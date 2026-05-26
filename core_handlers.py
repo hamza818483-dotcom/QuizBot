@@ -107,7 +107,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         text, 
-        parse_mode=ParseMode.MARKDOWN, 
+         
         reply_markup=InlineKeyboardMarkup(buttons),
         disable_web_page_preview=True
     )
@@ -179,7 +179,7 @@ async def img_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         document=csv_bytes,
         filename=f"mcq_{topic or 'generated'}.csv",
         caption=f"✅ *{len(mcqs)}টি MCQ তৈরি সম্পন্ন!*\n🔥 Topic: {topic or 'N/A'}",
-        parse_mode=ParseMode.MARKDOWN,
+        
         thumbnail=thumb
     )
     
@@ -256,7 +256,7 @@ async def txt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         document=csv_bytes,
         filename=f"mcq_{topic or 'text_generated'}.csv",
         caption=f"✅ *{len(mcqs)}টি MCQ তৈরি সম্পন্ন!*\n🔥 Topic: {topic or 'N/A'}",
-        parse_mode=ParseMode.MARKDOWN,
+        
         thumbnail=thumb
     )
     
@@ -342,11 +342,11 @@ async def show_mcq_list(update, context, mcqs, topic, index):
     # Send or edit message
     if update.callback_query:
         await update.callback_query.edit_message_text(
-            display, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons)
+            display, reply_markup=InlineKeyboardMarkup(buttons)
         )
     else:
         await update.message.reply_text(
-            display, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons)
+            display, reply_markup=InlineKeyboardMarkup(buttons)
         )
 
 
@@ -355,20 +355,20 @@ async def show_mcq_list(update, context, mcqs, topic, index):
 # ============================================================
 async def prompt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manage prompts"""
-    prompts = await db.fetchall('SELECT name, is_active FROM prompts ORDER BY id')
+    prompts = await db.fetchall('SELECT id, name, is_active FROM prompts ORDER BY id')
     
     buttons = []
-    for name, is_active in prompts:
+    for pid, name, is_active in prompts:
         emoji = "✅" if is_active else "💥"
         short_name = name[:30]
-        buttons.append([InlineKeyboardButton(f"{emoji} {short_name}", callback_data=f"prompt_view_{name}")])
+        buttons.append([InlineKeyboardButton(f"{emoji} {short_name}", callback_data=f"prompt_view_{pid}")])
     
     buttons.append([InlineKeyboardButton("➕ নতুন Prompt যোগ করো", callback_data="prompt_add")])
     buttons.append([InlineKeyboardButton("🔙 Back", callback_data="start_back")])
     
     await update.message.reply_text(
         "⚙️ *Prompt Management*\n\nএক বা একাধিক Active করা যাবে।\nActive Prompts অনুযায়ী MCQ তৈরি হবে।",
-        parse_mode=ParseMode.MARKDOWN,
+        
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -403,7 +403,7 @@ async def handle_core_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             'info_error': "🛠️ */error* — বট হেলথ চেক",
         }
         cmd = data.replace('info_', '')
-        await query.edit_message_text(info_texts.get(data, f"/{cmd} সম্পর্কে বিস্তারিত"), parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text(info_texts.get(data, f"/{cmd} সম্পর্কে বিস্তারিত"))
         return
     
     # MCQ Edit Callbacks
@@ -417,7 +417,15 @@ async def handle_core_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     if data == 'start_back':
-        await start_handler(update, context)
+        # Re-show start message using edit_message_text
+        user = query.from_user
+        text = f"🌟 ATLAS MCQ BOT\\n\\nWelcome back, {user.first_name}!\\nUse buttons below."
+        buttons = [
+            [InlineKeyboardButton("📸 /img", callback_data="info_img"), InlineKeyboardButton("📝 /txt", callback_data="info_txt")],
+            [InlineKeyboardButton("⚙️ /prompt", callback_data="info_prompt"), InlineKeyboardButton("💬 /exp", callback_data="info_exp")],
+            [InlineKeyboardButton("🔙 Back", callback_data="start_back")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
 
@@ -509,53 +517,69 @@ async def handle_prompt_callback(update: Update, context: ContextTypes.DEFAULT_T
     data = query.data
     
     if data.startswith('prompt_view_'):
-        name = data.replace('prompt_view_', '')
-        prompt = await db.fetchone('SELECT content, is_active FROM prompts WHERE name = ?', (name,))
+        pid = data.replace('prompt_view_', '')
+        prompt = await db.fetchone('SELECT name, content, is_active FROM prompts WHERE id = ?', (pid,))
         
         if prompt:
-            is_active = "✅ Active" if prompt[1] else "💥 Inactive"
+            name = prompt[0]
+            content_db = prompt[1]
+            is_active_db = prompt[2]
+            status_text = "✅ Active" if is_active_db else "💥 Inactive"
             buttons = [
                 [
-                    InlineKeyboardButton("✏️ Edit", callback_data=f"prompt_edit_{name}"),
-                    InlineKeyboardButton("✅ Activate" if not prompt[1] else "❌ Deactivate", 
-                                        callback_data=f"prompt_toggle_{name}")
+                    InlineKeyboardButton("✏️ Edit", callback_data=f"prompt_edit_{pid}"),
+                    InlineKeyboardButton("✅ Activate" if not is_active_db else "❌ Deactivate", 
+                                        callback_data=f"prompt_toggle_{pid}")
                 ],
                 [
-                    InlineKeyboardButton("🗑️ Delete", callback_data=f"prompt_delete_{name}"),
+                    InlineKeyboardButton("🗑️ Delete", callback_data=f"prompt_delete_{pid}"),
                     InlineKeyboardButton("🔙 Back", callback_data="prompt_back")
                 ]
             ]
             await query.edit_message_text(
-                f"📝 *{name}*\n{is_active}\n\n{prompt[0][:500]}...",
-                parse_mode=ParseMode.MARKDOWN,
+                f"📝 {name}\n{status_text}\n\n{content_db[:500]}...",
+                
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
     
     elif data.startswith('prompt_toggle_'):
-        name = data.replace('prompt_toggle_', '')
-        current = await db.fetchone('SELECT is_active FROM prompts WHERE name = ?', (name,))
+        pid = data.replace('prompt_toggle_', '')
+        current = await db.fetchone('SELECT name, is_active FROM prompts WHERE id = ?', (pid,))
         if current:
-            new_state = 0 if current[0] else 1
-            await db.execute('UPDATE prompts SET is_active = ? WHERE name = ?', (new_state, name))
-            await query.answer(f"✅ {name} {'Activated' if new_state else 'Deactivated'}!")
-            await prompt_handler(update, context)
+            name = current[0]; new_state = 0 if current[1] else 1
+            await db.execute('UPDATE prompts SET is_active = ? WHERE id = ?', (new_state, pid))
+            await query.answer(text=f"✅ {name} {'Activated' if new_state else 'Deactivated'}!", show_alert=True)
     
     elif data.startswith('prompt_edit_'):
-        name = data.replace('prompt_edit_', '')
-        context.user_data['editing_prompt'] = name
-        await query.edit_message_text(f"📝 *{name}* এর নতুন কন্টেন্ট লিখো:", parse_mode=ParseMode.MARKDOWN)
+        pid = data.replace('prompt_edit_', '')
+        prompt_info = await db.fetchone('SELECT name FROM prompts WHERE id = ?', (pid,))
+        pname = prompt_info[0] if prompt_info else 'Unknown'
+        context.user_data['editing_prompt'] = pid
+        await query.edit_message_text(
+    f"📝 {pname} এর নতুন কন্টেন্ট লিখো:",
+    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"prompt_view_{pid}")]])
+)
     
     elif data.startswith('prompt_delete_'):
-        name = data.replace('prompt_delete_', '')
-        if "Prompt-01" in name:
-            await query.answer("❌ Prompt-01 ডিলিট করা যাবে না!")
+        pid = data.replace('prompt_delete_', '')
+        prompt_info = await db.fetchone('SELECT name FROM prompts WHERE id = ?', (pid,))
+        pname = prompt_info[0] if prompt_info else ''
+        if "Prompt-01" in pname:
+            await query.edit_message_text("❌ Prompt-01 ডিলিট করা যাবে না!\n\n🔙 Back চাপো।")
         else:
-            await db.execute('DELETE FROM prompts WHERE name = ?', (name,))
-            await query.answer("🗑️ Deleted!")
-            await prompt_handler(update, context)
+            await db.execute('DELETE FROM prompts WHERE id = ?', (pid,))
+            await query.edit_message_text("🗑️ Deleted!\n\n🔙 Back চাপো।")
+            # Fixed - no reply_text
     
     elif data == 'prompt_back':
-        await prompt_handler(update, context)
+        prompts = await db.fetchall('SELECT id, name, is_active FROM prompts ORDER BY id')
+        buttons = []
+        for pid, name, is_active in prompts:
+            emoji = "✅" if is_active else "💥"
+            buttons.append([InlineKeyboardButton(f"{emoji} {name[:30]}", callback_data=f"prompt_view_{pid}")])
+        buttons.append([InlineKeyboardButton("➕ নতুন Prompt যোগ করো", callback_data="prompt_add")])
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="start_back")])
+        await query.edit_message_text("Prompt Management\n\nActive Prompts অনুযায়ী MCQ তৈরি হবে।", reply_markup=InlineKeyboardMarkup(buttons))
     
     elif data == 'prompt_add':
         context.user_data['adding_prompt'] = True
@@ -615,8 +639,10 @@ async def handle_edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     # Editing prompt content
     if 'editing_prompt' in context.user_data:
-        name = context.user_data['editing_prompt']
-        await db.execute('UPDATE prompts SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?', (text, name))
+        pid = context.user_data['editing_prompt']
+        await db.execute('UPDATE prompts SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (text, pid))
+        prompt_info = await db.fetchone('SELECT name FROM prompts WHERE id = ?', (pid,))
+        pname = prompt_info[0] if prompt_info else 'Unknown'
         del context.user_data['editing_prompt']
-        await update.message.reply_text(f"✅ Prompt '{name}' আপডেট সম্পন্ন!")
+        await update.message.reply_text(f"✅ Prompt '{pname}' আপডেট সম্পন্ন!")
         return

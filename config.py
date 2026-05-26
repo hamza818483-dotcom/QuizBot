@@ -145,7 +145,7 @@ class Database:
             await db.commit()
             
             # Insert default data
-            await self._insert_default_prompts(db)
+            # # await self._insert_default_prompts(db)  # Disabled - already inserted  # Disabled - already inserted
             await self._insert_default_exp(db)
             await self._insert_default_sheet_formats(db)
             await db.commit()
