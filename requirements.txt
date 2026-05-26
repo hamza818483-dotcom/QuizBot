@@ -1,0 +1,13 @@
+python-telegram-bot>=20.0
+google-genai
+playwright
+jinja2
+python-dotenv
+pillow
+requests
+aiohttp
+beautifulsoup4
+reportlab
+pypdf2
+aiosqlite
+lxml
