@@ -190,7 +190,7 @@ async def rename_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         document=bytes(content) if isinstance(content, bytearray) else content,
         filename=new_name,
         caption=f"✅ Renamed: `{new_name}`",
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=None
     )
 
 
@@ -258,9 +258,9 @@ async def exp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for btn_row in buttons:
         for btn in btn_row:
             if mode in btn.callback_data:
-                btn.text = "✅ " + btn.text
+                pass  # fixed
     
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+    await update.message.reply_text(text, parse_mode=None, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 # ============================================================
@@ -293,7 +293,7 @@ async def tag_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tags:
         text += "কোনো ট্যাগ নেই!\n\n*Tag Types:*\n• tag1 — উপরে (গ্যাপ সহ)\n• tag2 — নিচে (গ্যাপ সহ)\n• tag3 — পাশে inline\n• tag4 — উপরে (গ্যাপ ছাড়া)"
     
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+    await update.message.reply_text(text, parse_mode=None, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 # ============================================================
@@ -311,7 +311,7 @@ async def thumb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message or not update.message.reply_to_message.photo:
         thumb = await db.fetchone('SELECT file_id FROM thumbnail WHERE id = 1')
         if thumb:
-            await update.message.reply_text(f"📌 বর্তমান থাম্বনেইল:\n`{thumb[0][:50]}...`\n\n/thumb remove — রিমুভ করতে\nইমেজে reply করে /thumb — সেট করতে", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(f"📌 বর্তমান থাম্বনেইল:\n`{thumb[0][:50]}...`\n\n/thumb remove — রিমুভ করতে\nইমেজে reply করে /thumb — সেট করতে", parse_mode=None)
         else:
             await update.message.reply_text("❌ ইমেজে reply করে `/thumb` দাও, অথবা `/thumb remove` দিয়ে রিমুভ করো।")
         return
@@ -362,7 +362,7 @@ async def sheet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await progress.delete()
     await update.message.reply_text(
         f"📊 *{len(mcqs)}টি MCQ পাওয়া গেছে!*\n\nActive ফরম্যাট সিলেক্ট করো (টগল):",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -389,7 +389,7 @@ async def ping_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⏱️ *Uptime:* {days}d {hours}h {minutes}m {seconds}s
 📅 *Started:* {BOT_START_TIME.strftime('%Y-%m-%d %H:%M:%S')}
-{ram_text}""", parse_mode=ParseMode.MARKDOWN)
+{ram_text}""", parse_mode=None)
 
 
 # ============================================================
@@ -433,7 +433,7 @@ async def error_handler_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users = await db.fetchall('SELECT COUNT(*) FROM bot_users')
     report += f"👤 *Users:* {users[0][0]}\n"
     
-    await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(report, parse_mode=None)
 
 
 # ============================================================
@@ -475,7 +475,7 @@ async def collect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 শেষ হলে:
 • `/done` — CSV ফাইল পাবে
 • `/status` — কত collected
-• `/cancel` — বাতিল""", parse_mode=ParseMode.MARKDOWN)
+• `/cancel` — বাতিল""", parse_mode=None)
 
 
 # ============================================================
@@ -495,7 +495,7 @@ async def done_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         document=csv_bytes,
         filename=f"collected_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         caption=f"✅ *{len(polls)}টি পোল সংগ্রহ সম্পন্ন!*",
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=None
     )
 
 
@@ -506,7 +506,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check collection status"""
     user_id = update.effective_user.id
     count = poll_collector.get_count(user_id)
-    await update.message.reply_text(f"📊 *Collected:* {count} টি পোল", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"📊 *Collected:* {count} টি পোল", parse_mode=None)
 
 
 # ============================================================
@@ -581,7 +581,19 @@ async def handle_tools_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         if current:
             new_state = 0 if current[0] else 1
             await db.execute('UPDATE tag_settings SET is_active = ? WHERE id = ?', (new_state, tag_id))
-            await tag_handler(update, context)
+            await query.answer(f"{'✅ Activated' if new_state else '❌ Deactivated'}!")
+            # Update button icons
+            tags = await db.fetchall('SELECT id, tag_type, tag_name, is_active FROM tag_settings ORDER BY id')
+            buttons = []
+            for tid, ttype, tname, tactive in tags:
+                icon = "✅" if tactive else "❌"
+                buttons.append([
+                    InlineKeyboardButton(f"{icon} {ttype}", callback_data=f"tag_toggle_{tid}"),
+                    InlineKeyboardButton("✏️ Edit", callback_data=f"tag_edit_{tid}"),
+                    InlineKeyboardButton("🗑️ Del", callback_data=f"tag_delete_{tid}")
+                ])
+            buttons.append([InlineKeyboardButton("➕ New Tag", callback_data="tag_add")])
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
     
     elif data.startswith('tag_edit_'):
         tag_id = int(data.replace('tag_edit_', ''))
@@ -591,7 +603,6 @@ async def handle_tools_callbacks(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith('tag_delete_'):
         tag_id = int(data.replace('tag_delete_', ''))
         await db.execute('DELETE FROM tag_settings WHERE id = ?', (tag_id,))
-        await tag_handler(update, context)
     
     elif data == 'tag_add':
         context.user_data['adding_tag'] = True

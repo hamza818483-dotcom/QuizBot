@@ -38,9 +38,9 @@ async def permit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'INSERT OR IGNORE INTO admins (user_id, username, added_by) VALUES (?, ?, ?)',
                 (new_admin_id, username, user_id)
             )
-            await update.message.reply_text(f"✅ অ্যাডমিন যোগ করা হয়েছে!\n👤 User ID: `{new_admin_id}`\n👤 Username: @{username}" if username else f"✅ অ্যাডমিন যোগ করা হয়েছে!\n👤 User ID: `{new_admin_id}`", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(f"✅ অ্যাডমিন যোগ করা হয়েছে!\n👤 User ID: `{new_admin_id}`\n👤 Username: @{username}" if username else f"✅ অ্যাডমিন যোগ করা হয়েছে!\n👤 User ID: `{new_admin_id}`", parse_mode=None)
         except ValueError:
-            await update.message.reply_text("❌ সঠিক User ID দাও!\nযেমন: `/permit 12345678`", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text("❌ সঠিক User ID দাও!\nযেমন: `/permit 12345678`", parse_mode=None)
     else:
         # Show admin list
         admins = await db.fetchall('SELECT user_id, username, added_at FROM admins ORDER BY added_at')
@@ -64,7 +64,7 @@ async def permit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             text, 
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=None,
             reply_markup=InlineKeyboardMarkup(buttons)
         )
 
@@ -96,7 +96,7 @@ async def adminlist_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text += f"\n📊 *Total Admins:* {len(admins)}"
     
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(text, parse_mode=None)
 
 
 # ============================================================
@@ -134,7 +134,7 @@ async def broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📦 *Total:* {total}
 
 কোথায় পাঠাতে চাও?""",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -169,7 +169,7 @@ async def channel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'INSERT OR IGNORE INTO channels (channel_id, channel_name) VALUES (?, ?)',
             (channel_id, channel_name)
         )
-        await update.message.reply_text(f"✅ চ্যানেল যোগ করা হয়েছে!\n📢 ID: `{channel_id}`\n📢 Name: {channel_name}", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"✅ চ্যানেল যোগ করা হয়েছে!\n📢 ID: `{channel_id}`\n📢 Name: {channel_name}", parse_mode=None)
     else:
         # List channels
         channels = await db.fetchall('SELECT id, channel_id, channel_name, added_at FROM channels ORDER BY added_at')
@@ -195,7 +195,7 @@ async def channel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             text,
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=None,
             reply_markup=InlineKeyboardMarkup(buttons)
         )
 
@@ -223,7 +223,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer("❌ Owner-কে রিমুভ করা যাবে না!", show_alert=True)
             return
         await db.execute('DELETE FROM admins WHERE user_id = ?', (admin_id,))
-        await query.edit_message_text(f"✅ অ্যাডমিন `{admin_id}` রিমুভ করা হয়েছে!", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text(f"✅ অ্যাডমিন `{admin_id}` রিমুভ করা হয়েছে!", parse_mode=None)
     
     elif data.startswith('admin_info_'):
         admin_id = int(data.replace('admin_info_', ''))
@@ -244,7 +244,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer(f"📢 ID: {channel[0]}\n📅 Added: {channel[2][:10]}", show_alert=True)
     
     elif data == 'channel_add':
-        await query.edit_message_text("📢 চ্যানেল যোগ করতে:\n`/channel @channel_name` বা `/channel -100xxx Name`", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("📢 চ্যানেল যোগ করতে:\n`/channel @channel_name` বা `/channel -100xxx Name`", parse_mode=None)
     
     # Broadcast
     elif data == 'broadcast_cancel':
@@ -333,7 +333,7 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
                 failed += 1
             await asyncio.sleep(0.1)
     
-    await update.message.reply_text(f"✅ *Broadcast সম্পন্ন!*\n\n📤 Sent: {sent}\n❌ Failed: {failed}", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ *Broadcast সম্পন্ন!*\n\n📤 Sent: {sent}\n❌ Failed: {failed}", parse_mode=None)
     
     context.user_data.pop('broadcast_mode', None)
     context.user_data.pop('broadcast_waiting', None)

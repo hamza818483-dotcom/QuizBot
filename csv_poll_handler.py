@@ -151,7 +151,7 @@ async def send_single_poll(bot, chat_id: int, mcq: dict, reply_to: int = None):
             type='quiz',
             correct_option_id=correct_idx,
             explanation=explanation,
-            is_anonymous=False,
+            is_anonymous=True,
             reply_to_message_id=reply_to
         )
         return poll_msg.message_id, True
@@ -218,7 +218,7 @@ async def csv_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"✅ *{len(mcqs)}টি MCQ* | 🔥 {topic or 'N/A'}\n\nকোন চ্যানেলে পাঠাবে?",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -237,7 +237,7 @@ async def csvs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     args = context.args
     if len(args) < 3:
-        await update.message.reply_text("❌ `/csvS <ব্যাচ সংখ্যা> <চ্যানেল> <টপিক>`\nউদাহরণ: `/csvS 10 @physics পদার্থবিজ্ঞান`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("❌ `/csvS <ব্যাচ সংখ্যা> <চ্যানেল> <টপিক>`\nউদাহরণ: `/csvS 10 @physics পদার্থবিজ্ঞান`", parse_mode=None)
         return
     
     try:
@@ -332,7 +332,7 @@ async def csvi_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"🎯 *Inline Quiz Mode*\n✅ {len(mcqs)}টি MCQ\n\nকোন চ্যানেলে?",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -445,7 +445,7 @@ async def send_serial_polls(update, context, channel_id, mcqs, batch_size, topic
     # Master summary
     if total_batches > 1:
         summary = get_master_summary(topic, total, total_batches, batch_links)
-        await bot.send_message(chat_id=channel_id, text=summary, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        await bot.send_message(chat_id=channel_id, text=summary, parse_mode=None, disable_web_page_preview=True)
     
     await progress.edit_text(f"✅ সম্পন্ন! {total}টি পোল → {channel_id}")
 
@@ -537,7 +537,14 @@ async def handle_csv_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         topic = context.user_data.get('poll_topic', '')
         
         if not mcqs:
-            await query.edit_message_text("❌ MCQ সেশন শেষ!")
+            # Try to get from last_csv
+            csv_bytes = context.user_data.get('last_csv')
+            if csv_bytes:
+                from services import parse_csv_to_mcqs
+                content_str = csv_bytes.decode('utf-8-sig') if isinstance(csv_bytes, bytes) else str(csv_bytes)
+                mcqs = parse_csv_to_mcqs(content_str)
+        if not mcqs:
+            await query.edit_message_text("❌ MCQ সেশন শেষ! আবার /img বা /txt দাও।")
             return
         
         await query.edit_message_text(f"📤 {len(mcqs)}টি পোল পাঠানো শুরু...")
@@ -708,5 +715,5 @@ async def handle_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Placeholder - full implementation with DB tracking
     await query.message.reply_text(
         f"📊 *Quiz Result*\n\n✅ সঠিক: ?\n❌ ভুল: ?\n🎯 অ্যাকুরেসি: ?%\n\n🔄 Retake দিয়ে আবার চেষ্টা করো!",
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=None
     )
