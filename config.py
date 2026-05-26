@@ -18,9 +18,11 @@ class Config:
     """Bot configuration"""
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     OWNER_ID = int(os.getenv('OWNER_ID', 0))
-    GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.0-flash-exp')
+    GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
     GEMINI_API_KEYS = os.getenv('GEMINI_API_KEYS', '').split(',')
     IMGBB_API_KEYS = os.getenv('IMGBB_API_KEYS', '').split(',')
+    API_ID = os.getenv('TELEGRAM_API_ID')
+    API_HASH = os.getenv('TELEGRAM_API_HASH')
     DB_PATH = 'data/atlas_bot.db'
     TEMP_PATH = 'data/temp'
     THUMB_PATH = 'data/thumbnails'
@@ -121,71 +123,96 @@ class Database:
                 )
             ''')
             
+            # File Store
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS file_store (
+                    user_id INTEGER PRIMARY KEY,
+                    file_data BLOB,
+                    file_name TEXT,
+                    file_type TEXT,
+                    saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Sheet Format Settings
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS sheet_formats (
+                    format_id TEXT PRIMARY KEY,
+                    format_name TEXT,
+                    is_active INTEGER DEFAULT 1
+                )
+            ''')
+            
             await db.commit()
             
-            # Insert default prompts if not exist
+            # Insert default data
             await self._insert_default_prompts(db)
+            await self._insert_default_exp(db)
+            await self._insert_default_sheet_formats(db)
             await db.commit()
     
     async def _insert_default_prompts(self, db):
         """Insert 7 default prompts"""
         prompts = [
-            ("Prompt-01", """MCQ TYPE: Standard Easy
+            ("Prompt-01 (Standard/Easy)", """MCQ TYPE: Standard Easy
 - প্রশ্ন: ছোট, ১ লাইন
-- অপশন: ৪টি, এক শব্দের
-- উত্তর: ৪টির মধ্যে একটি
-- ব্যাখ্যা: সঠিক উত্তর + ওই topic-এর বাকি তথ্য
-- Input source থেকেই সব
+- অপশন: ৪টি, এক শব্দের ছোট
+- উত্তর: ৪টির মধ্যে একটি (CSV-তে 1,2,3,4)
+- ব্যাখ্যা: সঠিক উত্তর + ওই টপিকের বাকি তথ্য (Source থেকে)
+- Input source থেকেই সব তথ্য
 - Bengali explanation, max 165 chars
 - JSON output only"""),
             
-            ("Prompt-02", """MCQ TYPE: Short Question, Long Options
+            ("Prompt-02 (ছোট প্রশ্ন, বড় অপশন)", """MCQ TYPE: Short Question, Long Options
 - প্রশ্ন: ছোট, এক লাইন
 - অপশন: ৪টি বড় (বাক্য বা phrase)
-- উত্তর: ৪টির মধ্যে একটি
-- ব্যাখ্যা: সঠিকটা কেন সঠিক + বাকিগুলো কেন ভুল
-- Input source থেকেই
+- উত্তর: ৪টির মধ্যে একটি (CSV-তে 1,2,3,4)
+- ব্যাখ্যা: সঠিকটা কেন সঠিক + বাকিগুলো কেন ভুল (Precisely)
+- Input source থেকেই সব
 - Bengali, max 165 chars
 - JSON output only"""),
             
-            ("Prompt-03", """MCQ TYPE: Long Question, Short Options
+            ("Prompt-03 (বড় প্রশ্ন, ছোট অপশন)", """MCQ TYPE: Long Question, Short Options
 - প্রশ্ন: ২-৩ লাইন, চিন্তা করতে হয়
 - অপশন: ছোট (এক শব্দ বা phrase)
-- উত্তর: ৪টির মধ্যে একটি
-- ব্যাখ্যা: ধাপে ধাপে logic
-- Input source থেকেই
+- উত্তর: ৪টির মধ্যে একটি (CSV-তে 1,2,3,4)
+- ব্যাখ্যা: ধাপে ধাপে কীভাবে সঠিক উত্তর পাওয়া যায়
+- Input source থেকেই সব
 - Bengali, max 165 chars
 - JSON output only"""),
             
-            ("Prompt-04", """MCQ TYPE: True/False Style
+            ("Prompt-04 (সত্য/মিথ্যা)", """MCQ TYPE: True/False Style
 প্রশ্নের ধরন (randomly mix):
 - "নিচের কোনটিকে সত্য বললে ভুল হবে না?" → সত্য চাই
 - "নিচের কোনটিকে সত্য বললে ভুল হবে?" → মিথ্যা চাই
 - "নিচের কোনটিকে মিথ্যা বললে ভুল হবে?" → সত্য চাই
 - "নিচের কোনটিকে মিথ্যা বললে ভুল হবে না?" → মিথ্যা চাই
-- অপশন: ছোট বা বড়
+- অপশন: ছোট বা বড় (২ টাইপই হতে পারে)
+- উত্তর: ৪টির মধ্যে একটি (CSV-তে 1,2,3,4)
+- ব্যাখ্যা: কোনটা সঠিক, কেন সঠিক
+- Input source থেকেই সব
 - Bengali, max 165 chars
 - JSON output only"""),
             
-            ("Prompt-05", """MCQ TYPE: Mixed (01+02)
+            ("Prompt-05 (01+02 Mixed)", """MCQ TYPE: Mixed (01+02)
 50% Prompt-01 (ছোট প্রশ্ন, ছোট অপশন)
 50% Prompt-02 (ছোট প্রশ্ন, বড় অপশন)
-- Input source থেকেই
+- Input source থেকেই সব
 - Bengali, max 165 chars
 - JSON output only"""),
             
-            ("Prompt-06", """MCQ TYPE: Mixed (02+03)
+            ("Prompt-06 (02+03 Mixed)", """MCQ TYPE: Mixed (02+03)
 50% Prompt-02 (ছোট প্রশ্ন, বড় অপশন)
 50% Prompt-03 (বড় প্রশ্ন, ছোট অপশন)
-- Input source থেকেই
+- Input source থেকেই সব
 - Bengali, max 165 chars
 - JSON output only"""),
             
-            ("Prompt-07", """MCQ TYPE: Mixed (01+02+03)
+            ("Prompt-07 (01+02+03 Mixed)", """MCQ TYPE: Mixed (01+02+03)
 33% Prompt-01 (ছোট প্রশ্ন, ছোট অপশন)
 33% Prompt-02 (ছোট প্রশ্ন, বড় অপশন)
 34% Prompt-03 (বড় প্রশ্ন, ছোট অপশন)
-- Input source থেকেই
+- Input source থেকেই সব
 - Bengali, max 165 chars
 - JSON output only""")
         ]
@@ -193,7 +220,29 @@ class Database:
         for name, content in prompts:
             await db.execute(
                 'INSERT OR IGNORE INTO prompts (name, content, is_active) VALUES (?, ?, ?)',
-                (name, content, 1 if name == "Prompt-01" else 0)
+                (name, content, 1 if "Prompt-01" in name else 0)
+            )
+    
+    async def _insert_default_exp(self, db):
+        """Insert default explanation settings"""
+        await db.execute(
+            'INSERT OR IGNORE INTO exp_settings (id, mode, custom_text, tag_name) VALUES (1, ?, ?, ?)',
+            ('auto', '', '')
+        )
+    
+    async def _insert_default_sheet_formats(self, db):
+        """Insert default sheet formats"""
+        formats = [
+            ('format_01', 'Practice Sheet (প্রশ্ন + উত্তর + ব্যাখ্যা)'),
+            ('format_02', 'Solve Sheet (সাইডবারে উত্তর)'),
+            ('format_03', 'Exam Style (Answer টেবিল)'),
+            ('format_04', 'Mixed Style'),
+            ('format_05', 'Summary + Answer Key')
+        ]
+        for fid, fname in formats:
+            await db.execute(
+                'INSERT OR IGNORE INTO sheet_formats (format_id, format_name, is_active) VALUES (?, ?, 1)',
+                (fid, fname)
             )
     
     async def execute(self, query: str, params: tuple = ()) -> Any:
