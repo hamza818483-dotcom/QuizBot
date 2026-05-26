@@ -316,6 +316,10 @@ class GeminiKeyManager:
         return ""
 
 
+    def get_stats(self):
+        healthy = len([k for k,v in self.keys.items() if v.get('healthy')])
+        return {'total': len(self.keys), 'healthy': healthy}
+
 class ImgBBKeyManager:
     """ImgBB API key rotation manager"""
     

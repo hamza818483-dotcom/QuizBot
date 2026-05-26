@@ -458,7 +458,7 @@ async def mhtml_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Start status message
     status_msg = await update.message.reply_text(
         f"🚀 *ATLAS Extractor Started*\n📁 File: `{filename}`\n⏳ Downloading...",
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=None
     )
     
     start_time = time.time()
@@ -489,7 +489,7 @@ async def mhtml_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"🚀 Speed: `{speed/1024:.1f} MB/s`\n"
                         f"⏳ ETA: `{int(eta//60):02d}:{int(eta%60):02d}`\n"
                         f"[{'█'*int(pct/10)}{'░'*(10-int(pct/10))}] {pct}%",
-                        parse_mode=ParseMode.MARKDOWN
+                        parse_mode=None
                     )
                 except:
                     pass
@@ -503,7 +503,7 @@ async def mhtml_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Parse MHTML/HTML
-    await status_msg.edit_text("🔍 *Parsing file structure...*", parse_mode=ParseMode.MARKDOWN)
+    await status_msg.edit_text("🔍 *Parsing file structure...*", parse_mode=None)
     html_body, img_map = parse_mhtml_to_parts(file_bytes, filename)
     
     if not html_body:
@@ -514,7 +514,7 @@ async def mhtml_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     soup = BeautifulSoup(html_body, 'html.parser')
     
     # Try Chorcha.net first
-    await status_msg.edit_text("🔍 *Scanning for Chorcha.net format...*", parse_mode=ParseMode.MARKDOWN)
+    await status_msg.edit_text("🔍 *Scanning for Chorcha.net format...*", parse_mode=None)
     
     # Status callback for progress
     async def update_status(current, total):
@@ -526,7 +526,7 @@ async def mhtml_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⌛ *ATLAS Extractor*\n"
                 f"📝 MCQ: `{current}/{total}`\n"
                 f"⏳ ETA: `{int(eta//60):02d}:{int(eta%60):02d}`",
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=None
             )
         except:
             pass
@@ -542,16 +542,16 @@ async def mhtml_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         source = "Chorcha.net"
     else:
         # Try TestMoz
-        await status_msg.edit_text("🔍 *Chorcha.net পাওয়া যায়নি। TestMoz চেষ্টা...*", parse_mode=ParseMode.MARKDOWN)
+        await status_msg.edit_text("🔍 *Chorcha.net পাওয়া যায়নি। TestMoz চেষ্টা...*", parse_mode=None)
         results = extract_testmoz_mcqs(soup, img_map, sync_callback)
         source = "TestMoz" if results else "Unknown"
     
     if not results:
-        await status_msg.edit_text("❌ *কোনো MCQ পাওয়া যায়নি!*\n\n✅ Supported: Chorcha.net & TestMoz", parse_mode=ParseMode.MARKDOWN)
+        await status_msg.edit_text("❌ *কোনো MCQ পাওয়া যায়নি!*\n\n✅ Supported: Chorcha.net & TestMoz", parse_mode=None)
         return
     
     # Generate CSV
-    await status_msg.edit_text("📊 *CSV ফাইল তৈরি হচ্ছে...*", parse_mode=ParseMode.MARKDOWN)
+    await status_msg.edit_text("📊 *CSV ফাইল তৈরি হচ্ছে...*", parse_mode=None)
     csv_bytes = mcqs_to_csv_bytes(results)
     
     # Get thumbnail
@@ -576,7 +576,7 @@ async def mhtml_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 This CSV can be used directly with:
 • `/csv` — Send as Poll
 • `/sheet` — Generate Practice Sheet""",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=None,
         thumbnail=thumb
     )
     

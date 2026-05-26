@@ -504,6 +504,70 @@ async def handle_mcq_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="ch_cancel")])
         await query.edit_message_text("📢 কোন চ্যানেলে পাঠাবে?", reply_markup=InlineKeyboardMarkup(buttons))
     
+    elif data.startswith('ch_send_'):
+        channel_id = data.replace('ch_send_', '')
+        mcqs = context.user_data.get('edit_mcqs', [])
+        topic = context.user_data.get('edit_topic', '')
+        if mcqs:
+            await query.edit_message_text(f"📤 {len(mcqs)}টি পোল পাঠানো শুরু...")
+            from csv_poll_handler import send_single_poll, get_pre_message, get_ending_message, get_message_link
+            bot = context.bot
+            pre_text = get_pre_message(topic, len(mcqs))
+            pre_msg = await bot.send_message(chat_id=channel_id, text=pre_text)
+            first_poll_id = None
+            sent = 0
+            for mcq in mcqs:
+                while context.user_data.get('paused', False):
+                    await asyncio.sleep(1)
+                import asyncio
+                poll_id, success = await send_single_poll(bot, channel_id, mcq, pre_msg.message_id)
+                if success and first_poll_id is None:
+                    first_poll_id = poll_id
+                if success:
+                    sent += 1
+                await asyncio.sleep(2)
+            first_link = await get_message_link(bot, channel_id, first_poll_id) if first_poll_id else ""
+            ending = get_ending_message(topic, sent, first_link)
+            await bot.send_message(chat_id=channel_id, text=ending, disable_web_page_preview=True)
+            await query.message.reply_text(f"✅ {sent}টি পোল পাঠানো সম্পন্ন!"  )
+        else:
+            await query.edit_message_text("❌ MCQ সেশন শেষ!")
+
+    elif data.startswith('ch_send_'):
+        channel_id = data.replace('ch_send_', '')
+        mcqs = context.user_data.get('edit_mcqs', [])
+        topic = context.user_data.get('edit_topic', '')
+        if not mcqs:
+            csv_bytes = context.user_data.get('last_csv')
+            if csv_bytes:
+                from services import parse_csv_to_mcqs
+                content_str = csv_bytes.decode('utf-8-sig') if isinstance(csv_bytes, bytes) else str(csv_bytes)
+                mcqs = parse_csv_to_mcqs(content_str)
+        if mcqs:
+            await query.edit_message_text(f"📤 {len(mcqs)}টি পোল পাঠানো শুরু...")
+            from csv_poll_handler import send_single_poll, get_pre_message, get_ending_message, get_message_link
+            bot = context.bot
+            pre_text = get_pre_message(topic, len(mcqs))
+            pre_msg = await bot.send_message(chat_id=channel_id, text=pre_text)
+            first_poll_id = None
+            sent = 0
+            for mcq in mcqs:
+                while context.user_data.get('paused', False):
+                    await asyncio.sleep(1)
+                import asyncio
+                poll_id, success = await send_single_poll(bot, channel_id, mcq, pre_msg.message_id)
+                if success and first_poll_id is None:
+                    first_poll_id = poll_id
+                if success:
+                    sent += 1
+                await asyncio.sleep(2)
+            first_link = await get_message_link(bot, channel_id, first_poll_id) if first_poll_id else ""
+            ending = get_ending_message(topic, sent, first_link)
+            await bot.send_message(chat_id=channel_id, text=ending, disable_web_page_preview=True)
+            await query.message.reply_text(f"✅ {sent}টি পোল পাঠানো সম্পন্ন!"  )
+        else:
+            await query.edit_message_text("❌ MCQ সেশন শেষ! আবার /img বা /txt দাও।")
+
     elif data == 'mcq_noop':
         await query.answer("📋 MCQ List View")
 

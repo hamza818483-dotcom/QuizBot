@@ -151,7 +151,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
        context.user_data.get('setting_tag_name') or \
        context.user_data.get('editing_tag') or \
        context.user_data.get('adding_tag_name'):
-        await handle_edit_message(update, context)
+        await handle_settings_message(update, context)
         return
     
     # Check settings message

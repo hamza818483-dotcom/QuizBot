@@ -81,7 +81,7 @@ async def pdfm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎯 MCQ/Page: {mcq_count or 'Highest Possible'}
 
 *Select Mood:*""",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -146,7 +146,7 @@ async def qbm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *শুধু Existing MCQ Extract হবে, নতুন বানাবে না।*
 
 *Select Mood:*""",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -289,7 +289,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE,
         document=csv_bytes,
         filename=f"{title}.csv",
         caption=f"✅ *{len(all_mcqs)}টি MCQ*\n📄 {len(images)} পৃষ্ঠা থেকে",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=None,
         thumbnail=thumb
     )
     
@@ -316,7 +316,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE,
         ]
         await update.effective_message.reply_text(
             f"✅ *{len(all_mcqs)}টি MCQ প্রস্তুত!*\n\nকী করতে চাও?",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=None,
             reply_markup=InlineKeyboardMarkup(buttons)
         )
     else:
@@ -329,7 +329,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE,
         
         await update.effective_message.reply_text(
             f"✅ *{len(all_mcqs)}টি MCQ প্রস্তুত!*\n\nকোন চ্যানেলে পাঠাবে?",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=None,
             reply_markup=InlineKeyboardMarkup(buttons)
         )
     

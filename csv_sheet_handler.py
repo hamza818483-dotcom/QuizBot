@@ -302,7 +302,7 @@ async def sheet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"📊 *{len(mcqs)}টি MCQ পাওয়া গেছে!*\n📁 `{filename}`\n\n*ফরম্যাট সিলেক্ট করো (টগল):*\n(Active ☑️ | Inactive ☐)",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -357,7 +357,7 @@ async def generate_sheet_pdfs(update: Update, context: ContextTypes.DEFAULT_TYPE
             os.remove(pdf_path)
     
     await progress_msg.delete()
-    await query.message.reply_text(f"✅ *{len(selected_formats)}টি ফরম্যাটে PDF তৈরি সম্পন্ন!*\n📊 মোট MCQ: {len(mcqs)}", parse_mode=ParseMode.MARKDOWN)
+    await query.message.reply_text(f"✅ *{len(selected_formats)}টি ফরম্যাটে PDF তৈরি সম্পন্ন!*\n📊 মোট MCQ: {len(mcqs)}", parse_mode=None)
 
 
 # ============================================================
@@ -410,7 +410,7 @@ async def handle_sheet_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data['waiting_sheet_title'] = True
         
         filename = context.user_data.get('sheet_filename', 'Practice')
-        await query.edit_message_text(f"📝 PDF এর *Title* লিখো:\n\nDefault: `{filename}`", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text(f"📝 PDF এর *Title* লিখো:\n\nDefault: `{filename}`", parse_mode=None)
 
 
 # ============================================================
@@ -430,7 +430,7 @@ async def handle_sheet_title(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not title:
         title = context.user_data.get('sheet_filename', 'Practice Sheet')
     
-    await update.message.reply_text(f"🖨️ *{title}* — {len(selected)}টি ফরম্যাটে PDF তৈরি হচ্ছে...", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"🖨️ *{title}* — {len(selected)}টি ফরম্যাটে PDF তৈরি হচ্ছে...", parse_mode=None)
     
     # Create a fake callback_query for generate function
     # Actually we call directly
@@ -466,5 +466,5 @@ async def handle_sheet_title(update: Update, context: ContextTypes.DEFAULT_TYPE)
             os.remove(pdf_path)
     
     await progress_msg.delete()
-    await update.message.reply_text(f"✅ *{len(selected)}টি ফরম্যাটে PDF তৈরি সম্পন্ন!*", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ *{len(selected)}টি ফরম্যাটে PDF তৈরি সম্পন্ন!*", parse_mode=None)
     return True
