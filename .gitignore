@@ -1,0 +1,45 @@
+cat > /mnt/user-data/outputs/.gitignore << 'GITEOF'
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Environment variables
+.env
+
+# Database
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+
+# Thumbnails
+thumbnails/
+
+# Playwright
+.playwright/
+GITEOF
+cat /mnt/user-data/outputs/.gitignore
