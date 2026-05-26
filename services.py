@@ -22,13 +22,10 @@ import aiosqlite
 from PIL import Image
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from google import genai
 from email import policy
 from email import message_from_bytes
-from playwright.async_api import async_playwright
 from jinja2 import Template
 
-import fitz  # PyMuPDF
 from pypdf import PdfReader
 
 load_dotenv()
@@ -103,24 +100,6 @@ imgbb_mgr = ImgBBKeyManager()
 # ============================================================
 # GEMINI AI SERVICE
 # ============================================================
-async def call_gemini(prompt: str, image_bytes: Optional[bytes] = None, retries: int = 3) -> str:
-    """Call Gemini API with retry"""
-    for attempt in range(retries):
-        key = gemini_key_mgr.get_healthy_key()
-        try:
-            client = genai.Client(api_key=key)
-            if image_bytes:
-                img = Image.open(io.BytesIO(image_bytes))
-                response = client.models.generate_content(model=GEMINI_MODEL, contents=[prompt, img])
-            else:
-                response = client.models.generate_content(model=GEMINI_MODEL, contents=[prompt])
-            gemini_key_mgr.record_success(key)
-            return response.text
-        except Exception as e:
-            gemini_key_mgr.record_failure(key)
-            if attempt == retries - 1: raise e
-    return "[]"
-
 async def generate_mcqs_from_image(image_bytes: bytes, active_prompts: List[str], 
                                     count: int = 12) -> List[Dict]:
     """Generate MCQs from image using active prompts"""
@@ -132,7 +111,7 @@ Follow ALL rules from the prompts above.
 Output ONLY valid JSON array:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}}]"""
     
-    response = await call_gemini(full_prompt, image_bytes)
+    response = call_gemini(full_prompt, image_bytes)
     return parse_mcq_json(response)
 
 async def generate_mcqs_from_text(text: str, active_prompts: List[str], 
@@ -149,7 +128,7 @@ Output ONLY valid JSON array:
 TEXT:
 {text[:4000]}"""
     
-    response = await call_gemini(full_prompt)
+    response = call_gemini(full_prompt)
     return parse_mcq_json(response)
 
 def parse_mcq_json(response: str) -> List[Dict]:
@@ -618,3 +597,5 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
         return buf.getvalue()
     except:
         return pdf_bytes
+
+from gemini_api import call_gemini

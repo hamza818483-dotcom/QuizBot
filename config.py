@@ -8,7 +8,6 @@ import aiosqlite
 import base64
 import requests
 from dotenv import load_dotenv
-from google import genai
 from typing import Optional, List, Dict, Any
 
 load_dotenv()
