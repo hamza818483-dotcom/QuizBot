@@ -458,18 +458,18 @@ async def send_serial_polls(update, context, channel_id, mcqs, batch_size, topic
         for mcq in batch:
             while GLOBAL_PAUSE.get(update.effective_user.id if hasattr(update, 'effective_user') else 0, False):
                 await asyncio.sleep(1)
-            poll_id, success = await send_single_poll(bot, channel_id, mcq, reply_to)
+            poll_id, success = await asyncio.create_task(send_single_poll(bot, channel_id, mcq, reply_to))
             if success and first_poll_id is None:
                 first_poll_id = poll_id
             if success:
                 sent += 1
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         
         first_link = await get_message_link(bot, channel_id, first_poll_id) if first_poll_id else ""
         ending = get_ending_message(batch_topic, sent, first_link)
         await bot.send_message(chat_id=channel_id, text=ending, disable_web_page_preview=True)
         batch_links.append((b_idx, first_link, len(batch)))
-        await asyncio.sleep(3)
+        await asyncio.sleep(1)
     
     if total_batches > 1:
         summary = get_master_summary(topic, total, total_batches, batch_links)
@@ -507,7 +507,7 @@ async def send_inline_quiz(bot, chat_id, mcqs, topic=""):
         if first_msg_id is None:
             first_msg_id = msg.message_id
         
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
     
     # Ending with Retake/Result
     first_link = await get_message_link(bot, chat_id, first_msg_id) if first_msg_id else ""
@@ -584,12 +584,12 @@ async def handle_csv_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
             while GLOBAL_PAUSE.get(update.effective_user.id if hasattr(update, 'effective_user') else 0, False):
                 await asyncio.sleep(1)
             
-            poll_id, success = await send_single_poll(bot, channel_id, mcq, pre_msg.message_id)
+            poll_id, success = asyncio.create_task(send_single_poll(bot, channel_id, mcq, pre_msg.message_id))
             if success and first_poll_id is None:
                 first_poll_id = poll_id
             if success:
                 sent += 1
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         
         first_link = await get_message_link(bot, channel_id, first_poll_id) if first_poll_id else ""
         ending = get_ending_message(topic, sent, first_link)

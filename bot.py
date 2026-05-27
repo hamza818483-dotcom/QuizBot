@@ -216,7 +216,7 @@ def main():
         sys.exit(1)
     
     # Build application
-    app = Application.builder() \
+    app = Application.builder().connect_timeout(60).read_timeout(60).write_timeout(60) \
         .token(Config.TELEGRAM_BOT_TOKEN) \
         .post_init(post_init) \
         .connect_timeout(30) \
@@ -305,10 +305,7 @@ def main():
     logger.info("✅ All handlers registered!")
     logger.info("🚀 Bot is now online and polling...")
     
-    app.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True
-    )
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":

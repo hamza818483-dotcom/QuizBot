@@ -67,11 +67,22 @@ class GeminiKeyManager:
         self.keys = {k: {'success': 0, 'fail': 0, 'healthy': True} for k in GEMINI_API_KEYS}
     
     def get_healthy_key(self) -> str:
-        healthy = [k for k, v in self.keys.items() if v['healthy']]
+        healthy = [k for k, v in self.keys.items() if v.get('healthy', True)]
         if not healthy:
             for k in self.keys: self.keys[k]['healthy'] = True
             healthy = list(self.keys.keys())
-        return random.choice(healthy)
+        key = random.choice(healthy)
+        # Quick test before returning
+        try:
+            import requests
+            url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}'
+            r = requests.post(url, json={'contents':[{'parts':[{'text':'test'}]}]}, timeout=5)
+            if r.status_code != 200:
+                self.keys[key]['healthy'] = False
+                return self.get_healthy_key()  # Try another
+        except:
+            pass
+        return key
     
     def record_success(self, key): 
         if key in self.keys: self.keys[key]['success'] += 1; self.keys[key]['healthy'] = True
@@ -242,25 +253,12 @@ class PDFProcessor:
                     img_bytes = img_bytes[0]
                 images.append((start + i, img_bytes))
             # If no images (scanned PDF), try OCR text extraction
-                if not images:
-            try:
-                from pypdf import PdfReader
-                reader = PdfReader(pdf_path)
-                for page_idx in range(start - 1, min(end, len(reader.pages))):
-                    text = reader.pages[page_idx].extract_text()
-                    if text and len(text.strip()) > 50:
-                        # Encode text as bytes for processing
-                        images.append((start + len(images), text.encode('utf-8')))
-            except:
-                pass
-        return images
+
+# ============================================================
+            return images
         except Exception as e:
             logger.error(f"PDF to images error: {e}")
             return []
-
-pdf_processor = PDFProcessor()
-
-# ============================================================
 # ASYNC PDF EXPORTER (Playwright)
 # ============================================================
 class AsyncPDFExporter:
@@ -627,3 +625,4 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
         return pdf_bytes
 
 from gemini_api import call_gemini
+pdf_processor = PDFProcessor()
