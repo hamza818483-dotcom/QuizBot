@@ -219,7 +219,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, is_qbm
 4. Remove question numbering (১., 1., Q1., Q.1) from question text.
 5. Detect answer from markings (circle, tick, underline, bold, answer key).
 6. If explanation exists in image → use it. If NOT → CREATE explanation: why answer is correct + why others are not + relevant topic info (max 165 chars Bengali).
-7. Add /exp tag_name after explanation.
+7. In explanation 4 Options relevant info will be given must from either from source or gemini own
 8. Output ONLY valid JSON array. If NO MCQ exists, return []."""]
     else:
         rows = await db.fetchall('SELECT content FROM prompts WHERE is_active = 1')
