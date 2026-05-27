@@ -590,6 +590,76 @@ async def update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Done!\n```{result[:500]}```")
 
 
+
+async def gemini_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show Gemini API key status"""
+    import requests, os
+    from dotenv import load_dotenv
+    load_dotenv()
+    keys = [k.strip() for k in os.getenv('GEMINI_API_KEYS','').split(',') if k.strip()]
+    msg = await update.message.reply_text(f"🔍 Checking {len(keys)} keys...")
+    work = 0
+    result = f"📊 Gemini API Keys Status\n\nTotal: {len(keys)} keys\n\n"
+    for i, key in enumerate(keys, 1):
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}'
+        try:
+            r = requests.post(url, json={'contents':[{'parts':[{'text':'hi'}]}]}, timeout=10)
+            if r.status_code == 200:
+                result += f"Key {i}: ✅ Working\n"; work += 1
+            else:
+                result += f"Key {i}: ❌ {r.json().get('error',{}).get('message','Unknown')[:50]}\n"
+        except Exception as e:
+            result += f"Key {i}: ❌ {str(e)[:40]}\n"
+    result += f"\n✅ Working: {work}/{len(keys)}"
+    await msg.edit_text(result)
+
+async def addgkey_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add new Gemini API keys (Owner only)"""
+    import os
+    if update.effective_user.id != Config.OWNER_ID:
+        await update.message.reply_text("❌ Owner only!"); return
+    if not context.args:
+        await update.message.reply_text("❌ /addgkey key1,key2,key3"); return
+    new_keys = ' '.join(context.args).replace(' ', '')
+    env_path = os.path.expanduser('~/AtlasMasterBot/.env')
+    with open(env_path, 'r') as f:
+        lines = f.readlines()
+    with open(env_path, 'w') as f:
+        for line in lines:
+            if line.startswith('GEMINI_API_KEYS='):
+                current = line.strip().replace('GEMINI_API_KEYS=', '')
+                updated = f"GEMINI_API_KEYS={current},{new_keys}\n" if current else f"GEMINI_API_KEYS={new_keys}\n"
+                f.write(updated)
+            else:
+                f.write(line)
+    await update.message.reply_text(f"✅ Keys added! Total: {len(new_keys.split(','))} new keys\nRestart bot: /restart")
+
+
+
+    if not context.args:
+        await update.message.reply_text("❌ /addgkey key1,key2,key3\nComma diye key add koro")
+        return
+    
+    new_keys = ' '.join(context.args).replace(' ', '')
+    env_path = os.path.expanduser('~/AtlasMasterBot/.env')
+    
+    with open(env_path, 'r') as f:
+        env_content = f.read()
+    
+    # Find GEMINI_API_KEYS line and append
+    for line in env_content.split('\n'):
+        if line.startswith('GEMINI_API_KEYS='):
+            current = line.replace('GEMINI_API_KEYS=', '')
+            updated = f"GEMINI_API_KEYS={current},{new_keys}" if current else f"GEMINI_API_KEYS={new_keys}"
+            env_content = env_content.replace(line, updated)
+            break
+    
+    with open(env_path, 'w') as f:
+        f.write(env_content)
+    
+    await update.message.reply_text(f"✅ Keys added!\n\nRestart bot to apply: /restart")
+
+
 async def restart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Restart bot - instant restart"""
     import os

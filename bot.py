@@ -33,6 +33,7 @@ from admin_handlers import (
 
 # Tools Handlers
 from tools_handlers import (
+    gemini_handler, addgkey_handler,
     update_handler,
     split_handler, merge_handler, convert_handler, rename_handler,
     watermark_handler, exp_handler, tag_handler, thumb_handler,
@@ -338,6 +339,8 @@ def main():
     app.add_handler(CommandHandler("pause", pause_handler))
     app.add_handler(CommandHandler("resume", resume_handler))
     app.add_handler(CommandHandler("update", update_handler))
+    app.add_handler(CommandHandler("gemini", gemini_handler))
+    app.add_handler(CommandHandler("addgkey", addgkey_handler))
     app.add_handler(CommandHandler("restart", restart_handler))
     
     # PDF
