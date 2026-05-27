@@ -189,21 +189,14 @@ async def csv_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ এই কমান্ড শুধু অ্যাডমিনরা ব্যবহার করতে পারবে!")
         return
     
-    # Get topic from args (skip first if numeric)
-    args = context.args
-    topic = ''
-    if args:
-        if args[0].isdigit():
-            topic = ' '.join(args[1:]) if len(args) > 1 else ''
-        else:
-            topic = ' '.join(args)
+    # Get topic from args
+    topic = ' '.join(context.args) if context.args else ''
     
     # Get file (reply or stored)
     mcqs = None
     if update.message.reply_to_message and update.message.reply_to_message.document:
         file = await update.message.reply_to_message.document.get_file()
         content = await file.download_as_bytearray()
-        mcqs = parse_csv_to_mcqs(content.decode('utf-8-sig'))
     elif 'last_csv' in context.user_data:
         csv_bytes = context.user_data['last_csv']
         mcqs = parse_csv_to_mcqs(csv_bytes.decode('utf-8-sig') if isinstance(csv_bytes, bytes) else csv_bytes)
@@ -234,107 +227,69 @@ async def csv_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /csvS HANDLER
 # ============================================================
 async def csvs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send CSV as serial batch polls"""
+    """Send CSV as serial batch polls - supports @username, -100id, t.me link, name"""
     user_id = update.effective_user.id
-    
     is_admin = await db.fetchone('SELECT 1 FROM admins WHERE user_id = ?', (user_id,))
     if user_id != Config.OWNER_ID and not is_admin:
-        await update.message.reply_text("❌ এই কমান্ড শুধু অ্যাডমিনরা ব্যবহার করতে পারবে!")
+        await update.message.reply_text("❌ Admin only!")
         return
-    
     args = context.args
     if len(args) < 1:
-        await update.message.reply_text("❌ `/csvS <ব্যাচ সংখ্যা> <চ্যানেল> <টপিক>`\nউদাহরণ: `/csvS 10 @physics পদার্থবিজ্ঞান`", parse_mode=None)
+        await update.message.reply_text("❌ /csvS <batch> or /csvS <batch> <topic> or /csvS <batch> <channel> <topic>\nChannel: @name, -100id, https://t.me/name")
         return
+    try: batch_size = int(args[0])
+    except: await update.message.reply_text("❌ Invalid batch size!"); return
     
-    try:
-        batch_size = int(args[0])
-    except:
-        await update.message.reply_text("❌ ব্যাচ সংখ্যা সঠিক নয়!")
-        return
-    
-    channel_name = args[1] if len(args) >= 3 else None
-    topic = " ".join(args[2:]) if len(args) >= 3 else (" ".join(args[1:]) if len(args) >= 2 else "MCQ")
+    # Parse: /csvS 5 | /csvS 5 Topic | /csvS 5 @Ch Topic | /csvS 5 -100id Topic | /csvS 5 link Topic
+    channel_name, topic = None, "MCQ"
+    if len(args) >= 3:
+        arg2 = args[1]
+        if arg2.startswith('@') or arg2.startswith('-100') or 't.me/' in arg2:
+            channel_name = arg2
+            topic = ' '.join(args[2:]) if len(args) > 2 else "MCQ"
+        else:
+            topic = ' '.join(args[1:])
+    elif len(args) == 2:
+        topic = args[1]
     
     # Get MCQs
     mcqs = None
     if update.message.reply_to_message and update.message.reply_to_message.document:
         file = await update.message.reply_to_message.document.get_file()
-        content = await file.download_as_bytearray()
-        mcqs = parse_csv_to_mcqs(content.decode('utf-8-sig'))
+        content_bytes = await file.download_as_bytearray()
+        mcqs = parse_csv_to_mcqs(content_bytes.decode('utf-8-sig'))
     elif 'last_csv' in context.user_data:
         csv_bytes = context.user_data['last_csv']
-        mcqs = parse_csv_to_mcqs(csv_bytes.decode('utf-8-sig') if isinstance(csv_bytes, bytes) else csv_bytes)
-    
+        mcqs = parse_csv_to_mcqs(csv_bytes.decode('utf-8-sig') if isinstance(csv_bytes, bytes) else str(csv_bytes))
     if not mcqs:
-        await update.message.reply_text("❌ CSV ফাইলে reply করে `/csvS` দাও!")
-    # If no channel, show list
-    if not channel_name:
-        channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
-        if not channels:
-            await update.message.reply_text("❌ কোনো চ্যানেল নেই!")
-            return
-        buttons = []
-        for ch_id, ch_name in channels:
-            buttons.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"csvs_ch_{ch_id}_{batch_size}")])
-        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="poll_cancel")])
-        context.user_data["csvs_mcqs"] = mcqs
-        context.user_data["csvs_topic"] = topic
-        context.user_data["csvs_batch"] = batch_size
-        await update.message.reply_text(f"📊 {len(mcqs)}টি MCQ | Batch: {batch_size}\nকোন চ্যানেলে পাঠাবে?", reply_markup=InlineKeyboardMarkup(buttons))
-        return
-
-    # If no channel, show list
-    if not channel_name:
-        channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
-        if not channels:
-            await update.message.reply_text("❌ কোনো চ্যানেল নেই!")
-            return
-        buttons = []
-        for ch_id, ch_name in channels:
-            buttons.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"csvs_ch_{ch_id}_{batch_size}")])
-        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="poll_cancel")])
-        context.user_data["csvs_mcqs"] = mcqs
-        context.user_data["csvs_topic"] = topic
-        context.user_data["csvs_batch"] = batch_size
-        await update.message.reply_text(f"📊 {len(mcqs)}টি MCQ | Batch: {batch_size}\nকোন চ্যানেলে পাঠাবে?", reply_markup=InlineKeyboardMarkup(buttons))
-        return
-
-        return
+        await update.message.reply_text("❌ CSV file reply kore /csvS daw!"); return
     
-    # Find channel
+    # If channel specified, find matching
+    if channel_name:
+        channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
+        matched = None
+        for ch_id, ch_name in channels:
+            if channel_name == ch_id or channel_name == ch_name or channel_name.lower() in ch_name.lower():
+                matched = ch_id; break
+        if matched:
+            await update.message.reply_text(f"📤 {len(mcqs)} MCQ → Batch: {batch_size}")
+            asyncio.create_task(send_serial_polls(update, context, matched, mcqs, batch_size, topic))
+            return
+        else:
+            await update.message.reply_text(f"❌ Channel not found: {channel_name}"); return
+    
+    # Show channel list
     channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
-    matching = []
+    if not channels: await update.message.reply_text("❌ No channels!"); return
+    buttons = []
     for ch_id, ch_name in channels:
-        if channel_name and channel_name and channel_name.lower() in ch_name.lower():
-            matching.append((ch_id, ch_name))
-    
-    if not matching:
-        await update.message.reply_text(f"❌ '{channel_name}' নামে কোনো চ্যানেল পাওয়া যায়নি!")
-        return
-    
-    if len(matching) == 1:
-        ch_id, ch_name = matching[0]
-        await update.message.reply_text(f"📤 {len(mcqs)}টি MCQ → {ch_name} (Batch: {batch_size})\n⏳ শুরু হচ্ছে...")
-        asyncio.create_task(send_serial_polls(update, context, ch_id, mcqs, batch_size, topic))
-    else:
-        buttons = []
-        for ch_id, ch_name in matching:
-            buttons.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"csvs_ch_{ch_id}_{batch_size}")])
-        
-        context.user_data['csvs_mcqs'] = mcqs
-        context.user_data['csvs_topic'] = topic
-        context.user_data['csvs_batch'] = batch_size
-        
-        await update.message.reply_text(
-            "🔍 একাধিক চ্যানেল পাওয়া গেছে। সিলেক্ট করো:",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
+        buttons.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"csvs_ch_{ch_id}_{batch_size}")])
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="poll_cancel")])
+    context.user_data['csvs_mcqs'] = mcqs
+    context.user_data['csvs_topic'] = topic
+    context.user_data['csvs_batch'] = batch_size
+    await update.message.reply_text(f"📊 {len(mcqs)} MCQ | Batch: {batch_size}\nSelect Channel:", reply_markup=InlineKeyboardMarkup(buttons))
 
-
-# ============================================================
-# /csvI HANDLER (Inline Button Quiz)
-# ============================================================
 async def csvi_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send CSV as Inline Button Quiz"""
     user_id = update.effective_user.id
@@ -350,7 +305,6 @@ async def csvi_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message and update.message.reply_to_message.document:
         file = await update.message.reply_to_message.document.get_file()
         content = await file.download_as_bytearray()
-        mcqs = parse_csv_to_mcqs(content.decode('utf-8-sig'))
     elif 'last_csv' in context.user_data:
         csv_bytes = context.user_data['last_csv']
         mcqs = parse_csv_to_mcqs(csv_bytes.decode('utf-8-sig') if isinstance(csv_bytes, bytes) else csv_bytes)
@@ -406,7 +360,6 @@ async def csvis_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message and update.message.reply_to_message.document:
         file = await update.message.reply_to_message.document.get_file()
         content = await file.download_as_bytearray()
-        mcqs = parse_csv_to_mcqs(content.decode('utf-8-sig'))
     elif 'last_csv' in context.user_data:
         csv_bytes = context.user_data['last_csv']
         mcqs = parse_csv_to_mcqs(csv_bytes.decode('utf-8-sig') if isinstance(csv_bytes, bytes) else csv_bytes)
@@ -456,20 +409,21 @@ async def send_serial_polls(update, context, channel_id, mcqs, batch_size, topic
         sent = 0
         
         for mcq in batch:
-            while GLOBAL_PAUSE.get(update.effective_user.id if hasattr(update, 'effective_user') else 0, False):
-                await asyncio.sleep(1)
-            poll_id, success = await asyncio.create_task(send_single_poll(bot, channel_id, mcq, reply_to))
+            uid = update.effective_user.id if hasattr(update, "effective_user") else query.from_user.id if query else 0
+            while GLOBAL_PAUSE.get(uid, False):
+                await asyncio.sleep(1.5)
+            poll_id, success = await send_single_poll(bot, channel_id, mcq, reply_to)
             if success and first_poll_id is None:
                 first_poll_id = poll_id
             if success:
                 sent += 1
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.5)
         
         first_link = await get_message_link(bot, channel_id, first_poll_id) if first_poll_id else ""
         ending = get_ending_message(batch_topic, sent, first_link)
         await bot.send_message(chat_id=channel_id, text=ending, disable_web_page_preview=True)
         batch_links.append((b_idx, first_link, len(batch)))
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.5)
     
     if total_batches > 1:
         summary = get_master_summary(topic, total, total_batches, batch_links)
@@ -507,7 +461,7 @@ async def send_inline_quiz(bot, chat_id, mcqs, topic=""):
         if first_msg_id is None:
             first_msg_id = msg.message_id
         
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.5)
     
     # Ending with Retake/Result
     first_link = await get_message_link(bot, chat_id, first_msg_id) if first_msg_id else ""
@@ -581,15 +535,16 @@ async def handle_csv_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         sent = 0
         
         for mcq in mcqs:
-            while GLOBAL_PAUSE.get(update.effective_user.id if hasattr(update, 'effective_user') else 0, False):
-                await asyncio.sleep(1)
+            uid = update.effective_user.id if hasattr(update, "effective_user") else query.from_user.id if query else 0
+            while GLOBAL_PAUSE.get(uid, False):
+                await asyncio.sleep(1.5)
             
-            poll_id, success = asyncio.create_task(send_single_poll(bot, channel_id, mcq, pre_msg.message_id))
+            poll_id, success = await send_single_poll(bot, channel_id, mcq, pre_msg.message_id)
             if success and first_poll_id is None:
                 first_poll_id = poll_id
             if success:
                 sent += 1
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.5)
         
         first_link = await get_message_link(bot, channel_id, first_poll_id) if first_poll_id else ""
         ending = get_ending_message(topic, sent, first_link)

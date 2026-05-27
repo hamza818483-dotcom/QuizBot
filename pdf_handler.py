@@ -45,16 +45,39 @@ async def send_poll_robust(bot, chat_id, mcq, reply_to, uid, with_source=False):
     for attempt in range(10):
         while GLOBAL_PAUSE.get(uid, False): await asyncio.sleep(1)
         try:
+            # Get question with tags
             q_raw = mcq.get('question','?')
+            tags = await db.fetchall('SELECT tag_name, position FROM tag_settings WHERE is_active = 1')
+            for tname, tpos in tags:
+                if tpos == 'tag1': q_raw = f"{tname}\n\n{q_raw}"
+                elif tpos == 'tag2': q_raw = f"{q_raw}\n\n{tname}"
+                elif tpos == 'tag3': q_raw = f"{q_raw} {tname}"
+                elif tpos == 'tag4': q_raw = f"{tname}\n{q_raw}"
+            
+            # Source tag
             source_tag = ''
             if with_source:
                 src_match = re.search(r'[\[\(][^\]\)]*(?:BCS|DU|HSTU|Medical|Admission|Exam|Test|উন্মেষ|মেডিকেল|RU|JU|CU|GST)[^\]\)]*[\]\)]', q_raw, re.IGNORECASE)
                 if src_match: source_tag = ' ' + src_match.group(0)
             q = (re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q_raw).strip() + source_tag)[:300]
+            
             opts = [mcq.get('options',{}).get(k,'Option '+k) for k in ['A','B','C','D']]
             ans = str(mcq.get('answer','1')).upper()
             cid = {'A':0,'B':1,'C':2,'D':3,'1':0,'2':1,'3':2,'4':3}.get(ans,0)
-            exp = mcq.get('explanation','')[:200]
+            
+            # Get explanation from /exp settings
+            exp_row = await db.fetchone('SELECT mode, custom_text, tag_name FROM exp_settings WHERE id = 1')
+            if exp_row:
+                mode, custom_text, tag_name = exp_row
+                if mode == 'custom' and custom_text:
+                    exp = custom_text
+                else:
+                    exp = mcq.get('explanation','')[:200]
+                if tag_name:
+                    exp = f"{exp}\n{tag_name}" if exp else tag_name
+            else:
+                exp = mcq.get('explanation','')[:200]
+            
             poll_msg = await bot.send_poll(chat_id=chat_id, question=q, options=opts,
                 type='quiz', correct_option_id=cid, explanation=exp or None,
                 is_anonymous=True, reply_to_message_id=reply_to)
