@@ -262,6 +262,26 @@ async def poll_collect_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"✅ Collected! \n📊 Total: {count} polls")
 
 
+
+# Merge file auto-detect handler
+async def merge_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Auto-detect forwarded CSV/JSON for merge"""
+    user_id = update.effective_user.id
+    doc = update.message.document
+    if not doc: return
+    
+    if doc.file_name.endswith(('.csv', '.json')):
+        # Check if merge mode is active
+        if 'merge_files' not in context.user_data:
+            context.user_data['merge_files'] = []
+        
+        file = await doc.get_file()
+        content = await file.download_as_bytearray()
+        context.user_data['merge_files'].append(content.decode('utf-8-sig'))
+        count = len(context.user_data['merge_files'])
+        await update.message.reply_text(f"📥 {doc.file_name}\n📊 Total: {count} files\n\n✅ /merge done")
+
+
 def main():
     """Initialize and run the bot"""
     logger.info("🚀 ATLAS MCQ BOT v3.0 Starting...")
@@ -333,6 +353,7 @@ def main():
     
     # MHTML/HTML files
     app.add_handler(MessageHandler(filters.POLL, poll_collect_handler))
+    app.add_handler(MessageHandler(filters.Document.FileExtension("csv") | filters.Document.FileExtension("json"), merge_file_handler))
     app.add_handler(MessageHandler(
         filters.Document.FileExtension("mhtml") | 
         filters.Document.FileExtension("mht") | 
