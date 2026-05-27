@@ -293,11 +293,6 @@ async def handle_csv_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         if mcqs:
             await query.edit_message_text("📤 Serial poll starting...")
             await send_serial_polls(update, context, channel_id, mcqs, batch_size, topic)
-            if len(mcqs) > batch_size:
-                total_batches = (len(mcqs) + batch_size - 1) // batch_size
-                summary = get_master_summary(topic, len(mcqs), total_batches, [])
-                await context.bot.send_message(chat_id=channel_id, text=summary, disable_web_page_preview=True)
-
 
 # ============ /csvI HANDLER ============
 async def csvi_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
