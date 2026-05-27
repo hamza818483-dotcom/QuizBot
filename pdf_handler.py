@@ -295,6 +295,17 @@ STRICT RULES:
 
     dash_data['status'] = '✅ COMPLETE!'; dash_data['pct'] = 100; await update_dashboard(dash_msg, dash_data)
     context.user_data['last_csv'] = csv_bytes; context.user_data['last_mcqs'] = all_mcqs
+    
+    # For QBM without channel, show channel list after CSV
+    if is_qbm and not channel_id:
+        channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
+        if channels:
+            buttons = []
+            for ch_id, ch_name in channels:
+                buttons.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"qbm_send_{ch_id}")])
+            buttons.append([InlineKeyboardButton("❌ Skip", callback_data="qbm_skip")])
+            await msg_target.reply_text(f"✅ CSV Ready!\n\nSend Polls to Channel?", reply_markup=InlineKeyboardMarkup(buttons))
+        return
 
 # ============================================================
 # CALLBACKS
@@ -318,17 +329,7 @@ async def handle_pdf_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data.startswith('qbm_source_'):
         context.chat_data['qbm_with_source'] = (data == 'qbm_source_yes')
         mood = context.chat_data.get('qbm_mood', 'topic')
-        channel_id = context.chat_data.get('qbm_channel')
-        if not channel_id:
-            # Show channel list
-            channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
-            if channels:
-                buttons = []
-                for ch_id, ch_name in channels:
-                    buttons.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"qbm_send_{ch_id}")])
-                await query.edit_message_text(f"📋 Select Channel for QBM:", reply_markup=InlineKeyboardMarkup(buttons))
-                return
-        await query.edit_message_text(f"⏳ QBM Extracting...")
+        await query.edit_message_text(f"⏳ QBM Extracting...\n📝 Source: {'With' if context.chat_data['qbm_with_source'] else 'Without'}")
         await process_pdf(update, context, True, mood)
     elif data.startswith('qbm_send_'):
         channel_id = data.replace('qbm_send_', '')
@@ -337,6 +338,22 @@ async def handle_pdf_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(f"⏳ QBM Extracting to channel...")
         await process_pdf(update, context, True, mood)
 
+    elif data == 'qbm_skip':
+        await query.edit_message_text("✅ CSV saved! Poll skipped.")
+    
+    elif data.startswith('qbm_send_'):
+        channel_id = data.replace('qbm_send_', '')
+        context.chat_data['qbm_channel'] = channel_id
+        mcqs = context.user_data.get('last_mcqs', [])
+        topic = context.user_data.get('last_topic', 'MCQ')
+        mood = context.chat_data.get('qbm_mood', 'topic')
+        with_source = context.chat_data.get('qbm_with_source', False)
+        if mcqs:
+            await query.edit_message_text(f"📤 Sending {len(mcqs)} polls...")
+            await send_polls_to_channel(update, context, channel_id, mcqs, topic, mood, None)
+        else:
+            await query.edit_message_text("❌ No MCQs!")
+    
     elif data in ('pdfm_cancel', 'qbm_cancel'):
         await query.edit_message_text("❌ Cancelled!")
 
