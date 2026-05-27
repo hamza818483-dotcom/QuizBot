@@ -29,7 +29,7 @@ async def update_dashboard(msg, data: dict):
 ║ 📥 {data.get('dl','')[:32]:<32} ║
 ╠══════════════════════════════════╣
 ║ 📄 Pages: {data.get('pg','0/0'):<24} ║
-║ 📝 MCQ: {data.get('mcq',0):<22} ║
+        is_qbm = data.startswith("qbm"); mood = data.split("_")[-1]
 ║ 📤 Sent: {data.get('sent','0/0'):<22} ║
 ║ ⏱️ {data.get('time',''):<28} ║
 ║ [{bar}] {pct}%{'':<10} ║
@@ -218,6 +218,11 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, is_qbm
         try: os.remove(pdf_path)
         except: pass; return
 
+    all_mcqs = []
+    page_links = {}
+    sent_count = 0
+    pdf_name = "PDF"
+    
     if is_qbm:
         active_prompts = ["""YOU ARE AN MCQ EXTRACTOR. STRICT RULES:
 1. ONLY extract EXISTING MCQs from this image. NEVER create new questions from info.
@@ -228,11 +233,12 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, is_qbm
 6. If explanation exists in image → use it. If NOT → CREATE explanation: why answer is correct + why others are not + relevant topic info (max 165 chars Bengali).
 7. Add /exp tag_name after explanation.
 8. Output ONLY valid JSON array. If NO MCQ exists, return []."""]
-    if is_qbm:
-
-    all_mcqs = []; sent_count = 0; page_links = {}
-    dash_data['status'] = '⚡ Processing & Sending...'
-
+    if not is_qbm:
+        rows = await db.fetchall('SELECT content FROM prompts WHERE is_active = 1')
+        if not rows:
+            await msg_target.reply_text("❌ No Active Prompt!")
+            return
+        active_prompts = [r[0] for r in rows]
     for idx, (page_num, img_bytes) in enumerate(images):
         while GLOBAL_PAUSE.get(uid, False):
             dash_data['status'] = '⏸️ PAUSED'; await update_dashboard(dash_msg, dash_data); await asyncio.sleep(1)
@@ -318,33 +324,36 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, is_qbm
 # CALLBACKS
 # ============================================================
 async def handle_pdf_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mood = "topic"
+    is_qbm = False
+    mood = "topic"
     query = update.callback_query; await query.answer()
+        is_qbm = data.startswith("qbm"); mood = data.split("_")[-1]
     data = query.data
     if data.startswith('pdfm_mood_') or data.startswith('qbm_mood_'):
-        is_qbm = data.startswith('qbm'); mood = data.split('_')[-1]
         if mood == 'cancel': await query.edit_message_text("❌ Cancelled!"); return
-        if is_qbm:
+        all_mcqs = []
+    page_links = {}
+    sent_count = 0
+    all_mcqs = []
+    sent_count = 0
+    page_links = {}
+    images = []
+    pdf_name = "PDF"
+    
+    if is_qbm:
             context.chat_data['qbm_mood'] = mood
             buttons = [
                 [InlineKeyboardButton("📝 With Source", callback_data="qbm_source_yes")],
                 [InlineKeyboardButton("📝 Without Source", callback_data="qbm_source_no")],
             ]
             await query.edit_message_text("📋 *Source Option:*\n\nWith Source = প্রশ্নে [BCS] tag সহ\nWithout Source = tag বাদে\n\n*CSV সবসময় Without Source*", parse_mode=None, reply_markup=InlineKeyboardMarkup(buttons))
-        else:
-            await query.edit_message_text(f"⏳ Processing...")
-            await process_pdf(update, context, is_qbm, mood)
     elif data.startswith('qbm_source_'):
         context.chat_data['qbm_with_source'] = (data == 'qbm_source_yes')
+        mood = context.chat_data.get("qbm_mood", "topic")
         mood = context.chat_data.get('qbm_mood', 'topic')
         await query.edit_message_text(f"⏳ QBM Extracting...\n📝 Source: {'With' if context.chat_data['qbm_with_source'] else 'Without'}")
         await process_pdf(update, context, True, mood)
-    elif data.startswith('qbm_send_'):
-        channel_id = data.replace('qbm_send_', '')
-        context.chat_data['qbm_channel'] = channel_id
-        mood = context.chat_data.get('qbm_mood', 'topic')
-        await query.edit_message_text(f"⏳ QBM Extracting to channel...")
-        await process_pdf(update, context, True, mood)
-
     elif data == 'qbm_skip':
         await query.edit_message_text("✅ CSV saved! Poll skipped.")
     
