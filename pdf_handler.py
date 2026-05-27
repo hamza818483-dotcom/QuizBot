@@ -57,9 +57,13 @@ async def send_poll_robust(bot, chat_id, mcq, reply_to, uid, with_source=False):
             # Source tag
             source_tag = ''
             if with_source:
-                src_match = re.search(r'[\[\(][^\]\)]*(?:BCS|DU|HSTU|Medical|Admission|Exam|Test|উন্মেষ|মেডিকেল|RU|JU|CU|GST)[^\]\)]*[\]\)]', q_raw, re.IGNORECASE)
-                if src_match: source_tag = ' ' + src_match.group(0)
-            q = (re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q_raw).strip() + source_tag)[:300]
+                # Keep ALL source tags from original question
+                src_matches = re.findall(r'[\[\(][^\]\)]*?(?:BCS|DU|HSTU|Medical|Admission|Exam|Test|উন্মেষ|মেডিকেল|RU|JU|CU|GST|RUET|KUET|CUET|BUET|HSC|SSC|JSC|PSC|primary|teacher|registrar|assistant|officer|bank|government|NTRCA|NSI|প্রাইমারি|শিক্ষক|নিবন্ধন|বিসিএস|পিএসসি|মাস্টার্স|ডিগ্রী|সম্মান|অনার্স|প্রিলি|লিখিত|ভাইভা|MCQ|CQ|সৃজনশীল|নৈর্ব্যক্তিক|সংক্ষিপ্ত|রচনামূলক)[^\]\)]*[\]\)]', q_raw, re.IGNORECASE)
+                if src_matches: source_tag = ' ' + ' '.join(src_matches)
+            # Remove numbering from poll question too
+            q_no_num = re.sub(r'^\s*[\d০-৯]+\s*[.)\-:\s]+\s*', '', q_raw)
+            q_no_num = re.sub(r'^\s*[Qq]\.?\s*[\d]+\s*[.)\-:\s]*\s*', '', q_no_num)
+            q = (re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q_no_num).strip() + source_tag)[:300]
             
             opts = [mcq.get('options',{}).get(k,'Option '+k) for k in ['A','B','C','D']]
             ans = str(mcq.get('answer','1')).upper()
@@ -215,17 +219,17 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, is_qbm
         except: pass; return
 
     if is_qbm:
-        active_prompts = ["""YOU ARE AN MCQ EXTRACTOR ONLY. DO NOT CREATE NEW QUESTIONS.
-STRICT RULES:
-1. ONLY extract questions that ALREADY EXIST in the image/text.
-2. If NO MCQ exists in the image, return EMPTY array [].
-3. NEVER generate new questions from text content.
-4. Preserve original question text EXACTLY as written.
-5. Detect answers from markings (circle/tick/underline/answer key).
-6. Include explanation ONLY if present in the image.
-7. Output ONLY valid JSON array. No extra text."""]
-    else:
-        rows = await db.fetchall('SELECT content FROM prompts WHERE is_active = 1')
+        active_prompts = ["""YOU ARE AN MCQ EXTRACTOR. STRICT RULES:
+1. ONLY extract EXISTING MCQs from this image. NEVER create new questions from info.
+2. Extract ALL - Bangla/English, A/B/C/D, 1/2/3/4, ক/খ/গ/ঘ, a/b/c/d.
+3. Multiple OCR passes to catch every MCQ. Triple-check.
+4. Remove question numbering (১., 1., Q1., Q.1) from question text.
+5. Detect answer from markings (circle, tick, underline, bold, answer key).
+6. If explanation exists in image → use it. If NOT → CREATE explanation: why answer is correct + why others are not + relevant topic info (max 165 chars Bengali).
+7. Add /exp tag_name after explanation.
+8. Output ONLY valid JSON array. If NO MCQ exists, return []."""]
+    if is_qbm:
+        active_prompts = ["EXTRACT ALL EXISTING MCQs FROM THIS IMAGE ONLY. DO NOT CREATE NEW. Rules: 1. Extract ALL MCQs - Bangla/English, any format. 2. Multiple OCR passes. 3. Triple-check. 4. Remove numbering. 5. Detect answer from markings. 6. Use explanation if present, else create one (why correct, why others wrong, relevant info). 7. Add /exp tag. 8. Output JSON only. No MCQ = return []."]
         if not rows: await msg_target.reply_text("❌ No Active Prompt!"); return
         active_prompts = [r[0] for r in rows]
 
@@ -247,7 +251,13 @@ STRICT RULES:
         if page_mcqs:
             # Clean source from CSV (always without source)
             for mcq_clean in page_mcqs:
-                mcq_clean['question'] = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', mcq_clean.get('question','')).strip()
+                # Remove source tag + ALL numbering formats
+                q_clean = mcq_clean.get('question','')
+                q_clean = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q_clean)  # Remove source
+                q_clean = re.sub(r'^\s*[\d০-৯]+\s*[.)\-:\s]+\s*', '', q_clean)  # 1. ১.
+                q_clean = re.sub(r'^\s*[Qq]\.?\s*[\d]+\s*[.)\-:\s]*\s*', '', q_clean)  # Q1. Q.1
+                q_clean = re.sub(r'^\s*\(?\s*[\d০-৯]+\s*\)?\s*[.)\-:\s]*\s*', '', q_clean)  # (1) (১)
+                mcq_clean['question'] = q_clean.strip()
 
             all_mcqs.extend(page_mcqs)
             dash_data['mcq'] = len(all_mcqs)
@@ -297,7 +307,7 @@ STRICT RULES:
     context.user_data['last_csv'] = csv_bytes; context.user_data['last_mcqs'] = all_mcqs
     
     # For QBM without channel, show channel list after CSV
-    if is_qbm and not channel_id:
+    if is_qbm and not channel_id and all_mcqs:
         channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
         if channels:
             buttons = []
