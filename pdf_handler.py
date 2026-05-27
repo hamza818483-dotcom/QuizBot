@@ -59,11 +59,11 @@ async def pdfm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             i += 1
     
     # Save context
-    context.user_data['pdf_title'] = title
-    context.user_data['pdf_channel'] = channel_id
-    context.user_data['pdf_mcq_count'] = mcq_count
-    context.user_data['pdf_page_range'] = page_range
-    context.user_data['pdf_doc'] = doc.file_id
+    context.chat_data['pdf_title'] = title
+    context.chat_data['pdf_channel'] = channel_id
+    context.chat_data['pdf_mcq_count'] = mcq_count
+    context.chat_data['pdf_page_range'] = page_range
+    context.chat_data['pdf_doc'] = doc.file_id
     
     # Show Mood selection
     buttons = [
@@ -124,11 +124,11 @@ async def qbm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mcq_count = int(match.group(1))
             i += 1
     
-    context.user_data['qbm_title'] = title
-    context.user_data['qbm_channel'] = channel_id
-    context.user_data['qbm_mcq_count'] = mcq_count
-    context.user_data['qbm_page_range'] = page_range
-    context.user_data['qbm_doc'] = doc.file_id
+    context.chat_data['qbm_title'] = title
+    context.chat_data['qbm_channel'] = channel_id
+    context.chat_data['qbm_mcq_count'] = mcq_count
+    context.chat_data['qbm_page_range'] = page_range
+    context.chat_data['qbm_doc'] = doc.file_id
     
     buttons = [
         [InlineKeyboardButton("📸 Image Mood", callback_data="qbm_mood_image")],
@@ -154,20 +154,62 @@ async def qbm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 # PDF PROCESSING CORE
 # ============================================================
+
+async def update_dashboard(msg, pdf_name, total_pages, current_page, mcq_count, start_time):
+    """Update live progress dashboard"""
+    elapsed = int(time.time() - start_time)
+    pct = int((current_page / total_pages) * 100) if total_pages > 0 else 0
+    bar_len = 20
+    filled = int(bar_len * current_page / total_pages) if total_pages > 0 else 0
+    bar = '█' * filled + '░' * (bar_len - filled)
+    
+    if current_page > 0:
+        rate = current_page / elapsed if elapsed > 0 else 0
+        remaining = (total_pages - current_page) / rate if rate > 0 else 0
+        eta_text = f"{int(remaining // 60)}m {int(remaining % 60)}s"
+        from datetime import datetime, timedelta
+        done_time = datetime.now() + timedelta(seconds=remaining)
+        done_text = done_time.strftime('%I:%M %p')
+    else:
+        eta_text = "calculating..."
+        done_text = "..."
+
+    dashboard = f"""╔══════════════════════════════════╗
+║     📊 ATLAS PDF PROCESSOR      ║
+╠══════════════════════════════════╣
+║ 📁 {pdf_name[:30]:<30} ║
+║ 📄 Total Pages: {total_pages:<16} ║
+║ ⏳ Processed: {current_page}/{total_pages} ({pct}%){'':<3} ║
+║ [{bar}] {pct}%{'':<5} ║
+║                                 ║
+║ 📝 MCQ Found: {mcq_count:<18} ║
+║ ⏱️ Elapsed: {elapsed}s{'':<19} ║
+║ ⏳ Remaining: {eta_text:<16} ║
+║ 🕐 Est. Done: {done_text:<16} ║
+║                                 ║
+║ 🔄 Processing page {current_page}...{'':<7} ║
+╚══════════════════════════════════╝"""
+    
+    try:
+        await msg.edit_text(f"```{dashboard}```", parse_mode='Markdown')
+    except:
+        await msg.edit_text(dashboard)
+
+
 async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                       is_qbm: bool = False, mood: str = 'topic'):
     """Core PDF processing pipeline"""
     query = update.callback_query
     
-    prefix = 'qbm' if is_qbm else 'pdfm'
-    title = context.user_data.get(f'{prefix}_title', 'MCQ')
-    channel_id = context.user_data.get(f'{prefix}_channel')
-    mcq_count = context.user_data.get(f'{prefix}_mcq_count')
-    page_range_str = context.user_data.get(f'{prefix}_page_range')
-    doc_id = context.user_data.get(f'{prefix}_doc')
+    prefix = 'qbm' if is_qbm else 'pdf'
+    title = context.chat_data.get('pdf_title', 'MCQ')
+    channel_id = context.chat_data.get('pdf_channel')
+    mcq_count = context.chat_data.get('pdf_mcq_count')
+    page_range_str = context.chat_data.get(f"{prefix}_page_range") or context.chat_data.get("pdf_page_range")
+    doc_id = context.chat_data.get(f"{prefix}_doc") or context.chat_data.get("pdf_doc")
     
     if not doc_id:
-        await query.edit_message_text("❌ PDF ডকুমেন্ট পাওয়া যায়নি!")
+        await query.edit_message_text(f"❌ PDF doc not found! Keys: {list(context.chat_data.keys())}")
         return
     
     # Parse page range
@@ -188,7 +230,18 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     try:
         file = await context.bot.get_file(doc_id)
+        file_size = file.file_size or 0
+        
+        if file_size > 0:
+            import time
+            dl_start = time.time()
+            await progress_msg.edit_text(f"📥 PDF Downloading...\n📊 Size: {file_size/1024/1024:.1f} MB\n⏳ 0%")
+            
         pdf_bytes = await file.download_as_bytearray()
+        
+        if file_size > 0:
+            dl_time = time.time() - dl_start
+            await progress_msg.edit_text(f"✅ PDF Downloaded!\n📊 Size: {file_size/1024/1024:.1f} MB\n⏱️ Time: {dl_time:.1f}s")
         if isinstance(pdf_bytes, bytearray):
             pdf_bytes = bytes(pdf_bytes)
     except Exception as e:
@@ -224,7 +277,12 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     # Get active prompts
     if is_qbm:
-        active_prompts = ["EXTRACT only existing MCQs from the image. Do NOT generate new questions. Output the exact questions, options, and answers as they appear in the image."]
+        active_prompts = ["""EXTRACT ALL existing MCQs from this image.
+- Find every question with options (A/B/C/D)
+- Detect correct answers from markings (circle/tick/answer key)
+- Output EXACT question text, options, and answer
+- DO NOT create new questions
+- Output ONLY valid JSON array"""]
     else:
         prompt_rows = await db.fetchall('SELECT content FROM prompts WHERE is_active = 1')
         if not prompt_rows:
@@ -236,9 +294,12 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE,
     all_mcqs = []
     page_links = {}  # For summary
     
+    dashboard_msg = await update.effective_message.reply_text("⏳ Starting...")
+    start_time = time.time()
     for idx, (page_num, img_bytes) in enumerate(images):
         pg_progress = format_progress(idx + 1, len(images), f"📄 পৃষ্ঠা {page_num}/{end_page}")
         await progress_msg.edit_text(f"{pg_progress}\n✅ MCQ পাওয়া: {len(all_mcqs)}")
+        await update_dashboard(dashboard_msg, title, len(images), idx + 1, len(all_mcqs), start_time)
         
         try:
             if mcq_count:
@@ -308,6 +369,11 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE,
     context.user_data['last_mcqs'] = all_mcqs
     context.user_data['last_topic'] = title
     
+    # Send polls to channel if specified
+    if channel_id and mood:
+        await send_polls_to_channel(update, context, channel_id, all_mcqs, title, mood, [img for _, img in images])
+        return
+    
     # If channel specified, ask for confirm or show channel list
     if channel_id:
         buttons = [
@@ -347,155 +413,76 @@ async def send_polls_to_channel(update: Update, context: ContextTypes.DEFAULT_TY
                                 channel_id: str, mcqs: list, topic: str, mood: str = 'topic',
                                 images: list = None):
     """Send polls to channel with pre/ending messages"""
-    query = update.callback_query
-    
+    from csv_poll_handler import send_single_poll, get_pre_message, get_ending_message, get_message_link
+    query = update.callback_query if hasattr(update, 'callback_query') else None
+    bot = context.bot
     total = len(mcqs)
     
-    # Get exp settings
-    exp_row = await db.fetchone('SELECT mode, custom_text, tag_name FROM exp_settings WHERE id = 1')
-    exp_mode = exp_row[0] if exp_row else 'auto'
-    custom_exp = exp_row[1] if exp_row else ''
-    tag_name = exp_row[2] if exp_row else ''
-    
-    # Get tag settings
-    tags = await db.fetchall('SELECT tag_name, position, is_active FROM tag_settings WHERE is_active = 1')
-    
-    # Send pre-message
     if mood == 'image' and images:
-        # Image Mood - send images first
-        image_msgs = []
-        for img_bytes in images:
-            img_msg = await context.bot.send_photo(
-                chat_id=channel_id,
-                photo=io.BytesIO(img_bytes)
-            )
-            image_msgs.append(img_msg.message_id)
+        # Image Mood - send per-image polls
+        per_image = max(1, total // len(images)) if images else total
+        mcq_idx = 0
+        page_links = {}
         
-        # Send header
-        header = f"""🌟ATLAS Master Poll Solve
-
-📋মোট পোল: {total}
-
-⁉️তোমার স্কোর কত?
-👉(?/{total})
-
-✅কমেন্টে জানিয়ে দাও"""
-        
-        header_msg = await context.bot.send_message(chat_id=channel_id, text=header)
-        reply_to = header_msg.message_id
-    else:
-        # Topic Name Mood
-        pre_text = f"""🌟Important Poll Solve By ATLAS
-🔥Topic Name: "{topic}"{" " if topic else ""}
-
-✅প্রশ্ন সংখ্যা: {total}"""
-        
-        pre_msg = await context.bot.send_message(chat_id=channel_id, text=pre_text)
-        reply_to = pre_msg.message_id
-    
-    # Send polls
-    first_poll_link = None
-    sent_count = 0
-    
-    for idx, mcq in enumerate(mcqs):
-        # Check pause
-        while context.user_data.get('paused', False):
-            await asyncio.sleep(1)
-        
-        # Build question with tags
-        q_text = mcq.get('question', '?')
-        for tag in tags:
-            tag_name_val = tag[0]
-            position = tag[1]
-            if position == 'tag1':
-                q_text = f"{tag_name_val}\n\n{q_text}"
-            elif position == 'tag2':
-                q_text = f"{q_text}\n\n{tag_name_val}"
-            elif position == 'tag3':
-                q_text = f"{q_text} {tag_name_val}"
-            elif position == 'tag4':
-                q_text = f"{tag_name_val}\n{q_text}"
-        
-        # Build explanation
-        if exp_mode == 'custom' and custom_exp:
-            explanation = custom_exp
-        elif exp_mode == 'auto':
-            explanation = mcq.get('explanation', '')
-        else:
-            explanation = mcq.get('explanation', '')
-        
-        if tag_name and exp_mode != 'custom':
-            explanation = f"{explanation}\n{tag_name}" if explanation else tag_name
-        
-        explanation = explanation[:200] if explanation else None
-        
-        # Options
-        opts = mcq.get('options', {})
-        option_list = [opts.get('A', ''), opts.get('B', ''), opts.get('C', ''), opts.get('D', '')]
-        
-        ans_str = mcq.get('answer', '1')
-        ans_map = {'1': 0, '2': 1, '3': 2, '4': 3, 'A': 0, 'B': 1, 'C': 2, 'D': 3}
-        correct_idx = ans_map.get(ans_str, 0)
-        
-        try:
-            poll_msg = await context.bot.send_poll(
-                chat_id=channel_id,
-                question=q_text[:300],
-                options=option_list,
-                type='quiz',
-                correct_option_id=correct_idx,
-                explanation=explanation,
-                is_anonymous=False,
-                reply_to_message_id=reply_to
-            )
+        for i, img_data in enumerate(images):
+            page_num = i + 1
+            img_bytes = img_data[1] if isinstance(img_data, tuple) else img_data
             
-            if idx == 0:
-                first_poll_link = f"https://t.me/c/{str(channel_id).replace('-100', '')}/{poll_msg.message_id}"
+            # Send image
+            img_msg = await bot.send_photo(chat_id=channel_id, photo=io.BytesIO(img_bytes if isinstance(img_bytes, bytes) else img_bytes))
             
-            sent_count += 1
-        except Exception as e:
-            continue
+            # Send polls for this page
+            page_mcqs = mcqs[mcq_idx:mcq_idx + per_image]
+            first_poll_id = None
+            sent = 0
+            
+            for mcq in page_mcqs:
+                poll_id, success = await send_single_poll(bot, channel_id, mcq, img_msg.message_id)
+                if success and first_poll_id is None:
+                    first_poll_id = poll_id
+                if success:
+                    sent += 1
+                await asyncio.sleep(2)
+            
+            mcq_idx += per_image
+            
+            # Ending for this page
+            first_link = await get_message_link(bot, channel_id, first_poll_id) if first_poll_id else ""
+            page_topic = f"{topic} (Page-{page_num:02d})"
+            ending = get_ending_message(page_topic, sent, first_link)
+            await bot.send_message(chat_id=channel_id, text=ending, reply_to_message_id=img_msg.message_id, disable_web_page_preview=True)
+            page_links[page_num] = first_link
         
-        await asyncio.sleep(2)
+        # Master summary
+        if len(page_links) > 1:
+            summary = f"🟥পেইজভিত্তিক Important Poll Solve By ATLAS\n🌟Topic: {topic}\n\n✅নিচে সিরিয়ালী সাজিয়ে দেওয়া হলো:\n\n"
+            for pg, link in page_links.items():
+                summary += f"📍Page-{pg:02d}:\n{link}\n\n"
+            await bot.send_message(chat_id=channel_id, text=summary, disable_web_page_preview=True)
     
-    # Send ending message
-    if first_poll_link:
-        ending = f"""🎉 ধন্যবাদ প্রিয় শিক্ষার্থী!
-👉এটলাস আয়োজিত "{topic}" পোল সলভে অংশগ্রহণ করার জন্য। 😊
-
-📊 মোট পোল: {sent_count}
-
-⁉️তোমার স্কোর কত? 🤔
-( ? / {sent_count} )
-
-নিচে লিখো! 👇
-
-✅পোল যেখান থেকে শুরু হয়েছে:
-{first_poll_link}"""
     else:
-        ending = f"""🎉 ধন্যবাদ প্রিয় শিক্ষার্থী!
-
-📊 মোট পোল: {sent_count}
-
-⁉️তোমার স্কোর কত? 🤔"""
-    
-    await context.bot.send_message(chat_id=channel_id, text=ending, disable_web_page_preview=True)
-    
-    # Send page-wise summary if multiple pages
-    page_links = context.user_data.get('page_links', {})
-    if len(page_links) > 1:
-        summary = "🟥পেইজভিত্তিক Important Poll Solve By ATLAS\n\n✅নিচে সিরিয়ালী সাজিয়ে দেওয়া হলো:\n\n"
-        for pg, count in page_links.items():
-            summary += f"📍Page-{pg}: ({count}টি প্রশ্ন)\n"
+        # Topic Name Mood - single pre-message with polls
+        pre_text = get_pre_message(topic, total)
+        pre_msg = await bot.send_message(chat_id=channel_id, text=pre_text)
         
-        await context.bot.send_message(chat_id=channel_id, text=summary)
+        first_poll_id = None
+        sent = 0
+        
+        for mcq in mcqs:
+            poll_id, success = await send_single_poll(bot, channel_id, mcq, pre_msg.message_id)
+            if success and first_poll_id is None:
+                first_poll_id = poll_id
+            if success:
+                sent += 1
+            await asyncio.sleep(2)
+        
+        first_link = await get_message_link(bot, channel_id, first_poll_id) if first_poll_id else ""
+        ending = get_ending_message(topic, sent, first_link)
+        await bot.send_message(chat_id=channel_id, text=ending, disable_web_page_preview=True)
     
-    await query.edit_message_text(f"✅ {sent_count}টি পোল পাঠানো সম্পন্ন!\n📢 {channel_id}")
+    if query:
+        await query.message.reply_text(f"✅ {total}টি পোল পাঠানো সম্পন্ন!")
 
-
-# ============================================================
-# PDF CALLBACK HANDLER
-# ============================================================
 async def handle_pdf_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle PDF callbacks"""
     query = update.callback_query
@@ -531,6 +518,18 @@ async def handle_pdf_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(f"📤 {len(mcqs)}টি পোল পাঠানো শুরু...")
         await send_polls_to_channel(update, context, channel_id, mcqs, topic, mood)
     
+    elif data.startswith('pdf_send_'):
+        channel_id = data.replace('pdf_send_', '')
+        mcqs = context.user_data.get('send_mcqs', [])
+        topic = context.user_data.get('send_topic', 'MCQ')
+        mood = context.user_data.get('send_mood', 'topic')
+        
+        if mcqs:
+            await query.edit_message_text(f"📤 {len(mcqs)}টি MCQ চ্যানেলে পাঠানো হচ্ছে...")
+            await send_polls_to_channel(update, context, channel_id, mcqs, topic, mood)
+        else:
+            await query.answer("❌ MCQ সেশন শেষ!", show_alert=True)
+
     elif data == 'pdf_show_list':
         mcqs = context.user_data.get('send_mcqs', [])
         if mcqs:

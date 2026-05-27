@@ -32,6 +32,22 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+def ocr_image(image_bytes: bytes, lang='eng+ben') -> str:
+    """Extract text from image using Tesseract OCR with double pass"""
+    try:
+        import pytesseract
+        from PIL import Image
+        img = Image.open(io.BytesIO(image_bytes))
+        # First pass - default
+        text1 = pytesseract.image_to_string(img, lang=lang)
+        # Second pass - with different config for better accuracy
+        text2 = pytesseract.image_to_string(img, lang=lang, config='--psm 6')
+        # Combine and return the longer/better result
+        return text1 if len(text1) > len(text2) else text2
+    except Exception as e:
+        return ""
+
+
 # ============================================================
 # CONFIG LOADER
 # ============================================================
@@ -206,29 +222,41 @@ class PDFProcessor:
     @staticmethod
     def get_page_count(pdf_path: str) -> int:
         try:
-            doc = fitz.open(pdf_path)
-            count = doc.page_count
-            doc.close()
-            return count
+            from pypdf import PdfReader
+            reader = PdfReader(pdf_path)
+            return len(reader.pages)
         except: return 0
     
     @staticmethod
-    def pdf_to_images(pdf_path: str, start: int = 1, end: int = 10) -> List[Tuple[int, bytes]]:
-        """Convert PDF pages to image bytes"""
-        images = []
+    def pdf_to_images(pdf_path: str, start: int = 1, end: int = 10) -> list:
+        """Convert PDF pages to images using pdf2image"""
         try:
-            doc = fitz.open(pdf_path)
-            for page_idx in range(start - 1, min(end, doc.page_count)):
-                page = doc[page_idx]
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            from pdf2image import convert_from_path
+            images = []
+            pages = convert_from_path(pdf_path, first_page=start, last_page=min(end, 999))
+            for i, img in enumerate(pages):
                 buf = io.BytesIO()
                 img.save(buf, format='JPEG', quality=85)
-                images.append((page_idx + 1, buf.getvalue()))
-            doc.close()
+                img_bytes = buf.getvalue()
+                if isinstance(img_bytes, tuple):
+                    img_bytes = img_bytes[0]
+                images.append((start + i, img_bytes))
+            # If no images (scanned PDF), try OCR text extraction
+                if not images:
+            try:
+                from pypdf import PdfReader
+                reader = PdfReader(pdf_path)
+                for page_idx in range(start - 1, min(end, len(reader.pages))):
+                    text = reader.pages[page_idx].extract_text()
+                    if text and len(text.strip()) > 50:
+                        # Encode text as bytes for processing
+                        images.append((start + len(images), text.encode('utf-8')))
+            except:
+                pass
+        return images
         except Exception as e:
             logger.error(f"PDF to images error: {e}")
-        return images
+            return []
 
 pdf_processor = PDFProcessor()
 

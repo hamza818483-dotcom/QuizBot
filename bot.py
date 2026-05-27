@@ -8,6 +8,7 @@ import os
 import sys
 from datetime import datetime
 
+from pyrogram import Client
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -73,6 +74,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_START_TIME = datetime.now()
+# Pyrogram client for large files
+import os
+pyro_client = None
+async def get_pyro_client():
+    global pyro_client
+    if pyro_client is None:
+        api_id = os.getenv('TELEGRAM_API_ID')
+        api_hash = os.getenv('TELEGRAM_API_HASH')
+        bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+        if api_id and api_hash:
+            pyro_client = Client("atlas_pyro", api_id=int(api_id), api_hash=api_hash, bot_token=bot_token, no_updates=True)
+            await pyro_client.start()
+    return pyro_client
+
 
 # ============================================================
 # POST INIT

@@ -525,7 +525,7 @@ async def cancel_collection_handler(update: Update, context: ContextTypes.DEFAUL
 # ============================================================
 async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Pause ongoing poll sending"""
-    context.user_data['paused'] = True
+    from global_state import GLOBAL_PAUSE; GLOBAL_PAUSE[update.effective_user.id] = True
     await update.message.reply_text("⏸️ পোল পাঠানো থামানো হয়েছে!\n▶️ `/resume` দিয়ে আবার চালু করো।")
 
 
@@ -534,7 +534,7 @@ async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Resume poll sending"""
-    context.user_data['paused'] = False
+    from global_state import GLOBAL_PAUSE; GLOBAL_PAUSE[update.effective_user.id] = False
     await update.message.reply_text("▶️ পোল পাঠানো আবার চালু হয়েছে!")
 
 

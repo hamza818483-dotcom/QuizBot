@@ -342,7 +342,18 @@ async def generate_sheet_pdfs(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # Generate PDF
         pdf_path = f"data/temp/sheet_{fid}_{int(time.time())}.pdf"
-        success = await AsyncPDFExporter.html_to_pdf(html, pdf_path)
+        import subprocess, os
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp:
+                tmp.write(html)
+                tmp_path = tmp.name
+        try:
+            subprocess.run(['chromium-browser', '--headless', '--disable-gpu', '--no-sandbox', f'--print-to-pdf={pdf_path}', tmp_path], timeout=30, check=True)
+            success = os.path.exists(pdf_path)
+        except:
+            success = False
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         
         if success and os.path.exists(pdf_path):
             with open(pdf_path, 'rb') as f:
@@ -386,12 +397,21 @@ async def handle_sheet_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         
         if fid in selected:
             selected.remove(fid)
-            await query.answer(f"❌ {FORMAT_NAMES.get(fid, fid)[:30]} — Removed")
         else:
             selected.append(fid)
-            await query.answer(f"✅ {FORMAT_NAMES.get(fid, fid)[:30]} — Added")
-        
         context.user_data['sheet_selected'] = selected
+        
+        # Rebuild buttons with checkmarks
+        formats = await db.fetchall('SELECT format_id, format_name, is_active FROM sheet_formats ORDER BY format_id')
+        buttons = []
+        for ffid, ffname, ffact in formats:
+            icon = "☑️" if ffid in selected else "☐"
+            buttons.append([InlineKeyboardButton(f"{icon} {ffname}", callback_data=f"sheet_toggle_{ffid}")])
+        buttons.append([InlineKeyboardButton("✅ Done — Generate PDF", callback_data="sheet_generate")])
+        buttons.append([InlineKeyboardButton("📚 Select All Active", callback_data="sheet_select_all")])
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="sheet_cancel")])
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
+        await query.answer(f"{'✅' if fid in selected else '❌'} Toggled!")
     
     elif data == 'sheet_generate':
         selected = context.user_data.get('sheet_selected', [])
@@ -453,7 +473,18 @@ async def handle_sheet_title(update: Update, context: ContextTypes.DEFAULT_TYPE)
         html = template.render(title=title, mcqs=mcqs)
         
         pdf_path = f"data/temp/sheet_{fid}_{int(time.time())}.pdf"
-        success = await AsyncPDFExporter.html_to_pdf(html, pdf_path)
+        import subprocess, os
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp:
+                tmp.write(html)
+                tmp_path = tmp.name
+        try:
+            subprocess.run(['chromium-browser', '--headless', '--disable-gpu', '--no-sandbox', f'--print-to-pdf={pdf_path}', tmp_path], timeout=30, check=True)
+            success = os.path.exists(pdf_path)
+        except:
+            success = False
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         
         if success and os.path.exists(pdf_path):
             with open(pdf_path, 'rb') as f:

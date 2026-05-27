@@ -1,3 +1,4 @@
+from global_state import GLOBAL_PAUSE
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """ATLAS BOT - CSV to Poll Handler (/csv, /csvS, /csvI, /csvIS)"""
@@ -455,7 +456,7 @@ async def send_serial_polls(update, context, channel_id, mcqs, batch_size, topic
         sent = 0
         
         for mcq in batch:
-            while context.user_data.get('paused', False):
+            while GLOBAL_PAUSE.get(update.effective_user.id if hasattr(update, 'effective_user') else 0, False):
                 await asyncio.sleep(1)
             poll_id, success = await send_single_poll(bot, channel_id, mcq, reply_to)
             if success and first_poll_id is None:
@@ -580,7 +581,7 @@ async def handle_csv_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         sent = 0
         
         for mcq in mcqs:
-            while context.user_data.get('paused', False):
+            while GLOBAL_PAUSE.get(update.effective_user.id if hasattr(update, 'effective_user') else 0, False):
                 await asyncio.sleep(1)
             
             poll_id, success = await send_single_poll(bot, channel_id, mcq, pre_msg.message_id)
