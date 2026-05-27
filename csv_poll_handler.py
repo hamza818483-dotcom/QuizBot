@@ -188,8 +188,14 @@ async def csv_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ এই কমান্ড শুধু অ্যাডমিনরা ব্যবহার করতে পারবে!")
         return
     
-    # Get topic from args
-    topic = ' '.join(context.args) if context.args else ''
+    # Get topic from args (skip first if numeric)
+    args = context.args
+    topic = ''
+    if args:
+        if args[0].isdigit():
+            topic = ' '.join(args[1:]) if len(args) > 1 else ''
+        else:
+            topic = ' '.join(args)
     
     # Get file (reply or stored)
     mcqs = None
@@ -236,7 +242,7 @@ async def csvs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     args = context.args
-    if len(args) < 3:
+    if len(args) < 1:
         await update.message.reply_text("❌ `/csvS <ব্যাচ সংখ্যা> <চ্যানেল> <টপিক>`\nউদাহরণ: `/csvS 10 @physics পদার্থবিজ্ঞান`", parse_mode=None)
         return
     
@@ -246,8 +252,8 @@ async def csvs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ ব্যাচ সংখ্যা সঠিক নয়!")
         return
     
-    channel_name = args[1]
-    topic = ' '.join(args[2:])
+    channel_name = args[1] if len(args) >= 3 else None
+    topic = " ".join(args[2:]) if len(args) >= 3 else (" ".join(args[1:]) if len(args) >= 2 else "MCQ")
     
     # Get MCQs
     mcqs = None
@@ -261,13 +267,45 @@ async def csvs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not mcqs:
         await update.message.reply_text("❌ CSV ফাইলে reply করে `/csvS` দাও!")
+    # If no channel, show list
+    if not channel_name:
+        channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
+        if not channels:
+            await update.message.reply_text("❌ কোনো চ্যানেল নেই!")
+            return
+        buttons = []
+        for ch_id, ch_name in channels:
+            buttons.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"csvs_ch_{ch_id}_{batch_size}")])
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="poll_cancel")])
+        context.user_data["csvs_mcqs"] = mcqs
+        context.user_data["csvs_topic"] = topic
+        context.user_data["csvs_batch"] = batch_size
+        await update.message.reply_text(f"📊 {len(mcqs)}টি MCQ | Batch: {batch_size}\nকোন চ্যানেলে পাঠাবে?", reply_markup=InlineKeyboardMarkup(buttons))
+        return
+
+    # If no channel, show list
+    if not channel_name:
+        channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
+        if not channels:
+            await update.message.reply_text("❌ কোনো চ্যানেল নেই!")
+            return
+        buttons = []
+        for ch_id, ch_name in channels:
+            buttons.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"csvs_ch_{ch_id}_{batch_size}")])
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="poll_cancel")])
+        context.user_data["csvs_mcqs"] = mcqs
+        context.user_data["csvs_topic"] = topic
+        context.user_data["csvs_batch"] = batch_size
+        await update.message.reply_text(f"📊 {len(mcqs)}টি MCQ | Batch: {batch_size}\nকোন চ্যানেলে পাঠাবে?", reply_markup=InlineKeyboardMarkup(buttons))
+        return
+
         return
     
     # Find channel
     channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
     matching = []
     for ch_id, ch_name in channels:
-        if channel_name.lower() in ch_name.lower():
+        if channel_name and channel_name and channel_name.lower() in ch_name.lower():
             matching.append((ch_id, ch_name))
     
     if not matching:
@@ -350,7 +388,7 @@ async def csvis_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     args = context.args
-    if len(args) < 3:
+    if len(args) < 1:
         await update.message.reply_text("❌ `/csvIS <ব্যাচ> <চ্যানেল> <টপিক>`")
         return
     
@@ -360,7 +398,7 @@ async def csvis_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ ব্যাচ সংখ্যা সঠিক নয়!")
         return
     
-    channel_name = args[1]
+    channel_name = args[1] if len(args) >= 3 else None
     topic = ' '.join(args[2:])
     
     mcqs = None
@@ -377,7 +415,7 @@ async def csvis_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
-    matching = [(ch_id, ch_name) for ch_id, ch_name in channels if channel_name.lower() in ch_name.lower()]
+    matching = [(ch_id, ch_name) for ch_id, ch_name in channels if channel_name and channel_name and channel_name.lower() in ch_name.lower()]
     
     if not matching:
         await update.message.reply_text(f"❌ '{channel_name}' চ্যানেল পাওয়া যায়নি!")
@@ -400,59 +438,42 @@ async def csvis_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # SEND SERIAL POLLS (/csvS)
 # ============================================================
 async def send_serial_polls(update, context, channel_id, mcqs, batch_size, topic):
-    """Send polls in batches with summary"""
     bot = context.bot
     total = len(mcqs)
     batches = [mcqs[i:i+batch_size] for i in range(0, total, batch_size)]
     total_batches = len(batches)
     
-    progress = await update.message.reply_text(f"📤 সিরিয়াল পোল শুরু...\n📦 ব্যাচ: {total_batches}")
-    
     batch_links = []
     
     for b_idx, batch in enumerate(batches, 1):
-        # Pre-message
         batch_topic = f"{topic} (Part-{b_idx:02d})"
         pre_text = get_pre_message(batch_topic, len(batch))
         pre_msg = await bot.send_message(chat_id=channel_id, text=pre_text)
         reply_to = pre_msg.message_id
         
-        # Send polls
         first_poll_id = None
         sent = 0
         
         for mcq in batch:
             while context.user_data.get('paused', False):
                 await asyncio.sleep(1)
-            
             poll_id, success = await send_single_poll(bot, channel_id, mcq, reply_to)
             if success and first_poll_id is None:
                 first_poll_id = poll_id
             if success:
                 sent += 1
-            
-            await progress.edit_text(f"📤 Part-{b_idx:02d}: {sent}/{len(batch)}\n📊 Total: {min(b_idx*batch_size, total)}/{total}")
             await asyncio.sleep(2)
         
-        # Ending message
         first_link = await get_message_link(bot, channel_id, first_poll_id) if first_poll_id else ""
         ending = get_ending_message(batch_topic, sent, first_link)
         await bot.send_message(chat_id=channel_id, text=ending, disable_web_page_preview=True)
-        
         batch_links.append((b_idx, first_link, len(batch)))
         await asyncio.sleep(3)
     
-    # Master summary
     if total_batches > 1:
         summary = get_master_summary(topic, total, total_batches, batch_links)
-        await bot.send_message(chat_id=channel_id, text=summary, parse_mode=None, disable_web_page_preview=True)
-    
-    await progress.edit_text(f"✅ সম্পন্ন! {total}টি পোল → {channel_id}")
+        await bot.send_message(chat_id=channel_id, text=summary, disable_web_page_preview=True)
 
-
-# ============================================================
-# SEND INLINE QUIZ
-# ============================================================
 async def send_inline_quiz(bot, chat_id, mcqs, topic=""):
     """Send inline button quiz"""
     batch_id = hashlib.md5(f"{topic}_{datetime.now().timestamp()}".encode()).hexdigest()[:8]
@@ -506,7 +527,8 @@ async def send_serial_inline(update, context, channel_id, mcqs, batch_size, topi
     total = len(mcqs)
     batches = [mcqs[i:i+batch_size] for i in range(0, total, batch_size)]
     
-    progress = await update.message.reply_text(f"🎯 Inline Serial → {len(batches)} ব্যাচ")
+    msg_target = update.message if update.message else update.callback_query.message if hasattr(update, 'callback_query') else None
+    progress = await msg_target.reply_text(f"🎯 Inline Serial → {len(batches)} ব্যাচ")
     
     for b_idx, batch in enumerate(batches, 1):
         batch_topic = f"{topic} (Part-{b_idx:02d})"
