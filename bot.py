@@ -206,6 +206,62 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 # MAIN FUNCTION
 # ============================================================
+
+async def poll_collect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from services import poll_collector
+    user_id = update.effective_user.id
+    if hasattr(poll_collector, "sessions") and user_id in poll_collector.sessions:
+        if poll_collector.sessions[user_id].get("collecting"):
+            poll = update.message.poll
+            if poll:
+                ans = str(poll.correct_option_id + 1) if poll.correct_option_id is not None else "1"
+                opts = [o.text or "" for o in poll.options]
+                while len(opts) < 5: opts.append("")
+                poll_data = {"questions": poll.question or "","option1": opts[0],"option2": opts[1],"option3": opts[2],"option4": opts[3],"option5": opts[4],"answer": ans,"explanation": poll.explanation or "","type": "1","section": "1"}
+                poll_collector.add_poll(user_id, poll_data)
+
+
+async def poll_collect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from services import poll_collector
+    user_id = update.effective_user.id
+    if hasattr(poll_collector, "sessions") and user_id in poll_collector.sessions:
+        if poll_collector.sessions[user_id].get("collecting"):
+            poll = update.message.poll
+            if poll:
+                ans = str(poll.correct_option_id + 1) if poll.correct_option_id is not None else "1"
+                opts = [o.text or "" for o in poll.options]
+                while len(opts) < 5: opts.append("")
+                poll_data = {"questions": poll.question or "","option1": opts[0],"option2": opts[1],"option3": opts[2],"option4": opts[3],"option5": opts[4],"answer": ans,"explanation": poll.explanation or "","type": "1","section": "1"}
+                poll_collector.add_poll(user_id, poll_data)
+
+
+async def poll_collect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Auto-collect forwarded polls with sender name hidden"""
+    from services import poll_collector
+    user_id = update.effective_user.id
+    poll = update.message.poll
+    if not poll: return
+    
+    # Auto-start collection if not started
+    if not hasattr(poll_collector, "sessions") or user_id not in poll_collector.sessions:
+        if not poll_collector.sessions.get(user_id, {}).get("collecting"): poll_collector.start(user_id)
+        await update.message.reply_text("📥 Auto Collection Started!\nSender Name HIDE করা Poll পাঠাতে থাকো।\n/done দিয়ে শেষ করো।")
+    
+    if poll_collector.sessions[user_id].get("collecting"):
+        # Extract answer
+        ans = str(poll.correct_option_id + 1) if poll.correct_option_id is not None else "1"
+        opts = [o.text or "" for o in poll.options]
+        while len(opts) < 5: opts.append("")
+        poll_data = {
+            "questions": poll.question or "",
+            "option1": opts[0], "option2": opts[1], "option3": opts[2], "option4": opts[3], "option5": opts[4],
+            "answer": ans, "explanation": poll.explanation or "", "type": "1", "section": "1"
+        }
+        poll_collector.add_poll(user_id, poll_data)
+        count = poll_collector.get_count(user_id)
+        await update.message.reply_text(f"✅ Collected! \n📊 Total: {count} polls")
+
+
 def main():
     """Initialize and run the bot"""
     logger.info("🚀 ATLAS MCQ BOT v3.0 Starting...")
@@ -276,6 +332,7 @@ def main():
     # ============================================================
     
     # MHTML/HTML files
+    app.add_handler(MessageHandler(filters.POLL, poll_collect_handler))
     app.add_handler(MessageHandler(
         filters.Document.FileExtension("mhtml") | 
         filters.Document.FileExtension("mht") | 

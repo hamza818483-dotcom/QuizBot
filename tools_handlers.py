@@ -491,7 +491,21 @@ async def done_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ কোনো পোল সংগ্রহ করা হয়নি!")
         return
     
-    csv_bytes = mcqs_to_csv(polls)
+    # Convert poll data to mcqs_to_csv format
+    mcq_list = []
+    for p in polls:
+        mcq_list.append({
+            'question': p.get('questions', p.get('question', '')),
+            'options': {
+                'A': p.get('option1', ''),
+                'B': p.get('option2', ''),
+                'C': p.get('option3', ''),
+                'D': p.get('option4', '')
+            },
+            'answer': p.get('answer', '1'),
+            'explanation': p.get('explanation', '')
+        })
+    csv_bytes = mcqs_to_csv(mcq_list)
     await update.message.reply_document(
         document=csv_bytes,
         filename=f"collected_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
@@ -525,7 +539,7 @@ async def cancel_collection_handler(update: Update, context: ContextTypes.DEFAUL
 # ============================================================
 async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Pause ongoing poll sending"""
-    from global_state import GLOBAL_PAUSE; GLOBAL_PAUSE[update.effective_user.id] = True
+    from global_state import GLOBAL_PAUSE; GLOBAL_PAUSE[update.effective_user.id] = True; print(f"⏸️ Paused: {update.effective_user.id}")
     await update.message.reply_text("⏸️ পোল পাঠানো থামানো হয়েছে!\n▶️ `/resume` দিয়ে আবার চালু করো।")
 
 
