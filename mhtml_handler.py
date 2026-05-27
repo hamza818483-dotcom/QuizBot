@@ -607,8 +607,6 @@ async def mhtml_worker():
             except:
                 pass
         
-        _is_processing = False
-        _processing_queue.task_done()
 
 
 async def queue_mhtml(update: Update, context: ContextTypes.DEFAULT_TYPE):

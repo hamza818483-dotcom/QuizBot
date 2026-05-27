@@ -77,40 +77,62 @@ async def split_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /merge HANDLER
 # ============================================================
 async def merge_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Merge multiple CSV/JSON files"""
+    """Merge multiple CSV/JSON files with instant count"""
     user_id = update.effective_user.id
+    args = context.args if context.args else []
     
+    # Initialize merge session
     if 'merge_files' not in context.user_data:
         context.user_data['merge_files'] = []
-        await update.message.reply_text("📁 *Merge Mode Started!*\n\nএখন CSV/JSON ফাইল পাঠাও।\nশেষে `/merge done` দাও।")
-        return
+        context.user_data['merge_count'] = 0
     
-    args = context.args
+    # /merge done - finish merging
     if args and args[0] == 'done':
-        files = context.user_data['merge_files']
+        files = context.user_data.get('merge_files', [])
         if not files:
-            await update.message.reply_text("❌ কোনো ফাইল জমা হয়নি!")
+            await update.message.reply_text("❌ কোনো ফাইল জমা হয়নি! /merge দিয়ে ফাইল পাঠাও।")
             return
         
+        await update.message.reply_text(f"🔄 {len(files)}টি ফাইল মার্জ হচ্ছে...")
         all_mcqs = []
         for content in files:
             mcqs = parse_csv_to_mcqs(content)
             all_mcqs.extend(mcqs)
         
+        if not all_mcqs:
+            await update.message.reply_text("❌ কোনো MCQ পাওয়া যায়নি!")
+            return
+        
         csv_bytes = mcqs_to_csv(all_mcqs)
         await update.message.reply_document(
             document=csv_bytes,
             filename="merged.csv",
-            caption=f"✅ {len(all_mcqs)}টি MCQ মার্জ করা হয়েছে!"
+            caption=f"✅ {len(all_mcqs)}টি MCQ মার্জ! ({len(files)} files)"
         )
         context.user_data['merge_files'] = []
-    elif update.message.reply_to_message and update.message.reply_to_message.document:
-        file = await update.message.reply_to_message.document.get_file()
+        context.user_data['merge_count'] = 0
+        return
+    
+    # File received (reply OR forwarded)
+    doc = None
+    if update.message.reply_to_message and update.message.reply_to_message.document:
+        doc = update.message.reply_to_message.document
+    elif update.message.document:
+        doc = update.message.document
+    
+    if doc:
+        if not doc.file_name.endswith(('.csv', '.json')):
+            await update.message.reply_text("❌ শুধু CSV/JSON ফাইল!")
+            return
+        file = await doc.get_file()
         content = await file.download_as_bytearray()
         context.user_data['merge_files'].append(content.decode('utf-8-sig'))
-        await update.message.reply_text(f"✅ জমা হয়েছে! ({len(context.user_data['merge_files'])} টি ফাইল)\nশেষে `/merge done` দাও।")
+        count = len(context.user_data['merge_files'])
+        await update.message.reply_text(f"📥 {doc.file_name}\n📊 Total: {count} file{'s' if count>1 else ''}\n\n➕ আরো পাঠাও\n✅ /merge done")
     else:
-        await update.message.reply_text("❌ ফাইলে reply করে `/merge` দাও, অথবা `/merge done` দিয়ে শেষ করো।")
+        # Start merge mode
+        context.user_data['merge_files'] = []
+        await update.message.reply_text("📁 *Merge Mode Started!*\n\nCSV/JSON ফাইলে reply করে `/merge` দাও।\nInstant count দেখাবে।\nশেষে `/merge done` দাও。")
 
 
 # ============================================================
@@ -556,14 +578,22 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /restart HANDLER
 # ============================================================
 async def restart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Restart bot (Owner only)"""
+    """Restart bot - instant restart"""
+    import os
     if update.effective_user.id != Config.OWNER_ID:
         await update.message.reply_text("❌ Owner only!")
         return
     
-    await update.message.reply_text("🔄 বট রিস্টার্ট হচ্ছে...\n\nসব ডাটা সেভ থাকবে।")
-    import sys
-    os.execv(sys.executable, ['python'] + sys.argv)
+    await update.message.reply_text("🔄 Restarting...")
+    os.system("bash ~/AtlasMasterBot/restart_bot.sh &")
+    # Save current process PID
+    pid = os.getpid()
+    # Start new bot in background
+    import os
+    os.system("pkill -9 -f 'python bot.py' 2>/dev/null; sleep 2; cd ~/AtlasMasterBot && nohup python bot.py > /dev/null 2>&1 &")
+    # New process will be started by auto_update.sh crontab
+    # Kill current process
+    os.kill(pid, 9)
 
 
 # ============================================================
