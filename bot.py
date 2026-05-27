@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from performance_config import rate_limiter
 # -*- coding: utf-8 -*-
 """ATLAS MCQ BOT v3.0 — Main Entry Point"""
 
