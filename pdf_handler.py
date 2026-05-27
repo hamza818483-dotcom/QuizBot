@@ -215,7 +215,15 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, is_qbm
         except: pass; return
 
     if is_qbm:
-        active_prompts = ["EXTRACT ALL MCQs from this text. Find EVERY question with options (A/B/C/D or 1/2/3/4 or ক/খ/গ/ঘ). Detect correct answers. Include explanation. Output ONLY valid JSON array."]
+        active_prompts = ["""YOU ARE AN MCQ EXTRACTOR ONLY. DO NOT CREATE NEW QUESTIONS.
+STRICT RULES:
+1. ONLY extract questions that ALREADY EXIST in the image/text.
+2. If NO MCQ exists in the image, return EMPTY array [].
+3. NEVER generate new questions from text content.
+4. Preserve original question text EXACTLY as written.
+5. Detect answers from markings (circle/tick/underline/answer key).
+6. Include explanation ONLY if present in the image.
+7. Output ONLY valid JSON array. No extra text."""]
     else:
         rows = await db.fetchall('SELECT content FROM prompts WHERE is_active = 1')
         if not rows: await msg_target.reply_text("❌ No Active Prompt!"); return
@@ -310,8 +318,25 @@ async def handle_pdf_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data.startswith('qbm_source_'):
         context.chat_data['qbm_with_source'] = (data == 'qbm_source_yes')
         mood = context.chat_data.get('qbm_mood', 'topic')
+        channel_id = context.chat_data.get('qbm_channel')
+        if not channel_id:
+            # Show channel list
+            channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
+            if channels:
+                buttons = []
+                for ch_id, ch_name in channels:
+                    buttons.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"qbm_send_{ch_id}")])
+                await query.edit_message_text(f"📋 Select Channel for QBM:", reply_markup=InlineKeyboardMarkup(buttons))
+                return
         await query.edit_message_text(f"⏳ QBM Extracting...")
         await process_pdf(update, context, True, mood)
+    elif data.startswith('qbm_send_'):
+        channel_id = data.replace('qbm_send_', '')
+        context.chat_data['qbm_channel'] = channel_id
+        mood = context.chat_data.get('qbm_mood', 'topic')
+        await query.edit_message_text(f"⏳ QBM Extracting to channel...")
+        await process_pdf(update, context, True, mood)
+
     elif data in ('pdfm_cancel', 'qbm_cancel'):
         await query.edit_message_text("❌ Cancelled!")
 
