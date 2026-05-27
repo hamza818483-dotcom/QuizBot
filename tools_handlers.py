@@ -577,6 +577,19 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 # /restart HANDLER
 # ============================================================
+
+async def update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Push current code to GitHub"""
+    import os
+    if update.effective_user.id != Config.OWNER_ID:
+        await update.message.reply_text("❌ Owner only!")
+        return
+    
+    await update.message.reply_text("📤 Pushing to GitHub...")
+    result = os.popen("cd ~/AtlasMasterBot && git add . && git commit -m 'Bot /update' && git push 2>&1").read()
+    await update.message.reply_text(f"✅ Done!\n```{result[:500]}```")
+
+
 async def restart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Restart bot - instant restart"""
     import os
