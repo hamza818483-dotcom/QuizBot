@@ -281,7 +281,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, is_qbm
         await context.bot.send_message(chat_id=channel_id, text=summary, disable_web_page_preview=True)
     dash_data['status'] = '✅ COMPLETE!'; dash_data['pct'] = 100; await update_dashboard(dash_msg, dash_data)
     context.user_data['last_csv'] = csv_bytes; context.user_data["last_mcqs"] = all_mcqs.copy()
-    if is_qbm and not channel_id and all_mcqs:
+    if not channel_id and all_mcqs:
         channels = await db.fetchall('SELECT channel_id, channel_name FROM channels')
         if channels:
             buttons = []
