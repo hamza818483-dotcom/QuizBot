@@ -1,5 +1,7 @@
-from global_state import GLOBAL_PAUSE
 #!/usr/bin/env python3
+from global_state import GLOBAL_PAUSE
+# -*- coding: utf-8 -*-
+
 # -*- coding: utf-8 -*-
 """ATLAS BOT - CSV to Poll Handler (/csv, /csvS, /csvI, /csvIS)"""
 
@@ -197,6 +199,7 @@ async def csv_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message and update.message.reply_to_message.document:
         file = await update.message.reply_to_message.document.get_file()
         content = await file.download_as_bytearray()
+        mcqs = parse_csv_to_mcqs(content.decode('utf-8-sig'))
     elif 'last_csv' in context.user_data:
         csv_bytes = context.user_data['last_csv']
         mcqs = parse_csv_to_mcqs(csv_bytes.decode('utf-8-sig') if isinstance(csv_bytes, bytes) else csv_bytes)
@@ -305,6 +308,7 @@ async def csvi_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message and update.message.reply_to_message.document:
         file = await update.message.reply_to_message.document.get_file()
         content = await file.download_as_bytearray()
+        mcqs = parse_csv_to_mcqs(content.decode('utf-8-sig'))
     elif 'last_csv' in context.user_data:
         csv_bytes = context.user_data['last_csv']
         mcqs = parse_csv_to_mcqs(csv_bytes.decode('utf-8-sig') if isinstance(csv_bytes, bytes) else csv_bytes)
@@ -360,6 +364,7 @@ async def csvis_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message and update.message.reply_to_message.document:
         file = await update.message.reply_to_message.document.get_file()
         content = await file.download_as_bytearray()
+        mcqs = parse_csv_to_mcqs(content.decode('utf-8-sig'))
     elif 'last_csv' in context.user_data:
         csv_bytes = context.user_data['last_csv']
         mcqs = parse_csv_to_mcqs(csv_bytes.decode('utf-8-sig') if isinstance(csv_bytes, bytes) else csv_bytes)
