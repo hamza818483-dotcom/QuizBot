@@ -76,20 +76,82 @@ async def get_question_with_tags(question: str) -> str:
         elif position == 'tag4': result = f"{tag_name}\n{result}"
     return result[:300]
 
+
+def extract_image_url(text):
+    """Extract first image URL from text with <img> tag"""
+    if not text: return None, text
+    import re
+    match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', text)
+    if match:
+        url = match.group(1)
+        clean_text = re.sub(r'<img[^>]+>', '', text).strip()
+        return url, clean_text
+    return None, text
+
+def build_option_with_image(text, key):
+    """Build option dict with image if present"""
+    img_url, clean_text = extract_image_url(text)
+    if img_url:
+        return {"text": f"{key}. {clean_text[:100]}", "media": {"type": "photo", "media": img_url}}
+    return {"text": f"{key}. {clean_text[:100]}"}
+
+
 async def send_single_poll(bot, chat_id: int, mcq: dict, reply_to: int = None):
-    question = await get_question_with_tags(mcq.get('question', '?'))
+    q_raw = mcq.get('question', '?')
+    q_img_url, q_clean = extract_image_url(q_raw)
+    question = await get_question_with_tags(q_clean)
+    
+    # Build options with images
     opts = mcq.get('options', {})
-    options_list = [opts.get('A', 'Option A'), opts.get('B', 'Option B'), opts.get('C', 'Option C'), opts.get('D', 'Option D')]
+    option_keys = ['A', 'B', 'C', 'D']
+    options_list = []
+    api_options = []
+    has_opt_image = False
+    
+    for key in option_keys:
+        opt_text = opts.get(key, f'Option {key}')
+        img_url, clean_opt = extract_image_url(opt_text)
+        if img_url:
+            has_opt_image = True
+            api_options.append({"text": f"{key}. {clean_opt[:100]}", "media": {"type": "photo", "media": img_url}})
+        else:
+            api_options.append({"text": f"{key}. {clean_opt[:100]}"})
+        options_list.append(clean_opt[:100] if clean_opt else opt_text[:100])
+    
     ans_str = str(mcq.get('answer', '1')).upper()
     ans_map = {'1': 0, '2': 1, '3': 2, '4': 3, 'A': 0, 'B': 1, 'C': 2, 'D': 3}
     correct_idx = ans_map.get(ans_str, 0)
-    explanation = await get_explanation(mcq)
+    
+    # Explanation with image
+    exp_raw = await get_explanation(mcq) or ''
+    exp_img_url, exp_clean = extract_image_url(exp_raw)
+    explanation = exp_clean[:200] if exp_clean else None
+    
+    # Build api_kwargs
+    api_kwargs = {}
+    if q_img_url:
+        api_kwargs["question_media"] = {"type": "photo", "media": q_img_url}
+    if has_opt_image:
+        api_kwargs["options"] = api_options
+    if exp_img_url:
+        api_kwargs["explanation_media"] = {"type": "photo", "media": exp_img_url}
+    
     try:
-        poll_msg = await bot.send_poll(chat_id=chat_id, question=question, options=options_list,
+        poll_msg = await bot.send_poll(
+            chat_id=chat_id, question=question[:300], options=options_list,
             type='quiz', correct_option_id=correct_idx, explanation=explanation,
-            is_anonymous=True, reply_to_message_id=reply_to)
+            is_anonymous=True, reply_to_message_id=reply_to,
+            api_kwargs=api_kwargs if api_kwargs else None)
         return poll_msg.message_id, True
-    except: return None, False
+    except:
+        # Fallback without images
+        try:
+            poll_msg = await bot.send_poll(
+                chat_id=chat_id, question=question[:300], options=options_list,
+                type='quiz', correct_option_id=correct_idx, explanation=explanation,
+                is_anonymous=True, reply_to_message_id=reply_to)
+            return poll_msg.message_id, True
+        except: return None, False
 
 async def get_message_link(bot, chat_id: int, message_id: int) -> str:
     try:
@@ -231,6 +293,10 @@ async def handle_csv_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         if mcqs:
             await query.edit_message_text("📤 Serial poll starting...")
             await send_serial_polls(update, context, channel_id, mcqs, batch_size, topic)
+            if len(mcqs) > batch_size:
+                total_batches = (len(mcqs) + batch_size - 1) // batch_size
+                summary = get_master_summary(topic, len(mcqs), total_batches, [])
+                await context.bot.send_message(chat_id=channel_id, text=summary, disable_web_page_preview=True)
 
 
 # ============ /csvI HANDLER ============
