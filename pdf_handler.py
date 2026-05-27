@@ -229,9 +229,6 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, is_qbm
 7. Add /exp tag_name after explanation.
 8. Output ONLY valid JSON array. If NO MCQ exists, return []."""]
     if is_qbm:
-        active_prompts = ["EXTRACT ALL EXISTING MCQs FROM THIS IMAGE ONLY. DO NOT CREATE NEW. Rules: 1. Extract ALL MCQs - Bangla/English, any format. 2. Multiple OCR passes. 3. Triple-check. 4. Remove numbering. 5. Detect answer from markings. 6. Use explanation if present, else create one (why correct, why others wrong, relevant info). 7. Add /exp tag. 8. Output JSON only. No MCQ = return []."]
-        if not rows: await msg_target.reply_text("❌ No Active Prompt!"); return
-        active_prompts = [r[0] for r in rows]
 
     all_mcqs = []; sent_count = 0; page_links = {}
     dash_data['status'] = '⚡ Processing & Sending...'
