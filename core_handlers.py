@@ -601,7 +601,7 @@ async def handle_prompt_callback(update: Update, context: ContextTypes.DEFAULT_T
                 ]
             ]
             await query.edit_message_text(
-                f"📝 {name}\n{status_text}\n\n{content_db[:500]}...",
+                f"📝 {name}\n{status_text}\n\n{content_db[:2000]}...",
                 
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
