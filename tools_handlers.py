@@ -633,6 +633,8 @@ async def addgkey_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 f.write(line)
     await update.message.reply_text(f"✅ Keys added! Total: {len(new_keys.split(','))} new keys\nRestart bot: /restart")
+    import os
+    os.system("bash ~/AtlasMasterBot/restart_bot.sh &")
 
 
 
@@ -658,6 +660,8 @@ async def addgkey_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f.write(env_content)
     
     await update.message.reply_text(f"✅ Keys added!\n\nRestart bot to apply: /restart")
+    import os
+    os.system("bash ~/AtlasMasterBot/restart_bot.sh &")
 
 
 async def restart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
