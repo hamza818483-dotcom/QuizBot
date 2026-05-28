@@ -133,7 +133,7 @@ async def generate_mcqs_from_image(image_bytes: bytes, active_prompts: List[str]
     prompt_text = "\n\n".join(active_prompts)
     full_prompt = f"""{prompt_text}
 
-Generate exactly {count} MCQs from this image.
+Generate the MAXIMUM POSSIBLE number of MCQs from this image. Maintain high quality. Do NOT create irrelevant questions. Only use information present in the source.
 Follow ALL rules from the prompts above.
 Output ONLY valid JSON array:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}}]"""
@@ -147,7 +147,7 @@ async def generate_mcqs_from_text(text: str, active_prompts: List[str],
     prompt_text = "\n\n".join(active_prompts)
     full_prompt = f"""{prompt_text}
 
-Generate exactly {count} MCQs from this text. Use EVERY LINE as source.
+Generate the MAXIMUM POSSIBLE number of MCQs from this text. Use EVERY LINE as source. Maintain high quality. Do NOT create irrelevant questions.
 Follow ALL rules from the prompts above.
 Output ONLY valid JSON array:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}}]
