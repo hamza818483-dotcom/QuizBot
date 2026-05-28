@@ -248,12 +248,12 @@ async def send_serial_polls(update, context, channel_id, mcqs, batch_size, topic
             poll_id, success = await send_single_poll(bot, channel_id, mcq, pre_msg.message_id)
             if success and first_poll_id is None: first_poll_id = poll_id
             if success: sent += 1
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2.5)
         first_link = await get_message_link(bot, channel_id, first_poll_id) if first_poll_id else ""
         ending = get_ending_message(batch_topic, sent, first_link)
         await bot.send_message(chat_id=channel_id, text=ending, disable_web_page_preview=True)
         batch_links.append((b_idx, first_link, len(batch)))
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(2.5)
     if total_batches > 1:
         summary = get_master_summary(topic, total, total_batches, batch_links)
         await bot.send_message(chat_id=channel_id, text=summary, disable_web_page_preview=True)
@@ -282,7 +282,7 @@ async def handle_csv_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
             poll_id, success = await send_single_poll(bot, channel_id, mcq, pre_msg.message_id)
             if success and first_poll_id is None: first_poll_id = poll_id
             if success: sent += 1
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2.5)
         first_link = await get_message_link(bot, channel_id, first_poll_id) if first_poll_id else ""
         ending = get_ending_message(topic, sent, first_link)
         await bot.send_message(chat_id=channel_id, text=ending, disable_web_page_preview=True)
@@ -364,7 +364,7 @@ async def send_inline_quiz(bot, chat_id, mcqs, topic="", batch_size=10):
             (q_id, {'A':0,'B':1,'C':2,'D':3}.get(str(mcq.get('answer','A')).upper(), 0), mcq.get('explanation','')[:200], json.dumps(opt_list), batch_id))
         buttons = [[InlineKeyboardButton(f"{chr(65+i)}. {opt[:40]}", callback_data=f"iq_{i}_{q_id}")] for i, opt in enumerate(opt_list) if opt]
         await bot.send_message(chat_id=chat_id, text=q_text, reply_markup=InlineKeyboardMarkup(buttons))
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(2.5)
     first_link = await get_message_link(bot, chat_id, 0)
     ending = get_ending_message(topic, len(mcqs), first_link)
     kb = [[InlineKeyboardButton("🔄 Retake", callback_data=f"retake_{batch_id}"), InlineKeyboardButton("📊 Result", callback_data=f"result_{batch_id}")]]
