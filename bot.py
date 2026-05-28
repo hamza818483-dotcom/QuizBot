@@ -146,6 +146,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 # MESSAGE ROUTER
 # ============================================================
+async def channel_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Skip channel messages to avoid NoneType errors
+    if update.effective_chat.type == 'channel':
+        return
+
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Route text messages to appropriate handlers"""
     
@@ -169,7 +174,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
        context.user_data.get('setting_tag_name') or \
        context.user_data.get('editing_tag') or \
        context.user_data.get('adding_tag_name'):
-        await handle_settings_message(update, context)
+        await handle_edit_message(update, context)
         return
     
     # Check settings message
@@ -182,6 +187,10 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Global error handler"""
     error = context.error
+    
+    # Skip NoneType errors from channel messages
+    if "'NoneType' object has no attribute" in str(error):
+        return
     
     logger.error(f"❌ Bot Error: {error}")
     
@@ -283,6 +292,16 @@ async def merge_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['merge_files'].append(content.decode('utf-8-sig'))
         count = len(context.user_data['merge_files'])
         await update.message.reply_text(f"📥 {doc.file_name}\n📊 Total: {count} files\n\n✅ /merge done")
+
+
+
+import asyncio
+
+def parallel_handler(original_handler):
+    """Wrap handler to run in parallel"""
+    async def wrapped(update, context):
+        asyncio.create_task(original_handler(update, context))
+    return wrapped
 
 
 def main():

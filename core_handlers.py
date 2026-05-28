@@ -696,15 +696,18 @@ async def handle_edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if context.user_data.get('adding_prompt'):
         name = text.strip()
         await db.execute('INSERT OR IGNORE INTO prompts (name, content, is_active) VALUES (?, ?, 0)', (name, ''))
+        # Fetch the ID of new prompt
+        new_row = await db.fetchone('SELECT id FROM prompts WHERE name = ?', (name,))
+        new_id = new_row[0] if new_row else 1
         context.user_data['adding_prompt'] = False
-        context.user_data['editing_prompt'] = name
+        context.user_data['editing_prompt'] = new_id  # Store ID  # Store name for new prompts
         await update.message.reply_text(f"✅ Prompt '{name}' তৈরি! এখন কন্টেন্ট লিখো:")
         return
     
     # Editing prompt content
     if 'editing_prompt' in context.user_data:
         pid = context.user_data['editing_prompt']
-        await db.execute('UPDATE prompts SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (text, pid))
+        await db.execute('UPDATE prompts SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE (id = ? OR name = ?)', (text, pid, pid))
         prompt_info = await db.fetchone('SELECT name FROM prompts WHERE id = ?', (pid,))
         pname = prompt_info[0] if prompt_info else 'Unknown'
         del context.user_data['editing_prompt']
