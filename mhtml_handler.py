@@ -621,3 +621,25 @@ async def queue_mhtml(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if pos > 0:
         await update.message.reply_text(f"📥 Queue Position: {pos + 1}\n⏳ অনুগ্রহ করে অপেক্ষা করো...")
+
+# ============================================================
+# LIVE DASHBOARD (added safely at end)
+# ============================================================
+async def update_mhtml_dashboard(msg, data: dict):
+    pct = data.get('pct', 0)
+    bar_len = 20
+    filled = int(bar_len * pct / 100)
+    bar = '█' * filled + '░' * (bar_len - filled)
+    dashboard = f"""╔══════════════════════════════════╗
+║     📊 ATLAS MHTML EXTRACTOR    ║
+╠══════════════════════════════════╣
+║ 📁 {data.get('file','N/A')[:30]:<30} ║
+║ 📥 {data.get('dl','')[:32]:<32} ║
+╠══════════════════════════════════╣
+║ 📝 MCQ: {data.get('mcq',0):<22} ║
+║ ⏱️ {data.get('time',''):<28} ║
+║ [{bar}] {pct}%{'':<10} ║
+║ {data.get('status','⏳'):<32} ║
+╚══════════════════════════════════╝"""
+    try: await msg.edit_text(f"```{dashboard}```", parse_mode='Markdown')
+    except: await msg.edit_text(dashboard)

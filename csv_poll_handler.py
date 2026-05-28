@@ -243,8 +243,8 @@ async def send_serial_polls(update, context, channel_id, mcqs, batch_size, topic
         pre_msg = await bot.send_message(chat_id=channel_id, text=pre_text)
         first_poll_id, sent = None, 0
         for mcq in batch:
-            uid = update.effective_user.id if hasattr(update, "effective_user") else 0
-            while GLOBAL_PAUSE.get(uid, False): await asyncio.sleep(1.5)
+            uid = update.effective_user.id if hasattr(update, "effective_user") and update.effective_user else 0
+            while GLOBAL_PAUSE.get(uid, False): await asyncio.sleep(0.2)
             poll_id, success = await send_single_poll(bot, channel_id, mcq, pre_msg.message_id)
             if success and first_poll_id is None: first_poll_id = poll_id
             if success: sent += 1
@@ -278,7 +278,7 @@ async def handle_csv_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         first_poll_id, sent = None, 0
         for mcq in mcqs:
             uid = update.effective_user.id if hasattr(update, "effective_user") else query.from_user.id
-            while GLOBAL_PAUSE.get(uid, False): await asyncio.sleep(1.5)
+            while GLOBAL_PAUSE.get(uid, False): await asyncio.sleep(0.2)
             poll_id, success = await send_single_poll(bot, channel_id, mcq, pre_msg.message_id)
             if success and first_poll_id is None: first_poll_id = poll_id
             if success: sent += 1
