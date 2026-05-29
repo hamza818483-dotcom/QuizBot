@@ -646,22 +646,3 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
         return pdf_bytes
 from gemini_api import call_gemini
 pdf_processor = PDFProcessor()
-
-# ============================================================
-# MCQ CACHE - Save Keys
-# ============================================================
-import hashlib, json
-
-async def get_cached_mcqs(file_bytes: bytes):
-    """Check if MCQ exists in cache"""
-    file_hash = hashlib.sha256(file_bytes).hexdigest()
-    row = await db.fetchone("SELECT mcqs FROM mcq_cache WHERE file_hash = ?", (file_hash,))
-    if row:
-        return json.loads(row[0])
-    return None
-
-async def save_mcq_cache(file_bytes: bytes, mcqs: list):
-    """Save MCQ to cache"""
-    file_hash = hashlib.sha256(file_bytes).hexdigest()
-    await db.execute("INSERT OR REPLACE INTO mcq_cache (file_hash, mcqs) VALUES (?, ?)",
-                     (file_hash, json.dumps(mcqs, ensure_ascii=False)))

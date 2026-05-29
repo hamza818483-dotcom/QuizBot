@@ -8,7 +8,6 @@ from telegram.ext import ContextTypes
 from config import db
 from services import pdf_processor, generate_mcqs_from_image, mcqs_to_csv, format_progress, parse_csv_to_mcqs
 from ocr_engine import ocr_image, is_scanned_pdf
-from cache_handler import get_cached_mcqs, save_mcq_cache
 from global_state import GLOBAL_PAUSE
 from csv_poll_handler import get_pre_message, get_ending_message, get_message_link
 
