@@ -329,3 +329,16 @@ async def handle_pdf_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.edit_message_text("❌ No MCQs!")
     elif data in ('pdfm_cancel', 'qbm_cancel'):
         await query.edit_message_text("❌ Cancelled!")
+
+
+# ============================================================
+# OCR BATCH PROCESSOR - Save Keys
+# ============================================================
+async def process_batch_ocr(ocr_images, batch_size=2):
+    """Process OCR text in batches to save Gemini keys"""
+    batches = []
+    for i in range(0, len(ocr_images), batch_size):
+        batch = ocr_images[i:i+batch_size]
+        combined_text = "\n---\n".join([text.decode('utf-8') if isinstance(text, bytes) else text for _, text in batch])
+        batches.append(combined_text)
+    return batches

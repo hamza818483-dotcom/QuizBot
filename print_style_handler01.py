@@ -17,7 +17,7 @@ PRINT_FORMAT_NAMES = {
 # PRINT STYLE-01 CSS
 # ============================================================
 PRINT_CSS = """<style>
-@page{size:A4 portrait;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}@bottom-right{content:counter(page)}}
+@page{size:A4 portrait;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}}
 body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:12pt;line-height:1.2;color:#000;margin:0;padding:10px;width:210mm;max-width:210mm}
 .exam-header{text-align:center;border:2px solid #4169E1;background-color:#F0F8FF;border-radius:6px;padding:10px;margin-bottom:15px}
 .exam-header h1{color:#191970;margin:0;font-size:15pt;font-weight:bold}
@@ -47,8 +47,7 @@ body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:1
 .answer-key-table th,.answer-key-table td{border:1px solid #333;padding:6px;text-align:center;font-size:11pt}
 .answer-key-table th{background-color:#f5f5f5;font-weight:bold}
 img{max-width:35%!important;height:auto!important;vertical-align:middle}
-@media print{@page{size:A4 portrait;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}@bottom-right{content:counter(page)}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:210mm;max-width:210mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
-.footer-pg{text-align:center;font-size:9pt;color:#999;margin-top:10px;padding:5px}
+@media print{@page{size:A4 portrait;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:210mm;max-width:210mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
 </style>"""
 
 # ============================================================
@@ -82,8 +81,7 @@ def build_print_p1(data, heading):
             body += f'<div class="explanation"><span class="explanation-label">ব্যাখ্যা:</span> {d["exp"]}{d["ei"]}</div>'
         body += '</div>'
     body += '</div>'
-    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}<div class="footer-pg">সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস</div>
-</body></html>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
 # ============================================================
 # FORMAT P2: Exam Style (Questions + Answer Table)
@@ -104,8 +102,7 @@ def build_print_p2(data, heading):
     for d in data:
         body += f'<tr><td class="qno-col">{d["n"]}</td><td class="ans-col">{d["al"]}</td><td class="exp-col">{d["exp"] if d["exp"] else "-"}</td></tr>'
     body += '</tbody></table></div>'
-    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}<div class="footer-pg">সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস</div>
-</body></html>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
 # ============================================================
 # FORMAT P3: Compact Exam (Horizontal Answer Key)
@@ -129,8 +126,7 @@ def build_print_p3(data, heading):
     for d in data:
         body += f'<td class="ans-cell">{d["al"]}</td>'
     body += '</tr></tbody></table></div>'
-    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}<div class="footer-pg">সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস</div>
-</body></html>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
 # ============================================================
 # BUILDERS DICT
