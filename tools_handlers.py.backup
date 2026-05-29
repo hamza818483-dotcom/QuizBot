@@ -247,30 +247,6 @@ async def watermark_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-
-# ============================================================
-# /wm HANDLER - Fixed Watermark
-# ============================================================
-async def wm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set or remove fixed watermark"""
-    args = context.args
-    if not args:
-        wm = await db.fetchone("SELECT text FROM fixed_watermark WHERE id = 1")
-        if wm:
-            await update.message.reply_text(f"🔒 Fixed Watermark: {wm[0]}\n\n❌ Remove: `/wm remove`")
-        else:
-            await update.message.reply_text("❌ No fixed watermark set!\n\nSet: `/wm আপনার_টেক্সট`")
-        return
-    
-    text = " ".join(args)
-    if text.lower() == "remove":
-        await db.execute("DELETE FROM fixed_watermark WHERE id = 1")
-        await update.message.reply_text("✅ Fixed Watermark Removed!")
-        return
-    
-    await db.execute("INSERT OR REPLACE INTO fixed_watermark (id, text) VALUES (1, ?)", (text,))
-    await update.message.reply_text(f"✅ Fixed Watermark Set: {text}\n\nসব PDF-তে Auto Apply হবে!")
-
 # ============================================================
 # /exp HANDLER
 # ============================================================
