@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ATLAS BOT - PDF Handlers FINAL FIXED - ALL FEATURES"""
+"""ATLAS BOT - PDF Handlers FINAL FIXED - ALL FEATURES + BATCH 2"""
 import os, re, io, json, time, asyncio, logging, tempfile
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -226,58 +226,103 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, is_qbm
         rows = await db.fetchall('SELECT content FROM prompts WHERE is_active = 1')
         if not rows: await msg_target.reply_text("❌ No Active Prompt!"); return
         active_prompts = [r[0] for r in rows]
+
+    # ===== BATCH 2: Process 2 pages together =====
+    BATCH_SIZE = 2
+    batch_images = []
     for idx, (page_num, img_bytes) in enumerate(images):
         while GLOBAL_PAUSE.get(uid, False):
             dash_data['status'] = '⏸️ PAUSED'; await update_dashboard(dash_msg, dash_data); await asyncio.sleep(1)
-        page_mcqs = []
-        for retry in range(3 if is_qbm else 2):
-            try:
-                cnt = mcq_count if mcq_count and not is_qbm else (15 if not is_qbm else 20)
-                # Cache check
-                cached = await get_cached_mcqs(img_bytes)
-                if cached:
-                    page_mcqs = cached
-                else:
-                    page_mcqs = await generate_mcqs_from_image(img_bytes, active_prompts, cnt)
-                    if page_mcqs:
-                        await save_mcq_cache(img_bytes, page_mcqs)
-                if page_mcqs: break
-            except: await asyncio.sleep(2)
-        if page_mcqs:
-            for mcq_clean in page_mcqs:
-                q_clean = mcq_clean.get('question','')
-                q_clean = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q_clean)
-                q_clean = re.sub(r'^\s*[\d০-৯]+\s*[.)\-:\s]+\s*', '', q_clean)
-                q_clean = re.sub(r'^\s*[Qq]\.?\s*[\d]+\s*[.)\-:\s]*\s*', '', q_clean)
-                q_clean = re.sub(r'^\s*\(?\s*[\d০-৯]+\s*\)?\s*[.)\-:\s]*\s*', '', q_clean)
-                mcq_clean['question'] = q_clean.strip()
-            all_mcqs.extend(page_mcqs)
-            dash_data['mcq'] = len(all_mcqs)
-            dash_data['pg'] = f"{idx+1}/{total}"
-            dash_data['pct'] = int((idx+1)/total*100)
-            if channel_id:
-                if mood == 'image':
-                    img_raw = img_bytes[1] if isinstance(img_bytes, tuple) else img_bytes
-                    img_msg = await context.bot.send_photo(chat_id=channel_id, photo=io.BytesIO(img_raw if isinstance(img_raw, bytes) else img_raw))
-                    reply_to = img_msg.message_id
-                else:
-                    pre_text = get_pre_message(f"{title} (Page-{page_num:02d})", len(page_mcqs))
-                    pre_msg = await context.bot.send_message(chat_id=channel_id, text=pre_text)
-                    reply_to = pre_msg.message_id
-                first_pid, psent = None, 0
-                for mcq in page_mcqs:
-                    pid, ok = await send_poll_robust(context.bot, channel_id, mcq, reply_to, uid, with_source)
-                    if ok:
-                        if not first_pid: first_pid = pid
-                        psent += 1; sent_count += 1
-                        dash_data['sent'] = f"{sent_count}/{len(all_mcqs)}"
-                    await update_dashboard(dash_msg, dash_data)
-                    await asyncio.sleep(1)
-                first_link = await get_message_link(context.bot, channel_id, first_pid) if first_pid else ""
-                ending = get_ending_message(f"{title} (Page-{page_num:02d})", psent, first_link)
-                await context.bot.send_message(chat_id=channel_id, text=ending, reply_to_message_id=reply_to, disable_web_page_preview=True)
-                page_links[page_num] = first_link
-        dash_data['time'] = f"{int(time.time()-start_time)}s"; await update_dashboard(dash_msg, dash_data)
+        batch_images.append((page_num, img_bytes))
+
+        if len(batch_images) >= BATCH_SIZE or idx == len(images) - 1:
+            # Process batch
+            batch_page_nums = [pg for pg, _ in batch_images]
+            batch_mcqs_all = []
+
+            for retry in range(3 if is_qbm else 2):
+                try:
+                    cnt = mcq_count if mcq_count and not is_qbm else (15 if not is_qbm else 20)
+                    cnt = cnt * len(batch_images)  # More MCQ for batch
+                    # Combine images
+                    combined_bytes = b"\n---PAGE---\n".join([
+                        img if isinstance(img, bytes) else img
+                        for _, img in batch_images
+                    ])
+                    # Cache check for combined
+                    cached = await get_cached_mcqs(combined_bytes)
+                    if cached:
+                        batch_mcqs_all = cached
+                    else:
+                        batch_mcqs_all = await generate_mcqs_from_image(combined_bytes, active_prompts, cnt)
+                        if batch_mcqs_all:
+                            await save_mcq_cache(combined_bytes, batch_mcqs_all)
+                    if batch_mcqs_all:
+                        break
+                except:
+                    await asyncio.sleep(2)
+
+            if batch_mcqs_all:
+                # Clean and add all MCQs
+                for mcq_clean in batch_mcqs_all:
+                    q_clean = mcq_clean.get('question', '')
+                    q_clean = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q_clean)
+                    q_clean = re.sub(r'^\s*[\d০-৯]+\s*[.)\-:\s]+\s*', '', q_clean)
+                    q_clean = re.sub(r'^\s*[Qq]\.?\s*[\d]+\s*[.)\-:\s]*\s*', '', q_clean)
+                    q_clean = re.sub(r'^\s*\(?\s*[\d০-৯]+\s*\)?\s*[.)\-:\s]*\s*', '', q_clean)
+                    mcq_clean['question'] = q_clean.strip()
+                all_mcqs.extend(batch_mcqs_all)
+                dash_data['mcq'] = len(all_mcqs)
+                dash_data['pg'] = f"{batch_page_nums[-1]}/{total}"
+                dash_data['pct'] = int(batch_page_nums[-1] / total * 100)
+
+                # Send polls if channel
+                if channel_id:
+                    if mood == 'image':
+                        img_raw = batch_images[0][1]
+                        if isinstance(img_raw, tuple):
+                            img_raw = img_raw[1]
+                        img_msg = await context.bot.send_photo(
+                            chat_id=channel_id,
+                            photo=io.BytesIO(img_raw if isinstance(img_raw, bytes) else img_raw)
+                        )
+                        reply_to = img_msg.message_id
+                    else:
+                        pre_text = get_pre_message(
+                            f"{title} (Pages {batch_page_nums[0]:02d}-{batch_page_nums[-1]:02d})",
+                            len(batch_mcqs_all)
+                        )
+                        pre_msg = await context.bot.send_message(chat_id=channel_id, text=pre_text)
+                        reply_to = pre_msg.message_id
+
+                    first_pid, psent = None, 0
+                    for mcq in batch_mcqs_all:
+                        pid, ok = await send_poll_robust(context.bot, channel_id, mcq, reply_to, uid, with_source)
+                        if ok:
+                            if not first_pid:
+                                first_pid = pid
+                            psent += 1
+                            sent_count += 1
+                            dash_data['sent'] = f"{sent_count}/{len(all_mcqs)}"
+                        await update_dashboard(dash_msg, dash_data)
+                        await asyncio.sleep(1)
+
+                    first_link = await get_message_link(context.bot, channel_id, first_pid) if first_pid else ""
+                    ending = get_ending_message(
+                        f"{title} (Pages {batch_page_nums[0]:02d}-{batch_page_nums[-1]:02d})",
+                        psent, first_link
+                    )
+                    await context.bot.send_message(
+                        chat_id=channel_id, text=ending,
+                        reply_to_message_id=reply_to, disable_web_page_preview=True
+                    )
+                    for pg in batch_page_nums:
+                        page_links[pg] = first_link
+
+            batch_images = []  # Reset for next batch
+            dash_data['time'] = f"{int(time.time() - start_time)}s"
+            await update_dashboard(dash_msg, dash_data)
+
     try: os.remove(pdf_path)
     except: pass
     dash_data['status'] = '📊 CSV...'; await update_dashboard(dash_msg, dash_data)
