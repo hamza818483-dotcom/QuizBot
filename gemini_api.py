@@ -26,7 +26,10 @@ def call_gemini(prompt, image_bytes=None):
             if resp.status_code == 200:
                 data = resp.json()
                 return data['candidates'][0]['content']['parts'][0]['text']
-        except:
+        except Exception as e:
+            if 'quota' in str(e).lower():
+                quota_keys.add(key)
+                continue
             continue
     return "[]"
 
