@@ -378,9 +378,11 @@ async def handle_sheet_callbacks(update: Update, context: ContextTypes.DEFAULT_T
 # PRINT STYLE-01 INTEGRATION (Added safely at end)
 # ============================================================
 from print_style_handler01 import PRINT_BUILDERS, PRINT_FORMAT_NAMES
+from print_style_handler02 import PRINT2_BUILDERS, PRINT2_FORMAT_NAMES
 
 # Merge print formats into FORMAT_NAMES
 FORMAT_NAMES.update(PRINT_FORMAT_NAMES)
+FORMAT_NAMES.update(PRINT2_FORMAT_NAMES)
 
 # Override handle_sheet_title to support print formats
 _original_handle_sheet_title = handle_sheet_title
@@ -402,6 +404,8 @@ async def handle_sheet_title(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Check if print format
         if fid.startswith('print_') and fid in PRINT_BUILDERS:
             html = PRINT_BUILDERS[fid](data, title)
+        elif fid.startswith("print2_") and fid in PRINT2_BUILDERS:
+            html = PRINT2_BUILDERS[fid](data, title)
         else:
             fmt_num = int(fid.split('_')[-1])
             html = build_html(data, title, fmt_num, title)

@@ -33,7 +33,7 @@ from admin_handlers import (
 
 # Tools Handlers
 from tools_handlers import (
-    wm_handler, gemini_handler, addgkey_handler,
+    gemini_handler, addgkey_handler,
     update_handler,
     split_handler, merge_handler, convert_handler, rename_handler,
     watermark_handler, exp_handler, tag_handler, thumb_handler,
@@ -344,7 +344,6 @@ def main():
     app.add_handler(CommandHandler("convert", convert_handler))
     app.add_handler(CommandHandler("rename", rename_handler))
     app.add_handler(CommandHandler("watermark", watermark_handler))
-    app.add_handler(CommandHandler("wm", wm_handler))
     app.add_handler(CommandHandler("exp", exp_handler))
     app.add_handler(CommandHandler("tag", tag_handler))
     app.add_handler(CommandHandler("thumb", thumb_handler))
