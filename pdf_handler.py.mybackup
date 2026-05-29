@@ -233,14 +233,7 @@ async def process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, is_qbm
         for retry in range(3 if is_qbm else 2):
             try:
                 cnt = mcq_count if mcq_count and not is_qbm else (15 if not is_qbm else 20)
-                # Cache check
-                cached = await get_cached_mcqs(img_bytes)
-                if cached:
-                    page_mcqs = cached
-                else:
-                    page_mcqs = await generate_mcqs_from_image(img_bytes, active_prompts, cnt)
-                    if page_mcqs:
-                        await save_mcq_cache(img_bytes, page_mcqs)
+                page_mcqs = await generate_mcqs_from_image(img_bytes, active_prompts, cnt)
                 if page_mcqs: break
             except: await asyncio.sleep(2)
         if page_mcqs:
