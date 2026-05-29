@@ -274,6 +274,8 @@ async def sheet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['sheet_mcqs'] = mcqs; context.user_data['sheet_filename'] = filename
     context.user_data['sheet_selected'] = []
+    print(f"DEBUG sheet_selected: {context.user_data.get("sheet_selected")}")
+    print(f"DEBUG sheet_selected: {context.user_data.get("sheet_selected")}")
     formats = await db.fetchall('SELECT format_id, format_name, is_active FROM sheet_formats ORDER BY format_id')
     if not formats:
         for fid, fname in FORMAT_NAMES.items():
@@ -292,7 +294,7 @@ async def sheet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append([InlineKeyboardButton("🖨️ PRINT STYLE-01 (Hard Copy)", callback_data="noop")])
             print_header_added = True
         
-        icon = "☑️" if is_active else "☐"
+        icon = "☐"  # Always unchecked initially
         buttons.append([InlineKeyboardButton(f"{icon} {fname}", callback_data=f"sheet_toggle_{fid}")])
     buttons.append([InlineKeyboardButton("✅ Done — Generate PDF", callback_data="sheet_generate")])
     buttons.append([InlineKeyboardButton("📚 Select All Active", callback_data="sheet_select_all")])
