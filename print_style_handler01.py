@@ -48,6 +48,7 @@ body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:1
 .answer-key-table th{background-color:#f5f5f5;font-weight:bold}
 img{max-width:35%!important;height:auto!important;vertical-align:middle}
 @media print{@page{size:A4 portrait;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}@bottom-right{content:counter(page)}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:210mm;max-width:210mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
+.footer-pg{text-align:center;font-size:9pt;color:#999;margin-top:10px;padding:5px}
 </style>"""
 
 # ============================================================
@@ -81,7 +82,8 @@ def build_print_p1(data, heading):
             body += f'<div class="explanation"><span class="explanation-label">ব্যাখ্যা:</span> {d["exp"]}{d["ei"]}</div>'
         body += '</div>'
     body += '</div>'
-    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}<div class="footer-pg">সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস</div>
+</body></html>'
 
 # ============================================================
 # FORMAT P2: Exam Style (Questions + Answer Table)
@@ -102,7 +104,8 @@ def build_print_p2(data, heading):
     for d in data:
         body += f'<tr><td class="qno-col">{d["n"]}</td><td class="ans-col">{d["al"]}</td><td class="exp-col">{d["exp"] if d["exp"] else "-"}</td></tr>'
     body += '</tbody></table></div>'
-    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}<div class="footer-pg">সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস</div>
+</body></html>'
 
 # ============================================================
 # FORMAT P3: Compact Exam (Horizontal Answer Key)
@@ -126,7 +129,8 @@ def build_print_p3(data, heading):
     for d in data:
         body += f'<td class="ans-cell">{d["al"]}</td>'
     body += '</tr></tbody></table></div>'
-    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}<div class="footer-pg">সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস</div>
+</body></html>'
 
 # ============================================================
 # BUILDERS DICT
