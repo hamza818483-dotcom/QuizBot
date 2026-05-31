@@ -472,7 +472,8 @@ async def tagQ_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         tag_text = ' '.join(args)
 
-        await db.execute("INSERT OR REPLACE INTO quiz_settings (id, tag) VALUES (1, ?)", (tag_text, update.effective_user.id))
+        await db.execute("INSERT OR REPLACE INTO quiz_settings (id, tag) VALUES (1, ?)", (tag_text,))
+        await db.execute("UPDATE quizzes SET tag=?", (tag_text,))
         await update.message.reply_text(f"✅ Tag set: {tag_text} (permanent)")
     except Exception as e:
         await update.message.reply_text("❌ Error setting tag!")
@@ -491,7 +492,9 @@ async def expQ_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         footer = ' '.join(args)
 
-        await db.execute("INSERT OR REPLACE INTO quiz_settings (id, exp_footer) VALUES (1, ?)", (footer, update.effective_user.id))
+        await db.execute("INSERT OR REPLACE INTO quiz_settings (id, exp_footer) VALUES (1, ?)", (footer,))
+        await db.execute("UPDATE quizzes SET exp_footer=?", (footer,))
+        await db.execute("UPDATE quizzes SET exp_footer=?", (footer,))
         await update.message.reply_text(f"✅ Footer set: {footer} (permanent)")
     except Exception as e:
         await update.message.reply_text("❌ Error setting footer!")
