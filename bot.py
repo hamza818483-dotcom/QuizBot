@@ -28,6 +28,7 @@ from telegram.ext import (
 from config import Config, db, gemini_manager, imgbb_manager
 
 # Core Handlers
+from mcq_count_handler import img_handler, txt_handler
 from core_handlers import (
     start_handler, img_handler, txt_handler, prompt_handler,
     handle_core_callbacks, handle_edit_message
