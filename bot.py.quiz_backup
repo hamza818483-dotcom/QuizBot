@@ -11,14 +11,6 @@ from datetime import datetime
 
 from pyrogram import Client
 from telegram import Update
-from telegram.ext import PollAnswerHandler
-
-# Quiz System
-from quiz_system import (
-    quiz_create_handler, quiz_start_handler, quiz_answer_handler,
-    tagQ_handler, expQ_handler, qlist_handler, qdel_handler,
-    quiz_callback_handler
-)
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes
@@ -335,7 +327,7 @@ def main():
     # ============================================================
     
     # Core
-    app.add_handler(CommandHandler("start", start_handler))  # Quiz + Normal start
+    app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("img", img_handler))
     app.add_handler(CommandHandler("txt", txt_handler))
     app.add_handler(CommandHandler("prompt", prompt_handler))
@@ -352,15 +344,6 @@ def main():
     app.add_handler(CommandHandler("convert", convert_handler))
     app.add_handler(CommandHandler("rename", rename_handler))
     app.add_handler(CommandHandler("watermark", watermark_handler))
-
-    # Quiz System Handlers
-    app.add_handler(CommandHandler("q", quiz_create_handler))
-    app.add_handler(CommandHandler("tagQ", tagQ_handler))
-    app.add_handler(CommandHandler("expQ", expQ_handler))
-    app.add_handler(CommandHandler("qlist", qlist_handler))
-    app.add_handler(CommandHandler("qdel", qdel_handler))
-    app.add_handler(PollAnswerHandler(quiz_answer_handler))
-    app.add_handler(CallbackQueryHandler(quiz_callback_handler, pattern="^quiz_"))
     app.add_handler(CommandHandler("wm", wm_handler))
     app.add_handler(CommandHandler("exp", exp_handler))
     app.add_handler(CommandHandler("tag", tag_handler))
@@ -426,17 +409,8 @@ def main():
     logger.info("✅ All handlers registered!")
     logger.info("🚀 Bot is now online and polling...")
     
-    app.run_polling(
-    allowed_updates=['message', 'callback_query', 'poll_answer', 'poll'],
-    drop_pending_updates=False
-)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
     main()
-
-from quiz_bot_debug import start as quiz_start, poll_answer as quiz_poll, callback as quiz_cb
-app.add_handler(CommandHandler("start_quiz", quiz_start))
-app.add_handler(PollAnswerHandler(quiz_poll))
-app.add_handler(CallbackQueryHandler(quiz_cb, pattern="^(lb_|hist_)"))
-

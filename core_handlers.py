@@ -22,7 +22,13 @@ from services import (
 # /start HANDLER
 # ============================================================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Welcome message with all commands & details"""
+    """Welcome + Quiz deep link"""
+    args = context.args
+    # Quiz deep link
+    if args and args[0].startswith('qz_'):
+        from quiz_system import quiz_start_handler
+        return await quiz_start_handler(update, context)
+    
     user = update.effective_user
     
     # Save user to DB
