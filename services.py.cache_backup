@@ -133,8 +133,7 @@ async def generate_mcqs_from_image(image_bytes: bytes, active_prompts: List[str]
     prompt_text = "\n\n".join(active_prompts)
     full_prompt = f"""{prompt_text}
 
-{"Generate the HIGHEST POSSIBLE number of MCQs from this image. Extract every possible question from every line and fact. Maximum quantity with high quality." if count == 0 else f"Generate exactly {count} MCQs from this image. No more, no less."}
-Only use information present in the source. Do NOT create irrelevant questions.
+Generate the MAXIMUM POSSIBLE number of MCQs from this image. Maintain high quality. Do NOT create irrelevant questions. Only use information present in the source.
 Follow ALL rules from the prompts above.
 Output ONLY valid JSON array:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}}]"""
@@ -148,8 +147,7 @@ async def generate_mcqs_from_text(text: str, active_prompts: List[str],
     prompt_text = "\n\n".join(active_prompts)
     full_prompt = f"""{prompt_text}
 
-{"Generate the HIGHEST POSSIBLE number of MCQs from this text. Use EVERY LINE as a source. Maximum quantity with high quality." if count == 0 else f"Generate exactly {count} MCQs from this text. No more, no less."}
-Use EVERY LINE as source. Do NOT create irrelevant questions.
+Generate the MAXIMUM POSSIBLE number of MCQs from this text. Use EVERY LINE as source. Maintain high quality. Do NOT create irrelevant questions.
 Follow ALL rules from the prompts above.
 Output ONLY valid JSON array:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}}]
@@ -648,22 +646,3 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
         return pdf_bytes
 from gemini_api import call_gemini
 pdf_processor = PDFProcessor()
-
-# ============================================================
-# MCQ CACHE - Save Keys
-# ============================================================
-import hashlib, json
-
-async def get_cached_mcqs(file_bytes: bytes):
-    """Check if MCQ exists in cache"""
-    file_hash = hashlib.sha256(file_bytes).hexdigest()
-    row = await db.fetchone("SELECT mcqs FROM mcq_cache WHERE file_hash = ?", (file_hash,))
-    if row:
-        return json.loads(row[0])
-    return None
-
-async def save_mcq_cache(file_bytes: bytes, mcqs: list):
-    """Save MCQ to cache"""
-    file_hash = hashlib.sha256(file_bytes).hexdigest()
-    await db.execute("INSERT OR REPLACE INTO mcq_cache (file_hash, mcqs) VALUES (?, ?)",
-                     (file_hash, json.dumps(mcqs, ensure_ascii=False)))

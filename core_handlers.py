@@ -130,7 +130,7 @@ async def img_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Parse args
     args = context.args
-    count = 12  # default
+    count = 25  # max default
     topic = ''
     
     if args:
@@ -140,7 +140,7 @@ async def img_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             topic = ' '.join(args[1:]) if len(args) > 1 else ''
         except ValueError:
             topic = ' '.join(args)
-            count = 15  # default when topic given without number
+            count = 25  # default when topic given without number
     
     # Download image
     progress_msg = await update.message.reply_text("⏳ ইমেজ ডাউনলোড হচ্ছে...")
@@ -216,7 +216,7 @@ async def txt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Parse args
     args = context.args
-    count = 12
+    count = 25
     topic = ''
     
     if args:
