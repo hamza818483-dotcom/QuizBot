@@ -435,7 +435,6 @@ def main():
 if __name__ == "__main__":
     main()
 
-from quiz_bot_debug import start as quiz_start, poll_answer as quiz_poll, callback as quiz_cb
 app.add_handler(CommandHandler("start_quiz", quiz_start))
 app.add_handler(PollAnswerHandler(quiz_poll))
 app.add_handler(CallbackQueryHandler(quiz_cb, pattern="^(lb_|hist_)"))
