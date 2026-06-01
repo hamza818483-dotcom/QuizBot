@@ -66,6 +66,13 @@ async def setup_quiz_tables():
             PRIMARY KEY (quiz_id, user_id)
         )
     ''')
+    await db.execute('''
+        CREATE TABLE IF NOT EXISTS quiz_settings (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            tag TEXT DEFAULT '',
+            exp_footer TEXT DEFAULT ''
+        )
+    ''')
 
 # ============================================================
 # SECTION 2: HELPERS
@@ -100,7 +107,6 @@ def parse_csv_to_quiz(csv_text):
     questions = []
     try:
         import csv as csv_module
-        # Clean BOM + TAB
         csv_text = csv_text.replace('\ufeff', '').replace('\t', ',')
         reader = csv_module.DictReader(io.StringIO(csv_text))
         for row in reader:
@@ -152,13 +158,37 @@ async def quiz_create_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not questions:
             await msg.reply_text("❌ CSV-তে কোনো প্রশ্ন পাওয়া যায়নি!")
             return
+        
+        # Get global tag/exp from quiz_settings
+        global_tag = await db.fetchone("SELECT tag FROM quiz_settings WHERE id=1")
+        global_exp = await db.fetchone("SELECT exp_footer FROM quiz_settings WHERE id=1")
+        auto_tag = global_tag[0] if global_tag and global_tag[0] else ''
+        auto_exp = global_exp[0] if global_exp and global_exp[0] else ''
+        
         quiz_id = generate_quiz_id()
-        await db.execute('INSERT INTO quizzes (id, name, description, timer, shuffle, csv_data, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)', (quiz_id, quiz_name, description, timer, 1 if shuffle else 0, json.dumps(questions), update.effective_user.id))
+        await db.execute(
+            'INSERT INTO quizzes (id, name, description, timer, shuffle, csv_data, tag, exp_footer, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (quiz_id, quiz_name, description, timer, 1 if shuffle else 0, json.dumps(questions), auto_tag, auto_exp, update.effective_user.id)
+        )
         quiz_link = f"https://t.me/atlasQuizProBot?start={quiz_id}"
-        await msg.reply_text(f"✅ *Quiz Created Successfully!*\n\n📝 *Name:* {quiz_name}\n📄 *Description:* {description}\n⏱️ *Timer:* {timer}s\n🔀 *Shuffle:* {'Yes' if shuffle else 'No'}\n📊 *Questions:* {len(questions)}\n\n🔗 *Quiz Link:*\n{quiz_link}\n\n👆 যে কেউ এই লিংকে ক্লিক করে কুইজ solve করতে পারবে!", parse_mode=None)
+        await msg.reply_text(
+            f"✅ *Quiz Created Successfully!*\n\n"
+            f"📝 *Name:* {quiz_name}\n"
+            f"📄 *Description:* {description}\n"
+            f"⏱️ *Timer:* {timer}s\n"
+            f"🔀 *Shuffle:* {'Yes' if shuffle else 'No'}\n"
+            f"📊 *Questions:* {len(questions)}\n"
+            f"{'🔖 Tag: ' + auto_tag + chr(10) if auto_tag else ''}"
+            f"{'📝 Footer: ' + auto_exp + chr(10) if auto_exp else ''}"
+            f"\n🔗 *Quiz Link:*\n{quiz_link}\n\n"
+            f"👆 যে কেউ এই লিংকে ক্লিক করে কুইজ solve করতে পারবে!",
+            parse_mode=None
+        )
+        logger.info(f"Quiz created: {quiz_id} | {quiz_name} | {len(questions)} Qs | tag={auto_tag} | exp={auto_exp}")
     except Exception as e:
         logger.error(f"Quiz create error: {e}")
-        await update.message.reply_text("❌ কিছু সমস্যা হয়েছে!")
+        await update.message.reply_text(f"❌ Error: {e}")
+
 # ============================================================
 # SECTION 4: QUIZ START (Deep Link)
 # ============================================================
@@ -167,7 +197,7 @@ async def quiz_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         args = context.args
         if not args or not args[0].startswith('qz_'):
-            return  # Not a quiz start
+            return
         
         quiz_id = args[0]
         quiz = await db.fetchone('SELECT * FROM quizzes WHERE id = ?', (quiz_id,))
@@ -186,7 +216,6 @@ async def quiz_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if shuffle:
             questions = shuffle_questions(questions)
         
-        # Save session
         session_data = {
             'quiz_id': quiz_id,
             'questions': questions,
@@ -204,9 +233,8 @@ async def quiz_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.chat_data['quiz_sessions'] = {}
         context.chat_data['quiz_sessions'][quiz_id] = session_data
         
-        # Show quiz info
         await update.message.reply_text(
-            f"📝 *{quiz_name}*\n"
+            f"📝 {quiz_name}\n"
             f"📄 {description}\n"
             f"⏱️ Timer: {timer}s per question\n"
             f"📊 Total: {len(questions)} questions\n\n"
@@ -219,7 +247,7 @@ async def quiz_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
     except Exception as e:
         logger.error(f"Quiz start error: {e}")
-        await update.message.reply_text("❌ কিছু সমস্যা হয়েছে!")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 # ============================================================
 # SECTION 5: SEND QUESTION
@@ -238,15 +266,15 @@ async def send_next_question(update: Update, context: ContextTypes.DEFAULT_TYPE,
             return
         
         question = session['questions'][current]
-        q_text = question['question']
-        options = question['options'][:10]  # Max 10 options
+        q_text = question['question'].replace('\\*', '').replace('**', '')
+        options = question['options'][:10]
         correct_idx = question['answer_index']
-        explanation = question.get('explanation', '')
+        explanation = question.get('explanation', '').replace('\\*', '').replace('**', '')
         tag = session.get('tag', '')
         
-        # Build question text
+        # Build question with tag spacing
         if tag:
-            q_text = f"{tag}\n{current+1}. {q_text}"
+            q_text = f"{tag}\n\n{current+1}. {q_text}"
         else:
             q_text = f"{current+1}. {q_text}"
         
@@ -258,11 +286,13 @@ async def send_next_question(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except:
                 pass
         
-        # Send poll
-        poll_msg = await context.bot.send_poll(
+        # Clean options
+        clean_opts = [o.replace('\\*', '').replace('**', '')[:100] for o in options]
+        
+        msg = await context.bot.send_poll(
             chat_id=update.effective_chat.id,
             question=q_text[:300],
-            options=[opt[:100] for opt in options],
+            options=clean_opts,
             type='quiz',
             correct_option_id=correct_idx,
             open_period=session['timer'],
@@ -270,10 +300,10 @@ async def send_next_question(update: Update, context: ContextTypes.DEFAULT_TYPE,
             explanation=explanation[:200] if explanation else None
         )
         
-        # Update session
-        session['current_poll_id'] = poll_msg.poll.id
+        session['current_poll_id'] = msg.poll.id
         session['current_question'] = current
         session['current_correct'] = correct_idx
+        logger.info(f"Q{current+1}/{session['total']} sent | poll_id={msg.poll.id}")
         
     except Exception as e:
         logger.error(f"Send question error: {e}")
@@ -288,28 +318,28 @@ async def quiz_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_id = poll_answer.user.id
         option_ids = poll_answer.option_ids
         
-        # Find active session
         for quiz_id, session in context.chat_data.get('quiz_sessions', {}).items():
             if session.get('current_poll_id') == poll_answer.poll_id:
                 current = session['current']
                 correct = session.get('current_correct', -1)
                 
                 if not option_ids:
-                    # No answer = skip
                     session['skip'] += 1
+                    logger.info(f"User {user_id} Q{current+1}: SKIPPED")
                 elif option_ids[0] == correct:
                     session['right'] += 1
+                    logger.info(f"User {user_id} Q{current+1}: CORRECT")
                 else:
                     session['wrong'] += 1
+                    logger.info(f"User {user_id} Q{current+1}: WRONG")
                 
                 session['current'] += 1
                 
-                # Wait for poll close then send next
-                # Check if quiz finished
                 if session['current'] >= session['total']:
                     await finish_quiz(update, context, quiz_id)
                     return
-                await asyncio.sleep(2)
+                
+                # Instant next
                 await send_next_question(update, context, quiz_id)
                 break
                 
@@ -334,14 +364,11 @@ async def finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz_i
         score = f"{right}/{total}"
         percentage = int(right / total * 100) if total > 0 else 0
         
-        # Get motamot
         emoji, motamot_text = get_motamot(percentage)
         
-        # Get user info
         user = update.effective_user
         user_name = user.first_name or "Student"
         
-        # Quiz info
         quiz = await db.fetchone('SELECT name FROM quizzes WHERE id = ?', (quiz_id,))
         quiz_name = quiz[0] if quiz else "Quiz"
         
@@ -357,11 +384,24 @@ async def finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz_i
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (user.id, user_name, quiz_id, right, wrong, skip, total, score, attempt))
         
-        # Update leaderboard
-        await db.execute('''
-            INSERT OR REPLACE INTO quiz_leaderboard (quiz_id, user_id, user_name, score, right_count, total, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (quiz_id, user.id, user_name, score, right, total))
+        # Update leaderboard (only if better)
+        existing_lb = await db.fetchone(
+            'SELECT right_count FROM quiz_leaderboard WHERE quiz_id = ? AND user_id = ?',
+            (quiz_id, user.id)
+        )
+        if existing_lb:
+            if right > existing_lb[0]:
+                await db.execute(
+                    'UPDATE quiz_leaderboard SET user_name=?, score=?, right_count=?, total=?, updated_at=CURRENT_TIMESTAMP WHERE quiz_id=? AND user_id=?',
+                    (user_name, score, right, total, quiz_id, user.id)
+                )
+                logger.info(f"Leaderboard UPDATED: {user_name} {right}/{total}")
+        else:
+            await db.execute(
+                'INSERT INTO quiz_leaderboard (quiz_id, user_id, user_name, score, right_count, total) VALUES (?,?,?,?,?,?)',
+                (quiz_id, user.id, user_name, score, right, total)
+            )
+            logger.info(f"Leaderboard INSERTED: {user_name} {right}/{total}")
         
         # History
         history_text = ""
@@ -371,15 +411,15 @@ async def finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz_i
                 (user.id, quiz_id)
             )
             if len(prev_results) >= 2:
-                prev_score = prev_results[-2][0]
-                history_text = f"\n\n📈 *Progress:*\n🟢 Previous: {prev_score}\n🟢 Now: {score}"
-                if right > int(prev_score.split('/')[0]):
-                    history_text += f"\n🎉 উন্নতি হয়েছে!"
+                history_text = f"\n\n📈 Progress:\n"
+                for sc, att in prev_results:
+                    marker = '🟢' if att == attempt else '⚪'
+                    history_text += f"{marker} Attempt {att}: {sc}\n"
         
         # Buttons
         keyboard = [
             [
-                InlineKeyboardButton("📌 আবার প্রাক্টিস করো", url=f"https://t.me/{(await context.bot.get_me()).username}?start={quiz_id}"),
+                InlineKeyboardButton("📌 আবার প্রাক্টিস করো", url=f"https://t.me/atlasQuizProBot?start={quiz_id}"),
             ],
             [
                 InlineKeyboardButton("👥 Leaderboard", callback_data=f"quiz_leaderboard_{quiz_id}"),
@@ -388,14 +428,14 @@ async def finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz_i
         ]
         
         result_text = (
-            f"🌟 এটলাসের *{quiz_name}* কুইজে অংশগ্রহণ করায়\n"
-            f"অভিনন্দন প্রিয় শিক্ষার্থী *{user_name}*!\n\n"
-            f"📊 *তোমার রেজাল্ট:*\n"
+            f"🌟 এটলাসের {quiz_name} কুইজে অংশগ্রহণ করায়\n"
+            f"তোমাকে অভিনন্দন প্রিয় শিক্ষার্থী {user_name}!\n\n"
+            f"📊 তোমার রেজাল্ট:\n"
             f"✅ Right: {right}\n"
             f"❌ Wrong: {wrong}\n"
             f"😐 Skipped: {skip}\n\n"
-            f"⚡ *Final Result:* {score} ({percentage}%)\n\n"
-            f"{emoji} _{motamot_text}_"
+            f"⚡ Final Result: {score} ({percentage}%)\n\n"
+            f"{emoji} {motamot_text}"
             f"{history_text}"
         )
         
@@ -404,6 +444,7 @@ async def finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz_i
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=None
         )
+        logger.info(f"Quiz finished: {user_name} | {score} ({percentage}%) | {emoji}")
         
     except Exception as e:
         logger.error(f"Finish quiz error: {e}")
@@ -421,11 +462,11 @@ async def quiz_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             quiz_id = query.data.replace('quiz_leaderboard_', '')
             leaderboard = await db.fetchall('''
                 SELECT user_name, score, right_count, total FROM quiz_leaderboard 
-                WHERE quiz_id = ? ORDER BY CAST(SUBSTR(score, 1, INSTR(score, '/')-1) AS INTEGER) DESC LIMIT 10
+                WHERE quiz_id = ? ORDER BY right_count DESC
             ''', (quiz_id,))
             
             if leaderboard:
-                text = f"🏆 *Leaderboard*\n\n"
+                text = f"🏆 Leaderboard\n\n"
                 medals = ['🥇', '🥈', '🥉']
                 for i, (name, score, right, total) in enumerate(leaderboard):
                     medal = medals[i] if i < 3 else f"{i+1}."
@@ -434,6 +475,7 @@ async def quiz_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 text = "এখনো কেউ quiz solve করেনি!"
             
             await query.edit_message_text(text, parse_mode=None)
+            logger.info(f"Leaderboard shown for {quiz_id}: {len(leaderboard) if leaderboard else 0} users")
         
         elif query.data.startswith('quiz_history_'):
             quiz_id = query.data.replace('quiz_history_', '')
@@ -444,16 +486,21 @@ async def quiz_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             )
             
             if history:
-                text = f"📈 *তোমার Progress*\n\n"
+                text = f"📈 তোমার Progress\n\n"
                 for score, attempt, date in history:
-                    text += f"🟢 Attempt {attempt}: {score} — {date[:10]}\n"
+                    text += f"🟢 Attempt {attempt}: {score}"
+                    if date:
+                        text += f" | 📅 {date[:10]}"
+                    text += "\n"
             else:
                 text = "এখনো কোনো history নেই!"
             
             await query.edit_message_text(text, parse_mode=None)
+            logger.info(f"History shown for user {user_id}: {len(history) if history else 0} attempts")
             
     except Exception as e:
         logger.error(f"Callback error: {e}")
+        await query.edit_message_text(f"❌ Error: {e}", parse_mode=None)
 
 # ============================================================
 # SECTION 9: SETTINGS
@@ -463,7 +510,9 @@ async def tagQ_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         args = context.args
         if not args:
-            tag = await db.fetchone("SELECT tag FROM quizzes WHERE created_by = ? ORDER BY created_at DESC LIMIT 1", (update.effective_user.id,))
+            tag = await db.fetchone(
+                "SELECT tag FROM quiz_settings WHERE id=1"
+            )
             if tag and tag[0]:
                 await update.message.reply_text(f"🔖 Current tag: {tag[0]}\n\nChange: /tagQ New Tag")
             else:
@@ -471,18 +520,32 @@ async def tagQ_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         tag_text = ' '.join(args)
-
-        await db.execute("UPDATE quizzes SET tag=? WHERE created_by=?", (tag_text,))
-        await update.message.reply_text(f"✅ Tag set: {tag_text} (permanent)")
+        
+        # Update latest quiz
+        await db.execute(
+            "UPDATE quizzes SET tag=? WHERE id=(SELECT id FROM quizzes WHERE created_by=? ORDER BY created_at DESC LIMIT 1)",
+            (tag_text, update.effective_user.id)
+        )
+        # Update global settings
+        await db.execute(
+            "INSERT OR REPLACE INTO quiz_settings (id, tag) VALUES (1, ?)",
+            (tag_text,)
+        )
+        
+        await update.message.reply_text(f"✅ Tag set: {tag_text}\n(সর্বশেষ কুইজ + future কুইজের জন্য)")
+        logger.info(f"Tag set by {update.effective_user.id}: {tag_text}")
     except Exception as e:
-        await update.message.reply_text("❌ Error setting tag!")
+        logger.error(f"tagQ error: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 async def expQ_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set explanation footer — /expQ"""
     try:
         args = context.args
         if not args:
-            exp = await db.fetchone("SELECT exp_footer FROM quizzes WHERE created_by = ? ORDER BY created_at DESC LIMIT 1", (update.effective_user.id,))
+            exp = await db.fetchone(
+                "SELECT exp_footer FROM quiz_settings WHERE id=1"
+            )
             if exp and exp[0]:
                 await update.message.reply_text(f"📝 Current footer: {exp[0]}\n\nChange: /expQ New Footer")
             else:
@@ -490,27 +553,42 @@ async def expQ_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         footer = ' '.join(args)
-
-        await db.execute("UPDATE quizzes SET exp_footer=? WHERE created_by=?", (footer, update.effective_user.id))
-        await update.message.reply_text(f"✅ Footer set: {footer} (permanent)")
+        
+        # Update latest quiz
+        await db.execute(
+            "UPDATE quizzes SET exp_footer=? WHERE id=(SELECT id FROM quizzes WHERE created_by=? ORDER BY created_at DESC LIMIT 1)",
+            (footer, update.effective_user.id)
+        )
+        # Update global settings
+        await db.execute(
+            "INSERT OR REPLACE INTO quiz_settings (id, exp_footer) VALUES (1, ?)",
+            (footer,)
+        )
+        
+        await update.message.reply_text(f"✅ Footer set: {footer}\n(সর্বশেষ কুইজ + future কুইজের জন্য)")
+        logger.info(f"Exp footer set by {update.effective_user.id}: {footer}")
     except Exception as e:
-        await update.message.reply_text("❌ Error setting footer!")
+        logger.error(f"expQ error: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 async def qlist_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all quizzes — /qlist"""
     try:
-        quizzes = await db.fetchall("SELECT id, name, description, timer, created_at FROM quizzes ORDER BY created_at DESC LIMIT 10")
+        quizzes = await db.fetchall(
+            "SELECT id, name, description, timer, created_at FROM quizzes ORDER BY created_at DESC LIMIT 10"
+        )
         if not quizzes:
             await update.message.reply_text("❌ কোনো quiz নেই!")
             return
         
-        text = "📋 *All Quizzes*\n\n"
+        text = "📋 All Quizzes\n\n"
         for q_id, name, desc, timer, date in quizzes:
-            text += f"📝 *{name}*\n⏱️ {timer}s | 🗓 {date[:10]}\n🔗 {q_id}\n\n"
+            text += f"📝 {name}\n⏱️ {timer}s | 🗓 {date[:10]}\n🔗 {q_id}\n\n"
         
         await update.message.reply_text(text, parse_mode=None)
     except Exception as e:
-        await update.message.reply_text("❌ Error!")
+        logger.error(f"qlist error: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 async def qdel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Delete quiz — /qdel ID"""
@@ -525,8 +603,10 @@ async def qdel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.execute("DELETE FROM quiz_results WHERE quiz_id = ?", (quiz_id,))
         await db.execute("DELETE FROM quiz_leaderboard WHERE quiz_id = ?", (quiz_id,))
         await update.message.reply_text(f"✅ Quiz deleted: {quiz_id}")
+        logger.info(f"Quiz deleted: {quiz_id}")
     except Exception as e:
-        await update.message.reply_text("❌ Error deleting quiz!")
+        logger.error(f"qdel error: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 # ============================================================
 # AUTO SETUP
@@ -535,9 +615,9 @@ import asyncio as _asyncio
 _asyncio.get_event_loop().create_task(setup_quiz_tables())
 
 # ============================================================
-# CLOUDFLARE SYNC — Send quiz to Cloudflare D1
+# CLOUDFLARE SYNC
 # ============================================================
-import aiohttp, json
+import aiohttp
 
 async def sync_quiz_to_cloudflare(quiz_id, name, description, timer, shuffle, csv_text, tag='', exp_footer=''):
     """Sync quiz to Cloudflare Worker"""
@@ -551,7 +631,7 @@ async def sync_quiz_to_cloudflare(quiz_id, name, description, timer, shuffle, cs
                     'desc': description,
                     'timer': timer,
                     'shuffle': shuffle,
-                    'csv': json.dumps(questions),
+                    'csv': csv_text,
                     'tag': tag,
                     'exp': exp_footer
                 }
