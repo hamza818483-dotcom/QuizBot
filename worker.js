@@ -45,7 +45,6 @@ async queue(batch, env) {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     globalThis.DB = env.DB;
-    globalThis.BOT_TOKEN = env.BOT_TOKEN;
     globalThis.QUIZ_BOT_TOKEN = env.QUIZ_BOT_TOKEN;
     globalThis.OWNER_ID = env.OWNER_ID;
     globalThis.GEMINI_KEYS = env.GEMINI_KEYS;
@@ -433,10 +432,10 @@ async function handleTagQ(msg, token) {
   var tag = (msg.text || '').replace('/tagQ', '').trim();
   if (tag) {
     await DB.prepare('INSERT OR REPLACE INTO quiz_settings (id, tag) VALUES (1, ?1)').bind(tag).run();
-    await sendMsg(msg.chat.id, '✅ Tag set: ' + tag + '\n(Future quizzes)', BOT_TOKEN);
+    await sendMsg(msg.chat.id, '✅ Tag set: ' + tag + '\n(Future quizzes)', QUIZ_BOT_TOKEN);
   } else {
     var settings = await DB.prepare('SELECT tag FROM quiz_settings WHERE id=1').first();
-    await sendMsg(msg.chat.id, '🔖 Current tag: ' + (settings ? (settings.tag || 'None') : 'None') + '\n\nSet: /tagQ [ATLAS 📚]', BOT_TOKEN);
+    await sendMsg(msg.chat.id, '🔖 Current tag: ' + (settings ? (settings.tag || 'None') : 'None') + '\n\nSet: /tagQ [ATLAS 📚]', QUIZ_BOT_TOKEN);
   }
 }
 
@@ -444,10 +443,10 @@ async function handleExpQ(msg, token) {
   var exp = (msg.text || '').replace('/expQ', '').trim();
   if (exp) {
     await DB.prepare('INSERT OR REPLACE INTO quiz_settings (id, exp_footer) VALUES (1, ?1)').bind(exp).run();
-    await sendMsg(msg.chat.id, '✅ Footer set: ' + exp + '\n(Future quizzes)', BOT_TOKEN);
+    await sendMsg(msg.chat.id, '✅ Footer set: ' + exp + '\n(Future quizzes)', QUIZ_BOT_TOKEN);
   } else {
     var settings = await DB.prepare('SELECT exp_footer FROM quiz_settings WHERE id=1').first();
-    await sendMsg(msg.chat.id, '📝 Current footer: ' + (settings ? (settings.exp_footer || 'None') : 'None') + '\n\nSet: /expQ [✅ এটলাস]', BOT_TOKEN);
+    await sendMsg(msg.chat.id, '📝 Current footer: ' + (settings ? (settings.exp_footer || 'None') : 'None') + '\n\nSet: /expQ [✅ এটলাস]', QUIZ_BOT_TOKEN);
   }
 }
 
