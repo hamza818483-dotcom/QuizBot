@@ -4,27 +4,44 @@
 // ============================================================
 
 export default {
-  async queue(batch, env) {
-  var token = env.QUIZ_BOT_TOKEN;
-  var DB = env.DB;
-  for (const msg of batch.messages) {
-    var body = msg.body;
-    var sessionRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('s_' + body.uid).first();
-    if (!sessionRow) continue;
-    var session = JSON.parse(sessionRow.data);
-    if (session.cur === body.curIndex) {
-      await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: body.chatId,
-          text: '⏱️ দ্রুত সঠিকভাবে দাগানোর অভ্যাস করুন,\nপরবর্তী Quiz এ যেতে "Next" Button এ ক্লিক করুন।',
-          reply_markup: { inline_keyboard: [[{ text: '⏭️ Next', callback_data: 'next_' + body.uid }]] }
-        })
-      });
+async queue(batch, env) {
+  console.log('Queue triggered! Batch size:', batch.messages.length);
+  console.log('ENV check - DB:', !!env.DB, 'Token:', !!env.QUIZ_BOT_TOKEN, 'QUIZ_BOT_TOKEN:', !!env.QUIZ_BOT_TOKEN);
+  try {
+    var token = env.QUIZ_BOT_TOKEN;
+    var DB = env.DB;
+    console.log('DB available:', !!DB, 'Token:', !!token);
+    for (const msg of batch.messages) {
+      try {
+        var body = msg.body;
+        console.log('Processing msg:', JSON.stringify(body));
+        var sessionRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('s_' + body.uid).first();
+        console.log('Session found:', !!sessionRow);
+        if (!sessionRow) continue;
+        var session = JSON.parse(sessionRow.data);
+        console.log('Queue check:', body.curIndex, 'vs', session.cur, session.cur === body.curIndex ? 'MATCH' : 'SKIP');
+        if (session.cur === body.curIndex) {
+          var result = await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: body.chatId,
+              text: '⏱️ দ্রুত সঠিকভাবে দাগানোর অভ্যাস করুন,\nপরবর্তী Quiz এ যেতে "Next" Button এ ক্লিক করুন।',
+              reply_markup: { inline_keyboard: [[{ text: '⏭️ Next', callback_data: 'next_' + body.uid }]] }
+            })
+          });
+          var sendResult = await result.json();
+          console.log('Send result:', sendResult.ok);
+        }
+      } catch (e) {
+        console.error('Msg error:', e.message);
+      }
     }
+  } catch (e) {
+    console.error('Queue error:', e.message);
   }
 },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     globalThis.DB = env.DB;
@@ -205,29 +222,6 @@ async function handleWebhook(request) {
       await handleQuizPoll(update.poll_answer);
       return new Response('OK');
     }
-    if (update.poll && update.poll.is_closed) {
-    var pollId = update.poll.id;
-    var row = await DB.prepare('SELECT chat_id, next_q_index, session_uid FROM poll_sessions WHERE poll_id = ?1').bind(pollId).first();
-    if (row) {
-     var sessionRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('s_' + row.session_uid).first();
-     if (sessionRow) {
-      var session = JSON.parse(sessionRow.data);
-      if (session.cur === row.next_q_index - 1) {
-        await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: row.chat_id,
-            text: '⏱️ দ্রুত সঠিকভাবে দাগানোর অভ্যাস করুন,\nপরবর্তী Quiz এ যেতে "Next" Button এ ক্লিক করুন।',
-            reply_markup: { inline_keyboard: [[{ text: '⏭️ Next', callback_data: 'next_' + row.session_uid }]] }
-          })
-        });
-      }
-    }
-    await DB.prepare('DELETE FROM poll_sessions WHERE poll_id = ?1').bind(pollId).run();
-  }
-  return new Response('OK');
-}  
 
 
 
@@ -723,10 +717,13 @@ async function sendQuestion(chatId, session, token) {
     session.pid = data.result.poll ? data.result.poll.id : null;
     session.cor = q.answer_index || 0;
     await DB.prepare('INSERT OR REPLACE INTO quiz_sessions (key, data, updated_at) VALUES (?1, ?2, ?3)').bind('s_' + session.uid, JSON.stringify(session), Date.now()).run();
-    if (session.pid) {
-     await DB.prepare('INSERT OR REPLACE INTO poll_sessions (poll_id, chat_id, next_q_index, session_uid) VALUES (?1, ?2, ?3, ?4)').bind(session.pid, chatId, session.cur + 1, session.uid).run();
-     await globalThis.NEXT_QUEUE.send({ chatId: chatId, uid: session.uid, curIndex: session.cur }, { delaySeconds: session.timer + 2 });    
-  }
+  if (session.pid) {
+    console.log('Queue send for Q:', session.cur);
+    await DB.prepare('INSERT OR REPLACE INTO poll_sessions (poll_id, chat_id, next_q_index, session_uid) VALUES (?1, ?2, ?3, ?4)').bind(session.pid, chatId, session.cur + 1, session.uid).run();
+    await globalThis.NEXT_QUEUE.send({ chatId: chatId, uid: session.uid, curIndex: session.cur }, { delaySeconds: session.timer + 2 }); 
+ } else {
+  console.log('No poll ID for Q:', session.cur);
+}
 }
 }
 
