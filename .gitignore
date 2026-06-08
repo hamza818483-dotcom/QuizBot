@@ -1,6 +1,0 @@
-__pycache__/
-data/
-*.pyc
-.env
-backup.sh
-*.backup
