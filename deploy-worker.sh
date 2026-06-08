@@ -1,5 +1,5 @@
 #!/bin/bash
-CF_TOKEN="cfut_FGraQfSZRQyYYrFicvB6uPOBRuIkmAf9goNL04Qw12e3e776"
+CF_TOKEN="YOUR_CLOUDFLARE_TOKEN_HERE"
 CF_ACCOUNT="acb7a8f8fc00546ef672527a692d89fc"
 WORKER_NAME="atlas-mcq-worker"
 SCRIPT="$HOME/cloudflare-worker/worker.js"
