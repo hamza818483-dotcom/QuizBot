@@ -175,8 +175,24 @@ function parseCSV(csvText) {
     var eIdx = headers.findIndex(function(h) { return h === 'explanation'; });
     var iIdx = headers.findIndex(function(h) { return h === 'image' || h === 'qi'; });
     for (var i = 1; i < lines.length; i++) {
-      var cols = lines[i].split(',').map(function(c) { return c.trim(); });
-      var q = {
+    // Smart split - respect quotes
+    var cols = [];
+    var current = '';
+    var inQuotes = false;
+    var line = lines[i];
+    for (var c = 0; c < line.length; c++) {
+    var ch = line[c];
+    if (ch === '"') {
+    inQuotes = !inQuotes;
+  } else if (ch === ',' && !inQuotes) {
+    cols.push(current.trim());
+    current = '';
+  } else {
+    current += ch;
+  }
+}
+cols.push(current.trim()); 
+     var q = {
         question: cols[qIdx] || '',
         options: [],
         answer_index: 0,
@@ -252,6 +268,14 @@ async function handleMsg(msg, token) {
       return new Response('OK');
     }
     if (text === '/ping') {
+    if (text.startsWith('/channel')) { await handleChannelCommand(msg, token, text); return new Response('OK'); }
+    if (text === '/channellist') { await handleChannelCommand(msg, token, '/channel list'); return new Response('OK'); }
+    if (text.startsWith('/collect') || text === '/status' || text === '/done' || text === '/cancel') { await handleCollectCommand(msg, token); return new Response('OK'); } if (text.startsWith('/merge')) { await handleMergeCommand(msg, token, text); return new Response('OK'); }
+    if (text === '/convert') { await handleConvertCommand(msg, token); return new Response('OK'); }
+    if (text.startsWith('/csvS')) { await handleCsvSCommand(msg, token, text); return new Response('OK'); }
+    if (text.startsWith('/csv')) { await handleCsvCommand(msg, token, text); return new Response('OK'); }
+    if (text === '/pause') { await handlePauseCommand(chatId, token); return new Response('OK'); } 
+    if (text === '/resume') { await handleResumeCommand(chatId, token); return new Response('OK'); }
       await sendMsg(chatId, '🏓 Pong! Quiz Bot Online!', token);
       return new Response('OK');
     }
@@ -259,6 +283,10 @@ async function handleMsg(msg, token) {
       await sendMsg(chatId, '✅ All systems running!', token);
       return new Response('OK');
     }
+    if (text.startsWith('/csvS')) { await handleCsvSCommand(msg, token, text); return new Response('OK'); }
+    if (text.startsWith('/csv')) { await handleCsvCommand(msg, token, text); return new Response('OK'); }
+    if (text === '/pause') { await handlePauseCommand(chatId, token); return new Response('OK'); }
+    if (text === '/resume') { await handleResumeCommand(chatId, token); return new Response('OK'); }   
     if (!isAuth) {
       await sendMsg(chatId, '❌ Admin only!', token);
       return new Response('OK');
@@ -327,6 +355,9 @@ async function handleCB(query, token) {
   };
   try {
     await answerCb();
+    if (data.startsWith('csvs_chn_')) { await handleCsvCallback(query, token); return; }
+    if (data.startsWith('csv_chn_')) { await handleCsvCallback(query, token); return; }
+    if (data.startsWith('csv_cancel')) { await handleCsvCallback(query, token); return; }
     if (data.startsWith('lb_')) {
       await handleLB(chatId, data.replace('lb_', ''), uid, token);
       return;
@@ -947,5 +978,925 @@ async function handleMistake(chatId, quizId, uid, token, type) {
 }
 
 // ============================================================
-// END — ATLAS QUIZ BOT v6.0 COMPLETE
-// ============================================================;
+// 17 Features | Error Handling | Console Logs
+// ============================================================
+
+var POLL_PAUSE_STATE = {};
+
+// ============================================================
+// FEATURE 5: CHANNEL MANAGEMENT (/channel, /channellist)
+// ============================================================
+
+async function handleChannelCommand(msg, token, text) {
+  var chatId = msg.chat.id;
+  var args = text.replace('/channel', '').trim();
+  console.log('[Channel] Command:', args, 'by user:', msg.from.id);
+  
+  if (!args || args === 'list' || text === '/channellist') {
+    try {
+      var channels = await DB.prepare('SELECT id, chat_id, title FROM channels').all();
+      if (!channels.results || !channels.results.length) {
+        await sendMsg(chatId, '📢 No saved channels!\n\nAdd: /channel @name\nAdd: /channel -100xxx\nAdd: /channel https://t.me/xxx', token);
+        return;
+      }
+      
+      var txt = '📢 Saved Channels\n\n';
+      var keyboard = { inline_keyboard: [] };
+      
+      for (var i = 0; i < channels.results.length; i++) {
+        var ch = channels.results[i];
+        txt += '📢 ' + ch.title + '\n🔗 ' + ch.chat_id + '\n\n';
+        keyboard.inline_keyboard.push([
+          { text: '✏️ Edit ' + ch.title, callback_data: 'chn_edit_' + ch.id },
+          { text: '🗑️ Delete', callback_data: 'chn_del_' + ch.id }
+        ]);
+      }
+      
+      keyboard.inline_keyboard.push([{ text: '➕ Add New', callback_data: 'chn_add' }]);
+      
+      await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: txt, reply_markup: keyboard })
+      });
+      console.log('[Channel] List sent with', channels.results.length, 'channels');
+    } catch (e) {
+      console.error('[Channel] List error:', e.message);
+      await sendMsg(chatId, '❌ Error: ' + e.message, token);
+    }
+    return;
+  }
+  
+  var channelId = args;
+  if (args.includes('t.me/')) {
+    var parts = args.split('/');
+    channelId = '@' + parts[parts.length - 1];
+  }
+  
+  if (channelId.startsWith('@') || channelId.startsWith('-100')) {
+    try {
+      await DB.prepare('INSERT OR IGNORE INTO channels (chat_id, title) VALUES (?1, ?2)').bind(channelId, args).run();
+      console.log('[Channel] Added:', channelId);
+      await sendMsg(chatId, '✅ Channel added: ' + channelId, token);
+    } catch (e) {
+      console.error('[Channel] Add error:', e.message);
+      await sendMsg(chatId, '❌ Error: ' + e.message, token);
+    }
+  } else {
+    await sendMsg(chatId, '❌ Invalid! Use: @name or -100xxx or https://t.me/xxx', token);
+  }
+}
+
+async function handleChannelCallback(query, token) {
+  var data = query.data;
+  var chatId = query.message.chat.id;
+  var uid = query.from.id;
+  console.log('[Channel CB] Data:', data, 'User:', uid);
+  
+  await fetch('https://api.telegram.org/bot' + token + '/answerCallbackQuery', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ callback_query_id: query.id })
+  });
+  
+  try {
+    if (data === 'chn_add') {
+      await DB.prepare('INSERT OR REPLACE INTO quiz_sessions (key, data, updated_at) VALUES (?1, ?2, ?3)').bind('chn_add_' + uid, JSON.stringify({ step: 'add' }), Date.now()).run();
+      await sendMsg(chatId, '📢 Send channel @username or ID or link to add:', token);
+      return;
+    }
+    
+    if (data.startsWith('chn_edit_')) {
+      var id = parseInt(data.replace('chn_edit_', ''));
+      await DB.prepare('INSERT OR REPLACE INTO quiz_sessions (key, data, updated_at) VALUES (?1, ?2, ?3)').bind('chn_edit_' + uid, JSON.stringify({ step: 'edit', channelId: id }), Date.now()).run();
+      await sendMsg(chatId, '✏️ Send new name for this channel:', token);
+      return;
+    }
+    
+    if (data.startsWith('chn_del_')) {
+      var id = parseInt(data.replace('chn_del_', ''));
+      await DB.prepare('DELETE FROM channels WHERE id = ?1').bind(id).run();
+      console.log('[Channel] Deleted ID:', id);
+      await sendMsg(chatId, '✅ Channel deleted!', token);
+      await handleChannelCommand({ chat: { id: chatId } }, token, '/channel list');
+      return;
+    }
+  } catch (e) {
+    console.error('[Channel CB] Error:', e.message);
+  }
+}
+
+async function handleChannelState(msg, token) {
+  var text = (msg.text || '').trim();
+  var uid = msg.from.id;
+  var chatId = msg.chat.id;
+  
+  try {
+    var addRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('chn_add_' + uid).first();
+    if (addRow) {
+      var channelId = text;
+      if (text.includes('t.me/')) {
+        var parts = text.split('/');
+        channelId = '@' + parts[parts.length - 1];
+      }
+      await DB.prepare('INSERT OR IGNORE INTO channels (chat_id, title) VALUES (?1, ?2)').bind(channelId, text).run();
+      await DB.prepare('DELETE FROM quiz_sessions WHERE key = ?1').bind('chn_add_' + uid).run();
+      console.log('[Channel State] Added:', channelId);
+      await sendMsg(chatId, '✅ Channel added: ' + channelId, token);
+      await handleChannelCommand({ chat: { id: chatId } }, token, '/channel list');
+      return;
+    }
+    
+    var editRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('chn_edit_' + uid).first();
+    if (editRow) {
+      var state = JSON.parse(editRow.data);
+      await DB.prepare('UPDATE channels SET title = ?1 WHERE id = ?2').bind(text, state.channelId).run();
+      await DB.prepare('DELETE FROM quiz_sessions WHERE key = ?1').bind('chn_edit_' + uid).run();
+      console.log('[Channel State] Updated ID:', state.channelId, 'to:', text);
+      await sendMsg(chatId, '✅ Name updated!', token);
+      await handleChannelCommand({ chat: { id: chatId } }, token, '/channel list');
+      return;
+    }
+  } catch (e) {
+    console.error('[Channel State] Error:', e.message);
+  }
+}
+
+// ============================================================
+// FEATURE 6: POLL COLLECTION (/collect)
+// ============================================================
+
+async function handleCollectCommand(msg, token) {
+  var chatId = msg.chat.id;
+  var text = (msg.text || '').trim();
+  var uid = msg.from.id;
+  console.log('[Collect] Command:', text, 'User:', uid);
+  
+  try {
+    if (text === '/collect') {
+      await sendMsg(chatId, '📊 Poll collection started!\n\nForward polls (hidden sender) to collect.\n/status - check count\n/done - download CSV\n/cancel - clear', token);
+      return;
+    }
+    
+    if (text === '/status') {
+      var count = await DB.prepare('SELECT COUNT(*) as c FROM poll_collection WHERE user_id = ?1').bind(uid).first();
+      await sendMsg(chatId, '📊 Total collected: ' + (count ? count.c : 0) + ' polls', token);
+      return;
+    }
+    
+    if (text === '/done') {
+      var polls = await DB.prepare('SELECT poll_data FROM poll_collection WHERE user_id = ?1').bind(uid).all();
+      if (!polls.results || !polls.results.length) {
+        await sendMsg(chatId, '❌ No polls collected!', token);
+        return;
+      }
+      
+      var csvRows = ['questions,option1,option2,option3,option4,answer,explanation,type,section'];
+      for (var i = 0; i < polls.results.length; i++) {
+        var pollData = JSON.parse(polls.results[i].poll_data);
+        var options = pollData.options || [];
+        while (options.length < 4) options.push('');
+        var answerNum = String((pollData.correct || 0) + 1);
+        var row = '"' + (pollData.question || '').replace(/"/g, '""') + '","' + (options[0] || '').replace(/"/g, '""') + '","' + (options[1] || '').replace(/"/g, '""') + '","' + (options[2] || '').replace(/"/g, '""') + '","' + (options[3] || '').replace(/"/g, '""') + '",' + answerNum + ',"' + (pollData.explanation || '').replace(/"/g, '""') + '",1,1';
+        csvRows.push(row);
+      }
+      
+      var csvText = csvRows.join('\n');
+      var csvBytes = new TextEncoder().encode(csvText);
+      var csvB64 = btoa(String.fromCharCode.apply(null, csvBytes));
+      
+      await fetch('https://api.telegram.org/bot' + token + '/sendDocument', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          document: 'data:text/csv;base64,' + csvB64,
+          filename: 'collected_polls_' + polls.results.length + '.csv',
+          caption: '✅ ' + polls.results.length + ' polls collected!'
+        })
+      });
+      
+      await DB.prepare('DELETE FROM poll_collection WHERE user_id = ?1').bind(uid).run();
+      console.log('[Collect] Done:', polls.results.length, 'polls');
+      return;
+    }
+    
+    if (text === '/cancel') {
+      await DB.prepare('DELETE FROM poll_collection WHERE user_id = ?1').bind(uid).run();
+      await sendMsg(chatId, '❌ Collection cancelled!', token);
+      console.log('[Collect] Cancelled');
+      return;
+    }
+  } catch (e) {
+    console.error('[Collect] Error:', e.message);
+    await sendMsg(chatId, '❌ Error: ' + e.message, token);
+  }
+}
+
+async function handlePollAutoCollect(msg, token) {
+  if (!msg.poll || !msg.forward_date) return;
+  if (msg.forward_sender_name) return;
+  
+  var uid = msg.from.id;
+  console.log('[AutoCollect] Poll from user:', uid);
+  
+  try {
+    var pollData = {
+      question: msg.poll.question,
+      options: msg.poll.options.map(function(o) { return o.text; }),
+      correct: msg.poll.correct_option_id,
+      explanation: msg.poll.explanation || ''
+    };
+    
+    await DB.prepare('INSERT INTO poll_collection (user_id, poll_data) VALUES (?1, ?2)').bind(uid, JSON.stringify(pollData)).run();
+    
+    var count = await DB.prepare('SELECT COUNT(*) as c FROM poll_collection WHERE user_id = ?1').bind(uid).first();
+    await sendMsg(msg.chat.id, '📊 Collected! Total: ' + (count ? count.c : 0) + ' polls', token);
+    console.log('[AutoCollect] Total:', count ? count.c : 0);
+  } catch (e) {
+    console.error('[AutoCollect] Error:', e.message);
+  }
+}
+
+// ============================================================
+// FEATURE 7: FILE MERGE (/merge)
+// ============================================================
+
+async function handleMergeCommand(msg, token, text) {
+  var chatId = msg.chat.id;
+  var uid = msg.from.id;
+  var args = text.replace('/merge', '').trim();
+  console.log('[Merge] Command:', args, 'User:', uid);
+  
+  try {
+    if (args === 'done') {
+      var mergeRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('merge_' + uid).first();
+      if (!mergeRow) {
+        await sendMsg(chatId, '❌ No files to merge! Forward CSV files first.', token);
+        return;
+      }
+      
+      var mergeData = JSON.parse(mergeRow.data);
+      var files = mergeData.files || [];
+      
+      if (!files.length) {
+        await sendMsg(chatId, '❌ No files to merge!', token);
+        return;
+      }
+      
+      var allRows = [];
+      var header = null;
+      
+      for (var i = 0; i < files.length; i++) {
+        var content = files[i];
+        var lines = content.split('\n').filter(function(l) { return l.trim(); });
+        
+        if (!header) {
+          header = lines[0];
+          allRows.push(header);
+        }
+        
+        for (var j = 1; j < lines.length; j++) {
+          allRows.push(lines[j]);
+        }
+      }
+      
+      var mergedText = allRows.join('\n');
+      var mergedBytes = new TextEncoder().encode(mergedText);
+      var mergedB64 = btoa(String.fromCharCode.apply(null, mergedBytes));
+      
+      await fetch('https://api.telegram.org/bot' + token + '/sendDocument', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          document: 'data:text/csv;base64,' + mergedB64,
+          filename: 'merged_' + (allRows.length - 1) + '.csv',
+          caption: '✅ Merged: ' + (allRows.length - 1) + ' rows from ' + files.length + ' files'
+        })
+      });
+      
+      await DB.prepare('DELETE FROM quiz_sessions WHERE key = ?1').bind('merge_' + uid).run();
+      console.log('[Merge] Done:', (allRows.length - 1), 'rows from', files.length, 'files');
+      return;
+    }
+    
+    if (args === 'status') {
+      var mergeRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('merge_' + uid).first();
+      var count = mergeRow ? (JSON.parse(mergeRow.data).files || []).length : 0;
+      await sendMsg(chatId, '📊 Total files: ' + count, token);
+      return;
+    }
+    
+    if (args === 'cancel') {
+      await DB.prepare('DELETE FROM quiz_sessions WHERE key = ?1').bind('merge_' + uid).run();
+      await sendMsg(chatId, '❌ Merge cancelled!', token);
+      console.log('[Merge] Cancelled');
+      return;
+    }
+    
+    if (msg.reply_to_message && msg.reply_to_message.document) {
+      var fileRes = await fetch('https://api.telegram.org/bot' + token + '/getFile?file_id=' + msg.reply_to_message.document.file_id);
+      var fileData = await fileRes.json();
+      var filePath = fileData.result ? fileData.result.file_path : null;
+      
+      if (!filePath) {
+        await sendMsg(chatId, '❌ File download failed!', token);
+        return;
+      }
+      
+      var csvRes = await fetch('https://api.telegram.org/file/bot' + token + '/' + filePath);
+      var content = await csvRes.text();
+      
+      var mergeRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('merge_' + uid).first();
+      var files = mergeRow ? JSON.parse(mergeRow.data).files : [];
+      files.push(content);
+      
+      await DB.prepare('INSERT OR REPLACE INTO quiz_sessions (key, data, updated_at) VALUES (?1, ?2, ?3)').bind('merge_' + uid, JSON.stringify({ files: files }), Date.now()).run();
+      await sendMsg(chatId, '📎 File ' + files.length + ' received! Total: ' + files.length + ' files\n/merge done when ready', token);
+      console.log('[Merge] File added. Total:', files.length);
+      return;
+    }
+    
+    await sendMsg(chatId, '🔗 Forward CSV files one by one, then /merge done\n/merge status - check count\n/merge cancel - clear', token);
+  } catch (e) {
+    console.error('[Merge] Error:', e.message);
+    await sendMsg(chatId, '❌ Error: ' + e.message, token);
+  }
+}
+
+// ============================================================
+// FEATURE 8: /convert — CSV ↔ JSON
+// ============================================================
+
+async function handleConvertCommand(msg, token) {
+  var chatId = msg.chat.id;
+  console.log('[Convert] Request by user:', msg.from.id);
+  
+  if (!msg.reply_to_message || !msg.reply_to_message.document) {
+    await sendMsg(chatId, '❌ CSV বা JSON ফাইলে reply করে `/convert` দাও!', token);
+    return;
+  }
+  
+  try {
+    var fileRes = await fetch('https://api.telegram.org/bot' + token + '/getFile?file_id=' + msg.reply_to_message.document.file_id);
+    var fileData = await fileRes.json();
+    var filePath = fileData.result ? fileData.result.file_path : null;
+    
+    if (!filePath) {
+      await sendMsg(chatId, '❌ File download failed!', token);
+      return;
+    }
+    
+    var fileRes2 = await fetch('https://api.telegram.org/file/bot' + token + '/' + filePath);
+    var content = await fileRes2.text();
+    var fileName = msg.reply_to_message.document.file_name || '';
+    
+    if (fileName.toLowerCase().endsWith('.csv')) {
+      // CSV → JSON
+      var questions = parseCSV(content);
+      var jsonData = [];
+      for (var i = 0; i < questions.length; i++) {
+        var q = questions[i];
+        var answerLetter = ['A', 'B', 'C', 'D'][q.answer_index] || 'A';
+        jsonData.push({
+          question_number: String(i + 1),
+          question: q.question || '',
+          options: {
+            A: (q.options[0] || ''),
+            B: (q.options[1] || ''),
+            C: (q.options[2] || ''),
+            D: (q.options[3] || '')
+          },
+          correct_answer: answerLetter,
+          explanation: q.explanation || ''
+        });
+      }
+      
+      var jsonBytes = new TextEncoder().encode(JSON.stringify(jsonData, null, 2));
+      var jsonB64 = btoa(String.fromCharCode.apply(null, jsonBytes));
+      
+      await fetch('https://api.telegram.org/bot' + token + '/sendDocument', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          document: 'data:application/json;base64,' + jsonB64,
+          filename: fileName.replace('.csv', '.json'),
+          caption: '✅ CSV → JSON Converted!\n📊 ' + questions.length + ' questions'
+        })
+      });
+      console.log('[Convert] CSV→JSON:', questions.length, 'questions');
+      
+    } else if (fileName.toLowerCase().endsWith('.json')) {
+      // JSON → CSV
+      var jsonData = JSON.parse(content);
+      var csvRows = ['questions,option1,option2,option3,option4,answer,explanation,type,section'];
+      
+      for (var i = 0; i < jsonData.length; i++) {
+        var item = jsonData[i];
+        var opts = item.options || {};
+        var answerMap = { 'A': '1', 'B': '2', 'C': '3', 'D': '4' };
+        var ansNum = answerMap[item.correct_answer] || '1';
+        var row = '"' + (item.question || '').replace(/"/g, '""') + '","' + (opts.A || '').replace(/"/g, '""') + '","' + (opts.B || '').replace(/"/g, '""') + '","' + (opts.C || '').replace(/"/g, '""') + '","' + (opts.D || '').replace(/"/g, '""') + '",' + ansNum + ',"' + (item.explanation || '').replace(/"/g, '""') + '",1,1';
+        csvRows.push(row);
+      }
+      
+      var csvText = csvRows.join('\n');
+      var csvBytes = new TextEncoder().encode(csvText);
+      var csvB64 = btoa(String.fromCharCode.apply(null, csvBytes));
+      
+      await fetch('https://api.telegram.org/bot' + token + '/sendDocument', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          document: 'data:text/csv;base64,' + csvB64,
+          filename: fileName.replace('.json', '.csv'),
+          caption: '✅ JSON → CSV Converted!\n📊 ' + jsonData.length + ' questions'
+        })
+      });
+      console.log('[Convert] JSON→CSV:', jsonData.length, 'questions');
+    } else {
+      await sendMsg(chatId, '❌ Only CSV or JSON files!', token);
+    }
+  } catch (e) {
+    console.error('[Convert] Error:', e.message);
+    await sendMsg(chatId, '❌ Error: ' + e.message, token);
+  }
+}
+
+// ============================================================
+// FEATURE 1-4: CSV POLL HANDLERS (UPDATED WITH IMAGE SUPPORT)
+// ============================================================
+
+async function getChannelList() {
+  var channels = await DB.prepare('SELECT chat_id, title FROM channels').all();
+  if (!channels.results || !channels.results.length) return null;
+  
+  var keyboard = { inline_keyboard: [] };
+  for (var i = 0; i < channels.results.length; i++) {
+    var ch = channels.results[i];
+    keyboard.inline_keyboard.push([{ text: '📢 ' + ch.title, callback_data: 'csv_chn_' + ch.chat_id }]);
+  }
+  keyboard.inline_keyboard.push([{ text: '❌ Cancel', callback_data: 'csv_cancel' }]);
+  return keyboard;
+}
+
+function extractImageUrlFromText(text) {
+  if (!text) return { url: null, cleanText: text };
+  var match = text.match(/<img[^>]+src=["']([^"']+)["'][^>]*>/i);
+  if (match) {
+    return {
+      url: match[1],
+      cleanText: text.replace(/<img[^>]+>/gi, '').trim()
+    };
+  }
+  return { url: null, cleanText: text };
+}
+
+async function applyTagToQuestion(questionText) {
+  try {
+    var quizSettings = await DB.prepare('SELECT tag FROM quiz_settings WHERE id = 1').first();
+    if (quizSettings && quizSettings.tag) {
+      questionText = quizSettings.tag + '\n\n' + questionText;
+    }
+  } catch (e) {
+    console.error('[Tag Apply] Error:', e.message);
+  }
+  return questionText;
+}
+
+async function applyExpToExplanation(explanationText) {
+  try {
+    var quizSettings = await DB.prepare('SELECT exp_footer FROM quiz_settings WHERE id = 1').first();
+    if (quizSettings && quizSettings.exp_footer) {
+      if (explanationText) {
+        explanationText = explanationText + '\n' + quizSettings.exp_footer;
+      } else {
+        explanationText = quizSettings.exp_footer;
+      }
+    }
+  } catch (e) {
+    console.error('[Exp Apply] Error:', e.message);
+  }
+  return explanationText;
+}
+
+async function sendPollToChannel(channelId, mcq, replyToId, token) {
+  try {
+    var questionText = mcq.question || '?';
+    var optionsList = mcq.options || [];
+    var explanationText = mcq.explanation || '';
+    
+    console.log('[Poll Send] Question:', questionText.substring(0, 50));
+    
+    // Extract images from text
+    var questionImage = extractImageUrlFromText(questionText);
+    var optionImages = optionsList.map(function(o) { return extractImageUrlFromText(o).url; });
+    var explanationImage = extractImageUrlFromText(explanationText);
+    
+    // Clean text (remove img tags)
+    questionText = questionImage.cleanText;
+    optionsList = optionsList.map(function(o) { return extractImageUrlFromText(o).cleanText; });
+    explanationText = explanationImage.cleanText;
+    
+    // Apply tag settings
+    questionText = await applyTagToQuestion(questionText);
+    
+    // Apply exp settings
+    explanationText = await applyExpToExplanation(explanationText);
+    
+    // Build poll body
+    var pollBody = {
+      chat_id: channelId,
+      question: questionText.slice(0, 300),
+      options: optionsList.map(function(o) { return (o || '').slice(0, 100); }),
+      type: 'quiz',
+      correct_option_id: mcq.answer_index || 0,
+      is_anonymous: true,
+      reply_to_message_id: replyToId,
+      explanation: (explanationText || '').slice(0, 200)
+    };
+    
+    // Add question image
+    if (questionImage.url) {
+      pollBody.media = { type: 'photo', media: questionImage.url };
+    }
+    
+    // Add explanation image
+    if (explanationImage.url) {
+      pollBody.explanation_media = { type: 'photo', media: explanationImage.url };
+    }
+    
+    // Add option images
+    var hasOptionImage = false;
+    for (var i = 0; i < optionImages.length; i++) {
+      if (optionImages[i]) {
+        hasOptionImage = true;
+        break;
+      }
+    }
+    
+    if (hasOptionImage) {
+      pollBody.options = optionsList.map(function(o, i) {
+        var img = optionImages[i];
+        if (img) {
+          return { text: (o || '').slice(0, 100), media: { type: 'photo', media: img } };
+        }
+        return { text: (o || '').slice(0, 100) };
+      });
+    }
+    
+    // Send poll with images
+    var result = await fetch('https://api.telegram.org/bot' + token + '/sendPoll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pollBody)
+    });
+    
+    var pollData = await result.json();
+    
+    if (!pollData.ok) {
+      console.log('[Poll Send] Image mode failed, retrying without images...');
+      // Fallback without images
+      var fallbackBody = {
+        chat_id: channelId,
+        question: questionText.slice(0, 300),
+        options: optionsList.map(function(o) { return (o || '').slice(0, 100); }),
+        type: 'quiz',
+        correct_option_id: mcq.answer_index || 0,
+        is_anonymous: true,
+        reply_to_message_id: replyToId,
+        explanation: (explanationText || '').slice(0, 200)
+      };
+      
+      result = await fetch('https://api.telegram.org/bot' + token + '/sendPoll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fallbackBody)
+      });
+    }
+    
+    return result;
+  } catch (e) {
+    console.error('[Poll Send] Error:', e.message);
+    return { ok: false };
+  }
+}
+
+async function handleCsvCommand(msg, token, text) {
+  var chatId = msg.chat.id;
+  var isAuth = await isOwnerOrAdmin(msg.from.id);
+  if (!isAuth) { await sendMsg(chatId, '❌ Admin only!', token); return; }
+  
+  if (!msg.reply_to_message || !msg.reply_to_message.document) {
+    await sendMsg(chatId, '❌ CSV ফাইলে reply করে `/csv` বা `/csv Topic` দাও!', token);
+    return;
+  }
+  
+  var topic = text.replace('/csv', '').trim() || 'MCQ Practice';
+  console.log('[CSV] Starting simple poll. Topic:', topic);
+  
+  try {
+    var fileRes = await fetch('https://api.telegram.org/bot' + token + '/getFile?file_id=' + msg.reply_to_message.document.file_id);
+    var fileData = await fileRes.json();
+    var filePath = fileData.result ? fileData.result.file_path : null;
+    if (!filePath) { await sendMsg(chatId, '❌ File download failed!', token); return; }
+    
+    var csvRes = await fetch('https://api.telegram.org/file/bot' + token + '/' + filePath);
+    var questions = parseCSV(await csvRes.text());
+    
+    if (!questions || !questions.length) { await sendMsg(chatId, '❌ CSV-তে কোনো প্রশ্ন পাওয়া যায়নি!', token); return; }
+    
+    console.log('[CSV] Parsed:', questions.length, 'questions');
+    
+    await DB.prepare('INSERT OR REPLACE INTO quiz_sessions (key, data, updated_at) VALUES (?1, ?2, ?3)').bind('csv_' + msg.from.id, JSON.stringify({ questions: questions, topic: topic }), Date.now()).run();
+    
+    var keyboard = await getChannelList();
+    if (!keyboard) { await sendMsg(chatId, '❌ কোনো Channel saved নেই!\n📢 /channel add দিয়ে যোগ করো', token); return; }
+    
+    await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: '📊 Total MCQ: ' + questions.length + '\n📝 Topic: ' + topic + '\n\n📢 Select Channel:', reply_markup: keyboard })
+    });
+  } catch (e) {
+    console.error('[CSV] Error:', e.message);
+    await sendMsg(chatId, '❌ ' + e.message, token);
+  }
+}
+
+async function handleCsvSCommand(msg, token, text) {
+  var chatId = msg.chat.id;
+  var isAuth = await isOwnerOrAdmin(msg.from.id);
+  if (!isAuth) { await sendMsg(chatId, '❌ Admin only!', token); return; }
+  
+  if (!msg.reply_to_message || !msg.reply_to_message.document) {
+    await sendMsg(chatId, '❌ CSV ফাইলে reply করে `/csvS N` বা `/csvS N Topic` দাও!', token);
+    return;
+  }
+  
+  var args = text.replace('/csvS', '').trim().split(/\s+/);
+  var batchSize = 5, topic = 'MCQ Practice', channelId = null;
+  
+  if (args[0] && /^\d+$/.test(args[0])) { batchSize = parseInt(args[0]); args.shift(); }
+  if (args[0] && (args[0].startsWith('@') || args[0].startsWith('-100'))) { channelId = args[0]; args.shift(); }
+  if (args.length > 0) topic = args.join(' ');
+  
+  console.log('[CSVS] Batch:', batchSize, 'Topic:', topic, 'Channel:', channelId);
+  
+  try {
+    var fileRes = await fetch('https://api.telegram.org/bot' + token + '/getFile?file_id=' + msg.reply_to_message.document.file_id);
+    var fileData = await fileRes.json();
+    var filePath = fileData.result ? fileData.result.file_path : null;
+    if (!filePath) { await sendMsg(chatId, '❌ File download failed!', token); return; }
+    
+    var csvRes = await fetch('https://api.telegram.org/file/bot' + token + '/' + filePath);
+    var questions = parseCSV(await csvRes.text());
+    if (!questions || !questions.length) { await sendMsg(chatId, '❌ CSV-তে কোনো প্রশ্ন পাওয়া যায়নি!', token); return; }
+    
+    console.log('[CSVS] Parsed:', questions.length, 'questions');
+    
+    await DB.prepare('INSERT OR REPLACE INTO quiz_sessions (key, data, updated_at) VALUES (?1, ?2, ?3)').bind('csvs_' + msg.from.id, JSON.stringify({ questions: questions, topic: topic, batchSize: batchSize, channelId: channelId }), Date.now()).run();
+    
+    if (channelId) {
+      await sendBatchedPolls(channelId, questions, topic, batchSize, token, chatId);
+      return;
+    }
+    
+    var channels = await DB.prepare('SELECT chat_id, title FROM channels').all();
+    if (!channels.results || !channels.results.length) { await sendMsg(chatId, '❌ No channels!', token); return; }
+    
+    var keyboard = { inline_keyboard: [] };
+    for (var i = 0; i < channels.results.length; i++) {
+      var ch = channels.results[i];
+      keyboard.inline_keyboard.push([{ text: '📢 ' + ch.title, callback_data: 'csvs_chn_' + ch.chat_id }]);
+    }
+    keyboard.inline_keyboard.push([{ text: '❌ Cancel', callback_data: 'csv_cancel' }]);
+    
+    await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: '📊 Batch Size: ' + batchSize + '\n📝 Topic: ' + topic + '\n📦 Total MCQ: ' + questions.length + '\n\n📢 Select Channel:', reply_markup: keyboard })
+    });
+  } catch (e) {
+    console.error('[CSVS] Error:', e.message);
+    await sendMsg(chatId, '❌ ' + e.message, token);
+  }
+}
+
+async function sendBatchedPolls(channelId, questions, topic, batchSize, token, notifyChatId) {
+  var totalBatches = Math.ceil(questions.length / batchSize);
+  var pageLinks = {};
+  console.log('[Batch] Starting:', totalBatches, 'batches,', questions.length, 'questions');
+  
+  for (var bn = 1; bn <= totalBatches; bn++) {
+    var start = (bn - 1) * batchSize;
+    var end = Math.min(start + batchSize, questions.length);
+    var batch = questions.slice(start, end);
+    var partName = topic + ' (Part-' + String(bn).padStart(2, '0') + ')';
+    
+    console.log('[Batch] Part', bn + '/' + totalBatches, ':', batch.length, 'polls');
+    
+    var preText = '🌟Important Poll Solve By ATLAS\n🔥Topic Name: "' + partName + '"\n✅প্রশ্ন সংখ্যা: ' + batch.length + '\n📦 Batch: ' + bn + '/' + totalBatches;
+    var preRes = await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: channelId, text: preText })
+    });
+    var preData = await preRes.json();
+    var replyTo = preData.result ? preData.result.message_id : null;
+    
+    var firstPid = null, sent = 0;
+    
+    for (var i = 0; i < batch.length; i++) {
+      while (POLL_PAUSE_STATE[notifyChatId]) {
+        await new Promise(function(r) { setTimeout(r, 1000); });
+      }
+      
+      var result = await sendPollToChannel(channelId, batch[i], replyTo, token);
+      var pollData = await result.json();
+      
+      if (pollData.ok) {
+        if (!firstPid) firstPid = pollData.result.message_id;
+        sent++;
+      } else {
+        console.log('[Batch] Poll failed, retrying...');
+        await new Promise(function(r) { setTimeout(r, 1000); });
+        result = await sendPollToChannel(channelId, batch[i], replyTo, token);
+        pollData = await result.json();
+        if (pollData.ok) { if (!firstPid) firstPid = pollData.result.message_id; sent++; }
+        else { console.log('[Batch] Poll failed after retry'); }
+      }
+      
+      await new Promise(function(r) { setTimeout(r, 1500); });
+    }
+    
+    var firstLink = firstPid ? 'https://t.me/c/' + channelId.replace('-100', '') + '/' + firstPid : '';
+    var ending = '🎉 ধন্যবাদ প্রিয় শিক্ষার্থী!\n👉এটলাস আয়োজিত "' + partName + '" পোল সলভে অংশগ্রহণ করার জন্য। 😊\n\n📊 মোট পোল: ' + sent + '\n\n⁉️তোমার স্কোর কত? 🤔\n( ? / ' + sent + ' )\n\nনিচে লিখো! 👇\n\n✅পোল যেখান থেকে শুরু হয়েছে:\n' + firstLink;
+    
+    await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: channelId, text: ending, reply_to_message_id: replyTo, disable_web_page_preview: true })
+    });
+    
+    pageLinks[bn] = firstLink;
+    
+    if (notifyChatId) {
+      await sendMsg(notifyChatId, '✅ Part-' + String(bn).padStart(2, '0') + ': ' + sent + '/' + batch.length + ' sent (Batch ' + bn + '/' + totalBatches + ')', token);
+    }
+    
+    if (bn < totalBatches) await new Promise(function(r) { setTimeout(r, 2000); });
+  }
+  
+  if (Object.keys(pageLinks).length > 1) {
+    var summary = '🟥Poll Topic\n🌟Topic: ' + topic + '\n\n✅নিচে সিরিয়ালী সাজিয়ে দেওয়া হলো:\n\n';
+    for (var key in pageLinks) {
+      summary += '✅Part-' + String(key).padStart(2, '0') + ':\n' + pageLinks[key] + '\n\n';
+    }
+    summary += '📱 WhatsApp: wa.me/8801999681290\n🌐 Website: Atlascourses.com\n🟥Visit Our Website: Atlascourses.com\n🌟Whatsapp: wa.me/8801999681290';
+    
+    await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: channelId, text: summary, disable_web_page_preview: true })
+    });
+    console.log('[Batch] Master Summary sent');
+  }
+  
+  console.log('[Batch] Complete:', questions.length, 'questions in', totalBatches, 'batches');
+}
+
+async function handleCsvCallback(query, token) {
+  var data = query.data;
+  var chatId = query.message.chat.id;
+  var uid = query.from.id;
+  var msgId = query.message.message_id;
+  console.log('[CSV CB] Data:', data, 'User:', uid);
+  
+  await fetch('https://api.telegram.org/bot' + token + '/answerCallbackQuery', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ callback_query_id: query.id })
+  });
+  
+  try {
+    if (data === 'csv_cancel') {
+      await fetch('https://api.telegram.org/bot' + token + '/editMessageText', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, message_id: msgId, text: '❌ Cancelled!' })
+      });
+      return;
+    }
+    
+    if (data.startsWith('csv_chn_')) {
+      var channelId = data.replace('csv_chn_', '');
+      console.log('[CSV CB] Sending to channel:', channelId);
+      
+      await fetch('https://api.telegram.org/bot' + token + '/editMessageText', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, message_id: msgId, text: '📤 Sending polls...' })
+      });
+      
+      var row = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('csv_' + uid).first();
+      if (!row) { await sendMsg(chatId, '❌ Session expired!', token); return; }
+      
+      var sessionData = JSON.parse(row.data);
+      var questions = sessionData.questions;
+      var topic = sessionData.topic;
+      
+      var preText = '🌟Important Poll Solve By ATLAS\n━━━━━━━━━━━━━━━━━━━━━━\n🔥Topic Name: "' + topic + '"\n✅প্রশ্ন সংখ্যা: ' + questions.length + '\n━━━━━━━━━━━━━━━━━━━━━━\n📝 নিচের পোলগুলো solve করো!\n✅ উত্তর দেওয়ার সাথে সাথেই সঠিক উত্তর দেখাবে!';
+      
+      var preRes = await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: channelId, text: preText })
+      });
+      var preData = await preRes.json();
+      var replyTo = preData.result ? preData.result.message_id : null;
+      
+      var firstPid = null, sent = 0;
+      
+      for (var i = 0; i < questions.length; i++) {
+        while (POLL_PAUSE_STATE[chatId]) {
+          await new Promise(function(r) { setTimeout(r, 1000); });
+        }
+        
+        var result = await sendPollToChannel(channelId, questions[i], replyTo, token);
+        var pollData = await result.json();
+        
+        if (pollData.ok) {
+          if (!firstPid) firstPid = pollData.result.message_id;
+          sent++;
+        } else {
+          await new Promise(function(r) { setTimeout(r, 1000); });
+          result = await sendPollToChannel(channelId, questions[i], replyTo, token);
+          pollData = await result.json();
+          if (pollData.ok) { if (!firstPid) firstPid = pollData.result.message_id; sent++; }
+        }
+        
+        await new Promise(function(r) { setTimeout(r, 1500); });
+        
+        if (i % 5 === 4 || i === questions.length - 1) {
+          var pct = Math.round((i + 1) / questions.length * 100);
+          await sendMsg(chatId, '📊 Progress: ' + (i + 1) + '/' + questions.length + ' (' + pct + '%)', token);
+        }
+      }
+      
+      var firstLink = firstPid ? 'https://t.me/c/' + channelId.replace('-100', '') + '/' + firstPid : '';
+      var ending = '🎉 ধন্যবাদ প্রিয় শিক্ষার্থী!\n👉এটলাস আয়োজিত "' + topic + '" পোল সলভে অংশগ্রহণ করার জন্য। 😊\n\n📊 মোট পোল: ' + sent + '\n\n⁉️তোমার স্কোর কত? 🤔\n( ? / ' + sent + ' )\n\nনিচে লিখো! 👇\n\n✅পোল যেখান থেকে শুরু হয়েছে:\n' + firstLink;
+      
+      await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: channelId, text: ending, reply_to_message_id: replyTo, disable_web_page_preview: true })
+      });
+      
+      await sendMsg(chatId, '✅ ' + sent + '/' + questions.length + ' polls sent!', token);
+      console.log('[CSV CB] Done:', sent + '/' + questions.length);
+      await DB.prepare('DELETE FROM quiz_sessions WHERE key = ?1').bind('csv_' + uid).run();
+      return;
+    }
+    
+    if (data.startsWith('csvs_chn_')) {
+      var channelId = data.replace('csvs_chn_', '');
+      console.log('[CSV CB] Serial to channel:', channelId);
+      
+      await fetch('https://api.telegram.org/bot' + token + '/editMessageText', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, message_id: msgId, text: '📤 Sending serial polls...' })
+      });
+      
+      var row = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('csvs_' + uid).first();
+      if (!row) { await sendMsg(chatId, '❌ Session expired!', token); return; }
+      
+      var sessionData = JSON.parse(row.data);
+      await sendBatchedPolls(channelId, sessionData.questions, sessionData.topic, sessionData.batchSize, token, chatId);
+      await DB.prepare('DELETE FROM quiz_sessions WHERE key = ?1').bind('csvs_' + uid).run();
+      return;
+    }
+  } catch (e) {
+    console.error('[CSV CB] Error:', e.message);
+  }
+}
+
+// ============================================================
+// FEATURE 9: /pause & /resume — INSTANT
+// ============================================================
+
+async function handlePauseCommand(chatId, token) {
+  POLL_PAUSE_STATE[chatId] = true;
+  console.log('[Pause] Enabled for:', chatId);
+  await sendMsg(chatId, '⏸️ Poll paused!', token);
+}
+
+async function handleResumeCommand(chatId, token) {
+  POLL_PAUSE_STATE[chatId] = false;
+  console.log('[Resume] Disabled for:', chatId);
+  await sendMsg(chatId, '▶️ Poll resumed!', token);
+}
