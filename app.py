@@ -784,7 +784,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
 
         # ✅ নতুন: cache save করো যাতে buttons কাজ করে
         cache_id_img = gen_session_id()
-        await db_save_mcq_cache(cache_id_img, "img_gen", 1, topic, mcqs, poll_links,
+        await db_save_mcq_cache(cache_id_img, cache_id_img, 1, topic, mcqs, poll_links,
                                 file_id, image_msg_id, channel_id)
 
         exam_url = f"{HF_SPACE_URL}/exam/{cache_id_img}"
@@ -1025,7 +1025,7 @@ async def handle_csv_command(msg: dict):
 
         # Session save (topic + mcqs)
         cache_id = gen_session_id()
-        await db_save_mcq_cache(cache_id, "csv_import", 0, topic or "CSV MCQ", mcqs)
+        await db_save_mcq_cache(cache_id, cache_id, 0, topic or "CSV MCQ", mcqs)
 
         sb.table("quiz_sessions").upsert({
             "key": f"csv_cmd_{uid}",
@@ -1118,7 +1118,7 @@ async def handle_csvs_command(msg: dict):
 
         # Session save
         cache_id = gen_session_id()
-        await db_save_mcq_cache(cache_id, "csvs_import", 0, topic, mcqs)
+        await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs)
 
         sb.table("quiz_sessions").upsert({
             "key": f"csv_cmd_{uid}",
@@ -2988,7 +2988,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
         await edit_msg(chat_id, loading_id, f"✅ {len(new_mcqs)} টি নতুন MCQ ready!\n\nশুরু হচ্ছে...")
 
     new_cache_id = gen_session_id()
-    await db_save_mcq_cache(new_cache_id, "new_gen", page, topic, new_mcqs, [],
+    await db_save_mcq_cache(new_cache_id, new_cache_id, page, topic, new_mcqs, [],
                             image_file_id, image_msg_id, channel_id,
                             is_new_gen=True, end_msg_id=cache.get("end_msg_id"))
 
@@ -3375,7 +3375,7 @@ async def handle_quiz_new(cache_id: str, user: dict, chat_id: int):
         return
     await db_increment_gen_count(cache_id, uid)
     new_cache_id = gen_session_id()
-    await db_save_mcq_cache(new_cache_id, "new_gen", cache["page_number"], cache["topic"],
+    await db_save_mcq_cache(new_cache_id, new_cache_id, cache["page_number"], cache["topic"],
                             new_mcqs, [], image_file_id, cache.get("image_msg_id"),
                             cache.get("channel_id"), is_new_gen=True, end_msg_id=cache.get("end_msg_id"))
     if loading_id:
@@ -4288,7 +4288,7 @@ async def generate_new_exam(request: Request):
         if not new_mcqs:
             return JSONResponse({"error": "MCQ generation failed"}, status_code=500)
         new_cache_id = gen_session_id()
-        await db_save_mcq_cache(new_cache_id, "new_gen", cache["page_number"], cache["topic"],
+        await db_save_mcq_cache(new_cache_id, new_cache_id, cache["page_number"], cache["topic"],
             new_mcqs, [], image_file_id, cache.get("image_msg_id"),
             cache.get("channel_id"), is_new_gen=True, end_msg_id=cache.get("end_msg_id"))
         await db_increment_gen_count(cache_id, user_id)
