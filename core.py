@@ -111,6 +111,75 @@ async def d1_run(sql: str, params: list = None) -> bool:
     return r.get("ok", False)
 
 # ============================================================
+# /error COMMAND — CENTRAL ERROR CAPTURE
+# Every logger.error(...) call anywhere in the codebase is
+# automatically captured here (no need to touch existing
+# try/except blocks) and stored in D1 for the /error command.
+# ============================================================
+import asyncio as _asyncio
+import traceback as _traceback
+
+_ERROR_TABLE_READY = False
+
+async def _ensure_error_table():
+    global _ERROR_TABLE_READY
+    if _ERROR_TABLE_READY:
+        return
+    await d1_run(
+        "CREATE TABLE IF NOT EXISTS bot_error_logs ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "module TEXT, filename TEXT, lineno INTEGER, "
+        "funcname TEXT, message TEXT, traceback TEXT, "
+        "created_at INTEGER DEFAULT (unixepoch()))"
+    )
+    _ERROR_TABLE_READY = True
+
+async def _save_error_log(record: logging.LogRecord):
+    try:
+        await _ensure_error_table()
+        tb = ""
+        if record.exc_info:
+            tb = "".join(_traceback.format_exception(*record.exc_info))[-3000:]
+        await d1_run(
+            "INSERT INTO bot_error_logs (module, filename, lineno, funcname, message, traceback) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            [
+                record.name, record.filename, record.lineno,
+                record.funcName, record.getMessage()[:1000], tb
+            ]
+        )
+    except Exception:
+        pass  # never let error logging itself crash the bot
+
+class _D1ErrorCaptureHandler(logging.Handler):
+    """Captures every logger.error()/logger.exception() call and
+    persists it to D1 asynchronously, without blocking the caller."""
+    def emit(self, record: logging.LogRecord):
+        if record.levelno < logging.ERROR:
+            return
+        try:
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_save_error_log(record))
+        except Exception:
+            pass  # logging must never raise
+
+logging.getLogger().addHandler(_D1ErrorCaptureHandler())
+
+async def get_recent_errors(limit: int = 10) -> list:
+    """Used by the /error command to fetch the most recent captured errors."""
+    await _ensure_error_table()
+    return await d1_select(
+        "SELECT module, filename, lineno, funcname, message, created_at "
+        "FROM bot_error_logs ORDER BY id DESC LIMIT ?1",
+        [limit]
+    )
+
+async def clear_error_logs():
+    await _ensure_error_table()
+    await d1_run("DELETE FROM bot_error_logs")
+
+# ============================================================
 # TELEGRAM HELPERS
 # ============================================================
 async def tg_post(method: str, data: dict) -> dict:

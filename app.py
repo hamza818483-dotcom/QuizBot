@@ -50,6 +50,7 @@ from core import (
     db_get_new_gen_count, db_increment_gen_count, db_save_leaderboard,
     db_get_channels, db_save_last_quiz, db_get_last_quiz,
     build_back_url, source_msg_id,
+    get_recent_errors, clear_error_logs,
 )
 
 # D1 Quiz System (fully independent module — see quiz.py)
@@ -3597,6 +3598,54 @@ async def handle_merge_command(msg: dict):
     )
 
 
+async def handle_error_command(msg: dict):
+    """Owner/Admin only — সাম্প্রতিক bot error/crash গুলো clearly দেখায়
+    (file, line number, function, message সহ) যাতে AI/dev দ্রুত debug করতে পারে।"""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    text = msg.get("text", "").strip()
+
+    if not await db_is_owner_or_admin(uid):
+        await send_msg(chat_id, "❌ Owner/Admin only!")
+        return
+
+    if text.strip() in ("/error clear", "/errors clear"):
+        await clear_error_logs()
+        await send_msg(chat_id, "✅ Error log clear করা হয়েছে!")
+        return
+
+    parts = text.split()
+    limit = 10
+    if len(parts) > 1 and parts[1].isdigit():
+        limit = min(int(parts[1]), 30)
+
+    errors = await get_recent_errors(limit)
+    if not errors:
+        await send_msg(chat_id, "✅ কোনো error পাওয়া যায়নি! Bot ক্লিন আছে।")
+        return
+
+    lines = [f"🛑 <b>সাম্প্রতিক {len(errors)}টি Error</b>\n"]
+    for i, e in enumerate(errors, 1):
+        ts = e.get("created_at")
+        when = datetime.fromtimestamp(ts, pytz.timezone("Asia/Dhaka")).strftime("%d-%b %I:%M %p") if ts else "N/A"
+        fname = (e.get("filename") or "?").split("/")[-1]
+        lineno = e.get("lineno") or "?"
+        func = e.get("funcname") or "?"
+        message = (e.get("message") or "")[:300]
+        lines.append(
+            f"<b>{i}.</b> 📄 <code>{fname}:{lineno}</code> — <code>{func}()</code>\n"
+            f"🕐 {when}\n"
+            f"💬 {message}\n"
+        )
+
+    full_text = "\n".join(lines)
+    # Telegram message limit safety — split if too long
+    if len(full_text) > 3800:
+        full_text = full_text[:3800] + "\n\n…(আরও আছে, /error 5 দিয়ে কম দেখাও)"
+
+    await send_msg(chat_id, full_text)
+
+
 async def handle_convert_command(msg: dict):
     """CSV ↔ JSON convert"""
     chat_id = msg["chat"]["id"]
@@ -3871,6 +3920,8 @@ async def handle_message(msg: dict):
         await handle_merge_command(msg)
     elif text == "/convert":
         await handle_convert_command(msg)
+    elif text.startswith("/error") or text.startswith("/errors"):
+        await handle_error_command(msg)
     elif text == "/ping":
         await send_msg(chat_id, "🏓 Pong! ATLAS Bot Online!")
 
