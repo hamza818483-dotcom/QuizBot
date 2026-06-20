@@ -49,11 +49,230 @@ async queue(batch, env) {
     globalThis.OWNER_ID = env.OWNER_ID;
     globalThis.GEMINI_KEYS = env.GEMINI_KEYS;
     globalThis.NEXT_QUEUE = env.NEXT_QUEUE;
+    globalThis.HF_SPACE_URL = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
+    globalThis.ATLAS_BOT_TOKEN = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN;
+
     if (url.pathname === '/init-db') return await initDB();
     if (url.pathname === '/webhook') return await handleWebhook(request);
-    return new Response('🚀 ATLAS QUIZ BOT v6.0 Running!');
+    if (url.pathname === '/d1/set' && request.method === 'POST') return await d1Set(request);
+    if (url.pathname === '/d1/get' && request.method === 'GET') return await d1Get(request);
+    if (url.pathname === '/d1/del' && request.method === 'POST') return await d1Del(request);
+
+    // TG PROXY — HF Space → CF → Telegram API
+    if (url.pathname.startsWith('/tg-proxy/')) {
+      return await handleTgProxy(request, url);
+    }
+
+    // TG FILE DOWNLOAD PROXY — HF Space → CF → Telegram File Server
+    if (url.pathname === '/tg-file') {
+      return await handleTgFileProxy(request, url);
+    }
+
+    // TG SEND PHOTO PROXY — multipart, 100% reliable
+    if (url.pathname === '/tg-sendphoto') {
+      return await handleTgSendPhoto(request);
+    }
+	// TG SEND DOCUMENT PROXY
+    if (url.pathname === '/tg-senddoc') {
+      return await handleTgSendDoc(request);
+    }
+      return new Response('🚀 ATLAS QUIZ BOT v6.0 Running!');
   }
 };
+
+async function handleTgSendDoc(request) {
+  try {
+    var body = await request.json();
+    var token = globalThis.ATLAS_BOT_TOKEN;
+    var chatId = body.chat_id;
+    var caption = body.caption || '';
+    var filename = body.filename || 'file';
+    var mimeType = body.mime_type || 'application/octet-stream';
+    var docB64 = body.doc_b64;
+    if (!docB64) {
+      return new Response(JSON.stringify({ ok: false, error: 'No doc_b64' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    var binaryStr = atob(docB64);
+    var bytes = new Uint8Array(binaryStr.length);
+    for (var i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    var formData = new FormData();
+    formData.append('chat_id', String(chatId));
+    formData.append('caption', caption);
+    formData.append('document', new Blob([bytes], { type: mimeType }), filename);
+    var resp = await fetch('https://api.telegram.org/bot' + token + '/sendDocument', {
+      method: 'POST',
+      body: formData
+    });
+    var result = await resp.json();
+    return new Response(JSON.stringify(result), {
+      status: resp.status,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    return new Response(JSON.stringify({ ok: false, error: e.message }), {
+      status: 500, headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// ============================================================
+// TG PROXY HANDLER
+// ============================================================
+async function handleTgProxy(request, url) {
+  try {
+    var method = url.pathname.replace('/tg-proxy/', '');
+    if (!method) return new Response(JSON.stringify({ ok: false, error: 'No method' }), { headers: { 'Content-Type': 'application/json' } });
+    var token = globalThis.ATLAS_BOT_TOKEN;
+    var body = await request.text();
+    var contentType = request.headers.get('content-type') || 'application/json';
+    var resp = await fetch('https://api.telegram.org/bot' + token + '/' + method, {
+      method: 'POST',
+      headers: { 'Content-Type': contentType },
+      body: body
+    });
+    var result = await resp.text();
+    return new Response(result, { status: resp.status, headers: { 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error('[TgProxy] Error:', e.message);
+    return new Response(JSON.stringify({ ok: false, error: e.message }), { headers: { 'Content-Type': 'application/json' } });
+  }
+}
+
+// ============================================================
+// TG FILE DOWNLOAD PROXY — binary safe
+// ============================================================
+async function handleTgFileProxy(request, url) {
+  try {
+    var filePath = url.searchParams.get('path');
+    if (!filePath) {
+      return new Response(JSON.stringify({ ok: false, error: 'No path' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    var token = globalThis.ATLAS_BOT_TOKEN;
+    var fileUrl = 'https://api.telegram.org/file/bot' + token + '/' + filePath;
+    var resp = await fetch(fileUrl);
+    if (!resp.ok) {
+      return new Response(JSON.stringify({ ok: false, error: 'TG file fetch failed: ' + resp.status }), {
+        status: resp.status,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    var contentType = resp.headers.get('content-type') || 'application/octet-stream';
+    var fileBytes = await resp.arrayBuffer();
+    return new Response(fileBytes, {
+      status: 200,
+      headers: {
+        'Content-Type': contentType,
+        'Content-Length': fileBytes.byteLength.toString(),
+        'Cache-Control': 'no-cache'
+      }
+    });
+  } catch (e) {
+    console.error('[TgFileProxy] Error:', e.message);
+    return new Response(JSON.stringify({ ok: false, error: e.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+
+// ============================================================
+// TG SEND PHOTO PROXY — multipart/form-data, binary safe
+// ============================================================
+async function handleTgSendPhoto(request) {
+  try {
+    var body = await request.json();
+    var token = globalThis.ATLAS_BOT_TOKEN;
+    var chatId = body.chat_id;
+    var caption = body.caption || '';
+    var replyMarkup = body.reply_markup;
+    var replyToMsgId = body.reply_to_message_id;
+    var photoB64 = body.photo_b64;
+
+    if (!photoB64) {
+      return new Response(JSON.stringify({ ok: false, error: 'No photo_b64' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Decode base64 to binary
+    var binaryStr = atob(photoB64);
+    var bytes = new Uint8Array(binaryStr.length);
+    for (var i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+
+    // Build multipart form
+    var formData = new FormData();
+    formData.append('chat_id', String(chatId));
+    formData.append('caption', caption);
+    formData.append('parse_mode', 'HTML');
+    formData.append('photo', new Blob([bytes], { type: 'image/jpeg' }), 'page.jpg');
+    if (replyMarkup) {
+      formData.append('reply_markup', JSON.stringify(replyMarkup));
+    }
+    if (replyToMsgId) {
+      formData.append('reply_to_message_id', String(replyToMsgId));
+    }
+
+    var resp = await fetch('https://api.telegram.org/bot' + token + '/sendPhoto', {
+      method: 'POST',
+      body: formData
+    });
+    var result = await resp.json();
+    return new Response(JSON.stringify(result), {
+      status: resp.status,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (e) {
+    console.error('[TgSendPhoto] Error:', e.message);
+    return new Response(JSON.stringify({ ok: false, error: e.message }), {
+      status: 500, headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+async function forwardToHF(update) {
+  try {
+    var hfUrl = globalThis.HF_SPACE_URL + '/webhook';
+    await fetch(hfUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(update)
+    });
+  } catch (e) {
+    console.error('[HF Forward] Error:', e.message);
+  }
+}
+
+// HF commands list
+var HF_MSG_COMMANDS = ['/pdf', '/bm', '/info2', '/tagQ', '/expQ', '/channel', '/permit', '/remove'];
+var HF_CB_PREFIXES = ['pollagain_', 'pollnew_', 'polllb_', 'pdfch_'];
+
+function isHFMessage(text) {
+  if (!text) return false;
+  // /start pdf_{cache_id} → HF Quiz Solve
+  if (text.startsWith('/start pdf_')) return true;
+  for (var i = 0; i < HF_MSG_COMMANDS.length; i++) {
+    if (text.startsWith(HF_MSG_COMMANDS[i])) return true;
+  }
+  return false;
+}
+
+function isHFCallback(data) {
+  if (!data) return false;
+  for (var i = 0; i < HF_CB_PREFIXES.length; i++) {
+    if (data.startsWith(HF_CB_PREFIXES[i])) return true;
+  }
+  return false;
+}
 
 // ============================================================
 // FEATURE 1: DATABASE (10 Tables)
@@ -71,6 +290,7 @@ async function initDB() {
     await DB.exec("CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, title TEXT)");
     await DB.exec("CREATE TABLE IF NOT EXISTS quiz_question_results (id INTEGER PRIMARY KEY AUTOINCREMENT, result_id INTEGER, question_index INTEGER, result_type TEXT, quiz_id TEXT, user_id INTEGER, created_at INTEGER DEFAULT (unixepoch()))");
     await DB.exec("CREATE TABLE IF NOT EXISTS poll_sessions (poll_id TEXT PRIMARY KEY, chat_id INTEGER NOT NULL, next_q_index INTEGER NOT NULL, session_uid INTEGER NOT NULL, created_at INTEGER DEFAULT (unixepoch()))");
+    await DB.exec("CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER NOT NULL)");
     return new Response('✅ All tables created!');
   } catch (e) {
     return new Response('❌ Error: ' + e.message);
@@ -175,7 +395,6 @@ function parseCSV(csvText) {
     var eIdx = headers.findIndex(function(h) { return h === 'explanation'; });
     var iIdx = headers.findIndex(function(h) { return h === 'image' || h === 'qi'; });
     for (var i = 1; i < lines.length; i++) {
-    // Smart split - respect quotes
     var cols = [];
     var current = '';
     var inQuotes = false;
@@ -231,16 +450,27 @@ async function handleWebhook(request) {
     var update = await request.json();
     var token = QUIZ_BOT_TOKEN;
     if (update.message) {
+      var text = (update.message.text || '').trim();
+      // Parallel: HF commands forward to HF, CF handles rest
+      if (isHFMessage(text)) {
+        // Only forward to HF, CF does not handle
+        await forwardToHF(update);
+        return new Response('OK');
+      }
       return await handleMsg(update.message, token);
     }
     if (update.poll_answer) {
+      await forwardToHF(update);
       await handleQuizPoll(update.poll_answer);
       return new Response('OK');
     }
-
-
-
- if (update.callback_query) {
+    if (update.callback_query) {
+      var cbData = update.callback_query.data || '';
+      if (isHFCallback(cbData)) {
+        // Only forward to HF
+        await forwardToHF(update);
+        return new Response('OK');
+      }
       await handleCB(update.callback_query, token);
       return new Response('OK');
     }
@@ -264,7 +494,7 @@ async function handleMsg(msg, token) {
       return new Response('OK');
     }
     if (text === '/start') {
-      await sendMsg(chatId, '🌟 ATLAS Quiz Bot\n\n🔗 Quiz link দিয়ে start করুন!\n\n📝 /q - Create Quiz\n📋 /qlist - List\n🗑️ /qdel - Delete\n🏷️ /tagQ - Tag\n📝 /expQ - Footer\n🖼️ /pre - Preview\n👑 /permit - Admin\n📤 /send - Broadcast\n📊 /info - Stats', token);
+      await sendMsg(chatId, '🌟 ATLAS Quiz Bot\n\n🔗 Quiz link দিয়ে start করুন!\n\n📝 /q - Create Quiz\n📋 /qlist - List\n🗑️ /qdel - Delete\n🏷️ /tagQ - Tag\n📝 /expQ - Footer\n🖼️ /pre - Preview\n👑 /permit - Admin\n📤 /send - Broadcast\n📊 /info - Stats', token);
       return new Response('OK');
     }
     if (text === '/ping') {
@@ -417,7 +647,7 @@ async function handleQuizCreate(msg, token) {
     var csvRes = await fetch('https://api.telegram.org/file/bot' + token + '/' + filePath);
     var questions = parseCSV(await csvRes.text());
     if (!questions.length) {
-      await sendMsg(chatId, '❌ CSV-তে কোনো প্রশ্ন পাওয়া যায়নি!', token);
+      await sendMsg(chatId, '❌ CSV-তে কোনো প্রশ্ন পাওয়া যায়নি!', token);
       return;
     }
     var quizId = 'qz_' + Math.random().toString(36).substring(2, 10);
@@ -580,9 +810,7 @@ async function handleSendCB(query, token) {
   var uid = query.from.id;
   var chatId = query.message.chat.id;
   var row = await DB.prepare('SELECT data FROM quiz_sessions WHERE key=?1').bind('send_' + uid).first();
-  if (!row) {
-    return;
-  }
+  if (!row) { return; }
   var info = JSON.parse(row.data);
   var msgId = info.msgId;
   var fromChatId = info.chatId;
@@ -595,33 +823,17 @@ async function handleSendCB(query, token) {
   };
   if (data === 'send_users') {
     var users = await DB.prepare('SELECT user_id FROM bot_users').all();
-    if (users.results) {
-      for (var i = 0; i < users.results.length; i++) {
-        await forwardMsg(users.results[i].user_id);
-      }
-    }
+    if (users.results) { for (var i = 0; i < users.results.length; i++) { await forwardMsg(users.results[i].user_id); } }
     await sendMsg(chatId, '✅ Sent to all users!', token);
   } else if (data === 'send_chns') {
     var chs = await DB.prepare('SELECT chat_id FROM channels').all();
-    if (chs.results) {
-      for (var i = 0; i < chs.results.length; i++) {
-        await forwardMsg(chs.results[i].chat_id);
-      }
-    }
+    if (chs.results) { for (var i = 0; i < chs.results.length; i++) { await forwardMsg(chs.results[i].chat_id); } }
     await sendMsg(chatId, '✅ Sent to all channels!', token);
   } else if (data === 'send_both') {
     var users = await DB.prepare('SELECT user_id FROM bot_users').all();
-    if (users.results) {
-      for (var i = 0; i < users.results.length; i++) {
-        await forwardMsg(users.results[i].user_id);
-      }
-    }
+    if (users.results) { for (var i = 0; i < users.results.length; i++) { await forwardMsg(users.results[i].user_id); } }
     var chs = await DB.prepare('SELECT chat_id FROM channels').all();
-    if (chs.results) {
-      for (var i = 0; i < chs.results.length; i++) {
-        await forwardMsg(chs.results[i].chat_id);
-      }
-    }
+    if (chs.results) { for (var i = 0; i < chs.results.length; i++) { await forwardMsg(chs.results[i].chat_id); } }
     await sendMsg(chatId, '✅ Sent to all!', token);
   }
   await DB.prepare('DELETE FROM quiz_sessions WHERE key=?1').bind('send_' + uid).run();
@@ -647,7 +859,7 @@ async function startQuiz(chatId, quizId, user, token, mistakeQuestions, mistakeT
     } else {
       quiz = await DB.prepare('SELECT * FROM quizzes WHERE id=?1').bind(quizId).first();
       if (!quiz) {
-        await sendMsg(chatId, '❌ কুইজ পাওয়া যায়নি! লিংক ভুল হতে পারে!', token);
+        await sendMsg(chatId, '❌ কুইজ পাওয়া যায়নি! লিংক ভুল হতে পারে!', token);
         return;
       }
       questions = JSON.parse(quiz.csv_data);
@@ -686,11 +898,8 @@ async function startQuiz(chatId, quizId, user, token, mistakeQuestions, mistakeT
     await DB.prepare('INSERT OR REPLACE INTO quiz_sessions (key, data, updated_at) VALUES (?1, ?2, ?3)').bind('s_' + user.id, JSON.stringify(session), Date.now()).run();
     if (mistakeQuestions) {
       var introText = '📝 ' + session.name + '\n';
-      if (mistakeType === 'wrong') {
-        introText += '❌ Wrong Questions: ' + questions.length + '\n';
-      } else {
-        introText += '❌ Wrong+Skip: ' + questions.length + '\n';
-      }
+      if (mistakeType === 'wrong') { introText += '❌ Wrong Questions: ' + questions.length + '\n'; }
+      else { introText += '❌ Wrong+Skip: ' + questions.length + '\n'; }
       introText += '🔄 Practice\n\nএখনই কুইজ আসবে, আপনি প্রস্তুত তো? 😎';
       await sendMsg(chatId, introText, token, true);
       var countdownMessages = ['3...', '2...', '1...'];
@@ -731,9 +940,7 @@ async function sendQuestion(chatId, session, token) {
     return await finishQuiz(chatId, session, token);
   }
   var q = session.questions[session.cur];
-  if (!q) {
-    return;
-  }
+  if (!q) { return; }
   session.qResults.push({ index: session.cur, type: null });
   var tagPart = session.tag ? session.tag + '\n\n' : '';
   var questionText = cleanText(tagPart + (session.cur + 1) + '. ' + (q.question || '?')).slice(0, 300);
@@ -747,14 +954,14 @@ async function sendQuestion(chatId, session, token) {
     session.pid = data.result.poll ? data.result.poll.id : null;
     session.cor = q.answer_index || 0;
     await DB.prepare('INSERT OR REPLACE INTO quiz_sessions (key, data, updated_at) VALUES (?1, ?2, ?3)').bind('s_' + session.uid, JSON.stringify(session), Date.now()).run();
-  if (session.pid) {
-    console.log('Queue send for Q:', session.cur);
-    await DB.prepare('INSERT OR REPLACE INTO poll_sessions (poll_id, chat_id, next_q_index, session_uid) VALUES (?1, ?2, ?3, ?4)').bind(session.pid, chatId, session.cur + 1, session.uid).run();
-    await globalThis.NEXT_QUEUE.send({ chatId: chatId, uid: session.uid, curIndex: session.cur }, { delaySeconds: session.timer + 2 }); 
- } else {
-  console.log('No poll ID for Q:', session.cur);
-}
-}
+    if (session.pid) {
+      console.log('Queue send for Q:', session.cur);
+      await DB.prepare('INSERT OR REPLACE INTO poll_sessions (poll_id, chat_id, next_q_index, session_uid) VALUES (?1, ?2, ?3, ?4)').bind(session.pid, chatId, session.cur + 1, session.uid).run();
+      await globalThis.NEXT_QUEUE.send({ chatId: chatId, uid: session.uid, curIndex: session.cur }, { delaySeconds: session.timer + 2 });
+    } else {
+      console.log('No poll ID for Q:', session.cur);
+    }
+  }
 }
 
 // ============================================================
@@ -763,31 +970,19 @@ async function sendQuestion(chatId, session, token) {
 async function handleQuizPoll(pollAnswer) {
   var uid = pollAnswer.user.id;
   var row = await DB.prepare('SELECT data FROM quiz_sessions WHERE key=?1').bind('s_' + uid).first();
-  if (!row) {
-    return;
-  }
+  if (!row) { return; }
   var session = JSON.parse(row.data);
-  if (session.pid !== pollAnswer.poll_id) {
-    return;
-  }
+  if (session.pid !== pollAnswer.poll_id) { return; }
   var optionIds = pollAnswer.option_ids || [];
   var qResult = session.qResults.find(function(x) { return x.index === session.cur; });
   if (qResult) {
-    if (!optionIds.length) {
-      qResult.type = 'skip';
-    } else if (optionIds[0] === session.cor) {
-      qResult.type = 'right';
-    } else {
-      qResult.type = 'wrong';
-    }
+    if (!optionIds.length) { qResult.type = 'skip'; }
+    else if (optionIds[0] === session.cor) { qResult.type = 'right'; }
+    else { qResult.type = 'wrong'; }
   }
-  if (!optionIds.length) {
-    session.skip++;
-  } else if (optionIds[0] === session.cor) {
-    session.right++;
-  } else {
-    session.wrong++;
-  }
+  if (!optionIds.length) { session.skip++; }
+  else if (optionIds[0] === session.cor) { session.right++; }
+  else { session.wrong++; }
   session.cur++;
   if (session.cur >= session.tot) {
     await finishQuiz(uid, session, QUIZ_BOT_TOKEN);
@@ -798,14 +993,10 @@ async function handleQuizPoll(pollAnswer) {
 
 async function handleNext(chatId, uid, token) {
   var row = await DB.prepare('SELECT data FROM quiz_sessions WHERE key=?1').bind('s_' + uid).first();
-  if (!row) {
-    return;
-  }
+  if (!row) { return; }
   var session = JSON.parse(row.data);
   var qResult = session.qResults.find(function(x) { return x.index === session.cur; });
-  if (qResult) {
-    qResult.type = 'skip';
-  }
+  if (qResult) { qResult.type = 'skip'; }
   session.skip++;
   session.cur++;
   if (session.cur >= session.tot) {
@@ -857,23 +1048,16 @@ async function finishQuiz(uid, session, token) {
     console.error('Save Error:', e.message);
   }
   var mot = '';
-  if (pct >= 90) {
-    mot = '🏆 অসাধারণ! তুমি সেরা! আরও এগিয়ে যাও!';
-  } else if (pct >= 70) {
-    mot = '🎉 চমৎকার! তুমি খুব ভালো করেছো! আরও প্র্যাকটিস করো!';
-  } else if (pct >= 50) {
-    mot = '👍 মোটামুটি ভালো! আরও একটু পড়াশোনা করো!';
-  } else {
-    mot = '📚 পড়া হয়নি! আবার পড়ে চেষ্টা করো!';
-  }
+  if (pct >= 90) { mot = '🏆 অসাধারণ! তুমি সেরা! আরও এগিয়ে যাও!'; }
+  else if (pct >= 70) { mot = '🎉 চমৎকার! তুমি খুব ভালো করেছো! আরও প্র্যাকটিস করো!'; }
+  else if (pct >= 50) { mot = '👍 মোটামুটি ভালো! আরও একটু পড়াশোনা করো!'; }
+  else { mot = '📚 পড়া হয়নি! আবার পড়ে চেষ্টা করো!'; }
   var originalQuizId = session.isMistake ? quizId.replace('mp', '') : quizId;
-  var link = 'https://t.me/atlasQuizProBot?start=' + originalQuizId; 
-  var txt = '🌟 এটলাসের ' + name + ' কুইজে অংশগ্রহণ করার \nতোমাকে অভিনন্দন প্রিয় শিক্ষার্থী ' + uname + '!\n\n📊 তোমার রেজাল্ট:\n✅ Right: ' + right + '\n❌ Wrong: ' + wrong + '\n😐 Skipped: ' + skip + '\n\n⚡ Final Result: ' + score + ' (' + pct + '%)\n\n' + mot;
+  var link = 'https://t.me/atlasQuizProBot?start=' + originalQuizId;
+  var txt = '🌟 এটলাসের ' + name + ' কুইজে অংশগ্রহণ করার \nতোমাকে অভিনন্দন প্রিয় শিক্ষার্থী ' + uname + '!\n\n📊 তোমার রেজাল্ট:\n✅ Right: ' + right + '\n❌ Wrong: ' + wrong + '\n😐 Skipped: ' + skip + '\n\n⚡ Final Result: ' + score + ' (' + pct + '%)\n\n' + mot;
   var kb;
   if (session.isMistake) {
-    kb = {
-      inline_keyboard: [[{ text: '📌 আবার প্রাক্টিস করো', url: link }]]
-    };
+    kb = { inline_keyboard: [[{ text: '📌 আবার প্রাক্টিস করো', url: link }]] };
   } else {
     kb = {
       inline_keyboard: [
@@ -903,11 +1087,7 @@ async function handleLB(chatId, quizId, uid, token) {
     return;
   }
   var yourPos = -1;
-  lb.results.forEach(function(r, i) {
-    if (r.user_id === uid) {
-      yourPos = i + 1;
-    }
-  });
+  lb.results.forEach(function(r, i) { if (r.user_id === uid) { yourPos = i + 1; } });
   var text = (yourPos > 0 ? '📊 Your Position: #' + yourPos + '\n\n' : '') + '🏆 Leaderboard\n\n';
   lb.results.forEach(function(r, i) {
     var medal = ['🥇', '🥈', '🥉'][i] || (i + 1 + '.');
@@ -927,9 +1107,7 @@ async function handleHist(chatId, quizId, uid, token) {
   if (hist.results && hist.results.length) {
     hist.results.forEach(function(r) {
       text += '🟢 Attempt ' + r.attempt + ': ' + r.score;
-      if (r.created_at) {
-        text += ' | 📅 ' + new Date(r.created_at * 1000).toISOString().slice(0, 10);
-      }
+      if (r.created_at) { text += ' | 📅 ' + new Date(r.created_at * 1000).toISOString().slice(0, 10); }
       text += '\n';
     });
   } else {
@@ -944,32 +1122,23 @@ async function handleHist(chatId, quizId, uid, token) {
 async function handleMistake(chatId, quizId, uid, token, type) {
   try {
     var lastResult = await DB.prepare('SELECT id FROM quiz_results WHERE user_id=?1 AND quiz_id=?2 ORDER BY id DESC LIMIT 1').bind(uid, quizId).first();
-    if (!lastResult) {
-      await sendMsg(chatId, 'No previous attempt found!', token);
-      return;
-    }
+    if (!lastResult) { await sendMsg(chatId, 'No previous attempt found!', token); return; }
     var types = type === 'wrong' ? ['wrong'] : ['wrong', 'skip'];
     var wrongQs;
     if (types.length === 1) {
-    wrongQs = await DB.prepare('SELECT question_index FROM quiz_question_results WHERE result_id=?1 AND result_type=?2').bind(lastResult.id, types[0]).all();
+      wrongQs = await DB.prepare('SELECT question_index FROM quiz_question_results WHERE result_id=?1 AND result_type=?2').bind(lastResult.id, types[0]).all();
     } else {
-    wrongQs = await DB.prepare('SELECT question_index FROM quiz_question_results WHERE result_id=?1 AND result_type IN (?2, ?3)').bind(lastResult.id, types[0], types[1]).all();
+      wrongQs = await DB.prepare('SELECT question_index FROM quiz_question_results WHERE result_id=?1 AND result_type IN (?2, ?3)').bind(lastResult.id, types[0], types[1]).all();
     }
-    if (!wrongQs.results || !wrongQs.results.length) {    
+    if (!wrongQs.results || !wrongQs.results.length) {
       await sendMsg(chatId, type === 'wrong' ? '🎉 সব সঠিক ছিল! Practice-এর প্রয়োজন নেই!' : '🎉 সব সঠিক ছিল, skip-ও নেই!', token);
       return;
     }
     var quiz = await DB.prepare('SELECT * FROM quizzes WHERE id=?1').bind(quizId).first();
-    if (!quiz) {
-      await sendMsg(chatId, 'Quiz not found!', token);
-      return;
-    }
+    if (!quiz) { await sendMsg(chatId, 'Quiz not found!', token); return; }
     var allQuestions = JSON.parse(quiz.csv_data);
     var practiceQuestions = wrongQs.results.map(function(r) { return allQuestions[r.question_index]; }).filter(function(q) { return q; });
-    if (!practiceQuestions.length) {
-      await sendMsg(chatId, 'Questions not found!', token);
-      return;
-    }
+    if (!practiceQuestions.length) { await sendMsg(chatId, 'Questions not found!', token); return; }
     await startQuiz(chatId, quizId, { id: uid, first_name: 'Student' }, token, practiceQuestions, type);
   } catch (e) {
     console.error('Mistake Practice:', e.message);
@@ -999,10 +1168,8 @@ async function handleChannelCommand(msg, token, text) {
         await sendMsg(chatId, '📢 No saved channels!\n\nAdd: /channel @name\nAdd: /channel -100xxx\nAdd: /channel https://t.me/xxx', token);
         return;
       }
-      
       var txt = '📢 Saved Channels\n\n';
       var keyboard = { inline_keyboard: [] };
-      
       for (var i = 0; i < channels.results.length; i++) {
         var ch = channels.results[i];
         txt += '📢 ' + ch.title + '\n🔗 ' + ch.chat_id + '\n\n';
@@ -1011,9 +1178,7 @@ async function handleChannelCommand(msg, token, text) {
           { text: '🗑️ Delete', callback_data: 'chn_del_' + ch.id }
         ]);
       }
-      
       keyboard.inline_keyboard.push([{ text: '➕ Add New', callback_data: 'chn_add' }]);
-      
       await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1052,27 +1217,23 @@ async function handleChannelCallback(query, token) {
   var chatId = query.message.chat.id;
   var uid = query.from.id;
   console.log('[Channel CB] Data:', data, 'User:', uid);
-  
   await fetch('https://api.telegram.org/bot' + token + '/answerCallbackQuery', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ callback_query_id: query.id })
   });
-  
   try {
     if (data === 'chn_add') {
       await DB.prepare('INSERT OR REPLACE INTO quiz_sessions (key, data, updated_at) VALUES (?1, ?2, ?3)').bind('chn_add_' + uid, JSON.stringify({ step: 'add' }), Date.now()).run();
       await sendMsg(chatId, '📢 Send channel @username or ID or link to add:', token);
       return;
     }
-    
     if (data.startsWith('chn_edit_')) {
       var id = parseInt(data.replace('chn_edit_', ''));
       await DB.prepare('INSERT OR REPLACE INTO quiz_sessions (key, data, updated_at) VALUES (?1, ?2, ?3)').bind('chn_edit_' + uid, JSON.stringify({ step: 'edit', channelId: id }), Date.now()).run();
       await sendMsg(chatId, '✏️ Send new name for this channel:', token);
       return;
     }
-    
     if (data.startsWith('chn_del_')) {
       var id = parseInt(data.replace('chn_del_', ''));
       await DB.prepare('DELETE FROM channels WHERE id = ?1').bind(id).run();
@@ -1090,7 +1251,6 @@ async function handleChannelState(msg, token) {
   var text = (msg.text || '').trim();
   var uid = msg.from.id;
   var chatId = msg.chat.id;
-  
   try {
     var addRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('chn_add_' + uid).first();
     if (addRow) {
@@ -1106,7 +1266,6 @@ async function handleChannelState(msg, token) {
       await handleChannelCommand({ chat: { id: chatId } }, token, '/channel list');
       return;
     }
-    
     var editRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('chn_edit_' + uid).first();
     if (editRow) {
       var state = JSON.parse(editRow.data);
@@ -1131,26 +1290,19 @@ async function handleCollectCommand(msg, token) {
   var text = (msg.text || '').trim();
   var uid = msg.from.id;
   console.log('[Collect] Command:', text, 'User:', uid);
-  
   try {
     if (text === '/collect') {
       await sendMsg(chatId, '📊 Poll collection started!\n\nForward polls (hidden sender) to collect.\n/status - check count\n/done - download CSV\n/cancel - clear', token);
       return;
     }
-    
     if (text === '/status') {
       var count = await DB.prepare('SELECT COUNT(*) as c FROM poll_collection WHERE user_id = ?1').bind(uid).first();
       await sendMsg(chatId, '📊 Total collected: ' + (count ? count.c : 0) + ' polls', token);
       return;
     }
-    
     if (text === '/done') {
       var polls = await DB.prepare('SELECT poll_data FROM poll_collection WHERE user_id = ?1').bind(uid).all();
-      if (!polls.results || !polls.results.length) {
-        await sendMsg(chatId, '❌ No polls collected!', token);
-        return;
-      }
-      
+      if (!polls.results || !polls.results.length) { await sendMsg(chatId, '❌ No polls collected!', token); return; }
       var csvRows = ['questions,option1,option2,option3,option4,answer,explanation,type,section'];
       for (var i = 0; i < polls.results.length; i++) {
         var pollData = JSON.parse(polls.results[i].poll_data);
@@ -1160,27 +1312,18 @@ async function handleCollectCommand(msg, token) {
         var row = '"' + (pollData.question || '').replace(/"/g, '""') + '","' + (options[0] || '').replace(/"/g, '""') + '","' + (options[1] || '').replace(/"/g, '""') + '","' + (options[2] || '').replace(/"/g, '""') + '","' + (options[3] || '').replace(/"/g, '""') + '",' + answerNum + ',"' + (pollData.explanation || '').replace(/"/g, '""') + '",1,1';
         csvRows.push(row);
       }
-      
       var csvText = csvRows.join('\n');
       var csvBytes = new TextEncoder().encode(csvText);
       var csvB64 = btoa(String.fromCharCode.apply(null, csvBytes));
-      
       await fetch('https://api.telegram.org/bot' + token + '/sendDocument', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          document: 'data:text/csv;base64,' + csvB64,
-          filename: 'collected_polls_' + polls.results.length + '.csv',
-          caption: '✅ ' + polls.results.length + ' polls collected!'
-        })
+        body: JSON.stringify({ chat_id: chatId, document: 'data:text/csv;base64,' + csvB64, filename: 'collected_polls_' + polls.results.length + '.csv', caption: '✅ ' + polls.results.length + ' polls collected!' })
       });
-      
       await DB.prepare('DELETE FROM poll_collection WHERE user_id = ?1').bind(uid).run();
       console.log('[Collect] Done:', polls.results.length, 'polls');
       return;
     }
-    
     if (text === '/cancel') {
       await DB.prepare('DELETE FROM poll_collection WHERE user_id = ?1').bind(uid).run();
       await sendMsg(chatId, '❌ Collection cancelled!', token);
@@ -1196,10 +1339,8 @@ async function handleCollectCommand(msg, token) {
 async function handlePollAutoCollect(msg, token) {
   if (!msg.poll || !msg.forward_date) return;
   if (msg.forward_sender_name) return;
-  
   var uid = msg.from.id;
   console.log('[AutoCollect] Poll from user:', uid);
-  
   try {
     var pollData = {
       question: msg.poll.question,
@@ -1207,9 +1348,7 @@ async function handlePollAutoCollect(msg, token) {
       correct: msg.poll.correct_option_id,
       explanation: msg.poll.explanation || ''
     };
-    
     await DB.prepare('INSERT INTO poll_collection (user_id, poll_data) VALUES (?1, ?2)').bind(uid, JSON.stringify(pollData)).run();
-    
     var count = await DB.prepare('SELECT COUNT(*) as c FROM poll_collection WHERE user_id = ?1').bind(uid).first();
     await sendMsg(msg.chat.id, '📊 Collected! Total: ' + (count ? count.c : 0) + ' polls', token);
     console.log('[AutoCollect] Total:', count ? count.c : 0);
@@ -1227,97 +1366,60 @@ async function handleMergeCommand(msg, token, text) {
   var uid = msg.from.id;
   var args = text.replace('/merge', '').trim();
   console.log('[Merge] Command:', args, 'User:', uid);
-  
   try {
     if (args === 'done') {
       var mergeRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('merge_' + uid).first();
-      if (!mergeRow) {
-        await sendMsg(chatId, '❌ No files to merge! Forward CSV files first.', token);
-        return;
-      }
-      
+      if (!mergeRow) { await sendMsg(chatId, '❌ No files to merge! Forward CSV files first.', token); return; }
       var mergeData = JSON.parse(mergeRow.data);
       var files = mergeData.files || [];
-      
-      if (!files.length) {
-        await sendMsg(chatId, '❌ No files to merge!', token);
-        return;
-      }
-      
+      if (!files.length) { await sendMsg(chatId, '❌ No files to merge!', token); return; }
       var allRows = [];
       var header = null;
-      
       for (var i = 0; i < files.length; i++) {
         var content = files[i];
         var lines = content.split('\n').filter(function(l) { return l.trim(); });
-        
-        if (!header) {
-          header = lines[0];
-          allRows.push(header);
-        }
-        
-        for (var j = 1; j < lines.length; j++) {
-          allRows.push(lines[j]);
-        }
+        if (!header) { header = lines[0]; allRows.push(header); }
+        for (var j = 1; j < lines.length; j++) { allRows.push(lines[j]); }
       }
-      
       var mergedText = allRows.join('\n');
       var mergedBytes = new TextEncoder().encode(mergedText);
       var mergedB64 = btoa(String.fromCharCode.apply(null, mergedBytes));
-      
       await fetch('https://api.telegram.org/bot' + token + '/sendDocument', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          document: 'data:text/csv;base64,' + mergedB64,
-          filename: 'merged_' + (allRows.length - 1) + '.csv',
-          caption: '✅ Merged: ' + (allRows.length - 1) + ' rows from ' + files.length + ' files'
-        })
+        body: JSON.stringify({ chat_id: chatId, document: 'data:text/csv;base64,' + mergedB64, filename: 'merged_' + (allRows.length - 1) + '.csv', caption: '✅ Merged: ' + (allRows.length - 1) + ' rows from ' + files.length + ' files' })
       });
-      
       await DB.prepare('DELETE FROM quiz_sessions WHERE key = ?1').bind('merge_' + uid).run();
       console.log('[Merge] Done:', (allRows.length - 1), 'rows from', files.length, 'files');
       return;
     }
-    
     if (args === 'status') {
       var mergeRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('merge_' + uid).first();
       var count = mergeRow ? (JSON.parse(mergeRow.data).files || []).length : 0;
       await sendMsg(chatId, '📊 Total files: ' + count, token);
       return;
     }
-    
     if (args === 'cancel') {
       await DB.prepare('DELETE FROM quiz_sessions WHERE key = ?1').bind('merge_' + uid).run();
       await sendMsg(chatId, '❌ Merge cancelled!', token);
       console.log('[Merge] Cancelled');
       return;
     }
-    
     if (msg.reply_to_message && msg.reply_to_message.document) {
       var fileRes = await fetch('https://api.telegram.org/bot' + token + '/getFile?file_id=' + msg.reply_to_message.document.file_id);
       var fileData = await fileRes.json();
       var filePath = fileData.result ? fileData.result.file_path : null;
-      
-      if (!filePath) {
-        await sendMsg(chatId, '❌ File download failed!', token);
-        return;
-      }
-      
+      if (!filePath) { await sendMsg(chatId, '❌ File download failed!', token); return; }
       var csvRes = await fetch('https://api.telegram.org/file/bot' + token + '/' + filePath);
       var content = await csvRes.text();
-      
       var mergeRow = await DB.prepare('SELECT data FROM quiz_sessions WHERE key = ?1').bind('merge_' + uid).first();
       var files = mergeRow ? JSON.parse(mergeRow.data).files : [];
       files.push(content);
-      
       await DB.prepare('INSERT OR REPLACE INTO quiz_sessions (key, data, updated_at) VALUES (?1, ?2, ?3)').bind('merge_' + uid, JSON.stringify({ files: files }), Date.now()).run();
       await sendMsg(chatId, '📎 File ' + files.length + ' received! Total: ' + files.length + ' files\n/merge done when ready', token);
       console.log('[Merge] File added. Total:', files.length);
       return;
     }
-    
     await sendMsg(chatId, '🔗 Forward CSV files one by one, then /merge done\n/merge status - check count\n/merge cancel - clear', token);
   } catch (e) {
     console.error('[Merge] Error:', e.message);
@@ -1332,67 +1434,37 @@ async function handleMergeCommand(msg, token, text) {
 async function handleConvertCommand(msg, token) {
   var chatId = msg.chat.id;
   console.log('[Convert] Request by user:', msg.from.id);
-  
   if (!msg.reply_to_message || !msg.reply_to_message.document) {
     await sendMsg(chatId, '❌ CSV বা JSON ফাইলে reply করে `/convert` দাও!', token);
     return;
   }
-  
   try {
     var fileRes = await fetch('https://api.telegram.org/bot' + token + '/getFile?file_id=' + msg.reply_to_message.document.file_id);
     var fileData = await fileRes.json();
     var filePath = fileData.result ? fileData.result.file_path : null;
-    
-    if (!filePath) {
-      await sendMsg(chatId, '❌ File download failed!', token);
-      return;
-    }
-    
+    if (!filePath) { await sendMsg(chatId, '❌ File download failed!', token); return; }
     var fileRes2 = await fetch('https://api.telegram.org/file/bot' + token + '/' + filePath);
     var content = await fileRes2.text();
     var fileName = msg.reply_to_message.document.file_name || '';
-    
     if (fileName.toLowerCase().endsWith('.csv')) {
-      // CSV → JSON
       var questions = parseCSV(content);
       var jsonData = [];
       for (var i = 0; i < questions.length; i++) {
         var q = questions[i];
         var answerLetter = ['A', 'B', 'C', 'D'][q.answer_index] || 'A';
-        jsonData.push({
-          question_number: String(i + 1),
-          question: q.question || '',
-          options: {
-            A: (q.options[0] || ''),
-            B: (q.options[1] || ''),
-            C: (q.options[2] || ''),
-            D: (q.options[3] || '')
-          },
-          correct_answer: answerLetter,
-          explanation: q.explanation || ''
-        });
+        jsonData.push({ question_number: String(i + 1), question: q.question || '', options: { A: (q.options[0] || ''), B: (q.options[1] || ''), C: (q.options[2] || ''), D: (q.options[3] || '') }, correct_answer: answerLetter, explanation: q.explanation || '' });
       }
-      
       var jsonBytes = new TextEncoder().encode(JSON.stringify(jsonData, null, 2));
       var jsonB64 = btoa(String.fromCharCode.apply(null, jsonBytes));
-      
       await fetch('https://api.telegram.org/bot' + token + '/sendDocument', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          document: 'data:application/json;base64,' + jsonB64,
-          filename: fileName.replace('.csv', '.json'),
-          caption: '✅ CSV → JSON Converted!\n📊 ' + questions.length + ' questions'
-        })
+        body: JSON.stringify({ chat_id: chatId, document: 'data:application/json;base64,' + jsonB64, filename: fileName.replace('.csv', '.json'), caption: '✅ CSV → JSON Converted!\n📊 ' + questions.length + ' questions' })
       });
       console.log('[Convert] CSV→JSON:', questions.length, 'questions');
-      
     } else if (fileName.toLowerCase().endsWith('.json')) {
-      // JSON → CSV
       var jsonData = JSON.parse(content);
       var csvRows = ['questions,option1,option2,option3,option4,answer,explanation,type,section'];
-      
       for (var i = 0; i < jsonData.length; i++) {
         var item = jsonData[i];
         var opts = item.options || {};
@@ -1401,20 +1473,13 @@ async function handleConvertCommand(msg, token) {
         var row = '"' + (item.question || '').replace(/"/g, '""') + '","' + (opts.A || '').replace(/"/g, '""') + '","' + (opts.B || '').replace(/"/g, '""') + '","' + (opts.C || '').replace(/"/g, '""') + '","' + (opts.D || '').replace(/"/g, '""') + '",' + ansNum + ',"' + (item.explanation || '').replace(/"/g, '""') + '",1,1';
         csvRows.push(row);
       }
-      
       var csvText = csvRows.join('\n');
       var csvBytes = new TextEncoder().encode(csvText);
       var csvB64 = btoa(String.fromCharCode.apply(null, csvBytes));
-      
       await fetch('https://api.telegram.org/bot' + token + '/sendDocument', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          document: 'data:text/csv;base64,' + csvB64,
-          filename: fileName.replace('.json', '.csv'),
-          caption: '✅ JSON → CSV Converted!\n📊 ' + jsonData.length + ' questions'
-        })
+        body: JSON.stringify({ chat_id: chatId, document: 'data:text/csv;base64,' + csvB64, filename: fileName.replace('.json', '.csv'), caption: '✅ JSON → CSV Converted!\n📊 ' + jsonData.length + ' questions' })
       });
       console.log('[Convert] JSON→CSV:', jsonData.length, 'questions');
     } else {
@@ -1426,3 +1491,49 @@ async function handleConvertCommand(msg, token) {
   }
 }
 
+// ============================================================
+// D1 KEY-VALUE STORE (for HF app.py state persistence)
+// ============================================================
+async function d1Set(request) {
+  try {
+    var body = await request.json();
+    var key = body.key;
+    var value = JSON.stringify(body.value);
+    var ttl = body.ttl || 86400;
+    await DB.prepare(
+      "INSERT OR REPLACE INTO kv_store (key, value, expires_at) VALUES (?1, ?2, ?3)"
+    ).bind(key, value, Math.floor(Date.now()/1000) + ttl).run();
+    return new Response(JSON.stringify({ok: true}), {headers: {'Content-Type': 'application/json'}});
+  } catch(e) {
+    return new Response(JSON.stringify({ok: false, error: e.message}), {headers: {'Content-Type': 'application/json'}});
+  }
+}
+
+async function d1Get(request) {
+  try {
+    var url = new URL(request.url);
+    var key = url.searchParams.get('key');
+    var row = await DB.prepare(
+      "SELECT value, expires_at FROM kv_store WHERE key = ?1"
+    ).bind(key).first();
+    if (!row) return new Response(JSON.stringify({ok: true, value: null}), {headers: {'Content-Type': 'application/json'}});
+    if (row.expires_at < Math.floor(Date.now()/1000)) {
+      await DB.prepare("DELETE FROM kv_store WHERE key = ?1").bind(key).run();
+      return new Response(JSON.stringify({ok: true, value: null}), {headers: {'Content-Type': 'application/json'}});
+    }
+    return new Response(JSON.stringify({ok: true, value: JSON.parse(row.value)}), {headers: {'Content-Type': 'application/json'}});
+  } catch(e) {
+    return new Response(JSON.stringify({ok: false, error: e.message}), {headers: {'Content-Type': 'application/json'}});
+  }
+}
+
+async function d1Del(request) {
+  try {
+    var body = await request.json();
+    var key = body.key;
+    await DB.prepare("DELETE FROM kv_store WHERE key = ?1").bind(key).run();
+    return new Response(JSON.stringify({ok: true}), {headers: {'Content-Type': 'application/json'}});
+  } catch(e) {
+    return new Response(JSON.stringify({ok: false, error: e.message}), {headers: {'Content-Type': 'application/json'}});
+  }
+}
