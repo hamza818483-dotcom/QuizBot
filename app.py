@@ -1307,13 +1307,31 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 channel_id, batch, batch_topic, chat_id, pre_msg_id
             )
 
+            # প্রতিটা batch-এর জন্য আলাদা cache — Quiz Solve/Poll Solve/Web Exam বাটনের জন্য
+            batch_cache_id = gen_session_id()
+            await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
+
             # Ending message for this batch
             ending = csv_get_ending_message(batch_topic, sent, first_link)
-            await tg_post("sendMessage", {
+            exam_url = f"{HF_SPACE_URL}/exam/{batch_cache_id}"
+            quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{batch_cache_id}"
+            poll_url = f"https://t.me/atlasQuizProBot?start=poll_{batch_cache_id}"
+            end_kb = {"inline_keyboard": [
+                [{"text": "📝 Quiz Solve", "url": quiz_url}],
+                [{"text": "🔄 Poll Solve", "url": poll_url}],
+                [{"text": "🌐 Web Exam", "url": exam_url}]
+            ]}
+            end_r = await tg_post("sendMessage", {
                 "chat_id": channel_id,
                 "text": ending,
-                "disable_web_page_preview": True
+                "disable_web_page_preview": True,
+                "reply_markup": end_kb
             })
+            if end_r.get("ok"):
+                await db_update_cache(batch_cache_id, {
+                    "channel_id": channel_id,
+                    "end_msg_id": end_r["result"]["message_id"]
+                })
             batch_links.append((b_idx, first_link, len(batch)))
 
             if loading_id:
@@ -1351,11 +1369,25 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
         )
 
         ending = csv_get_ending_message(topic, sent, first_link)
-        await tg_post("sendMessage", {
+        exam_url = f"{HF_SPACE_URL}/exam/{cache_id}"
+        quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id}"
+        poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id}"
+        end_kb = {"inline_keyboard": [
+            [{"text": "📝 Quiz Solve", "url": quiz_url}],
+            [{"text": "🔄 Poll Solve", "url": poll_url}],
+            [{"text": "🌐 Web Exam", "url": exam_url}]
+        ]}
+        end_r = await tg_post("sendMessage", {
             "chat_id": channel_id,
             "text": ending,
-            "disable_web_page_preview": True
+            "disable_web_page_preview": True,
+            "reply_markup": end_kb
         })
+        if end_r.get("ok"):
+            await db_update_cache(cache_id, {
+                "channel_id": channel_id,
+                "end_msg_id": end_r["result"]["message_id"]
+            })
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
