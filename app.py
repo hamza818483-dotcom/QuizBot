@@ -307,6 +307,34 @@ async def d1_del(key: str):
     except Exception as e:
         logger.warning(f"[D1] del warn: {e}")
 
+D1_TOKEN = os.environ.get("D1_TOKEN", "")
+
+async def d1_query(sql: str, params: list = None, is_select: bool = True) -> dict:
+    try:
+        body = {"sql": sql, "params": params or [], "token": D1_TOKEN}
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body)
+            data = r.json()
+            if not data.get("ok"):
+                logger.warning(f"[D1] query error: {data.get('error')}")
+                return {"ok": False, "error": data.get("error")}
+            return data
+    except Exception as e:
+        logger.warning(f"[D1] query error: {e}")
+        return {"ok": False, "error": str(e)}
+
+async def d1_select(sql: str, params: list = None) -> list:
+    r = await d1_query(sql, params, True)
+    return r.get("results", [])
+
+async def d1_run(sql: str, params: list = None) -> bool:
+    r = await d1_query(sql, params, False)
+    return r.get("ok", False)
+
+
+# QUIZ SESSION STATE (in-memory for active quiz play)
+QUIZ_SESSIONS = {}  # uid -> quiz session dict
+QUIZ_TIMERS = {}    # uid -> asyncio.Task
 
 DEFAULT_TOPIC = "Pagewise MCQ Solve By ATLAS"
 QUIZ_Q_SEC = 35
@@ -743,7 +771,7 @@ async def handle_start(msg: dict):
             "  Format: <code>/pdfm -p 1-5 -c @channel -m \"Topic\" 10</code>\n\n"
             "📸 <b>Image Commands:</b>\n"
             "• <code>/img</code> — Image reply করে MCQ poll channel-এ\n"
-            "• <code>/pdf_collect</code> — একাধিক image → PDF বানাও\n"
+            "• <code>/pdfc</code> — একাধিক image → PDF বানাও\n"
             "• <code>/done</code> — Image collection শেষ করো\n\n"
             "📝 <b>Text/CSV Commands:</b>\n"
             "• <code>/txt</code> — Text reply করে MCQ poll\n"
@@ -753,7 +781,8 @@ async def handle_start(msg: dict):
             "• <code>/live [topic]</code> — CSV reply করে Live Quiz শুরু\n"
             "• <code>/livetime [sec]</code> — প্রতি প্রশ্নের সময় set করো\n\n"
             "⚙️ <b>Settings:</b>\n"
-            "• <code>/channel</code> — Channel/Group add করো\n"
+            "• <code>/channel @id Name</code> — Channel/Group add করো\n"
+            "• <code>/channelist</code> — Channel list দেখো\n"
             "• <code>/tagQ [text]</code> — Poll-এ tag set করো\n"
             "• <code>/expQ [text]</code> — Explanation footer set করো\n"
             "• <code>/permit [user_id]</code> — Admin add করো\n"
@@ -764,6 +793,16 @@ async def handle_start(msg: dict):
             "🔖 <b>Bookmark:</b>\n"
             "• <code>/bm</code> — Bookmark PDF বানাও\n"
             "• <code>/bmexam</code> — Bookmark MCQ থেকে Quiz\n\n"
+            "🧩 <b>D1 Quiz System:</b>\n"
+            "• <code>/q [name]</code> — CSV থেকে quiz তৈরি\n"
+            "• <code>/qlist</code> — সব quiz দেখো\n"
+            "• <code>/qdel [id]</code> — Quiz delete করো\n"
+            "• <code>/pre [quiz_id]</code> — Quiz preview image set\n"
+            "• <code>/info [quiz_id]</code> — Quiz details\n"
+            "• <code>/send [quiz_id]</code> — Quiz share করো channel-এ\n"
+            "• <code>/collect</code> — Poll collect mode on\n"
+            "• <code>/merge</code> — Collected polls merge করো\n"
+            "• <code>/convert [quiz_id]</code> — Quiz → CSV export\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "🚀 <b>ATLAS BOT</b> — Atlascourses.com"
         )
@@ -848,29 +887,55 @@ async def handle_expQ(msg: dict):
         await send_msg(chat_id, f"📝 Current footer:\n{s.get('exp_footer') or 'None'}\n\nSet: /expQ [text]")
 
 # ============================================================
-# FEATURE 5: /channel
+# FEATURE 5: /channel, /channelist
 # ============================================================
 async def handle_channel(msg: dict):
     chat_id = msg["chat"]["id"]
-    text = msg.get("text", "").replace("/channel", "").strip()
-    if not text or text == "list":
-        channels = await db_get_channels()
-        if not channels:
-            await send_msg(chat_id, "📢 No channels saved!\n\nAdd: /channel @name\nAdd: /channel -100xxx")
-            return
-        txt = "📢 <b>Saved Channels</b>\n\n"
-        for ch in channels:
-            txt += f"📢 {ch.get('channel_name', ch['channel_id'])}\n🔗 {ch['channel_id']}\n\n"
-        await send_msg(chat_id, txt)
-        return
-    channel_id = text
-    if "t.me/" in text:
-        channel_id = "@" + text.split("/")[-1]
+    text = msg.get("text", "")
+    if text.strip() == "/channelist":
+        return await _show_channel_list(chat_id)
+    args = text.replace("/channel", "").strip()
+    if not args or args == "list":
+        return await _show_channel_list(chat_id)
+    parts = args.split(maxsplit=1)
+    channel_id = parts[0]
+    custom_name = parts[1] if len(parts) > 1 else None
+    if "t.me/" in channel_id:
+        channel_id = "@" + channel_id.split("/")[-1]
     if channel_id.startswith("@") or channel_id.startswith("-100"):
-        sb.table("channels").upsert({"channel_id": channel_id, "channel_name": channel_id}).execute()
-        await send_msg(chat_id, f"✅ Channel added: {channel_id}")
+        display = custom_name or channel_id
+        sb.table("channels").upsert({
+            "channel_id": channel_id,
+            "channel_name": display
+        }).execute()
+        await send_msg(chat_id, f"✅ Channel added: {channel_id}\n📛 Name: {display}")
     else:
-        await send_msg(chat_id, "❌ Invalid! Use: @name or -100xxx")
+        await send_msg(chat_id,
+            "❌ Invalid!\n\n"
+            "<b>Usage:</b>\n"
+            "<code>/channel @name</code>\n"
+            "<code>/channel -100xxx Custom Name</code>\n"
+            "<code>/channelist</code> — list all"
+        )
+
+async def _show_channel_list(chat_id):
+    channels = await db_get_channels()
+    if not channels:
+        await send_msg(chat_id,
+            "📢 No channels saved!\n\n"
+            "Add: <code>/channel @name</code>\n"
+            "Add: <code>/channel -100xxx Custom Name</code>"
+        )
+        return
+    txt = "📢 <b>Saved Channels</b>\n\n"
+    for i, ch in enumerate(channels, 1):
+        ch_id = ch.get("channel_id", "")
+        ch_name = ch.get("channel_name", ch_id)
+        txt += f"{i}. 📢 <b>{ch_name}</b>\n   🔗 <code>{ch_id}</code>\n\n"
+    txt += "<b>Commands:</b>\n"
+    txt += "<code>/channel @id Name</code> — add/update\n"
+    txt += "<code>/channelist</code> — view list"
+    await send_msg(chat_id, txt)
 
 # ============================================================
 # FEATURE: /pin on | /pin off
@@ -1983,7 +2048,7 @@ async def handle_pdf(msg: dict):
             app.state.pdf_cache[f"pdf_img_{uid}"] = pages
             sb.table("quiz_sessions").upsert({
                 "key": f"pdf_pending_{uid}",
-                "data": json.dumps({"topic": topic, "mcq_count": mcq_count, "file_name": file_name, "status_msg_id": status_msg_id, "thread_id": thread_id}),
+                "data": json.dumps({"topic": topic, "mcq_count": mcq_count, "file_name": file_name, "status_msg_id": status_msg_id, "thread_id": thread_id, "file_id": file_id, "page_range": page_range}),
                 "updated_at": int(time.time())
             }).execute()
             kb = {"inline_keyboard": []}
@@ -2240,12 +2305,12 @@ async def handle_pdfm(msg: dict):
         await send_msg(chat_id,
             "❌ PDF ফাইলে reply করে /pdfm দাও!\n\n"
             "<b>Format:</b>\n"
-            "<code>/pdfm -p 1-5 -c @channel -m \"Topic\" 10</code>\n\n"
+            "<code>/pdfm -p 1-5 -c @channel -m \"Topic\" -t group_id [5]</code>\n\n"
             "📌 -p = page range (না দিলে সব page)\n"
             "📌 -c = channel id (না দিলে list দেখাবে)\n"
             "📌 -m = topic name\n"
             "📌 -t = topic/thread id (group হলে)\n"
-            "📌 শেষে number = per page MCQ count"
+            "📌 [N] = per page MCQ count (bracket সহ)"
         )
         return
 
@@ -2289,7 +2354,9 @@ async def handle_pdfm(msg: dict):
                 "data": json.dumps({
                     "topic": topic, "mcq_count": mcq_count,
                     "file_name": file_name, "status_msg_id": status_msg_id,
-                    "thread_id": thread_id
+                    "thread_id": thread_id,
+                    "file_id": file_id,
+                    "page_range": page_range
                 }),
                 "updated_at": int(time.time())
             }).execute()
@@ -2348,10 +2415,14 @@ def _parse_pdfm_params(text: str) -> dict:
     if m:
         result["thread_id"] = int(m.group(1))
 
-    cleaned = re.sub(r'-[pcmt]\s+\S+', '', text)
-    m2 = re.search(r'(\d+)\s*$', cleaned)
-    if m2:
-        result["mcq_count"] = int(m2.group(1))
+    m_bracket = re.search(r'\[(\d+)\]', text)
+    if m_bracket:
+        result["mcq_count"] = int(m_bracket.group(1))
+    else:
+        cleaned = re.sub(r'-[pcmt]\s+\S+', '', text)
+        m2 = re.search(r'(\d+)\s*$', cleaned)
+        if m2:
+            result["mcq_count"] = int(m2.group(1))
 
     return result
 
@@ -3063,11 +3134,11 @@ async def _send_live_grand_result(group_id, state: dict):
                 pass
 
 # ============================================================
-# FEATURE: /pdf image collection → /done → PDF
+# FEATURE: /pdfc image collection → /done → PDF
 # ============================================================
 async def handle_pdf_image_mode(msg: dict):
     """
-    /pdf_collect দিলে bot image চাইবে।
+    /pdfc দিলে bot image চাইবে।
     User একটার পর একটা image পাঠাবে।
     /done দিলে সব image দিয়ে ATLAS.pdf বানাবে।
     """
@@ -3075,7 +3146,7 @@ async def handle_pdf_image_mode(msg: dict):
     uid = msg["from"]["id"]
     text = msg.get("text","").strip()
 
-    if text == "/pdf_collect":
+    if text in ("/pdfc", "/pdf_collect"):
         IMG_COLLECTION[uid] = {"imgs": [], "collecting": True, "chat_id": chat_id}
         await send_msg(chat_id,
             "📸 Image collection mode চালু!\n\n"
@@ -3087,7 +3158,7 @@ async def handle_pdf_image_mode(msg: dict):
 
     if text == "/done":
         if uid not in IMG_COLLECTION or not IMG_COLLECTION[uid].get("collecting"):
-            await send_msg(chat_id, "❌ আগে /pdf_collect দিয়ে image collection শুরু করো!")
+            await send_msg(chat_id, "❌ আগে /pdfc দিয়ে image collection শুরু করো!")
             return
         imgs = IMG_COLLECTION[uid].get("imgs",[])
         if not imgs:
@@ -3503,6 +3574,12 @@ async def handle_poll_answer(pa: dict):
             except Exception:
                 pass
 
+        # D1 quiz system check
+        uid_ck = pa.get("user", {}).get("id")
+        if uid_ck and uid_ck in QUIZ_SESSIONS:
+            await handle_quiz_poll_answer(pa)
+            return
+
         uid = pa["user"]["id"]
         st = await qs_get(uid)
         if not st or pa.get("poll_id") != st["poll_id"] or st["answered"]:
@@ -3693,6 +3770,842 @@ async def handle_quiz_practice(uid: int, chat_id: int, uname: str, kind: str):
     await start_sequential_quiz(chat_id, uid, uname, last["cache_id"], indices=indices, mode="practice", title=title)
 
 # ============================================================
+# D1 QUIZ SYSTEM (converted from worker.js)
+# ============================================================
+
+async def handle_quiz_create(msg: dict):
+    """CSV reply করে /q Name\nDescription\nTimer\nShuffle"""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ CSV ফাইলে reply করে <code>/q</code> দাও!\n\n"
+            "📝 Format:\n<code>/q Quiz Name\nDescription\nTimer(sec)\nShuffle(Yes/No)</code>"
+        )
+        return
+
+    lines = text.split("/q", 1)[1].strip().split("\n") if "/q" in text else []
+    lines = [l.strip() for l in lines if l.strip()]
+    if len(lines) < 4:
+        await send_msg(chat_id,
+            "❌ ৪টা info দাও:\n1. Name\n2. Description\n3. Timer(sec)\n4. Shuffle(Yes/No)")
+        return
+
+    name = lines[0]
+    desc = lines[1]
+    timer = int(lines[2]) if lines[2].isdigit() else 15
+    shuffle = lines[3].lower() == "yes"
+
+    loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
+
+    try:
+        csv_bytes = await download_tg_file(reply["document"]["file_id"])
+        mcqs = _parse_csv_bytes(csv_bytes)
+        if not mcqs:
+            await send_msg(chat_id, "❌ CSV-তে কোনো MCQ পাওয়া যায়নি!")
+            return
+
+        quiz_id = "qz_" + gen_session_id()[:8]
+        settings = await db_get_settings()
+        tag = settings.get("tag", "")
+        exp = settings.get("exp_footer", "")
+
+        questions = []
+        for mcq in mcqs:
+            ans_map = {"A": 0, "B": 1, "C": 2, "D": 3}
+            questions.append({
+                "question": mcq["question"],
+                "options": mcq["options"],
+                "answer_index": ans_map.get(mcq.get("answer", "A"), 0),
+                "explanation": mcq.get("explanation", "")
+            })
+
+        await d1_run(
+            "INSERT OR REPLACE INTO quizzes (id, name, description, timer, shuffle, csv_data, tag, exp_footer, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            [quiz_id, name, desc, timer, 1 if shuffle else 0, json.dumps(questions), tag, exp, uid]
+        )
+
+        bot_info = await tg_post("getMe", {})
+        bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
+        link = f"https://t.me/{bot_username}?start={quiz_id}"
+
+        await send_msg(chat_id,
+            f"✅ <b>Quiz Created!</b>\n\n"
+            f"📝 Name: {name}\n📄 Description: {desc}\n"
+            f"⏱️ Timer: {timer}s\n🔀 Shuffle: {'Yes' if shuffle else 'No'}\n"
+            f"📊 Questions: {len(questions)}\n\n"
+            f"🔗 Quiz Link:\n{link}\n\n"
+            f"👆 যে কেউ এই লিংকে ক্লিক করে কুইজ solve করতে পারবে!"
+        )
+    except Exception as e:
+        logger.error(f"[Q] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+
+async def handle_qlist(msg: dict):
+    chat_id = msg["chat"]["id"]
+    quizzes = await d1_select("SELECT id, name FROM quizzes ORDER BY created_at ASC")
+    if not quizzes:
+        await send_msg(chat_id, "❌ কোনো quiz নেই!")
+        return
+    bot_info = await tg_post("getMe", {})
+    bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
+    txt = "📋 <b>All Quizzes</b>\n\n"
+    for q in quizzes:
+        txt += f"📝 {q['name']}\n🔗 https://t.me/{bot_username}?start={q['id']}\n\n"
+    await send_msg(chat_id, txt)
+
+
+async def handle_qdel(msg: dict):
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+    qid = text.replace("/qdel", "").strip()
+    if not qid:
+        await send_msg(chat_id, "❌ Usage: /qdel qz_xxx")
+        return
+    await d1_run("DELETE FROM quizzes WHERE id=?1", [qid])
+    await d1_run("DELETE FROM quiz_results WHERE quiz_id=?1", [qid])
+    await d1_run("DELETE FROM quiz_leaderboard WHERE quiz_id=?1", [qid])
+    await send_msg(chat_id, f"✅ Quiz deleted: {qid}")
+
+
+async def handle_d1_pre(msg: dict):
+    """Quiz Preview Image set/remove"""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").replace("/pre", "").strip()
+    reply = msg.get("reply_to_message")
+    if text == "remove":
+        await d1_run("DELETE FROM quiz_preview WHERE id=1")
+        await send_msg(chat_id, "✅ Preview Image removed!")
+    elif reply and reply.get("photo"):
+        file_id = reply["photo"][-1]["file_id"]
+        await d1_run("INSERT OR REPLACE INTO quiz_preview (id, file_id) VALUES (1, ?1)", [file_id])
+        await send_msg(chat_id, "✅ Quiz Preview Image set!")
+    else:
+        rows = await d1_select("SELECT file_id FROM quiz_preview WHERE id=1")
+        if rows and rows[0].get("file_id"):
+            await send_msg(chat_id, "🖼️ Preview is set.\n/pre remove to delete")
+        else:
+            await send_msg(chat_id, "❌ No preview!\nReply to image with /pre")
+
+
+async def handle_d1_info(msg: dict):
+    """D1 quiz system stats"""
+    chat_id = msg["chat"]["id"]
+    users = await d1_select("SELECT COUNT(*) as c FROM bot_users")
+    quizzes = await d1_select("SELECT COUNT(*) as c FROM quizzes")
+    attempts = await d1_select("SELECT COUNT(*) as c FROM quiz_results")
+    top = await d1_select("SELECT user_name, COUNT(*) as c FROM quiz_results GROUP BY user_id ORDER BY c DESC LIMIT 3")
+
+    txt = "📊 <b>D1 Quiz Stats</b>\n\n"
+    txt += f"👥 Total Users: {users[0]['c'] if users else 0}\n"
+    txt += f"📝 Total Quizzes: {quizzes[0]['c'] if quizzes else 0}\n"
+    txt += f"🎯 Total Attempts: {attempts[0]['c'] if attempts else 0}\n"
+    medals = ["🥇", "🥈", "🥉"]
+    if top:
+        txt += "\n🔝 Top Quiz Solvers:\n"
+        for i, r in enumerate(top):
+            txt += f"{medals[i] if i < 3 else ''} {r['user_name']} — {r['c']} quizzes\n"
+    await send_msg(chat_id, txt)
+
+
+async def handle_d1_send(msg: dict):
+    """Broadcast message to all quiz bot users"""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    reply = msg.get("reply_to_message")
+    if not reply:
+        await send_msg(chat_id, "❌ Reply to a message with /send")
+        return
+    reply_msg_id = reply["message_id"]
+    users = await d1_select("SELECT user_id FROM bot_users")
+    channels = await d1_select("SELECT chat_id FROM channels")
+    total_users = len(users)
+    total_chs = len(channels)
+
+    kb = {"inline_keyboard": [
+        [{"text": f"👥 All Users ({total_users})", "callback_data": f"d1send_users_{uid}"}],
+        [{"text": f"📢 All Channels ({total_chs})", "callback_data": f"d1send_chns_{uid}"}],
+        [{"text": f"👥+📢 Both ({total_users + total_chs})", "callback_data": f"d1send_both_{uid}"}]
+    ]}
+
+    sb.table("quiz_sessions").upsert({
+        "key": f"d1_send_{uid}",
+        "data": json.dumps({"msg_id": reply_msg_id, "chat_id": chat_id}),
+        "updated_at": int(time.time())
+    }).execute()
+
+    await send_msg(chat_id,
+        f"📤 Send This Message To:\n\n"
+        f"👥 Total Users: {total_users}\n📢 Total Channels: {total_chs}",
+        reply_markup=kb
+    )
+
+
+async def handle_d1_send_cb(query: dict):
+    """Broadcast callback handler"""
+    data = query["data"]
+    chat_id = query["message"]["chat"]["id"]
+    uid = query["from"]["id"]
+
+    parts = data.split("_")
+    target = parts[1]  # users/chns/both
+    orig_uid = int(parts[2])
+    if uid != orig_uid:
+        return
+
+    row = sb.table("quiz_sessions").select("data").eq("key", f"d1_send_{uid}").execute()
+    if not row.data:
+        return
+    info = json.loads(row.data[0]["data"])
+    msg_id = info["msg_id"]
+    from_chat_id = info["chat_id"]
+
+    sent = 0
+    if target in ("users", "both"):
+        users = await d1_select("SELECT user_id FROM bot_users")
+        for u in users:
+            try:
+                await tg_post("forwardMessage", {
+                    "chat_id": u["user_id"], "from_chat_id": from_chat_id, "message_id": msg_id
+                })
+                sent += 1
+                await asyncio.sleep(0.05)
+            except:
+                pass
+    if target in ("chns", "both"):
+        channels = await d1_select("SELECT chat_id FROM channels")
+        for ch in channels:
+            try:
+                await tg_post("forwardMessage", {
+                    "chat_id": ch["chat_id"], "from_chat_id": from_chat_id, "message_id": msg_id
+                })
+                sent += 1
+                await asyncio.sleep(0.05)
+            except:
+                pass
+
+    sb.table("quiz_sessions").delete().eq("key", f"d1_send_{uid}").execute()
+    await send_msg(chat_id, f"✅ Sent to {sent} recipients!")
+
+
+async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None, mistake_type=None):
+    """Start a quiz from D1 database"""
+    uid = user["id"]
+    uname = user.get("first_name", "Student")
+
+    if mistake_qs:
+        questions = mistake_qs
+        quiz = {"timer": 15, "tag": "", "exp_footer": "", "name": "Practice", "description": ""}
+        row = sb.table("quiz_sessions").select("data").eq("key", f"d1_otag_{uid}").execute()
+        if row.data:
+            orig = json.loads(row.data[0]["data"])
+            quiz["timer"] = orig.get("timer", 15)
+            quiz["tag"] = orig.get("tag", "")
+            quiz["exp_footer"] = orig.get("exp", "")
+            quiz["name"] = orig.get("name", "Practice")
+    else:
+        rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [quiz_id])
+        if not rows:
+            await send_msg(chat_id, "❌ কুইজ পাওয়া যায়নি! Link টা সঠিক কিনা দেখো।")
+            return
+        quiz = rows[0]
+        questions = json.loads(quiz["csv_data"])
+        if quiz.get("shuffle"):
+            import copy
+            questions = copy.deepcopy(questions)
+            random.shuffle(questions)
+            for q in questions:
+                correct_opt = q["options"][q["answer_index"]]
+                random.shuffle(q["options"])
+                q["answer_index"] = q["options"].index(correct_opt)
+
+        sb.table("quiz_sessions").upsert({
+            "key": f"d1_otag_{uid}",
+            "data": json.dumps({
+                "timer": quiz.get("timer", 15), "tag": quiz.get("tag", ""),
+                "exp": quiz.get("exp_footer", ""), "name": quiz.get("name", "")
+            }),
+            "updated_at": int(time.time())
+        }).execute()
+
+    session = {
+        "quiz_id": (quiz_id + "mp") if mistake_qs else quiz_id,
+        "name": quiz.get("name", "Quiz") + (" — Practice" if mistake_qs else ""),
+        "desc": quiz.get("description", ""),
+        "questions": questions,
+        "cur": 0,
+        "tot": len(questions),
+        "right": 0,
+        "wrong": 0,
+        "skip": 0,
+        "timer": quiz.get("timer", 15) if isinstance(quiz.get("timer"), int) else int(quiz.get("timer", 15)),
+        "tag": quiz.get("tag", ""),
+        "exp": quiz.get("exp_footer", ""),
+        "chat_id": chat_id,
+        "uname": uname,
+        "uid": uid,
+        "pid": None,
+        "cor": None,
+        "q_results": [],
+        "is_mistake": bool(mistake_qs)
+    }
+
+    QUIZ_SESSIONS[uid] = session
+
+    if mistake_qs:
+        intro = f"📝 {session['name']}\n"
+        if mistake_type == "wrong":
+            intro += f"❌ Wrong Questions: {len(questions)}\n"
+        else:
+            intro += f"❌ Wrong+Skip: {len(questions)}\n"
+        intro += "🔄 Practice\n\nএখনই কুইজ আসবে, আপনি প্রস্তুত তো? 😎"
+        await send_msg(chat_id, intro)
+    else:
+        preview = await d1_select("SELECT file_id FROM quiz_preview WHERE id=1")
+        info_text = (
+            f"📝 {session['name']}\n📄 {session['desc']}\n"
+            f"⏱️ Timer: {session['timer']}s\n📊 Questions: {session['tot']}"
+        )
+        if preview and preview[0].get("file_id"):
+            await send_photo_by_id(chat_id, preview[0]["file_id"], info_text)
+        else:
+            await send_msg(chat_id, info_text)
+
+    for cd in ["3...", "2...", "1..."]:
+        await asyncio.sleep(0.7)
+        await send_msg(chat_id, cd)
+    await asyncio.sleep(1)
+    await send_quiz_question(chat_id, session)
+
+
+async def send_quiz_question(chat_id: int, session: dict):
+    """Send the current quiz question as a poll"""
+    if session["cur"] >= session["tot"]:
+        await finish_d1_quiz(session)
+        return
+
+    q = session["questions"][session["cur"]]
+    session["q_results"].append({"index": session["cur"], "type": None})
+
+    tag_part = f"{session['tag']}\n\n" if session["tag"] else ""
+    q_text = f"{tag_part}{session['cur'] + 1}. {q.get('question', '?')}"[:300]
+    exp = q.get("explanation", "")
+    if session["exp"]:
+        exp = f"{exp}\n{session['exp']}"
+    exp = exp[:200]
+
+    opts = q.get("options", [])
+    ans_idx = q.get("answer_index", 0)
+
+    poll_r = await tg_post("sendPoll", {
+        "chat_id": chat_id,
+        "question": q_text,
+        "options": [o[:100] for o in opts],
+        "type": "quiz",
+        "correct_option_id": ans_idx,
+        "open_period": session["timer"],
+        "is_anonymous": False,
+        "explanation": exp
+    })
+
+    if poll_r.get("ok"):
+        poll_id = poll_r["result"].get("poll", {}).get("id", "")
+        session["pid"] = poll_id
+        session["cor"] = ans_idx
+        QUIZ_SESSIONS[session["uid"]] = session
+
+        # Timer: auto-skip after timer expires
+        async def _quiz_timeout():
+            await asyncio.sleep(session["timer"] + 2)
+            s = QUIZ_SESSIONS.get(session["uid"])
+            if s and s["pid"] == poll_id and s["cur"] == session["cur"]:
+                await send_msg(chat_id,
+                    "⏱️ সময় শেষ!\nNext Question এ যেতে \"Next\" Button-এ ক্লিক করো।",
+                    reply_markup={"inline_keyboard": [[
+                        {"text": "⏭️ Next", "callback_data": f"qznext_{session['uid']}"}
+                    ]]}
+                )
+        if session["uid"] in QUIZ_TIMERS:
+            QUIZ_TIMERS[session["uid"]].cancel()
+        QUIZ_TIMERS[session["uid"]] = asyncio.create_task(_quiz_timeout())
+
+
+async def handle_quiz_poll_answer(pa: dict):
+    """Handle poll answer for D1 quiz system"""
+    uid = pa.get("user", {}).get("id")
+    if not uid or uid not in QUIZ_SESSIONS:
+        return
+
+    session = QUIZ_SESSIONS[uid]
+    poll_id = pa.get("poll_id", "")
+    if session.get("pid") != poll_id:
+        return
+
+    option_ids = pa.get("option_ids", [])
+    q_result = None
+    for qr in session["q_results"]:
+        if qr["index"] == session["cur"]:
+            q_result = qr
+            break
+
+    if q_result:
+        if not option_ids:
+            q_result["type"] = "skip"
+        elif option_ids[0] == session["cor"]:
+            q_result["type"] = "right"
+        else:
+            q_result["type"] = "wrong"
+
+    if not option_ids:
+        session["skip"] += 1
+    elif option_ids[0] == session["cor"]:
+        session["right"] += 1
+    else:
+        session["wrong"] += 1
+
+    session["cur"] += 1
+
+    if uid in QUIZ_TIMERS:
+        QUIZ_TIMERS[uid].cancel()
+
+    if session["cur"] >= session["tot"]:
+        await finish_d1_quiz(session)
+    else:
+        await send_quiz_question(session["chat_id"], session)
+
+
+async def handle_quiz_next(uid: int):
+    """Handle Next button click — skip question"""
+    session = QUIZ_SESSIONS.get(uid)
+    if not session:
+        return
+
+    q_result = None
+    for qr in session["q_results"]:
+        if qr["index"] == session["cur"]:
+            q_result = qr
+            break
+    if q_result:
+        q_result["type"] = "skip"
+
+    session["skip"] += 1
+    session["cur"] += 1
+
+    if uid in QUIZ_TIMERS:
+        QUIZ_TIMERS[uid].cancel()
+
+    if session["cur"] >= session["tot"]:
+        await finish_d1_quiz(session)
+    else:
+        await send_quiz_question(session["chat_id"], session)
+
+
+async def finish_d1_quiz(session: dict):
+    """Quiz finish — show results, save to D1"""
+    uid = session["uid"]
+    chat_id = session["chat_id"]
+    QUIZ_SESSIONS.pop(uid, None)
+    QUIZ_TIMERS.pop(uid, None)
+
+    tot = session["tot"]
+    right = session["right"]
+    wrong = session["wrong"]
+    skip = session["skip"]
+    name = session["name"]
+    uname = session["uname"]
+    quiz_id = session["quiz_id"]
+    score = f"{right}/{tot}"
+    pct = round(right / tot * 100) if tot else 0
+
+    # Save result to D1
+    try:
+        cnt = await d1_select(
+            "SELECT COUNT(*) as cnt FROM quiz_results WHERE user_id=?1 AND quiz_id=?2",
+            [uid, quiz_id]
+        )
+        attempt = (cnt[0]["cnt"] if cnt else 0) + 1
+
+        await d1_run(
+            "INSERT INTO quiz_results (user_id, user_name, quiz_id, right_count, wrong_count, skip_count, total, score, attempt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            [uid, uname, quiz_id, right, wrong, skip, tot, score, attempt]
+        )
+
+        # Save per-question results
+        result_id_rows = await d1_select("SELECT last_insert_rowid() as id")
+        result_id = result_id_rows[0]["id"] if result_id_rows else None
+        if result_id:
+            for qr in session.get("q_results", []):
+                if qr.get("type"):
+                    await d1_run(
+                        "INSERT INTO quiz_question_results (result_id, question_index, result_type, quiz_id, user_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        [result_id, qr["index"], qr["type"], quiz_id, uid]
+                    )
+
+        # Update leaderboard
+        existing = await d1_select(
+            "SELECT right_count FROM quiz_leaderboard WHERE quiz_id=?1 AND user_id=?2",
+            [quiz_id, uid]
+        )
+        if existing:
+            if right > existing[0]["right_count"]:
+                await d1_run(
+                    "UPDATE quiz_leaderboard SET user_name=?1, score=?2, right_count=?3, total=?4, updated_at=?5 WHERE quiz_id=?6 AND user_id=?7",
+                    [uname, score, right, tot, int(time.time()), quiz_id, uid]
+                )
+        else:
+            await d1_run(
+                "INSERT INTO quiz_leaderboard (quiz_id, user_id, user_name, score, right_count, total, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                [quiz_id, uid, uname, score, right, tot, int(time.time())]
+            )
+    except Exception as e:
+        logger.error(f"[Quiz] Save result error: {e}")
+
+    # Motivation
+    if pct >= 90:
+        mot = "🏆 অসাধারণ! তুমি সেরা!"
+    elif pct >= 70:
+        mot = "🎉 চমৎকার! আরও প্র্যাকটিস করো!"
+    elif pct >= 50:
+        mot = "👍 মোটামুটি ভালো! আরও পড়ো!"
+    else:
+        mot = "📚 পড়া হয়নি! আবার চেষ্টা করো!"
+
+    original_qid = quiz_id.replace("mp", "") if session.get("is_mistake") else quiz_id
+    bot_info = await tg_post("getMe", {})
+    bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
+    link = f"https://t.me/{bot_username}?start={original_qid}"
+
+    txt = (
+        f"🌟 {name} কুইজে অংশগ্রহণের জন্য অভিনন্দন, {uname}!\n\n"
+        f"📊 তোমার রেজাল্ট:\n"
+        f"✅ Right: {right}\n❌ Wrong: {wrong}\n😐 Skipped: {skip}\n\n"
+        f"⚡ Final: {score} ({pct}%)\n\n{mot}"
+    )
+
+    if session.get("is_mistake"):
+        kb = {"inline_keyboard": [[{"text": "📌 আবার প্রাক্টিস করো", "url": link}]]}
+    else:
+        kb = {"inline_keyboard": [
+            [{"text": "📌 আবার প্রাক্টিস করো", "url": link}],
+            [{"text": "👥 Leaderboard", "callback_data": f"qzlb_{quiz_id}"},
+             {"text": "📈 History", "callback_data": f"qzhist_{quiz_id}"}],
+            [{"text": "🔴 Practice (Wrong only)", "callback_data": f"qzmp1_{quiz_id}"}],
+            [{"text": "🟡 Practice (Wrong+Skip)", "callback_data": f"qzmp2_{quiz_id}"}]
+        ]}
+
+    await send_msg(chat_id, txt, reply_markup=kb)
+
+
+async def handle_d1_leaderboard(chat_id: int, quiz_id: str, uid: int):
+    lb = await d1_select(
+        "SELECT user_name, score, right_count, total, user_id FROM quiz_leaderboard WHERE quiz_id=?1 ORDER BY right_count DESC",
+        [quiz_id]
+    )
+    if not lb:
+        await send_msg(chat_id, "🏆 এখনো কেউ quiz solve করেনি!")
+        return
+
+    your_pos = -1
+    for i, r in enumerate(lb):
+        if r["user_id"] == uid:
+            your_pos = i + 1
+
+    txt = ""
+    if your_pos > 0:
+        txt += f"📊 Your Position: #{your_pos}\n\n"
+    txt += "🏆 <b>Leaderboard</b>\n\n"
+    medals = ["🥇", "🥈", "🥉"]
+    for i, r in enumerate(lb):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        is_you = r["user_id"] == uid
+        p = round(r["right_count"] / r["total"] * 100) if r["total"] else 0
+        txt += f"{'<b>' if is_you else ''}{medal} {r['user_name']} — {r['score']} ({p}%)"
+        if is_you:
+            txt += " 👈 You"
+        txt += f"{'</b>' if is_you else ''}\n"
+    await send_msg(chat_id, txt)
+
+
+async def handle_d1_history(chat_id: int, quiz_id: str, uid: int):
+    hist = await d1_select(
+        "SELECT score, attempt, created_at FROM quiz_results WHERE user_id=?1 AND quiz_id=?2 ORDER BY attempt",
+        [uid, quiz_id]
+    )
+    txt = "📈 <b>Progress</b>\n\n"
+    if hist:
+        for r in hist:
+            txt += f"🟢 Attempt {r['attempt']}: {r['score']}"
+            if r.get("created_at"):
+                from datetime import datetime as dt
+                txt += f" | 📅 {dt.fromtimestamp(r['created_at']).strftime('%Y-%m-%d')}"
+            txt += "\n"
+    else:
+        txt += "এখনো কোনো history নেই!"
+    await send_msg(chat_id, txt)
+
+
+async def handle_d1_mistake(chat_id: int, quiz_id: str, uid: int, user: dict, mtype: str):
+    """Mistake practice — replay wrong/skipped questions"""
+    try:
+        last = await d1_select(
+            "SELECT id FROM quiz_results WHERE user_id=?1 AND quiz_id=?2 ORDER BY id DESC LIMIT 1",
+            [uid, quiz_id]
+        )
+        if not last:
+            await send_msg(chat_id, "❌ No previous attempt found!")
+            return
+
+        result_id = last[0]["id"]
+        if mtype == "wrong":
+            wrong_qs = await d1_select(
+                "SELECT question_index FROM quiz_question_results WHERE result_id=?1 AND result_type='wrong'",
+                [result_id]
+            )
+        else:
+            wrong_qs = await d1_select(
+                "SELECT question_index FROM quiz_question_results WHERE result_id=?1 AND result_type IN ('wrong', 'skip')",
+                [result_id]
+            )
+
+        if not wrong_qs:
+            if mtype == "wrong":
+                await send_msg(chat_id, "🎉 সব সঠিক ছিল! Practice-এর প্রয়োজন নেই!")
+            else:
+                await send_msg(chat_id, "🎉 সব সঠিক ছিল, skip-ও নেই!")
+            return
+
+        quiz_rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [quiz_id])
+        if not quiz_rows:
+            await send_msg(chat_id, "❌ Quiz not found!")
+            return
+
+        all_questions = json.loads(quiz_rows[0]["csv_data"])
+        practice = [all_questions[r["question_index"]] for r in wrong_qs
+                     if r["question_index"] < len(all_questions)]
+        if not practice:
+            await send_msg(chat_id, "❌ Questions not found!")
+            return
+
+        await start_d1_quiz(chat_id, quiz_id, user, mistake_qs=practice, mistake_type=mtype)
+    except Exception as e:
+        logger.error(f"[Mistake] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+
+async def handle_collect_command(msg: dict):
+    """Poll collection from forwarded polls"""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    text = msg.get("text", "").strip()
+
+    if text == "/collect":
+        await send_msg(chat_id,
+            "📊 Poll collection started!\n\n"
+            "Forward polls to collect.\n"
+            "/cstatus — check count\n"
+            "/cdone — download CSV\n"
+            "/ccancel — clear"
+        )
+        return
+    if text == "/cstatus":
+        rows = await d1_select(
+            "SELECT COUNT(*) as c FROM poll_collection WHERE user_id=?1", [uid]
+        )
+        await send_msg(chat_id, f"📊 Total collected: {rows[0]['c'] if rows else 0} polls")
+        return
+    if text == "/cdone":
+        rows = await d1_select(
+            "SELECT poll_data FROM poll_collection WHERE user_id=?1", [uid]
+        )
+        if not rows:
+            await send_msg(chat_id, "❌ No polls collected!")
+            return
+        import io as _io, csv as _csv
+        buf = _io.StringIO()
+        writer = _csv.writer(buf)
+        writer.writerow(["questions","option1","option2","option3","option4","answer","explanation","type","section"])
+        for r in rows:
+            pd = json.loads(r["poll_data"])
+            opts = pd.get("options", [])
+            while len(opts) < 4:
+                opts.append("")
+            ans = str((pd.get("correct", 0) or 0) + 1)
+            writer.writerow([pd.get("question",""), opts[0], opts[1], opts[2], opts[3],
+                             ans, pd.get("explanation",""), "1", "1"])
+        await send_document(chat_id, buf.getvalue().encode("utf-8"),
+            f"collected_{len(rows)}.csv",
+            caption=f"✅ {len(rows)} polls collected!",
+            mime_type="text/csv")
+        await d1_run("DELETE FROM poll_collection WHERE user_id=?1", [uid])
+        return
+    if text == "/ccancel":
+        await d1_run("DELETE FROM poll_collection WHERE user_id=?1", [uid])
+        await send_msg(chat_id, "❌ Collection cancelled!")
+        return
+
+
+async def handle_poll_auto_collect(msg: dict):
+    """Auto-collect forwarded polls"""
+    poll = msg.get("poll")
+    if not poll or not msg.get("forward_date"):
+        return False
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    try:
+        poll_data = {
+            "question": poll.get("question", ""),
+            "options": [o.get("text", "") for o in poll.get("options", [])],
+            "correct": poll.get("correct_option_id"),
+            "explanation": poll.get("explanation", "")
+        }
+        await d1_run(
+            "INSERT INTO poll_collection (user_id, poll_data) VALUES (?1, ?2)",
+            [uid, json.dumps(poll_data)]
+        )
+        rows = await d1_select("SELECT COUNT(*) as c FROM poll_collection WHERE user_id=?1", [uid])
+        await send_msg(chat_id, f"📊 Collected! Total: {rows[0]['c'] if rows else 0} polls")
+        return True
+    except Exception as e:
+        logger.error(f"[Collect] Error: {e}")
+    return False
+
+
+async def handle_merge_command(msg: dict):
+    """CSV file merge"""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    text = msg.get("text", "").strip()
+    reply = msg.get("reply_to_message")
+
+    args = text.replace("/merge", "").strip()
+
+    if args == "done":
+        row = sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute()
+        if not row.data:
+            await send_msg(chat_id, "❌ No files to merge!")
+            return
+        merge_data = json.loads(row.data[0]["data"])
+        files = merge_data.get("files", [])
+        if not files:
+            await send_msg(chat_id, "❌ No files to merge!")
+            return
+        all_rows = []
+        header = None
+        for content in files:
+            lines = [l for l in content.split("\n") if l.strip()]
+            if not header:
+                header = lines[0]
+                all_rows.append(header)
+            all_rows.extend(lines[1:])
+        merged = "\n".join(all_rows)
+        await send_document(chat_id, merged.encode("utf-8"),
+            f"merged_{len(all_rows)-1}.csv",
+            caption=f"✅ Merged: {len(all_rows)-1} rows from {len(files)} files",
+            mime_type="text/csv")
+        sb.table("quiz_sessions").delete().eq("key", f"merge_{uid}").execute()
+        return
+
+    if args == "status":
+        row = sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute()
+        count = len(json.loads(row.data[0]["data"]).get("files", [])) if row.data else 0
+        await send_msg(chat_id, f"📊 Total files: {count}")
+        return
+
+    if args == "cancel":
+        sb.table("quiz_sessions").delete().eq("key", f"merge_{uid}").execute()
+        await send_msg(chat_id, "❌ Merge cancelled!")
+        return
+
+    if reply and reply.get("document"):
+        try:
+            csv_bytes = await download_tg_file(reply["document"]["file_id"])
+            content = csv_bytes.decode("utf-8-sig")
+            row = sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute()
+            files = json.loads(row.data[0]["data"]).get("files", []) if row.data else []
+            files.append(content)
+            sb.table("quiz_sessions").upsert({
+                "key": f"merge_{uid}",
+                "data": json.dumps({"files": files}),
+                "updated_at": int(time.time())
+            }).execute()
+            await send_msg(chat_id, f"📎 File {len(files)} received! Total: {len(files)}\n/merge done when ready")
+        except Exception as e:
+            await send_msg(chat_id, f"❌ Error: {e}")
+        return
+
+    await send_msg(chat_id,
+        "🔗 CSV ফাইলে reply করে /merge দাও\n"
+        "/merge done — merge করো\n"
+        "/merge status — count দেখো\n"
+        "/merge cancel — বাতিল"
+    )
+
+
+async def handle_convert_command(msg: dict):
+    """CSV ↔ JSON convert"""
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id, "❌ CSV বা JSON ফাইলে reply করে /convert দাও!")
+        return
+    try:
+        file_bytes = await download_tg_file(reply["document"]["file_id"])
+        file_name = reply["document"].get("file_name", "")
+
+        if file_name.lower().endswith(".csv"):
+            mcqs = _parse_csv_bytes(file_bytes)
+            json_data = []
+            for i, mcq in enumerate(mcqs):
+                opts = mcq.get("options", [])
+                json_data.append({
+                    "question_number": str(i + 1),
+                    "question": mcq["question"],
+                    "options": {
+                        "A": opts[0] if len(opts) > 0 else "",
+                        "B": opts[1] if len(opts) > 1 else "",
+                        "C": opts[2] if len(opts) > 2 else "",
+                        "D": opts[3] if len(opts) > 3 else ""
+                    },
+                    "correct_answer": mcq.get("answer", "A"),
+                    "explanation": mcq.get("explanation", "")
+                })
+            out = json.dumps(json_data, ensure_ascii=False, indent=2).encode("utf-8")
+            await send_document(chat_id, out,
+                file_name.replace(".csv", ".json"),
+                caption=f"✅ CSV → JSON Converted! {len(json_data)} questions",
+                mime_type="application/json")
+
+        elif file_name.lower().endswith(".json"):
+            json_data = json.loads(file_bytes.decode("utf-8-sig"))
+            import io as _io, csv as _csv
+            buf = _io.StringIO()
+            writer = _csv.writer(buf)
+            writer.writerow(["questions","option1","option2","option3","option4","answer","explanation","type","section"])
+            for item in json_data:
+                opts = item.get("options", {})
+                ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                ans = ans_map.get(item.get("correct_answer", "A"), "1")
+                writer.writerow([
+                    item.get("question", ""),
+                    opts.get("A", ""), opts.get("B", ""),
+                    opts.get("C", ""), opts.get("D", ""),
+                    ans, item.get("explanation", ""), "1", "1"
+                ])
+            await send_document(chat_id, buf.getvalue().encode("utf-8"),
+                file_name.replace(".json", ".csv"),
+                caption=f"✅ JSON → CSV Converted! {len(json_data)} questions",
+                mime_type="text/csv")
+        else:
+            await send_msg(chat_id, "❌ Only CSV or JSON files!")
+    except Exception as e:
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+
+# ============================================================
 # WEBHOOK HANDLER
 # ============================================================
 @app.post("/webhook")
@@ -3725,6 +4638,8 @@ async def handle_message(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     uname = msg["from"].get("first_name", "User")
+    chat_type = msg["chat"].get("type", "private")
+    is_private = chat_type == "private"
     await db_track_user(uid, uname)
     is_auth = await db_is_owner_or_admin(uid)
 
@@ -3737,6 +4652,12 @@ async def handle_message(msg: dict):
     # DB cleanup (every ~100 requests, random)
     if random.random() < 0.01:
         asyncio.create_task(db_auto_cleanup_if_needed())
+
+    # Poll auto-collect (forwarded polls)
+    if msg.get("poll") and msg.get("forward_date"):
+        collected = await handle_poll_auto_collect(msg)
+        if collected:
+            return
 
     if text == "/start":
         await handle_start(msg)
@@ -3752,9 +4673,14 @@ async def handle_message(msg: dict):
         cache_id = text.replace("/start poll_", "").strip()
         asyncio.create_task(handle_poll_again(cache_id, msg["from"], chat_id))
         return
-    if text.startswith("/pdf"):
+    if text.startswith("/start qz_"):
+        quiz_id = text.split()[1] if len(text.split()) > 1 else text.replace("/start ", "")
+        asyncio.create_task(start_d1_quiz(chat_id, quiz_id, msg["from"]))
+        return
+    if text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm"):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            if is_private:
+                await send_msg(chat_id, UNAUTH_MSG)
             return
         await handle_pdf(msg)
         return
@@ -3764,8 +4690,12 @@ async def handle_message(msg: dict):
     if text == "/bmexam":
         asyncio.create_task(handle_bmexam(msg))
         return
+    if text in ("/collect", "/cstatus", "/cdone", "/ccancel"):
+        await handle_collect_command(msg)
+        return
     if not is_auth:
-        await send_msg(chat_id, UNAUTH_MSG)
+        if is_private:
+            await send_msg(chat_id, UNAUTH_MSG)
         return
     if text.startswith("/permit"):
         await handle_permit(msg)
@@ -3775,7 +4705,7 @@ async def handle_message(msg: dict):
         await handle_tagQ(msg)
     elif text.startswith("/expQ"):
         await handle_expQ(msg)
-    elif text.startswith("/channel"):
+    elif text.startswith("/channel") or text == "/channelist":
         await handle_channel(msg)
     elif text == "/info2":
         await handle_info2(msg)
@@ -3826,7 +4756,8 @@ async def handle_message(msg: dict):
             {"command": "csvS", "description": "CSV থেকে sequential poll"},
             {"command": "live", "description": "CSV দিয়ে Live Quiz শুরু করো"},
             {"command": "livetime", "description": "Live Quiz-এর প্রতি প্রশ্নের সময় set করো"},
-            {"command": "channel", "description": "Channel/Group add বা list দেখো"},
+            {"command": "channel", "description": "Channel/Group add করো (custom name সহ)"},
+            {"command": "channelist", "description": "Channel list দেখো"},
             {"command": "tagQ", "description": "Poll-এ tag set করো"},
             {"command": "expQ", "description": "Explanation footer set করো"},
             {"command": "bm", "description": "Bookmark PDF বানাও"},
@@ -3836,8 +4767,17 @@ async def handle_message(msg: dict):
             {"command": "pinon", "description": "Auto-pin চালু করো"},
             {"command": "pinoff", "description": "Auto-pin বন্ধ করো"},
             {"command": "info2", "description": "Bot stats দেখো"},
-            {"command": "pdf_collect", "description": "Image collection শুরু করো"},
+            {"command": "pdfc", "description": "Image collection শুরু করো"},
             {"command": "done", "description": "Image collection শেষ করো — PDF বানাও"},
+            {"command": "q", "description": "CSV থেকে D1 quiz তৈরি করো"},
+            {"command": "qlist", "description": "সব D1 quiz দেখো"},
+            {"command": "qdel", "description": "D1 quiz delete করো"},
+            {"command": "pre", "description": "Quiz preview image set করো"},
+            {"command": "info", "description": "Quiz details দেখো"},
+            {"command": "send", "description": "Quiz share করো channel-এ"},
+            {"command": "collect", "description": "Poll collect mode চালু করো"},
+            {"command": "merge", "description": "Collected polls merge করো"},
+            {"command": "convert", "description": "Quiz → CSV export করো"},
             {"command": "setcommand", "description": "Bot commands register করো (Owner)"},
         ]
         r = await tg_post("setMyCommands", {"commands": commands})
@@ -3855,8 +4795,30 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         await handle_pin(msg)
-    elif text == "/pdf_collect" or text == "/done" or text == "/cancel":
+    elif text in ("/pdfc", "/pdf_collect", "/done", "/cancel"):
         await handle_pdf_image_mode(msg)
+    elif text.startswith("/q") and not text.startswith("/qlist") and not text.startswith("/qdel"):
+        await handle_quiz_create(msg)
+    elif text == "/qlist":
+        await handle_qlist(msg)
+    elif text.startswith("/qdel"):
+        await handle_qdel(msg)
+    elif text.startswith("/pre"):
+        await handle_d1_pre(msg)
+    elif text == "/info":
+        if uid == OWNER_ID:
+            await handle_d1_info(msg)
+        else:
+            await send_msg(chat_id, "❌ Owner only!")
+    elif text == "/send":
+        if uid == OWNER_ID:
+            await handle_d1_send(msg)
+        else:
+            await send_msg(chat_id, "❌ Owner only!")
+    elif text.startswith("/merge"):
+        await handle_merge_command(msg)
+    elif text == "/convert":
+        await handle_convert_command(msg)
     elif text == "/ping":
         await send_msg(chat_id, "🏓 Pong! ATLAS Bot Online!")
 
@@ -3878,16 +4840,28 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            pages = getattr(app.state, "pdf_cache", {}).get(f"pdf_img_{uid}")
-            if not pages:
-                await send_msg(chat_id, "❌ Session expired!")
-                return
             row = sb.table("quiz_sessions").select("data").eq("key", f"pdf_pending_{uid}").execute()
             if not row.data:
                 await send_msg(chat_id, "❌ Session expired!")
                 return
             pending = json.loads(row.data[0]["data"])
             saved_thread_id = pending.get("thread_id")
+            pages = getattr(app.state, "pdf_cache", {}).get(f"pdf_img_{uid}")
+            if not pages:
+                saved_file_id = pending.get("file_id")
+                if not saved_file_id:
+                    await send_msg(chat_id, "❌ Session expired!")
+                    return
+                await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
+                try:
+                    pdf_bytes = await download_tg_file(saved_file_id)
+                    pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, pending.get("page_range"))
+                except Exception as e:
+                    await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
+                    return
+                if not pages:
+                    await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
+                    return
             if channel == "csv":
                 await process_pdf_pages(chat_id, uid, user.get("first_name", "User"), pages,
                     pending["topic"], pending.get("mcq_count"), None, True,
@@ -3898,7 +4872,7 @@ async def handle_callback(query: dict):
                     pending["topic"], pending.get("mcq_count"), channel, False,
                     pending.get("file_name", "document.pdf"), pending.get("status_msg_id"),
                     thread_id=saved_thread_id)
-            app.state.pdf_cache.pop(f"pdf_img_{uid}", None)
+            getattr(app.state, "pdf_cache", {}).pop(f"pdf_img_{uid}", None)
 
         elif data.startswith("pollagain_"):
             cache_id = data.replace("pollagain_", "")
@@ -4000,15 +4974,27 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            pages = getattr(app.state,"pdf_cache",{}).get(f"pdfm_img_{uid}")
-            if not pages:
-                await send_msg(chat_id, "❌ Session expired!")
-                return
             row = sb.table("quiz_sessions").select("data").eq("key", f"pdfm_pending_{uid}").execute()
             if not row.data:
                 await send_msg(chat_id, "❌ Session expired!")
                 return
             pending = json.loads(row.data[0]["data"])
+            pages = getattr(app.state,"pdf_cache",{}).get(f"pdfm_img_{uid}")
+            if not pages:
+                saved_file_id = pending.get("file_id")
+                if not saved_file_id:
+                    await send_msg(chat_id, "❌ Session expired!")
+                    return
+                await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
+                try:
+                    pdf_bytes = await download_tg_file(saved_file_id)
+                    pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, pending.get("page_range"))
+                except Exception as e:
+                    await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
+                    return
+                if not pages:
+                    await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
+                    return
             csv_only = channel == "csv"
             ch = None if csv_only else channel
             asyncio.create_task(process_pdfm_pages(
@@ -4018,7 +5004,7 @@ async def handle_callback(query: dict):
                 pending.get("status_msg_id"),
                 thread_id=pending.get("thread_id")
             ))
-            app.state.pdf_cache.pop(f"pdfm_img_{uid}", None)
+            getattr(app.state,"pdf_cache",{}).pop(f"pdfm_img_{uid}", None)
 
         elif data.startswith("livechannel_"):
             parts    = data.split("_", 2)
@@ -4067,6 +5053,31 @@ async def handle_callback(query: dict):
                 "message_id": msg_id,
                 "text":       "❌ Live Quiz cancelled!"
             })
+
+        # D1 Quiz System callbacks
+        elif data.startswith("qznext_"):
+            target_uid = int(data.replace("qznext_", ""))
+            if uid == target_uid:
+                asyncio.create_task(handle_quiz_next(uid))
+
+        elif data.startswith("qzlb_"):
+            quiz_id = data.replace("qzlb_", "")
+            await handle_d1_leaderboard(chat_id, quiz_id, uid)
+
+        elif data.startswith("qzhist_"):
+            quiz_id = data.replace("qzhist_", "")
+            await handle_d1_history(chat_id, quiz_id, uid)
+
+        elif data.startswith("qzmp1_"):
+            quiz_id = data.replace("qzmp1_", "")
+            asyncio.create_task(handle_d1_mistake(chat_id, quiz_id, uid, user, "wrong"))
+
+        elif data.startswith("qzmp2_"):
+            quiz_id = data.replace("qzmp2_", "")
+            asyncio.create_task(handle_d1_mistake(chat_id, quiz_id, uid, user, "wrong+skip"))
+
+        elif data.startswith("d1send_"):
+            await handle_d1_send_cb(query)
 
     except Exception as e:
         logger.error(f"[CB] Error: {e}")
