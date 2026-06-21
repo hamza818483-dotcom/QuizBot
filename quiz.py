@@ -394,12 +394,15 @@ async def send_quiz_question(chat_id: int, session: dict):
             await asyncio.sleep(session["timer"] + 2)
             s = QUIZ_SESSIONS.get(session["uid"])
             if s and s["pid"] == poll_id and s["cur"] == session["cur"]:
-                await send_msg(chat_id,
+                r = await send_msg(chat_id,
                     "⏱️ সময় শেষ!\nNext Question এ যেতে \"Next\" Button-এ ক্লিক করো।",
                     reply_markup={"inline_keyboard": [[
                         {"text": "⏭️ Next", "callback_data": f"qznext_{session['uid']}"}
                     ]]}
                 )
+                if r.get("ok"):
+                    s["timeout_msg_id"] = r["result"]["message_id"]
+                    QUIZ_SESSIONS[session["uid"]] = s
         if session["uid"] in QUIZ_TIMERS:
             QUIZ_TIMERS[session["uid"]].cancel()
         QUIZ_TIMERS[session["uid"]] = asyncio.create_task(_quiz_timeout())
@@ -454,6 +457,14 @@ async def handle_quiz_next(uid: int):
     session = QUIZ_SESSIONS.get(uid)
     if not session:
         return
+
+    # টাইমআউট মেসেজ (⏱️ সময় শেষ! + Next button) মুছে ফেলো
+    if session.get("timeout_msg_id"):
+        await tg_post("deleteMessage", {
+            "chat_id": session["chat_id"],
+            "message_id": session["timeout_msg_id"]
+        })
+        session["timeout_msg_id"] = None
 
     q_result = None
     for qr in session["q_results"]:

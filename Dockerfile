@@ -8,7 +8,11 @@ RUN apt-get update && apt-get install -y \
     curl \
     gcc \
     python3-dev \
+    chromium \
+    fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
+
+ENV CHROMIUM_PATH=/usr/bin/chromium
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

@@ -1528,7 +1528,6 @@ body{{font-family:'Noto Sans Bengali',sans-serif;background:#fff;font-size:11px;
 async def handle_bmexam(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
-    uname = msg["from"].get("first_name", "User")
     try:
         r = sb.table("bookmarks").select("*").eq("user_id", uid).order("created_at").execute()
         bookmarks = r.data or []
@@ -1536,45 +1535,70 @@ async def handle_bmexam(msg: dict):
             await send_msg(chat_id, "🔖 কোনো bookmark নেই!\n\nWeb Exam এ 🔖 বাটন চেপে bookmark করো।")
             return
 
-        await send_msg(chat_id,
-            f"🎯 <b>Bookmark Quiz শুরু হচ্ছে!</b>\n\n"
-            f"📝 {len(bookmarks)} টি bookmark MCQ থেকে quiz হবে\n"
-            f"⏱️ প্রতিটায় {QUIZ_Q_SEC} সেকেন্ড সময়\n\n"
-            f"3️⃣ 2️⃣ 1️⃣ 🚀 শুরু!"
-        )
-
-        settings = await db_get_settings()
-        tag = settings.get("tag", "")
-        exp_footer = settings.get("exp_footer", "")
         total = len(bookmarks)
-
-        for i, bm in enumerate(bookmarks):
-            q = bm.get("question_data", {})
-            opts = q.get("options", [])
-            ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(q.get("answer", "A"), 0)
-            q_text = f"({i+1}/{total}) {q.get('question', '')}"
-            if tag:
-                q_text = f"{tag}\n\n{q_text}"
-            exp = q.get("explanation", "")
-            if exp_footer:
-                exp = f"{exp}\n{exp_footer}"
-            await send_poll(chat_id, q_text, opts, ans_idx, explanation=exp[:200])
-            await asyncio.sleep(1.5)
-
-        # End message with buttons
-        end_kb = {"inline_keyboard": [
-            [{"text": "🔖 Bookmark PDF", "callback_data": "bm_pdf"}],
-            [{"text": "🔄 Exam আবার দাও", "callback_data": "bmexam_again"}]
+        kb = {"inline_keyboard": [
+            [{"text": f"✅ সব {total}টি Practice করো", "callback_data": f"bmex_all_{uid}"}],
         ]}
+        if total > 10:
+            kb["inline_keyboard"].insert(0,
+                [{"text": "🔟 শেষ 10টি", "callback_data": f"bmex_10_{uid}"}])
+        if total > 20:
+            kb["inline_keyboard"].insert(0,
+                [{"text": "2️⃣0️⃣ শেষ 20টি", "callback_data": f"bmex_20_{uid}"}])
+
         await send_msg(chat_id,
-            f"✅ <b>Bookmark Quiz শেষ!</b>\n\n"
-            f"📝 {total} টি MCQ সম্পন্ন\n\n"
-            f"📖 PDF বানাতে /bm দাও\n"
-            f"🔄 আবার quiz দিতে /bmexam দাও",
-            reply_markup=end_kb
+            f"🔖 <b>তোমার মোট {total}টি Bookmark MCQ আছে!</b>\n\n"
+            f"কতগুলো নিয়ে practice করতে চাও?",
+            reply_markup=kb
         )
     except Exception as e:
         logger.error(f"[BMEXAM] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+
+async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: str):
+    """User count select করার পর — cache বানিয়ে Quiz Solve/Poll Solve/Web Exam বাটন দাও"""
+    try:
+        r = sb.table("bookmarks").select("*").eq("user_id", uid).order("created_at").execute()
+        bookmarks = r.data or []
+        if not bookmarks:
+            await send_msg(chat_id, "🔖 কোনো bookmark নেই!")
+            return
+
+        if count_choice == "10":
+            bookmarks = bookmarks[-10:]
+        elif count_choice == "20":
+            bookmarks = bookmarks[-20:]
+        # "all" হলে সবগুলো
+
+        mcqs = []
+        for bm in bookmarks:
+            q = bm.get("question_data", {})
+            if q:
+                mcqs.append(q)
+
+        if not mcqs:
+            await send_msg(chat_id, "❌ Bookmark MCQ পাওয়া যায়নি!")
+            return
+
+        cache_id = gen_session_id()
+        await db_save_mcq_cache(cache_id, cache_id, 0, "🔖 Bookmark Practice", mcqs)
+
+        exam_url = f"{HF_SPACE_URL}/exam/{cache_id}"
+        quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id}"
+        poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id}"
+        end_kb = {"inline_keyboard": [
+            [{"text": "📝 Quiz Solve", "url": quiz_url}],
+            [{"text": "🔄 Poll Solve", "url": poll_url}],
+            [{"text": "🌐 Web Exam", "url": exam_url}]
+        ]}
+        await send_msg(chat_id,
+            f"✅ <b>{len(mcqs)}টি Bookmark MCQ Ready!</b>\n\n"
+            f"নিচের যেকোনো একটি বাটনে ক্লিক করে practice শুরু করো 👇",
+            reply_markup=end_kb
+        )
+    except Exception as e:
+        logger.error(f"[BMEXAM] start error: {e}")
         await send_msg(chat_id, f"❌ Error: {e}")
 
 # ============================================================
@@ -1582,23 +1606,28 @@ async def handle_bmexam(msg: dict):
 # ============================================================
 async def _html_to_pdf(html: str) -> bytes:
     import tempfile
+    chromium_bin = os.environ.get("CHROMIUM_PATH", "chromium")
     try:
         with tempfile.NamedTemporaryFile(suffix=".html", mode="w", encoding="utf-8", delete=False) as f:
             f.write(html)
             html_path = f.name
         pdf_path = html_path.replace(".html", ".pdf")
         proc = await asyncio.create_subprocess_exec(
-            "chromium", "--headless", "--no-sandbox",
+            chromium_bin, "--headless", "--no-sandbox",
             "--disable-gpu", "--disable-dev-shm-usage",
             f"--print-to-pdf={pdf_path}",
             f"file://{html_path}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        await asyncio.wait_for(proc.communicate(), timeout=45)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
         if os.path.exists(pdf_path):
             with open(pdf_path, "rb") as f:
                 return f.read()
+        else:
+            logger.error(f"[PDF Gen] chromium produced no file. stderr: {stderr.decode(errors='ignore')[:500]}")
+    except FileNotFoundError:
+        logger.error(f"[PDF Gen] chromium binary not found at '{chromium_bin}' — check Dockerfile install")
     except Exception as e:
         logger.error(f"[PDF Gen] Error: {e}")
     return None
@@ -3908,7 +3937,10 @@ async def handle_message(msg: dict):
         try:
             admin_rows = sb.table("admins").select("user_id").execute()
             for row in (admin_rows.data or []):
-                admin_ids.add(row["user_id"])
+                try:
+                    admin_ids.add(int(row["user_id"]))
+                except (TypeError, ValueError):
+                    logger.error(f"[SetCommand] invalid admin user_id: {row.get('user_id')}")
         except Exception as e:
             logger.error(f"[SetCommand] admin fetch error: {e}")
 
@@ -3920,6 +3952,8 @@ async def handle_message(msg: dict):
             })
             if r_admin.get("ok"):
                 ok_count += 1
+            else:
+                logger.error(f"[SetCommand] failed for admin {admin_id}: {r_admin.get('description')}")
 
         if r_default.get("ok"):
             await send_msg(chat_id,
@@ -4199,6 +4233,14 @@ async def handle_callback(query: dict):
                 "message_id": msg_id,
                 "text":       "❌ Live Quiz cancelled!"
             })
+
+        # Bookmark Exam — count select
+        elif data.startswith("bmex_"):
+            parts = data.split("_")
+            count_choice = parts[1]
+            target_uid = int(parts[2])
+            if uid == target_uid:
+                asyncio.create_task(handle_bmexam_start(chat_id, uid, uname, count_choice))
 
         # D1 Quiz System callbacks
         elif data.startswith("qznext_"):
