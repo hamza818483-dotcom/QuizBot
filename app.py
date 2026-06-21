@@ -3845,8 +3845,9 @@ async def handle_message(msg: dict):
         if uid != OWNER_ID:
             await send_msg(chat_id, "❌ Owner only!")
             return
-        # Telegram Bot API তে commands set করো
-        commands = [
+
+        # ---- ADMIN/OWNER command list (full) ----
+        admin_commands = [
             {"command": "start", "description": "Bot শুরু করো / সব commands দেখো"},
             {"command": "help", "description": "সব commands ও ব্যবহার দেখো"},
             {"command": "pdf", "description": "PDF থেকে MCQ generate করো"},
@@ -3879,13 +3880,50 @@ async def handle_message(msg: dict):
             {"command": "collect", "description": "Poll collect mode চালু করো"},
             {"command": "merge", "description": "Collected polls merge করো"},
             {"command": "convert", "description": "Quiz → CSV export করো"},
+            {"command": "error", "description": "সাম্প্রতিক bot error দেখো"},
             {"command": "setcommand", "description": "Bot commands register করো (Owner)"},
         ]
-        r = await tg_post("setMyCommands", {"commands": commands})
-        if r.get("ok"):
-            await send_msg(chat_id, f"✅ {len(commands)} টি command register হয়েছে!")
+
+        # ---- USER command list (minimal) ----
+        user_commands = [
+            {"command": "start", "description": "Bot শুরু করো"},
+            {"command": "help", "description": "ব্যবহার নির্দেশিকা দেখো"},
+            {"command": "bm", "description": "Bookmark PDF বানাও"},
+            {"command": "bmexam", "description": "Bookmark MCQ থেকে Quiz দাও"},
+        ]
+
+        # Default scope → সব normal user এই list দেখবে
+        r_default = await tg_post("setMyCommands", {
+            "commands": user_commands,
+            "scope": {"type": "default"}
+        })
+
+        # প্রতিটা admin/owner chat-এ আলাদা scope দিয়ে full list set করো
+        admin_ids = {OWNER_ID}
+        try:
+            admin_rows = sb.table("admins").select("user_id").execute()
+            for row in (admin_rows.data or []):
+                admin_ids.add(row["user_id"])
+        except Exception as e:
+            logger.error(f"[SetCommand] admin fetch error: {e}")
+
+        ok_count = 0
+        for admin_id in admin_ids:
+            r_admin = await tg_post("setMyCommands", {
+                "commands": admin_commands,
+                "scope": {"type": "chat", "chat_id": admin_id}
+            })
+            if r_admin.get("ok"):
+                ok_count += 1
+
+        if r_default.get("ok"):
+            await send_msg(chat_id,
+                f"✅ Command list set হয়েছে!\n\n"
+                f"👤 User-দের জন্য: {len(user_commands)}টি command\n"
+                f"👑 {ok_count}/{len(admin_ids)} Admin-দের জন্য: {len(admin_commands)}টি command"
+            )
         else:
-            await send_msg(chat_id, f"❌ Error: {r.get('description')}")
+            await send_msg(chat_id, f"❌ Error: {r_default.get('description')}")
     elif text.startswith("/livetime"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
@@ -4332,9 +4370,10 @@ async def save_bookmark(request: Request):
             "question_index": data.get("question_index"),
             "question_data": data.get("question_data"),
             "topic": data.get("topic"), "page_number": data.get("page")
-        }).execute()
+        }, on_conflict="user_id,cache_id,question_index").execute()
         return JSONResponse({"ok": True})
     except Exception as e:
+        logger.error(f"[Bookmark] save error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.delete("/api/bookmark")
