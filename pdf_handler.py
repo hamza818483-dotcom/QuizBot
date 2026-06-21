@@ -82,12 +82,18 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 -MUST বানাতে হবে exactly {count} টি MCQ, কম বেশি নয়
 -Highest quality MCQ বানাবে
 
+🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
+-Source image-এর মূল ভাষা যা থাকবে (Bengali বা English), Question + Options + Explanation সবকিছু সেই একই ভাষায় লিখতে হবে
+-Source ইংরেজি হলে পুরো MCQ ইংরেজিতে লিখবে — বাংলায় translate করা সম্পূর্ণ নিষেধ
+-Source বাংলা হলে পুরো MCQ বাংলায় লিখবে — ইংরেজিতে translate করা সম্পূর্ণ নিষেধ
+-Mixed-language source হলে, যে অংশ থেকে প্রশ্ন বানাচ্ছো সেই অংশের ভাষা অনুসরণ করবে
+
 💥প্রশ্ন: (ছোট, ১/১.৫/২ লাইন)
 💥অপশন: (৪টি, ছোট+মিক্সড সোর্স থেকে)
 -অপশনে সঠিক উত্তর অবশ্যই একটিই থাকবে
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
 💥উত্তর: A/B/C/D — different options এ হতে হবে
-💥ব্যাখ্যা: Bengali, max 200 chars, source থেকে
+💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
 
 Topic: {topic}
 Page: {page}
@@ -108,6 +114,12 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 -MAXIMUM possible MCQ বানাবে — প্রতিটি লাইন, বক্স, তথ্য, সোর্স use করে
 -তথ্য কম থাকলে minimum 10 টি
 
+🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
+-Source image-এর মূল ভাষা যা থাকবে (Bengali বা English), Question + Options + Explanation সবকিছু সেই একই ভাষায় লিখতে হবে
+-Source ইংরেজি হলে পুরো MCQ ইংরেজিতে লিখবে — বাংলায় translate করা সম্পূর্ণ নিষেধ
+-Source বাংলা হলে পুরো MCQ বাংলায় লিখবে — ইংরেজিতে translate করা সম্পূর্ণ নিষেধ
+-Mixed-language source হলে, যে অংশ থেকে প্রশ্ন বানাচ্ছো সেই অংশের ভাষা অনুসরণ করবে
+
 💥প্রশ্ন: (ছোট, ১/১.৫/২ লাইন)
 -সোর্স থেকে সকল টাইপের প্রশ্ন
 -যতভাবে প্রশ্ন আসতে পারে সব বানাবে
@@ -115,7 +127,7 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 -অপশনে সঠিক উত্তর একটিই
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
 💥উত্তর: A/B/C/D — different options এ হতে হবে
-💥ব্যাখ্যা: Bengali, max 200 chars, source থেকে
+💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
 
 Topic: {topic}
 Page: {page}
