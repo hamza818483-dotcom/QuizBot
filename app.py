@@ -3658,14 +3658,15 @@ async def handle_error_command(msg: dict):
         await send_msg(chat_id, "✅ কোনো error পাওয়া যায়নি! Bot ক্লিন আছে।")
         return
 
+    import html as _html
     lines = [f"🛑 <b>সাম্প্রতিক {len(errors)}টি Error</b>\n"]
     for i, e in enumerate(errors, 1):
         ts = e.get("created_at")
         when = datetime.fromtimestamp(ts, pytz.timezone("Asia/Dhaka")).strftime("%d-%b %I:%M %p") if ts else "N/A"
-        fname = (e.get("filename") or "?").split("/")[-1]
+        fname = _html.escape((e.get("filename") or "?").split("/")[-1])
         lineno = e.get("lineno") or "?"
-        func = e.get("funcname") or "?"
-        message = (e.get("message") or "")[:300]
+        func = _html.escape(e.get("funcname") or "?")
+        message = _html.escape((e.get("message") or "")[:300])
         lines.append(
             f"<b>{i}.</b> 📄 <code>{fname}:{lineno}</code> — <code>{func}()</code>\n"
             f"🕐 {when}\n"
