@@ -459,11 +459,16 @@ async def handle_start(msg: dict):
         )
     else:
         await send_msg(chat_id,
-            "🌟 <b>ATLAS MCQ Bot</b>\n\n"
+            f"🌟 <b>স্বাগতম {uname}..!</b>\n\n"
+            "🚀 <b>ATLAS MCQ Bot</b> এ আপনাকে স্বাগতম!\n\n"
             "📚 <b>তোমার জন্য available commands:</b>\n\n"
-            "🔖 <code>/bm</code> — Bookmark PDF বানাও (Practice Sheet)\n"
-            "🎯 <code>/bmexam</code> — Bookmark MCQ থেকে Quiz দাও\n\n"
-            "📌 Quiz link পেলে সরাসরি শুরু হবে!\n\n"
+            "🔖 <code>/bm</code> — Bookmark করা PDF বানাও (Practice Sheet)\n"
+            "🎯 <code>/bmexam</code> — Bookmark MCQ থেকে Quiz দাও\n"
+            "📸 <code>/pdfc</code> — একাধিক Image → একটা PDF বানাও\n"
+            "✅ <code>/done</code> — Image collection শেষ করো\n"
+            "❌ <code>/cancel</code> — চলমান কাজ বাতিল করো\n\n"
+            "📌 কোনো Quiz link পেলে সরাসরি ক্লিক করলেই কুইজ শুরু হয়ে যাবে!\n\n"
+            "❓ <code>/help</code> — আবার এই মেনু দেখতে চাইলে\n\n"
             "🚀 ATLAS — Atlascourses.com"
         )
 
@@ -3769,6 +3774,98 @@ async def process_update(update: dict):
 # ============================================================
 # MESSAGE HANDLER
 # ============================================================
+async def set_bot_commands(notify_chat_id: int = None):
+    """v1.1: register Telegram's '/' command menu for both default (user) and
+    admin/owner scopes. Called automatically on every bot startup (so the
+    menu is always in sync after a deploy) and also via /setcommand for a
+    manual refresh."""
+    # ---- ADMIN/OWNER command list (full) ----
+    admin_commands = [
+        {"command": "start", "description": "Bot শুরু করো / সব commands দেখো"},
+        {"command": "help", "description": "সব commands ও ব্যবহার দেখো"},
+        {"command": "pdf", "description": "PDF থেকে MCQ generate করো"},
+        {"command": "pdfm", "description": "PDF pagewise MCQ with image"},
+        {"command": "img", "description": "Image থেকে MCQ poll channel-এ পাঠাও"},
+        {"command": "txt", "description": "Text থেকে MCQ poll"},
+        {"command": "csv", "description": "CSV থেকে channel poll"},
+        {"command": "csvS", "description": "CSV থেকে sequential poll"},
+        {"command": "live", "description": "CSV দিয়ে Live Quiz শুরু করো"},
+        {"command": "livetime", "description": "Live Quiz-এর প্রতি প্রশ্নের সময় set করো"},
+        {"command": "channel", "description": "Channel/Group add করো (custom name সহ)"},
+        {"command": "channelist", "description": "Channel list দেখো"},
+        {"command": "tagQ", "description": "Poll-এ tag set করো"},
+        {"command": "expQ", "description": "Explanation footer set করো"},
+        {"command": "bm", "description": "Bookmark PDF বানাও"},
+        {"command": "bmexam", "description": "Bookmark MCQ থেকে Quiz দাও"},
+        {"command": "permit", "description": "Admin add করো"},
+        {"command": "remove", "description": "Admin remove করো"},
+        {"command": "pinon", "description": "Auto-pin চালু করো"},
+        {"command": "pinoff", "description": "Auto-pin বন্ধ করো"},
+        {"command": "info2", "description": "Bot stats দেখো"},
+        {"command": "pdfc", "description": "Image collection শুরু করো"},
+        {"command": "done", "description": "Image collection শেষ করো — PDF বানাও"},
+        {"command": "q", "description": "CSV থেকে D1 quiz তৈরি করো"},
+        {"command": "qlist", "description": "সব D1 quiz দেখো"},
+        {"command": "qdel", "description": "D1 quiz delete করো"},
+        {"command": "pre", "description": "Quiz preview image set করো"},
+        {"command": "info", "description": "Quiz details দেখো"},
+        {"command": "send", "description": "Quiz share করো channel-এ"},
+        {"command": "collect", "description": "Poll collect mode চালু করো"},
+        {"command": "merge", "description": "Collected polls merge করো"},
+        {"command": "convert", "description": "Quiz → CSV export করো"},
+        {"command": "error", "description": "সাম্প্রতিক bot error দেখো"},
+        {"command": "setcommand", "description": "Bot commands register করো (Owner)"},
+    ]
+
+    # ---- USER command list (everything a regular user can actually use) ----
+    user_commands = [
+        {"command": "start", "description": "Bot শুরু করো"},
+        {"command": "help", "description": "সাহায্য / সব commands দেখো"},
+        {"command": "bm", "description": "🔖 Bookmark PDF বানাও"},
+        {"command": "bmexam", "description": "🎯 Bookmark MCQ থেকে Quiz দাও"},
+        {"command": "pdfc", "description": "📸 একাধিক Image → PDF বানান"},
+        {"command": "done", "description": "✅ Image collection শেষ করো"},
+        {"command": "cancel", "description": "❌ চলমান কাজ বাতিল করো"},
+    ]
+
+    r_default = await tg_post("setMyCommands", {
+        "commands": user_commands,
+        "scope": {"type": "default"}
+    })
+
+    admin_ids = {OWNER_ID}
+    try:
+        admin_rows = sb.table("admins").select("user_id").execute()
+        for row in (admin_rows.data or []):
+            try:
+                admin_ids.add(int(row["user_id"]))
+            except (TypeError, ValueError):
+                logger.error(f"[SetCommand] invalid admin user_id: {row.get('user_id')}")
+    except Exception as e:
+        logger.error(f"[SetCommand] admin fetch error: {e}")
+
+    ok_count = 0
+    for admin_id in admin_ids:
+        r_admin = await tg_post("setMyCommands", {
+            "commands": admin_commands,
+            "scope": {"type": "chat", "chat_id": admin_id}
+        })
+        if r_admin.get("ok"):
+            ok_count += 1
+        else:
+            logger.error(f"[SetCommand] failed for admin {admin_id}: {r_admin.get('description')}")
+
+    if notify_chat_id is not None:
+        if r_default.get("ok"):
+            await send_msg(notify_chat_id,
+                f"✅ Command list set হয়েছে!\n\n"
+                f"👤 User-দের জন্য: {len(user_commands)}টি command\n"
+                f"👑 {ok_count}/{len(admin_ids)} Admin-দের জন্য: {len(admin_commands)}টি command"
+            )
+        else:
+            await send_msg(notify_chat_id, f"❌ Error: {r_default.get('description')}")
+    return r_default.get("ok"), ok_count, len(admin_ids)
+
 async def handle_message(msg: dict):
     text = msg.get("text", "").strip()
     chat_id = msg["chat"]["id"]
@@ -3876,94 +3973,13 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         asyncio.create_task(handle_live_command(msg))
+
+
     elif text == "/setcommand":
         if uid != OWNER_ID:
             await send_msg(chat_id, "❌ Owner only!")
             return
-
-        # ---- ADMIN/OWNER command list (full) ----
-        admin_commands = [
-            {"command": "start", "description": "Bot শুরু করো / সব commands দেখো"},
-            {"command": "help", "description": "সব commands ও ব্যবহার দেখো"},
-            {"command": "pdf", "description": "PDF থেকে MCQ generate করো"},
-            {"command": "pdfm", "description": "PDF pagewise MCQ with image"},
-            {"command": "img", "description": "Image থেকে MCQ poll channel-এ পাঠাও"},
-            {"command": "txt", "description": "Text থেকে MCQ poll"},
-            {"command": "csv", "description": "CSV থেকে channel poll"},
-            {"command": "csvS", "description": "CSV থেকে sequential poll"},
-            {"command": "live", "description": "CSV দিয়ে Live Quiz শুরু করো"},
-            {"command": "livetime", "description": "Live Quiz-এর প্রতি প্রশ্নের সময় set করো"},
-            {"command": "channel", "description": "Channel/Group add করো (custom name সহ)"},
-            {"command": "channelist", "description": "Channel list দেখো"},
-            {"command": "tagQ", "description": "Poll-এ tag set করো"},
-            {"command": "expQ", "description": "Explanation footer set করো"},
-            {"command": "bm", "description": "Bookmark PDF বানাও"},
-            {"command": "bmexam", "description": "Bookmark MCQ থেকে Quiz দাও"},
-            {"command": "permit", "description": "Admin add করো"},
-            {"command": "remove", "description": "Admin remove করো"},
-            {"command": "pinon", "description": "Auto-pin চালু করো"},
-            {"command": "pinoff", "description": "Auto-pin বন্ধ করো"},
-            {"command": "info2", "description": "Bot stats দেখো"},
-            {"command": "pdfc", "description": "Image collection শুরু করো"},
-            {"command": "done", "description": "Image collection শেষ করো — PDF বানাও"},
-            {"command": "q", "description": "CSV থেকে D1 quiz তৈরি করো"},
-            {"command": "qlist", "description": "সব D1 quiz দেখো"},
-            {"command": "qdel", "description": "D1 quiz delete করো"},
-            {"command": "pre", "description": "Quiz preview image set করো"},
-            {"command": "info", "description": "Quiz details দেখো"},
-            {"command": "send", "description": "Quiz share করো channel-এ"},
-            {"command": "collect", "description": "Poll collect mode চালু করো"},
-            {"command": "merge", "description": "Collected polls merge করো"},
-            {"command": "convert", "description": "Quiz → CSV export করো"},
-            {"command": "error", "description": "সাম্প্রতিক bot error দেখো"},
-            {"command": "setcommand", "description": "Bot commands register করো (Owner)"},
-        ]
-
-        # ---- USER command list (minimal) ----
-        user_commands = [
-            {"command": "start", "description": "Bot শুরু করো"},
-            {"command": "help", "description": "ব্যবহার নির্দেশিকা দেখো"},
-            {"command": "bm", "description": "Bookmark PDF বানাও"},
-            {"command": "bmexam", "description": "Bookmark MCQ থেকে Quiz দাও"},
-        ]
-
-        # Default scope → সব normal user এই list দেখবে
-        r_default = await tg_post("setMyCommands", {
-            "commands": user_commands,
-            "scope": {"type": "default"}
-        })
-
-        # প্রতিটা admin/owner chat-এ আলাদা scope দিয়ে full list set করো
-        admin_ids = {OWNER_ID}
-        try:
-            admin_rows = sb.table("admins").select("user_id").execute()
-            for row in (admin_rows.data or []):
-                try:
-                    admin_ids.add(int(row["user_id"]))
-                except (TypeError, ValueError):
-                    logger.error(f"[SetCommand] invalid admin user_id: {row.get('user_id')}")
-        except Exception as e:
-            logger.error(f"[SetCommand] admin fetch error: {e}")
-
-        ok_count = 0
-        for admin_id in admin_ids:
-            r_admin = await tg_post("setMyCommands", {
-                "commands": admin_commands,
-                "scope": {"type": "chat", "chat_id": admin_id}
-            })
-            if r_admin.get("ok"):
-                ok_count += 1
-            else:
-                logger.error(f"[SetCommand] failed for admin {admin_id}: {r_admin.get('description')}")
-
-        if r_default.get("ok"):
-            await send_msg(chat_id,
-                f"✅ Command list set হয়েছে!\n\n"
-                f"👤 User-দের জন্য: {len(user_commands)}টি command\n"
-                f"👑 {ok_count}/{len(admin_ids)} Admin-দের জন্য: {len(admin_commands)}টি command"
-            )
-        else:
-            await send_msg(chat_id, f"❌ Error: {r_default.get('description')}")
+        await set_bot_commands(notify_chat_id=chat_id)
     elif text.startswith("/livetime"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
@@ -4489,3 +4505,13 @@ async def startup():
         logger.error("[App] BOT_TOKEN missing!")
         return
     logger.info("[App] Using CF Worker proxy for TG API")
+    try:
+        ok, admin_ok, admin_total = await set_bot_commands()
+        logger.info(f"[App] Command menu set on startup: default={ok}, admins={admin_ok}/{admin_total}")
+    except Exception as e:
+        logger.error(f"[App] Failed to set command menu on startup: {e}")
+    try:
+        ok, admin_ok, admin_total = await set_bot_commands()
+        logger.info(f"[App] Command menu set on startup: default={ok}, admins={admin_ok}/{admin_total}")
+    except Exception as e:
+        logger.error(f"[App] Failed to set command menu on startup: {e}")
