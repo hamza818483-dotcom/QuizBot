@@ -42,12 +42,45 @@ TG_API = f"{CF_WORKER_URL}/tg-proxy"
 # ============================================================
 # SUPABASE CLIENT
 # ============================================================
+import httpx as _httpx
+
 try:
     sb = create_client(SUPABASE_URL, SUPABASE_KEY)
     logger.info("[DB] Supabase connected")
 except Exception as e:
     logger.error(f"[DB] Supabase connection failed: {e}")
     sb = None
+
+def _patch_supabase_execute_with_retry():
+    """v1.1: monkey-patch postgrest's execute() so any sb.table(...)...execute()
+    call auto-retries once on transient HTTP/2 ConnectionTerminated errors.
+    The underlying connection can be closed server-side after being idle
+    (load balancer / idle timeout); recreating the global Supabase client
+    opens a fresh connection. This requires zero changes at any of the
+    existing sb.table(...) call sites across the codebase."""
+    try:
+        from postgrest._sync.request_builder import SyncQueryRequestBuilder
+    except ImportError:
+        logger.warning("[DB] Could not patch postgrest execute() — retry-on-disconnect disabled")
+        return
+
+    original_execute = SyncQueryRequestBuilder.execute
+
+    def patched_execute(self):
+        try:
+            return original_execute(self)
+        except (_httpx.RemoteProtocolError, _httpx.ConnectError, _httpx.ReadError) as e:
+            global sb
+            logger.warning(f"[DB] Supabase connection error ({type(e).__name__}) — recreating client and retrying once")
+            try:
+                sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+            except Exception as ce:
+                logger.error(f"[DB] Supabase client recreation failed: {ce}")
+            return original_execute(self)
+
+    SyncQueryRequestBuilder.execute = patched_execute
+
+_patch_supabase_execute_with_retry()
 
 # ============================================================
 # FASTAPI APP (single shared instance)
