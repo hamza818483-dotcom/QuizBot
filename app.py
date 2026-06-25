@@ -76,6 +76,9 @@ LIVE_TIMERS = {}      # channel_id -> timer task
 # IMAGE COLLECTION (for /pdf image→PDF feature)
 IMG_COLLECTION = {}   # uid -> {"imgs": [], "collecting": bool}
 
+# v1.2: /ping status command — set at startup, used to compute uptime
+BOT_START_TIME = time.time()
+
 # DEFAULT LIVE QUIZ TIME (seconds per question)
 DEFAULT_LIVE_TIME = 10
 
@@ -4025,7 +4028,43 @@ async def handle_message(msg: dict):
     elif text.startswith("/error") or text.startswith("/errors"):
         await handle_error_command(msg)
     elif text == "/ping":
-        await send_msg(chat_id, "🏓 Pong! ATLAS Bot Online!")
+        try:
+            uptime_seconds = int(time.time() - BOT_START_TIME)
+            days, rem = divmod(uptime_seconds, 86400)
+            hours, rem = divmod(rem, 3600)
+            minutes, _ = divmod(rem, 60)
+            uptime_str = (f"{days}d " if days else "") + f"{hours}h {minutes}m"
+
+            bd_tz = pytz.timezone("Asia/Dhaka")
+            started_at = datetime.fromtimestamp(BOT_START_TIME, bd_tz).strftime("%d-%b %I:%M %p")
+
+            today_start = datetime.now(bd_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start_ts = int(today_start.timestamp())
+
+            total_users = 0
+            daily_active = 0
+            try:
+                total_r = sb.table("pdf_users").select("user_id", count="exact").execute()
+                total_users = total_r.count or 0
+                active_r = sb.table("pdf_users").select("user_id", count="exact") \
+                    .gte("last_seen", today_start_ts).execute()
+                daily_active = active_r.count or 0
+            except Exception as e:
+                logger.error(f"[Ping] user count error: {e}")
+
+            key_count = len(key_rotator.keys)
+
+            await send_msg(chat_id,
+                "🏓 <b>Pong! ATLAS Bot Online</b>\n\n"
+                f"🕐 চালু হয়েছে: {started_at}\n"
+                f"⏱ Active আছে: {uptime_str}\n"
+                f"🔑 Gemini Keys: {key_count}\n"
+                f"👥 Total Users: {total_users}\n"
+                f"🟢 আজকে Active: {daily_active}"
+            )
+        except Exception as e:
+            logger.error(f"[Ping] error: {e}")
+            await send_msg(chat_id, f"🏓 Pong! (stats error: {e})")
 
 # ============================================================
 # CALLBACK HANDLER
@@ -4508,6 +4547,8 @@ async def health():
 
 @app.on_event("startup")
 async def startup():
+    global BOT_START_TIME
+    BOT_START_TIME = time.time()
     logger.info("[App] ATLAS BOT v4.1 starting...")
     if not BOT_TOKEN:
         logger.error("[App] BOT_TOKEN missing!")
