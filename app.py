@@ -3833,6 +3833,14 @@ async def set_bot_commands(notify_chat_id: int = None):
         "scope": {"type": "default"}
     })
 
+    # v1.1: explicitly set the menu button (the icon next to the chat box)
+    # to show the command list. Without this, some Telegram clients don't
+    # surface the '/' menu icon even if setMyCommands succeeded.
+    try:
+        await tg_post("setChatMenuButton", {"menu_button": {"type": "commands"}})
+    except Exception as e:
+        logger.error(f"[SetCommand] setChatMenuButton error: {e}")
+
     admin_ids = {OWNER_ID}
     try:
         admin_rows = sb.table("admins").select("user_id").execute()
