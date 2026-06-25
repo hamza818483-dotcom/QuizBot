@@ -3996,7 +3996,7 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         await handle_livetime(msg)
-    elif text.startswith("/pin"):
+    elif text == "/pin" or text.startswith("/pin "):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
