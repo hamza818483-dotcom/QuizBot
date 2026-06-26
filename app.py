@@ -1477,6 +1477,13 @@ def _build_bm_html(bookmarks: list) -> str:
     items = ""
     for i, bm in enumerate(bookmarks, 1):
         q = bm.get("question_data", {})
+        if isinstance(q, str):
+            try:
+                q = json.loads(q)
+            except (json.JSONDecodeError, TypeError):
+                q = {}
+        if not isinstance(q, dict):
+            q = {}
         opts = q.get("options", [])
         ans = q.get("answer", "")  # "A","B","C","D"
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(ans, 0)
@@ -3131,6 +3138,9 @@ async def qs_get(uid: int) -> dict:
     if uid in QUIZ_STATE:
         return QUIZ_STATE[uid]
     val = await d1_get(f"qs_{uid}")
+    if val and not isinstance(val, dict):
+        logger.warning(f"[QS] qs_get returned non-dict for uid={uid}: {type(val)} — discarding")
+        val = None
     if val:
         QUIZ_STATE[uid] = val
     return val
@@ -3302,7 +3312,7 @@ async def handle_poll_answer(pa: dict):
 
         uid = pa["user"]["id"]
         st = await qs_get(uid)
-        if not st or pa.get("poll_id") != st["poll_id"] or st["answered"]:
+        if not st or not isinstance(st, dict) or pa.get("poll_id") != st.get("poll_id") or st.get("answered"):
             return
 
         st["answered"] = True
