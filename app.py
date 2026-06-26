@@ -1589,7 +1589,12 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
         mcqs = []
         for bm in bookmarks:
             q = bm.get("question_data", {})
-            if q:
+            if isinstance(q, str):
+                try:
+                    q = json.loads(q)
+                except (json.JSONDecodeError, TypeError):
+                    q = {}
+            if q and isinstance(q, dict):
                 mcqs.append(q)
 
         if not mcqs:
