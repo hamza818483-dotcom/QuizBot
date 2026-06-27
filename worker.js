@@ -43,7 +43,24 @@ export default {
       return await forwardToHF(request, env);
     }
 
+    // Health check
+    if (url.pathname === '/health') return jsonResp({ ok: true, status: 'alive' });
+
     return jsonResp({ ok: true, service: 'ATLAS Bot Proxy', version: '2.0' });
+  },
+
+  // ── Cron: প্রতি 5 মিনিটে HF Space ping করে alive রাখে ──
+  async scheduled(event, env) {
+    const HF_URL = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
+    try {
+      const r = await fetch(HF_URL + '/health', {
+        method: 'GET',
+        signal: AbortSignal.timeout(10000),
+      });
+      console.log(`[cron] HF ping: ${r.status}`);
+    } catch(e) {
+      console.error(`[cron] HF ping failed: ${e.message}`);
+    }
   }
 };
 
