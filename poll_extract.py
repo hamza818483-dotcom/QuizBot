@@ -199,10 +199,10 @@ def build_csv(polls: list) -> bytes:
     return output.getvalue().encode("utf-8-sig")
 
 
-# ── D1 quiz save ─────────────────────────────────────────────
+# ── D1 quiz save + Supabase backup ──────────────────────────
 async def save_quiz_to_d1(polls: list, name: str, uid: int) -> str | None:
     """
-    polls list → D1 quizzes table এ save করে quiz_id return করে।
+    polls list → D1 quizzes table এ save + Supabase quiz_backups এ backup।
     quiz.py এর format: {question, options, answer_index (0-based int), explanation}
     """
     from core import d1_run
@@ -213,33 +213,58 @@ async def save_quiz_to_d1(polls: list, name: str, uid: int) -> str | None:
         questions.append({
             "question":    p["question"],
             "options":     p["options"],
-            "answer_index": p["correct_idx"],   # 0-based int — quiz.py এর exact format
+            "answer_index": p["correct_idx"],
             "explanation": p["explanation"],
         })
 
     quiz_id = "qz_" + gen_session_id()[:8]
 
+    # ── D1 save ──
+    d1_ok = False
     try:
         await d1_run(
             "INSERT OR REPLACE INTO quizzes "
             "(id, name, description, timer, shuffle, csv_data, tag, exp_footer, created_by) "
             "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             [
-                quiz_id,
-                name,
+                quiz_id, name,
                 f"Poll extract — {len(questions)} প্রশ্ন",
-                30,
-                0,
+                30, 0,
                 json.dumps(questions),
-                "",
-                "",
-                uid,
+                "", "", uid,
             ]
         )
-        return quiz_id
+        d1_ok = True
     except Exception as e:
         logger.error(f"[poll_extract] D1 save error: {e}")
-        return None
+
+    # ── Supabase backup ──
+    try:
+        from core import SUPABASE_URL, SUPABASE_KEY
+        import httpx
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        }
+        payload = {
+            "quiz_id": quiz_id,
+            "name": name,
+            "questions": questions,
+            "created_by": uid,
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/quiz_backups",
+                headers=headers,
+                json=payload,
+            )
+        logger.info(f"[poll_extract] Supabase backup ok: {quiz_id}")
+    except Exception as e:
+        logger.warning(f"[poll_extract] Supabase backup failed: {e}")
+
+    return quiz_id if (d1_ok) else None
 
 
 # ── Main handler ─────────────────────────────────────────────
