@@ -498,3 +498,43 @@ def build_back_url(channel_id, msg_id) -> Optional[str]:
 
 def source_msg_id(cache: dict):
     return cache.get("end_msg_id") or cache.get("image_msg_id")
+
+# ============================================================
+# WATERMARK (ported from AtlasMasterBot's services.py)
+# ============================================================
+def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
+    """Add a diagonal, semi-transparent text watermark to every page of a PDF."""
+    try:
+        import io as _io
+        from pypdf import PdfReader, PdfWriter
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.colors import Color
+
+        reader = PdfReader(_io.BytesIO(pdf_bytes))
+        writer = PdfWriter()
+
+        for page in reader.pages:
+            packet = _io.BytesIO()
+            c = canvas.Canvas(packet, pagesize=(float(page.mediabox.width), float(page.mediabox.height)))
+            c.setFont("Helvetica-Bold", 60)
+            c.setFillColor(Color(0, 0, 0, alpha=0.10))
+            page_width = float(page.mediabox.width)
+            page_height = float(page.mediabox.height)
+            c.saveState()
+            c.translate(page_width / 2, page_height / 2)
+            c.rotate(45)
+            c.drawCentredString(0, 0, watermark_text)
+            c.restoreState()
+            c.save()
+            packet.seek(0)
+            overlay = PdfReader(packet)
+            page.merge_page(overlay.pages[0])
+            writer.add_page(page)
+
+        buf = _io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+    except Exception as e:
+        logger.error(f"[Watermark] error: {e}")
+        return pdf_bytes
+

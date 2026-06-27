@@ -51,6 +51,7 @@ from core import (
     db_get_channels, db_save_last_quiz, db_get_last_quiz,
     build_back_url, source_msg_id,
     get_recent_errors, clear_error_logs,
+    add_watermark_to_pdf,
 )
 
 # D1 Quiz System (fully independent module — see quiz.py)
@@ -75,6 +76,10 @@ LIVE_TIMERS = {}      # channel_id -> timer task
 
 # IMAGE COLLECTION (for /pdf image→PDF feature)
 IMG_COLLECTION = {}   # uid -> {"imgs": [], "collecting": bool}
+
+# v1.2: /watermark feature — uid -> pdf_bytes (waiting for watermark text)
+WATERMARK_PENDING = {}
+
 
 # v1.2: /ping status command — set at startup, used to compute uptime
 BOT_START_TIME = time.time()
@@ -3704,6 +3709,59 @@ async def handle_error_command(msg: dict):
     await send_msg(chat_id, full_text)
 
 
+async def handle_watermark_command(msg: dict):
+    """v1.2: /watermark — ask the user to send a PDF, then ask for watermark
+    text, then return the watermarked PDF. Ported from AtlasMasterBot."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    WATERMARK_PENDING[uid] = {"step": "awaiting_pdf"}
+    await send_msg(chat_id, "📄 যে PDF-এ watermark বসাতে চান, সেটা পাঠান।")
+
+async def handle_watermark_document(msg: dict) -> bool:
+    """Called from the document/text router. Returns True if the message
+    was consumed by the watermark flow, False otherwise (so other PDF
+    handlers can still process it)."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    state = WATERMARK_PENDING.get(uid)
+    if not state:
+        return False
+
+    if state.get("step") == "awaiting_pdf":
+        doc = msg.get("document")
+        if not doc or not (doc.get("file_name") or "").lower().endswith(".pdf"):
+            await send_msg(chat_id, "❌ দয়া করে একটি PDF file পাঠান।")
+            return True
+        try:
+            pdf_bytes = await download_tg_file(doc["file_id"])
+        except Exception as e:
+            logger.error(f"[Watermark] download error: {e}")
+            await send_msg(chat_id, f"❌ PDF download করতে সমস্যা হয়েছে: {e}")
+            WATERMARK_PENDING.pop(uid, None)
+            return True
+        state["pdf_bytes"] = pdf_bytes
+        state["step"] = "awaiting_text"
+        await send_msg(chat_id, "✏️ Watermark-এ কী লেখা থাকবে? (যেমন: তোমার নাম/চ্যানেল)")
+        return True
+
+    if state.get("step") == "awaiting_text":
+        text = (msg.get("text") or "").strip()
+        if not text:
+            await send_msg(chat_id, "❌ দয়া করে watermark text লিখুন।")
+            return True
+        pdf_bytes = state.get("pdf_bytes")
+        WATERMARK_PENDING.pop(uid, None)
+        loading = await send_msg(chat_id, "⏳ Watermark বসানো হচ্ছে...")
+        try:
+            watermarked = add_watermark_to_pdf(pdf_bytes, text)
+            await send_document(chat_id, watermarked, filename="watermarked.pdf", caption="✅ Watermark বসানো হয়েছে!")
+        except Exception as e:
+            logger.error(f"[Watermark] process error: {e}")
+            await send_msg(chat_id, f"❌ Watermark বসাতে সমস্যা হয়েছে: {e}")
+        return True
+
+    return False
+
 async def handle_convert_command(msg: dict):
     """CSV ↔ JSON convert"""
     chat_id = msg["chat"]["id"]
@@ -3830,6 +3888,7 @@ async def set_bot_commands(notify_chat_id: int = None):
         {"command": "send", "description": "Quiz share করো channel-এ"},
         {"command": "collect", "description": "Poll collect mode চালু করো"},
         {"command": "merge", "description": "Collected polls merge করো"},
+        {"command": "watermark", "description": "PDF-এ watermark বসাও"},
         {"command": "convert", "description": "Quiz → CSV export করো"},
         {"command": "error", "description": "সাম্প্রতিক bot error দেখো"},
         {"command": "setcommand", "description": "Bot commands register করো (Owner)"},
@@ -3906,6 +3965,12 @@ async def handle_message(msg: dict):
     if msg.get("photo") or msg.get("document"):
         collected = await handle_incoming_image_for_collection(msg)
         if collected:
+            return
+
+    # v1.2: Watermark flow check (awaiting PDF, then awaiting text)
+    if uid in WATERMARK_PENDING:
+        consumed = await handle_watermark_document(msg)
+        if consumed:
             return
 
     # DB cleanup (every ~100 requests, random)
@@ -4038,6 +4103,8 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, "❌ Owner only!")
     elif text.startswith("/merge"):
         await handle_merge_command(msg)
+    elif text == "/watermark":
+        await handle_watermark_command(msg)
     elif text == "/convert":
         await handle_convert_command(msg)
     elif text.startswith("/error") or text.startswith("/errors"):
