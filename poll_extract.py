@@ -81,6 +81,10 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
             # Question text
             q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
 
+            # [SABAS] বা যেকোনো case → [ATLAS] replace
+            q_text = re.sub(r'\[sabas\]', '[ATLAS]', q_text, flags=re.IGNORECASE)
+            q_text = re.sub(r'\bsabas\b', 'ATLAS', q_text, flags=re.IGNORECASE)
+
             # Options
             options = []
             for ans in p.answers:
