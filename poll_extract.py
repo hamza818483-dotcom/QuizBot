@@ -25,22 +25,34 @@ SESSION_STR  = os.environ.get("SESSION_STRING", "")
 # ── Link parser ──────────────────────────────────────────────
 def parse_tg_link(link: str):
     """
-    Returns (channel_entity, msg_id)
-    Private:  t.me/c/1234567890/55  → (int(-1001234567890), 55)
-    Public:   t.me/mychannel/55     → ("mychannel", 55)
+    Returns (channel_entity, msg_id, topic_id)
+    Private:       t.me/c/123/456       → (int(-100123), 456, None)
+    Private topic: t.me/c/123/3/456     → (int(-100123), 456, 3)
+    Public:        t.me/mychan/456       → ("mychan", 456, None)
+    Public topic:  t.me/mychan/3/456    → ("mychan", 456, 3)
     """
     link = link.strip().rstrip("/")
+    # Private topic: t.me/c/{chat}/{topic}/{msg}
+    m = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", link)
+    if m:
+        return int(f"-100{m.group(1)}"), int(m.group(3)), int(m.group(2))
+    # Private: t.me/c/{chat}/{msg}
     m = re.search(r"t\.me/c/(\d+)/(\d+)", link)
     if m:
-        return int(f"-100{m.group(1)}"), int(m.group(2))
+        return int(f"-100{m.group(1)}"), int(m.group(2)), None
+    # Public topic: t.me/{username}/{topic}/{msg}
+    m = re.search(r"t\.me/([A-Za-z0-9_]+)/(\d+)/(\d+)", link)
+    if m:
+        return m.group(1), int(m.group(3)), int(m.group(2))
+    # Public: t.me/{username}/{msg}
     m = re.search(r"t\.me/([A-Za-z0-9_]+)/(\d+)", link)
     if m:
-        return m.group(1), int(m.group(2))
-    return None, None
+        return m.group(1), int(m.group(2)), None
+    return None, None, None
 
 
 # ── Telethon extract ─────────────────────────────────────────
-async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_cb=None) -> list:
+async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_cb=None, topic_id=None) -> list:
     """
     Telethon দিয়ে channel থেকে start_id→end_id range এর
     সব quiz poll extract করে list of dict return করে।
@@ -65,6 +77,15 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
             reverse=True,
         ):
             checked += 1
+
+            # Topic filter — group topic এর message হলে reply_to check করো
+            if topic_id and message.reply_to:
+                msg_topic = getattr(message.reply_to, "reply_to_top_id", None) or getattr(message.reply_to, "reply_to_msg_id", None)
+                if msg_topic != topic_id:
+                    continue
+            elif topic_id and not message.reply_to:
+                continue
+
             if not message.poll:
                 if progress_cb and checked % 100 == 0:
                     await progress_cb(checked, len(polls))
@@ -254,16 +275,18 @@ async def handle_poll_extract(msg: dict):
         )
         return
 
-    ch1, start_id = parse_tg_link(links[0])
-    ch2, end_id   = parse_tg_link(links[1])
+    ch1, start_id, topic1 = parse_tg_link(links[0])
+    ch2, end_id,   topic2 = parse_tg_link(links[1])
 
     if not ch1 or not start_id or not end_id:
         await send_msg(chat_id, "❌ Link parse হয়নি। সঠিক Telegram link দাও।")
         return
 
     if ch1 != ch2:
-        await send_msg(chat_id, "❌ দুটো link একই channel এর হতে হবে!")
+        await send_msg(chat_id, "❌ দুটো link একই channel/group এর হতে হবে!")
         return
+
+    topic_id = topic1 or topic2  # topic filter
 
     if start_id > end_id:
         start_id, end_id = end_id, start_id
@@ -279,7 +302,8 @@ async def handle_poll_extract(msg: dict):
 
     # Status message
     r = await send_msg(chat_id,
-        f"⏳ Scan করছি: {start_id} → {end_id} ({total} messages)...",
+        f"⏳ Scan করছি: {start_id} → {end_id} ({total} messages)"
+        + (f" [Topic: {topic_id}]" if topic_id else "") + "...",
         parse_mode="HTML"
     )
     status_id = r.get("result", {}).get("message_id")
@@ -294,7 +318,7 @@ async def handle_poll_extract(msg: dict):
 
     # Extract
     try:
-        polls = await extract_polls_telethon(ch1, start_id, end_id, progress_cb=progress)
+        polls = await extract_polls_telethon(ch1, start_id, end_id, progress_cb=progress, topic_id=topic_id)
     except Exception as e:
         logger.error(f"[poll_extract] Telethon error: {e}")
         await send_msg(chat_id, f"❌ Error: {e}")
