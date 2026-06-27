@@ -2570,7 +2570,7 @@ def _get_bd_time() -> str:
 # এর একটা PDF (CSV-এর option ছাড়া) admin-কে পাঠানো হয়।
 # ============================================================
 RAPID_Q_INTERVAL = 10   # সেকেন্ড — প্রতি প্রশ্নের গ্যাপ
-RAPID_ANS_DELAY = 12    # সেকেন্ড — প্রশ্ন আসার পর উত্তর reveal করতে কত সময়
+RAPID_ANS_DELAY = 8     # সেকেন্ড — প্রশ্ন আসার পর উত্তর reveal (8s পর answer, তারপর 2s এ নতুন প্রশ্ন)
 
 _RAPID_ANS_EMOJIS = ["✅", "🎯", "💡", "🔥", "📌", "⭐"]
 
@@ -2824,13 +2824,23 @@ async def _run_rapid_job(job_id: str):
             "reply_to_message_id": topic_msg_id
         })
 
-        # Only Q + A + Explanation PDF (no CSV options) → admin-কে পাঠানো
+        # PDF → channel-এ topic_msg reply হিসেবে + admin-এও কপি
         try:
             html_out = _build_rapid_pdf_html(topic, mcqs)
             pdf_bytes = await _html_to_pdf(html_out)
             if pdf_bytes:
                 safe_topic = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:40] or "Rapid"
-                await send_document(admin_chat, pdf_bytes, f"{safe_topic}_Rapid_QA.pdf",
+                pdf_fname = f"{safe_topic}_Rapid_QA.pdf"
+                pdf_caption = (
+                    f"📄 <b>{topic}</b> — Rapid Fire Q+A\n"
+                    f"📝 {total} টি প্রশ্ন | উত্তর + ব্যাখ্যা সহ"
+                )
+                # Channel-এ first message (topic_msg) reply হিসেবে
+                await send_document(channel_id, pdf_bytes, pdf_fname,
+                    caption=pdf_caption, mime_type="application/pdf",
+                    reply_to_message_id=topic_msg_id)
+                # Admin-এও কপি
+                await send_document(admin_chat, pdf_bytes, pdf_fname,
                     caption=f"✅ \"{topic}\" Rapid Fire শেষ!\n📝 {total} টি প্রশ্ন\n📄 Q+A+Explanation PDF")
         except Exception as e:
             logger.error(f"[RAPID] PDF error: {e}")
