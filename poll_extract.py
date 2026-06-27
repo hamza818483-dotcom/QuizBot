@@ -44,10 +44,12 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
     """
     Telethon দিয়ে channel থেকে start_id→end_id range এর
     সব quiz poll extract করে list of dict return করে।
+    GetPollResultsRequest ব্যবহার করে vote ছাড়াই correct answer পায়।
     progress_cb(checked, found) — optional callback every 100 msgs
     """
     from telethon import TelegramClient
     from telethon.sessions import StringSession
+    from telethon.tl import functions
 
     polls = []
     client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
@@ -63,42 +65,69 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
             reverse=True,
         ):
             checked += 1
-            if message.poll:
-                p       = message.poll.poll
+            if not message.poll:
+                if progress_cb and checked % 100 == 0:
+                    await progress_cb(checked, len(polls))
+                continue
+
+            p = message.poll.poll
+
+            # Quiz poll only (non-quiz poll এ correct answer নেই)
+            if not getattr(p, "quiz", False):
+                if progress_cb and checked % 100 == 0:
+                    await progress_cb(checked, len(polls))
+                continue
+
+            # Question text
+            q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
+
+            # Options
+            options = []
+            for ans in p.answers:
+                opt = ans.text.text if hasattr(ans.text, "text") else str(ans.text)
+                options.append(opt)
+
+            # ── Correct answer: GetPollResultsRequest (vote ছাড়াই কাজ করে) ──
+            correct_idx = 0
+            explanation = ""
+            try:
+                poll_results = await client(functions.messages.GetPollResultsRequest(
+                    peer=channel,
+                    msg_id=message.id
+                ))
+                res = getattr(poll_results, "results", None)
+                if res and getattr(res, "results", None):
+                    for i, r in enumerate(res.results):
+                        if getattr(r, "correct", False):
+                            correct_idx = i
+                            break
+                if res and getattr(res, "solution", None):
+                    explanation = res.solution
+            except Exception as e:
+                # Fallback: message.poll.results থেকে try করো
                 results = message.poll.results
-
-                # Question text
-                q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
-
-                # Options
-                options = []
-                for ans in p.answers:
-                    opt = ans.text.text if hasattr(ans.text, "text") else str(ans.text)
-                    options.append(opt)
-
-                # Correct answer (0-based index)
-                correct_idx = 0
-                if results and results.results:
+                if results and getattr(results, "results", None):
                     for i, r in enumerate(results.results):
                         if getattr(r, "correct", False):
                             correct_idx = i
                             break
-
-                # Explanation
-                explanation = ""
                 if results and getattr(results, "solution", None):
                     explanation = results.solution
+                logger.warning(f"[poll_extract] GetPollResults fallback msg {message.id}: {e}")
 
-                polls.append({
-                    "question":    q_text,
-                    "options":     options,
-                    "correct_idx": correct_idx,       # 0-based
-                    "answer":      correct_idx + 1,   # 1-based for CSV
-                    "explanation": explanation,
-                })
+            polls.append({
+                "question":    q_text,
+                "options":     options,
+                "correct_idx": correct_idx,       # 0-based
+                "answer":      correct_idx + 1,   # 1-based for CSV
+                "explanation": explanation,
+            })
 
             if progress_cb and checked % 100 == 0:
                 await progress_cb(checked, len(polls))
+
+            # Rate limit এড়াতে ছোট delay
+            await asyncio.sleep(0.05)
 
     finally:
         await client.disconnect()
@@ -136,22 +165,17 @@ def build_csv(polls: list) -> bytes:
 async def save_quiz_to_d1(polls: list, name: str, uid: int) -> str | None:
     """
     polls list → D1 quizzes table এ save করে quiz_id return করে।
-    quiz_id format: qz_XXXXXXXX (existing convention থেকে)
-    Returns quiz_id বা None on failure.
+    quiz.py এর format: {question, options, answer_index (0-based int), explanation}
     """
-    from core import d1_run, d1_select
+    from core import d1_run
     from pdf_handler import gen_session_id
 
-    # D1 এর existing format এ convert করো
-    # _parse_csv_bytes যা return করে সেই format
     questions = []
-    ans_map = {0: "A", 1: "B", 2: "C", 3: "D", 4: "E"}
     for p in polls:
-        opts = p["options"]
         questions.append({
             "question":    p["question"],
-            "options":     opts,
-            "answer":      ans_map.get(p["correct_idx"], "A"),
+            "options":     p["options"],
+            "answer_index": p["correct_idx"],   # 0-based int — quiz.py এর exact format
             "explanation": p["explanation"],
         })
 
@@ -166,8 +190,8 @@ async def save_quiz_to_d1(polls: list, name: str, uid: int) -> str | None:
                 quiz_id,
                 name,
                 f"Poll extract — {len(questions)} প্রশ্ন",
-                30,          # default timer 30s
-                0,           # no shuffle
+                30,
+                0,
                 json.dumps(questions),
                 "",
                 "",
