@@ -683,70 +683,29 @@ async def handle_livetime(msg: dict):
         await send_msg(chat_id, f"⚡ Current live quiz time: {current} সেকেন্ড\n\nChange: /livetime 15")
 
 # ============================================================
-# FEATURE: /pollcsv <link1> <link2>
-# Public/private channel এর poll range থেকে CSV extract
-# Bot must be admin/member of that channel
+# FEATURE: /poll — Channel poll range → CSV (Telethon, no forward)
 # ============================================================
 
+SESSION_STRING = os.environ.get("SESSION_STRING", "")
+
 def _parse_tg_link(link: str):
-    """
-    Parse Telegram message link → (channel_id, msg_id)
-    Supports:
-      https://t.me/c/1234567890/55  → ("-1001234567890", 55)
-      https://t.me/mychannel/55     → ("@mychannel", 55)
-    Returns (None, None) on failure.
-    """
     link = link.strip().rstrip("/")
-    # private: t.me/c/{numeric}/{msg_id}
     m = re.search(r"t\.me/c/(\d+)/(\d+)", link)
     if m:
-        return f"-100{m.group(1)}", int(m.group(2))
-    # public: t.me/{username}/{msg_id}
+        return int(f"-100{m.group(1)}"), int(m.group(2))
     m = re.search(r"t\.me/([A-Za-z0-9_]+)/(\d+)", link)
     if m:
-        return f"@{m.group(1)}", int(m.group(2))
+        return m.group(1), int(m.group(2))
     return None, None
 
 
-async def _forward_and_get_poll(from_chat_id, msg_id: int, to_chat_id) -> dict | None:
-    """
-    একটা message forward করে poll content বের করে।
-    Returns poll dict বা None।
-    """
-    result = await tg_post("forwardMessage", {
-        "chat_id": to_chat_id,
-        "from_chat_id": from_chat_id,
-        "message_id": msg_id,
-    })
-    if not result.get("ok"):
-        return None
-    forwarded = result.get("result", {})
-    poll = forwarded.get("poll")
-    # Forwarded message delete করো (cleanup)
-    fwd_msg_id = forwarded.get("message_id")
-    if fwd_msg_id:
-        asyncio.create_task(tg_post("deleteMessage", {
-            "chat_id": to_chat_id,
-            "message_id": fwd_msg_id,
-        }))
-    return poll  # None if not a poll
-
-
 async def handle_pollcsv_command(msg: dict):
-    """
-    /pollcsv <link1>
-    <link2>
-
-    channel এর link1 থেকে link2 পর্যন্ত সব quiz poll extract করে CSV দেবে।
-    CSV format: question,option_a,option_b,option_c,option_d,correct,explanation
-    """
     chat_id = msg["chat"]["id"]
-    uid = msg["from"]["id"]
     text = msg.get("text", "").strip()
 
-    # Remove command prefix
-    body = re.sub(r"^/poll\s*", "", text, flags=re.IGNORECASE).strip()
-    links = [l.strip() for l in body.split() if "t.me/" in l]
+    body = re.sub(r"^/poll\s*|^/pollcsv\s*|^/pcsv\s*", "", text, flags=re.IGNORECASE).strip()
+    links = [l.strip() for l in body.splitlines() + body.split() if "t.me/" in l]
+    links = list(dict.fromkeys(links))  # deduplicate, preserve order
 
     if len(links) < 2:
         await send_msg(chat_id,
@@ -754,10 +713,7 @@ async def handle_pollcsv_command(msg: dict):
             "📌 Format:\n"
             "<code>/poll\n"
             "https://t.me/c/.../101\n"
-            "https://t.me/c/.../250</code>\n\n"
-            "• প্রথম link = range start\n"
-            "• দ্বিতীয় link = range end\n"
-            "• Bot অবশ্যই সেই channel এর member/admin হতে হবে",
+            "https://t.me/c/.../250</code>",
             parse_mode="HTML"
         )
         return
@@ -766,10 +722,9 @@ async def handle_pollcsv_command(msg: dict):
     ch2, end_id   = _parse_tg_link(links[1])
 
     if not ch1 or not start_id or not end_id:
-        await send_msg(chat_id, "❌ Link parse করা গেল না। t.me/c/... বা t.me/username/... format ব্যবহার করো।")
+        await send_msg(chat_id, "❌ Link parse হয়নি। t.me/c/... বা t.me/username/... format দাও।")
         return
 
-    # Same channel validate
     if ch1 != ch2:
         await send_msg(chat_id, "❌ দুটো link একই channel এর হতে হবে!")
         return
@@ -778,65 +733,85 @@ async def handle_pollcsv_command(msg: dict):
         start_id, end_id = end_id, start_id
 
     total_range = end_id - start_id + 1
-    MAX_RANGE = 500
-    if total_range > MAX_RANGE:
-        await send_msg(chat_id,
-            f"❌ Range বড় ({total_range} messages)। সর্বোচ্চ {MAX_RANGE} messages এর মধ্যে রাখো।"
-        )
+    if total_range > 1000:
+        await send_msg(chat_id, f"❌ Range বড় ({total_range})। সর্বোচ্চ ১০০০ message এর মধ্যে রাখো।")
+        return
+
+    if not SESSION_STRING:
+        await send_msg(chat_id, "❌ SESSION_STRING set নেই। HF Space secrets এ add করো।")
         return
 
     status_msg = await send_msg(chat_id,
-        f"⏳ <b>{ch1}</b> থেকে message {start_id}→{end_id} scan করছি...\n"
-        f"({total_range} messages চেক হবে, একটু সময় লাগবে)",
+        f"⏳ Telethon দিয়ে scan করছি...\n"
+        f"Range: {start_id} → {end_id} ({total_range} messages)",
         parse_mode="HTML"
     )
     status_msg_id = status_msg.get("result", {}).get("message_id")
 
-    # Forward destination: owner's DM (or same chat)
-    inbox = OWNER_ID  # bot এর owner এর chat — forwarded msg এখানে আসবে, তারপর delete হবে
-
     polls_found = []
-    errors = 0
-    checked = 0
 
-    for msg_id in range(start_id, end_id + 1):
-        checked += 1
-        try:
-            poll = await _forward_and_get_poll(ch1, msg_id, inbox)
-            if poll:
-                # Only quiz polls (correct_option_id exists)
-                correct_idx = poll.get("correct_option_id")
-                if correct_idx is None:
-                    # Regular poll (not quiz) — skip or include as-is
-                    correct_idx = 0
-                question = poll.get("question", "")
-                options = [o.get("text", "") for o in poll.get("options", [])]
-                explanation = poll.get("explanation", "")
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        API_ID   = int(os.environ.get("API_ID", "33312774"))
+        API_HASH = os.environ.get("API_HASH", "883db3366f8759d1d14c861c0d628232")
+
+        client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+        await client.connect()
+
+        checked = 0
+        # iter_messages with IDs — fastest way, no forward needed
+        async for message in client.iter_messages(
+            ch1,
+            min_id=start_id - 1,
+            max_id=end_id + 1,
+            limit=total_range,
+            reverse=True,
+        ):
+            checked += 1
+            if message.poll:
+                p = message.poll.poll
+                results = message.poll.results
+                question = p.question.text if hasattr(p.question, "text") else str(p.question)
+                options = []
+                for ans in p.answers:
+                    opt_text = ans.text.text if hasattr(ans.text, "text") else str(ans.text)
+                    options.append(opt_text)
+
+                correct_idx = 0
+                explanation = ""
+                if results and results.results:
+                    for i, r in enumerate(results.results):
+                        if getattr(r, "correct", False):
+                            correct_idx = i
+                            break
+                if results and results.solution:
+                    explanation = results.solution
+
                 polls_found.append({
                     "question": question,
                     "options": options,
                     "correct_idx": correct_idx,
                     "explanation": explanation,
                 })
-        except Exception as e:
-            errors += 1
-            logger.warning(f"[pollcsv] msg {msg_id} error: {e}")
 
-        # Rate limit: 30 req/s max, দিই 0.05s gap
-        await asyncio.sleep(0.05)
+            if checked % 100 == 0 and status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    f"⏳ চেক: {checked}/{total_range} — Poll: {len(polls_found)}",
+                    parse_mode="HTML"
+                )
 
-        # Progress update every 50 messages
-        if checked % 50 == 0 and status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                f"⏳ চেক করছি: {checked}/{total_range} — Poll পেয়েছি: {len(polls_found)}",
-                parse_mode="HTML"
-            )
+        await client.disconnect()
+
+    except Exception as e:
+        logger.error(f"[pollcsv] Telethon error: {e}")
+        await send_msg(chat_id, f"❌ Telethon error: {e}")
+        return
 
     if not polls_found:
         await send_msg(chat_id,
-            f"😕 এই range এ কোনো quiz poll পাওয়া যায়নি।\n"
-            f"({checked} messages চেক হয়েছে, {errors} error)\n\n"
-            f"নিশ্চিত করো bot সেই channel এর admin/member আছে।"
+            f"😕 এই range এ কোনো quiz poll পাওয়া যায়নি।\n({total_range} messages চেক হয়েছে)"
         )
         return
 
@@ -846,37 +821,28 @@ async def handle_pollcsv_command(msg: dict):
 
     output = StringIO()
     writer = csv.writer(output, quoting=csv.QUOTE_ALL)
-
-    # Header — new format
     writer.writerow(["questions", "option1", "option2", "option3", "option4", "option5", "answer", "explanation", "type", "section"])
 
     for p in polls_found:
-        opts = p["options"]
-        # Pad to 5 options
-        padded = (opts + ["", "", "", "", ""])[:5]
-        # answer = 1-based numeric (correct_option_id is 0-based)
-        answer_numeric = (p["correct_idx"] or 0) + 1
+        padded = (p["options"] + ["", "", "", "", ""])[:5]
+        answer_numeric = p["correct_idx"] + 1
         writer.writerow([
             p["question"],
             padded[0], padded[1], padded[2], padded[3], padded[4],
             answer_numeric,
             p["explanation"],
-            1,   # type — fixed
-            1,   # section — fixed
+            1, 1,
         ])
 
-    csv_bytes = output.getvalue().encode("utf-8-sig")  # utf-8-sig for Excel Bengali support
-
-    # Send CSV
-    filename = f"polls_{ch1.lstrip('@').replace('-100','')}_{start_id}_{end_id}.csv"
+    csv_bytes = output.getvalue().encode("utf-8-sig")
+    filename = f"polls_{str(ch1).lstrip('@').replace('-100','')}_{start_id}_{end_id}.csv"
     caption = (
         f"✅ <b>Poll CSV ready!</b>\n"
-        f"📊 Channel: <code>{ch1}</code>\n"
-        f"📌 Range: {start_id} → {end_id}\n"
-        f"📋 Poll found: <b>{len(polls_found)}</b>\n"
-        f"⚠️ Errors/skipped: {errors}"
+        f"📊 Range: {start_id} → {end_id}\n"
+        f"📋 Poll পেয়েছি: <b>{len(polls_found)}</b>"
     )
     await send_document(chat_id, csv_bytes, filename, caption=caption, mime_type="text/csv")
+
 
 # ============================================================
 # FEATURE: /img — Image reply → Poll
