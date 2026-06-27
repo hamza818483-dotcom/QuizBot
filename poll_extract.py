@@ -87,24 +87,49 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                 opt = ans.text.text if hasattr(ans.text, "text") else str(ans.text)
                 options.append(opt)
 
-            # ── Correct answer: GetPollResultsRequest (vote ছাড়াই কাজ করে) ──
+            # ── Correct answer: vote দিয়ে force করো ──
             correct_idx = 0
             explanation = ""
             try:
+                # প্রথমে GetPollResults try করো (already voted থাকলে কাজ করবে)
                 poll_results = await client(functions.messages.GetPollResultsRequest(
                     peer=channel,
                     msg_id=message.id
                 ))
                 res = getattr(poll_results, "results", None)
+                got_answer = False
                 if res and getattr(res, "results", None):
                     for i, r in enumerate(res.results):
                         if getattr(r, "correct", False):
                             correct_idx = i
+                            got_answer = True
                             break
                 if res and getattr(res, "solution", None):
                     explanation = res.solution
+
+                # Vote না থাকলে auto-vote দাও → তারপর আবার fetch
+                if not got_answer:
+                    await client(functions.messages.SendVoteRequest(
+                        peer=channel,
+                        msg_id=message.id,
+                        options=[p.answers[0].option]  # যেকোনো option এ vote
+                    ))
+                    await asyncio.sleep(0.3)
+                    poll_results2 = await client(functions.messages.GetPollResultsRequest(
+                        peer=channel,
+                        msg_id=message.id
+                    ))
+                    res2 = getattr(poll_results2, "results", None)
+                    if res2 and getattr(res2, "results", None):
+                        for i, r in enumerate(res2.results):
+                            if getattr(r, "correct", False):
+                                correct_idx = i
+                                break
+                    if res2 and getattr(res2, "solution", None):
+                        explanation = res2.solution
+
             except Exception as e:
-                # Fallback: message.poll.results থেকে try করো
+                # Last fallback: message.poll.results
                 results = message.poll.results
                 if results and getattr(results, "results", None):
                     for i, r in enumerate(results.results):
@@ -113,7 +138,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                             break
                 if results and getattr(results, "solution", None):
                     explanation = results.solution
-                logger.warning(f"[poll_extract] GetPollResults fallback msg {message.id}: {e}")
+                logger.warning(f"[poll_extract] vote fallback msg {message.id}: {e}")
 
             polls.append({
                 "question":    q_text,
