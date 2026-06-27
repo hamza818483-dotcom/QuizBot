@@ -745,14 +745,16 @@ async def handle_pollcsv_command(msg: dict):
     text = msg.get("text", "").strip()
 
     # Remove command prefix
-    body = re.sub(r"^/pollcsv\s*|^/pcsv\s*", "", text, flags=re.IGNORECASE).strip()
+    body = re.sub(r"^/poll\s*", "", text, flags=re.IGNORECASE).strip()
     links = [l.strip() for l in body.split() if "t.me/" in l]
 
     if len(links) < 2:
         await send_msg(chat_id,
             "❌ দুটো link দাও!\n\n"
             "📌 Format:\n"
-            "<code>/pollcsv https://t.me/c/.../101\nhttps://t.me/c/.../250</code>\n\n"
+            "<code>/poll\n"
+            "https://t.me/c/.../101\n"
+            "https://t.me/c/.../250</code>\n\n"
             "• প্রথম link = range start\n"
             "• দ্বিতীয় link = range end\n"
             "• Bot অবশ্যই সেই channel এর member/admin হতে হবে",
@@ -845,21 +847,22 @@ async def handle_pollcsv_command(msg: dict):
     output = StringIO()
     writer = csv.writer(output, quoting=csv.QUOTE_ALL)
 
-    # Header
-    writer.writerow(["question", "option_a", "option_b", "option_c", "option_d", "correct_option", "explanation"])
-
-    OPTION_LABELS = ["A", "B", "C", "D", "E", "F"]
+    # Header — new format
+    writer.writerow(["questions", "option1", "option2", "option3", "option4", "option5", "answer", "explanation", "type", "section"])
 
     for p in polls_found:
         opts = p["options"]
-        # Pad to 4 options minimum, truncate after 4 for CSV columns
-        padded = (opts + ["", "", "", ""])[:4]
-        correct_letter = OPTION_LABELS[p["correct_idx"]] if p["correct_idx"] < len(OPTION_LABELS) else "A"
+        # Pad to 5 options
+        padded = (opts + ["", "", "", "", ""])[:5]
+        # answer = 1-based numeric (correct_option_id is 0-based)
+        answer_numeric = (p["correct_idx"] or 0) + 1
         writer.writerow([
             p["question"],
-            padded[0], padded[1], padded[2], padded[3],
-            correct_letter,
+            padded[0], padded[1], padded[2], padded[3], padded[4],
+            answer_numeric,
             p["explanation"],
+            1,   # type — fixed
+            1,   # section — fixed
         ])
 
     csv_bytes = output.getvalue().encode("utf-8-sig")  # utf-8-sig for Excel Bengali support
@@ -4722,8 +4725,11 @@ async def handle_message(msg: dict):
             return
         asyncio.create_task(handle_pollcsv_command(msg))
 
-
-    elif text == "/setcommand":
+    elif text.startswith("/poll") and "\n" in text and "t.me/" in text:
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        asyncio.create_task(handle_pollcsv_command(msg))    elif text == "/setcommand":
         if uid != OWNER_ID:
             await send_msg(chat_id, "❌ Owner only!")
             return
