@@ -798,6 +798,40 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             if photo_r.get("ok"):
                 image_msg_id = photo_r["result"]["message_id"]
 
+        # ✅ CSV file generate করো এবং bot-এ পাঠাও (poll channel-এ যাওয়ার আগে)
+        try:
+            csv_lines = ["Question,Option A,Option B,Option C,Option D,Answer,Explanation"]
+            for m in mcqs:
+                opts = m.get("options", ["", "", "", ""])
+                while len(opts) < 4:
+                    opts.append("")
+                q = m.get("question", "").replace(",", "،")
+                ans_map = {0: "A", 1: "B", 2: "C", 3: "D"}
+                ans_letter = ans_map.get(
+                    {0: 0, 1: 1, 2: 2, 3: 3}.get(
+                        {"A": 0, "B": 1, "C": 2, "D": 3}.get(m.get("answer", "A"), 0), 0
+                    ), "A"
+                )
+                exp = m.get("explanation", "").replace(",", "،").replace("\n", " ")
+                csv_lines.append(
+                    f"{q},{opts[0]},{opts[1]},{opts[2]},{opts[3]},{ans_letter},{exp}"
+                )
+            csv_content = "\n".join(csv_lines).encode("utf-8")
+            csv_caption = (
+                f"📄 CSV ফাইল — {topic}\n"
+                f"💎 {len(mcqs)} MCQ\n\n"
+                f"📌 Format: Question, A, B, C, D, Answer, Explanation"
+            )
+            await send_document(
+                chat_id,
+                csv_content,
+                f"ATLAS_{topic or 'MCQ'}.csv",
+                caption=csv_caption,
+                mime_type="text/csv"
+            )
+        except Exception as csv_err:
+            logger.warning(f"[IMG] CSV send failed: {csv_err}")
+
         poll_links = []
         for i, mcq in enumerate(mcqs):
             opts = mcq.get("options", [])
@@ -840,9 +874,10 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id_img}"
 
         end_kb = {"inline_keyboard": [
-            [{"text": "📝 Quiz Solve", "url": quiz_url}],
-            [{"text": "🔄 Poll Solve", "url": poll_url}],
-            [{"text": "🌐 Web Exam", "url": exam_url}]
+            [{"text": "📝 Quiz Solve", "url": quiz_url},
+             {"text": "🔄 Poll Solve", "url": poll_url}],
+            [{"text": "🌐 Web Exam", "url": exam_url},
+             {"text": "💎 Premium PDF", "url": f"https://t.me/atlasQuizProBot?start=premium_{cache_id_img}"}]
         ]}
 
         end_r = await tg_post("sendMessage", {
@@ -1026,31 +1061,55 @@ def _get_first_poll_link(channel_id: str, msg_id: int) -> str:
 
 # ============================================================
 # /csv COMMAND HANDLER
-# Usage: CSV file reply করে /csv [topic]
+# Usage 1 (reply): CSV file reply করে /csv [topic]
+# Usage 2 (inline): /csv (Topic Name) (channel/group id) (topic_id optional)
 # ============================================================
 async def handle_csv_command(msg: dict):
     """
-    CSV file-এ reply করে /csv [topic] দিলে:
-    1. CSV parse করে MCQ list বানাবে
-    2. Channel list দেখাবে
-    3. Channel select করলে:
-       - Pre-message পাঠাবে
-       - সব polls পাঠাবে (pre_msg এর reply হিসেবে)
-       - Ending message পাঠাবে (first poll link সহ)
+    দুটো usage:
+    1. CSV file-এ reply করে: /csv [topic]
+       → Channel list দেখাবে
+    2. Inline: /csv (Topic Name) (-100xxx or @ch) (topic_id)
+       → CSV reply করে সরাসরি ওই channel/group topic-এ পাঠাবে
     """
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     text = msg.get("text", "").strip()
     reply = msg.get("reply_to_message")
 
-    # Topic extract করো (/csv এর পরের অংশ)
-    topic = text.replace("/csv", "").strip()
+    # Full text after /csv
+    raw_args = text[len("/csv"):].strip()
+
+    # Parse inline args: (Topic Name) (channel_id) (topic_id optional)
+    # Format: /csv জাতীয় বাজেট -100123456789 12
+    inline_channel = None
+    inline_topic_id = None
+    inline_topic_name = raw_args
+
+    # Check if args contain a channel_id (-100... or @...) pattern
+    import re as _re
+    chan_match = _re.search(r'(-100\d+|@\S+)', raw_args)
+    if chan_match:
+        inline_channel = chan_match.group(1)
+        before_chan = raw_args[:chan_match.start()].strip()
+        after_chan = raw_args[chan_match.end():].strip()
+        inline_topic_name = before_chan
+
+        # topic_id is digits after channel_id
+        tid_match = _re.match(r'(\d+)', after_chan)
+        if tid_match:
+            inline_topic_id = int(tid_match.group(1))
+
+    topic = inline_topic_name or ""
 
     if not reply or not reply.get("document"):
         await send_msg(chat_id,
             "❌ CSV ফাইলে reply করে /csv দাও!\n\n"
-            "<b>Example:</b>\n"
+            "<b>Usage 1 (reply mode):</b>\n"
             "<code>/csv জাতীয় বাজেট-২০২৬</code>\n\n"
+            "<b>Usage 2 (inline mode):</b>\n"
+            "<code>/csv Topic Name -100123456 [topic_id]</code>\n"
+            "<code>/csv Topic Name @channel</code>\n\n"
             "📌 Topic optional — না দিলে blank থাকবে"
         )
         return
@@ -1081,10 +1140,22 @@ async def handle_csv_command(msg: dict):
                 "cache_id": cache_id,
                 "topic": topic,
                 "mcq_count": len(mcqs),
-                "mode": "csv"  # normal /csv mode
+                "mode": "csv",
+                "inline_channel": inline_channel,
+                "inline_topic_id": inline_topic_id
             }),
             "updated_at": int(time.time())
         }).execute()
+
+        # Inline mode: directly send to specified channel
+        if inline_channel:
+            if loading_id:
+                await edit_msg(chat_id, loading_id,
+                    f"✅ {len(mcqs)} MCQ | 📢 সরাসরি {inline_channel}-এ পাঠানো হচ্ছে...")
+            asyncio.create_task(process_csv_to_channel(
+                cache_id, inline_channel, chat_id, uid
+            ))
+            return
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
@@ -1260,7 +1331,8 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
 # ============================================================
 async def _send_csv_polls_to_channel(
     channel_id: str, mcqs: list, topic: str,
-    chat_id: int, pre_msg_id: int = None
+    chat_id: int, pre_msg_id: int = None,
+    thread_id: int = None
 ) -> tuple:
     """
     একটা batch-এর polls পাঠাও।
@@ -1290,7 +1362,8 @@ async def _send_csv_polls_to_channel(
             poll_r = await send_poll(
                 channel_id, q_text, opts, ans_idx,
                 explanation=exp[:200],
-                reply_to_message_id=pre_msg_id
+                reply_to_message_id=pre_msg_id,
+                message_thread_id=thread_id
             )
             if poll_r.get("ok"):
                 if sent == 0:
@@ -1321,6 +1394,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
     session = json.loads(row.data[0]["data"])
     topic = session.get("topic", "")
     mode = session.get("mode", "csv")
+    thread_id = session.get("inline_topic_id") or None  # group topic/thread ID
 
     cache = await db_get_mcq_cache(cache_id)
     if not cache:
@@ -1352,7 +1426,8 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
 
             # Polls পাঠাও
             sent, first_link = await _send_csv_polls_to_channel(
-                channel_id, batch, batch_topic, chat_id, pre_msg_id
+                channel_id, batch, batch_topic, chat_id, pre_msg_id,
+                thread_id=thread_id
             )
 
             # প্রতিটা batch-এর জন্য আলাদা cache — Quiz Solve/Poll Solve/Web Exam বাটনের জন্য
@@ -1407,13 +1482,15 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
     else:
         # Normal /csv mode — single batch
         pre_text = csv_get_pre_message(topic, total)
-        pre_r = await tg_post("sendMessage", {
-            "chat_id": channel_id, "text": pre_text
-        })
+        pre_send_data = {"chat_id": channel_id, "text": pre_text}
+        if thread_id:
+            pre_send_data["message_thread_id"] = thread_id
+        pre_r = await tg_post("sendMessage", pre_send_data)
         pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
 
         sent, first_link = await _send_csv_polls_to_channel(
-            channel_id, mcqs, topic, chat_id, pre_msg_id
+            channel_id, mcqs, topic, chat_id, pre_msg_id,
+            thread_id=thread_id
         )
 
         ending = csv_get_ending_message(topic, sent, first_link)
@@ -1425,12 +1502,15 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             [{"text": "🔄 Poll Solve", "url": poll_url}],
             [{"text": "🌐 Web Exam", "url": exam_url}]
         ]}
-        end_r = await tg_post("sendMessage", {
+        end_send_data = {
             "chat_id": channel_id,
             "text": ending,
             "disable_web_page_preview": True,
             "reply_markup": end_kb
-        })
+        }
+        if thread_id:
+            end_send_data["message_thread_id"] = thread_id
+        end_r = await tg_post("sendMessage", end_send_data)
         if end_r.get("ok"):
             await db_update_cache(cache_id, {
                 "channel_id": channel_id,
