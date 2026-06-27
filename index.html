@@ -228,6 +228,27 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
   <div class="wrap" id="resultWrap"></div>
 </div>
 
+<!-- New Exam Progress (instant page on "New Exam" click) -->
+<div class="mode" id="modeNewExamProgress">
+  <div class="wrap">
+    <div class="hero" style="padding-top:36px">
+      <div style="font-size:42px;margin-bottom:10px" id="neIcon">🧠</div>
+      <div class="hero-title" id="neTitle" style="font-size:17px">নতুন MCQ তৈরি হচ্ছে...</div>
+    </div>
+    <div class="info-card">
+      <div class="info-row"><span class="info-lbl">📄 পেজ নং</span><span class="info-val" id="nePage">—</span></div>
+      <div class="info-row"><span class="info-lbl">⏱️ আনুমানিক বাকি সময়</span><span class="info-val" id="neEta">—</span></div>
+      <div class="info-row"><span class="info-lbl">📊 অগ্রগতি</span><span class="info-val" id="nePctText">0%</span></div>
+    </div>
+    <div class="hdr-bar-wrap" style="height:10px;border-radius:6px;margin:6px 0 18px">
+      <div class="hdr-bar-fill" id="neBarFill" style="width:0%;height:100%;border-radius:6px"></div>
+    </div>
+    <button class="btn-start" id="neStartBtn" disabled
+      style="opacity:.45;cursor:not-allowed;background:var(--text-tertiary)"
+      onclick="goToNewExam()">▶️ Start Exam</button>
+  </div>
+</div>
+
 <!-- Nav -->
 <div class="nav-overlay" id="navOverlay" onclick="closeNav()">
   <div class="nav-popup" onclick="event.stopPropagation()">
@@ -577,7 +598,7 @@ async function doSubmit(){
   html+=`<div class="result-btns">
     <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
     <button class="result-btn success"  onclick="solvePDF()">📄 Solve PDF</button>
-    <button class="result-btn primary" id="newExamBtn" onclick="startNewExam()">🆕 New Exam</button>`;
+    <button class="result-btn primary" id="newExamBtn" onclick="startNewExamV2()">🆕 New Exam</button>`;
   if(backUrl) html+=`<button class="result-btn" onclick="window.open('${backUrl}','_blank')">↩️ Back to Source</button>`;
   html+=`
     <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (Only Wrong)</button>
@@ -640,7 +661,7 @@ function filt(e,t){
   });
 }
 
-// ── NEW EXAM ──
+// ── NEW EXAM (original, kept exactly as-is) ──
 async function startNewExam(){
   const btn=document.getElementById('newExamBtn');
   if(btn){btn.disabled=true;btn.textContent='⏳ নতুন MCQ তৈরি হচ্ছে...';}
@@ -666,6 +687,99 @@ async function startNewExam(){
     if(btn){btn.disabled=false;btn.textContent='🆕 New Exam';}
   }
 }
+
+// ── NEW EXAM v2 (v1.3 — instant progress page, additive, doesn't touch v1 above) ──
+let _neJobId = null;
+let _nePollTimer = null;
+let _neResultData = null;
+
+function startNewExamV2(){
+  // Instantly switch to the progress page — no waiting on network first.
+  setMode('NewExamProgress');
+  document.getElementById('neIcon').textContent = '🧠';
+  document.getElementById('neTitle').textContent = 'নতুন MCQ তৈরি হচ্ছে...';
+  document.getElementById('nePage').textContent = '—';
+  document.getElementById('neEta').textContent = '—';
+  document.getElementById('nePctText').textContent = '0%';
+  document.getElementById('neBarFill').style.width = '0%';
+  const btn = document.getElementById('neStartBtn');
+  btn.disabled = true;
+  btn.style.opacity = '.45';
+  btn.style.cursor = 'not-allowed';
+  btn.style.background = 'var(--text-tertiary)';
+  btn.textContent = '▶️ Start Exam';
+  _neResultData = null;
+
+  fetch(`${HF_URL}/api/new-exam/start`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({cache_id:CACHE_ID,user_id:USER_ID})
+  }).then(r=>r.json()).then(d=>{
+    if(d.error==='limit_reached'){
+      document.getElementById('neIcon').textContent='🚫';
+      document.getElementById('neTitle').textContent='সর্বোচ্চ 5 বার New Exam করা যায়!';
+      return;
+    }
+    if(!d.ok || !d.job_id){
+      document.getElementById('neIcon').textContent='❌';
+      document.getElementById('neTitle').textContent='Error: '+(d.error||'শুরু করা যায়নি');
+      return;
+    }
+    _neJobId = d.job_id;
+    document.getElementById('nePage').textContent = d.page!=null ? d.page : '—';
+    _nePollNewExam();
+  }).catch(()=>{
+    document.getElementById('neIcon').textContent='❌';
+    document.getElementById('neTitle').textContent='Network error — আবার চেষ্টা করো';
+  });
+}
+
+function _nePollNewExam(){
+  if(_nePollTimer) clearTimeout(_nePollTimer);
+  if(!_neJobId) return;
+  fetch(`${HF_URL}/api/new-exam/status/${_neJobId}`).then(r=>r.json()).then(d=>{
+    if(!d.ok){
+      document.getElementById('neIcon').textContent='❌';
+      document.getElementById('neTitle').textContent='Error: '+(d.error||'Generation failed');
+      return;
+    }
+    const pct = Math.max(0, Math.min(100, d.pct||0));
+    document.getElementById('nePctText').textContent = pct+'%';
+    document.getElementById('neBarFill').style.width = pct+'%';
+    if(d.page!=null) document.getElementById('nePage').textContent = d.page;
+    if(d.eta_sec!=null){
+      document.getElementById('neEta').textContent = d.eta_sec>0 ? `${d.eta_sec} সেকেন্ড` : 'প্রায় শেষ...';
+    }
+
+    if(d.status==='done'){
+      document.getElementById('neIcon').textContent='✅';
+      document.getElementById('neTitle').textContent='নতুন MCQ তৈরি সম্পন্ন!';
+      document.getElementById('neEta').textContent='0 সেকেন্ড';
+      _neResultData = d;
+      const btn=document.getElementById('neStartBtn');
+      btn.disabled=false;
+      btn.style.opacity='1';
+      btn.style.cursor='pointer';
+      btn.style.background='var(--success)';
+      btn.textContent='▶️ Start Exam (100%)';
+      return; // stop polling
+    }
+    if(d.status==='error'){
+      document.getElementById('neIcon').textContent='❌';
+      document.getElementById('neTitle').textContent='Error: '+(d.error||'Generation failed');
+      return; // stop polling
+    }
+    _nePollTimer = setTimeout(_nePollNewExam, 1000);
+  }).catch(()=>{
+    _nePollTimer = setTimeout(_nePollNewExam, 1500); // transient network blip — keep polling
+  });
+}
+
+function goToNewExam(){
+  if(!_neResultData || !_neResultData.new_cache_id) return;
+  // Same as the old instant-redirect flow, but only fires once generation is truly 100%.
+  window.location.href = `${HF_URL}/exam/${_neResultData.new_cache_id}?uid=${USER_ID}&name=${encodeURIComponent(USER_NAME)}`;
+}
+
 
 // ── SOLVE PDF ──
 async function solvePDF(){
