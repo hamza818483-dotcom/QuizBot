@@ -366,16 +366,20 @@ async def handle_poll_extract(msg: dict):
 
     bot_info     = await tg_post("getMe", {})
     bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
-    quiz_link    = f"https://t.me/{bot_username}?start={quiz_id}" if quiz_id else None
 
-    # Caption
+    from core import CF_WORKER_URL
+    web_link  = f"{CF_WORKER_URL}/quiz/{quiz_id}" if quiz_id else None
+    bot_link  = f"https://t.me/{bot_username}?start={quiz_id}" if quiz_id else None
+
     caption = (
         f"✅ <b>Poll Extract সম্পন্ন!</b>\n"
         f"📌 Range: {start_id} → {end_id}\n"
         f"📋 Poll পেয়েছি: <b>{len(polls)}</b>\n"
     )
-    if quiz_link:
-        caption += f"\n🔗 <b>Permanent Quiz Link:</b>\n{quiz_link}"
+    if web_link:
+        caption += f"\n🌐 <b>Web Quiz (bot ছাড়াই চলবে):</b>\n{web_link}"
+    if bot_link:
+        caption += f"\n\n🤖 <b>Bot Quiz:</b>\n{bot_link}"
 
     await send_document(
         chat_id, csv_bytes, filename,
