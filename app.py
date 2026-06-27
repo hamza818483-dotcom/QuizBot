@@ -4695,7 +4695,9 @@ async def handle_message(msg: dict):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        asyncio.create_task(handle_pollcsv_command(msg))    elif text == "/setcommand":
+        asyncio.create_task(handle_pollcsv_command(msg))
+
+    elif text == "/setcommand":
         if uid != OWNER_ID:
             await send_msg(chat_id, "❌ Owner only!")
             return
