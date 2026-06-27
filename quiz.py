@@ -281,6 +281,40 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
     else:
         rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [quiz_id])
         if not rows:
+            # D1 এ নেই — Supabase backup থেকে restore করো
+            try:
+                from core import SUPABASE_URL, SUPABASE_KEY
+                import httpx
+                headers = {
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                }
+                async with httpx.AsyncClient(timeout=10) as hc:
+                    r = await hc.get(
+                        f"{SUPABASE_URL}/rest/v1/quiz_backups",
+                        headers=headers,
+                        params={"quiz_id": f"eq.{quiz_id}", "select": "*"},
+                    )
+                backup = r.json()
+                if backup:
+                    b = backup[0]
+                    # D1 তে re-import করো
+                    await d1_run(
+                        "INSERT OR REPLACE INTO quizzes "
+                        "(id, name, description, timer, shuffle, csv_data, tag, exp_footer, created_by) "
+                        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        [
+                            b["quiz_id"], b["name"],
+                            f"Restored — {len(b['questions'])} প্রশ্ন",
+                            30, 0,
+                            json.dumps(b["questions"]),
+                            "", "", b.get("created_by", 0),
+                        ]
+                    )
+                    rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [quiz_id])
+            except Exception as e:
+                logger.warning(f"[quiz] Supabase restore failed: {e}")
+        if not rows:
             await send_msg(chat_id, "❌ কুইজ পাওয়া যায়নি! Link টা সঠিক কিনা দেখো।")
             return
         quiz = rows[0]
