@@ -50,17 +50,46 @@ export default {
     return jsonResp({ ok: true, service: 'ATLAS Bot Proxy', version: '2.0' });
   },
 
-  // ── Cron: প্রতি 5 মিনিটে HF Space ping করে alive রাখে ──
+  // ── Cron: HF ping + daily Supabase→D1 sync ──
   async scheduled(event, env) {
     const HF_URL = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
+    const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+    const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+
+    // প্রতি 5 মিনিটে HF ping
     try {
-      const r = await fetch(HF_URL + '/health', {
-        method: 'GET',
-        signal: AbortSignal.timeout(10000),
-      });
+      const r = await fetch(HF_URL + '/health', { signal: AbortSignal.timeout(10000) });
       console.log(`[cron] HF ping: ${r.status}`);
     } catch(e) {
       console.error(`[cron] HF ping failed: ${e.message}`);
+    }
+
+    // প্রতিদিন রাত 12টায় Supabase→D1 sync (cron: 0 0 * * *)
+    // সব quiz_backups D1 তে আছে কিনা check করে, না থাকলে restore করে
+    const now = new Date();
+    if (now.getUTCHours() === 0 && now.getUTCMinutes() < 5) {
+      try {
+        const r = await fetch(
+          `${SB_URL}/rest/v1/quiz_backups?select=quiz_id,name,questions,created_by`,
+          { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } }
+        );
+        const backups = await r.json();
+        let synced = 0;
+        for (const b of (backups || [])) {
+          try {
+            const existing = await env.DB.prepare("SELECT id FROM quizzes WHERE id=?1").bind(b.quiz_id).first();
+            if (!existing) {
+              await env.DB.prepare(
+                "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
+              ).bind(b.quiz_id, b.name, '', 30, 0, JSON.stringify(b.questions), '', '', b.created_by || 0).run();
+              synced++;
+            }
+          } catch(_) {}
+        }
+        console.log(`[cron] Daily sync: ${synced} quizzes restored to D1`);
+      } catch(e) {
+        console.error(`[cron] Daily sync failed: ${e.message}`);
+      }
     }
   }
 };
