@@ -713,3 +713,22 @@ async def handle_d1_mistake(chat_id: int, quiz_id: str, uid: int, user: dict, mt
     except Exception as e:
         logger.error(f"[Mistake] Error: {e}")
         await send_msg(chat_id, f"❌ Error: {e}")
+
+async def create_quiz_from_mcqs(mcqs: list, name: str, uid: int) -> str:
+    """MCQ list → D1 quiz save → quiz_id return"""
+    from pdf_handler import gen_session_id
+    ANS_MAP = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4}
+    questions = []
+    for q in mcqs:
+        questions.append({
+            "question": q.get("question", ""),
+            "options": q.get("options", []),
+            "answer_index": ANS_MAP.get(q.get("answer", "A"), 0),
+            "explanation": q.get("explanation", ""),
+        })
+    quiz_id = "qz_" + gen_session_id()[:8]
+    await d1_run(
+        "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        [quiz_id, name, f"{len(questions)} প্রশ্ন", 30, 0, json.dumps(questions), "", "", uid]
+    )
+    return quiz_id
