@@ -368,7 +368,9 @@ async def handle_poll_extract(msg: dict):
     bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
 
     from core import CF_WORKER_URL
-    web_link  = f"{CF_WORKER_URL}/quiz/{quiz_id}" if quiz_id else None
+    # Web quiz Worker URL — bot ছাড়াই permanent
+    QUIZ_WORKER_URL = "https://atlasquizbotpro.hamza818483.workers.dev"
+    web_link  = f"{QUIZ_WORKER_URL}/quiz/{quiz_id}" if quiz_id else None
     bot_link  = f"https://t.me/{bot_username}?start={quiz_id}" if quiz_id else None
 
     caption = (
