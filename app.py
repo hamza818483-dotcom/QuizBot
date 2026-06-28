@@ -692,17 +692,16 @@ from poll_extract import handle_poll_extract
 # FEATURE: /img — Image reply → Poll
 # ============================================================
 async def handle_img_command(msg: dict):
-    """
-    Image-এ reply করে /img দিলে 2টা option আসবে:
-    - Image Mode: image সহ channel-এ যাবে
-    - Topic Mode: শুধু MCQ poll যাবে
-    """
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
+    text = msg.get("text", "").strip()
     reply = msg.get("reply_to_message")
 
+    # Topic extract from command: /img Physics Chapter 3
+    topic = re.sub(r"^/img\s*", "", text, flags=re.IGNORECASE).strip() or "ATLAS Special MCQ"
+
     if not reply:
-        await send_msg(chat_id, "❌ কোনো image-এ reply করে /img দাও!")
+        await send_msg(chat_id, "❌ কোনো image-এ reply করে /img দাও!\n\nExample: image-এ reply করে <code>/img Physics</code>", parse_mode="HTML")
         return
     if not (reply.get("photo") or reply.get("document")):
         await send_msg(chat_id, "❌ Image-এ reply করতে হবে!")
@@ -716,7 +715,7 @@ async def handle_img_command(msg: dict):
     session_key = f"img_cmd_{uid}"
     sb.table("quiz_sessions").upsert({
         "key": session_key,
-        "data": json.dumps({"file_id": file_id, "msg_id": reply["message_id"]}),
+        "data": json.dumps({"file_id": file_id, "msg_id": reply["message_id"], "topic": topic}),
         "updated_at": int(time.time())
     }).execute()
 
@@ -725,12 +724,11 @@ async def handle_img_command(msg: dict):
         [{"text": "📝 Topic Mode (শুধু MCQ Poll)", "callback_data": f"imgmode_topic_{uid}"}]
     ]}
     await send_msg(chat_id,
-        "📸 Image পাওয়া গেছে! কোন mode-এ পাঠাবে?",
-        reply_markup=kb
+        f"📸 Image পাওয়া গেছে!\n📌 Topic: <b>{topic}</b>\n\nকোন mode-এ পাঠাবে?",
+        reply_markup=kb, parse_mode="HTML"
     )
 
 async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
-    """Image Mode বা Topic Mode handle করো"""
     session_key = f"img_cmd_{uid}"
     row = sb.table("quiz_sessions").select("data").eq("key", session_key).execute()
     if not row.data:
@@ -739,6 +737,7 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
 
     img_data = json.loads(row.data[0]["data"])
     file_id = img_data["file_id"]
+    topic = img_data.get("topic", "ATLAS Special MCQ")
 
     channels = await db_get_channels()
     if not channels:
@@ -747,7 +746,7 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
 
     sb.table("quiz_sessions").upsert({
         "key": f"img_mode_{uid}",
-        "data": json.dumps({"file_id": file_id, "mode": mode}),
+        "data": json.dumps({"file_id": file_id, "mode": mode, "topic": topic}),
         "updated_at": int(time.time())
     }).execute()
 
@@ -759,11 +758,10 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
             "text": f"📢 {ch_name}",
             "callback_data": f"imgchannel_{ch_id}_{uid}"
         }])
-    await send_msg(chat_id, "📢 কোন channel-এ পাঠাবে?", reply_markup=kb)
+    await send_msg(chat_id, f"📢 কোন channel-এ পাঠাবে?\n📌 Topic: <b>{topic}</b>", reply_markup=kb, parse_mode="HTML")
 
 async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
-                               chat_id: int, uid: int, uname: str):
-    """Image থেকে MCQ generate করে channel-এ পাঠাও"""
+                               chat_id: int, uid: int, uname: str, topic: str = "ATLAS Special MCQ"):
     settings = await db_get_settings()
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
@@ -776,7 +774,6 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         from PIL import Image as PILImage
         img = PILImage.open(BytesIO(img_bytes))
 
-        topic = "ATLAS Special MCQ"
         mcqs = await generate_mcq_from_image(img, topic, 1, None)
         if not mcqs:
             await send_msg(chat_id, "❌ MCQ generate হয়নি!")
@@ -1432,10 +1429,12 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             exam_url = f"{HF_SPACE_URL}/exam/{batch_cache_id}"
             quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{batch_cache_id}"
             poll_url = f"https://t.me/atlasQuizProBot?start=poll_{batch_cache_id}"
+            web_url  = f"https://atlasquizbotpro.hamza818483.workers.dev/quiz/{batch_cache_id}"
             end_kb = {"inline_keyboard": [
-                [{"text": "📝 Quiz Solve", "url": quiz_url}],
-                [{"text": "🔄 Poll Solve", "url": poll_url}],
-                [{"text": "🌐 Web Exam", "url": exam_url}]
+                [{"text": "📝 Quiz Solve", "url": quiz_url},
+                 {"text": "🔄 Poll Solve", "url": poll_url}],
+                [{"text": "🌐 Web Exam", "url": exam_url},
+                 {"text": "📄 Premium PDF", "url": web_url}],
             ]}
             end_r = await tg_post("sendMessage", {
                 "chat_id": channel_id,
@@ -1490,10 +1489,12 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
         exam_url = f"{HF_SPACE_URL}/exam/{cache_id}"
         quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id}"
         poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id}"
+        web_url  = f"https://atlasquizbotpro.hamza818483.workers.dev/quiz/{cache_id}"
         end_kb = {"inline_keyboard": [
-            [{"text": "📝 Quiz Solve", "url": quiz_url}],
-            [{"text": "🔄 Poll Solve", "url": poll_url}],
-            [{"text": "🌐 Web Exam", "url": exam_url}]
+            [{"text": "📝 Quiz Solve", "url": quiz_url},
+             {"text": "🔄 Poll Solve", "url": poll_url}],
+            [{"text": "🌐 Web Exam", "url": exam_url},
+             {"text": "📄 Premium PDF", "url": web_url}],
         ]}
         end_send_data = {
             "chat_id": channel_id,
@@ -1514,9 +1515,76 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             await edit_msg(chat_id, loading_id,
                 f"✅ {sent}/{total} polls channel-এ পাঠানো হয়েছে!")
 
-# ============================================================
-# FEATURE 6: /info2
-# ============================================================
+async def handle_premium_pdf_start(msg: dict, cache_id: str):
+    """Premium PDF button clicked — generate PDF from cache"""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    uname = msg.get("from", {}).get("username", "user")
+    await send_msg(chat_id, "⏳ Premium PDF তৈরি হচ্ছে...")
+    try:
+        cache = await db_get_mcq_cache(cache_id)
+        if not cache:
+            await send_msg(chat_id, "❌ Cache পাওয়া যায়নি!")
+            return
+        topic = cache.get("topic", "MCQ")
+        pages = [cache["mcq_data"]]
+        await process_pdfm_pages(chat_id, uid, uname, pages, topic, None, None, None, None)
+    except Exception as e:
+        await send_msg(chat_id, f"❌ PDF error: {e}")
+
+
+async def handle_wm_command(msg: dict):
+    """/wm (watermark text) — apply watermark to replied PDF or set default"""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    text = msg.get("text", "").strip()
+    wm_text = re.sub(r"^/wm\s*", "", text, flags=re.IGNORECASE).strip()
+    reply = msg.get("reply_to_message")
+
+    if not wm_text:
+        await send_msg(chat_id,
+            "📌 Usage:\n"
+            "<code>/wm YourName</code> — reply করো যেকোনো PDF এ\n"
+            "অথবা default watermark set করতে reply ছাড়াই দাও",
+            parse_mode="HTML"
+        )
+        return
+
+    # Default watermark save করো
+    settings = await db_get_settings()
+    settings["watermark"] = wm_text
+    await db_save_settings(settings)
+
+    # Reply PDF থাকলে সেটায় apply করো
+    if reply and (reply.get("document") or reply.get("photo")):
+        file_id = None
+        if reply.get("document"):
+            file_id = reply["document"]["file_id"]
+        if file_id:
+            await send_msg(chat_id, f"⏳ Watermark apply হচ্ছে: <b>{wm_text}</b>", parse_mode="HTML")
+            asyncio.create_task(_apply_watermark_to_pdf(chat_id, file_id, wm_text))
+            return
+
+    await send_msg(chat_id,
+        f"✅ Default watermark set: <b>{wm_text}</b>\n\n"
+        f"এখন থেকে সব PDF এ এই watermark apply হবে।\n"
+        f"যেকোনো পুরনো PDF এ reply করে <code>/wm {wm_text}</code> দিলে সেটায় apply হবে।",
+        parse_mode="HTML"
+    )
+
+
+async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str):
+    """Download PDF, apply watermark using existing add_watermark_to_pdf, resend"""
+    try:
+        pdf_bytes = await download_tg_file(file_id)
+        wm_bytes = add_watermark_to_pdf(pdf_bytes, wm_text)
+        await send_document(chat_id, wm_bytes,
+            f"watermarked.pdf",
+            caption=f"✅ Watermark applied: <b>{wm_text}</b>",
+            mime_type="application/pdf"
+        )
+    except Exception as e:
+        await send_msg(chat_id, f"❌ Watermark error: {e}")
 async def handle_info2(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
@@ -4526,6 +4594,10 @@ async def handle_message(msg: dict):
     if text == "/help":
         await handle_start(msg)
         return
+    if text.startswith("/start premium_"):
+        cache_id = text.replace("/start premium_", "").strip()
+        asyncio.create_task(handle_premium_pdf_start(msg, cache_id))
+        return
     if text.startswith("/start pdf_"):
         cache_id = text.replace("/start pdf_", "").strip()
         asyncio.create_task(handle_quiz_solve(msg, cache_id))
@@ -4606,7 +4678,11 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         asyncio.create_task(handle_rapid_command(msg))
-    elif text.startswith("/live ") or text == "/live":
+    elif text.startswith("/wm"):
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        asyncio.create_task(handle_wm_command(msg))
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
@@ -4809,7 +4885,7 @@ async def handle_callback(query: dict):
             img_data = json.loads(row.data[0]["data"])
             asyncio.create_task(process_img_to_poll(
                 img_data["file_id"], channel, img_data["mode"],
-                chat_id, uid, uname
+                chat_id, uid, uname, topic=img_data.get("topic", "ATLAS Special MCQ")
             ))
 
         elif data.startswith("txtchannel_"):
