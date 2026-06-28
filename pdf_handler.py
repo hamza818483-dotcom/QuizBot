@@ -92,14 +92,14 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 💥অপশন: (৪টি, ছোট+মিক্সড সোর্স থেকে)
 -অপশনে সঠিক উত্তর অবশ্যই একটিই থাকবে
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
-💥উত্তর: A/B/C/D — different options এ হতে হবে
+💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position (A, B, C, or D) — vary them naturally across questions.
 💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
 
 Topic: {topic}
 Page: {page}
 
 MUST Return ONLY valid JSON array, no markdown:
-[{{"question":"...","options":["A","B","C","D"],"answer":"A","explanation":"..."}}]"""
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
 
 MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 
@@ -126,14 +126,14 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 💥অপশন: (৪টি, ছোট+20% বড়, মিক্সড সোর্স)
 -অপশনে সঠিক উত্তর একটিই
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
-💥উত্তর: A/B/C/D — different options এ হতে হবে
+💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position — vary them naturally so answers are spread across A, B, C, D positions.
 💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
 
 Topic: {topic}
 Page: {page}
 
 MUST Return ONLY valid JSON array, no markdown:
-[{{"question":"...","options":["A","B","C","D"],"answer":"A","explanation":"..."}}]"""
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"..."}}]"""
 
 # ============================================================
 # PDF TO IMAGES
@@ -186,6 +186,24 @@ def _parse_mcq_json(text: str) -> list:
         if all(k in m for k in ["question", "options", "answer", "explanation"]):
             if len(m["options"]) == 4 and m["answer"] in ["A", "B", "C", "D"]:
                 valid.append(m)
+
+    # Post-process: answer গুলো সব একই হলে shuffle করো
+    import random as _rnd
+    if valid:
+        answers = [m["answer"] for m in valid]
+        # সব answer একই হলে force distribute
+        if len(set(answers)) == 1:
+            labels = ["A", "B", "C", "D"]
+            for i, m in enumerate(valid):
+                new_ans_label = labels[i % 4]
+                new_ans_idx = labels.index(new_ans_label)
+                old_ans_idx = labels.index(m["answer"])
+                opts = m["options"][:]
+                # correct option swap করো new position এ
+                opts[old_ans_idx], opts[new_ans_idx] = opts[new_ans_idx], opts[old_ans_idx]
+                m["options"] = opts
+                m["answer"] = new_ans_label
+
     return valid
 
 # ============================================================
