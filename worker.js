@@ -305,20 +305,64 @@ async function handleTgSendDoc(request) {
 // ============================================================
 async function handleQuizData(request, url) {
   try {
-    // Support both /quiz-data?id=qz_X and /api/exam/qz_X
     let id = url.searchParams.get('id');
     if (!id) id = url.pathname.replace('/api/exam/', '');
     if (!id) return jsonResp({ ok: false, error: 'No id' }, 400);
-
     if (!id.startsWith('qz_')) return jsonResp({ ok: false, error: 'Invalid quiz id' }, 400);
 
-    const row = await DB.prepare("SELECT * FROM quizzes WHERE id=?1").bind(id).first();
+    const ANS = ["A","B","C","D","E"];
+
+    // ── Layer 1: D1 ──
+    let row = null;
+    try {
+      row = await DB.prepare("SELECT * FROM quizzes WHERE id=?1").bind(id).first();
+    } catch(e) {
+      console.error('[quiz] D1 failed:', e.message);
+    }
+
+    // ── Layer 2: Supabase backup (D1 fail বা empty হলে) ──
+    if (!row) {
+      try {
+        const SB_URL = typeof SUPABASE_URL !== 'undefined' ? SUPABASE_URL : '';
+        const SB_KEY = typeof SUPABASE_KEY !== 'undefined' ? SUPABASE_KEY : '';
+        if (SB_URL && SB_KEY) {
+          const r = await fetch(
+            `${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${id}&select=*`,
+            { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } }
+          );
+          const data = await r.json();
+          if (data && data[0]) {
+            const b = data[0];
+            // D1 তে re-import করো (future এর জন্য)
+            try {
+              await DB.prepare(
+                "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
+              ).bind(id, b.name, '', 30, 0, JSON.stringify(b.questions), '', '', 0).run();
+            } catch(_) {}
+            // Supabase data দিয়ে serve করো
+            const mcqs = b.questions.map(q => ({
+              question: q.question || '',
+              options: q.options || [],
+              answer: ANS[q.answer_index ?? 0] || 'A',
+              explanation: q.explanation || '',
+            }));
+            return jsonResp({
+              cache_id: id, topic: b.name || 'Quiz', page: 1,
+              mcqs, tag: '', exp_footer: '', channel_id: '',
+              image_msg_id: null, end_msg_id: null,
+              image_file_id: null, is_new_gen: false, timer: 30,
+              _source: 'supabase_backup',
+            });
+          }
+        }
+      } catch(e) {
+        console.error('[quiz] Supabase fallback failed:', e.message);
+      }
+    }
+
     if (!row) return jsonResp({ error: 'Not found' }, 404);
 
     const questions = JSON.parse(row.csv_data || '[]');
-    const ANS = ["A","B","C","D","E"];
-
-    // Convert to index.html mcqs format
     const mcqs = questions.map(q => ({
       question: q.question || '',
       options: q.options || [],
@@ -327,18 +371,10 @@ async function handleQuizData(request, url) {
     }));
 
     return jsonResp({
-      cache_id: id,
-      topic: row.name || 'Quiz',
-      page: 1,
-      mcqs,
-      tag: row.tag || '',
-      exp_footer: row.exp_footer || '',
-      channel_id: '',
-      image_msg_id: null,
-      end_msg_id: null,
-      image_file_id: null,
-      is_new_gen: false,
-      timer: row.timer || 30,
+      cache_id: id, topic: row.name || 'Quiz', page: 1,
+      mcqs, tag: row.tag || '', exp_footer: row.exp_footer || '',
+      channel_id: '', image_msg_id: null, end_msg_id: null,
+      image_file_id: null, is_new_gen: false, timer: row.timer || 30,
     });
   } catch(e) {
     return jsonResp({ error: e.message }, 500);
