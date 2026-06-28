@@ -367,11 +367,10 @@ async def handle_poll_extract(msg: dict):
     bot_info     = await tg_post("getMe", {})
     bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
 
-    from core import CF_WORKER_URL
-    # Web quiz Worker URL — bot ছাড়াই permanent
+    # Web quiz Worker URL — HF full exam system এ redirect করে
     QUIZ_WORKER_URL = "https://atlasquizbotpro.hamza818483.workers.dev"
-    web_link  = f"{QUIZ_WORKER_URL}/quiz/{quiz_id}" if quiz_id else None
-    bot_link  = f"https://t.me/{bot_username}?start={quiz_id}" if quiz_id else None
+    web_link = f"{QUIZ_WORKER_URL}/quiz/{quiz_id}" if quiz_id else None
+    bot_link = f"https://t.me/{bot_username}?start={quiz_id}" if quiz_id else None
 
     caption = (
         f"✅ <b>Poll Extract সম্পন্ন!</b>\n"

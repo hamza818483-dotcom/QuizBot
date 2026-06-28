@@ -34,8 +34,15 @@ export default {
     // TG send document (multipart)
     if (url.pathname === '/tg-senddoc') return await handleTgSendDoc(request);
 
-    // Web Quiz — bot ছাড়াই চলে, D1 থেকে directly serve
-    if (url.pathname.startsWith('/quiz/')) return await handleWebQuiz(request, url, env);
+    // Web Quiz — HF full exam system এ redirect
+    if (url.pathname.startsWith('/quiz/')) {
+      const quizId = url.pathname.replace('/quiz/', '').split('?')[0];
+      const uid = url.searchParams.get('uid') || '';
+      const name = url.searchParams.get('name') || 'Student';
+      const HF = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
+      const target = `${HF}/exam/${quizId}?uid=${uid}&name=${encodeURIComponent(name)}`;
+      return Response.redirect(target, 302);
+    }
     if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url);
 
     // Webhook → forward everything to HF Space

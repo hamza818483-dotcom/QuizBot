@@ -5062,6 +5062,59 @@ async def exam_page(cache_id: str, request: Request):
 @app.get("/api/exam/{cache_id}")
 async def get_exam_data(cache_id: str):
     try:
+        # qz_ prefix মানে D1 quiz — poll_extract থেকে আসা
+        if cache_id.startswith("qz_"):
+            rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [cache_id])
+            if not rows:
+                # Supabase backup থেকে restore
+                try:
+                    import httpx as _hx
+                    _h = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+                    async with _hx.AsyncClient(timeout=10) as _c:
+                        _r = await _c.get(f"{SUPABASE_URL}/rest/v1/quiz_backups",
+                            headers=_h, params={"quiz_id": f"eq.{cache_id}", "select": "*"})
+                    _b = _r.json()
+                    if _b:
+                        _bk = _b[0]
+                        await d1_run(
+                            "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                            [cache_id, _bk["name"], "", 30, 0, json.dumps(_bk["questions"]), "", "", 0]
+                        )
+                        rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [cache_id])
+                except Exception as _e:
+                    logger.warning(f"[exam] Supabase restore failed: {_e}")
+            if not rows:
+                return JSONResponse({"error": "Quiz not found"}, status_code=404)
+            row = rows[0]
+            questions = json.loads(row.get("csv_data", "[]"))
+            # index.html এর mcqs format এ convert
+            mcqs = []
+            for q in questions:
+                opts = q.get("options", [])
+                ans_idx = q.get("answer_index", 0)
+                ans_labels = ["A","B","C","D","E"]
+                mcqs.append({
+                    "question": q.get("question",""),
+                    "options": opts,
+                    "answer": ans_labels[ans_idx] if ans_idx < len(ans_labels) else "A",
+                    "explanation": q.get("explanation",""),
+                })
+            return JSONResponse({
+                "cache_id": cache_id,
+                "topic": row.get("name", "Quiz"),
+                "page": 1,
+                "mcqs": mcqs,
+                "tag": row.get("tag",""),
+                "exp_footer": row.get("exp_footer",""),
+                "channel_id": "",
+                "image_msg_id": None,
+                "end_msg_id": None,
+                "image_file_id": None,
+                "is_new_gen": False,
+                "timer": row.get("timer", 30),
+            })
+
+        # Normal cache_id — existing system
         cache = await db_get_mcq_cache(cache_id)
         if not cache:
             return JSONResponse({"error": "Not found"}, status_code=404)
