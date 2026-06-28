@@ -1518,17 +1518,28 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
 async def handle_premium_pdf_start(msg: dict, cache_id: str):
     """Premium PDF button clicked — generate PDF from cache"""
     chat_id = msg["chat"]["id"]
-    uid = msg["from"]["id"]
-    uname = msg.get("from", {}).get("username", "user")
-    await send_msg(chat_id, "⏳ Premium PDF তৈরি হচ্ছে...")
+    r = await send_msg(chat_id, "⏳ Premium PDF তৈরি হচ্ছে...")
+    status_id = r.get("result", {}).get("message_id")
     try:
         cache = await db_get_mcq_cache(cache_id)
         if not cache:
             await send_msg(chat_id, "❌ Cache পাওয়া যায়নি!")
             return
         topic = cache.get("topic", "MCQ")
-        pages = [cache["mcq_data"]]
-        await process_pdfm_pages(chat_id, uid, uname, pages, topic, None, None, None, None)
+        mcqs = cache["mcq_data"]
+        html = _build_rapid_pdf_html(topic, mcqs)
+        pdf_bytes = await _html_to_pdf(html)
+        if not pdf_bytes:
+            await send_msg(chat_id, "❌ PDF generate হয়নি!")
+            return
+        safe = re.sub(r"[^\w\u0980-\u09FF]+", "_", topic)[:40] or "MCQ"
+        if status_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_id})
+        await send_document(chat_id, pdf_bytes,
+            f"{safe}.pdf",
+            caption=f"📄 <b>{topic}</b>\n💎 {len(mcqs)} MCQ",
+            mime_type="application/pdf"
+        )
     except Exception as e:
         await send_msg(chat_id, f"❌ PDF error: {e}")
 
