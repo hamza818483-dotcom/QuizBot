@@ -427,16 +427,19 @@ async def send_quiz_question(chat_id: int, session: dict):
         async def _quiz_timeout():
             await asyncio.sleep(session["timer"] + 2)
             s = QUIZ_SESSIONS.get(session["uid"])
-            if s and s["pid"] == poll_id and s["cur"] == session["cur"]:
-                r = await send_msg(chat_id,
-                    "⏱️ সময় শেষ!\nNext Question এ যেতে \"Next\" Button-এ ক্লিক করো।",
-                    reply_markup={"inline_keyboard": [[
-                        {"text": "⏭️ Next", "callback_data": f"qznext_{session['uid']}"}
-                    ]]}
-                )
-                if r.get("ok"):
-                    s["timeout_msg_id"] = r["result"]["message_id"]
-                    QUIZ_SESSIONS[session["uid"]] = s
+            if not s or s["pid"] != poll_id or s["cur"] != session["cur"]:
+                return
+            # Auto-advance — skip হিসেবে count করো
+            for qr in s["q_results"]:
+                if qr["index"] == s["cur"] and qr["type"] == "pending":
+                    qr["type"] = "skip"
+                    break
+            s["skip"] += 1
+            s["cur"] += 1
+            QUIZ_SESSIONS[s["uid"]] = s
+            # 1s gap দিয়ে next question auto-send
+            await asyncio.sleep(1)
+            await send_quiz_question(chat_id, s)
         if session["uid"] in QUIZ_TIMERS:
             QUIZ_TIMERS[session["uid"]].cancel()
         QUIZ_TIMERS[session["uid"]] = asyncio.create_task(_quiz_timeout())
