@@ -1159,28 +1159,25 @@ async def handle_csv_command(msg: dict):
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
-                f"✅ {len(mcqs)} MCQ পাওয়া গেছে!\n📢 Channel select করো:")
+                f"✅ {len(mcqs)} MCQ পাওয়া গেছে!\n📢 কী করতে চাও?")
 
-        channels = await db_get_channels()
-        if not channels:
-            await send_msg(chat_id, "❌ Channel নেই! /channel দিয়ে add করো।")
-            return
-
-        kb = {"inline_keyboard": []}
-        for ch in channels:
-            ch_id = ch.get("channel_id", "")
-            ch_name = ch.get("channel_name", ch_id)
-            kb["inline_keyboard"].append([{
-                "text": f"📢 {ch_name}",
-                "callback_data": f"csvchannel_{ch_id}_{uid}"
-            }])
-        kb["inline_keyboard"].append([{
-            "text": "❌ Cancel",
-            "callback_data": f"csvcancel_{uid}"
-        }])
+        # Action buttons — Quiz Solve, Poll Solve, Web Exam, Premium PDF
+        kb = {"inline_keyboard": [
+            [
+                {"text": "🎯 Quiz Solve", "callback_data": f"csvact_quiz_{cache_id}_{uid}"},
+                {"text": "📊 Poll Solve", "callback_data": f"csvact_poll_{cache_id}_{uid}"},
+            ],
+            [
+                {"text": "🌐 Web Exam", "callback_data": f"csvact_web_{cache_id}_{uid}"},
+                {"text": "📄 Premium PDF", "callback_data": f"csvact_pdf_{cache_id}_{uid}"},
+            ],
+            [{"text": "📢 Channel এ পাঠাও", "callback_data": f"csvact_channel_{cache_id}_{uid}"}],
+            [{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}],
+        ]}
         await send_msg(chat_id,
-            f"✅ {len(mcqs)} MCQ | 🔥 {topic or 'N/A'}\n\nChannel select করো:",
-            reply_markup=kb
+            f"✅ <b>{len(mcqs)} MCQ</b> | 🔥 {topic or 'N/A'}\n\nএকটা option select করো:",
+            reply_markup=kb,
+            parse_mode="HTML"
         )
 
     except Exception as e:
@@ -4833,6 +4830,97 @@ async def handle_callback(query: dict):
             asyncio.create_task(process_txt_to_poll(
                 txt_data["text"], channel, chat_id, uid, uname
             ))
+
+        elif data.startswith("csvact_"):
+            # csvact_{action}_{cache_id}_{uid}
+            parts = data.split("_", 3)
+            action = parts[1]
+            rest = parts[2] if len(parts) > 2 else ""
+            # cache_id may contain _ so split from right
+            rest_parts = rest.rsplit("_", 1)
+            cache_id_cb = rest_parts[0] if len(rest_parts) > 1 else rest
+            orig_uid = int(rest_parts[1]) if len(rest_parts) > 1 else uid
+            if uid != orig_uid:
+                return
+            row = sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{uid}").execute()
+            if not row.data:
+                await send_msg(chat_id, "❌ Session expired! আবার CSV reply করে /csv দাও।")
+                return
+            csv_data = json.loads(row.data[0]["data"])
+            c_id = csv_data["cache_id"]
+            topic_cb = csv_data.get("topic", "MCQ")
+
+            if action == "quiz":
+                # D1 quiz হিসেবে save করে bot link দাও
+                mcqs_row = await db_get_mcq_cache(c_id)
+                if mcqs_row:
+                    from quiz import create_quiz_from_mcqs
+                    quiz_id = await create_quiz_from_mcqs(mcqs_row["mcq_data"], topic_cb, uid)
+                    bot_info = await tg_post("getMe", {})
+                    bot_un = bot_info.get("result", {}).get("username", "")
+                    await send_msg(chat_id,
+                        f"🎯 <b>Quiz তৈরি হয়েছে!</b>\n\n"
+                        f"🔗 <code>https://t.me/{bot_un}?start={quiz_id}</code>",
+                        parse_mode="HTML"
+                    )
+
+            elif action == "poll":
+                # Channel select করতে বলো — poll পাঠাবে
+                channels = await db_get_channels()
+                if not channels:
+                    await send_msg(chat_id, "❌ Channel নেই! /channel দিয়ে add করো।")
+                    return
+                kb2 = {"inline_keyboard": []}
+                for ch in channels:
+                    kb2["inline_keyboard"].append([{
+                        "text": f"📢 {ch.get('channel_name', ch.get('channel_id'))}",
+                        "callback_data": f"csvchannel_{ch['channel_id']}_{uid}"
+                    }])
+                kb2["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}])
+                await send_msg(chat_id, "📢 Channel select করো:", reply_markup=kb2)
+
+            elif action == "web":
+                # D1 তে save করে web link দাও
+                mcqs_row = await db_get_mcq_cache(c_id)
+                if mcqs_row:
+                    from poll_extract import save_quiz_to_d1
+                    polls = [{"question": q["question"], "options": q["options"],
+                               "correct_idx": ["A","B","C","D","E"].index(q.get("answer","A")) if q.get("answer","A") in ["A","B","C","D","E"] else 0,
+                               "explanation": q.get("explanation","")}
+                              for q in mcqs_row["mcq_data"]]
+                    quiz_id = await save_quiz_to_d1(polls, topic_cb, uid)
+                    web_url = f"https://atlasquizbotpro.hamza818483.workers.dev/quiz/{quiz_id}"
+                    await send_msg(chat_id,
+                        f"🌐 <b>Web Exam Link:</b>\n{web_url}",
+                        parse_mode="HTML"
+                    )
+
+            elif action == "pdf":
+                # existing pdfm flow use করো
+                mcqs_row = await db_get_mcq_cache(c_id)
+                if not mcqs_row:
+                    await send_msg(chat_id, "❌ Session expired!")
+                    return
+                uname = msg.get("from", {}).get("username", "user")
+                pages = [mcqs_row["mcq_data"]]
+                asyncio.create_task(process_pdfm_pages(
+                    chat_id, uid, uname, pages, topic_cb,
+                    None, None, None, None
+                ))
+
+            elif action == "channel":
+                channels = await db_get_channels()
+                if not channels:
+                    await send_msg(chat_id, "❌ Channel নেই!")
+                    return
+                kb2 = {"inline_keyboard": []}
+                for ch in channels:
+                    kb2["inline_keyboard"].append([{
+                        "text": f"📢 {ch.get('channel_name', ch.get('channel_id'))}",
+                        "callback_data": f"csvchannel_{ch['channel_id']}_{uid}"
+                    }])
+                kb2["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}])
+                await send_msg(chat_id, "📢 Channel select করো:", reply_markup=kb2)
 
         elif data.startswith("csvchannel_"):
             parts = data.split("_", 2)
