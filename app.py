@@ -5066,7 +5066,7 @@ async def get_exam_data(cache_id: str):
         if cache_id.startswith("qz_"):
             rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [cache_id])
             if not rows:
-                # Supabase backup থেকে restore
+                # Layer 2: Supabase backup থেকে restore
                 try:
                     import httpx as _hx
                     _h = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
@@ -5083,6 +5083,19 @@ async def get_exam_data(cache_id: str):
                         rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [cache_id])
                 except Exception as _e:
                     logger.warning(f"[exam] Supabase restore failed: {_e}")
+
+            if not rows:
+                # Layer 3: CF Worker fallback
+                try:
+                    import httpx as _hx
+                    CF_QUIZ_URL = f"https://atlasquizbotpro.hamza818483.workers.dev/api/exam/{cache_id}"
+                    async with _hx.AsyncClient(timeout=8) as _c:
+                        _r = await _c.get(CF_QUIZ_URL)
+                    if _r.status_code == 200:
+                        return JSONResponse(_r.json())
+                except Exception as _e:
+                    logger.warning(f"[exam] CF fallback failed: {_e}")
+
             if not rows:
                 return JSONResponse({"error": "Quiz not found"}, status_code=404)
             row = rows[0]
