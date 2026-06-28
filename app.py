@@ -798,36 +798,32 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             if photo_r.get("ok"):
                 image_msg_id = photo_r["result"]["message_id"]
 
-        # ✅ CSV file generate করো এবং bot-এ পাঠাও (poll channel-এ যাওয়ার আগে)
+        # ✅ CSV file generate করো — new format with varied answers
         try:
-            csv_lines = ["Question,Option A,Option B,Option C,Option D,Answer,Explanation"]
+            import csv as _csv
+            from io import StringIO as _SIO
+            _out = _SIO()
+            _wr = _csv.writer(_out, quoting=_csv.QUOTE_ALL)
+            _wr.writerow(["questions","option1","option2","option3","option4","option5","answer","explanation","type","section"])
             for m in mcqs:
-                opts = m.get("options", ["", "", "", ""])
-                while len(opts) < 4:
+                opts = m.get("options", ["","","",""])
+                while len(opts) < 5:
                     opts.append("")
-                q = m.get("question", "").replace(",", "،")
-                ans_map = {0: "A", 1: "B", 2: "C", 3: "D"}
-                ans_letter = ans_map.get(
-                    {0: 0, 1: 1, 2: 2, 3: 3}.get(
-                        {"A": 0, "B": 1, "C": 2, "D": 3}.get(m.get("answer", "A"), 0), 0
-                    ), "A"
-                )
-                exp = m.get("explanation", "").replace(",", "،").replace("\n", " ")
-                csv_lines.append(
-                    f"{q},{opts[0]},{opts[1]},{opts[2]},{opts[3]},{ans_letter},{exp}"
-                )
-            csv_content = "\n".join(csv_lines).encode("utf-8")
+                padded = (opts + ["","","","",""])[:5]
+                ans_idx = {"A":0,"B":1,"C":2,"D":3,"E":4}.get(m.get("answer","A"), 0)
+                ans_numeric = ans_idx + 1  # 1-based
+                exp = m.get("explanation","")
+                _wr.writerow([m.get("question",""), padded[0], padded[1], padded[2], padded[3], padded[4], ans_numeric, exp, 1, 1])
+            csv_content = _out.getvalue().encode("utf-8-sig")
             csv_caption = (
                 f"📄 CSV ফাইল — {topic}\n"
                 f"💎 {len(mcqs)} MCQ\n\n"
-                f"📌 Format: Question, A, B, C, D, Answer, Explanation"
+                f"📌 Format: questions, option1-5, answer(numeric), explanation, type, section"
             )
             await send_document(
-                chat_id,
-                csv_content,
+                chat_id, csv_content,
                 f"ATLAS_{topic or 'MCQ'}.csv",
-                caption=csv_caption,
-                mime_type="text/csv"
+                caption=csv_caption, mime_type="text/csv"
             )
         except Exception as csv_err:
             logger.warning(f"[IMG] CSV send failed: {csv_err}")
