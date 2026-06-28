@@ -311,71 +311,75 @@ async function handleQuizData(request, url) {
     if (!id.startsWith('qz_')) return jsonResp({ ok: false, error: 'Invalid quiz id' }, 400);
 
     const ANS = ["A","B","C","D","E"];
+    const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+    const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+    const HF_URL = 'https://hamzahf1-atlasboss.hf.space';
+
+    function toMcqs(questions) {
+      return questions.map(q => ({
+        question: q.question || '',
+        options: q.options || [],
+        answer: ANS[q.answer_index ?? 0] || 'A',
+        explanation: q.explanation || '',
+      }));
+    }
+
+    function makeResp(id, name, mcqs, timer=30, source='d1') {
+      return jsonResp({
+        cache_id: id, topic: name || 'Quiz', page: 1,
+        mcqs, tag: '', exp_footer: '', channel_id: '',
+        image_msg_id: null, end_msg_id: null,
+        image_file_id: null, is_new_gen: false,
+        timer, _source: source,
+      });
+    }
 
     // ── Layer 1: D1 ──
-    let row = null;
     try {
-      row = await DB.prepare("SELECT * FROM quizzes WHERE id=?1").bind(id).first();
+      const row = await DB.prepare("SELECT * FROM quizzes WHERE id=?1").bind(id).first();
+      if (row) {
+        const questions = JSON.parse(row.csv_data || '[]');
+        return makeResp(id, row.name, toMcqs(questions), row.timer || 30, 'd1');
+      }
     } catch(e) {
       console.error('[quiz] D1 failed:', e.message);
     }
 
-    // ── Layer 2: Supabase backup (D1 fail বা empty হলে) ──
-    if (!row) {
-      try {
-        const SB_URL = typeof SUPABASE_URL !== 'undefined' ? SUPABASE_URL : '';
-        const SB_KEY = typeof SUPABASE_KEY !== 'undefined' ? SUPABASE_KEY : '';
-        if (SB_URL && SB_KEY) {
-          const r = await fetch(
-            `${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${id}&select=*`,
-            { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } }
-          );
-          const data = await r.json();
-          if (data && data[0]) {
-            const b = data[0];
-            // D1 তে re-import করো (future এর জন্য)
-            try {
-              await DB.prepare(
-                "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
-              ).bind(id, b.name, '', 30, 0, JSON.stringify(b.questions), '', '', 0).run();
-            } catch(_) {}
-            // Supabase data দিয়ে serve করো
-            const mcqs = b.questions.map(q => ({
-              question: q.question || '',
-              options: q.options || [],
-              answer: ANS[q.answer_index ?? 0] || 'A',
-              explanation: q.explanation || '',
-            }));
-            return jsonResp({
-              cache_id: id, topic: b.name || 'Quiz', page: 1,
-              mcqs, tag: '', exp_footer: '', channel_id: '',
-              image_msg_id: null, end_msg_id: null,
-              image_file_id: null, is_new_gen: false, timer: 30,
-              _source: 'supabase_backup',
-            });
-          }
-        }
-      } catch(e) {
-        console.error('[quiz] Supabase fallback failed:', e.message);
+    // ── Layer 2: Supabase ──
+    try {
+      const r = await fetch(
+        `${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${id}&select=*`,
+        { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } }
+      );
+      const data = await r.json();
+      if (data && data[0]) {
+        const b = data[0];
+        // D1 তে re-import
+        try {
+          await DB.prepare(
+            "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
+          ).bind(id, b.name, '', 30, 0, JSON.stringify(b.questions), '', '', 0).run();
+        } catch(_) {}
+        return makeResp(id, b.name, toMcqs(b.questions), 30, 'supabase');
       }
+    } catch(e) {
+      console.error('[quiz] Supabase failed:', e.message);
     }
 
-    if (!row) return jsonResp({ error: 'Not found' }, 404);
+    // ── Layer 3: HF Space ──
+    try {
+      const r = await fetch(`${HF_URL}/api/exam/${id}`, {
+        signal: AbortSignal.timeout(8000)
+      });
+      if (r.ok) {
+        const d = await r.json();
+        if (d && d.mcqs) return jsonResp(d);
+      }
+    } catch(e) {
+      console.error('[quiz] HF fallback failed:', e.message);
+    }
 
-    const questions = JSON.parse(row.csv_data || '[]');
-    const mcqs = questions.map(q => ({
-      question: q.question || '',
-      options: q.options || [],
-      answer: ANS[q.answer_index ?? 0] || 'A',
-      explanation: q.explanation || '',
-    }));
-
-    return jsonResp({
-      cache_id: id, topic: row.name || 'Quiz', page: 1,
-      mcqs, tag: row.tag || '', exp_footer: row.exp_footer || '',
-      channel_id: '', image_msg_id: null, end_msg_id: null,
-      image_file_id: null, is_new_gen: false, timer: row.timer || 30,
-    });
+    return jsonResp({ error: 'Quiz পাওয়া যায়নি' }, 404);
   } catch(e) {
     return jsonResp({ error: e.message }, 500);
   }
