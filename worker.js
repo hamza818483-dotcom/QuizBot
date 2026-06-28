@@ -34,15 +34,9 @@ export default {
     // TG send document (multipart)
     if (url.pathname === '/tg-senddoc') return await handleTgSendDoc(request);
 
-    // Web Quiz — HF full exam system এ redirect
-    if (url.pathname.startsWith('/quiz/')) {
-      const quizId = url.pathname.replace('/quiz/', '').split('?')[0];
-      const uid = url.searchParams.get('uid') || '';
-      const name = url.searchParams.get('name') || 'Student';
-      const HF = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
-      const target = `${HF}/exam/${quizId}?uid=${uid}&name=${encodeURIComponent(name)}`;
-      return Response.redirect(target, 302);
-    }
+    // Web Quiz — same index.html style, CF থেকেই চলে, HF লাগে না
+    if (url.pathname.startsWith('/quiz/')) return await handleWebQuiz(request, url, env);
+    if (url.pathname.startsWith('/api/exam/')) return await handleQuizData(request, url);
     if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url);
 
     // Webhook → forward everything to HF Space
@@ -307,19 +301,47 @@ async function handleTgSendDoc(request) {
 }
 
 // ============================================================
-// WEB QUIZ — Bot ছাড়াই D1 থেকে quiz serve
-// URL: /quiz/qz_XXXXX
+// WEB QUIZ — Same index.html style, runs entirely on CF
 // ============================================================
 async function handleQuizData(request, url) {
   try {
-    const id = url.searchParams.get('id');
+    // Support both /quiz-data?id=qz_X and /api/exam/qz_X
+    let id = url.searchParams.get('id');
+    if (!id) id = url.pathname.replace('/api/exam/', '');
     if (!id) return jsonResp({ ok: false, error: 'No id' }, 400);
+
+    if (!id.startsWith('qz_')) return jsonResp({ ok: false, error: 'Invalid quiz id' }, 400);
+
     const row = await DB.prepare("SELECT * FROM quizzes WHERE id=?1").bind(id).first();
-    if (!row) return jsonResp({ ok: false, error: 'Not found' }, 404);
+    if (!row) return jsonResp({ error: 'Not found' }, 404);
+
     const questions = JSON.parse(row.csv_data || '[]');
-    return jsonResp({ ok: true, name: row.name, timer: row.timer || 30, questions });
+    const ANS = ["A","B","C","D","E"];
+
+    // Convert to index.html mcqs format
+    const mcqs = questions.map(q => ({
+      question: q.question || '',
+      options: q.options || [],
+      answer: ANS[q.answer_index ?? 0] || 'A',
+      explanation: q.explanation || '',
+    }));
+
+    return jsonResp({
+      cache_id: id,
+      topic: row.name || 'Quiz',
+      page: 1,
+      mcqs,
+      tag: row.tag || '',
+      exp_footer: row.exp_footer || '',
+      channel_id: '',
+      image_msg_id: null,
+      end_msg_id: null,
+      image_file_id: null,
+      is_new_gen: false,
+      timer: row.timer || 30,
+    });
   } catch(e) {
-    return jsonResp({ ok: false, error: e.message }, 500);
+    return jsonResp({ error: e.message }, 500);
   }
 }
 
@@ -327,151 +349,38 @@ async function handleWebQuiz(request, url, env) {
   const quizId = url.pathname.replace('/quiz/', '').split('?')[0];
   if (!quizId) return new Response('Quiz ID missing', { status: 400 });
 
-  const html = `<!DOCTYPE html>
-<html lang="bn">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ATLAS Quiz</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:'Segoe UI',sans-serif;background:#0f0f13;color:#e2e8f0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:16px}
-  .card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:20px;width:100%;max-width:520px;margin-top:16px}
-  h1{font-size:18px;font-weight:800;color:#818CF8;text-align:center;margin-bottom:4px}
-  .sub{font-size:11px;color:#64748b;text-align:center;margin-bottom:16px}
-  .progress{height:4px;background:rgba(255,255,255,.08);border-radius:2px;margin-bottom:16px}
-  .progress-bar{height:100%;background:#818CF8;border-radius:2px;transition:width .3s}
-  .qnum{font-size:10px;color:#64748b;margin-bottom:8px}
-  .question{font-size:14px;font-weight:700;line-height:1.6;margin-bottom:16px;color:#f1f5f9}
-  .options{display:flex;flex-direction:column;gap:8px}
-  .opt{padding:11px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.03);cursor:pointer;font-size:13px;transition:all .15s;text-align:left;color:#e2e8f0}
-  .opt:hover{border-color:#818CF8;background:rgba(129,140,248,.08)}
-  .opt.correct{border-color:#10B981;background:rgba(16,185,129,.12);color:#10B981;font-weight:700}
-  .opt.wrong{border-color:#EF4444;background:rgba(239,68,68,.1);color:#EF4444}
-  .opt.reveal{border-color:#10B981;background:rgba(16,185,129,.08);color:#10B981}
-  .opt:disabled{cursor:default}
-  .explanation{margin-top:12px;padding:10px 12px;border-radius:10px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2);font-size:12px;color:#a5b4fc;line-height:1.6;display:none}
-  .timer{text-align:center;font-size:22px;font-weight:900;font-family:monospace;color:#FBBF24;margin-bottom:12px}
-  .timer.urgent{color:#EF4444;animation:blink .5s ease-in-out infinite}
-  @keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
-  .next-btn{width:100%;margin-top:14px;padding:12px;border-radius:10px;background:#818CF8;color:#fff;border:none;font-size:14px;font-weight:800;cursor:pointer;display:none}
-  .next-btn:hover{background:#6366F1}
-  .result-card{text-align:center;padding:24px}
-  .result-score{font-size:48px;font-weight:900;color:#818CF8;margin:12px 0}
-  .result-detail{font-size:13px;color:#64748b;line-height:2}
-  .restart-btn{margin-top:16px;padding:10px 24px;border-radius:10px;background:#10B981;color:#fff;border:none;font-size:13px;font-weight:800;cursor:pointer}
-  .loading{text-align:center;padding:40px;color:#64748b}
-  .error{text-align:center;padding:40px;color:#EF4444}
-</style>
-</head>
-<body>
-<div class="card" id="app">
-  <div class="loading">⏳ লোড হচ্ছে...</div>
-</div>
-<script>
-const QUIZ_ID = '${quizId}';
-const BASE = location.origin;
-let questions=[], current=0, score=0, wrong=0, skipped=0, timer=30, timerEl, interval;
+  const uid  = url.searchParams.get('uid') || '0';
+  const name = url.searchParams.get('name') || 'Student';
 
-async function init(){
-  try{
-    const r = await fetch(BASE+'/quiz-data?id='+QUIZ_ID);
-    const d = await r.json();
-    if(!d.ok){ document.getElementById('app').innerHTML='<div class="error">❌ Quiz পাওয়া যায়নি।</div>'; return; }
-    questions = d.questions;
-    timer = d.timer || 30;
-    document.title = d.name + ' — ATLAS Quiz';
-    document.getElementById('app').innerHTML = '<h1>'+escHtml(d.name)+'</h1><div class="sub">ATLAS Quiz · '+questions.length+' প্রশ্ন</div><div class="progress"><div class="progress-bar" id="pbar" style="width:0%"></div></div><div id="qarea"></div>';
-    showQ();
-  }catch(e){ document.getElementById('app').innerHTML='<div class="error">❌ Error: '+e.message+'</div>'; }
-}
+  // index.html GitHub raw থেকে fetch করো
+  const WORKER_ORIGIN = `https://atlasquizbotpro.hamza818483.workers.dev`;
+  try {
+    const r = await fetch(
+      'https://raw.githubusercontent.com/hamza818483-dotcom/QuizBot/main/index.html',
+      { cf: { cacheEverything: true, cacheTtl: 300 } }
+    );
+    if (!r.ok) throw new Error('index.html fetch failed');
 
-function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    let html = await r.text();
 
-function showQ(){
-  if(current>=questions.length){ showResult(); return; }
-  const q = questions[current];
-  const pct = (current/questions.length*100).toFixed(0);
-  document.getElementById('pbar').style.width=pct+'%';
-  const opts = q.options.map((o,i)=>
-    '<button class="opt" id="opt'+i+'" onclick="pick('+i+')" data-i="'+i+'">'+escHtml(o)+'</button>'
-  ).join('');
-  document.getElementById('qarea').innerHTML =
-    '<div class="timer" id="timer">'+timer+'</div>'+
-    '<div class="qnum">প্রশ্ন '+(current+1)+' / '+questions.length+'</div>'+
-    '<div class="question">'+escHtml(q.question)+'</div>'+
-    '<div class="options">'+opts+'</div>'+
-    '<div class="explanation" id="exp">'+escHtml(q.explanation||'')+'</div>'+
-    '<button class="next-btn" id="nxt" onclick="next()">পরের প্রশ্ন →</button>';
-  startTimer(q.answer_index);
-}
+    // Template variables replace — HF_SPACE_URL কে worker নিজেই handle করবে
+    html = html.replace(/\{\{CACHE_ID\}\}/g,      quizId);
+    html = html.replace(/\{\{USER_ID\}\}/g,       uid);
+    html = html.replace(/\{\{USER_NAME\}\}/g,     encodeURIComponent(name));
+    html = html.replace(/\{\{HF_SPACE_URL\}\}/g,  WORKER_ORIGIN);
+    html = html.replace(/\{\{SUPABASE_URL\}\}/g,  '');
+    html = html.replace(/\{\{SUPABASE_KEY\}\}/g,  '');
 
-function startTimer(ans){
-  let t=timer;
-  timerEl=document.getElementById('timer');
-  interval=setInterval(()=>{
-    t--;
-    if(timerEl) timerEl.textContent=t;
-    if(t<=5 && timerEl) timerEl.classList.add('urgent');
-    if(t<=0){ clearInterval(interval); timeUp(ans); }
-  },1000);
-}
-
-function timeUp(ans){
-  skipped++;
-  lockOpts(ans, -1);
-}
-
-function pick(i){
-  clearInterval(interval);
-  const q=questions[current];
-  const ans=q.answer_index;
-  if(i===ans) score++; else wrong++;
-  lockOpts(ans, i);
-}
-
-function lockOpts(ans, chosen){
-  document.querySelectorAll('.opt').forEach(b=>{
-    b.onclick=null;
-    const i=parseInt(b.dataset.i);
-    if(i===ans) b.classList.add(chosen===-1?'reveal':'correct');
-    else if(i===chosen) b.classList.add('wrong');
-  });
-  const exp=document.getElementById('exp');
-  if(exp && exp.textContent.trim()) exp.style.display='block';
-  const nxt=document.getElementById('nxt');
-  if(nxt) nxt.style.display='block';
-}
-
-function next(){ current++; showQ(); }
-
-function showResult(){
-  const pct=Math.round(score/questions.length*100);
-  document.getElementById('app').innerHTML =
-    '<div class="result-card">'+
-    '<h1>✅ Quiz সম্পন্ন!</h1>'+
-    '<div class="result-score">'+pct+'%</div>'+
-    '<div class="result-detail">'+
-    '✅ সঠিক: <b>'+score+'</b><br>'+
-    '❌ ভুল: <b>'+wrong+'</b><br>'+
-    '⏭ Skip: <b>'+skipped+'</b><br>'+
-    '📋 মোট: <b>'+questions.length+'</b>'+
-    '</div>'+
-    '<button class="restart-btn" onclick="restart()">🔄 আবার দাও</button>'+
-    '</div>';
-}
-
-function restart(){ current=0; score=0; wrong=0; skipped=0; showQ(); }
-
-init();
-</script>
-</body>
-</html>`;
-
-  return new Response(html, {
-    status: 200,
-    headers: { 'Content-Type': 'text/html;charset=UTF-8' }
-  });
+    return new Response(html, {
+      status: 200,
+      headers: { 'Content-Type': 'text/html;charset=UTF-8' }
+    });
+  } catch(e) {
+    return new Response(`<h2 style="font-family:sans-serif;color:#EF4444;padding:24px">❌ Quiz load failed: ${e.message}</h2>`, {
+      status: 500,
+      headers: { 'Content-Type': 'text/html' }
+    });
+  }
 }
 async function forwardToHF(request, env) {
   try {
