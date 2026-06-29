@@ -52,17 +52,27 @@ export default {
 
   // ── Cron: HF ping + daily Supabase→D1 sync ──
   async scheduled(event, env) {
-    const HF_URL = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
-    const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
-    const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+    const HF_URL     = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
+    const RENDER_URL = env.RENDER_URL   || 'https://quizbot-s482.onrender.com';
 
-    // প্রতি 5 মিনিটে HF ping
+    // HF ping — sleep না করতে
     try {
       const r = await fetch(HF_URL + '/health', { signal: AbortSignal.timeout(10000) });
       console.log(`[cron] HF ping: ${r.status}`);
     } catch(e) {
       console.error(`[cron] HF ping failed: ${e.message}`);
     }
+
+    // Render ping — 15min sleep না করতে
+    try {
+      const r2 = await fetch(RENDER_URL + '/health', { signal: AbortSignal.timeout(10000) });
+      console.log(`[cron] Render ping: ${r2.status}`);
+    } catch(e) {
+      console.warn(`[cron] Render ping failed: ${e.message}`);
+    }
+
+    const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+    const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
 
     // প্রতিদিন রাত 12টায় Supabase→D1 sync (cron: 0 0 * * *)
     // সব quiz_backups D1 তে আছে কিনা check করে, না থাকলে restore করে
@@ -452,16 +462,34 @@ async function handleWebQuiz(request, url, env) {
   }
 }
 async function forwardToHF(request, env) {
+  const HF_URL     = (env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space') + '/webhook';
+  const RENDER_URL = (env.RENDER_URL   || 'https://quizbot-s482.onrender.com')    + '/webhook';
+  const body = await request.text();
+
+  // Primary: HF Space
   try {
-    const hfUrl = (env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space') + '/webhook';
-    const body = await request.text();
-    await fetch(hfUrl, {
+    const r = await fetch(HF_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: body
+      body,
+      signal: AbortSignal.timeout(8000),
     });
-  } catch (e) {
-    console.error('[HF Forward] Error:', e.message);
+    if (r.ok) return new Response('OK');
+  } catch(e) {
+    console.warn('[webhook] HF failed:', e.message);
   }
+
+  // Fallback: Render
+  try {
+    await fetch(RENDER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch(e) {
+    console.warn('[webhook] Render fallback failed:', e.message);
+  }
+
   return new Response('OK');
 }
