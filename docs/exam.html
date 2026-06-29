@@ -314,12 +314,59 @@ let tag = '', expFooter = '', channelId = '', imageMsgId = null, endMsgId = null
 let isNewGen = false;
 let totalSec = 0, totalLeft = 0, totalTimer = null;
 
-// ── INIT ──
+// ── INIT (100% same logic as CF worker: HF primary → Supabase backup. No CF dependency) ──
+async function fetchExamData() {
+  const ANS = ["A","B","C","D","E"];
+  const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+  const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+  const HF_SPACE = 'https://hamzahf1-atlasboss.hf.space';
+  const CF_WORKER = 'https://atlasquizbotpro.hamza818483.workers.dev';
+
+  // Layer 1: HF Space direct (primary data source — same as CF worker's own Layer 1)
+  try {
+    const r = await fetch(`${HF_SPACE}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(6000) });
+    if (r.ok) {
+      const d = await r.json();
+      if (d && d.mcqs && d.mcqs.length > 0) return d;
+    }
+  } catch (e) {}
+
+  // Layer 2: CF worker (forwards HF/D1/Supabase itself — covers cases where HF direct is blocked by CORS)
+  try {
+    const r2 = await fetch(`${CF_WORKER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(6000) });
+    if (r2.ok) {
+      const d2 = await r2.json();
+      if (d2 && d2.mcqs && d2.mcqs.length > 0) return d2;
+    }
+  } catch (e) {}
+
+  // Layer 3: Supabase direct (true last-resort, independent of both CF and HF)
+  try {
+    const r3 = await fetch(`${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`, {
+      headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` }
+    });
+    const data3 = await r3.json();
+    if (data3 && data3[0]) {
+      const b = data3[0];
+      const mcqs = (b.questions || []).map(q => ({
+        question: q.question || '', options: q.options || [],
+        answer: ANS[q.answer_index ?? 0] || 'A', explanation: q.explanation || '',
+      }));
+      return {
+        cache_id: CACHE_ID, topic: b.name || 'Special Topic', page: 1, mcqs,
+        tag: '', exp_footer: '', channel_id: '', image_msg_id: null,
+        end_msg_id: null, image_file_id: null, is_new_gen: false, timer: 30,
+      };
+    }
+  } catch (e) {}
+
+  return { error: 'all sources failed' };
+}
+
 async function init() {
   setMode('Loading');
   try {
-    const r = await fetch(`${HF_URL}/api/exam/${CACHE_ID}`);
-    const d = await r.json();
+    const d = await fetchExamData();
     if (d.error) { showErr('❌ Exam পাওয়া যায়নি!'); return; }
     examData   = d;
     questions  = d.mcqs || [];
