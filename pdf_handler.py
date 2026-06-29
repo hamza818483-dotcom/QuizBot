@@ -462,3 +462,5 @@ def get_motivation(pct: float) -> str:
         return "👍 মোটামুটি ভালো! আরও একটু পড়াশোনা করো!"
     else:
         return "📚 পড়া হয়নি! আবার পড়ে চেষ্টা করো!"
+
+generate_new_mcq = generate_mcq_from_image
