@@ -4,8 +4,8 @@ compatibility_date = "2024-01-01"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "quizbot-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_name = "atlasbot-db"
+database_id = "9b866cf1-d4e8-440c-a2f8-33f2b826e383"
 
 [triggers]
 crons = ["*/15 * * * *"]
