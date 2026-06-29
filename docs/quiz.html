@@ -42,9 +42,16 @@ h1{font-size:16px;font-weight:800;color:#818CF8;text-align:center;margin-bottom:
 const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
 const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
 
-// quiz_id from URL: /quiz.html?id=qz_XXX or /quiz/qz_XXX
+// quiz_id from URL:
+//   /quiz.html?id=qz_XXX
+//   /exam/qz_XXX  (via 404.html redirect)
 const params = new URLSearchParams(location.search);
-let quizId = params.get('id') || location.pathname.split('/').pop();
+let quizId = params.get('id');
+if (!quizId) {
+  // Try /exam/qz_xxx path
+  const m = location.pathname.match(/\/exam\/(qz_[A-Za-z0-9_-]+)/);
+  if (m) quizId = m[1];
+}
 if (!quizId || !quizId.startsWith('qz_')) {
   document.getElementById('app').innerHTML = '<div class="error">❌ Quiz ID নেই।<br><small>URL: quiz.html?id=qz_XXXXX</small></div>';
 }
