@@ -36,6 +36,7 @@ export default {
 
     // Web Quiz — same index.html style, CF থেকেই চলে, HF লাগে না
     if (url.pathname.startsWith('/quiz/')) return await handleWebQuiz(request, url, env);
+    if (url.pathname.startsWith('/exam/')) return await handleWebQuiz(request, url, env);
     if (url.pathname.startsWith('/api/exam/')) return await handleQuizData(request, url);
     if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url);
 
@@ -325,6 +326,7 @@ async function handleTgSendDoc(request) {
     const formData = new FormData();
     formData.append('chat_id', String(body.chat_id));
     formData.append('caption', body.caption || '');
+    if (body.parse_mode) formData.append('parse_mode', body.parse_mode);
     formData.append('document', new Blob([bytes], { type: body.mime_type || 'application/octet-stream' }), body.filename || 'file');
 
     const resp = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
@@ -425,7 +427,7 @@ async function handleQuizData(request, url) {
 }
 
 async function handleWebQuiz(request, url, env) {
-  const quizId = url.pathname.replace('/quiz/', '').split('?')[0];
+  const quizId = url.pathname.replace('/quiz/', '').replace('/exam/', '').split('?')[0];
   if (!quizId) return new Response('Quiz ID missing', { status: 400 });
 
   const uid  = url.searchParams.get('uid') || '0';

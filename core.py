@@ -274,11 +274,12 @@ async def send_photo_by_id(chat_id, file_id: str, caption: str = "",
 
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
-                        reply_to_message_id: int = None) -> dict:
+                        reply_to_message_id: int = None, parse_mode: str = "HTML") -> dict:
     try:
         data = {
             "chat_id": str(chat_id),
             "caption": caption,
+            "parse_mode": parse_mode,
             "filename": filename,
             "mime_type": mime_type,
             "doc_b64": base64.b64encode(file_bytes).decode()
