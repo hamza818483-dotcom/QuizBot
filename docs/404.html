@@ -4,13 +4,13 @@
 <meta charset="UTF-8">
 <title>ATLAS Quiz</title>
 <script>
-  // GitHub Pages এ /exam/qz_xxx → /quiz.html?id=qz_xxx redirect
+  // GitHub Pages এ /exam/qz_xxx → /exam.html?id=qz_xxx redirect (full ATLAS exam UI)
   const path = location.pathname;
   const m = path.match(/\/exam\/(qz_[A-Za-z0-9_-]+)/);
   if (m) {
-    location.replace(location.origin + '/QuizBot/quiz.html?id=' + m[1]);
+    location.replace(location.origin + '/QuizBot/exam.html?id=' + m[1] + location.search.replace(/^\?/, '&'));
   } else {
-    location.replace(location.origin + '/QuizBot/quiz.html');
+    location.replace(location.origin + '/QuizBot/exam.html');
   }
 </script>
 </head>
