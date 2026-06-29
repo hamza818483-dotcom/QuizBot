@@ -34,11 +34,28 @@ export default {
     // TG send document (multipart)
     if (url.pathname === '/tg-senddoc') return await handleTgSendDoc(request);
 
-    // Web Quiz — same index.html style, CF থেকেই চলে, HF লাগে না
+    // Web Quiz — CF serves index.html, API data via HF→D1→Supabase chain
     if (url.pathname.startsWith('/quiz/')) return await handleWebQuiz(request, url, env);
     if (url.pathname.startsWith('/exam/')) return await handleWebQuiz(request, url, env);
     if (url.pathname.startsWith('/api/exam/')) return await handleQuizData(request, url);
     if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url);
+
+    // Forward HF-only API routes to HF Space
+    const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
+                     '/api/leaderboard', '/api/solve-pdf', '/api/tg-image'];
+    if (HF_ONLY.some(p => url.pathname.startsWith(p))) {
+      const HF = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
+      const hfReq = new Request(HF + url.pathname + url.search, {
+        method: request.method,
+        headers: request.headers,
+        body: request.method !== 'GET' ? request.body : undefined,
+      });
+      try {
+        return await fetch(hfReq, { signal: AbortSignal.timeout(15000) });
+      } catch(e) {
+        return jsonResp({ ok: false, error: 'HF unavailable: ' + e.message }, 502);
+      }
+    }
 
     // Webhook → forward everything to HF Space
     if (url.pathname === '/webhook' || url.pathname.startsWith('/webhook/')) {
@@ -347,9 +364,8 @@ async function handleTgSendDoc(request) {
 async function handleQuizData(request, url) {
   try {
     let id = url.searchParams.get('id');
-    if (!id) id = url.pathname.replace('/api/exam/', '');
+    if (!id) id = url.pathname.replace('/api/exam/', '').split('?')[0].trim();
     if (!id) return jsonResp({ ok: false, error: 'No id' }, 400);
-    if (!id.startsWith('qz_')) return jsonResp({ ok: false, error: 'Invalid quiz id' }, 400);
 
     const ANS = ["A","B","C","D","E"];
     const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
@@ -365,28 +381,49 @@ async function handleQuizData(request, url) {
       }));
     }
 
-    function makeResp(id, name, mcqs, timer=30, source='d1') {
+    function makeResp(id, name, mcqs, timer=30, source='d1', extra={}) {
       return jsonResp({
-        cache_id: id, topic: name || 'Quiz', page: 1,
-        mcqs, tag: '', exp_footer: '', channel_id: '',
-        image_msg_id: null, end_msg_id: null,
-        image_file_id: null, is_new_gen: false,
+        cache_id: id, topic: name || 'Quiz', page: extra.page || 1,
+        mcqs, tag: extra.tag || '', exp_footer: extra.exp_footer || '',
+        channel_id: extra.channel_id || '',
+        image_msg_id: extra.image_msg_id || null,
+        end_msg_id: extra.end_msg_id || null,
+        image_file_id: extra.image_file_id || null,
+        is_new_gen: extra.is_new_gen || false,
         timer, _source: source,
       });
     }
 
-    // ── Layer 1: D1 ──
+    // ── Layer 1: HF Space (primary — has all data including image_file_id) ──
     try {
-      const row = await DB.prepare("SELECT * FROM quizzes WHERE id=?1").bind(id).first();
-      if (row) {
-        const questions = JSON.parse(row.csv_data || '[]');
-        return makeResp(id, row.name, toMcqs(questions), row.timer || 30, 'd1');
+      const r = await fetch(`${HF_URL}/api/exam/${id}`, {
+        signal: AbortSignal.timeout(6000)
+      });
+      if (r.ok) {
+        const d = await r.json();
+        if (d && d.mcqs && d.mcqs.length > 0) {
+          // Forward HF response as-is (preserves image_file_id, channel_id, etc.)
+          return jsonResp(d);
+        }
       }
     } catch(e) {
-      console.error('[quiz] D1 failed:', e.message);
+      console.warn('[quiz] HF primary failed:', e.message);
     }
 
-    // ── Layer 2: Supabase ──
+    // ── Layer 2: D1 (qz_ prefix quizzes only) ──
+    if (id.startsWith('qz_')) {
+      try {
+        const row = await DB.prepare("SELECT * FROM quizzes WHERE id=?1").bind(id).first();
+        if (row) {
+          const questions = JSON.parse(row.csv_data || '[]');
+          return makeResp(id, row.name, toMcqs(questions), row.timer || 30, 'd1');
+        }
+      } catch(e) {
+        console.error('[quiz] D1 failed:', e.message);
+      }
+    }
+
+    // ── Layer 3: Supabase quiz_backups ──
     try {
       const r = await fetch(
         `${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${id}&select=*`,
@@ -395,29 +432,17 @@ async function handleQuizData(request, url) {
       const data = await r.json();
       if (data && data[0]) {
         const b = data[0];
-        // D1 তে re-import
-        try {
-          await DB.prepare(
-            "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
-          ).bind(id, b.name, '', 30, 0, JSON.stringify(b.questions), '', '', 0).run();
-        } catch(_) {}
+        if (id.startsWith('qz_')) {
+          try {
+            await DB.prepare(
+              "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
+            ).bind(id, b.name, '', 30, 0, JSON.stringify(b.questions), '', '', 0).run();
+          } catch(_) {}
+        }
         return makeResp(id, b.name, toMcqs(b.questions), 30, 'supabase');
       }
     } catch(e) {
       console.error('[quiz] Supabase failed:', e.message);
-    }
-
-    // ── Layer 3: HF Space ──
-    try {
-      const r = await fetch(`${HF_URL}/api/exam/${id}`, {
-        signal: AbortSignal.timeout(8000)
-      });
-      if (r.ok) {
-        const d = await r.json();
-        if (d && d.mcqs) return jsonResp(d);
-      }
-    } catch(e) {
-      console.error('[quiz] HF fallback failed:', e.message);
     }
 
     return jsonResp({ error: 'Quiz পাওয়া যায়নি' }, 404);
@@ -517,3 +542,4 @@ async function forwardToHF(request, env) {
 
   return new Response('OK');
 }
+
