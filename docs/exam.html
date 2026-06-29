@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ATLAS Special Exam</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0A0D1E;--card-bg:#12162E;--card-hover:#1A1E3A;
+  --border:#2A2E4A;--divider:#1E2240;
+  --accent:#5A5FE0;--accent-light:rgba(90,95,224,0.12);--accent-glow:rgba(90,95,224,0.4);
+  --atlas-bg:#0D1033;--atlas-card:#151A3E;--atlas-border:#3A3F6E;
+  --atlas-text:#A8AEFF;--atlas-glow:rgba(90,95,224,0.2);--atlas-glow-strong:rgba(90,95,224,0.6);
+  --text:#E8EAFF;--text-secondary:#7A82C8;--text-tertiary:#4A5080;
+  --success:#22D47A;--success-light:rgba(34,212,122,0.15);--success-glow:rgba(34,212,122,0.3);
+  --error:#F87171;--error-light:rgba(248,113,113,0.15);--warning:#FBBF24;
+  --option-bg:#1A1E3A;--option-border:#2A2E4A;
+  --btn-bg:#1A1E3A;--overlay:rgba(0,0,0,0.78);
+  --shadow-sm:0 1px 6px rgba(0,0,0,0.3);--shadow-md:0 4px 20px rgba(0,0,0,0.5);--shadow-lg:0 8px 40px rgba(0,0,0,0.6);
+  --radius:12px;--radius-sm:8px;--radius-full:999px;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;}
+.mode{display:none;}.mode.active{display:block;animation:fadeIn .25s ease;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.wrap{max-width:600px;margin:0 auto;padding:16px 14px 90px;}
+
+/* HEADER */
+.header{position:sticky;top:0;z-index:50;background:var(--atlas-bg);border-bottom:1px solid var(--atlas-border);padding:10px 16px;display:flex;align-items:center;gap:8px;min-height:52px;}
+.brand{font-size:18px;font-weight:900;background:linear-gradient(135deg,#818CF8,#C4B5FD,#F472B6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;flex-shrink:0;}
+.header-sub{font-size:11px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.exam-hdr{display:none;position:sticky;top:52px;z-index:49;background:var(--atlas-bg);border-bottom:1px solid var(--atlas-border);padding:7px 14px 6px;gap:8px;flex-wrap:wrap;align-items:center;}
+.exam-hdr.visible{display:flex;}
+.hdr-timer{font-size:19px;font-weight:900;letter-spacing:1px;font-variant-numeric:tabular-nums;color:var(--success);}
+.hdr-timer.warn{color:var(--warning);}
+.hdr-timer.danger{color:var(--error);animation:blink .5s infinite;}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.hdr-meta{font-size:10.5px;color:var(--text-secondary);flex:1;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hdr-prog{font-size:11px;color:var(--text-secondary);font-weight:700;}
+.hdr-bar-wrap{width:100%;height:3px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden;}
+.hdr-bar-fill{height:100%;background:linear-gradient(90deg,var(--success),var(--accent));transition:width .5s;}
+
+/* PRE EXAM */
+.hero{text-align:center;padding:20px 14px 14px;}
+.hero-img{width:100%;max-height:240px;object-fit:contain;background:var(--card-bg);border-radius:var(--radius);margin-bottom:14px;border:1px solid var(--border);}
+.hero-title{font-size:20px;font-weight:800;color:var(--accent);margin-bottom:12px;}
+.hero-stats{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;}
+.stat-box{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 16px;text-align:center;min-width:76px;}
+.stat-val{font-size:18px;font-weight:800;color:var(--accent);}
+.stat-lbl{font-size:10px;color:var(--text-secondary);margin-top:2px;}
+.info-card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin:12px 0;}
+.info-row{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--divider);font-size:13px;}
+.info-row:last-child{border-bottom:none;}
+.info-lbl{color:var(--text-secondary);}
+.info-val{font-weight:600;}
+
+/* Name prompt card */
+.name-card{background:var(--card-bg);border:1.5px solid var(--accent);border-radius:var(--radius);padding:16px;margin:10px 0;}
+.name-card h3{font-size:14px;font-weight:700;color:var(--accent);margin-bottom:10px;}
+.name-input{width:100%;background:var(--option-bg);border:1.5px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;color:var(--text);font-size:14px;font-family:'Noto Sans Bengali','Inter',sans-serif;outline:none;}
+.name-input:focus{border-color:var(--accent);}
+
+.btn-start{width:100%;padding:14px;background:linear-gradient(135deg,var(--accent),#7c3aed);color:#fff;border:none;border-radius:var(--radius-sm);font-size:15px;font-weight:700;cursor:pointer;margin-top:6px;font-family:'Noto Sans Bengali','Inter',sans-serif;}
+
+/* EXAM HALL */
+.hall-area{padding:12px 14px 100px;max-width:600px;margin:0 auto;}
+.mcq-card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px;box-shadow:var(--shadow-sm);transition:border-color .3s;}
+.mcq-card.done{border-color:var(--atlas-border);opacity:.9;}
+.q-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+.q-num{font-size:11px;color:var(--accent);font-weight:700;background:var(--accent-light);padding:3px 9px;border-radius:var(--radius-full);}
+.bm-btn{background:none;border:1px solid var(--border);font-size:14px;cursor:pointer;padding:4px 7px;border-radius:6px;transition:.2s;color:var(--text-secondary);}
+.bm-btn.active{color:var(--warning);border-color:var(--warning);}
+.q-text{font-size:14px;font-weight:600;margin-bottom:10px;line-height:1.7;}
+.opt{display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:6px;background:var(--option-bg);border:1.5px solid var(--option-border);border-radius:var(--radius-sm);cursor:pointer;transition:all .18s;font-size:13px;}
+.opt:hover:not(.locked){border-color:var(--accent);background:rgba(90,95,224,0.1);}
+.opt.locked{cursor:default;pointer-events:none;}
+.opt.correct-r{background:var(--success-light)!important;border-color:var(--success)!important;}
+.opt.wrong-r{background:var(--error-light)!important;border-color:var(--error)!important;}
+.opt.dim{opacity:.32;}
+.opt-radio{width:20px;height:20px;border-radius:50%;border:2px solid var(--text-tertiary);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:11px;font-weight:700;transition:all .18s;}
+.opt.correct-r .opt-radio{border-color:var(--success);background:var(--success);color:#fff;}
+.opt.wrong-r .opt-radio{border-color:var(--error);background:var(--error);color:#fff;}
+.opt-icon{margin-left:auto;font-size:15px;flex-shrink:0;}
+.mcq-card.current{border-color:var(--accent);box-shadow:0 0 12px var(--accent-glow);}
+
+/* SUBMIT FAB */
+.submit-fixed{position:fixed;bottom:0;left:0;right:0;background:var(--success);color:#fff;border:none;padding:15px;font-size:16px;font-weight:700;cursor:pointer;z-index:100;box-shadow:0 -2px 16px var(--success-glow);font-family:'Noto Sans Bengali','Inter',sans-serif;display:none;}
+.nav-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);width:38px;height:38px;background:var(--accent);border:none;border-radius:10px 0 0 10px;color:#fff;font-size:15px;cursor:pointer;z-index:101;align-items:center;justify-content:center;box-shadow:0 4px 12px var(--accent-glow);display:none;}
+
+/* NAV OVERLAY */
+.nav-overlay{position:fixed;inset:0;background:var(--overlay);z-index:200;display:none;align-items:flex-end;}
+.nav-overlay.open{display:flex;}
+.nav-popup{width:100%;max-width:520px;margin:0 auto;background:var(--card-bg);border-radius:var(--radius) var(--radius) 0 0;padding:16px;border:1px solid var(--border);max-height:80vh;overflow-y:auto;}
+.nav-title{font-size:14px;font-weight:700;color:var(--accent);margin-bottom:12px;text-align:center;}
+.nav-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:5px;}
+@media(max-width:480px){.nav-grid{grid-template-columns:repeat(6,1fr);}}
+.nav-num{aspect-ratio:1;border-radius:6px;background:var(--option-bg);border:1px solid var(--border);color:var(--text-secondary);font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+.nav-num.cur{background:var(--accent);color:#fff;border-color:var(--accent);}
+.nav-num.ok{background:var(--success);color:#fff;border-color:var(--success);}
+.nav-num.bad{background:var(--error);color:#fff;border-color:var(--error);}
+.nav-num.skip{background:var(--text-tertiary);color:#fff;border-color:var(--text-tertiary);}
+.nav-close{display:block;margin:12px auto 0;padding:8px 20px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;}
+
+/* RESULT */
+.result-score-card{background:linear-gradient(140deg,var(--atlas-bg),var(--atlas-card));border:1.5px solid var(--atlas-border);border-radius:var(--radius);padding:24px 18px;text-align:center;margin-bottom:14px;box-shadow:var(--shadow-md),0 0 24px var(--atlas-glow);}
+.result-name{font-size:15px;font-weight:800;color:#fff;margin-bottom:10px;}
+.result-big{font-size:52px;font-weight:900;color:var(--atlas-text);text-shadow:0 0 20px var(--atlas-glow-strong);}
+.result-denom{font-size:52px;font-weight:900;color:var(--atlas-text);text-shadow:0 0 20px var(--atlas-glow-strong);opacity:.75;}
+.result-total-lbl{font-size:12px;color:var(--atlas-text);opacity:.6;margin-top:4px;}
+.result-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px;}
+.result-stat{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 8px;text-align:center;}
+.r-val{font-size:20px;font-weight:800;}
+.r-lbl{font-size:10px;color:var(--text-secondary);margin-top:2px;}
+.c-val{color:var(--success);}.w-val{color:var(--error);}.s-val{color:var(--warning);}
+.info-row2{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:11px 14px;margin-bottom:8px;display:flex;justify-content:space-between;font-size:13px;}
+
+/* FIX: motivation 1 line gap */
+.mot-box{background:var(--card-bg);border:1px solid var(--accent-light);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:14px;}
+.mot-grade{font-size:13px;font-weight:700;color:var(--success);margin-bottom:12px;line-height:1.6;}
+.mot-divider{height:1px;background:var(--divider);margin:10px 0;}
+.mot-text{font-size:13px;font-weight:700;color:var(--accent);margin-bottom:6px;}
+.ayat-text{font-size:11px;color:var(--text-secondary);line-height:1.6;}
+
+.result-btns{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;}
+.result-btn{padding:12px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--btn-bg);color:var(--text);font-size:13px;font-weight:700;cursor:pointer;transition:all .2s;font-family:'Noto Sans Bengali','Inter',sans-serif;width:100%;text-align:center;}
+.result-btn:hover{border-color:var(--accent);color:var(--accent);}
+.result-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+.result-btn.danger{background:#c0392b;color:#fff;border-color:#c0392b;}
+.result-btn.warning{background:#d68910;color:#fff;border-color:#d68910;}
+.result-btn.success{background:var(--success);color:#fff;border-color:var(--success);}
+.result-btn.purple{background:#7c3aed;color:#fff;border-color:#7c3aed;}
+.divider{height:1px;background:var(--divider);margin:14px 0;}
+.section-title{font-size:13px;font-weight:700;color:var(--text-secondary);margin-bottom:10px;}
+.filter-bar{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;}
+.filter-btn{padding:6px 14px;border-radius:20px;border:1px solid var(--border);background:var(--card-bg);color:var(--text-secondary);cursor:pointer;font-size:11px;font-weight:600;transition:.2s;}
+.filter-btn.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+.solve-item{margin-bottom:12px;}
+.q-result-badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:var(--radius-full);margin-bottom:7px;display:inline-block;}
+.q-result-badge.correct{background:var(--success-light);color:var(--success);}
+.q-result-badge.wrong{background:var(--error-light);color:var(--error);}
+.q-result-badge.skip{background:rgba(251,191,36,0.15);color:var(--warning);}
+.exp-box{background:var(--card-hover);border-left:3px solid var(--accent);padding:10px 12px;margin-top:8px;border-radius:0 6px 6px 0;font-size:12px;line-height:1.5;color:var(--text);}
+.exp-hd{color:var(--accent);font-weight:700;font-size:11px;margin-bottom:3px;}
+
+/* LEADERBOARD */
+.lb-overlay{position:fixed;inset:0;background:var(--overlay);z-index:500;display:none;align-items:center;justify-content:center;}
+.lb-overlay.open{display:flex;}
+.lb-modal{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);width:94%;max-width:560px;max-height:85vh;display:flex;flex-direction:column;box-shadow:var(--shadow-lg);}
+.lb-head{background:linear-gradient(135deg,var(--atlas-bg),var(--atlas-card));padding:16px;border-radius:var(--radius) var(--radius) 0 0;border-bottom:1px solid var(--atlas-border);}
+.lb-title{font-size:16px;font-weight:800;color:var(--atlas-text);}
+.lb-sub{font-size:11px;color:var(--atlas-text);opacity:.7;margin-top:3px;}
+.lb-body{flex:1;overflow-y:auto;padding:14px;}
+.lb-table{width:100%;border-collapse:collapse;font-size:12px;}
+.lb-table th{background:var(--card-hover);padding:8px;text-align:left;font-size:11px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--border);}
+.lb-table td{padding:8px;border-bottom:1px solid var(--divider);color:var(--text);}
+.lb-table tr:nth-child(1) td{color:#FFD700;font-weight:700;}
+.lb-table tr:nth-child(2) td{color:#C0C0C0;font-weight:700;}
+.lb-table tr:nth-child(3) td{color:#CD7F32;font-weight:700;}
+.lb-table tr.my-row td{background:var(--accent-light);color:var(--accent);font-weight:700;}
+.lb-close{display:block;margin:12px 14px;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;}
+
+/* LOADING */
+.loading{text-align:center;padding:60px 20px;color:var(--text-secondary);}
+.spin{font-size:40px;animation:spin 1s linear infinite;display:block;margin-bottom:14px;}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* TOAST */
+.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--card-bg);border:1px solid var(--border);color:var(--text);padding:10px 18px;border-radius:var(--radius-full);font-size:13px;font-weight:600;z-index:1000;opacity:0;transition:opacity .3s;white-space:nowrap;pointer-events:none;}
+.toast.show{opacity:1;}
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="brand">ATLAS</div>
+  <div class="header-sub" id="headerSub">Special Exam</div>
+</header>
+
+<div class="exam-hdr" id="examHdr">
+  <span class="hdr-timer" id="hdrTimer">00:00</span>
+  <span class="hdr-meta" id="hdrMeta">—</span>
+  <span class="hdr-prog" id="hdrProg">0/0 (0%)</span>
+  <div class="hdr-bar-wrap"><div class="hdr-bar-fill" id="hdrBarFill" style="width:0%"></div></div>
+</div>
+
+<!-- Loading -->
+<div class="mode active" id="modeLoading">
+  <div class="loading"><span class="spin">⏳</span><div>লোড হচ্ছে...</div></div>
+</div>
+
+<!-- Pre Exam -->
+<div class="mode" id="modePreExam">
+  <div class="wrap">
+    <div class="hero">
+      <img id="preImg" class="hero-img" src="" alt="" style="display:none">
+      <div class="hero-title" id="preTitle">—</div>
+      <div class="hero-stats">
+        <div class="stat-box"><div class="stat-val" id="preQCount">—</div><div class="stat-lbl">📋 প্রশ্ন</div></div>
+        <div class="stat-box"><div class="stat-val" id="preTimerDisp">—</div><div class="stat-lbl">⏱️ মোট সময়</div></div>
+        <div class="stat-box"><div class="stat-val" id="prePage">—</div><div class="stat-lbl">📄 পেজ</div></div>
+      </div>
+    </div>
+    <div class="info-card">
+      <div class="info-row"><span class="info-lbl">Topic</span><span class="info-val" id="preTopic">—</span></div>
+      <div class="info-row"><span class="info-lbl">Type</span><span class="info-val">ATLAS Special MCQ</span></div>
+      <div class="info-row"><span class="info-lbl">Negative</span><span class="info-val">প্রতি ভুলে -0.25</span></div>
+      <div class="info-row"><span class="info-lbl">Timer</span><span class="info-val" id="preTimerRule">—</span></div>
+    </div>
+    <!-- FIX: Name prompt — শুধু anonymous user (Telegram থেকে না আসলে) -->
+    <div class="name-card" id="nameCard" style="display:none">
+      <h3>👤 তোমার নাম লেখো (Leaderboard এ দেখাবে)</h3>
+      <input type="text" class="name-input" id="nameInput" placeholder="তোমার নাম..." maxlength="30">
+    </div>
+    <button class="btn-start" onclick="startHall()">▶️ এক্সাম শুরু করুন</button>
+  </div>
+</div>
+
+<!-- Exam Hall -->
+<div class="mode" id="modeHall">
+  <div class="hall-area" id="hallArea"></div>
+  <button class="submit-fixed" id="submitBtn" onclick="confirmSubmit()">📤 Submit করুন</button>
+  <button class="nav-fab" id="navFab" onclick="openNav()">📋</button>
+</div>
+
+<!-- Result -->
+<div class="mode" id="modeResult">
+  <div class="wrap" id="resultWrap"></div>
+</div>
+
+<!-- New Exam Progress (instant page on "New Exam" click) -->
+<div class="mode" id="modeNewExamProgress">
+  <div class="wrap">
+    <div class="hero" style="padding-top:36px">
+      <div style="font-size:42px;margin-bottom:10px" id="neIcon">🧠</div>
+      <div class="hero-title" id="neTitle" style="font-size:17px">নতুন MCQ তৈরি হচ্ছে...</div>
+    </div>
+    <div class="info-card">
+      <div class="info-row"><span class="info-lbl">📄 পেজ নং</span><span class="info-val" id="nePage">—</span></div>
+      <div class="info-row"><span class="info-lbl">⏱️ আনুমানিক বাকি সময়</span><span class="info-val" id="neEta">—</span></div>
+      <div class="info-row"><span class="info-lbl">📊 অগ্রগতি</span><span class="info-val" id="nePctText">0%</span></div>
+    </div>
+    <div class="hdr-bar-wrap" style="height:10px;border-radius:6px;margin:6px 0 18px">
+      <div class="hdr-bar-fill" id="neBarFill" style="width:0%;height:100%;border-radius:6px"></div>
+    </div>
+    <button class="btn-start" id="neStartBtn" disabled
+      style="opacity:.45;cursor:not-allowed;background:var(--text-tertiary)"
+      onclick="goToNewExam()">▶️ Start Exam</button>
+  </div>
+</div>
+
+<!-- Nav -->
+<div class="nav-overlay" id="navOverlay" onclick="closeNav()">
+  <div class="nav-popup" onclick="event.stopPropagation()">
+    <div class="nav-title">📋 প্রশ্ন অগ্রগতি</div>
+    <div class="nav-grid" id="navGrid"></div>
+    <div style="text-align:center;margin-top:8px;font-size:10px;color:var(--text-secondary)" id="navStats"></div>
+    <button class="nav-close" onclick="closeNav()">✕ বন্ধ</button>
+  </div>
+</div>
+
+<!-- Leaderboard -->
+<div class="lb-overlay" id="lbOverlay">
+  <div class="lb-modal">
+    <div class="lb-head">
+      <div class="lb-title">🏆 Leaderboard</div>
+      <div class="lb-sub" id="lbSub">—</div>
+    </div>
+    <div class="lb-body" id="lbBody"><div class="loading"><span class="spin">⏳</span></div></div>
+    <button class="lb-close" onclick="closeLb()">✕ বন্ধ</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── CONFIG (GitHub Pages — runtime resolve, same as CF/HF template) ──
+const _qp = new URLSearchParams(location.search);
+let _CACHE_ID = _qp.get('id') || '';
+if (!_CACHE_ID) {
+  const _m = location.pathname.match(/\/exam\/(qz_[A-Za-z0-9_-]+)/);
+  if (_m) _CACHE_ID = _m[1];
+}
+const CACHE_ID  = _CACHE_ID;
+const HF_URL    = 'https://atlasquizbotpro.hamza818483.workers.dev';
+const SEC_PER_Q = 30;
+
+// USER ID
+let USER_ID   = Number(_qp.get('uid')) || 0;
+let USER_NAME = decodeURIComponent(_qp.get('name') || 'Student');
+const FROM_TELEGRAM = USER_ID !== 0;
+
+try {
+  if (!USER_ID) {
+    let aid = localStorage.getItem('atlas_uid');
+    if (!aid) {
+      aid = String(Date.now() % 1000000000) + String(Math.floor(Math.random()*900)+100);
+      localStorage.setItem('atlas_uid', aid);
+    }
+    USER_ID = Number(aid);
+    const savedName = localStorage.getItem('atlas_name');
+    if (savedName && savedName !== 'Student') USER_NAME = savedName;
+  } else {
+    localStorage.setItem('atlas_uid', String(USER_ID));
+    localStorage.setItem('atlas_name', USER_NAME);
+  }
+} catch(e) {}
+
+// ── STATE ──
+let examData = null, questions = [], origQs = [];
+let userAnswers = {}, bookmarks = {};
+let submitted = false;
+let tag = '', expFooter = '', channelId = '', imageMsgId = null, endMsgId = null;
+let isNewGen = false;
+let totalSec = 0, totalLeft = 0, totalTimer = null;
+
+// ── INIT ──
+async function init() {
+  setMode('Loading');
+  try {
+    const r = await fetch(`${HF_URL}/api/exam/${CACHE_ID}`);
+    const d = await r.json();
+    if (d.error) { showErr('❌ Exam পাওয়া যায়নি!'); return; }
+    examData   = d;
+    questions  = d.mcqs || [];
+    origQs     = [...questions];
+    tag        = d.tag || '';
+    expFooter  = d.exp_footer || '';
+    channelId  = d.channel_id || '';
+    imageMsgId = d.image_msg_id || null;
+    endMsgId   = d.end_msg_id   || null;
+    isNewGen   = d.is_new_gen   || false;
+
+    document.getElementById('headerSub').textContent = d.topic || 'Special Exam';
+    document.getElementById('preTitle').textContent  = '📝 ' + (d.topic || 'ATLAS Special Exam');
+    document.getElementById('preQCount').textContent = questions.length;
+    document.getElementById('preTopic').textContent  = d.topic || '—';
+    document.getElementById('prePage').textContent   = 'Page No: ' + zp(d.page || 1);
+
+    totalSec = Math.max(30, Math.ceil(questions.length * SEC_PER_Q));
+    document.getElementById('preTimerDisp').textContent = zp(Math.floor(totalSec/60))+':'+zp(totalSec%60);
+    document.getElementById('preTimerRule').textContent =
+      `মোট ${(questions.length/2)} মিনিট • শেষ হলে auto submit`;
+
+    if (d.image_file_id) {
+      const img = document.getElementById('preImg');
+      if (img) {
+        img.src = `${HF_URL}/api/tg-image/${d.image_file_id}`;
+        img.style.display = 'block';
+        img.onerror = () => { img.style.display = 'none'; };
+      }
+    }
+
+    // FIX: Name prompt — শুধু anonymous user দের জন্য (Telegram থেকে না আসলে)
+    if (!FROM_TELEGRAM) {
+      const nameCard = document.getElementById('nameCard');
+      const nameInput = document.getElementById('nameInput');
+      if (nameCard) {
+        nameCard.style.display = 'block';
+        // Pre-fill saved name
+        const saved = localStorage.getItem('atlas_name');
+        if (saved && saved !== 'Student') {
+          nameInput.value = saved;
+        }
+      }
+    }
+
+    setMode('PreExam');
+  } catch(e) { showErr('❌ লোড করতে সমস্যা!'); }
+}
+
+// ── START HALL ──
+function startHall() {
+  // FIX: Name save from input (anonymous users only)
+  if (!FROM_TELEGRAM) {
+    const nameInput = document.getElementById('nameInput');
+    const inputVal = nameInput ? nameInput.value.trim() : '';
+    if (inputVal) {
+      USER_NAME = inputVal.slice(0, 30);
+      try { localStorage.setItem('atlas_name', USER_NAME); } catch(e) {}
+    } else if (!USER_NAME || USER_NAME === 'Student') {
+      USER_NAME = 'Student';
+    }
+  }
+
+  userAnswers = {}; bookmarks = {}; submitted = false;
+  totalLeft   = totalSec;
+
+  let html = '';
+  questions.forEach((q, qi) => {
+    const qText = tag ? tag + '\n\n' + q.question : q.question;
+    html += `<div class="mcq-card" id="qCard${qi}" data-qi="${qi}">
+      <div class="q-head">
+        <span class="q-num">প্রশ্ন ${qi+1}/${questions.length}</span>
+        <button class="bm-btn" id="bmBtn${qi}" onclick="toggleBm(${qi})">🔖</button>
+      </div>
+      <div class="q-text">${qText.replace(/\n/g,'<br>')}</div>`;
+    q.options.forEach((opt, oi) => {
+      html += `<div class="opt" id="opt${qi}_${oi}" onclick="pickOpt(${qi},${oi})">
+        <span class="opt-radio">${['A','B','C','D'][oi]}</span>
+        <span>${opt}</span>
+      </div>`;
+    });
+    html += `</div>`;
+  });
+  document.getElementById('hallArea').innerHTML = html;
+
+  document.getElementById('submitBtn').style.display = 'block';
+  document.getElementById('navFab').style.display    = 'flex';
+  document.getElementById('examHdr').classList.add('visible');
+  document.getElementById('hdrMeta').textContent =
+    `${examData.topic || 'ATLAS Exam'} • Page No: ${zp(examData.page || 1)}`;
+
+  setMode('Hall');
+  window.scrollTo({top: 0, behavior: 'instant'});
+
+  updateHdrTimer();
+  clearInterval(totalTimer);
+  totalTimer = setInterval(() => {
+    totalLeft--;
+    updateHdrTimer();
+    if (totalLeft <= 0) { stopAll(); doSubmit(); }
+  }, 1000);
+
+  highlightCurrent(0);
+  updateHdrProg();
+}
+
+function highlightCurrent(qi) {
+  document.querySelectorAll('.mcq-card').forEach(c => c.classList.remove('current'));
+  const card = document.getElementById('qCard' + qi);
+  if (card) card.classList.add('current');
+}
+
+function updateHdrTimer() {
+  const el = document.getElementById('hdrTimer');
+  if (!el) return;
+  const t = Math.max(0, totalLeft);
+  el.textContent = zp(Math.floor(t/60))+':'+zp(t%60);
+  el.className = 'hdr-timer' + (t <= 15 ? ' danger' : t <= 60 ? ' warn' : '');
+}
+
+function updateHdrProg() {
+  const answered = Object.keys(userAnswers).length;
+  const total    = questions.length;
+  const pct      = total ? Math.round(answered/total*100) : 0;
+  document.getElementById('hdrProg').textContent    = `${answered}/${total} (${pct}%)`;
+  document.getElementById('hdrBarFill').style.width = pct + '%';
+}
+
+function pickOpt(qi, oi) {
+  if (submitted || userAnswers[qi] !== undefined) return;
+  userAnswers[qi] = oi;
+  lockQuestion(qi, oi);
+  updateHdrProg();
+  const nextUnanswered = questions.findIndex((_, i) => i > qi && userAnswers[i] === undefined);
+  if (nextUnanswered >= 0) {
+    highlightCurrent(nextUnanswered);
+    const nextCard = document.getElementById('qCard' + nextUnanswered);
+    if (nextCard) nextCard.scrollIntoView({behavior:'smooth', block:'center'});
+  }
+}
+
+function lockQuestion(qi, chosen) {
+  const q  = questions[qi];
+  const card = document.getElementById('qCard' + qi);
+  if (card) card.classList.add('done');
+  q.options.forEach((_, oi) => {
+    const el = document.getElementById(`opt${qi}_${oi}`);
+    if (!el) return;
+    el.classList.add('locked');
+    if (oi === chosen) {
+      el.style.borderColor = 'var(--accent)';
+      el.style.background  = 'rgba(90,95,224,0.18)';
+      if (!el.querySelector('.opt-icon'))
+        el.insertAdjacentHTML('beforeend','<span class="opt-icon">🔒</span>');
+    } else {
+      el.classList.add('dim');
+    }
+  });
+}
+
+function toggleBm(qi) {
+  bookmarks[qi] = !bookmarks[qi];
+  const btn = document.getElementById('bmBtn' + qi);
+  if (btn) btn.className = 'bm-btn' + (bookmarks[qi] ? ' active' : '');
+  showToast(bookmarks[qi] ? '🔖 বুকমার্ক করা হয়েছে' : '🔖 বুকমার্ক রিমুভ');
+  if (!USER_ID) return;
+  const q = questions[qi];
+  const payload = {user_id:USER_ID,cache_id:CACHE_ID,question_index:qi,
+    question_data:q,topic:examData?.topic||'',page:examData?.page||0};
+  fetch(`${HF_URL}/api/bookmark`, {
+    method: bookmarks[qi]?'POST':'DELETE',
+    headers:{'Content-Type':'application/json'},
+    body: bookmarks[qi]
+      ? JSON.stringify(payload)
+      : JSON.stringify({user_id:USER_ID,cache_id:CACHE_ID,question_index:qi})
+  }).catch(()=>{});
+}
+
+function openNav() {
+  let html='';
+  questions.forEach((q,i)=>{
+    let cls='nav-num';
+    if(userAnswers[i]!==undefined){
+      const ci=['A','B','C','D'].indexOf(q.answer);
+      cls+= userAnswers[i]===ci?' ok':' bad';
+    }
+    html+=`<div class="${cls}" onclick="goToQ(${i})">${i+1}</div>`;
+  });
+  document.getElementById('navGrid').innerHTML=html;
+  const ans=Object.keys(userAnswers).length;
+  document.getElementById('navStats').textContent=`✅ ${ans} উত্তর | ⬜ ${questions.length-ans} বাকি`;
+  document.getElementById('navOverlay').classList.add('open');
+}
+function closeNav(){document.getElementById('navOverlay').classList.remove('open');}
+function goToQ(qi){
+  closeNav();
+  const el=document.getElementById('qCard'+qi);
+  if(el) el.scrollIntoView({behavior:'smooth',block:'center'});
+}
+
+function confirmSubmit(){
+  if(submitted) return;
+  const unanswered=questions.filter((_,i)=>userAnswers[i]===undefined).length;
+  const msg=unanswered>0
+    ? `${unanswered}টি প্রশ্ন এখনো উত্তর দেওয়া হয়নি। Submit করবেন?`
+    : 'Exam submit করবেন?';
+  if(!confirm(msg)) return;
+  stopAll(); doSubmit();
+}
+
+function stopAll(){ clearInterval(totalTimer); }
+
+async function doSubmit(){
+  if(submitted) return;
+  submitted=true;
+  stopAll();
+  document.getElementById('submitBtn').style.display='none';
+  document.getElementById('navFab').style.display='none';
+  document.getElementById('examHdr').classList.remove('visible');
+
+  const timeTaken = Math.max(0, totalSec - totalLeft);
+  let correct=0,wrong=0,skipped=0;
+  questions.forEach((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=userAnswers[i];
+    if(ua===undefined) skipped++;
+    else if(ua===ci)   correct++;
+    else               wrong++;
+  });
+
+  const neg  = parseFloat((wrong*.25).toFixed(2));
+  const fin  = parseFloat((correct-neg).toFixed(2));
+  const pct  = questions.length?Math.round(correct/questions.length*100):0;
+  const mins = Math.floor(timeTaken/60);
+  const secs = timeTaken%60;
+
+  _saveAnswerSnapshot();
+
+  let motivation='',ayat='';
+  try{
+    const res=await fetch(`${HF_URL}/api/exam/result`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({cache_id:CACHE_ID,user_id:USER_ID,user_name:USER_NAME,
+        topic:examData.topic,page:examData.page,total:questions.length,
+        correct,wrong,skipped,time_taken:timeTaken})
+    });
+    const rd=await res.json();
+    motivation=rd.motivation||''; ayat=rd.ayat||'';
+  }catch(e){}
+
+  const backUrl = buildBackUrl(channelId, endMsgId || imageMsgId);
+
+  let html=`
+  <div class="result-score-card">
+    <div class="result-name">📝 ${examData.topic||'ATLAS Exam'}</div>
+    <div><span class="result-big">${fin}</span><span class="result-denom">/${questions.length}</span></div>
+    <div class="result-total-lbl">Final Score (${pct}%)</div>
+  </div>
+  <div class="result-grid">
+    <div class="result-stat"><div class="r-val c-val">✅ ${correct}</div><div class="r-lbl">সঠিক</div></div>
+    <div class="result-stat"><div class="r-val w-val">❌ ${wrong}</div><div class="r-lbl">ভুল</div></div>
+    <div class="result-stat"><div class="r-val s-val">⏭️ ${skipped}</div><div class="r-lbl">স্কিপ</div></div>
+  </div>
+  <div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-${neg} (${wrong}×0.25)</span></div>
+  <div class="info-row2"><span>🏆 Final Score</span><span style="color:var(--accent);font-weight:700">${fin}/${questions.length} (${pct}%)</span></div>
+  <div class="info-row2" style="margin-bottom:14px"><span>⏱️ সময়</span><span>${mins}m ${secs}s</span></div>`;
+
+  // FIX: Motivation 1 line gap — grade আলাদা, তারপর divider, তারপর motivation+ayat
+  if(motivation||ayat){
+    const grade = pct>=80?'🏆 অসাধারণ! অনেক ভালো করেছো!':
+                  pct>=60?'✅ মোটামুটি ভালো! চেষ্টা চালিয়ে যাও!':
+                  pct>=40?'📚 আরো পড়তে হবে! হাল ছেড়ো না!':
+                          '💪 পড়া হয়নি! আবার পড়ে practice করো!';
+    html+=`<div class="mot-box">
+      <div class="mot-grade">${grade}</div>
+      <div class="mot-divider"></div>
+      ${motivation?`<div class="mot-text">${motivation}</div>`:''}
+      ${ayat?`<div class="ayat-text">📖 ${ayat}</div>`:''}
+    </div>`;
+  }
+
+  html+=`<div class="result-btns">
+    <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
+    <button class="result-btn success"  onclick="solvePDF()">📄 Solve PDF</button>
+    <button class="result-btn primary" id="newExamBtn" onclick="startNewExamV2()">🆕 New Exam</button>`;
+  if(backUrl) html+=`<button class="result-btn" onclick="window.open('${backUrl}','_blank')">↩️ Back to Source</button>`;
+  html+=`
+    <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (Only Wrong)</button>
+    <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (Wrong+Skip)</button>`;
+  if(!isNewGen)
+    html+=`<button class="result-btn warning" onclick="openLb()">🏆 Leaderboard</button>`;
+  html+=`
+    <button class="result-btn"          onclick="window.open('https://Atlascourses.com','_blank')">🌐 ATLAS Courses</button>
+    <button class="result-btn"          onclick="window.open('https://wa.me/8801999681290','_blank')">💬 WhatsApp</button>
+    <button class="result-btn"          onclick="window.open('https://t.me/MediAtlas/4221','_blank')">📢 Groups+Channels</button>
+  </div>
+  <div class="divider"></div>
+  <div class="section-title">📋 Solve Sheet</div>
+  <div class="filter-bar">
+    <button class="filter-btn active" onclick="filt(event,'all')">সব</button>
+    <button class="filter-btn" onclick="filt(event,'correct')">✅ সঠিক</button>
+    <button class="filter-btn" onclick="filt(event,'wrong')">❌ ভুল</button>
+    <button class="filter-btn" onclick="filt(event,'skip')">⏭️ স্কিপ</button>
+  </div>
+  <div id="solveSheet">`;
+
+  questions.forEach((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=userAnswers[i];
+    const st=ua===undefined?'skip':ua===ci?'correct':'wrong';
+    const stL=st==='correct'?'✅ সঠিক':st==='wrong'?'❌ ভুল':'⏭️ স্কিপ';
+    const qTxt=tag?tag+'\n\n'+q.question:q.question;
+    let exp=q.explanation||'';
+    if(expFooter) exp=exp?exp+'\n'+expFooter:expFooter;
+    html+=`<div class="mcq-card solve-item" data-status="${st}">
+      <span class="q-result-badge ${st}">${stL}</span>
+      <div class="q-head"><span class="q-num">প্রশ্ন ${i+1}/${questions.length}</span></div>
+      <div class="q-text">${qTxt.replace(/\n/g,'<br>')}</div>`;
+    q.options.forEach((opt,oi)=>{
+      let cls='opt locked',icon='';
+      if(oi===ci){cls+=' correct-r';icon='<span class="opt-icon">✅</span>';}
+      else if(oi===ua&&ua!==ci){cls+=' wrong-r';icon='<span class="opt-icon">❌</span>';}
+      else cls+=' dim';
+      html+=`<div class="${cls}"><span class="opt-radio">${['A','B','C','D'][oi]}</span><span>${opt}</span>${icon}</div>`;
+    });
+    if(exp) html+=`<div class="exp-box"><div class="exp-hd">📋 ব্যাখ্যা</div>${exp.replace(/\n/g,'<br>')}</div>`;
+    html+=`</div>`;
+  });
+  html+=`</div>`;
+
+  document.getElementById('resultWrap').innerHTML=html;
+  setMode('Result');
+
+  // FIX: Instant scroll to result (0.1s)
+  setTimeout(() => {
+    window.scrollTo({top: 0, behavior: 'instant'});
+  }, 100);
+}
+
+function filt(e,t){
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+  e.target.classList.add('active');
+  document.querySelectorAll('.solve-item').forEach(el=>{
+    el.style.display=(t==='all'||el.dataset.status===t)?'block':'none';
+  });
+}
+
+// ── NEW EXAM (original, kept exactly as-is) ──
+async function startNewExam(){
+  const btn=document.getElementById('newExamBtn');
+  if(btn){btn.disabled=true;btn.textContent='⏳ নতুন MCQ তৈরি হচ্ছে...';}
+  try{
+    const r=await fetch(`${HF_URL}/api/new-exam`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({cache_id:CACHE_ID,user_id:USER_ID})
+    });
+    const d=await r.json();
+    if(d.error==='limit_reached'){
+      showToast('❌ সর্বোচ্চ 5 বার New Exam!');
+      if(btn){btn.disabled=false;btn.textContent='🆕 New Exam (লিমিট শেষ)';}
+      return;
+    }
+    if(d.ok&&d.new_cache_id){
+      window.location.href=`${HF_URL}/exam/${d.new_cache_id}?uid=${USER_ID}&name=${encodeURIComponent(USER_NAME)}`;
+    }else{
+      showToast('❌ '+(d.error||'Error'));
+      if(btn){btn.disabled=false;btn.textContent='🆕 New Exam';}
+    }
+  }catch(e){
+    showToast('❌ Network error');
+    if(btn){btn.disabled=false;btn.textContent='🆕 New Exam';}
+  }
+}
+
+// ── NEW EXAM v2 (v1.3 — instant progress page, additive, doesn't touch v1 above) ──
+let _neJobId = null;
+let _nePollTimer = null;
+let _neResultData = null;
+
+function startNewExamV2(){
+  // Instantly switch to the progress page — no waiting on network first.
+  setMode('NewExamProgress');
+  document.getElementById('neIcon').textContent = '🧠';
+  document.getElementById('neTitle').textContent = 'নতুন MCQ তৈরি হচ্ছে...';
+  document.getElementById('nePage').textContent = '—';
+  document.getElementById('neEta').textContent = '—';
+  document.getElementById('nePctText').textContent = '0%';
+  document.getElementById('neBarFill').style.width = '0%';
+  const btn = document.getElementById('neStartBtn');
+  btn.disabled = true;
+  btn.style.opacity = '.45';
+  btn.style.cursor = 'not-allowed';
+  btn.style.background = 'var(--text-tertiary)';
+  btn.textContent = '▶️ Start Exam';
+  _neResultData = null;
+
+  fetch(`${HF_URL}/api/new-exam/start`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({cache_id:CACHE_ID,user_id:USER_ID})
+  }).then(r=>r.json()).then(d=>{
+    if(d.error==='limit_reached'){
+      document.getElementById('neIcon').textContent='🚫';
+      document.getElementById('neTitle').textContent='সর্বোচ্চ 5 বার New Exam করা যায়!';
+      return;
+    }
+    if(!d.ok || !d.job_id){
+      document.getElementById('neIcon').textContent='❌';
+      document.getElementById('neTitle').textContent='Error: '+(d.error||'শুরু করা যায়নি');
+      return;
+    }
+    _neJobId = d.job_id;
+    document.getElementById('nePage').textContent = d.page!=null ? d.page : '—';
+    _nePollNewExam();
+  }).catch(()=>{
+    document.getElementById('neIcon').textContent='❌';
+    document.getElementById('neTitle').textContent='Network error — আবার চেষ্টা করো';
+  });
+}
+
+function _nePollNewExam(){
+  if(_nePollTimer) clearTimeout(_nePollTimer);
+  if(!_neJobId) return;
+  fetch(`${HF_URL}/api/new-exam/status/${_neJobId}`).then(r=>r.json()).then(d=>{
+    if(!d.ok){
+      document.getElementById('neIcon').textContent='❌';
+      document.getElementById('neTitle').textContent='Error: '+(d.error||'Generation failed');
+      return;
+    }
+    const pct = Math.max(0, Math.min(100, d.pct||0));
+    document.getElementById('nePctText').textContent = pct+'%';
+    document.getElementById('neBarFill').style.width = pct+'%';
+    if(d.page!=null) document.getElementById('nePage').textContent = d.page;
+    if(d.eta_sec!=null){
+      document.getElementById('neEta').textContent = d.eta_sec>0 ? `${d.eta_sec} সেকেন্ড` : 'প্রায় শেষ...';
+    }
+
+    if(d.status==='done'){
+      document.getElementById('neIcon').textContent='✅';
+      document.getElementById('neTitle').textContent='নতুন MCQ তৈরি সম্পন্ন!';
+      document.getElementById('neEta').textContent='0 সেকেন্ড';
+      _neResultData = d;
+      const btn=document.getElementById('neStartBtn');
+      btn.disabled=false;
+      btn.style.opacity='1';
+      btn.style.cursor='pointer';
+      btn.style.background='var(--success)';
+      btn.textContent='▶️ Start Exam (100%)';
+      return; // stop polling
+    }
+    if(d.status==='error'){
+      document.getElementById('neIcon').textContent='❌';
+      document.getElementById('neTitle').textContent='Error: '+(d.error||'Generation failed');
+      return; // stop polling
+    }
+    _nePollTimer = setTimeout(_nePollNewExam, 1000);
+  }).catch(()=>{
+    _nePollTimer = setTimeout(_nePollNewExam, 1500); // transient network blip — keep polling
+  });
+}
+
+function goToNewExam(){
+  if(!_neResultData || !_neResultData.new_cache_id) return;
+  // Same as the old instant-redirect flow, but only fires once generation is truly 100%.
+  window.location.href = `${HF_URL}/exam/${_neResultData.new_cache_id}?uid=${USER_ID}&name=${encodeURIComponent(USER_NAME)}`;
+}
+
+
+// ── SOLVE PDF ──
+async function solvePDF(){
+  showToast('⏳ PDF তৈরি হচ্ছে...');
+  const answers={};
+  Object.keys(lastAnswers).forEach(k=>{ answers[String(k)]=lastAnswers[k]; });
+  try{
+    const r=await fetch(`${HF_URL}/api/solve-pdf`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({cache_id:CACHE_ID,answers})
+    });
+    const d=await r.json();
+    if(d.ok&&d.pdf_b64){
+      const bytes=Uint8Array.from(atob(d.pdf_b64),c=>c.charCodeAt(0));
+      const blob=new Blob([bytes],{type:'application/pdf'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=url; a.download=`ATLAS_Solve_${examData.topic}_P${examData.page}.pdf`;
+      a.click(); URL.revokeObjectURL(url);
+      showToast('✅ PDF Download শুরু হয়েছে!');
+    }else{
+      showToast('❌ '+(d.error||'PDF error'));
+    }
+  }catch(e){showToast('❌ Network error');}
+}
+
+// ── PRACTICE MODES ──
+let lastAnswers = {};
+function _saveAnswerSnapshot() { lastAnswers = {...userAnswers}; }
+
+function practiceAgain(){
+  questions = [...origQs];
+  totalSec = Math.max(30, Math.ceil(questions.length * SEC_PER_Q));
+  userAnswers={};bookmarks={};submitted=false;
+  startHall();
+}
+
+function _startPractice(filtered){
+  if(!filtered.length){showToast('✅ এই ক্যাটেগরিতে কোনো প্রশ্ন নেই!');return;}
+  questions=filtered;
+  totalSec = Math.max(30, Math.ceil(questions.length * SEC_PER_Q));
+  userAnswers={};bookmarks={};submitted=false;
+  startHall();
+}
+
+function mistakePractice(){
+  const snap = lastAnswers;
+  const filtered=origQs.filter((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=snap[i];
+    return ua!==undefined && ua!==ci;
+  });
+  _startPractice(filtered);
+}
+
+function specialPractice(){
+  const snap = lastAnswers;
+  const filtered=origQs.filter((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=snap[i];
+    if(ua===undefined) return true;
+    return ua!==ci;
+  });
+  _startPractice(filtered);
+}
+
+// ── LEADERBOARD ──
+async function openLb(){
+  if(isNewGen){showToast('❌ New Exam এ leaderboard নেই!');return;}
+  document.getElementById('lbSub').textContent=
+    `${examData.topic} — Page No: ${zp(examData.page||1)}`;
+  document.getElementById('lbBody').innerHTML='<div class="loading"><span class="spin">⏳</span></div>';
+  document.getElementById('lbOverlay').classList.add('open');
+  try{
+    const r=await fetch(`${HF_URL}/api/leaderboard/${CACHE_ID}`);
+    const d=await r.json();
+    if(d.disabled){
+      document.getElementById('lbBody').innerHTML=
+        '<div style="text-align:center;padding:30px;color:var(--text-secondary)">New Exam এ leaderboard নেই</div>';
+      return;
+    }
+    const lb=d.data||[];
+    if(!lb.length){
+      document.getElementById('lbBody').innerHTML=
+        '<div style="text-align:center;padding:30px;color:var(--text-secondary)">এখনো কেউ exam দেয়নি!</div>';
+      return;
+    }
+    const medals=['🥇','🥈','🥉'];
+    let html=`<table class="lb-table"><thead><tr><th>#</th><th>নাম</th><th>মার্ক</th><th>%</th></tr></thead><tbody>`;
+    lb.forEach((row,i)=>{
+      const isMe=String(row.user_id)===String(USER_ID);
+      const p=row.total?Math.round(row.correct/row.total*100):0;
+      html+=`<tr class="${isMe?'my-row':''}">
+        <td>${medals[i]||(i+1)+'.'}</td>
+        <td>${row.user_name||'User'}${isMe?' 👈':''}</td>
+        <td><b>${row.final_score}</b>/${row.total}</td>
+        <td>${p}%</td></tr>`;
+    });
+    html+=`</tbody></table>`;
+    document.getElementById('lbBody').innerHTML=html;
+  }catch(e){
+    document.getElementById('lbBody').innerHTML='<div style="text-align:center;color:var(--error);padding:20px">❌ Error</div>';
+  }
+}
+function closeLb(){document.getElementById('lbOverlay').classList.remove('open');}
+
+// ── HELPERS ──
+function buildBackUrl(chId,msgId){
+  if(!chId) return null;
+  if(String(chId).startsWith('-100')){
+    const c=String(chId).substring(4);
+    return msgId?`https://t.me/c/${c}/${msgId}`:`https://t.me/c/${c}`;
+  }
+  const c=String(chId).replace('@','');
+  return msgId?`https://t.me/${c}/${msgId}`:`https://t.me/${c}`;
+}
+
+function zp(n){return String(n).padStart(2,'0');}
+
+function setMode(m){
+  document.querySelectorAll('.mode').forEach(el=>el.classList.remove('active'));
+  document.getElementById('mode'+m).classList.add('active');
+}
+
+function showToast(msg,dur=2800){
+  const t=document.getElementById('toast');
+  t.textContent=msg;t.classList.add('show');
+  clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),dur);
+}
+
+function showErr(msg){
+  setMode('Loading');
+  document.querySelector('.loading').innerHTML=
+    `<div style="font-size:40px;margin-bottom:14px">❌</div><div>${msg}</div><br>
+    <button onclick="location.reload()" style="padding:8px 16px;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer">🔄 Retry</button>`;
+}
+
+document.addEventListener('DOMContentLoaded',init);
+</script>
+</body>
+</html>

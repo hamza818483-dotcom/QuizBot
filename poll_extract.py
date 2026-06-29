@@ -228,7 +228,7 @@ async def save_quiz_to_d1(polls: list, name: str, uid: int) -> str | None:
             "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             [
                 quiz_id, name,
-                f"Poll extract — {len(questions)} প্রশ্ন",
+                f"Special Topic — {len(questions)} প্রশ্ন",
                 30, 0,
                 json.dumps(questions),
                 "", "", uid,
@@ -360,8 +360,8 @@ async def handle_poll_extract(msg: dict):
     ch_str    = str(ch1).lstrip("@").replace("-100", "")
     filename  = f"polls_{ch_str}_{start_id}_{end_id}.csv"
 
-    # Save to D1 → get permanent quiz link
-    quiz_name = f"Poll Extract [{ch_str} {start_id}-{end_id}]"
+    # Save to D1 → get permanent quiz link (default topic always "Special Topic")
+    quiz_name = "Special Topic"
     quiz_id   = await save_quiz_to_d1(polls, quiz_name, uid)
 
     bot_info     = await tg_post("getMe", {})
@@ -371,7 +371,7 @@ async def handle_poll_extract(msg: dict):
     GH_PAGES_URL    = "https://hamza818483-dotcom.github.io/QuizBot/quiz.html"
     HF_SPACE_URL    = "https://hamzahf1-atlasboss.hf.space"
 
-    gh_link  = f"https://hamza818483-dotcom.github.io/QuizBot/exam/{quiz_id}" if quiz_id else None
+    gh_link  = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={quiz_id}" if quiz_id else None
     cf_link  = f"{QUIZ_WORKER_URL}/exam/{quiz_id}" if quiz_id else None
     hf_link  = f"{HF_SPACE_URL}/exam/{quiz_id}" if quiz_id else None
     bot_link = f"https://t.me/{bot_username}?start={quiz_id}" if quiz_id else None
