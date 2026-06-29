@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ATLAS Quiz</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#0f0f13;color:#e2e8f0;min-height:100vh;padding:12px;display:flex;flex-direction:column;align-items:center}
+.card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:18px;width:100%;max-width:520px;margin-top:12px}
+h1{font-size:16px;font-weight:800;color:#818CF8;text-align:center;margin-bottom:3px}
+.sub{font-size:10px;color:#64748b;text-align:center;margin-bottom:14px}
+.prog{height:3px;background:rgba(255,255,255,.08);border-radius:2px;margin-bottom:14px}
+.prog-bar{height:100%;background:#818CF8;border-radius:2px;transition:width .3s}
+.qnum{font-size:10px;color:#64748b;margin-bottom:6px}
+.question{font-size:13.5px;font-weight:700;line-height:1.6;margin-bottom:14px;color:#f1f5f9}
+.options{display:flex;flex-direction:column;gap:7px}
+.opt{padding:10px 13px;border-radius:9px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.03);cursor:pointer;font-size:12.5px;transition:all .15s;text-align:left;color:#e2e8f0;width:100%}
+.opt:hover{border-color:#818CF8;background:rgba(129,140,248,.08)}
+.opt.correct{border-color:#10B981!important;background:rgba(16,185,129,.12)!important;color:#10B981!important;font-weight:700}
+.opt.wrong{border-color:#EF4444!important;background:rgba(239,68,68,.1)!important;color:#EF4444!important}
+.opt.reveal{border-color:#10B981!important;background:rgba(16,185,129,.07)!important;color:#10B981!important}
+.exp{margin-top:10px;padding:9px 11px;border-radius:9px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2);font-size:11.5px;color:#a5b4fc;line-height:1.6;display:none}
+.timer{text-align:center;font-size:26px;font-weight:900;font-family:monospace;color:#FBBF24;margin-bottom:10px}
+.timer.urgent{color:#EF4444;animation:blink .5s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.next-btn{width:100%;margin-top:12px;padding:11px;border-radius:9px;background:#818CF8;color:#fff;border:none;font-size:13px;font-weight:800;cursor:pointer;display:none}
+.next-btn:hover{background:#6366F1}
+.result{text-align:center;padding:20px}
+.result-score{font-size:52px;font-weight:900;color:#818CF8;margin:10px 0}
+.result-detail{font-size:12px;color:#64748b;line-height:2.2}
+.restart-btn{margin-top:14px;padding:9px 22px;border-radius:9px;background:#10B981;color:#fff;border:none;font-size:12px;font-weight:800;cursor:pointer}
+.loading{text-align:center;padding:40px;color:#64748b;font-size:13px}
+.error{text-align:center;padding:40px;color:#EF4444;font-size:13px}
+.badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:9px;font-weight:800;margin-left:6px;background:rgba(16,185,129,.15);color:#10B981;border:1px solid rgba(16,185,129,.2)}
+</style>
+</head>
+<body>
+<div class="card" id="app"><div class="loading">⏳ লোড হচ্ছে...</div></div>
+
+<script>
+const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+
+// quiz_id from URL: /quiz.html?id=qz_XXX or /quiz/qz_XXX
+const params = new URLSearchParams(location.search);
+let quizId = params.get('id') || location.pathname.split('/').pop();
+if (!quizId || !quizId.startsWith('qz_')) {
+  document.getElementById('app').innerHTML = '<div class="error">❌ Quiz ID নেই।<br><small>URL: quiz.html?id=qz_XXXXX</small></div>';
+}
+
+let questions=[], cur=0, score=0, wrong=0, skipped=0, timerSec=30, interval;
+
+async function init(){
+  try {
+    // Supabase থেকে quiz data
+    const r = await fetch(`${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${quizId}&select=*`, {
+      headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` }
+    });
+    const data = await r.json();
+    if (!data || !data[0]) {
+      document.getElementById('app').innerHTML = '<div class="error">❌ Quiz পাওয়া যায়নি।</div>';
+      return;
+    }
+    const b = data[0];
+    questions = b.questions || [];
+    timerSec = 30;
+    document.title = (b.name || 'ATLAS Quiz') + ' — ATLAS';
+    document.getElementById('app').innerHTML =
+      `<h1>${esc(b.name || 'ATLAS Quiz')}</h1>` +
+      `<div class="sub">ATLAS Quiz <span class="badge">Supabase</span> · ${questions.length} প্রশ্ন</div>` +
+      `<div class="prog"><div class="prog-bar" id="pb" style="width:0%"></div></div>` +
+      `<div id="qa"></div>`;
+    showQ();
+  } catch(e) {
+    document.getElementById('app').innerHTML = `<div class="error">❌ Error: ${e.message}</div>`;
+  }
+}
+
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function showQ(){
+  clearInterval(interval);
+  if (cur >= questions.length){ showResult(); return; }
+  const q = questions[cur];
+  const pct = (cur/questions.length*100).toFixed(0);
+  document.getElementById('pb').style.width = pct+'%';
+  const opts = (q.options||[]).map((o,i)=>
+    `<button class="opt" id="o${i}" onclick="pick(${i})" data-i="${i}">${esc(o)}</button>`
+  ).join('');
+  document.getElementById('qa').innerHTML =
+    `<div class="timer" id="tmr">${timerSec}</div>` +
+    `<div class="qnum">প্রশ্ন ${cur+1} / ${questions.length}</div>` +
+    `<div class="question">${esc(q.question||'')}</div>` +
+    `<div class="options">${opts}</div>` +
+    `<div class="exp" id="exp">${esc(q.explanation||'')}</div>` +
+    `<button class="next-btn" id="nxt" onclick="next()">পরের প্রশ্ন →</button>`;
+  startTimer(q.answer_index ?? 0);
+}
+
+function startTimer(ans){
+  let t = timerSec;
+  const el = ()=>document.getElementById('tmr');
+  interval = setInterval(()=>{
+    t--;
+    if(el()) el().textContent = t;
+    if(t<=5 && el()) el().classList.add('urgent');
+    if(t<=0){ clearInterval(interval); timeUp(ans); }
+  }, 1000);
+}
+
+function timeUp(ans){ skipped++; lock(ans,-1); }
+
+function pick(i){
+  clearInterval(interval);
+  const ans = questions[cur].answer_index ?? 0;
+  if(i===ans) score++; else wrong++;
+  lock(ans, i);
+}
+
+function lock(ans, chosen){
+  document.querySelectorAll('.opt').forEach(b=>{
+    b.onclick=null;
+    const i=parseInt(b.dataset.i);
+    if(i===ans) b.classList.add(chosen===-1?'reveal':'correct');
+    else if(i===chosen) b.classList.add('wrong');
+  });
+  const exp=document.getElementById('exp');
+  if(exp && exp.textContent.trim()) exp.style.display='block';
+  const nxt=document.getElementById('nxt');
+  if(nxt) nxt.style.display='block';
+}
+
+function next(){ cur++; showQ(); }
+
+function showResult(){
+  const pct=Math.round(score/questions.length*100);
+  document.getElementById('app').innerHTML =
+    `<div class="result">` +
+    `<h1>✅ Quiz সম্পন্ন!</h1>` +
+    `<div class="result-score">${pct}%</div>` +
+    `<div class="result-detail">` +
+    `✅ সঠিক: <b>${score}</b><br>` +
+    `❌ ভুল: <b>${wrong}</b><br>` +
+    `⏭ Skip: <b>${skipped}</b><br>` +
+    `📋 মোট: <b>${questions.length}</b>` +
+    `</div>` +
+    `<button class="restart-btn" onclick="restart()">🔄 আবার দাও</button>` +
+    `</div>`;
+}
+
+function restart(){ cur=0; score=0; wrong=0; skipped=0; init(); }
+
+if(quizId && quizId.startsWith('qz_')) init();
+</script>
+</body>
+</html>

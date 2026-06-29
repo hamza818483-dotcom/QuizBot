@@ -368,11 +368,11 @@ async def handle_poll_extract(msg: dict):
     bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
 
     QUIZ_WORKER_URL = "https://atlasquizbotpro.hamza818483.workers.dev"
-    GH_PAGES_URL    = "https://hamza818483-dotcom.github.io/QuizBot"
+    GH_PAGES_URL    = "https://hamza818483-dotcom.github.io/QuizBot/quiz.html"
     HF_SPACE_URL    = "https://hamzahf1-atlasboss.hf.space"
 
     cf_link  = f"{QUIZ_WORKER_URL}/quiz/{quiz_id}" if quiz_id else None
-    gh_link  = f"{GH_PAGES_URL}/quiz/{quiz_id}" if quiz_id else None
+    gh_link  = f"{GH_PAGES_URL}?id={quiz_id}" if quiz_id else None
     hf_link  = f"{HF_SPACE_URL}/exam/{quiz_id}" if quiz_id else None
     bot_link = f"https://t.me/{bot_username}?start={quiz_id}" if quiz_id else None
 
