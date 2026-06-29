@@ -334,7 +334,46 @@ async def generate_mcq_from_image(
     return await _openrouter_fallback(img, prompt, page)
 
 
-async def generate_new_mcq(img: Image.Image, topic: str, page: int, count: int = 15) -> list:
+async def generate_mcq_from_text(text: str, topic: str = "MCQ", count: int = 15) -> list:
+    """Text থেকে MCQ generate করে — same format as generate_mcq_from_image"""
+    import google.generativeai as genai
+    import os, json as _json
+
+    prompt = f"""নিচের text থেকে {count}টি MCQ বানাও।
+
+RULES:
+- প্রশ্ন text এর ভাষায় (বাংলা হলে বাংলা, ইংরেজি হলে ইংরেজি)
+- ৪টি option, একটি সঠিক
+- Answer A/B/C/D — MUST vary across questions, NEVER all same
+- Explanation max 200 chars
+
+TEXT:
+{text[:4000]}
+
+Return ONLY valid JSON array:
+[{{"question":"...","options":["...","...","...","..."],"answer":"B","explanation":"..."}}]"""
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        return []
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        resp = model.generate_content(prompt)
+        raw = resp.text.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].split("```")[0].strip()
+            if raw.startswith("json"):
+                raw = raw[4:].strip()
+        mcqs = _json.loads(raw)
+        valid = [m for m in mcqs if all(k in m for k in ["question","options","answer","explanation"])
+                 and len(m["options"]) >= 4 and m["answer"] in ["A","B","C","D"]]
+        return valid
+    except Exception as e:
+        print(f"[generate_mcq_from_text] error: {e}")
+        return []
+
+
     return await generate_mcq_from_image(img, topic, page, mcq_count=count)
 
 # ============================================================

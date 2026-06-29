@@ -982,11 +982,12 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
             return
 
         for i, mcq in enumerate(mcqs):
-            opts = mcq.get("options", [])
+            opts = [o[:100] for o in mcq.get("options", [])[:4]]
             ans_idx = {"A":0,"B":1,"C":2,"D":3}.get(mcq.get("answer","A"), 0)
-            q_text = mcq["question"]
+            q_text = mcq["question"][:295]
             if tag:
                 q_text = f"{tag}\n\n{q_text}"
+            q_text = q_text[:300]
             exp = mcq.get("explanation","")
             if exp_footer:
                 exp = f"{exp}\n{exp_footer}"
