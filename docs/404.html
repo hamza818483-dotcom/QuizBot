@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<title>ATLAS Quiz</title>
+<script>
+  // GitHub Pages এ /exam/qz_xxx → /quiz.html?id=qz_xxx redirect
+  const path = location.pathname;
+  const m = path.match(/\/exam\/(qz_[A-Za-z0-9_-]+)/);
+  if (m) {
+    location.replace(location.origin + '/QuizBot/quiz.html?id=' + m[1]);
+  } else {
+    location.replace(location.origin + '/QuizBot/quiz.html');
+  }
+</script>
+</head>
+<body>
+<p style="font-family:sans-serif;text-align:center;padding:40px;color:#64748b">⏳ Redirecting...</p>
+</body>
+</html>

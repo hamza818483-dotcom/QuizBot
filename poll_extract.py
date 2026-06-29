@@ -371,8 +371,8 @@ async def handle_poll_extract(msg: dict):
     GH_PAGES_URL    = "https://hamza818483-dotcom.github.io/QuizBot/quiz.html"
     HF_SPACE_URL    = "https://hamzahf1-atlasboss.hf.space"
 
+    gh_link  = f"https://hamza818483-dotcom.github.io/QuizBot/exam/{quiz_id}" if quiz_id else None
     cf_link  = f"{QUIZ_WORKER_URL}/quiz/{quiz_id}" if quiz_id else None
-    gh_link  = f"{GH_PAGES_URL}?id={quiz_id}" if quiz_id else None
     hf_link  = f"{HF_SPACE_URL}/exam/{quiz_id}" if quiz_id else None
     bot_link = f"https://t.me/{bot_username}?start={quiz_id}" if quiz_id else None
 
@@ -381,17 +381,29 @@ async def handle_poll_extract(msg: dict):
         f"📌 Range: {start_id} → {end_id}\n"
         f"📋 Poll পেয়েছি: <b>{len(polls)}</b>\n\n"
     )
-    if cf_link:
-        caption += f"🌐 <b>Web Quiz (Primary):</b>\n{cf_link}\n\n"
     if gh_link:
-        caption += f"🔗 <b>Backup 1 (GitHub):</b>\n{gh_link}\n\n"
+        caption += f"🌐 <b>Web Quiz (Primary):</b>\n{gh_link}\n\n"
+    if cf_link:
+        caption += f"🔗 <b>Backup-01 (Cloudflare):</b>\n{cf_link}\n\n"
     if hf_link:
-        caption += f"🔗 <b>Backup 2 (HF):</b>\n{hf_link}\n\n"
+        caption += f"🔗 <b>Backup-02 (HF):</b>\n{hf_link}\n\n"
     if bot_link:
         caption += f"🤖 <b>Bot Quiz:</b>\n{bot_link}"
 
-    await send_document(
+    doc_result = await send_document(
         chat_id, csv_bytes, filename,
         caption=caption,
         mime_type="text/csv"
     )
+
+    # Auto-pin the response message
+    try:
+        sent_msg_id = doc_result.get("result", {}).get("message_id") if doc_result else None
+        if sent_msg_id:
+            await tg_post("pinChatMessage", {
+                "chat_id": chat_id,
+                "message_id": sent_msg_id,
+                "disable_notification": True
+            })
+    except Exception as e:
+        logger.warning(f"[poll_extract] Auto-pin failed: {e}")
