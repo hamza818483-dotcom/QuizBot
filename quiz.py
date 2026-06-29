@@ -281,39 +281,26 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
     else:
         rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [quiz_id])
         if not rows:
-            # D1 এ নেই — Supabase backup থেকে restore করো
+            # Supabase backup থেকে restore
             try:
-                from core import SUPABASE_URL, SUPABASE_KEY
-                import httpx
-                headers = {
-                    "apikey": SUPABASE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_KEY}",
-                }
-                async with httpx.AsyncClient(timeout=10) as hc:
-                    r = await hc.get(
-                        f"{SUPABASE_URL}/rest/v1/quiz_backups",
-                        headers=headers,
-                        params={"quiz_id": f"eq.{quiz_id}", "select": "*"},
-                    )
-                backup = r.json()
-                if backup:
-                    b = backup[0]
-                    # D1 তে re-import করো
-                    await d1_run(
-                        "INSERT OR REPLACE INTO quizzes "
-                        "(id, name, description, timer, shuffle, csv_data, tag, exp_footer, created_by) "
-                        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        [
-                            b["quiz_id"], b["name"],
-                            f"Restored — {len(b['questions'])} প্রশ্ন",
-                            30, 0,
-                            json.dumps(b["questions"]),
-                            "", "", b.get("created_by", 0),
-                        ]
-                    )
-                    rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [quiz_id])
-            except Exception as e:
-                logger.warning(f"[quiz] Supabase restore failed: {e}")
+                import httpx as _hx, os as _os
+                _sb_url = _os.environ.get("SUPABASE_URL","")
+                _sb_key = _os.environ.get("SUPABASE_KEY","")
+                if _sb_url and _sb_key:
+                    async with _hx.AsyncClient(timeout=10) as _c:
+                        _r = await _c.get(f"{_sb_url}/rest/v1/quiz_backups",
+                            headers={"apikey":_sb_key,"Authorization":f"Bearer {_sb_key}"},
+                            params={"quiz_id":f"eq.{quiz_id}","select":"*"})
+                    _b = _r.json()
+                    if _b and _b[0]:
+                        _bk = _b[0]
+                        await d1_run(
+                            "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                            [quiz_id,_bk["name"],"",30,0,json.dumps(_bk["questions"]),"","",0]
+                        )
+                        rows = await d1_select("SELECT * FROM quizzes WHERE id=?1",[quiz_id])
+            except Exception as _e:
+                logger.warning(f"[quiz] Supabase restore: {_e}")
         if not rows:
             await send_msg(chat_id, "❌ কুইজ পাওয়া যায়নি! Link টা সঠিক কিনা দেখো।")
             return
