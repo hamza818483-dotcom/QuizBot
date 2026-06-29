@@ -788,7 +788,6 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             caption += (
                 f"⌛ATLAS Special MCQ System\n"
                 f"🌟Topic: {topic}\n"
-                f"📌Page No: 01\n"
                 f"💎MCQ: {len(mcqs)}"
             )
             photo_r = await send_photo(channel_id, img_bytes, caption)
@@ -853,7 +852,6 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
 
         end_text = (
             f"🎯Topic: {topic}\n"
-            f"🌟Page No: 01\n"
             f"🚀MCQ: {len(mcqs)}\n"
         )
         if poll_links:
@@ -3601,7 +3599,7 @@ async def handle_poll_again(cache_id: str, user: dict, chat_id: int):
 
     pre_caption = (
         f"🔄 <b>Poll Practice শুরু হচ্ছে!</b>\n\n"
-        f"🌟 Topic: {topic}\n📄 Page No: {fmt_page(page)}\n📝 Total MCQ: {total}\n\n⏱️ Are you ready?"
+        f"🌟 Topic: {topic}\n📝 Total MCQ: {total}\n\n⏱️ Are you ready?"
     )
     img_id = cache.get("image_file_id")
     if img_id:
@@ -3627,7 +3625,7 @@ async def handle_poll_again(cache_id: str, user: dict, chat_id: int):
         await asyncio.sleep(1.5)
 
     end_text = (
-        f"✅ <b>Poll শেষ!</b>\n\n🎯 Topic: {topic}\n📄 Page: {fmt_page(page)}\n"
+        f"✅ <b>Poll শেষ!</b>\n\n🎯 Topic: {topic}\n"
         f"📝 {total} টি poll পাঠানো হয়েছে!\n\n🔄 আবার practice করতে বা নতুন poll চাইলে নিচের বাটন চাপো।"
     )
     end_kb = _poll_end_kb(cache_id, cache)
@@ -3703,7 +3701,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
 
     pre_caption = (
         f"🆕 <b>New Poll শুরু হচ্ছে!</b>\n\n"
-        f"🌟 Topic: {topic}\n📄 Page No: {fmt_page(page)}\n📝 Total MCQ: {total}\n\n⏱️ Are you ready?"
+        f"🌟 Topic: {topic}\n📝 Total MCQ: {total}\n\n⏱️ Are you ready?"
     )
     if image_file_id:
         r = await send_photo_by_id(chat_id, image_file_id, pre_caption, parse_mode="HTML")
@@ -3732,7 +3730,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
     kb["inline_keyboard"][1][0]["text"] = f"🆕 New Poll ({remaining_new} বাকি)"
 
     end_text = (
-        f"✅ <b>New Poll শেষ!</b>\n\n🎯 Topic: {topic}\n📄 Page: {fmt_page(page)}\n"
+        f"✅ <b>New Poll শেষ!</b>\n\n🎯 Topic: {topic}\n"
         f"📝 {total} টি poll পাঠানো হয়েছে!\n🔢 আর {remaining_new} বার নতুন poll বানানো যাবে।"
     )
     if image_file_id:
@@ -3819,7 +3817,7 @@ async def start_sequential_quiz(chat_id: int, uid: int, uname: str,
     total = len(mcqs)
 
     pre_caption = (
-        f"{title}\n\n🌟 Topic: {topic}\n📄 Page No: {fmt_page(page)}\n"
+        f"{title}\n\n🌟 Topic: {topic}\n"
         f"📝 Total MCQ: {total}\n⏱️ প্রতিটা প্রশ্নে {QUIZ_Q_SEC} সেকেন্ড সময়\n\nপ্রস্তুত থাকো!"
     )
     img_id = cache.get("image_file_id")
@@ -5599,3 +5597,4 @@ async def startup():
         await _recover_rapid_jobs()
     except Exception as e:
         logger.error(f"[App] /rapid job recovery failed: {e}")
+
