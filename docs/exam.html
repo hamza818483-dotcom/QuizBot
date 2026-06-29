@@ -198,7 +198,7 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
       <div class="hero-stats">
         <div class="stat-box"><div class="stat-val" id="preQCount">—</div><div class="stat-lbl">📋 প্রশ্ন</div></div>
         <div class="stat-box"><div class="stat-val" id="preTimerDisp">—</div><div class="stat-lbl">⏱️ মোট সময়</div></div>
-        <div class="stat-box"><div class="stat-val" id="prePage">—</div><div class="stat-lbl">📄 পেজ</div></div>
+
       </div>
     </div>
     <div class="info-card">
@@ -274,7 +274,7 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 <div class="toast" id="toast"></div>
 
 <script>
-// ── CONFIG (GitHub Pages — runtime resolve, same as CF/HF template) ──
+// ── CONFIG (GitHub Pages — runtime resolve) ──
 const _qp = new URLSearchParams(location.search);
 let _CACHE_ID = _qp.get('id') || '';
 if (!_CACHE_ID) {
@@ -314,55 +314,41 @@ let tag = '', expFooter = '', channelId = '', imageMsgId = null, endMsgId = null
 let isNewGen = false;
 let totalSec = 0, totalLeft = 0, totalTimer = null;
 
-// ── INIT (100% same logic as CF worker: HF primary → Supabase backup. No CF dependency) ──
+// ── FETCH (HF direct → CF worker → Supabase direct) ──
 async function fetchExamData() {
   const ANS = ["A","B","C","D","E"];
-  const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
-  const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
-  const HF_SPACE = 'https://hamzahf1-atlasboss.hf.space';
+  const HF_SPACE  = 'https://hamzahf1-atlasboss.hf.space';
   const CF_WORKER = 'https://atlasquizbotpro.hamza818483.workers.dev';
-
-  // Layer 1: HF Space direct (primary data source — same as CF worker's own Layer 1)
+  const SB_URL    = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+  const SB_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+  // 1) HF Space direct
   try {
     const r = await fetch(`${HF_SPACE}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(6000) });
-    if (r.ok) {
-      const d = await r.json();
-      if (d && d.mcqs && d.mcqs.length > 0) return d;
-    }
-  } catch (e) {}
-
-  // Layer 2: CF worker (forwards HF/D1/Supabase itself — covers cases where HF direct is blocked by CORS)
+    if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) return d; }
+  } catch(e) {}
+  // 2) CF Worker (has own HF→D1→Supabase fallback inside)
   try {
-    const r2 = await fetch(`${CF_WORKER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(6000) });
-    if (r2.ok) {
-      const d2 = await r2.json();
-      if (d2 && d2.mcqs && d2.mcqs.length > 0) return d2;
-    }
-  } catch (e) {}
-
-  // Layer 3: Supabase direct (true last-resort, independent of both CF and HF)
+    const r = await fetch(`${CF_WORKER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(6000) });
+    if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) return d; }
+  } catch(e) {}
+  // 3) Supabase direct
   try {
-    const r3 = await fetch(`${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`, {
-      headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` }
-    });
-    const data3 = await r3.json();
-    if (data3 && data3[0]) {
-      const b = data3[0];
-      const mcqs = (b.questions || []).map(q => ({
-        question: q.question || '', options: q.options || [],
-        answer: ANS[q.answer_index ?? 0] || 'A', explanation: q.explanation || '',
-      }));
-      return {
-        cache_id: CACHE_ID, topic: b.name || 'Special Topic', page: 1, mcqs,
-        tag: '', exp_footer: '', channel_id: '', image_msg_id: null,
-        end_msg_id: null, image_file_id: null, is_new_gen: false, timer: 30,
-      };
+    const r = await fetch(`${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`,
+      { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
+    const data = await r.json();
+    if (data && data[0]) {
+      const b = data[0];
+      return { cache_id: CACHE_ID, topic: b.name || 'Special Topic', page: 1,
+        mcqs: (b.questions||[]).map(q => ({ question: q.question||'', options: q.options||[],
+          answer: ANS[q.answer_index != null ? q.answer_index : 0]||'A', explanation: q.explanation||'' })),
+        tag:'', exp_footer:'', channel_id:'', image_msg_id:null,
+        end_msg_id:null, image_file_id:null, is_new_gen:false, timer:30 };
     }
-  } catch (e) {}
-
+  } catch(e) {}
   return { error: 'all sources failed' };
 }
 
+// ── INIT ──
 async function init() {
   setMode('Loading');
   try {
@@ -382,7 +368,7 @@ async function init() {
     document.getElementById('preTitle').textContent  = '📝 ' + (d.topic || 'ATLAS Special Exam');
     document.getElementById('preQCount').textContent = questions.length;
     document.getElementById('preTopic').textContent  = d.topic || '—';
-    document.getElementById('prePage').textContent   = 'Page No: ' + zp(d.page || 1);
+
 
     totalSec = Math.max(30, Math.ceil(questions.length * SEC_PER_Q));
     document.getElementById('preTimerDisp').textContent = zp(Math.floor(totalSec/60))+':'+zp(totalSec%60);
@@ -651,9 +637,6 @@ async function doSubmit(){
   html+=`<div class="result-btns">
     <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
     <button class="result-btn success"  onclick="solvePDF()">📄 Solve PDF</button>
-    <button class="result-btn primary" id="newExamBtn" onclick="startNewExamV2()">🆕 New Exam</button>`;
-  if(backUrl) html+=`<button class="result-btn" onclick="window.open('${backUrl}','_blank')">↩️ Back to Source</button>`;
-  html+=`
     <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (Only Wrong)</button>
     <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (Wrong+Skip)</button>`;
   if(!isNewGen)
@@ -974,3 +957,4 @@ document.addEventListener('DOMContentLoaded',init);
 </script>
 </body>
 </html>
+
