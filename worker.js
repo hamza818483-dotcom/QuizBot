@@ -42,7 +42,7 @@ export default {
 
     // Forward HF-only API routes to HF Space
     const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
-                     '/api/leaderboard', '/api/solve-pdf', '/api/tg-image'];
+                     '/api/leaderboard', '/api/solve-pdf', '/api/tg-image', '/api/new-exam/status'];
     if (HF_ONLY.some(p => url.pathname.startsWith(p))) {
       const HF = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
       const hfReq = new Request(HF + url.pathname + url.search, {
@@ -542,4 +542,5 @@ async function forwardToHF(request, env) {
 
   return new Response('OK');
 }
+
 
