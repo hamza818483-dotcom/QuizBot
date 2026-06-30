@@ -51,7 +51,7 @@ export default {
 
   // ── Cron: প্রতি 5 মিনিটে HF Space ping করে alive রাখে ──
   async scheduled(event, env) {
-    const HF_URL = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
+    const HF_URL = env.HF_SPACE_URL || 'https://hamzahf2-atlasboss.hf.space';
     try {
       const r = await fetch(HF_URL + '/health', {
         method: 'GET',
@@ -468,7 +468,7 @@ init();
 }
 async function forwardToHF(request, env) {
   try {
-    const hfUrl = (env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space') + '/webhook';
+    const hfUrl = (env.HF_SPACE_URL || 'https://hamzahf2-atlasboss.hf.space') + '/webhook';
     const body = await request.text();
     await fetch(hfUrl, {
       method: 'POST',
