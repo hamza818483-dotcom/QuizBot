@@ -4782,16 +4782,19 @@ async def handle_message(msg: dict):
 
             key_count = len(key_rotator.keys)
 
+            import os as _os
+            _platform = _os.environ.get("RUNNING_ON", "HuggingFace Space")
+            _proxy = "Cloudflare Worker" if "hf" in _platform.lower() or "hugging" in _platform.lower() else "Direct (No Proxy)"
+
             await send_msg(chat_id,
                 "🏓 <b>Pong! ATLAS QuizBot Online</b>\n\n"
-                f"🖥 <b>Platform:</b> HuggingFace Space\n"
-                f"🔗 <b>Proxy:</b> Cloudflare Worker\n"
+                f"🖥 <b>Platform:</b> {_platform}\n"
+                f"🔗 <b>Mode:</b> {_proxy}\n"
                 f"🕐 চালু হয়েছে: {started_at}\n"
                 f"⏱ Active আছে: {uptime_str}\n"
                 f"🔑 Gemini Keys: {key_count}\n"
                 f"👥 Total Users: {total_users}\n"
-                f"🟢 আজকে Active: {daily_active}\n\n"
-                f"✅ HF → CF Proxy mode চলছে",
+                f"🟢 আজকে Active: {daily_active}",
                 parse_mode="HTML"
             )
         except Exception as e:
