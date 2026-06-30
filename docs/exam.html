@@ -399,6 +399,11 @@ async function init() {
     }
 
     setMode('PreExam');
+
+    // Web Quiz link থেকে এলে — pre-screen না দেখিয়ে direct exam শুরু (নাম থাকলে)
+    if (FROM_TELEGRAM || localStorage.getItem('atlas_name')) {
+      setTimeout(() => startHall(), 80);
+    }
   } catch(e) { showErr('❌ লোড করতে সমস্যা!'); }
 }
 
