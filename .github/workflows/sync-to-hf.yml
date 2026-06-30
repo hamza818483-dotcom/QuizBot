@@ -1,9 +1,11 @@
-name: Sync to Hugging Face Space
+name: Sync to Hugging Face Space (DISABLED — HF account banned)
+
+# v4.3: HF account permanently banned (ToS violation). This workflow is
+# disabled — no more push trigger — to avoid wasting Actions minutes on
+# guaranteed-fail pushes. Kept as workflow_dispatch only in case HF
+# access is restored later.
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:

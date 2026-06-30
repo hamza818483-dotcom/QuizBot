@@ -189,39 +189,23 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
   <div class="loading"><span class="spin">⏳</span><div>লোড হচ্ছে...</div></div>
 </div>
 
-<!-- Pre Exam -->
-<div class="mode" id="modePreExam">
-  <div class="wrap">
-    <div class="hero">
-      <img id="preImg" class="hero-img" src="" alt="" style="display:none">
-      <div class="hero-title" id="preTitle">—</div>
-      <div class="hero-stats">
-        <div class="stat-box"><div class="stat-val" id="preQCount">—</div><div class="stat-lbl">📋 প্রশ্ন</div></div>
-        <div class="stat-box"><div class="stat-val" id="preTimerDisp">—</div><div class="stat-lbl">⏱️ মোট সময়</div></div>
-
-      </div>
-    </div>
-    <div class="info-card">
-      <div class="info-row"><span class="info-lbl">Topic</span><span class="info-val" id="preTopic">—</span></div>
-      <div class="info-row"><span class="info-lbl">Type</span><span class="info-val">ATLAS Special MCQ</span></div>
-      <div class="info-row"><span class="info-lbl">Negative</span><span class="info-val">প্রতি ভুলে -0.25</span></div>
-      <div class="info-row"><span class="info-lbl">Timer</span><span class="info-val" id="preTimerRule">—</span></div>
-    </div>
-    <!-- FIX: Name prompt — শুধু anonymous user (Telegram থেকে না আসলে) -->
-    <div class="name-card" id="nameCard" style="display:none">
-      <h3>👤 তোমার নাম লেখো (Leaderboard এ দেখাবে)</h3>
-      <input type="text" class="name-input" id="nameInput" placeholder="তোমার নাম..." maxlength="30">
-    </div>
-    <button class="btn-start" onclick="startHall()">▶️ এক্সাম শুরু করুন</button>
-  </div>
-</div>
-
 <!-- Exam Hall -->
 <div class="mode" id="modeHall">
   <div class="hall-area" id="hallArea"></div>
   <button class="submit-fixed" id="submitBtn" onclick="confirmSubmit()">📤 Submit করুন</button>
   <button class="nav-fab" id="navFab" onclick="openNav()">📋</button>
 </div>
+
+<!-- v4.2: Floating name prompt — শুধু anonymous user-দের প্রথমবার exam চলাকালীন
+     দেখায় (leaderboard-এর জন্য), exam block করে না। -->
+<div class="name-overlay" id="nameOverlay" style="display:none;position:fixed;bottom:80px;left:12px;right:12px;z-index:500;background:var(--bg-secondary,#1c1c1e);border-radius:14px;padding:14px;box-shadow:0 4px 20px rgba(0,0,0,.3)">
+  <div style="font-size:13px;margin-bottom:8px;color:var(--text-secondary,#999)">👤 তোমার নাম লেখো (Leaderboard এ দেখাবে)</div>
+  <div style="display:flex;gap:8px">
+    <input type="text" class="name-input" id="nameInputFloat" placeholder="তোমার নাম..." maxlength="30" style="flex:1">
+    <button onclick="saveFloatingName()" style="padding:0 16px;border-radius:8px;border:none;background:var(--accent,#0a84ff);color:#fff">✓</button>
+  </div>
+</div>
+
 
 <!-- Result -->
 <div class="mode" id="modeResult">
@@ -326,62 +310,31 @@ async function init() {
     isNewGen   = d.is_new_gen   || false;
 
     document.getElementById('headerSub').textContent = d.topic || 'Special Exam';
-    document.getElementById('preTitle').textContent  = '📝 ' + (d.topic || 'ATLAS Special Exam');
-    document.getElementById('preQCount').textContent = questions.length;
-    document.getElementById('preTopic').textContent  = d.topic || '—';
-
 
     totalSec = Math.max(30, Math.ceil(questions.length * SEC_PER_Q));
-    document.getElementById('preTimerDisp').textContent = zp(Math.floor(totalSec/60))+':'+zp(totalSec%60);
-    document.getElementById('preTimerRule').textContent =
-      `মোট ${(questions.length/2)} মিনিট • শেষ হলে auto submit`;
 
-    if (d.image_file_id) {
-      const img = document.getElementById('preImg');
-      if (img) {
-        img.src = `${HF_URL}/api/tg-image/${d.image_file_id}`;
-        img.style.display = 'block';
-        img.onerror = () => { img.style.display = 'none'; };
-      }
-    }
-
-    // FIX: Name prompt — শুধু anonymous user দের জন্য (Telegram থেকে না আসলে)
-    if (!FROM_TELEGRAM) {
-      const nameCard = document.getElementById('nameCard');
-      const nameInput = document.getElementById('nameInput');
-      if (nameCard) {
-        nameCard.style.display = 'block';
-        // Pre-fill saved name
-        const saved = localStorage.getItem('atlas_name');
-        if (saved && saved !== 'Student') {
-          nameInput.value = saved;
-        }
-      }
-    }
-
-    // Web Quiz link থেকে এলে (worker দিয়ে অথবা channel poll থেকে) — pre-screen একদমই না দেখিয়ে instant শুরু
-    const urlParams = new URLSearchParams(location.search);
-    if (urlParams.get('autostart') === '1' || window.__FORCE_AUTOSTART__ === true) {
-      startHall();
-    } else {
-      setMode('PreExam');
+    // v4.2: Pre-exam screen totally removed — instant exam start always.
+    startHall();
+    if (!FROM_TELEGRAM && !localStorage.getItem('atlas_name')) {
+      const overlay = document.getElementById('nameOverlay');
+      if (overlay) overlay.style.display = 'block';
     }
   } catch(e) { showErr('❌ লোড করতে সমস্যা!'); }
 }
 
+function saveFloatingName() {
+  const input = document.getElementById('nameInputFloat');
+  const val = input ? input.value.trim() : '';
+  if (val) {
+    USER_NAME = val.slice(0, 30);
+    try { localStorage.setItem('atlas_name', USER_NAME); } catch(e) {}
+  }
+  const overlay = document.getElementById('nameOverlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
 // ── START HALL ──
 function startHall() {
-  // FIX: Name save from input (anonymous users only)
-  if (!FROM_TELEGRAM) {
-    const nameInput = document.getElementById('nameInput');
-    const inputVal = nameInput ? nameInput.value.trim() : '';
-    if (inputVal) {
-      USER_NAME = inputVal.slice(0, 30);
-      try { localStorage.setItem('atlas_name', USER_NAME); } catch(e) {}
-    } else if (!USER_NAME || USER_NAME === 'Student') {
-      USER_NAME = 'Student';
-    }
-  }
 
   userAnswers = {}; bookmarks = {}; submitted = false;
   totalLeft   = totalSec;
@@ -495,7 +448,29 @@ function toggleBm(qi) {
     body: bookmarks[qi]
       ? JSON.stringify(payload)
       : JSON.stringify({user_id:USER_ID,cache_id:CACHE_ID,question_index:qi})
-  }).catch(()=>{});
+  }).catch(() => saveBookmarkDirectSupabase(qi, payload));
+}
+
+async function saveBookmarkDirectSupabase(qi, payload) {
+  const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+  const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+  try {
+    if (bookmarks[qi]) {
+      await fetch(`${SB_URL}/rest/v1/bookmarks?on_conflict=user_id,cache_id,question_index`, {
+        method: 'POST',
+        headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}`,
+                   'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates' },
+        body: JSON.stringify({ user_id: payload.user_id, cache_id: payload.cache_id,
+          question_index: payload.question_index, question_data: payload.question_data,
+          topic: payload.topic, page_number: payload.page })
+      });
+    } else {
+      await fetch(`${SB_URL}/rest/v1/bookmarks?user_id=eq.${payload.user_id}&cache_id=eq.${payload.cache_id}&question_index=eq.${qi}`, {
+        method: 'DELETE',
+        headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}` }
+      });
+    }
+  } catch(e) { console.warn('[bookmark] direct Supabase fallback failed:', e.message); }
 }
 
 function openNav() {
@@ -603,7 +578,6 @@ async function doSubmit(){
 
   html+=`<div class="result-btns">
     <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
-    <button class="result-btn success"  onclick="solvePDF()">📄 Solve PDF</button>
     <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (Only Wrong)</button>
     <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (Wrong+Skip)</button>`;
   if(!isNewGen)
@@ -857,8 +831,20 @@ async function openLb(){
   document.getElementById('lbBody').innerHTML='<div class="loading"><span class="spin">⏳</span></div>';
   document.getElementById('lbOverlay').classList.add('open');
   try{
-    const r=await fetch(`${HF_URL}/api/leaderboard/${CACHE_ID}`);
-    const d=await r.json();
+    let d;
+    try {
+      const r=await fetch(`${HF_URL}/api/leaderboard/${CACHE_ID}`, { signal: AbortSignal.timeout(8000) });
+      d=await r.json();
+      if (!r.ok || d.error) throw new Error('proxy failed');
+    } catch(_e) {
+      const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+      const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+      const r2 = await fetch(
+        `${SB_URL}/rest/v1/web_exam_leaderboard?cache_id=eq.${CACHE_ID}&select=*&order=final_score.desc&limit=50`,
+        { headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}` } }
+      );
+      d = { ok: true, data: await r2.json() };
+    }
     if(d.disabled){
       document.getElementById('lbBody').innerHTML=
         '<div style="text-align:center;padding:30px;color:var(--text-secondary)">New Exam এ leaderboard নেই</div>';
