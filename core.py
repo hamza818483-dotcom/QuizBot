@@ -137,7 +137,29 @@ async def d1_query(sql: str, params: list = None, is_select: bool = True) -> dic
 
 async def d1_select(sql: str, params: list = None) -> list:
     r = await d1_query(sql, params, True)
-    return r.get("results", [])
+    if r.get("ok") and r.get("results") is not None:
+        return r.get("results", [])
+    # ── CF down → Supabase direct fallback ──
+    try:
+        if "quizzes" in sql.lower() and params:
+            qid = params[0]
+            async with httpx.AsyncClient(timeout=10) as c:
+                rr = await c.get(f"{SUPABASE_URL}/rest/v1/quiz_backups",
+                    headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                    params={"quiz_id": f"eq.{qid}", "select": "*"})
+            data = rr.json()
+            if data and data[0]:
+                b = data[0]
+                import json as _json
+                return [{
+                    "id": b["quiz_id"], "name": b.get("name", "Special Topic"),
+                    "description": "", "timer": 30, "shuffle": 0,
+                    "csv_data": _json.dumps(b.get("questions", [])),
+                    "tag": "", "exp_footer": "", "created_by": b.get("created_by", 0),
+                }]
+    except Exception as e:
+        logger.warning(f"[D1] Supabase fallback failed: {e}")
+    return []
 
 async def d1_run(sql: str, params: list = None) -> bool:
     r = await d1_query(sql, params, False)
@@ -216,15 +238,26 @@ async def clear_error_logs():
 # TELEGRAM HELPERS
 # ============================================================
 async def tg_post(method: str, data: dict) -> dict:
+    # ── Primary: CF Worker TG proxy ──
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(f"{TG_API}/{method}", json=data)
             result = r.json()
+            if result.get("ok"):
+                return result
+            logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
+    except Exception as e:
+        logger.warning(f"[TG] {method} proxy error: {e}")
+    # ── Fallback: Direct Telegram API (CF down হলেও কাজ করবে) ──
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=data)
+            result = r.json()
             if not result.get("ok"):
-                logger.warning(f"[TG] {method} failed: {result.get('description')}")
+                logger.warning(f"[TG] {method} direct failed: {result.get('description')}")
             return result
     except Exception as e:
-        logger.error(f"[TG] {method} error: {e}")
+        logger.error(f"[TG] {method} direct error: {e}")
         return {"ok": False, "error": str(e)}
 
 async def send_msg(chat_id, text: str, parse_mode: str = "HTML",
