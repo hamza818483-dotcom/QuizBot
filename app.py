@@ -4783,12 +4783,16 @@ async def handle_message(msg: dict):
             key_count = len(key_rotator.keys)
 
             await send_msg(chat_id,
-                "🏓 <b>Pong! ATLAS Bot Online</b>\n\n"
+                "🏓 <b>Pong! ATLAS QuizBot Online</b>\n\n"
+                f"🖥 <b>Platform:</b> HuggingFace Space\n"
+                f"🔗 <b>Proxy:</b> Cloudflare Worker\n"
                 f"🕐 চালু হয়েছে: {started_at}\n"
                 f"⏱ Active আছে: {uptime_str}\n"
                 f"🔑 Gemini Keys: {key_count}\n"
                 f"👥 Total Users: {total_users}\n"
-                f"🟢 আজকে Active: {daily_active}"
+                f"🟢 আজকে Active: {daily_active}\n\n"
+                f"✅ HF → CF Proxy mode চলছে",
+                parse_mode="HTML"
             )
         except Exception as e:
             logger.error(f"[Ping] error: {e}")
