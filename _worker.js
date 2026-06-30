@@ -49,17 +49,17 @@ export default {
     return jsonResp({ ok: true, service: 'ATLAS Bot Proxy', version: '2.0' });
   },
 
-  // ── Cron: প্রতি 5 মিনিটে HF Space ping করে alive রাখে ──
+  // ── Cron: প্রতি 5 মিনিটে Render ping করে alive রাখে (HF permanently banned) ──
   async scheduled(event, env) {
-    const HF_URL = env.HF_SPACE_URL || 'https://hamzahf2-atlasboss.hf.space';
+    const RENDER_URL = env.RENDER_URL || 'https://quizbot-s482.onrender.com';
     try {
-      const r = await fetch(HF_URL + '/health', {
+      const r = await fetch(RENDER_URL + '/health', {
         method: 'GET',
         signal: AbortSignal.timeout(10000),
       });
-      console.log(`[cron] HF ping: ${r.status}`);
+      console.log(`[cron] Render ping: ${r.status}`);
     } catch(e) {
-      console.error(`[cron] HF ping failed: ${e.message}`);
+      console.error(`[cron] Render ping failed: ${e.message}`);
     }
   }
 };
@@ -467,16 +467,17 @@ init();
   });
 }
 async function forwardToHF(request, env) {
+  // v4.2: HF permanently banned — forwards directly to Render now.
   try {
-    const hfUrl = (env.HF_SPACE_URL || 'https://hamzahf2-atlasboss.hf.space') + '/webhook';
+    const renderUrl = (env.RENDER_URL || 'https://quizbot-s482.onrender.com') + '/webhook';
     const body = await request.text();
-    await fetch(hfUrl, {
+    await fetch(renderUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: body
     });
   } catch (e) {
-    console.error('[HF Forward] Error:', e.message);
+    console.error('[Render Forward] Error:', e.message);
   }
   return new Response('OK');
 }
