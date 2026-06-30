@@ -4782,14 +4782,31 @@ async def handle_message(msg: dict):
 
             key_count = len(key_rotator.keys)
 
-            import os as _os
+            import os as _os, httpx as _hx
             _platform = _os.environ.get("RUNNING_ON", "HuggingFace Space")
-            _proxy = "Cloudflare Worker" if "hf" in _platform.lower() or "hugging" in _platform.lower() else "Direct (No Proxy)"
+
+            # Current webhook check
+            _wh_url = "Unknown"
+            try:
+                async with _hx.AsyncClient(timeout=5) as _c:
+                    _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
+                    _wh_data = _wr.json()
+                    _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
+                    if "onrender.com" in _wh_url:
+                        _wh_short = "🟡 Render (fallback mode)"
+                    elif "workers.dev" in _wh_url or "pages.dev" in _wh_url:
+                        _wh_short = "🟢 CF Worker (normal)"
+                    elif "hf.space" in _wh_url:
+                        _wh_short = "🔵 HF Space (direct)"
+                    else:
+                        _wh_short = f"⚪ {_wh_url[:40]}"
+            except Exception:
+                _wh_short = "❓ Check failed"
 
             await send_msg(chat_id,
                 "🏓 <b>Pong! ATLAS QuizBot Online</b>\n\n"
-                f"🖥 <b>Platform:</b> {_platform}\n"
-                f"🔗 <b>Mode:</b> {_proxy}\n"
+                f"🖥 <b>Running on:</b> {_platform}\n"
+                f"🔗 <b>Webhook:</b> {_wh_short}\n"
                 f"🕐 চালু হয়েছে: {started_at}\n"
                 f"⏱ Active আছে: {uptime_str}\n"
                 f"🔑 Gemini Keys: {key_count}\n"
