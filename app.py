@@ -5262,7 +5262,7 @@ async def get_exam_data(cache_id: str):
         if cache_id.startswith("qz_"):
             rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [cache_id])
             if not rows:
-                # Layer 2: Supabase backup থেকে restore
+                # Layer 2: Supabase Primary backup থেকে restore
                 try:
                     import httpx as _hx
                     _h = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
@@ -5278,7 +5278,28 @@ async def get_exam_data(cache_id: str):
                         )
                         rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [cache_id])
                 except Exception as _e:
-                    logger.warning(f"[exam] Supabase restore failed: {_e}")
+                    logger.warning(f"[exam] Supabase Primary restore failed: {_e}")
+
+            if not rows:
+                # Layer 2b: Supabase Secondary backup থেকে restore
+                try:
+                    import httpx as _hx
+                    _SB2_URL = "https://xnkuuzstschdovcyomfk.supabase.co"
+                    _SB2_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4"
+                    _h2 = {"apikey": _SB2_KEY, "Authorization": f"Bearer {_SB2_KEY}"}
+                    async with _hx.AsyncClient(timeout=10) as _c:
+                        _r2 = await _c.get(f"{_SB2_URL}/rest/v1/quiz_backups",
+                            headers=_h2, params={"quiz_id": f"eq.{cache_id}", "select": "*"})
+                    _b2 = _r2.json()
+                    if _b2:
+                        _bk2 = _b2[0]
+                        await d1_run(
+                            "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                            [cache_id, _bk2["name"], "", 30, 0, json.dumps(_bk2["questions"]), "", "", 0]
+                        )
+                        rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [cache_id])
+                except Exception as _e:
+                    logger.warning(f"[exam] Supabase Secondary restore failed: {_e}")
 
             if not rows:
                 # Layer 3: CF Worker fallback
