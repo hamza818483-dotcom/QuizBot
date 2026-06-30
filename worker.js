@@ -44,7 +44,7 @@ export default {
     const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
                      '/api/leaderboard', '/api/solve-pdf', '/api/tg-image', '/api/new-exam/status'];
     if (HF_ONLY.some(p => url.pathname.startsWith(p))) {
-      const HF = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
+      const HF = env.HF_SPACE_URL || 'https://hamzahf2-atlasboss.hf.space';
       const hfReq = new Request(HF + url.pathname + url.search, {
         method: request.method,
         headers: request.headers,
@@ -70,7 +70,7 @@ export default {
 
   // ── Cron: HF ping + daily Supabase→D1 sync ──
   async scheduled(event, env) {
-    const HF_URL     = env.HF_SPACE_URL || 'https://hamzahf1-atlasboss.hf.space';
+    const HF_URL     = env.HF_SPACE_URL || 'https://hamzahf2-atlasboss.hf.space';
     const RENDER_URL = env.RENDER_URL   || 'https://quizbot-s482.onrender.com';
 
     // HF ping — sleep না করতে
@@ -370,7 +370,7 @@ async function handleQuizData(request, url) {
     const ANS = ["A","B","C","D","E"];
     const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
     const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
-    const HF_URL = 'https://hamzahf1-atlasboss.hf.space';
+    const HF_URL = 'https://hamzahf2-atlasboss.hf.space';
 
     function toMcqs(questions) {
       return questions.map(q => ({
@@ -490,12 +490,37 @@ async function handleWebQuiz(request, url, env) {
 }
 async function forwardToHF(request, env) {
   const BOT_TOKEN  = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
+  const HF_URL     = (env.HF_SPACE_URL || 'https://hamzahf2-atlasboss.hf.space') + '/webhook';
   const RENDER_URL = (env.RENDER_URL   || 'https://quizbot-s482.onrender.com')    + '/webhook';
   const TG_API     = `https://api.telegram.org/bot${BOT_TOKEN}`;
   const body = await request.text();
 
-  // ⚠️ HF Space account banned — HF আর ব্যবহার করা হচ্ছে না।
-  // সব update সরাসরি Render-এ forward হবে।
+  // Primary: HF Space
+  let hfOk = false;
+  try {
+    const r = await fetch(HF_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      signal: AbortSignal.timeout(8000),
+    });
+    hfOk = r.ok;
+  } catch(e) {
+    console.warn('[webhook] HF failed:', e.message);
+  }
+
+  if (hfOk) {
+    // HF alive — webhook সরাসরি TG-তে HF এ আছে কিনা নিশ্চিত করো (আগে Render এ ছিল হয়তো)
+    const kv = await env.DB.prepare("SELECT value FROM kv_store WHERE key='active_webhook'").first().catch(()=>null);
+    if (kv && kv.value === 'render') {
+      await fetch(`${TG_API}/setWebhook?url=${encodeURIComponent(HF_URL)}&drop_pending_updates=false`).catch(()=>{});
+      await env.DB.prepare("INSERT OR REPLACE INTO kv_store(key,value) VALUES('active_webhook','hf')").run().catch(()=>{});
+      console.log('[webhook] Switched back to HF');
+    }
+    return new Response('OK');
+  }
+
+  // HF failed — forward to Render + switch TG webhook to Render directly
   try {
     await fetch(RENDER_URL, {
       method: 'POST',
@@ -503,17 +528,14 @@ async function forwardToHF(request, env) {
       body,
       signal: AbortSignal.timeout(15000),
     });
-    // Ensure Telegram webhook itself points to Render (not CF), so CF down doesn't break delivery
     const kv = await env.DB.prepare("SELECT value FROM kv_store WHERE key='active_webhook'").first().catch(()=>null);
     if (!kv || kv.value !== 'render') {
       await fetch(`${TG_API}/setWebhook?url=${encodeURIComponent(RENDER_URL)}&drop_pending_updates=false`).catch(()=>{});
       await env.DB.prepare("INSERT OR REPLACE INTO kv_store(key,value) VALUES('active_webhook','render')").run().catch(()=>{});
-      console.log('[webhook] Webhook ensured on Render');
+      console.log('[webhook] Switched to Render fallback (HF down)');
     }
-    return new Response('OK');
   } catch(e) {
-    console.warn('[webhook] Render forward failed:', e.message);
-    return new Response('OK'); // always 200 to TG to avoid retries storm
+    console.warn('[webhook] Render fallback failed:', e.message);
   }
 
   return new Response('OK');
