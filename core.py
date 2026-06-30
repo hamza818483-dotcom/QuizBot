@@ -33,7 +33,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
-CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://quizbot-proxy-pages.pages.dev")
+CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://atlasquizbotpro.hamza818483.workers.dev")
 HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://hamzahf2-atlasboss.hf.space")
 RENDER_URL = os.environ.get("RENDER_URL", "")
 D1_TOKEN = os.environ.get("D1_TOKEN", "")
