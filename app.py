@@ -3747,6 +3747,11 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
 # ============================================================
 QUIZ_STATE = {}
 LAST_QUIZ = {}
+_QUIZ_START_LOCK: set = set()  # v4.1: per-uid debounce — prevents double-tap/duplicate
+                                # callback_query delivery from starting two overlapping
+                                # quiz sessions (qmis/qspe/qnew), which looked like
+                                # "more MCQ than it should have" since both sessions'
+                                # poll loops ran at once.
 
 async def qs_set(uid: int, state: dict):
     QUIZ_STATE[uid] = state
@@ -3767,6 +3772,16 @@ async def qs_get(uid: int) -> dict:
 async def qs_del(uid: int):
     QUIZ_STATE.pop(uid, None)
     asyncio.create_task(d1_del(f"qs_{uid}"))
+
+async def _run_quiz_start_debounced(coro, uid: int):
+    """v4.1: runs a quiz-start coroutine then releases the debounce lock,
+    even on error, so a single failed start doesn't permanently block uid."""
+    try:
+        await coro
+    except Exception as e:
+        logger.error(f"[QuizStart] debounced run error: {e}")
+    finally:
+        _QUIZ_START_LOCK.discard(uid)
 
 async def lq_set(uid: int, state: dict):
     LAST_QUIZ[uid] = state
@@ -3808,6 +3823,7 @@ async def start_sequential_quiz(chat_id: int, uid: int, uname: str,
         "tag": settings.get("tag", ""), "exp_footer": settings.get("exp_footer", ""),
         "channel_id": cache.get("channel_id", ""), "back_msg_id": source_msg_id(cache),
         "is_new_gen": bool(cache.get("is_new_gen")), "mode": mode,
+        "image_file_id": cache.get("image_file_id"),
         "start": time.time(), "poll_id": None, "answered": False, "timer_task": None
     }
     await qs_set(uid, state)
@@ -3966,7 +3982,7 @@ async def _finish_quiz(uid: int):
         st["timer_task"].cancel()
 
     await lq_set(uid, st)
-    await db_save_last_quiz(uid, st)
+    asyncio.create_task(db_save_last_quiz(uid, st))
 
     chat_id = st["chat_id"]
     cache_id = st["cache_id"]
@@ -3988,7 +4004,7 @@ async def _finish_quiz(uid: int):
         grade = "💪 পড়া হয়নি!হাল ছেড়ো না!আবার পড়ে প্রাক্টিস করো-শুভকামনায়--রাফি ভাইয়া(এটলাস)"
 
     if not st["is_new_gen"] and st["mode"] == "quiz":
-        await db_save_leaderboard(cache_id, uid, st["uname"], st["topic"], st["page"], right, total, fin)
+        asyncio.create_task(db_save_leaderboard(cache_id, uid, st["uname"], st["topic"], st["page"], right, total, fin))
 
     ayat = get_random_ayat()
     motivation = get_motivation(pct)
@@ -4032,8 +4048,7 @@ async def _finish_quiz(uid: int):
         kb["inline_keyboard"].append([{"text": "↩️ Back to Source", "url": back_url}])
     kb["inline_keyboard"].append([{"text": "🔄 Poll হিসেবে আবার দেখো", "callback_data": f"pollagain_{cache_id}"}])
 
-    cache = await db_get_mcq_cache(cache_id)
-    img_id = cache.get("image_file_id") if cache else None
+    img_id = st.get("image_file_id")
 
     if img_id:
         caption_trimmed = result_caption[:1024]
@@ -4884,13 +4899,22 @@ async def handle_callback(query: dict):
 
         elif data.startswith("qnew_"):
             cache_id = data.replace("qnew_", "")
-            asyncio.create_task(handle_quiz_new(cache_id, user, chat_id))
+            if uid in _QUIZ_START_LOCK:
+                return
+            _QUIZ_START_LOCK.add(uid)
+            asyncio.create_task(_run_quiz_start_debounced(handle_quiz_new(cache_id, user, chat_id), uid))
 
         elif data == "qmis":
-            asyncio.create_task(handle_quiz_practice(uid, chat_id, uname, "mis"))
+            if uid in _QUIZ_START_LOCK:
+                return
+            _QUIZ_START_LOCK.add(uid)
+            asyncio.create_task(_run_quiz_start_debounced(handle_quiz_practice(uid, chat_id, uname, "mis"), uid))
 
         elif data == "qspe":
-            asyncio.create_task(handle_quiz_practice(uid, chat_id, uname, "spe"))
+            if uid in _QUIZ_START_LOCK:
+                return
+            _QUIZ_START_LOCK.add(uid)
+            asyncio.create_task(_run_quiz_start_debounced(handle_quiz_practice(uid, chat_id, uname, "spe"), uid))
 
         elif data == "bm_pdf":
             fake_msg = {"chat": {"id": chat_id}, "from": {"id": uid, "first_name": uname}}
