@@ -5609,24 +5609,33 @@ async def startup():
     logger.info("[App] Using CF Worker proxy for TG API")
 
     # ── Auto webhook set ──
+    # নিয়ম: Render শুধু webhook নিজের দিকে নেবে যদি বর্তমানে webhook
+    # ইতিমধ্যেই Render-এ set থাকে (restart এর পর হারিয়ে না যায়) —
+    # HF সচল থাকলে HF থেকে কেড়ে নেবে না, CF cron-ই auto-switch handle করে।
     try:
         import httpx as _hx, os as _os
         running_on = _os.environ.get("RUNNING_ON", "")
         self_url = RENDER_URL or ""
 
         if running_on == "Render" or (self_url and "onrender.com" in self_url):
-            # Render এ চলছি — TG API directly call করতে পারি
             webhook_url = self_url.rstrip("/") + "/webhook"
             async with _hx.AsyncClient(timeout=10) as _c:
-                r = await _c.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-                    json={"url": webhook_url, "drop_pending_updates": False, "max_connections": 40}
-                )
-            result = r.json()
-            if result.get("ok"):
-                logger.info(f"[App] ✅ Render webhook set → {webhook_url}")
-            else:
-                logger.warning(f"[App] Render webhook failed: {result.get('description')}")
+                info_r = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
+                current_url = info_r.json().get("result", {}).get("url", "")
+
+                if "onrender.com" in current_url:
+                    # ইতিমধ্যেই Render-এ ছিল — restart এর পর re-confirm করছি
+                    r = await _c.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                        json={"url": webhook_url, "drop_pending_updates": False, "max_connections": 40}
+                    )
+                    result = r.json()
+                    if result.get("ok"):
+                        logger.info(f"[App] ✅ Render webhook re-confirmed → {webhook_url}")
+                    else:
+                        logger.warning(f"[App] Render webhook failed: {result.get('description')}")
+                else:
+                    logger.info(f"[App] Webhook currently on '{current_url}' (not Render) — leaving as-is, CF cron handles failover")
         else:
             # HF তে আছি — TG API blocked, CF Worker webhook handle করে
             logger.info("[App] HF mode — CF Worker handles webhook, no auto-set needed")

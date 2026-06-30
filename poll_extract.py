@@ -369,7 +369,7 @@ async def handle_poll_extract(msg: dict):
 
     QUIZ_WORKER_URL = "https://atlasquizbotpro.hamza818483.workers.dev"
     GH_PAGES_URL    = "https://hamza818483-dotcom.github.io/QuizBot/quiz.html"
-    HF_SPACE_URL    = "https://hamzahf1-atlasboss.hf.space"
+    HF_SPACE_URL    = "https://hamzahf2-atlasboss.hf.space"
 
     # একটাই smart link — ভেতরে HF→CF→Supabase auto fallback
     web_link = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={quiz_id}" if quiz_id else None
