@@ -14,19 +14,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Render Primary (keep-alive, layer 2)
+        env:
+          RENDER_URL: ${{ secrets.RENDER_URL }}
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-            "${{ secrets.RENDER_URL }}/health")
+            "${RENDER_URL}/health")
           echo "Render Primary: $STATUS"
           if [ "$STATUS" != "200" ]; then
             echo "::warning::Render Primary not responding (layer 2)!"
           fi
 
       - name: Ping Render Secondary (keep-alive, layer 2)
-        if: ${{ secrets.RENDER_URL_2 != '' }}
+        env:
+          RENDER_URL_2: ${{ secrets.RENDER_URL_2 }}
         run: |
+          if [ -z "$RENDER_URL_2" ]; then
+            echo "RENDER_URL_2 not set, skipping"
+            exit 0
+          fi
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-            "${{ secrets.RENDER_URL_2 }}/health")
+            "${RENDER_URL_2}/health")
           echo "Render Secondary: $STATUS"
           if [ "$STATUS" != "200" ]; then
             echo "::warning::Render Secondary not responding (layer 2)!"
