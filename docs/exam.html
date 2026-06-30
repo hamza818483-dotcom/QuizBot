@@ -314,19 +314,19 @@ let tag = '', expFooter = '', channelId = '', imageMsgId = null, endMsgId = null
 let isNewGen = false;
 let totalSec = 0, totalLeft = 0, totalTimer = null;
 
-// ── FETCH (HF direct → CF worker → Supabase direct) ──
+// ── FETCH (Render direct → CF worker → Supabase direct; HF permanently banned) ──
 async function fetchExamData() {
   const ANS = ["A","B","C","D","E"];
-  const HF_SPACE  = 'https://hamzahf2-atlasboss.hf.space';
+  const RENDER    = 'https://quizbot-s482.onrender.com';
   const CF_WORKER = 'https://atlasquizbotpro.hamza818483.workers.dev';
   const SB_URL    = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
   const SB_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
-  // 1) HF Space direct
+  // 1) Render direct
   try {
-    const r = await fetch(`${HF_SPACE}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(6000) });
+    const r = await fetch(`${RENDER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(8000) });
     if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) return d; }
   } catch(e) {}
-  // 2) CF Worker (has own HF→D1→Supabase fallback inside)
+  // 2) CF Worker (has own Render→D1→Supabase fallback inside)
   try {
     const r = await fetch(`${CF_WORKER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(6000) });
     if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) return d; }
@@ -414,11 +414,12 @@ async function init() {
       }
     }
 
-    setMode('PreExam');
-
-    // Web Quiz link থেকে এলে — pre-screen না দেখিয়ে direct exam শুরু (নাম থাকলে)
+    // v4.2: Web Quiz link থেকে এলে (Telegram বা saved name থাকলে) — Pre-Exam
+    // স্ক্রিন একদমই না দেখিয়ে সরাসরি Exam Hall-এ instant শুরু হয়ে যায়।
     if (FROM_TELEGRAM || localStorage.getItem('atlas_name')) {
-      setTimeout(() => startHall(), 80);
+      startHall();
+    } else {
+      setMode('PreExam');
     }
   } catch(e) { showErr('❌ লোড করতে সমস্যা!'); }
 }

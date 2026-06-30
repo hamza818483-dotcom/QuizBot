@@ -40,20 +40,20 @@ export default {
     if (url.pathname.startsWith('/api/exam/')) return await handleQuizData(request, url);
     if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url);
 
-    // Forward HF-only API routes to HF Space
+    // v4.2: HF account permanently banned — these routes now go to Render.
     const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
                      '/api/leaderboard', '/api/solve-pdf', '/api/tg-image', '/api/new-exam/status'];
     if (HF_ONLY.some(p => url.pathname.startsWith(p))) {
-      const HF = env.HF_SPACE_URL || 'https://hamzahf2-atlasboss.hf.space';
-      const hfReq = new Request(HF + url.pathname + url.search, {
+      const RENDER = env.RENDER_URL || 'https://quizbot-s482.onrender.com';
+      const renderReq = new Request(RENDER + url.pathname + url.search, {
         method: request.method,
         headers: request.headers,
         body: request.method !== 'GET' ? request.body : undefined,
       });
       try {
-        return await fetch(hfReq, { signal: AbortSignal.timeout(15000) });
+        return await fetch(renderReq, { signal: AbortSignal.timeout(20000) });
       } catch(e) {
-        return jsonResp({ ok: false, error: 'HF unavailable: ' + e.message }, 502);
+        return jsonResp({ ok: false, error: 'Render unavailable: ' + e.message }, 502);
       }
     }
 
@@ -68,20 +68,11 @@ export default {
     return jsonResp({ ok: true, service: 'ATLAS Bot Proxy', version: '2.0' });
   },
 
-  // ── Cron: HF ping + daily Supabase→D1 sync ──
+  // ── Cron: Render keep-alive + daily Supabase→D1 sync ──
   async scheduled(event, env) {
-    const HF_URL     = env.HF_SPACE_URL || 'https://hamzahf2-atlasboss.hf.space';
     const RENDER_URL = env.RENDER_URL   || 'https://quizbot-s482.onrender.com';
 
-    // HF ping — sleep না করতে
-    try {
-      const r = await fetch(HF_URL + '/health', { signal: AbortSignal.timeout(10000) });
-      console.log(`[cron] HF ping: ${r.status}`);
-    } catch(e) {
-      console.error(`[cron] HF ping failed: ${e.message}`);
-    }
-
-    // Render ping — 15min sleep না করতে
+    // Render ping — 15min sleep না করতে (HF permanently banned, removed)
     try {
       const r2 = await fetch(RENDER_URL + '/health', { signal: AbortSignal.timeout(10000) });
       console.log(`[cron] Render ping: ${r2.status}`);
@@ -370,7 +361,7 @@ async function handleQuizData(request, url) {
     const ANS = ["A","B","C","D","E"];
     const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
     const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
-    const HF_URL = 'https://hamzahf2-atlasboss.hf.space';
+    const RENDER_URL = 'https://quizbot-s482.onrender.com';
 
     function toMcqs(questions) {
       return questions.map(q => ({
@@ -394,20 +385,20 @@ async function handleQuizData(request, url) {
       });
     }
 
-    // ── Layer 1: HF Space (primary — has all data including image_file_id) ──
+    // ── Layer 1: Render (primary — has all data including image_file_id; HF permanently banned) ──
     try {
-      const r = await fetch(`${HF_URL}/api/exam/${id}`, {
-        signal: AbortSignal.timeout(6000)
+      const r = await fetch(`${RENDER_URL}/api/exam/${id}`, {
+        signal: AbortSignal.timeout(8000)
       });
       if (r.ok) {
         const d = await r.json();
         if (d && d.mcqs && d.mcqs.length > 0) {
-          // Forward HF response as-is (preserves image_file_id, channel_id, etc.)
+          // Forward Render response as-is (preserves image_file_id, channel_id, etc.)
           return jsonResp(d);
         }
       }
     } catch(e) {
-      console.warn('[quiz] HF primary failed:', e.message);
+      console.warn('[quiz] Render primary failed:', e.message);
     }
 
     // ── Layer 2: D1 (qz_ prefix quizzes only) ──
@@ -516,40 +507,16 @@ async function handleWebQuiz(request, url, env) {
   }
 }
 async function forwardToHF(request, env) {
+  // v4.2: HF account permanently banned (ToS violation) — Render is now
+  // the sole/primary target. HF attempt removed entirely so every
+  // message goes straight to Render with no wasted timeout/delay.
   const BOT_TOKEN  = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
-  const HF_URL     = (env.HF_SPACE_URL || 'https://hamzahf2-atlasboss.hf.space') + '/webhook';
-  const RENDER_URL = (env.RENDER_URL   || 'https://quizbot-s482.onrender.com')    + '/webhook';
+  const RENDER_URL = (env.RENDER_URL || 'https://quizbot-s482.onrender.com') + '/webhook';
   const TG_API     = `https://api.telegram.org/bot${BOT_TOKEN}`;
   const body = await request.text();
 
-  // Primary: HF Space
-  let hfOk = false;
   try {
-    const r = await fetch(HF_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-      signal: AbortSignal.timeout(8000),
-    });
-    hfOk = r.ok;
-  } catch(e) {
-    console.warn('[webhook] HF failed:', e.message);
-  }
-
-  if (hfOk) {
-    // HF alive — webhook সরাসরি TG-তে HF এ আছে কিনা নিশ্চিত করো (আগে Render এ ছিল হয়তো)
-    const kv = await env.DB.prepare("SELECT value FROM kv_store WHERE key='active_webhook'").first().catch(()=>null);
-    if (kv && kv.value === 'render') {
-      await fetch(`${TG_API}/setWebhook?url=${encodeURIComponent(HF_URL)}&drop_pending_updates=false`).catch(()=>{});
-      await env.DB.prepare("INSERT OR REPLACE INTO kv_store(key,value) VALUES('active_webhook','hf')").run().catch(()=>{});
-      console.log('[webhook] Switched back to HF');
-    }
-    return new Response('OK');
-  }
-
-  // HF failed — forward to Render + switch TG webhook to Render directly
-  try {
-    await fetch(RENDER_URL, {
+    const r = await fetch(RENDER_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body,
@@ -559,13 +526,13 @@ async function forwardToHF(request, env) {
     if (!kv || kv.value !== 'render') {
       await fetch(`${TG_API}/setWebhook?url=${encodeURIComponent(RENDER_URL)}&drop_pending_updates=false`).catch(()=>{});
       await env.DB.prepare("INSERT OR REPLACE INTO kv_store(key,value) VALUES('active_webhook','render')").run().catch(()=>{});
-      console.log('[webhook] Switched to Render fallback (HF down)');
+      console.log('[webhook] Confirmed Render as active (HF permanently disabled)');
     }
+    return r.ok ? new Response('OK') : new Response('Render error', { status: 502 });
   } catch(e) {
-    console.warn('[webhook] Render fallback failed:', e.message);
+    console.warn('[webhook] Render forward failed:', e.message);
+    return new Response('Render unavailable', { status: 502 });
   }
-
-  return new Response('OK');
 }
 
 
