@@ -4782,13 +4782,37 @@ async def handle_message(msg: dict):
 
             key_count = len(key_rotator.keys)
 
+            import os as _os, httpx as _hx
+            _platform = _os.environ.get("RUNNING_ON", "HuggingFace Space")
+
+            # Current webhook check
+            _wh_url = "Unknown"
+            try:
+                async with _hx.AsyncClient(timeout=5) as _c:
+                    _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
+                    _wh_data = _wr.json()
+                    _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
+                    if "onrender.com" in _wh_url:
+                        _wh_short = "🟡 Render (fallback mode)"
+                    elif "workers.dev" in _wh_url or "pages.dev" in _wh_url:
+                        _wh_short = "🟢 CF Worker (normal)"
+                    elif "hf.space" in _wh_url:
+                        _wh_short = "🔵 HF Space (direct)"
+                    else:
+                        _wh_short = f"⚪ {_wh_url[:40]}"
+            except Exception:
+                _wh_short = "❓ Check failed"
+
             await send_msg(chat_id,
-                "🏓 <b>Pong! ATLAS Bot Online</b>\n\n"
+                "🏓 <b>Pong! ATLAS QuizBot Online</b>\n\n"
+                f"🖥 <b>Running on:</b> {_platform}\n"
+                f"🔗 <b>Webhook:</b> {_wh_short}\n"
                 f"🕐 চালু হয়েছে: {started_at}\n"
                 f"⏱ Active আছে: {uptime_str}\n"
                 f"🔑 Gemini Keys: {key_count}\n"
                 f"👥 Total Users: {total_users}\n"
-                f"🟢 আজকে Active: {daily_active}"
+                f"🟢 আজকে Active: {daily_active}",
+                parse_mode="HTML"
             )
         except Exception as e:
             logger.error(f"[Ping] error: {e}")
@@ -5585,15 +5609,13 @@ async def startup():
     logger.info("[App] Using CF Worker proxy for TG API")
 
     # ── Auto webhook set ──
-    # Render-এ থাকলে সবসময় Render URL → CF/HF ছাড়াই bot চলবে
-    # HF-এ থাকলে HF URL (কিন্তু HF-এ TG block থাকায় কাজ করবে না, শুধু Render reliable)
     try:
-        import httpx as _hx
+        import httpx as _hx, os as _os
+        running_on = _os.environ.get("RUNNING_ON", "")
         self_url = RENDER_URL or ""
-        if not self_url:
-            # Render URL নেই মানে HF-এ আছি — HF-এ TG API block, skip
-            logger.info("[App] No RENDER_URL set, skipping auto webhook (HF TG API blocked)")
-        else:
+
+        if running_on == "Render" or (self_url and "onrender.com" in self_url):
+            # Render এ চলছি — TG API directly call করতে পারি
             webhook_url = self_url.rstrip("/") + "/webhook"
             async with _hx.AsyncClient(timeout=10) as _c:
                 r = await _c.post(
@@ -5602,11 +5624,14 @@ async def startup():
                 )
             result = r.json()
             if result.get("ok"):
-                logger.info(f"[App] ✅ Webhook set → {webhook_url}")
+                logger.info(f"[App] ✅ Render webhook set → {webhook_url}")
             else:
-                logger.warning(f"[App] Webhook set failed: {result.get('description')}")
+                logger.warning(f"[App] Render webhook failed: {result.get('description')}")
+        else:
+            # HF তে আছি — TG API blocked, CF Worker webhook handle করে
+            logger.info("[App] HF mode — CF Worker handles webhook, no auto-set needed")
     except Exception as e:
-        logger.error(f"[App] Webhook set error: {e}")
+        logger.error(f"[App] Webhook setup error: {e}")
 
     try:
         ok, admin_ok, admin_total = await set_bot_commands()
