@@ -5592,15 +5592,13 @@ async def startup():
     logger.info("[App] Using CF Worker proxy for TG API")
 
     # ── Auto webhook set ──
-    # Render-এ থাকলে সবসময় Render URL → CF/HF ছাড়াই bot চলবে
-    # HF-এ থাকলে HF URL (কিন্তু HF-এ TG block থাকায় কাজ করবে না, শুধু Render reliable)
     try:
-        import httpx as _hx
+        import httpx as _hx, os as _os
+        running_on = _os.environ.get("RUNNING_ON", "")
         self_url = RENDER_URL or ""
-        if not self_url:
-            # Render URL নেই মানে HF-এ আছি — HF-এ TG API block, skip
-            logger.info("[App] No RENDER_URL set, skipping auto webhook (HF TG API blocked)")
-        else:
+
+        if running_on == "Render" or (self_url and "onrender.com" in self_url):
+            # Render এ চলছি — TG API directly call করতে পারি
             webhook_url = self_url.rstrip("/") + "/webhook"
             async with _hx.AsyncClient(timeout=10) as _c:
                 r = await _c.post(
@@ -5609,11 +5607,14 @@ async def startup():
                 )
             result = r.json()
             if result.get("ok"):
-                logger.info(f"[App] ✅ Webhook set → {webhook_url}")
+                logger.info(f"[App] ✅ Render webhook set → {webhook_url}")
             else:
-                logger.warning(f"[App] Webhook set failed: {result.get('description')}")
+                logger.warning(f"[App] Render webhook failed: {result.get('description')}")
+        else:
+            # HF তে আছি — TG API blocked, CF Worker webhook handle করে
+            logger.info("[App] HF mode — CF Worker handles webhook, no auto-set needed")
     except Exception as e:
-        logger.error(f"[App] Webhook set error: {e}")
+        logger.error(f"[App] Webhook setup error: {e}")
 
     try:
         ok, admin_ok, admin_total = await set_bot_commands()
