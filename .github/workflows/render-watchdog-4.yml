@@ -1,0 +1,63 @@
+name: Keep Render Alive — Layer 4 (every 5min, +3) + Primary→Secondary Failover
+
+# v4.2: Layer 4 of 4. Runs at :03, :08, :13... AND also checks if the
+# Primary Render instance is down while it's the active webhook target —
+# if so, switches the webhook to the Secondary Render account instead.
+# This is the actual primary↔secondary failover layer; layers 1-3 are
+# pure keep-alive pings only.
+
+on:
+  schedule:
+    - cron: '3-59/5 * * * *'   # :03, :08, :13, :18...
+  workflow_dispatch:
+
+jobs:
+  ping_and_failover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render Primary (keep-alive, layer 4)
+        id: primary_check
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+            "${{ secrets.RENDER_URL }}/health")
+          echo "primary_status=$STATUS" >> $GITHUB_OUTPUT
+          echo "Render Primary: $STATUS"
+
+      - name: Ping Render Secondary (keep-alive, layer 4)
+        if: ${{ secrets.RENDER_URL_2 != '' }}
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+            "${{ secrets.RENDER_URL_2 }}/health")
+          echo "Render Secondary: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::Render Secondary not responding (layer 4)!"
+          fi
+
+      - name: Failover to Secondary if Primary down and webhook points to Primary
+        if: ${{ steps.primary_check.outputs.primary_status != '200' && secrets.RENDER_URL_2 != '' }}
+        run: |
+          CURRENT=$(curl -s "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/getWebhookInfo" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',{}).get('url',''))" 2>/dev/null || echo "")
+          echo "Current webhook: $CURRENT"
+          PRIMARY_HOST=$(echo "${{ secrets.RENDER_URL }}" | sed -E 's#https?://##')
+          if [[ "$CURRENT" == *"$PRIMARY_HOST"* ]]; then
+            SECONDARY_WEBHOOK="${{ secrets.RENDER_URL_2 }}/webhook"
+            echo "::warning::Primary Render down — switching webhook to Secondary: $SECONDARY_WEBHOOK"
+            curl -s "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/setWebhook" \
+              -d "url=$SECONDARY_WEBHOOK" \
+              -d "drop_pending_updates=false"
+          fi
+
+      - name: Switch back to Primary if it has recovered
+        if: ${{ steps.primary_check.outputs.primary_status == '200' }}
+        run: |
+          CURRENT=$(curl -s "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/getWebhookInfo" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',{}).get('url',''))" 2>/dev/null || echo "")
+          SECONDARY_HOST=$(echo "${{ secrets.RENDER_URL_2 }}" | sed -E 's#https?://##')
+          if [[ -n "$SECONDARY_HOST" && "$CURRENT" == *"$SECONDARY_HOST"* ]]; then
+            PRIMARY_WEBHOOK="${{ secrets.RENDER_URL }}/webhook"
+            echo "✅ Primary Render recovered — switching webhook back: $PRIMARY_WEBHOOK"
+            curl -s "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/setWebhook" \
+              -d "url=$PRIMARY_WEBHOOK" \
+              -d "drop_pending_updates=false"
+          fi
