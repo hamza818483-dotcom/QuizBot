@@ -335,9 +335,8 @@ async def generate_mcq_from_image(
 
 
 async def generate_mcq_from_text(text: str, topic: str = "MCQ", count: int = 15) -> list:
-    """Text থেকে MCQ generate করে — same format as generate_mcq_from_image"""
-    import google.generativeai as genai
-    import os, json as _json
+    """Text থেকে MCQ generate করে — same SDK + multi-key + fallback as generate_mcq_from_image"""
+    import json as _json
 
     prompt = f"""নিচের text থেকে {count}টি MCQ বানাও।
 
@@ -350,28 +349,90 @@ RULES:
 TEXT:
 {text[:4000]}
 
-Return ONLY valid JSON array:
+Return ONLY valid JSON array, no markdown, no extra text:
 [{{"question":"...","options":["...","...","...","..."],"answer":"B","explanation":"..."}}]"""
 
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        return []
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        resp = model.generate_content(prompt)
-        raw = resp.text.strip()
+    def _parse_text_json(raw: str) -> list:
+        raw = raw.strip()
         if "```" in raw:
             raw = raw.split("```")[1].split("```")[0].strip()
             if raw.startswith("json"):
                 raw = raw[4:].strip()
-        mcqs = _json.loads(raw)
-        valid = [m for m in mcqs if all(k in m for k in ["question","options","answer","explanation"])
-                 and len(m["options"]) >= 4 and m["answer"] in ["A","B","C","D"]]
-        return valid
-    except Exception as e:
-        print(f"[generate_mcq_from_text] error: {e}")
+        try:
+            mcqs = _json.loads(raw)
+        except Exception:
+            return []
+        return [m for m in mcqs if all(k in m for k in ["question","options","answer","explanation"])
+                and len(m.get("options", [])) >= 4 and m["answer"] in ["A","B","C","D"]]
+
+    # ── PRIMARY: Gemini (new google.genai SDK, multi-key rotation) ──
+    max_retries = len(key_rotator.keys) if key_rotator.keys else 3
+    for attempt in range(max_retries):
+        try:
+            key = key_rotator.get_key()
+            from google import genai as gai
+            from google.genai import types
+            client = gai.Client(api_key=key)
+
+            def _call_gemini():
+                return client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[types.Part.from_text(text=prompt)]
+                )
+
+            response = await asyncio.to_thread(_call_gemini)
+            valid = _parse_text_json(response.text)
+            if valid:
+                logger.info(f"[Gemini-Text] {len(valid)} MCQs (attempt {attempt+1})")
+                return valid
+        except Exception as e:
+            logger.warning(f"[Gemini-Text] Attempt {attempt+1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+            continue
+
+    logger.warning("[Gemini-Text] All keys failed → trying OpenRouter text fallback")
+
+    # ── FALLBACK: OpenRouter (text-only chat completion) ──
+    if not openrouter_rotator.has_keys():
+        logger.warning("[OpenRouter-Text] No keys available, skipping fallback")
         return []
+
+    max_or_retries = len(openrouter_rotator.keys) * len(OPENROUTER_MODELS)
+    for attempt in range(max(max_or_retries, 3)):
+        model = OPENROUTER_MODELS[attempt % len(OPENROUTER_MODELS)]
+        try:
+            key = openrouter_rotator.get_key()
+            async with httpx.AsyncClient(timeout=90) as client:
+                r = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "HTTP-Referer": "https://atlascourses.com",
+                        "X-Title": "ATLAS MCQ Bot"
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 4096
+                    }
+                )
+            if r.status_code == 429:
+                await asyncio.sleep(2)
+                continue
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            raw = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            valid = _parse_text_json(raw)
+            if valid:
+                logger.info(f"[OpenRouter-Text] {len(valid)} MCQs via {model}")
+                return valid
+        except Exception as e:
+            logger.warning(f"[OpenRouter-Text] {model} attempt {attempt+1} failed: {e}")
+            continue
+
+    return []
 
 
     return await generate_mcq_from_image(img, topic, page, mcq_count=count)
@@ -464,3 +525,4 @@ def get_motivation(pct: float) -> str:
         return "📚 পড়া হয়নি! আবার পড়ে চেষ্টা করো!"
 
 generate_new_mcq = generate_mcq_from_image
+
