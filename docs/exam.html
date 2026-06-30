@@ -331,10 +331,26 @@ async function fetchExamData() {
     const r = await fetch(`${CF_WORKER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(6000) });
     if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) return d; }
   } catch(e) {}
-  // 3) Supabase direct
+  // 3) Supabase Primary
   try {
     const r = await fetch(`${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`,
       { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
+    const data = await r.json();
+    if (data && data[0]) {
+      const b = data[0];
+      return { cache_id: CACHE_ID, topic: b.name || 'Special Topic', page: 1,
+        mcqs: (b.questions||[]).map(q => ({ question: q.question||'', options: q.options||[],
+          answer: ANS[q.answer_index != null ? q.answer_index : 0]||'A', explanation: q.explanation||'' })),
+        tag:'', exp_footer:'', channel_id:'', image_msg_id:null,
+        end_msg_id:null, image_file_id:null, is_new_gen:false, timer:30 };
+    }
+  } catch(e) {}
+  // 4) Supabase Secondary (backup of backup)
+  try {
+    const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
+    const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
+    const r = await fetch(`${SB2_URL}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`,
+      { headers: { apikey: SB2_KEY, Authorization: `Bearer ${SB2_KEY}` } });
     const data = await r.json();
     if (data && data[0]) {
       const b = data[0];

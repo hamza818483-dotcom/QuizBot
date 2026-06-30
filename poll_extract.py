@@ -238,31 +238,45 @@ async def save_quiz_to_d1(polls: list, name: str, uid: int) -> str | None:
     except Exception as e:
         logger.error(f"[poll_extract] D1 save error: {e}")
 
-    # ── Supabase backup ──
+    # ── Supabase backup (Primary + Secondary dual-write) ──
+    payload = {
+        "quiz_id": quiz_id,
+        "name": name,
+        "questions": questions,
+        "created_by": uid,
+    }
+    import httpx
+
+    # Primary Supabase
     try:
         from core import SUPABASE_URL, SUPABASE_KEY
-        import httpx
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
             "Content-Type": "application/json",
             "Prefer": "resolution=merge-duplicates",
         }
-        payload = {
-            "quiz_id": quiz_id,
-            "name": name,
-            "questions": questions,
-            "created_by": uid,
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(f"{SUPABASE_URL}/rest/v1/quiz_backups", headers=headers, json=payload)
+        logger.info(f"[poll_extract] Supabase Primary backup ok: {quiz_id}")
+    except Exception as e:
+        logger.warning(f"[poll_extract] Supabase Primary backup failed: {e}")
+
+    # Secondary Supabase (backup of backup)
+    try:
+        SB2_URL = "https://xnkuuzstschdovcyomfk.supabase.co"
+        SB2_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4"
+        headers2 = {
+            "apikey": SB2_KEY,
+            "Authorization": f"Bearer {SB2_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
         }
         async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(
-                f"{SUPABASE_URL}/rest/v1/quiz_backups",
-                headers=headers,
-                json=payload,
-            )
-        logger.info(f"[poll_extract] Supabase backup ok: {quiz_id}")
+            await client.post(f"{SB2_URL}/rest/v1/quiz_backups", headers=headers2, json=payload)
+        logger.info(f"[poll_extract] Supabase Secondary backup ok: {quiz_id}")
     except Exception as e:
-        logger.warning(f"[poll_extract] Supabase backup failed: {e}")
+        logger.warning(f"[poll_extract] Supabase Secondary backup failed: {e}")
 
     return quiz_id if (d1_ok) else None
 

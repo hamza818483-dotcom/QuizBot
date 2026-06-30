@@ -442,7 +442,31 @@ async function handleQuizData(request, url) {
         return makeResp(id, b.name, toMcqs(b.questions), 30, 'supabase');
       }
     } catch(e) {
-      console.error('[quiz] Supabase failed:', e.message);
+      console.error('[quiz] Supabase primary failed:', e.message);
+    }
+
+    // ── Layer 4: Supabase Secondary (backup of backup) ──
+    try {
+      const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
+      const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
+      const r = await fetch(
+        `${SB2_URL}/rest/v1/quiz_backups?quiz_id=eq.${id}&select=*`,
+        { headers: { apikey: SB2_KEY, Authorization: `Bearer ${SB2_KEY}` } }
+      );
+      const data = await r.json();
+      if (data && data[0]) {
+        const b = data[0];
+        if (id.startsWith('qz_')) {
+          try {
+            await DB.prepare(
+              "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
+            ).bind(id, b.name, '', 30, 0, JSON.stringify(b.questions), '', '', 0).run();
+          } catch(_) {}
+        }
+        return makeResp(id, b.name, toMcqs(b.questions), 30, 'supabase2');
+      }
+    } catch(e) {
+      console.error('[quiz] Supabase secondary failed:', e.message);
     }
 
     return jsonResp({ error: 'Quiz পাওয়া যায়নি' }, 404);
