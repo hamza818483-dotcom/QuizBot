@@ -164,7 +164,29 @@ async def d1_select(sql: str, params: list = None) -> list:
 
 async def d1_run(sql: str, params: list = None) -> bool:
     r = await d1_query(sql, params, False)
-    return r.get("ok", False)
+    if r.get("ok"):
+        return True
+    # ── CF down → Supabase fallback for quiz INSERT/REPLACE ──
+    try:
+        sql_lower = sql.lower()
+        if "quizzes" in sql_lower and ("insert" in sql_lower or "replace" in sql_lower) and params and len(params) >= 9:
+            import json as _j
+            qs = params[5]
+            questions = _j.loads(qs) if isinstance(qs, str) else qs
+            payload = {
+                "quiz_id": params[0], "name": params[1],
+                "questions": questions, "created_by": params[8] or 0,
+            }
+            headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                       "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"}
+            async with httpx.AsyncClient(timeout=10) as c:
+                rr = await c.post(f"{SUPABASE_URL}/rest/v1/quiz_backups",
+                                  headers=headers, json=payload)
+            logger.info(f"[D1] Supabase write fallback: {rr.status_code}")
+            return rr.status_code in (200, 201, 204)
+    except Exception as e:
+        logger.warning(f"[D1] Supabase write fallback failed: {e}")
+    return False
 
 # ============================================================
 # /error COMMAND — CENTRAL ERROR CAPTURE
@@ -281,20 +303,35 @@ async def edit_msg(chat_id, message_id: int, text: str, parse_mode: str = "HTML"
 async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
                      reply_markup=None, reply_to_message_id: int = None,
                      message_thread_id: int = None) -> dict:
+    # ── Primary: CF Worker (b64 proxy) ──
     try:
         b64 = base64.b64encode(photo_bytes).decode()
         data = {"chat_id": str(chat_id), "caption": caption, "photo_b64": b64}
-        if reply_markup:
-            data["reply_markup"] = reply_markup
-        if reply_to_message_id:
-            data["reply_to_message_id"] = reply_to_message_id
-        if message_thread_id:
-            data["message_thread_id"] = message_thread_id
-        async with httpx.AsyncClient(timeout=120) as client:
+        if reply_markup: data["reply_markup"] = reply_markup
+        if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
+        if message_thread_id: data["message_thread_id"] = message_thread_id
+        async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(f"{CF_WORKER_URL}/tg-sendphoto", json=data)
+            result = r.json()
+            if result.get("ok"): return result
+    except Exception as e:
+        logger.warning(f"[TG] sendPhoto CF failed: {e}")
+    # ── Fallback: Direct TG API multipart (CF down হলে) ──
+    try:
+        fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"}
+        if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
+        if message_thread_id: fields["message_thread_id"] = str(message_thread_id)
+        if reply_markup:
+            import json as _j
+            fields["reply_markup"] = _j.dumps(reply_markup)
+        files = {"photo": ("photo.jpg", photo_bytes, "image/jpeg")}
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                data=fields, files=files)
             return r.json()
     except Exception as e:
-        logger.error(f"[TG] sendPhoto error: {e}")
+        logger.error(f"[TG] sendPhoto direct failed: {e}")
         return {"ok": False, "error": str(e)}
 
 async def send_photo_by_id(chat_id, file_id: str, caption: str = "",
@@ -309,22 +346,32 @@ async def send_photo_by_id(chat_id, file_id: str, caption: str = "",
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML") -> dict:
+    # ── Primary: CF Worker (b64 proxy) ──
     try:
         data = {
-            "chat_id": str(chat_id),
-            "caption": caption,
-            "parse_mode": parse_mode,
-            "filename": filename,
-            "mime_type": mime_type,
+            "chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode,
+            "filename": filename, "mime_type": mime_type,
             "doc_b64": base64.b64encode(file_bytes).decode()
         }
-        if reply_to_message_id:
-            data["reply_to_message_id"] = reply_to_message_id
-        async with httpx.AsyncClient(timeout=120) as c:
+        if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
+        async with httpx.AsyncClient(timeout=60) as c:
             r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data)
+            result = r.json()
+            if result.get("ok"): return result
+    except Exception as e:
+        logger.warning(f"[sendDoc] CF failed: {e}")
+    # ── Fallback: Direct TG API multipart ──
+    try:
+        fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode}
+        if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
+        files = {"document": (filename, file_bytes, mime_type)}
+        async with httpx.AsyncClient(timeout=120) as c:
+            r = await c.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                data=fields, files=files)
             return r.json()
     except Exception as e:
-        logger.error(f"[sendDoc] {e}")
+        logger.error(f"[sendDoc] direct failed: {e}")
         return {"ok": False, "error": str(e)}
 
 async def send_poll(chat_id, question: str, options: list, correct_idx: int,

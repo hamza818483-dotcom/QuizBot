@@ -5584,21 +5584,25 @@ async def startup():
         return
     logger.info("[App] Using CF Worker proxy for TG API")
 
-    # ── Auto webhook set: এই server নিজেই নিজের URL-এ webhook set করবে ──
-    # CF down থাকলেও Telegram সরাসরি এখানে update পাঠাতে পারবে
+    # ── Auto webhook set ──
+    # Render-এ থাকলে সবসময় Render URL → CF/HF ছাড়াই bot চলবে
+    # HF-এ থাকলে HF URL (কিন্তু HF-এ TG block থাকায় কাজ করবে না, শুধু Render reliable)
     try:
         import httpx as _hx
-        self_url = RENDER_URL or HF_SPACE_URL  # Render হলে Render URL, HF হলে HF URL
-        if self_url:
+        self_url = RENDER_URL or ""
+        if not self_url:
+            # Render URL নেই মানে HF-এ আছি — HF-এ TG API block, skip
+            logger.info("[App] No RENDER_URL set, skipping auto webhook (HF TG API blocked)")
+        else:
             webhook_url = self_url.rstrip("/") + "/webhook"
-            # সরাসরি Telegram API কল (CF proxy bypass)
-            r = await _hx.AsyncClient(timeout=10).post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-                json={"url": webhook_url, "drop_pending_updates": False, "max_connections": 40}
-            )
+            async with _hx.AsyncClient(timeout=10) as _c:
+                r = await _c.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                    json={"url": webhook_url, "drop_pending_updates": False, "max_connections": 40}
+                )
             result = r.json()
             if result.get("ok"):
-                logger.info(f"[App] Webhook set → {webhook_url}")
+                logger.info(f"[App] ✅ Webhook set → {webhook_url}")
             else:
                 logger.warning(f"[App] Webhook set failed: {result.get('description')}")
     except Exception as e:
