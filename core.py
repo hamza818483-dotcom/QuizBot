@@ -35,6 +35,7 @@ OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://quizbot-proxy-pages.pages.dev")
 HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://hamzahf1-atlasboss.hf.space")
+RENDER_URL = os.environ.get("RENDER_URL", "")  # e.g. https://quizbot-s482.onrender.com
 D1_TOKEN = os.environ.get("D1_TOKEN", "")
 
 TG_API = f"{CF_WORKER_URL}/tg-proxy"

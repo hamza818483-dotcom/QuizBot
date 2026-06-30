@@ -43,7 +43,7 @@ from pdf_handler import (
 from core import (
     logger, app, sb,
     BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
-    CF_WORKER_URL, HF_SPACE_URL, D1_TOKEN, TG_API,
+    CF_WORKER_URL, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, edit_msg, send_photo, send_photo_by_id,
     send_document, send_poll, notify_owner, download_tg_file,
@@ -5583,11 +5583,27 @@ async def startup():
         logger.error("[App] BOT_TOKEN missing!")
         return
     logger.info("[App] Using CF Worker proxy for TG API")
+
+    # ── Auto webhook set: এই server নিজেই নিজের URL-এ webhook set করবে ──
+    # CF down থাকলেও Telegram সরাসরি এখানে update পাঠাতে পারবে
     try:
-        ok, admin_ok, admin_total = await set_bot_commands()
-        logger.info(f"[App] Command menu set on startup: default={ok}, admins={admin_ok}/{admin_total}")
+        import httpx as _hx
+        self_url = RENDER_URL or HF_SPACE_URL  # Render হলে Render URL, HF হলে HF URL
+        if self_url:
+            webhook_url = self_url.rstrip("/") + "/webhook"
+            # সরাসরি Telegram API কল (CF proxy bypass)
+            r = await _hx.AsyncClient(timeout=10).post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                json={"url": webhook_url, "drop_pending_updates": False, "max_connections": 40}
+            )
+            result = r.json()
+            if result.get("ok"):
+                logger.info(f"[App] Webhook set → {webhook_url}")
+            else:
+                logger.warning(f"[App] Webhook set failed: {result.get('description')}")
     except Exception as e:
-        logger.error(f"[App] Failed to set command menu on startup: {e}")
+        logger.error(f"[App] Webhook set error: {e}")
+
     try:
         ok, admin_ok, admin_total = await set_bot_commands()
         logger.info(f"[App] Command menu set on startup: default={ok}, admins={admin_ok}/{admin_total}")
