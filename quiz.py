@@ -102,13 +102,15 @@ async def handle_quiz_create(msg: dict):
         bot_info = await tg_post("getMe", {})
         bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
         link = f"https://t.me/{bot_username}?start={quiz_id}"
+        web_link = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={quiz_id}"
 
         await send_msg(chat_id,
             f"✅ <b>Quiz Created!</b>\n\n"
             f"📝 Name: {name}\n📄 Description: {desc}\n"
             f"⏱️ Timer: {timer}s\n🔀 Shuffle: {'Yes' if shuffle else 'No'}\n"
             f"📊 Questions: {len(questions)}\n\n"
-            f"🔗 Quiz Link:\n{link}\n\n"
+            f"🌐 Web Quiz:\n{web_link}\n\n"
+            f"🤖 Bot Quiz:\n{link}\n\n"
             f"👆 যে কেউ এই লিংকে ক্লিক করে কুইজ solve করতে পারবে!"
         )
     except Exception as e:

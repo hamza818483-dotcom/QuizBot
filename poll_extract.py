@@ -371,9 +371,8 @@ async def handle_poll_extract(msg: dict):
     GH_PAGES_URL    = "https://hamza818483-dotcom.github.io/QuizBot/quiz.html"
     HF_SPACE_URL    = "https://hamzahf1-atlasboss.hf.space"
 
-    gh_link  = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={quiz_id}" if quiz_id else None
-    cf_link  = f"{QUIZ_WORKER_URL}/exam/{quiz_id}" if quiz_id else None
-    hf_link  = f"{HF_SPACE_URL}/exam/{quiz_id}" if quiz_id else None
+    # একটাই smart link — ভেতরে HF→CF→Supabase auto fallback
+    web_link = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={quiz_id}" if quiz_id else None
     bot_link = f"https://t.me/{bot_username}?start={quiz_id}" if quiz_id else None
 
     caption = (
@@ -381,12 +380,8 @@ async def handle_poll_extract(msg: dict):
         f"📌 Range: {start_id} → {end_id}\n"
         f"📋 Poll পেয়েছি: <b>{len(polls)}</b>\n\n"
     )
-    if gh_link:
-        caption += f"🌐 <b>Web Quiz (Primary):</b>\n{gh_link}\n\n"
-    if cf_link:
-        caption += f"🔗 <b>Backup-01 (Cloudflare):</b>\n{cf_link}\n\n"
-    if hf_link:
-        caption += f"🔗 <b>Backup-02 (HF):</b>\n{hf_link}\n\n"
+    if web_link:
+        caption += f"🌐 <b>Web Quiz:</b>\n{web_link}\n\n"
     if bot_link:
         caption += f"🤖 <b>Bot Quiz:</b>\n{bot_link}"
 
