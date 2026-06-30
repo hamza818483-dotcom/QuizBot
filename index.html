@@ -359,9 +359,9 @@ async function init() {
       }
     }
 
-    // Web Quiz link থেকে এলে (worker দিয়ে) — pre-screen একদমই না দেখিয়ে instant শুরু
+    // Web Quiz link থেকে এলে (worker দিয়ে অথবা channel poll থেকে) — pre-screen একদমই না দেখিয়ে instant শুরু
     const urlParams = new URLSearchParams(location.search);
-    if (urlParams.get('autostart') === '1') {
+    if (urlParams.get('autostart') === '1' || window.__FORCE_AUTOSTART__ === true) {
       startHall();
     } else {
       setMode('PreExam');
