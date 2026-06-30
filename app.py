@@ -1430,12 +1430,12 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             exam_url = f"{CF_WORKER_URL}/exam/{batch_cache_id}"
             quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{batch_cache_id}"
             poll_url = f"https://t.me/atlasQuizProBot?start=poll_{batch_cache_id}"
-            web_url  = f"https://atlasquizbotpro.hamza818483.workers.dev/quiz/{batch_cache_id}"
+            premium_url = f"https://t.me/atlasQuizProBot?start=premium_{batch_cache_id}"
             end_kb = {"inline_keyboard": [
                 [{"text": "📝 Quiz Solve", "url": quiz_url},
                  {"text": "🔄 Poll Solve", "url": poll_url}],
                 [{"text": "🌐 Web Exam", "url": exam_url},
-                 {"text": "📄 Premium PDF", "url": web_url}],
+                 {"text": "💎 Premium PDF", "url": premium_url}],
             ]}
             end_r = await tg_post("sendMessage", {
                 "chat_id": channel_id,
@@ -1490,12 +1490,12 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
         exam_url = f"{CF_WORKER_URL}/exam/{cache_id}"
         quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id}"
         poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id}"
-        web_url  = f"https://atlasquizbotpro.hamza818483.workers.dev/quiz/{cache_id}"
+        premium_url = f"https://t.me/atlasQuizProBot?start=premium_{cache_id}"
         end_kb = {"inline_keyboard": [
             [{"text": "📝 Quiz Solve", "url": quiz_url},
              {"text": "🔄 Poll Solve", "url": poll_url}],
             [{"text": "🌐 Web Exam", "url": exam_url},
-             {"text": "📄 Premium PDF", "url": web_url}],
+             {"text": "💎 Premium PDF", "url": premium_url}],
         ]}
         end_send_data = {
             "chat_id": channel_id,
