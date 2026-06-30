@@ -5267,6 +5267,10 @@ async def exam_page(cache_id: str, request: Request):
     try:
         uid = request.query_params.get("uid", "")
         name = request.query_params.get("name", "Student")
+        # v4.2: Web Quiz link-e click korlei instant exam shuru hobe —
+        # source (Telegram uid soho/chara) jai hok na keno, pre-exam
+        # screen ekdomi skip kora hoy.
+        force_autostart = True
         with open("/app/index.html", "r", encoding="utf-8") as f:
             html = f.read()
         html = html.replace("{{CACHE_ID}}", cache_id)
@@ -5275,6 +5279,8 @@ async def exam_page(cache_id: str, request: Request):
         html = html.replace("{{SUPABASE_URL}}", SUPABASE_URL)
         html = html.replace("{{SUPABASE_KEY}}", SUPABASE_KEY)
         html = html.replace("{{HF_SPACE_URL}}", HF_SPACE_URL)
+        if force_autostart:
+            html = html.replace("<script>", "<script>window.__FORCE_AUTOSTART__=true;", 1)
         return HTMLResponse(html)
     except FileNotFoundError:
         return HTMLResponse("<h1>Exam page not found</h1>", status_code=404)
