@@ -477,6 +477,9 @@ async function handleWebQuiz(request, url, env) {
     html = html.replace(/\{\{SUPABASE_URL\}\}/g,  '');
     html = html.replace(/\{\{SUPABASE_KEY\}\}/g,  '');
 
+    // autostart=1 inject করো যাতে pre-screen skip হয়ে direct exam শুরু হয়
+    html = html.replace('</head>', `<script>history.replaceState(null,'',location.pathname+'?autostart=1');</script></head>`);
+
     return new Response(html, {
       status: 200,
       headers: { 'Content-Type': 'text/html;charset=UTF-8' }

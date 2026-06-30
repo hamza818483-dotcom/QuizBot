@@ -360,6 +360,12 @@ async function init() {
     }
 
     setMode('PreExam');
+
+    // Web Quiz link থেকে এলে (worker দিয়ে) — pre-screen skip করে direct শুরু
+    const urlParams = new URLSearchParams(location.search);
+    if (urlParams.get('autostart') === '1') {
+      setTimeout(() => startHall(), 50);
+    }
   } catch(e) { showErr('❌ লোড করতে সমস্যা!'); }
 }
 
