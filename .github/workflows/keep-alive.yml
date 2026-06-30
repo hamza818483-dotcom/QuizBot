@@ -1,0 +1,22 @@
+name: Keep Render & HF Alive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # প্রতি 10 মিনিট
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+            "${{ secrets.RENDER_URL }}/health")
+          echo "Render ping: $STATUS"
+
+      - name: Ping HF Space
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+            "${{ secrets.HF_SPACE_URL }}/health")
+          echo "HF ping: $STATUS"
