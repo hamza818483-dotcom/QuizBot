@@ -1,25 +1,35 @@
-name: Keep Render & HF Alive
+name: Keep Render Alive — Layer 1 (every 5min)
+
+# v4.2: HF permanently banned, removed from here. Multi-layer watchdog —
+# this is layer 1 of 4, running on the :00/:05/:10... schedule. Layers
+# 2-4 (in render-watchdog-2.yml, -3.yml, -4.yml) run on staggered offsets
+# (+1, +2, +3 min) so even if GitHub Actions queues/delays one run, the
+# others still cover the gap — true redundancy, not just duplication.
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # প্রতি 5 মিনিট — Render 15min sleep এর আগেই ping
+    - cron: '*/5 * * * *'   # :00, :05, :10, :15...
   workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Render (keep-alive)
+      - name: Ping Render Primary (keep-alive)
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
             "${{ secrets.RENDER_URL }}/health")
-          echo "Render: $STATUS"
+          echo "Render Primary: $STATUS"
           if [ "$STATUS" != "200" ]; then
-            echo "⚠️ Render not responding!"
+            echo "::warning::Render Primary not responding (layer 1)!"
           fi
 
-      - name: Ping HF Space (keep-alive)
+      - name: Ping Render Secondary (keep-alive)
+        if: ${{ secrets.RENDER_URL_2 != '' }}
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-            "${{ secrets.HF_SPACE_URL }}/health")
-          echo "HF: $STATUS"
+            "${{ secrets.RENDER_URL_2 }}/health")
+          echo "Render Secondary: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::Render Secondary not responding (layer 1)!"
+          fi

@@ -1,0 +1,33 @@
+name: Keep Render Alive — Layer 2 (every 5min, +1)
+
+# v4.2: Layer 2 of 4. Runs at :01, :06, :11... — offset from Layer 1's
+# :00 schedule so the two never queue at the exact same GitHub Actions
+# minute. Independent redundancy, not a duplicate.
+
+on:
+  schedule:
+    - cron: '1-59/5 * * * *'   # :01, :06, :11, :16...
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render Primary (keep-alive, layer 2)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+            "${{ secrets.RENDER_URL }}/health")
+          echo "Render Primary: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::Render Primary not responding (layer 2)!"
+          fi
+
+      - name: Ping Render Secondary (keep-alive, layer 2)
+        if: ${{ secrets.RENDER_URL_2 != '' }}
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+            "${{ secrets.RENDER_URL_2 }}/health")
+          echo "Render Secondary: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::Render Secondary not responding (layer 2)!"
+          fi
