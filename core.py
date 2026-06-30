@@ -35,10 +35,19 @@ OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://quizbot-proxy-pages.pages.dev")
 HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://hamzahf1-atlasboss.hf.space")
-RENDER_URL = os.environ.get("RENDER_URL", "")  # e.g. https://quizbot-s482.onrender.com
+RENDER_URL = os.environ.get("RENDER_URL", "")
 D1_TOKEN = os.environ.get("D1_TOKEN", "")
 
-TG_API = f"{CF_WORKER_URL}/tg-proxy"
+# Render এ চললে directly TG API, HF এ চললে CF proxy (HF তে TG blocked)
+_running_on = os.environ.get("RUNNING_ON", "")
+if _running_on == "Render" or (RENDER_URL and "onrender.com" in RENDER_URL):
+    TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+    _tg_mode = "direct"
+else:
+    TG_API = f"{CF_WORKER_URL}/tg-proxy"
+    _tg_mode = "cf-proxy"
+
+logger.info(f"[Core] TG API mode: {_tg_mode}")
 
 # ============================================================
 # SUPABASE CLIENT
