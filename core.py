@@ -91,17 +91,25 @@ app = FastAPI(title="ATLAS BOT", version="4.2.0")
 # ============================================================
 # D1 (CLOUDFLARE) HELPERS
 # ============================================================
+
+# ── In-memory KV fallback (used when CF Worker is down) ──
+_mem_kv: dict = {}
+
 async def d1_set(key: str, value: dict, ttl: int = 86400):
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.post(f"{CF_WORKER_URL}/d1/set",
                 json={"key": key, "value": value, "ttl": ttl})
             if r.text.strip():
-                return r.json().get("ok", False)
+                ok = r.json().get("ok", False)
+                if ok:
+                    _mem_kv[key] = value  # mirror to memory
+                    return True
         return True
     except Exception as e:
-        logger.warning(f"[D1] set warn: {e}")
-        return False
+        logger.warning(f"[D1] set warn (using memory): {e}")
+        _mem_kv[key] = value  # fallback: RAM
+        return True
 
 async def d1_get(key: str) -> dict:
     try:
@@ -109,11 +117,14 @@ async def d1_get(key: str) -> dict:
             r = await c.get(f"{CF_WORKER_URL}/d1/get", params={"key": key})
             if r.text.strip():
                 data = r.json()
-                return data.get("value")
-        return None
+                val = data.get("value")
+                if val is not None:
+                    _mem_kv[key] = val  # mirror
+                    return val
+        return _mem_kv.get(key)  # fallback: RAM
     except Exception as e:
-        logger.warning(f"[D1] get warn: {e}")
-        return None
+        logger.warning(f"[D1] get warn (using memory): {e}")
+        return _mem_kv.get(key)
 
 async def d1_del(key: str):
     try:
@@ -121,6 +132,8 @@ async def d1_del(key: str):
             await c.post(f"{CF_WORKER_URL}/d1/del", json={"key": key})
     except Exception as e:
         logger.warning(f"[D1] del warn: {e}")
+    _mem_kv.pop(key, None)  # always clean memory too
+
 
 async def d1_query(sql: str, params: list = None, is_select: bool = True) -> dict:
     try:
