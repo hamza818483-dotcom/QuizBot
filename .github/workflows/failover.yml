@@ -2,7 +2,7 @@ name: Bot Failover — CF → Render
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Every 5 minutes
+    - cron: '*/10 * * * *'  # Every 10 minutes (2000 min/month limit safe)
   workflow_dispatch:
 
 jobs:
