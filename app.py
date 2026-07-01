@@ -3592,6 +3592,13 @@ def _poll_end_kb(cache_id: str, cache: dict) -> dict:
     return kb
 
 async def handle_poll_again(cache_id: str, user: dict, chat_id: int):
+    try:
+        await _handle_poll_again_inner(cache_id, user, chat_id)
+    except Exception as e:
+        logger.error(f"[PollAgain] CRASHED cache={cache_id[:8]}: {e}")
+        await notify_owner(f"⚠️ Poll Solve crashed (cache={cache_id[:8]}): {e}")
+
+async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
     settings = await db_get_settings()
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
@@ -3873,6 +3880,16 @@ async def start_sequential_quiz(chat_id: int, uid: int, uname: str,
     await _send_quiz_question(uid)
 
 async def _send_quiz_question(uid: int):
+    try:
+        await _send_quiz_question_inner(uid)
+    except Exception as e:
+        logger.error(f"[QuizSolve] _send_quiz_question CRASHED for uid={uid}: {e}")
+        st = await qs_get(uid)
+        if st:
+            await _finish_quiz(uid)
+        await notify_owner(f"⚠️ Quiz Solve crashed: {e}")
+
+async def _send_quiz_question_inner(uid: int):
     st = await qs_get(uid)
     if not st:
         return
