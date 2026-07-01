@@ -836,13 +836,19 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             exp = mcq.get("explanation", "")
             if exp_footer:
                 exp = f"{exp}\n{exp_footer}"
-            poll_r = await send_poll(
-                channel_id, q_text, opts, ans_idx,
-                explanation=exp[:200],
-                reply_to_message_id=image_msg_id
-            )
+            poll_r = {"ok": False}
+            for _attempt in range(3):
+                poll_r = await send_poll(
+                    channel_id, q_text, opts, ans_idx,
+                    explanation=exp[:200],
+                    reply_to_message_id=image_msg_id
+                )
+                if poll_r.get("ok"):
+                    break
+                logger.warning(f"[ImgPoll] q{i+1}/{len(mcqs)} attempt {_attempt+1} failed, retrying...")
+                await asyncio.sleep(2)
             if not poll_r.get("ok"):
-                logger.error(f"[ImgPoll] sendPoll failed q{i+1}/{len(mcqs)} opts={len(opts)}: {poll_r.get('description') or poll_r.get('error')}")
+                logger.error(f"[ImgPoll] sendPoll FINAL FAIL q{i+1}/{len(mcqs)} opts={len(opts)}: {poll_r.get('description') or poll_r.get('error')}")
             if poll_r.get("ok") and i == 0:
                 msg_id = poll_r["result"]["message_id"]
                 cid = str(channel_id)
@@ -850,7 +856,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
                     poll_links.append(f"https://t.me/c/{cid[4:]}/{msg_id}")
                 else:
                     poll_links.append(f"https://t.me/{cid.lstrip('@')}/{msg_id}")
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
 
         end_text = (
             f"🎯Topic: {topic}\n"
