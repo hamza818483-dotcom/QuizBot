@@ -60,6 +60,10 @@ from core import (
 from chorcha_parser import parse_chorcha_file
 from chorcha_pdf import build_chorcha_pdf_html
 
+# ATLAS full mhtml/html → CSV converter (Chorcha.net + Testmoz, LaTeX cleanup, imgbb images)
+# Ported 100% from AtlasMasterBot's mhtml_handler.py
+from atlas_mhtml import parse_mhtml_to_mcqs, results_to_csv_bytes
+
 # D1 Quiz System (fully independent module — see quiz.py)
 from quiz import (
     QUIZ_SESSIONS, QUIZ_TIMERS,
@@ -1942,39 +1946,24 @@ async def handle_qcsv_auto(msg: dict):
 
     try:
         raw_bytes = await download_tg_file(doc["file_id"])
-        data = await asyncio.to_thread(parse_chorcha_file, raw_bytes)
+        parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, raw_bytes, file_name)
+        results = parsed["results"]
+        source = parsed["source"] or "Unknown"
 
-        if not data["items"]:
+        if not results:
             if loading_id:
                 await edit_msg(chat_id, loading_id, "❌ কোনো প্রশ্ন/উত্তর খুঁজে পাওয়া যায়নি! Format ভিন্ন হতে পারে।")
             return
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
-                f"✅ {len(data['items'])} টি প্রশ্ন পাওয়া গেছে!\n📄 CSV বানানো হচ্ছে...")
+                f"✅ {len(results)} টি MCQ পাওয়া গেছে! ({source})\n📄 CSV বানানো হচ্ছে...")
 
-        import io as _io, csv as _csv_mod
-        buf = _io.StringIO()
-        writer = _csv_mod.writer(buf)
+        csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
 
-        if data["format"] == "cq":
-            writer.writerow(["no", "stem", "tag", "sub_label", "sub_question", "sub_answer"])
-            for it in data["items"]:
-                for sub in it["subs"]:
-                    writer.writerow([
-                        it["no"], it["stem"], it["tag"],
-                        sub["label"], sub["question"], sub["answer"]
-                    ])
-        else:
-            writer.writerow(["no", "tag", "question", "answer"])
-            for it in data["items"]:
-                writer.writerow([it["no"], it["tag"], it["question"], it["answer"]])
-
-        csv_bytes = ("\ufeff" + buf.getvalue()).encode("utf-8")
-
-        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", data["page_title"])[:50] or "ATLAS_QuestionBank"
-        await send_document(chat_id, csv_bytes, f"{safe_title}.csv",
-            caption=f"📚 {data['page_title']}\n📝 মোট প্রশ্ন: {len(data['items'])}\n🚀 ATLAS APP",
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", file_name.rsplit(".", 1)[0])[:50] or "ATLAS_QuestionBank"
+        await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
+            caption=f"📚 Source: {source}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP",
             mime_type="text/csv")
 
         if loading_id:
@@ -2011,39 +2000,24 @@ async def handle_qcsv_command(msg: dict):
 
     try:
         raw_bytes = await download_tg_file(doc["file_id"])
-        data = await asyncio.to_thread(parse_chorcha_file, raw_bytes)
+        parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, raw_bytes, file_name)
+        results = parsed["results"]
+        source = parsed["source"] or "Unknown"
 
-        if not data["items"]:
+        if not results:
             if loading_id:
                 await edit_msg(chat_id, loading_id, "❌ কোনো প্রশ্ন/উত্তর খুঁজে পাওয়া যায়নি! Format ভিন্ন হতে পারে।")
             return
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
-                f"✅ {len(data['items'])} টি প্রশ্ন পাওয়া গেছে!\n📄 CSV বানানো হচ্ছে...")
+                f"✅ {len(results)} টি MCQ পাওয়া গেছে! ({source})\n📄 CSV বানানো হচ্ছে...")
 
-        import io as _io, csv as _csv_mod
-        buf = _io.StringIO()
-        writer = _csv_mod.writer(buf)
+        csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
 
-        if data["format"] == "cq":
-            writer.writerow(["no", "stem", "tag", "sub_label", "sub_question", "sub_answer"])
-            for it in data["items"]:
-                for sub in it["subs"]:
-                    writer.writerow([
-                        it["no"], it["stem"], it["tag"],
-                        sub["label"], sub["question"], sub["answer"]
-                    ])
-        else:
-            writer.writerow(["no", "tag", "question", "answer"])
-            for it in data["items"]:
-                writer.writerow([it["no"], it["tag"], it["question"], it["answer"]])
-
-        csv_bytes = ("\ufeff" + buf.getvalue()).encode("utf-8")
-
-        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", data["page_title"])[:50] or "ATLAS_QuestionBank"
-        await send_document(chat_id, csv_bytes, f"{safe_title}.csv",
-            caption=f"📚 {data['page_title']}\n📝 মোট প্রশ্ন: {len(data['items'])}\n🚀 ATLAS APP",
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", file_name.rsplit(".", 1)[0])[:50] or "ATLAS_QuestionBank"
+        await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
+            caption=f"📚 Source: {source}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP",
             mime_type="text/csv")
 
         if loading_id:
