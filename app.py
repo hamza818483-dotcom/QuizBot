@@ -4807,8 +4807,14 @@ async def handle_message(msg: dict):
                     _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
                     _wh_data = _wr.json()
                     _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
-                    if "onrender.com" in _wh_url:
-                        _wh_short = "🟡 Render (fallback mode)"
+                    _render_primary = (os.environ.get("RENDER_URL", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
+                    _render_secondary = (os.environ.get("RENDER_URL_2", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
+                    if _render_secondary and _render_secondary in _wh_url:
+                        _wh_short = "🟠 Render SECONDARY (failover active!)"
+                    elif _render_primary and _render_primary in _wh_url:
+                        _wh_short = "🟡 Render PRIMARY"
+                    elif "onrender.com" in _wh_url:
+                        _wh_short = "🟡 Render (unknown account)"
                     elif "workers.dev" in _wh_url or "pages.dev" in _wh_url:
                         _wh_short = "🟢 CF Worker (normal)"
                     elif "hf.space" in _wh_url:
