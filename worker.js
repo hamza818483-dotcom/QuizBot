@@ -386,19 +386,47 @@ async function handleQuizData(request, url) {
     }
 
     // ── Layer 1: Render (primary — has all data including image_file_id; HF permanently banned) ──
-    try {
-      const r = await fetch(`${RENDER_URL}/api/exam/${id}`, {
-        signal: AbortSignal.timeout(8000)
-      });
-      if (r.ok) {
-        const d = await r.json();
-        if (d && d.mcqs && d.mcqs.length > 0) {
-          // Forward Render response as-is (preserves image_file_id, channel_id, etc.)
-          return jsonResp(d);
+    // v4.4: 8s→25s timeout + 2 retries with short backoff, since Render free tier
+    // cold start commonly takes 30-50s. A single 8s shot was failing on every
+    // cold request and falling through to layers that don't cover pdf_mcq_cache.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const r = await fetch(`${RENDER_URL}/api/exam/${id}`, {
+          signal: AbortSignal.timeout(25000)
+        });
+        if (r.ok) {
+          const d = await r.json();
+          if (d && d.mcqs && d.mcqs.length > 0) {
+            // Forward Render response as-is (preserves image_file_id, channel_id, etc.)
+            return jsonResp(d);
+          }
+          break; // Render responded OK but no mcqs — real 404, don't retry
         }
+      } catch(e) {
+        console.warn(`[quiz] Render primary attempt ${attempt} failed:`, e.message);
+        if (attempt < 3) await new Promise(res => setTimeout(res, 1500));
+      }
+    }
+
+    // ── Layer 1.5: Supabase direct — pdf_mcq_cache table (covers /img, /pdf, /csv sources) ──
+    try {
+      const r = await fetch(
+        `${SB_URL}/rest/v1/pdf_mcq_cache?id=eq.${id}&select=*`,
+        { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` }, signal: AbortSignal.timeout(10000) }
+      );
+      const data = await r.json();
+      if (data && data[0]) {
+        const c = data[0];
+        return jsonResp({
+          cache_id: id, topic: c.topic || 'Quiz', page: c.page_number || 1,
+          mcqs: c.mcq_data || [], tag: '', exp_footer: '',
+          channel_id: c.channel_id || '', image_msg_id: c.image_msg_id || null,
+          end_msg_id: c.end_msg_id || null, image_file_id: c.image_file_id || null,
+          is_new_gen: !!c.is_new_gen, timer: 30, _source: 'supabase_direct',
+        });
       }
     } catch(e) {
-      console.warn('[quiz] Render primary failed:', e.message);
+      console.warn('[quiz] Supabase pdf_mcq_cache direct failed:', e.message);
     }
 
     // ── Layer 2: D1 (qz_ prefix quizzes only) ──
