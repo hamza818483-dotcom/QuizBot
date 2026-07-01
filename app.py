@@ -2930,23 +2930,28 @@ QBM_EXTRACT_PROMPT = """YOU ARE A STRICT MCQ EXTRACTOR. YOUR ONLY JOB IS TO EXTR
 🔴 ABSOLUTE FORBIDDEN RULES
 ════════════════════════════════
 ❌ NEVER create new questions from any text or information
-❌ NEVER add extra MCQs beyond what exists in the image
-❌ NEVER skip any existing MCQ — extract ALL of them
-❌ NEVER guess an answer — only detect from image
+❌ NEVER add extra MCQs beyond what already exists on the page/image
+❌ NEVER skip any existing MCQ — extract ALL of them, serially, in order
+❌ NEVER guess an answer — only detect from image/page content
 ❌ NEVER modify question text (only remove numbering)
+❌ If the page has ZERO existing MCQs → output EXACTLY [] (empty array).
+   Do NOT invent even a single MCQ on a page that has none.
+❌ If the page has exactly N existing MCQs → output EXACTLY those N. Never more, never fewer.
 
 ════════════════════════════════
-📌 EXTRACTION RULES
+📌 EXTRACTION RULES (NO MCQ COUNT NEEDED — extract however many exist)
 ════════════════════════════════
-✅ Extract ALL MCQs — Bangla, English, or mixed language
+✅ Extract ALL MCQs that already exist on this page — Bangla, English, or mixed language
 ✅ Extract from any font style — printed, handwritten, bold, italic
 ✅ Extract from blurry, low quality, or scanned PDF images
-✅ Perform MULTIPLE OCR passes — triple check every MCQ
+✅ Perform MULTIPLE independent passes over the page — read it at least 3 times internally
+   and cross-check your own extraction before finalizing, to avoid missing or misreading any MCQ
 ✅ Remove question numbering only: (১., 1., Q1., Q.1, ক., a.) from question text
-✅ Keep original question and option text intact
+✅ Keep original question and option text intact (do not paraphrase or rewrite existing text)
 ✅ If any major spelling mistake seen, correct it
+
 ════════════════════════════════
-🎯 ANSWER DETECTION (ALL FORMATS)
+🎯 ANSWER DETECTION (ALL FORMATS) — triple-check before finalizing
 ════════════════════════════════
 Format 1 — Answer beside question: detect circle/tick/underline/bold/star (★) on option
 Format 2 — Answer box at page bottom: match question number → correct option letter
@@ -2957,21 +2962,63 @@ Format 3 — Answer key on different page (few pages later):
 → If answer not found anywhere → set answer as "A" and note in explanation "Answer not found in source"
 Format 4 — Answer after each question block: read carefully
 → Convert all answer formats to A/B/C/D in output
+→ Re-verify each detected answer against the source at least twice before finalizing
 
 ════════════════════════════════
-💡 EXPLANATION RULES
+🔀 OPTION SHUFFLE (MANDATORY)
 ════════════════════════════════
-- Why correct answer is correct (from your latest real knowledge)
-- Why each wrong option is wrong (briefly)
-- Related topic info from latest real source
-- Max 165 characters, Bengali language
-- Must be factually accurate
+- After extracting the correct answer, SHUFFLE the four options into a new random order
+  before output, so the correct answer is NOT always in the same position.
+- Update the "answer" letter to match the option's NEW shuffled position.
+- Do this independently for every single MCQ — do not use the same shuffle pattern repeatedly.
+- STRICTLY FORBIDDEN: all extracted MCQs ending up with the same answer letter (e.g. all "A").
+  Vary the correct answer's position naturally across A/B/C/D.
+
+════════════════════════════════
+💡 EXPLANATION RULES (STRICT PRIORITY ORDER — follow exactly in this order)
+════════════════════════════════
+1) If the page/image already shows an explanation directly below or attached to the MCQ →
+   copy that explanation 100% verbatim, word-for-word, exactly as written in the source.
+2) Else if the page contains other relevant information related to the MCQ's topic
+   (a paragraph, note, box, or fact elsewhere on the page that relates to this question) →
+   build the explanation using that relevant information from the page.
+3) Else if there is no explanation and no relevant info anywhere on the page →
+   generate the BEST, most relevant, factually accurate explanation yourself
+   from your own real knowledge.
+- Explanation content must always include: why the correct option is correct, AND
+  brief relevant info about why the other options are not correct / related context.
+- Max 165 characters, Bengali language, factually accurate.
+
+════════════════════════════════
+🧮 MATH / CHEMISTRY FORMATTING (MANDATORY — apply to question, options, AND explanation)
+════════════════════════════════
+- Always use proper Unicode subscript/superscript characters for any mathematical or
+  chemical expression — never write raw underscore/caret notation and never leave
+  numbers in the wrong position.
+- Chemical formulas: subscript the quantity numbers. Example: H₂O, CO₂, NaHCO₃, H₂SO₄, Ca(OH)₂
+- Exponents/powers: superscript the exponent. Example: x², 10³, a⁻¹, E=mc²
+- Units and degree symbols must be correctly spaced/formatted: °C, m/s², cm³
+- Never mix this up (e.g. never write H2O when H₂O is correct; never write x^2 when x² is correct)
+- Apply this consistently in the question text, all four options, AND the explanation.
+
+════════════════════════════════
+🚫 FORBIDDEN PHRASES — NEVER reference the source/page/image itself
+════════════════════════════════
+In the question AND explanation text, NEVER use any of these phrase patterns (or their
+Bengali equivalents) that refer back to the source material itself:
+❌ "উল্লেখিত চিত্রে" / "বক্সে" / "ছকে" / "উদ্দীপকে" / "সারণিতে" / "টপিকে" / "পৃষ্ঠা নং এ"
+❌ "দেখা যাচ্ছে" / "বলা আছে" / "উল্লেখ করা আছে" / "লক্ষ করা যায়" / "বর্ণনা আছে"
+❌ Any phrase that talks ABOUT the source (image/box/table/diagram/page number) instead of
+   stating the fact/content directly.
+Instead, always state the actual fact, information, or content directly and naturally,
+as if it were general knowledge — never mention that it came from "the shown image/box/table/page".
+This rule applies permanently to every MCQ's question and explanation — no exceptions.
 
 ════════════════════════════════
 📤 OUTPUT FORMAT
 ════════════════════════════════
 Output ONLY a valid JSON array. No extra text. No markdown. No explanation outside JSON.
-If NO MCQ exists in image → return exactly: []
+If NO MCQ exists on this page → return exactly: []
 
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}]"""
 
@@ -3014,37 +3061,72 @@ def _qbm_parse_json(text: str) -> list:
     return valid
 
 
+async def _qbm_single_pass(img) -> list:
+    """One extraction attempt: Groq primary -> Gemini fallback."""
+    try:
+        key = os.environ.get("GROQ_API_KEY", "")
+        if key:
+            data_url = _img_to_data_url(img)
+            if data_url:
+                txt = await _post_openai_compat(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    key, "meta-llama/llama-4-scout-17b-16e-instruct",
+                    data_url, QBM_EXTRACT_PROMPT
+                )
+                result = _qbm_parse_json(txt)
+                if result:
+                    return result
+        return await _qbm_gemini_extract(img)
+    except Exception as e:
+        logger.warning(f"[QBM] single pass failed: {e}")
+        return []
+
+
 async def _qbm_extract_from_image(img) -> list:
     """
-    Groq primary -> Gemini fallback -> further fallbacks, using the
-    STRICT EXTRACTION prompt (not generation). 3x retry like AtlasMasterBot.
+    STRONG extraction with retry + cross-verification (multiple check):
+    1) Run extraction pass #1.
+    2) If pass #1 found MCQs, run a SECOND independent pass to cross-check.
+       - If both passes agree on count -> high confidence, use pass #1 (already
+         a clean, complete read).
+       - If counts disagree -> run a THIRD pass as tie-breaker, then use
+         whichever result has the MOST complete extraction (highest count),
+         since under-extraction (missing an existing MCQ) is the failure mode
+         we most want to avoid — never fabricate to make counts match.
+    3) If pass #1 found nothing, retry up to 3x total (page might have MCQs
+       that were missed on a bad first read) before concluding the page truly
+       has zero MCQs.
+    Never invents new questions across passes — cross-checking only decides
+    WHICH already-extracted set to trust, never merges or fabricates.
     """
-    for retry in range(3):
-        try:
-            # Groq primary
-            key = os.environ.get("GROQ_API_KEY", "")
-            if key:
-                data_url = _img_to_data_url(img)
-                if data_url:
-                    txt = await _post_openai_compat(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        key, "meta-llama/llama-4-scout-17b-16e-instruct",
-                        data_url, QBM_EXTRACT_PROMPT
-                    )
-                    result = _qbm_parse_json(txt)
-                    if result:
-                        return result
+    first = await _qbm_single_pass(img)
 
-            # Gemini fallback (direct call with extraction prompt)
-            gkey_result = await _qbm_gemini_extract(img)
-            if gkey_result:
-                return gkey_result
+    if not first:
+        # Nothing found — retry up to 2 more times before concluding "no MCQ on this page"
+        for retry in range(2):
+            await asyncio.sleep(2)
+            retry_result = await _qbm_single_pass(img)
+            if retry_result:
+                first = retry_result
+                break
+        if not first:
+            return []  # Confirmed: page genuinely has no existing MCQ
 
-        except Exception as e:
-            logger.warning(f"[QBM] extract attempt {retry+1} failed: {e}")
-        await asyncio.sleep(2)
+    # Cross-verification pass
+    second = await _qbm_single_pass(img)
+    if second and len(second) == len(first):
+        return first  # Both passes agree on count -> confident result
 
-    return []
+    if second and len(second) != len(first):
+        # Disagreement -> tie-breaker third pass, then trust the most complete extraction
+        third = await _qbm_single_pass(img)
+        candidates = [c for c in (first, second, third) if c]
+        if candidates:
+            best = max(candidates, key=len)
+            logger.info(f"[QBM] Cross-check disagreement (counts: {[len(c) for c in candidates]}) -> using most complete: {len(best)} MCQ")
+            return best
+
+    return first
 
 
 async def _qbm_gemini_extract(img) -> list:
