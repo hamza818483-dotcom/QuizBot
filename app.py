@@ -1930,6 +1930,61 @@ async def handle_qpdf_command(msg: dict):
         await send_msg(chat_id, f"❌ Error: {e}")
 
 # ============================================================
+# AUTO MHTML/HTML → CSV — file পাঠালেই সাথে সাথে CSV (কোনো command লাগে না)
+# ============================================================
+async def handle_qcsv_auto(msg: dict):
+    chat_id = msg["chat"]["id"]
+    doc = msg["document"]
+    file_name = doc.get("file_name", "")
+
+    loading = await send_msg(chat_id, "⏳ File পড়া হচ্ছে...")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        raw_bytes = await download_tg_file(doc["file_id"])
+        data = await asyncio.to_thread(parse_chorcha_file, raw_bytes)
+
+        if not data["items"]:
+            if loading_id:
+                await edit_msg(chat_id, loading_id, "❌ কোনো প্রশ্ন/উত্তর খুঁজে পাওয়া যায়নি! Format ভিন্ন হতে পারে।")
+            return
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"✅ {len(data['items'])} টি প্রশ্ন পাওয়া গেছে!\n📄 CSV বানানো হচ্ছে...")
+
+        import io as _io, csv as _csv_mod
+        buf = _io.StringIO()
+        writer = _csv_mod.writer(buf)
+
+        if data["format"] == "cq":
+            writer.writerow(["no", "stem", "tag", "sub_label", "sub_question", "sub_answer"])
+            for it in data["items"]:
+                for sub in it["subs"]:
+                    writer.writerow([
+                        it["no"], it["stem"], it["tag"],
+                        sub["label"], sub["question"], sub["answer"]
+                    ])
+        else:
+            writer.writerow(["no", "tag", "question", "answer"])
+            for it in data["items"]:
+                writer.writerow([it["no"], it["tag"], it["question"], it["answer"]])
+
+        csv_bytes = ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", data["page_title"])[:50] or "ATLAS_QuestionBank"
+        await send_document(chat_id, csv_bytes, f"{safe_title}.csv",
+            caption=f"📚 {data['page_title']}\n📝 মোট প্রশ্ন: {len(data['items'])}\n🚀 ATLAS APP",
+            mime_type="text/csv")
+
+        if loading_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
+
+    except Exception as e:
+        logger.error(f"[QCSV-AUTO] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+# ============================================================
 # MHTML/HTML → CSV — chorcha.net প্রশ্ন-উত্তর কে CSV এ export
 # ============================================================
 async def handle_qcsv_command(msg: dict):
@@ -4775,6 +4830,14 @@ async def handle_message(msg: dict):
         collected = await handle_incoming_image_for_collection(msg)
         if collected:
             return
+
+    # Auto mhtml/html → CSV (no command needed — just send the file)
+    if msg.get("document") and not msg.get("reply_to_message"):
+        _dfn = msg["document"].get("file_name", "").lower()
+        if _dfn.endswith(".mhtml") or _dfn.endswith(".mht") or _dfn.endswith(".html") or _dfn.endswith(".htm"):
+            asyncio.create_task(handle_qcsv_auto(msg))
+            return
+
 
     # v1.2: Watermark flow check (awaiting PDF, then awaiting text)
     if uid in WATERMARK_PENDING:
