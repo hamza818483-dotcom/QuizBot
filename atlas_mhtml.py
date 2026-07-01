@@ -24,20 +24,82 @@ logger = logging.getLogger("atlas.mhtml")
 # ============================================================
 # IMGBB UPLOAD (key rotation, sync — called via asyncio.to_thread)
 # ============================================================
+# ============================================================
+# IMGBB UPLOAD (health-tracked key rotation — always prefers a healthy key)
+# Env var: IMGBB_API_KEYS (comma-separated)
+# ============================================================
 class ImgBBKeyManager:
-    """ImgBB API key rotation manager"""
+    """
+    ImgBB API key rotation manager with health tracking.
+    - Always picks a currently-healthy key first (round-robin among healthy ones)
+    - A key gets marked unhealthy after 3 consecutive failures
+    - If ALL keys are unhealthy, auto-resets everyone to healthy (avoids permanent lockout
+      from a transient outage) and tries again
+    - record_success() resets a key's failure streak back to 0 (so one bad attempt doesn't
+      permanently penalize an otherwise-fine key)
+    """
 
     def __init__(self):
         raw = os.environ.get("IMGBB_API_KEYS", "")
-        self.keys = [k.strip() for k in raw.split(",") if k.strip()]
+        keys = [k.strip() for k in raw.split(",") if k.strip()]
+        self.stats = {k: {"success": 0, "fail": 0, "healthy": True} for k in keys}
         self.index = 0
 
+    @property
+    def keys(self):
+        return list(self.stats.keys())
+
+    def _healthy_keys(self):
+        healthy = [k for k, v in self.stats.items() if v["healthy"]]
+        if not healthy and self.stats:
+            # All keys down — reset everyone, better to retry than permanently fail
+            logger.warning("[ImgBB] All keys unhealthy — resetting all to healthy")
+            for k in self.stats:
+                self.stats[k]["healthy"] = True
+                self.stats[k]["fail"] = 0
+            healthy = list(self.stats.keys())
+        return healthy
+
+    def _next_key(self):
+        healthy = self._healthy_keys()
+        if not healthy:
+            return None
+        key = healthy[self.index % len(healthy)]
+        self.index += 1
+        return key
+
+    def record_success(self, key):
+        if key in self.stats:
+            self.stats[key]["success"] += 1
+            self.stats[key]["fail"] = 0
+            self.stats[key]["healthy"] = True
+
+    def record_failure(self, key):
+        if key in self.stats:
+            self.stats[key]["fail"] += 1
+            if self.stats[key]["fail"] >= 3:
+                self.stats[key]["healthy"] = False
+                logger.warning(f"[ImgBB] Key ...{key[-6:]} marked unhealthy after 3 failures")
+
+    def get_stats(self):
+        return {
+            "total": len(self.stats),
+            "healthy": len([k for k, v in self.stats.items() if v["healthy"]]),
+            "keys": {
+                f"key_{i+1}": {"success": v["success"], "fail": v["fail"], "healthy": v["healthy"]}
+                for i, (k, v) in enumerate(self.stats.items())
+            }
+        }
+
     def upload(self, image_bytes: bytes, retries: int = 3) -> str:
-        if not self.keys:
+        if not self.stats:
             return ""
-        for attempt in range(retries):
-            key = self.keys[self.index % len(self.keys)]
-            self.index += 1
+        tried = set()
+        for attempt in range(max(retries, len(self.stats))):
+            key = self._next_key()
+            if not key or key in tried and len(tried) >= len(self.stats):
+                break
+            tried.add(key)
             try:
                 b64 = base64.b64encode(image_bytes).decode("utf-8")
                 resp = httpx.post(
@@ -47,10 +109,12 @@ class ImgBBKeyManager:
                 )
                 data = resp.json()
                 if data.get("success"):
+                    self.record_success(key)
                     return data["data"]["url"]
-            except Exception:
-                if attempt == retries - 1:
-                    return ""
+                self.record_failure(key)
+            except Exception as e:
+                logger.warning(f"[ImgBB] Upload attempt failed on key ...{key[-6:]}: {e}")
+                self.record_failure(key)
         return ""
 
 
