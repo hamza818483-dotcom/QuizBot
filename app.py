@@ -54,6 +54,7 @@ from core import (
     build_back_url, source_msg_id,
     get_recent_errors, clear_error_logs,
     add_watermark_to_pdf,
+    get_bot_username,
 )
 
 # chorcha.net mhtml/html → Premium PDF (Question Bank converter)
@@ -1000,14 +1001,15 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
                                 file_id, image_msg_id, channel_id)
 
         exam_url = f"{CF_WORKER_URL}/exam/{cache_id_img}"
-        quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id_img}"
-        poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id_img}"
+        bot_un = await get_bot_username()
+        quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id_img}"
+        poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id_img}"
 
         end_kb = {"inline_keyboard": [
             [{"text": "📝 Quiz Solve", "url": quiz_url},
              {"text": "🔄 Poll Solve", "url": poll_url}],
             [{"text": "🌐 Web Exam", "url": exam_url},
-             {"text": "💎 Premium PDF", "url": f"https://t.me/atlasQuizProBot?start=premium_{cache_id_img}"}]
+             {"text": "💎 Premium PDF", "url": f"https://t.me/{bot_un}?start=premium_{cache_id_img}"}]
         ]}
 
         end_r = await tg_post("sendMessage", {
@@ -1565,9 +1567,10 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             # Ending message for this batch
             ending = csv_get_ending_message(batch_topic, sent, first_link)
             exam_url = f"{CF_WORKER_URL}/exam/{batch_cache_id}"
-            quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{batch_cache_id}"
-            poll_url = f"https://t.me/atlasQuizProBot?start=poll_{batch_cache_id}"
-            premium_url = f"https://t.me/atlasQuizProBot?start=premium_{batch_cache_id}"
+            bot_un = await get_bot_username()
+            quiz_url = f"https://t.me/{bot_un}?start=pdf_{batch_cache_id}"
+            poll_url = f"https://t.me/{bot_un}?start=poll_{batch_cache_id}"
+            premium_url = f"https://t.me/{bot_un}?start=premium_{batch_cache_id}"
             end_kb = {"inline_keyboard": [
                 [{"text": "📝 Quiz Solve", "url": quiz_url},
                  {"text": "🔄 Poll Solve", "url": poll_url}],
@@ -1625,9 +1628,10 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
 
         ending = csv_get_ending_message(topic, sent, first_link)
         exam_url = f"{CF_WORKER_URL}/exam/{cache_id}"
-        quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id}"
-        poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id}"
-        premium_url = f"https://t.me/atlasQuizProBot?start=premium_{cache_id}"
+        bot_un = await get_bot_username()
+        quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+        poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+        premium_url = f"https://t.me/{bot_un}?start=premium_{cache_id}"
         end_kb = {"inline_keyboard": [
             [{"text": "📝 Quiz Solve", "url": quiz_url},
              {"text": "🔄 Poll Solve", "url": poll_url}],
@@ -1929,8 +1933,9 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
         await db_save_mcq_cache(cache_id, cache_id, 0, "🔖 Bookmark Practice", mcqs)
 
         exam_url = f"{CF_WORKER_URL}/exam/{cache_id}"
-        quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id}"
-        poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id}"
+        bot_un = await get_bot_username()
+        quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+        poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
         end_kb = {"inline_keyboard": [
             [{"text": "📝 Quiz Solve", "url": quiz_url}],
             [{"text": "🔄 Poll Solve", "url": poll_url}],
@@ -2470,8 +2475,9 @@ async def process_pdf_pages(
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
 
                 exam_url = f"{CF_WORKER_URL}/exam/{cache_id}"
-                quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id}"
-                poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id}"
+                bot_un = await get_bot_username()
+                quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+                poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
 
                 end_data = {
                     "chat_id": channel_id,
