@@ -2930,95 +2930,120 @@ def _get_bd_time() -> str:
 # Different from /pdfm: extracts MCQs that ALREADY EXIST in the PDF,
 # never generates new ones. OCR fallback for scanned PDFs. 3x retry per page.
 # ============================================================
-QBM_EXTRACT_PROMPT = """YOU ARE A STRICT MCQ EXTRACTOR. YOUR ONLY JOB IS TO EXTRACT EXISTING MCQs. FOLLOW EVERY RULE WITHOUT EXCEPTION.
+QBM_EXTRACT_PROMPT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SPECIAL PERMANENT MODE. YOUR ONLY JOB IS TO EXTRACT MCQs THAT ALREADY EXIST ON THIS PAGE. YOU NEVER INVENT NEW QUESTIONS. FOLLOW EVERY RULE BELOW WITHOUT A SINGLE EXCEPTION, ALWAYS, ON EVERY PAGE, EVERY TIME.
 
 ════════════════════════════════
-🔴 ABSOLUTE FORBIDDEN RULES
+🔴 ABSOLUTE FORBIDDEN RULES (ZERO TOLERANCE)
 ════════════════════════════════
-❌ NEVER create new questions from any text or information
-❌ NEVER add extra MCQs beyond what already exists on the page/image
-❌ NEVER skip any existing MCQ — extract ALL of them, serially, in order
-❌ NEVER guess an answer — only detect from image/page content
-❌ NEVER modify question text (only remove numbering)
-❌ If the page has ZERO existing MCQs → output EXACTLY [] (empty array).
-   Do NOT invent even a single MCQ on a page that has none.
-❌ If the page has exactly N existing MCQs → output EXACTLY those N. Never more, never fewer.
+❌ NEVER create a new question from any text, fact, or information on the page
+❌ NEVER add even ONE extra MCQ beyond what already exists on the page/image
+❌ NEVER skip any existing MCQ — extract ALL of them, serially, in the exact order they appear
+❌ NEVER guess an answer — only detect it from actual image/page content
+❌ NEVER modify question or option text (only remove numbering prefixes)
+❌ If the page has ZERO existing MCQs → output EXACTLY [] (empty array). Do NOT invent a single MCQ.
+❌ If the page has exactly N existing MCQs → output EXACTLY those N. Never more, never fewer, never a "similar" or "extra" one.
+❌ No question count is ever given to you and none is ever needed — extract however many genuinely exist, nothing else.
+❌ This is a PERMANENT, ALWAYS-ON extraction mode — these rules apply identically to every page, every call, no matter what.
 
 ════════════════════════════════
-📌 EXTRACTION RULES (NO MCQ COUNT NEEDED — extract however many exist)
+📌 EXTRACTION RULES
 ════════════════════════════════
 ✅ Extract ALL MCQs that already exist on this page — Bangla, English, or mixed language
 ✅ Extract from any font style — printed, handwritten, bold, italic
-✅ Extract from blurry, low quality, or scanned PDF images
-✅ Perform MULTIPLE independent passes over the page — read it at least 3 times internally
-   and cross-check your own extraction before finalizing, to avoid missing or misreading any MCQ
+✅ Extract from blurry, low quality, rotated, or scanned images
+✅ Perform MULTIPLE independent internal read-throughs of the page (at least 3) and
+   cross-check your own extraction before finalizing, so no existing MCQ is missed or misread
 ✅ Remove question numbering only: (১., 1., Q1., Q.1, ক., a.) from question text
-✅ Keep original question and option text intact (do not paraphrase or rewrite existing text)
-✅ If any major spelling mistake seen, correct it
+✅ Keep original question and option wording intact (do not paraphrase or rewrite existing text)
+✅ If any obvious spelling mistake is seen, correct it — but do not alter meaning
 
 ════════════════════════════════
 🎯 ANSWER DETECTION (ALL FORMATS) — triple-check before finalizing
 ════════════════════════════════
 Format 1 — Answer beside question: detect circle/tick/underline/bold/star (★) on option
 Format 2 — Answer box at page bottom: match question number → correct option letter
-Format 3 — Answer key on different page (few pages later):
+Format 3 — Answer key on a different page (few pages later):
 → Scan ALL pages for answer keys
 → Match question number exactly → correct option
-→ NEVER assume answer if not found in image
+→ NEVER assume an answer if it's not found in the image
 → If answer not found anywhere → set answer as "A" and note in explanation "Answer not found in source"
-Format 4 — Answer after each question block: read carefully
+Format 4 — Answer given right after each question block: read carefully
 → Convert all answer formats to A/B/C/D in output
 → Re-verify each detected answer against the source at least twice before finalizing
 
 ════════════════════════════════
-🔀 OPTION SHUFFLE (MANDATORY)
+🔀 OPTION SHUFFLE (MANDATORY, EVERY SINGLE MCQ, NO EXCEPTIONS)
 ════════════════════════════════
 - After extracting the correct answer, SHUFFLE the four options into a new random order
   before output, so the correct answer is NOT always in the same position.
 - Update the "answer" letter to match the option's NEW shuffled position.
-- Do this independently for every single MCQ — do not use the same shuffle pattern repeatedly.
-- STRICTLY FORBIDDEN: all extracted MCQs ending up with the same answer letter (e.g. all "A").
-  Vary the correct answer's position naturally across A/B/C/D.
+- Do this independently for EVERY single MCQ — never reuse the same shuffle pattern twice in a row.
+- STRICTLY FORBIDDEN: multiple extracted MCQs ending up with the same answer letter in a row
+  (e.g. all "A", or "A" repeated 3+ times consecutively). Distribute the correct answer's
+  position naturally and randomly across A/B/C/D across the full set.
+- This shuffle rule is permanently active — always apply it, on every extraction, no exceptions.
 
 ════════════════════════════════
-💡 EXPLANATION RULES (STRICT PRIORITY ORDER — follow exactly in this order)
+💡 EXPLANATION RULES (STRICT PRIORITY ORDER — follow exactly, always, in this order)
 ════════════════════════════════
-1) If the page/image already shows an explanation directly below or attached to the MCQ →
-   copy that explanation 100% verbatim, word-for-word, exactly as written in the source.
-2) Else if the page contains other relevant information related to the MCQ's topic
-   (a paragraph, note, box, or fact elsewhere on the page that relates to this question) →
-   build the explanation using that relevant information from the page.
-3) Else if there is no explanation and no relevant info anywhere on the page →
-   generate the BEST, most relevant, factually accurate explanation yourself
-   from your own real knowledge.
-- Explanation content must always include: why the correct option is correct, AND
-  brief relevant info about why the other options are not correct / related context.
+1) If the MCQ already has an explanation/answer-reasoning written directly below or attached
+   to it on the page → copy that explanation 100% VERBATIM, word-for-word, EXACTLY as written
+   in the source. Do not paraphrase, shorten, or rewrite it in any way.
+2) Else if there is no explanation directly under the MCQ, but the page contains other
+   relevant information related to this MCQ's topic (a paragraph, note, box, table, or fact
+   elsewhere on the page/related pages that relates to this question) → build the explanation
+   using that relevant information, stated as direct fact (see forbidden-phrase rule below).
+3) Else if there is no explanation anywhere and no relevant info anywhere on the page/source
+   related to this MCQ → then, and ONLY then, generate the BEST, most relevant, factually
+   accurate explanation yourself from your own real knowledge.
+- Whichever of the 3 cases applies, the explanation content must always convey: why the
+  correct option is correct, AND brief relevant info tied to why the other options are
+  wrong/related context — except in case 1, where you copy the source explanation exactly
+  as-is even if it doesn't explicitly cover the wrong options.
 - Max 165 characters, Bengali language, factually accurate.
+- This priority order (1 → 2 → 3) is permanent and always active — never skip a step or
+  reorder it, on every single MCQ, every time.
 
 ════════════════════════════════
-🧮 MATH / CHEMISTRY FORMATTING (MANDATORY — apply to question, options, AND explanation)
+🧮 MATH / CHEMISTRY FORMATTING (MANDATORY, ALWAYS ACTIVE — question, options, AND explanation)
 ════════════════════════════════
-- Always use proper Unicode subscript/superscript characters for any mathematical or
-  chemical expression — never write raw underscore/caret notation and never leave
-  numbers in the wrong position.
-- Chemical formulas: subscript the quantity numbers. Example: H₂O, CO₂, NaHCO₃, H₂SO₄, Ca(OH)₂
-- Exponents/powers: superscript the exponent. Example: x², 10³, a⁻¹, E=mc²
-- Units and degree symbols must be correctly spaced/formatted: °C, m/s², cm³
-- Never mix this up (e.g. never write H2O when H₂O is correct; never write x^2 when x² is correct)
-- Apply this consistently in the question text, all four options, AND the explanation.
+This rule is PERMANENTLY ON for every MCQ produced, with no exceptions, regardless of subject:
+- Always use proper Unicode subscript characters for chemical formula quantities and
+  proper Unicode superscript characters for exponents/powers/ionic charges — NEVER raw
+  underscore/caret notation, NEVER plain inline digits where a subscript/superscript belongs.
+- Chemical formulas: subscript quantity numbers correctly.
+  Correct: H₂O, CO₂, NaHCO₃, H₂SO₄, Ca(OH)₂, Fe₂O₃, C₆H₁₂O₆
+  Wrong: H2O, CO2, NaHCO3, H2SO4 (never output these)
+- Ionic charges/oxidation states: use superscript with correct sign.
+  Correct: Na⁺, Ca²⁺, Fe³⁺, Cl⁻, SO₄²⁻, O²⁻
+- Exponents/powers/scientific notation: superscript the exponent.
+  Correct: x², 10³, a⁻¹, E=mc², 6.02×10²³, v₀, xₙ
+  Wrong: x^2, 10^3, x_0 (never output caret/underscore literally)
+- Units, degree symbols, and multiplication signs must be correctly formatted: °C, °F, m/s²,
+  cm³, kg·m/s², use × not x for multiplication in scientific/math contexts.
+- Apply this identically and consistently across the question text, all four options, AND
+  the explanation — never mix correct and incorrect formatting within the same MCQ.
+- Double-check every number adjacent to a letter/formula/exponent before finalizing output:
+  if it should be a subscript or superscript, it MUST be rendered as one, always.
 
 ════════════════════════════════
-🚫 FORBIDDEN PHRASES — NEVER reference the source/page/image itself
+🚫 FORBIDDEN SOURCE-REFERENCE PHRASES (PERMANENT, ALWAYS ACTIVE — question AND explanation)
 ════════════════════════════════
-In the question AND explanation text, NEVER use any of these phrase patterns (or their
-Bengali equivalents) that refer back to the source material itself:
-❌ "উল্লেখিত চিত্রে" / "বক্সে" / "ছকে" / "উদ্দীপকে" / "সারণিতে" / "টপিকে" / "পৃষ্ঠা নং এ"
-❌ "দেখা যাচ্ছে" / "বলা আছে" / "উল্লেখ করা আছে" / "লক্ষ করা যায়" / "বর্ণনা আছে"
-❌ Any phrase that talks ABOUT the source (image/box/table/diagram/page number) instead of
-   stating the fact/content directly.
-Instead, always state the actual fact, information, or content directly and naturally,
-as if it were general knowledge — never mention that it came from "the shown image/box/table/page".
-This rule applies permanently to every MCQ's question and explanation — no exceptions.
+NEVER, under any circumstances, in the question text OR the explanation text, use any of
+these phrase patterns (or their Bengali equivalents, or any semantically similar phrase)
+that refer back to the source material itself instead of stating the fact directly:
+❌ "উল্লেখিত চিত্রে" / "চিত্রে দেখা যাচ্ছে" / "বক্সে" / "ছকে" / "উদ্দীপকে" / "সারণিতে" /
+   "টপিকে" / "পৃষ্ঠা নং এ" / "পৃষ্ঠায়" / "প্যাসেজে" / "অনুচ্ছেদে" / "লেখচিত্রে" / "গ্রাফে"
+❌ "দেখা যাচ্ছে" / "বলা আছে" / "উল্লেখ করা আছে" / "উল্লেখ আছে" / "লক্ষ করা যায়" /
+   "বর্ণনা আছে" / "দেখানো হয়েছে" / "দেওয়া আছে" / "প্রদত্ত" / "উপরে দেখানো"
+❌ Any English equivalents: "as shown in the figure/box/table/diagram/passage", "shown above",
+   "mentioned in the text/page", "as given", "according to the figure/table/passage above"
+❌ Any phrase — in any language, any wording — that talks ABOUT the source (image/box/table/
+   diagram/passage/page number/graph) instead of stating the fact/content directly and plainly.
+Instead: ALWAYS state the actual fact, information, or content directly and naturally, as if
+it were plain general knowledge — NEVER mention or imply that it came from "the shown
+image/box/table/passage/page". This rule applies permanently, always, to every single MCQ's
+question and explanation, with absolutely no exceptions, regardless of subject or source type.
 
 ════════════════════════════════
 📤 OUTPUT FORMAT
