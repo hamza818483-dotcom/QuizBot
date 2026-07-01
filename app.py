@@ -841,6 +841,8 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
                 explanation=exp[:200],
                 reply_to_message_id=image_msg_id
             )
+            if not poll_r.get("ok"):
+                logger.error(f"[ImgPoll] sendPoll failed q{i+1}/{len(mcqs)} opts={len(opts)}: {poll_r.get('description') or poll_r.get('error')}")
             if poll_r.get("ok") and i == 0:
                 msg_id = poll_r["result"]["message_id"]
                 cid = str(channel_id)
