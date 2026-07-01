@@ -35,8 +35,8 @@ export default {
     if (url.pathname === '/tg-senddoc') return await handleTgSendDoc(request);
 
     // Web Quiz — bot ছাড়াই চলে, D1 থেকে directly serve
-    if (url.pathname.startsWith('/quiz/')) return await handleWebQuiz(request, url, env);
-    if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url);
+    if (url.pathname.startsWith('/quiz/') || url.pathname.startsWith('/exam/')) return await handleWebQuiz(request, url, env);
+    if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url, env);
 
     // Webhook → forward everything to HF Space
     if (url.pathname === '/webhook' || url.pathname.startsWith('/webhook/')) {
@@ -303,21 +303,60 @@ async function handleTgSendDoc(request) {
 // WEB QUIZ — Bot ছাড়াই D1 থেকে quiz serve
 // URL: /quiz/qz_XXXXX
 // ============================================================
-async function handleQuizData(request, url) {
+async function handleQuizData(request, url, env) {
+  const id = url.searchParams.get('id');
+  if (!id) return jsonResp({ ok: false, error: 'No id' }, 400);
+
+  // Layer 1: D1 quizzes table (CSV-uploaded quizzes, qz_ prefix)
   try {
-    const id = url.searchParams.get('id');
-    if (!id) return jsonResp({ ok: false, error: 'No id' }, 400);
     const row = await DB.prepare("SELECT * FROM quizzes WHERE id=?1").bind(id).first();
-    if (!row) return jsonResp({ ok: false, error: 'Not found' }, 404);
-    const questions = JSON.parse(row.csv_data || '[]');
-    return jsonResp({ ok: true, name: row.name, timer: row.timer || 30, questions });
+    if (row) {
+      const questions = JSON.parse(row.csv_data || '[]');
+      return jsonResp({ ok: true, name: row.name, timer: row.timer || 30, questions });
+    }
   } catch(e) {
-    return jsonResp({ ok: false, error: e.message }, 500);
+    console.warn('[quiz-data] D1 failed:', e.message);
   }
+
+  // Layer 2: Render (image/poll-based quizzes live in Supabase via Render's API)
+  const RENDER_URL = (env && env.RENDER_URL) || 'https://quizbot-s482.onrender.com';
+  try {
+    const r = await fetch(`${RENDER_URL}/api/exam/${id}`, { signal: AbortSignal.timeout(8000) });
+    if (r.ok) {
+      const d = await r.json();
+      if (d && d.mcqs && d.mcqs.length) {
+        const questions = d.mcqs.map(m => ({
+          question: m.question, options: m.options,
+          answer_index: m.answer, explanation: m.explanation || ''
+        }));
+        return jsonResp({ ok: true, name: d.topic || 'ATLAS Quiz', timer: 30, questions });
+      }
+    }
+  } catch(e) {
+    console.warn('[quiz-data] Render failed:', e.message);
+  }
+
+  // Layer 3: Supabase quiz_backups directly
+  try {
+    const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+    const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+    const r2 = await fetch(`${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${id}&select=*`, {
+      headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}` }
+    });
+    const rows = await r2.json();
+    if (rows && rows[0]) {
+      const questions = JSON.parse(rows[0].questions || '[]');
+      return jsonResp({ ok: true, name: rows[0].name || 'ATLAS Quiz', timer: 30, questions });
+    }
+  } catch(e) {
+    console.warn('[quiz-data] Supabase failed:', e.message);
+  }
+
+  return jsonResp({ ok: false, error: 'Not found' }, 404);
 }
 
 async function handleWebQuiz(request, url, env) {
-  const quizId = url.pathname.replace('/quiz/', '').split('?')[0];
+  const quizId = url.pathname.replace('/quiz/', '').replace('/exam/', '').split('?')[0];
   if (!quizId) return new Response('Quiz ID missing', { status: 400 });
 
   const html = `<!DOCTYPE html>
