@@ -1906,6 +1906,75 @@ async def handle_qpdf_command(msg: dict):
         await send_msg(chat_id, f"❌ Error: {e}")
 
 # ============================================================
+# MHTML/HTML → CSV — chorcha.net প্রশ্ন-উত্তর কে CSV এ export
+# ============================================================
+async def handle_qcsv_command(msg: dict):
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ chorcha.net থেকে save করা .mhtml/.html file-এ reply করে /qcsv দাও!\n\n"
+            "<b>যেভাবে file বানাবে:</b>\n"
+            "Chrome → পেজ খুলো (ক ভান্ডার/খ ভান্ডার/CQ) → Ctrl+S → "
+            "Save as type: <code>Webpage, Single File (*.mhtml)</code>"
+        )
+        return
+
+    doc = reply["document"]
+    file_name = doc.get("file_name", "")
+    if not (file_name.lower().endswith(".mhtml") or file_name.lower().endswith(".html") or file_name.lower().endswith(".htm")):
+        await send_msg(chat_id, "❌ শুধু .mhtml বা .html file support করে!")
+        return
+
+    loading = await send_msg(chat_id, "⏳ File পড়া হচ্ছে...")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        raw_bytes = await download_tg_file(doc["file_id"])
+        data = await asyncio.to_thread(parse_chorcha_file, raw_bytes)
+
+        if not data["items"]:
+            if loading_id:
+                await edit_msg(chat_id, loading_id, "❌ কোনো প্রশ্ন/উত্তর খুঁজে পাওয়া যায়নি! Format ভিন্ন হতে পারে।")
+            return
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"✅ {len(data['items'])} টি প্রশ্ন পাওয়া গেছে!\n📄 CSV বানানো হচ্ছে...")
+
+        import io as _io, csv as _csv_mod
+        buf = _io.StringIO()
+        writer = _csv_mod.writer(buf)
+
+        if data["format"] == "cq":
+            writer.writerow(["no", "stem", "tag", "sub_label", "sub_question", "sub_answer"])
+            for it in data["items"]:
+                for sub in it["subs"]:
+                    writer.writerow([
+                        it["no"], it["stem"], it["tag"],
+                        sub["label"], sub["question"], sub["answer"]
+                    ])
+        else:
+            writer.writerow(["no", "tag", "question", "answer"])
+            for it in data["items"]:
+                writer.writerow([it["no"], it["tag"], it["question"], it["answer"]])
+
+        csv_bytes = ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", data["page_title"])[:50] or "ATLAS_QuestionBank"
+        await send_document(chat_id, csv_bytes, f"{safe_title}.csv",
+            caption=f"📚 {data['page_title']}\n📝 মোট প্রশ্ন: {len(data['items'])}\n🚀 ATLAS APP",
+            mime_type="text/csv")
+
+        if loading_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
+
+    except Exception as e:
+        logger.error(f"[QCSV] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+# ============================================================
 # SOLVE SHEET PDF — Practice Sheet same style (2-col, boxed)
 # ============================================================
 def _build_solve_sheet_html(topic: str, page: int, mcqs: list, answers: dict = None) -> str:
@@ -4722,6 +4791,8 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         await handle_txt_command(msg)
+    elif text.startswith("/qcsv"):
+        asyncio.create_task(handle_qcsv_command(msg))
     elif text.startswith("/qpdf"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
