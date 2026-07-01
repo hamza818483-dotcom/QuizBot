@@ -338,7 +338,140 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
 # ============================================================
 # QUIZ_SESSIONS / QUIZ_TIMERS (D1 quiz in-memory state) now live in quiz.py
 
-DEFAULT_TOPIC = "Pagewise MCQ Solve By ATLAS"
+# ============================================================
+# QBM — 100% copied extraction prompt from AtlasMasterBot (pdf_handler.py)
+# ============================================================
+QBM_EXTRACT_PROMPT = """YOU ARE A STRICT MCQ EXTRACTOR. YOUR ONLY JOB IS TO EXTRACT EXISTING MCQs. FOLLOW EVERY RULE WITHOUT EXCEPTION.
+
+════════════════════════════════
+🔴 ABSOLUTE FORBIDDEN RULES
+════════════════════════════════
+❌ NEVER create new questions from any text or information
+❌ NEVER add extra MCQs beyond what exists in the image
+❌ NEVER skip any existing MCQ — extract ALL of them
+❌ NEVER guess an answer — only detect from image
+❌ NEVER modify question text (only remove numbering)
+
+════════════════════════════════
+📌 EXTRACTION RULES
+════════════════════════════════
+✅ Extract ALL MCQs — Bangla, English, or mixed language
+✅ Extract from any font style — printed, handwritten, bold, italic
+✅ Extract from blurry, low quality, or scanned PDF images
+✅ Perform MULTIPLE OCR passes — triple check every MCQ
+✅ Remove question numbering only: (১., 1., Q1., Q.1, ক., a.) from question text
+✅ Keep original question and option text intact
+✅ If any major spelling mistake seen,corrrect it
+════════════════════════════════
+🎯 ANSWER DETECTION (ALL FORMATS)
+════════════════════════════════
+Format 1 — Answer beside question: detect circle/tick/underline/bold/star (★) on option
+Format 2 — Answer box at page bottom: match question number → correct option letter
+Format 3 — Answer key on different page (few pages later):
+→ Scan ALL pages for answer keys
+→ Match question number exactly → correct option
+→ NEVER assume answer if not found in image
+→ If answer not found anywhere → set answer as "A" and note in explanation "Answer not found in source"
+Format 4 — Answer after each question block: read carefully
+→ Convert all answer formats to A/B/C/D in output
+
+════════════════════════════════
+💡 EXPLANATION RULES
+════════════════════════════════
+- Why correct answer is correct (from Gemini latest real knowledge)
+- Why each wrong option is wrong (briefly)
+- Related topic info from latest real source
+- Max 165 characters, Bengali language
+- Must be factually accurate — use Gemini's real knowledge
+
+════════════════════════════════
+📤 OUTPUT FORMAT
+════════════════════════════════
+Output ONLY a valid JSON array. No extra text. No markdown. No explanation outside JSON.
+If NO MCQ exists in image → return exactly: []
+
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}]"""
+
+
+async def _gemini_extract_mcq(img, page_num: int) -> list:
+    """Gemini call with QBM_EXTRACT_PROMPT (extraction, not generation)"""
+    max_retries = len(key_rotator.keys) if key_rotator.keys else 3
+    for attempt in range(max_retries):
+        try:
+            key = key_rotator.get_key()
+            from google import genai as gai
+            from google.genai import types
+            client = gai.Client(api_key=key)
+            img_b64 = _img_to_data_url(img).split(",", 1)[-1]
+
+            def _call_gemini():
+                return client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[
+                        types.Part.from_text(text=QBM_EXTRACT_PROMPT),
+                        types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                    ]
+                )
+            response = await asyncio.to_thread(_call_gemini)
+            valid = _parse_mcq_json(response.text)
+            if valid:
+                return valid
+        except Exception as e:
+            logger.warning(f"[QBM-Gemini] attempt {attempt+1} failed (page {page_num}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+            continue
+    return []
+
+
+async def generate_mcq_extract_from_image(img, page_num: int, retries: int = 3) -> list:
+    """
+    QBM mode: STRICTLY extract already-existing MCQs from the image (no generation).
+    Groq primary → Gemini → NVIDIA/OpenRouter/Nemotron/Gemma fallback chain.
+    """
+    data_url = _img_to_data_url(img)
+    if not data_url:
+        return []
+
+    for attempt in range(retries):
+        # 1) Groq (primary)
+        key = os.environ.get("GROQ_API_KEY", "")
+        if key:
+            txt = await _post_openai_compat(
+                "https://api.groq.com/openai/v1/chat/completions",
+                key, "meta-llama/llama-4-scout-17b-16e-instruct",
+                data_url, QBM_EXTRACT_PROMPT
+            )
+            out = _parse_mcq_json(txt)
+            if out:
+                return out
+
+        # 2) Gemini
+        out = await _gemini_extract_mcq(img, page_num)
+        if out:
+            return out
+
+        # 3) Other vision providers with extraction prompt
+        for prov, url, model, key_env in [
+            ("nvidia", "https://integrate.api.nvidia.com/v1/chat/completions",
+             "meta/llama-3.2-11b-vision-instruct", "NVIDIA_API_KEY"),
+            ("openrouter_qwen", "https://openrouter.ai/api/v1/chat/completions",
+             "qwen/qwen-2-vl-72b-instruct", "OPENROUTER_API_KEY"),
+        ]:
+            pkey = os.environ.get(key_env, "")
+            if not pkey:
+                continue
+            txt = await _post_openai_compat(url, pkey, model, data_url, QBM_EXTRACT_PROMPT)
+            out = _parse_mcq_json(txt)
+            if out:
+                return out
+
+        await asyncio.sleep(2)
+
+    return []
+
+
+
 QUIZ_Q_SEC = 35
 
 # ============================================================
@@ -2469,6 +2602,125 @@ async def process_pdf_pages(
         f"✅ <b>Processing Complete!</b>\n\n📄 File: {file_name}\n🎯 Topic: {topic}\n📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}")
 
 # ============================================================
+# FEATURE: /qbm — Question Bank Maker (PDF বা Image reply দুটোতেই কাজ করে)
+# Usage: /qbm -p 1-5 -c @channel -m "Topic" -t topicId 10
+# ============================================================
+async def handle_qbm(msg: dict):
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    uname = msg["from"].get("first_name", "User")
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not (reply.get("document") or reply.get("photo")):
+        await send_msg(chat_id,
+            "❌ PDF অথবা Image-এ reply করে /qbm দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/qbm -p 1-5 -c @channel -m \"Topic\" -t group_id [5]</code>\n\n"
+            "📌 -p = page range (শুধু PDF-এর জন্য, না দিলে সব page)\n"
+            "📌 -c = channel id (না দিলে list দেখাবে)\n"
+            "📌 -m = topic name\n"
+            "📌 -t = topic/thread id (group হলে)\n"
+            "📌 [N] = per page MCQ count (bracket সহ)"
+        )
+        return
+
+    params = _parse_pdfm_params(text)
+    topic = params["topic"] or "🌟ATLAS QBM"
+    page_range = params["page_range"]
+    channel_id = params["channel_id"]
+    mcq_count = params["mcq_count"]
+    thread_id = params["thread_id"]
+
+    status_r = await send_msg(chat_id, "⏳ File download হচ্ছে...")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    try:
+        if reply.get("photo"):
+            # ---- Image reply: single page ----
+            file_id = reply["photo"][-1]["file_id"]
+            file_name = "image.jpg"
+            img_bytes = await download_tg_file(file_id)
+            img = PILImage.open(BytesIO(img_bytes))
+            pages = [(1, img)]
+
+        elif reply["document"].get("file_name", "").lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            # ---- Document sent as image file ----
+            file_id = reply["document"]["file_id"]
+            file_name = reply["document"].get("file_name", "image.jpg")
+            img_bytes = await download_tg_file(file_id)
+            img = PILImage.open(BytesIO(img_bytes))
+            pages = [(1, img)]
+
+        elif reply["document"].get("file_name", "").lower().endswith(".pdf"):
+            # ---- PDF reply: multi page ----
+            file_id = reply["document"]["file_id"]
+            file_name = reply["document"].get("file_name", "document.pdf")
+            pdf_bytes = await download_tg_file(file_id)
+            pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, page_range)
+
+        else:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ শুধু PDF অথবা Image (.jpg/.png/.webp) support করে!")
+            return
+
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ QBM Extraction শুরু হচ্ছে...")
+
+        if not channel_id:
+            channels = await db_get_channels()
+            if not channels:
+                await process_pdfm_pages(chat_id, uid, uname, pages, topic,
+                    mcq_count, None, True, file_name, status_msg_id, thread_id,
+                    extract_mode=True)
+                return
+
+            app.state.pdf_cache = getattr(app.state, "pdf_cache", {})
+            app.state.pdf_cache[f"qbm_img_{uid}"] = pages
+            sb.table("quiz_sessions").upsert({
+                "key": f"qbm_pending_{uid}",
+                "data": json.dumps({
+                    "topic": topic, "mcq_count": mcq_count,
+                    "file_name": file_name, "status_msg_id": status_msg_id,
+                    "thread_id": thread_id,
+                }),
+                "updated_at": int(time.time())
+            }).execute()
+
+            kb = {"inline_keyboard": []}
+            for ch in channels:
+                ch_id = ch.get("channel_id", "")
+                ch_name = ch.get("channel_name", ch_id)
+                kb["inline_keyboard"].append([{
+                    "text": f"📢 {ch_name}",
+                    "callback_data": f"qbmch_{ch_id}_{uid}"
+                }])
+            kb["inline_keyboard"].append([{
+                "text": "📄 CSV Only",
+                "callback_data": f"qbmch_csv_{uid}"
+            }])
+            await send_msg(chat_id,
+                f"📋 <b>{len(pages)} page</b>\n🎯 Topic: {topic}\n\nChannel select করো:",
+                reply_markup=kb
+            )
+            return
+
+        await process_pdfm_pages(chat_id, uid, uname, pages, topic,
+            mcq_count, channel_id, False, file_name, status_msg_id, thread_id,
+            extract_mode=True)
+
+    except Exception as e:
+        logger.error(f"[QBM] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+
+# ============================================================
 # FEATURE: /pdfm — PDF pagewise MCQ to channel
 # Usage: /pdfm -p 1-5 -c @channel -m "Topic" -t topicId 10
 # ============================================================
@@ -2586,7 +2838,7 @@ def _parse_pdfm_params(text: str) -> dict:
 
     m = re.search(r'-p\s+([\d,\-]+)', text)
     if m:
-        result["page_range"] = parse_page_range(m.group(1))
+        result["page_range"] = m.group(1)
 
     m = re.search(r'-c\s+(@\S+|-100\d+)', text)
     if m:
@@ -2617,7 +2869,8 @@ async def process_pdfm_pages(
     channel_id, csv_only: bool,
     file_name: str = "document.pdf",
     status_msg_id: int = None,
-    thread_id: int = None
+    thread_id: int = None,
+    extract_mode: bool = False
 ):
     """
     /pdfm এর main processing — /pdf এর মতো কিন্তু নতুন caption format সহ।
@@ -2663,7 +2916,10 @@ async def process_pdfm_pages(
             _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
 
         try:
-            mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+            if extract_mode:
+                mcqs = await generate_mcq_extract_from_image(img, page_num)
+            else:
+                mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
@@ -4916,9 +5172,7 @@ async def handle_message(msg: dict):
     elif text == "/info2":
         await handle_info2(msg)
     elif text.startswith("/qbm"):
-        # /qbm = alias for /pdfm (Question Bank Maker, same PDF pagewise MCQ feature)
-        msg["text"] = "/pdfm" + text[len("/qbm"):]
-        asyncio.create_task(handle_pdfm(msg))
+        asyncio.create_task(handle_qbm(msg))
     elif text.startswith("/pdfm"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
@@ -5366,6 +5620,33 @@ async def handle_callback(query: dict):
                 "message_id": msg_id,
                 "text": "❌ Cancelled!"
             })
+
+        elif data.startswith("qbmch_"):
+            parts = data.split("_")
+            channel = parts[1]
+            orig_uid = int(parts[2])
+            if uid != orig_uid:
+                return
+            row = sb.table("quiz_sessions").select("data").eq("key", f"qbm_pending_{uid}").execute()
+            if not row.data:
+                await send_msg(chat_id, "❌ Session expired!")
+                return
+            pending = json.loads(row.data[0]["data"])
+            pages = getattr(app.state,"pdf_cache",{}).get(f"qbm_img_{uid}")
+            if not pages:
+                await send_msg(chat_id, "❌ Session expired! আবার /qbm দিয়ে শুরু করো।")
+                return
+            csv_only = channel == "csv"
+            ch = None if csv_only else channel
+            asyncio.create_task(process_pdfm_pages(
+                chat_id, uid, user.get("first_name","User"), pages,
+                pending["topic"], pending.get("mcq_count"), ch, csv_only,
+                pending.get("file_name","document.pdf"),
+                pending.get("status_msg_id"),
+                thread_id=pending.get("thread_id"),
+                extract_mode=True
+            ))
+            getattr(app.state,"pdf_cache",{}).pop(f"qbm_img_{uid}", None)
 
         elif data.startswith("pdfmch_"):
             parts = data.split("_")
