@@ -5,7 +5,7 @@
 // ============================================================
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     globalThis.DB = env.DB;
     globalThis.ATLAS_BOT_TOKEN = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN;
@@ -57,9 +57,20 @@ export default {
       }
     }
 
-    // Webhook → forward everything to HF Space
+    // Webhook → ack Telegram INSTANTLY, forward to Render in background.
+    // v4.4: previously this awaited Render synchronously, so a cold Render
+    // start (30-50s) meant Telegram itself waited that long for every
+    // command — the "1 min delay" bug. Telegram only needs a 200 quickly;
+    // it doesn't care when the actual processing happens.
     if (url.pathname === '/webhook' || url.pathname.startsWith('/webhook/')) {
-      return await forwardToHF(request, env);
+      const bodyText = await request.text();
+      const forwardReq = new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: bodyText,
+      });
+      ctx.waitUntil(forwardToHF(forwardReq, env));
+      return new Response('OK');
     }
 
     // Health check
@@ -548,7 +559,7 @@ async function forwardToHF(request, env) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body,
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(45000), // background now — safe to wait out a cold start
     });
     const kv = await env.DB.prepare("SELECT value FROM kv_store WHERE key='active_webhook'").first().catch(()=>null);
     if (!kv || kv.value !== 'render') {
