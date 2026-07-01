@@ -3612,6 +3612,7 @@ async def handle_poll_again(cache_id: str, user: dict, chat_id: int):
     await send_msg(chat_id, "3️⃣ 2️⃣ 1️⃣ 🚀 শুরু!")
     await asyncio.sleep(1)
 
+    poll_fail_count = 0
     for i, mcq in enumerate(mcqs):
         opts = mcq.get("options", [])
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
@@ -3621,8 +3622,13 @@ async def handle_poll_again(cache_id: str, user: dict, chat_id: int):
         exp = mcq.get("explanation", "")
         if exp_footer:
             exp = f"{exp}\n{exp_footer}"
-        await send_poll(chat_id, q_text, opts, ans_idx, explanation=exp[:200])
+        poll_res = await send_poll(chat_id, q_text, opts, ans_idx, explanation=exp[:200])
+        if not poll_res.get("ok"):
+            poll_fail_count += 1
+            logger.error(f"[PollAgain] sendPoll failed q{i+1}/{total}: {poll_res.get('description') or poll_res.get('error')}")
         await asyncio.sleep(1.5)
+    if poll_fail_count > 0:
+        await notify_owner(f"⚠️ Poll Practice ({cache_id[:8]}): {poll_fail_count}/{total} poll পাঠাতে ব্যর্থ হয়েছে। Render logs চেক করুন।")
 
     end_text = (
         f"✅ <b>Poll শেষ!</b>\n\n🎯 Topic: {topic}\n"
@@ -3713,6 +3719,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
     await send_msg(chat_id, "3️⃣ 2️⃣ 1️⃣ 🚀 শুরু!")
     await asyncio.sleep(1)
 
+    poll_fail_count2 = 0
     for i, mcq in enumerate(new_mcqs):
         opts = mcq.get("options", [])
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
@@ -3722,8 +3729,13 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
         exp = mcq.get("explanation", "")
         if exp_footer:
             exp = f"{exp}\n{exp_footer}"
-        await send_poll(chat_id, q_text, opts, ans_idx, explanation=exp[:200])
+        poll_res2 = await send_poll(chat_id, q_text, opts, ans_idx, explanation=exp[:200])
+        if not poll_res2.get("ok"):
+            poll_fail_count2 += 1
+            logger.error(f"[PollNew] sendPoll failed q{i+1}/{total}: {poll_res2.get('description') or poll_res2.get('error')}")
         await asyncio.sleep(1.5)
+    if poll_fail_count2 > 0:
+        await notify_owner(f"⚠️ New Poll ({new_cache_id[:8]}): {poll_fail_count2}/{total} poll পাঠাতে ব্যর্থ হয়েছে। Render logs চেক করুন।")
 
     remaining_new = 5 - (count + 1)
     kb = _poll_end_kb(new_cache_id, new_cache or cache)
@@ -3884,6 +3896,7 @@ async def _send_quiz_question(uid: int):
     })
 
     if not poll_r.get("ok"):
+        logger.error(f"[QuizSolve] sendPoll failed q{i+1}/{total}: {poll_r.get('description') or poll_r.get('error')}")
         st["idx"] += 1
         if st["idx"] >= len(st["mcqs"]):
             await _finish_quiz(uid)
