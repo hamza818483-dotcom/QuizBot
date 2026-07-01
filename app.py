@@ -64,6 +64,107 @@ from chorcha_pdf import build_chorcha_pdf_html
 # Ported 100% from AtlasMasterBot's mhtml_handler.py
 from atlas_mhtml import parse_mhtml_to_mcqs, results_to_csv_bytes
 
+# ============================================================
+# mhtml/html AUTO QUEUE SYSTEM (ported from AtlasMasterBot)
+# File পাঠালেই content দেখে bot নিজে সিদ্ধান্ত নেয়:
+#   - MCQ format (options সহ) পাওয়া গেলে → auto CSV বানায় (queue দিয়ে, একটার পর একটা)
+#   - Q&A/CQ format (options ছাড়া, চর্চা ক-ভান্ডার/খ-ভান্ডার/CQ স্টাইল) পাওয়া গেলে
+#     → বলে দেয় /qpdf দিয়ে PDF বানাতে (কারণ ওটা alada page structure)
+#   - দুটোর কোনোটাই না পেলে → error দেখায়
+# ============================================================
+_mhtml_auto_queue = asyncio.Queue()
+_mhtml_worker_started = False
+
+
+def _detect_mhtml_format(raw_bytes: bytes, file_name: str) -> str:
+    """
+    Content দেখে বলে দেয় এই file কোন pipeline এ যাবে:
+      "mcq"  -> atlas_mhtml (options সহ MCQ, Chorcha.net p-5/rounded-xl বা Testmoz) -> auto CSV
+      "qa"   -> chorcha_parser (Q&A/CQ, border/rounded-xl স্টাইল, options ছাড়া)   -> /qpdf বলবে
+      "none" -> কোনো চেনা format পাওয়া যায়নি
+    """
+    try:
+        parsed = parse_mhtml_to_mcqs(raw_bytes, file_name)
+        if parsed["results"]:
+            return "mcq"
+    except Exception as e:
+        logger.warning(f"[MHTML-Detect] mcq-format check failed: {e}")
+
+    try:
+        qa_data = parse_chorcha_file(raw_bytes)
+        if qa_data.get("items"):
+            return "qa"
+    except Exception as e:
+        logger.warning(f"[MHTML-Detect] qa-format check failed: {e}")
+
+    return "none"
+
+
+async def _mhtml_auto_worker():
+    """Queue worker — একটার পর একটা file process করে (AtlasMasterBot এর মতোই serial queue)."""
+    while True:
+        msg = await _mhtml_auto_queue.get()
+        try:
+            await _process_mhtml_auto(msg)
+        except Exception as e:
+            logger.error(f"[MHTML-Worker] Error: {e}")
+        finally:
+            _mhtml_auto_queue.task_done()
+
+
+async def _process_mhtml_auto(msg: dict):
+    chat_id = msg["chat"]["id"]
+    doc = msg["document"]
+    file_name = doc.get("file_name", "")
+
+    loading = await send_msg(chat_id, "🔍 File বিশ্লেষণ করা হচ্ছে...")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        raw_bytes = await download_tg_file(doc["file_id"])
+        fmt = await asyncio.to_thread(_detect_mhtml_format, raw_bytes, file_name)
+
+        if fmt == "qa":
+            if loading_id:
+                await edit_msg(chat_id, loading_id,
+                    "📋 এই file-টা Q&A/CQ ফরম্যাটের (চর্চা ক-ভান্ডার/খ-ভান্ডার/CQ)!\n\n"
+                    "এটার জন্য PDF বানাতে হলে এই file-এ <b>reply করে</b> "
+                    "<code>/qpdf</code> কমান্ড দাও।")
+            return
+
+        if fmt == "none":
+            if loading_id:
+                await edit_msg(chat_id, loading_id,
+                    "❌ কোনো চেনা প্রশ্ন/উত্তর ফরম্যাট খুঁজে পাওয়া যায়নি! "
+                    "Format ভিন্ন হতে পারে।")
+            return
+
+        # fmt == "mcq" → CSV বানাও
+        if loading_id:
+            await edit_msg(chat_id, loading_id, "⏳ MCQ CSV বানানো হচ্ছে...")
+
+        parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, raw_bytes, file_name)
+        results = parsed["results"]
+        source = parsed["source"] or "Unknown"
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"✅ {len(results)} টি MCQ পাওয়া গেছে! ({source})\n📄 CSV বানানো হচ্ছে...")
+
+        csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
+
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", file_name.rsplit(".", 1)[0])[:50] or "ATLAS_QuestionBank"
+        await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
+            caption=f"📚 Source: {source}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP",
+            mime_type="text/csv")
+
+        if loading_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
+
+    except Exception as e:
+        logger.error(f"[MHTML-Auto] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+
 # D1 Quiz System (fully independent module — see quiz.py)
 from quiz import (
     QUIZ_SESSIONS, QUIZ_TIMERS,
@@ -5250,11 +5351,14 @@ async def handle_message(msg: dict):
         if collected:
             return
 
-    # Auto mhtml/html → CSV (no command needed — just send the file)
+    # Auto mhtml/html → smart detect (MCQ→CSV queue, Q&A/CQ→tell user to use /qpdf)
     if msg.get("document") and not msg.get("reply_to_message"):
         _dfn = msg["document"].get("file_name", "").lower()
         if _dfn.endswith(".mhtml") or _dfn.endswith(".mht") or _dfn.endswith(".html") or _dfn.endswith(".htm"):
-            asyncio.create_task(handle_qcsv_auto(msg))
+            await _mhtml_auto_queue.put(msg)
+            qsize = _mhtml_auto_queue.qsize()
+            if qsize > 1:
+                await send_msg(chat_id, f"📥 Queue-তে যোগ হয়েছে (position: {qsize})")
             return
 
 
@@ -6371,6 +6475,14 @@ async def startup():
     global BOT_START_TIME
     BOT_START_TIME = time.time()
     logger.info("[App] ATLAS BOT v4.1 starting...")
+
+    # Start mhtml/html auto-queue worker (serial processing, one file at a time)
+    global _mhtml_worker_started
+    if not _mhtml_worker_started:
+        asyncio.create_task(_mhtml_auto_worker())
+        _mhtml_worker_started = True
+        logger.info("[App] mhtml auto-queue worker started")
+
     if not BOT_TOKEN:
         logger.error("[App] BOT_TOKEN missing!")
         return
