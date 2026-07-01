@@ -4776,6 +4776,10 @@ async def handle_message(msg: dict):
         await handle_channel(msg)
     elif text == "/info2":
         await handle_info2(msg)
+    elif text.startswith("/qbm"):
+        # /qbm = alias for /pdfm (Question Bank Maker, same PDF pagewise MCQ feature)
+        msg["text"] = "/pdfm" + text[len("/qbm"):]
+        asyncio.create_task(handle_pdfm(msg))
     elif text.startswith("/pdfm"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
