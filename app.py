@@ -1999,6 +1999,58 @@ async def handle_qcsv_command(msg: dict):
         await send_msg(chat_id, f"❌ Error: {e}")
 
 # ============================================================
+# /sheet — CSV file reply থেকে সরাসরি Practice Sheet PDF
+# ============================================================
+async def handle_sheet_command(msg: dict):
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id, "❌ CSV ফাইলে reply করে /sheet দাও!")
+        return
+
+    doc = reply["document"]
+    file_name = doc.get("file_name", "")
+    if not file_name.lower().endswith(".csv"):
+        await send_msg(chat_id, "❌ শুধু .csv file support করে!")
+        return
+
+    loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        csv_bytes = await download_tg_file(doc["file_id"])
+        mcqs = _parse_csv_bytes(csv_bytes)
+
+        if not mcqs:
+            if loading_id:
+                await edit_msg(chat_id, loading_id, "❌ CSV থেকে কোনো MCQ পাওয়া যায়নি! Format ঠিক আছে কিনা দেখো।")
+            return
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n🎨 Sheet PDF বানানো হচ্ছে...")
+
+        title = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
+        html_out = _build_solve_sheet_html(title, 1, mcqs)
+        pdf_bytes = await _html_to_pdf(html_out)
+
+        if not pdf_bytes:
+            if loading_id:
+                await edit_msg(chat_id, loading_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
+            return
+
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Sheet"
+        await send_document(chat_id, pdf_bytes, f"{safe_title}_sheet.pdf",
+            caption=f"📖 Practice Sheet\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP")
+
+        if loading_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
+
+    except Exception as e:
+        logger.error(f"[SHEET] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+# ============================================================
 # SOLVE SHEET PDF — Practice Sheet same style (2-col, boxed)
 # ============================================================
 def _build_solve_sheet_html(topic: str, page: int, mcqs: list, answers: dict = None) -> str:
@@ -4819,6 +4871,8 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         await handle_txt_command(msg)
+    elif text.startswith("/sheet"):
+        asyncio.create_task(handle_sheet_command(msg))
     elif text.startswith("/qcsv"):
         asyncio.create_task(handle_qcsv_command(msg))
     elif text.startswith("/qpdf"):
