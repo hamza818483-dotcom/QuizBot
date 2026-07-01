@@ -212,6 +212,20 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
         logger.warning(f"[AI-ROT] {model} err: {e}")
         return ""
 
+async def _gen_groq(img, topic, count):
+    key = os.environ.get("GROQ_API_KEY", "")
+    if not key:
+        return []
+    data_url = _img_to_data_url(img)
+    if not data_url:
+        return []
+    txt = await _post_openai_compat(
+        "https://api.groq.com/openai/v1/chat/completions",
+        key, "meta-llama/llama-4-scout-17b-16e-instruct",
+        data_url, _build_mcq_prompt(topic, count)
+    )
+    return _parse_mcq_json(txt)
+
 async def _gen_nvidia(img, topic, count):
     key = os.environ.get("NVIDIA_API_KEY", "")
     if not key:
@@ -278,11 +292,21 @@ _AI_FALLBACK_FNS = {
 
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
-    Smart wrapper: Gemini first (with internal key rotation via pdf_handler).
+    Smart wrapper: Groq first (primary), then Gemini (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
     Missing API keys are skipped silently. Never raises.
     """
-    # 1) Gemini (preferred — healthy key → use it)
+    # 1) Groq (primary — fast, set via GROQ_API_KEY)
+    try:
+        out = await _gen_groq(img, topic, mcq_count)
+        if out:
+            logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq")
+            return out
+        logger.warning(f"[AI-ROT] groq returned empty (page {page_num}); trying gemini")
+    except Exception as e:
+        logger.warning(f"[AI-ROT] groq failed (page {page_num}): {e}; trying gemini")
+
+    # 2) Gemini (secondary — healthy key → use it)
     try:
         out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
         if out:
@@ -291,7 +315,7 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     except Exception as e:
         logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {e}; rotating to fallbacks")
 
-    # 2) Fallback providers (skip silently if key missing / call fails)
+    # 3) Fallback providers (skip silently if key missing / call fails)
     for prov in _AI_PROVIDERS_ORDER:
         fn = _AI_FALLBACK_FNS.get(prov)
         if not fn:
