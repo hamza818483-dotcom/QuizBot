@@ -299,21 +299,45 @@ let tag = '', expFooter = '', channelId = '', imageMsgId = null, endMsgId = null
 let isNewGen = false;
 let totalSec = 0, totalLeft = 0, totalTimer = null;
 
-// ── FETCH (Render direct → CF worker → Supabase direct; HF permanently banned) ──
+// ── FETCH (direct Supabase + CF Worker in parallel → Render → Supabase backup; HF permanently banned) ──
 async function fetchExamData() {
   const ANS = ["A","B","C","D","E"];
   const RENDER    = 'https://quizbot-s482.onrender.com';
   const CF_WORKER = 'https://atlasquizbotpro.hamza818483.workers.dev';
   const SB_URL    = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
   const SB_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
-  // 1) CF Worker (always-warm, fast — has own Render→D1→Supabase fallback inside)
+
+  // Fast path: direct Supabase pdf_mcq_cache query (skips Render/CF entirely — no cold-start wait)
+  const directCacheFetch = (async () => {
+    if (CACHE_ID.startsWith('qz_')) throw new Error('skip'); // D1 quiz, not in pdf_mcq_cache
+    const r = await fetch(`${SB_URL}/rest/v1/pdf_mcq_cache?id=eq.${CACHE_ID}&select=*`,
+      { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` }, signal: AbortSignal.timeout(6000) });
+    const data = await r.json();
+    if (!data || !data[0] || !data[0].mcq_data || !data[0].mcq_data.length) throw new Error('not found');
+    const row = data[0];
+    return { cache_id: CACHE_ID, topic: row.topic || 'Quiz', page: row.page_number || 1,
+      mcqs: row.mcq_data, tag: '', exp_footer: '', channel_id: row.channel_id || '',
+      image_msg_id: row.image_msg_id, end_msg_id: row.end_msg_id,
+      image_file_id: row.image_file_id, is_new_gen: !!row.is_new_gen, timer: 30 };
+  })();
+
+  // CF Worker (always-warm, has its own Render→D1→Supabase fallback — needed for qz_ IDs)
+  const cfFetch = (async () => {
+    const r = await fetch(`${CF_WORKER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(9000) });
+    if (!r.ok) throw new Error('cf failed');
+    const d = await r.json();
+    if (!d || !d.mcqs || !d.mcqs.length) throw new Error('cf empty');
+    return d;
+  })();
+
+  // Race the two fast paths — whichever resolves first with real data wins
   try {
-    const r = await fetch(`${CF_WORKER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(5000) });
-    if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) return d; }
-  } catch(e) {}
+    return await Promise.any([directCacheFetch, cfFetch]);
+  } catch (e) { /* both failed, fall through to slower fallbacks */ }
+
   // 2) Render direct (cold-start prone on free tier, slower fallback)
   try {
-    const r = await fetch(`${RENDER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(8000) });
+    const r = await fetch(`${RENDER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(12000) });
     if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) return d; }
   } catch(e) {}
   // 3) Supabase Primary
