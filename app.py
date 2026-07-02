@@ -961,36 +961,6 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             await tg_post("deleteMessage", {"chat_id": channel_id, "message_id": image_msg_id})
             image_msg_id = None
 
-        # ✅ CSV file generate করো — new format with varied answers
-        try:
-            import csv as _csv
-            from io import StringIO as _SIO
-            _out = _SIO()
-            _wr = _csv.writer(_out, quoting=_csv.QUOTE_ALL)
-            _wr.writerow(["questions","option1","option2","option3","option4","option5","answer","explanation","type","section"])
-            for m in mcqs:
-                opts = m.get("options", ["","","",""])
-                while len(opts) < 5:
-                    opts.append("")
-                padded = (opts + ["","","","",""])[:5]
-                ans_idx = {"A":0,"B":1,"C":2,"D":3,"E":4}.get(m.get("answer","A"), 0)
-                ans_numeric = ans_idx + 1  # 1-based
-                exp = m.get("explanation","")
-                _wr.writerow([m.get("question",""), padded[0], padded[1], padded[2], padded[3], padded[4], ans_numeric, exp, 1, 1])
-            csv_content = _out.getvalue().encode("utf-8-sig")
-            csv_caption = (
-                f"📄 CSV ফাইল — {topic}\n"
-                f"💎 {len(mcqs)} MCQ\n\n"
-                f"📌 Format: questions, option1-5, answer(numeric), explanation, type, section"
-            )
-            await send_document(
-                chat_id, csv_content,
-                f"ATLAS_{topic or 'MCQ'}.csv",
-                caption=csv_caption, mime_type="text/csv"
-            )
-        except Exception as csv_err:
-            logger.warning(f"[IMG] CSV send failed: {csv_err}")
-
         poll_links = []
         for i, mcq in enumerate(mcqs):
             opts = mcq.get("options", [])
@@ -1024,6 +994,36 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
                 else:
                     poll_links.append(f"https://t.me/{cid.lstrip('@')}/{msg_id}")
             await asyncio.sleep(0.5)
+
+        # ✅ CSV file generate করো — poll গুলো channel-এ যাওয়ার পরে পাঠানো হয়
+        try:
+            import csv as _csv
+            from io import StringIO as _SIO
+            _out = _SIO()
+            _wr = _csv.writer(_out, quoting=_csv.QUOTE_ALL)
+            _wr.writerow(["questions","option1","option2","option3","option4","option5","answer","explanation","type","section"])
+            for m in mcqs:
+                opts = m.get("options", ["","","",""])
+                while len(opts) < 5:
+                    opts.append("")
+                padded = (opts + ["","","","",""])[:5]
+                ans_idx = {"A":0,"B":1,"C":2,"D":3,"E":4}.get(m.get("answer","A"), 0)
+                ans_numeric = ans_idx + 1  # 1-based
+                exp = m.get("explanation","")
+                _wr.writerow([m.get("question",""), padded[0], padded[1], padded[2], padded[3], padded[4], ans_numeric, exp, 1, 1])
+            csv_content = _out.getvalue().encode("utf-8-sig")
+            csv_caption = (
+                f"📄 CSV ফাইল — {topic}\n"
+                f"💎 {len(mcqs)} MCQ\n\n"
+                f"📌 Format: questions, option1-5, answer(numeric), explanation, type, section"
+            )
+            await send_document(
+                chat_id, csv_content,
+                f"ATLAS_{topic or 'MCQ'}.csv",
+                caption=csv_caption, mime_type="text/csv"
+            )
+        except Exception as csv_err:
+            logger.warning(f"[IMG] CSV send failed: {csv_err}")
 
         end_text = (
             f"🎯Topic: {topic}\n"
