@@ -4467,10 +4467,19 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
     await asyncio.sleep(1)
 
     poll_fail_count = 0
+    skipped_empty = 0
     for i, mcq in enumerate(mcqs):
         opts = mcq.get("options", [])
+        q_raw = (mcq.get("question") or "").strip()
+        if not q_raw or len(opts) < 2 or all(not (o or "").strip() for o in opts):
+            skipped_empty += 1
+            logger.warning(f"[PollAgain] skipped q{i+1}/{total}: empty question or options in cache")
+            continue
+        # pad missing/empty options up to 4, and drop fully-empty ones beyond first 2
+        opts = [(o or "").strip() or f"Option {j+1}" for j, o in enumerate(opts)][:10]
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
-        q_text = f"({i+1}/{total}) {mcq['question']}"
+        ans_idx = min(ans_idx, len(opts) - 1)
+        q_text = f"({i+1}/{total}) {q_raw}"
         if tag:
             q_text = f"{tag}\n\n{q_text}"
         exp = mcq.get("explanation", "")
@@ -4481,8 +4490,11 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
             poll_fail_count += 1
             logger.error(f"[PollAgain] sendPoll failed q{i+1}/{total}: {poll_res.get('description') or poll_res.get('error')}")
         await asyncio.sleep(1.5)
-    if poll_fail_count > 0:
-        await notify_owner(f"⚠️ Poll Practice ({cache_id[:8]}): {poll_fail_count}/{total} poll পাঠাতে ব্যর্থ হয়েছে। Render logs চেক করুন।")
+    if poll_fail_count > 0 or skipped_empty > 0:
+        await notify_owner(
+            f"⚠️ Poll Practice ({cache_id[:8]}): {poll_fail_count}/{total} poll পাঠাতে ব্যর্থ, "
+            f"{skipped_empty} টা empty question/option থাকায় skip করা হয়েছে। Render logs চেক করুন।"
+        )
 
     end_text = (
         f"✅ <b>Poll শেষ!</b>\n\n🎯 Topic: {topic}\n"
