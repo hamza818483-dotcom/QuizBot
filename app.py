@@ -176,6 +176,8 @@ def _parse_mcq_json(text: str) -> list:
                 ans = {"1":"A","2":"B","3":"C","4":"D"}[ans]
             if ans not in ("A","B","C","D"):
                 ans = "A"
+            if any(re.match(r'^(card|page|section|chapter|part|topic|slide)\s*\d*$', str(o).strip(), re.IGNORECASE) for o in opts):
+                continue
             out.append({
                 "question": q,
                 "options": opts,
