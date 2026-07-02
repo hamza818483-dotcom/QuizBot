@@ -306,14 +306,14 @@ async function fetchExamData() {
   const CF_WORKER = 'https://atlasquizbotpro.hamza818483.workers.dev';
   const SB_URL    = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
   const SB_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
-  // 1) Render direct
+  // 1) CF Worker (always-warm, fast — has own Render→D1→Supabase fallback inside)
   try {
-    const r = await fetch(`${RENDER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(8000) });
+    const r = await fetch(`${CF_WORKER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(5000) });
     if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) return d; }
   } catch(e) {}
-  // 2) CF Worker (has own Render→D1→Supabase fallback inside)
+  // 2) Render direct (cold-start prone on free tier, slower fallback)
   try {
-    const r = await fetch(`${CF_WORKER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(6000) });
+    const r = await fetch(`${RENDER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(8000) });
     if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) return d; }
   } catch(e) {}
   // 3) Supabase Primary
