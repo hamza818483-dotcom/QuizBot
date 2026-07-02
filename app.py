@@ -180,6 +180,16 @@ from quiz import (
 # APP-LOCAL CONFIG (not shared with quiz.py)
 # ============================================================
 # PIN SYSTEM
+# v-RAM-fix: cap in-memory PIL-image page caches (pdf_cache/qbm_cache) so an
+# abandoned upload flow (user never finishes channel-select) can't leak heavy
+# decoded images forever. Self-overwrites per uid, but this adds a hard
+# ceiling + oldest-key eviction as a safety net.
+_PAGE_CACHE_MAX_ENTRIES = 50
+
+def _cap_page_cache(cache: dict) -> None:
+    while len(cache) > _PAGE_CACHE_MAX_ENTRIES:
+        cache.pop(next(iter(cache)), None)
+
 PIN_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB)
 
 # LIVE QUIZ CONFIG
@@ -2350,6 +2360,7 @@ async def handle_pdf(msg: dict):
                 return
             app.state.pdf_cache = getattr(app.state, "pdf_cache", {})
             app.state.pdf_cache[f"pdf_img_{uid}"] = pages
+            _cap_page_cache(app.state.pdf_cache)
             sb.table("quiz_sessions").upsert({
                 "key": f"pdf_pending_{uid}",
                 "data": json.dumps({"topic": topic, "mcq_count": mcq_count, "file_name": file_name, "status_msg_id": status_msg_id, "thread_id": thread_id, "file_id": file_id, "page_range": page_range}),
@@ -2654,6 +2665,7 @@ async def handle_pdfm(msg: dict):
 
             app.state.pdf_cache = getattr(app.state, "pdf_cache", {})
             app.state.pdf_cache[f"pdfm_img_{uid}"] = pages
+            _cap_page_cache(app.state.pdf_cache)
             sb.table("quiz_sessions").upsert({
                 "key": f"pdfm_pending_{uid}",
                 "data": json.dumps({
@@ -3338,6 +3350,7 @@ async def handle_qbm(msg: dict):
 
             app.state.qbm_cache = getattr(app.state, "qbm_cache", {})
             app.state.qbm_cache[f"qbm_img_{uid}"] = pages
+            _cap_page_cache(app.state.qbm_cache)
             sb.table("quiz_sessions").upsert({
                 "key": f"qbm_pending_{uid}",
                 "data": json.dumps({
