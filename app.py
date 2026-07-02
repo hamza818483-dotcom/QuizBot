@@ -2275,22 +2275,22 @@ def _build_solve_sheet_html(topic: str, page: int, mcqs: list, answers: dict = N
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700;800&display=swap');
 @page{{size:A4;margin:8mm 10mm;}}
 *{{margin:0;padding:0;box-sizing:border-box;}}
-body{{font-family:'Noto Sans Bengali',sans-serif;background:#fff;font-size:11px;}}
+body{{font-family:'Noto Sans Bengali',sans-serif;background:#fff;font-size:12.5px;}}
 .hdr{{text-align:center;padding:10px 14px;background:#1a237e;color:#fff;margin-bottom:12px;border-radius:8px;}}
-.hdr h1{{font-size:16px;font-weight:800;}}
-.hdr .sub{{font-size:11px;color:#c5cae9;margin-top:3px;}}
+.hdr h1{{font-size:18px;font-weight:800;}}
+.hdr .sub{{font-size:12.5px;color:#c5cae9;margin-top:3px;}}
 .grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;}}
 .card{{background:#fff;border:1.5px solid #c5cae9;border-radius:8px;padding:9px 10px;break-inside:avoid;page-break-inside:avoid;}}
-.qno{{font-size:10px;font-weight:800;color:#1a237e;margin-bottom:3px;}}
-.qtxt{{font-size:12px;font-weight:700;color:#111;margin-bottom:7px;line-height:1.6;}}
+.qno{{font-size:11.5px;font-weight:800;color:#1a237e;margin-bottom:3px;}}
+.qtxt{{font-size:13.5px;font-weight:700;color:#111;margin-bottom:7px;line-height:1.6;}}
 .opts-wrap{{display:flex;flex-direction:column;gap:3px;margin-bottom:7px;}}
-.opt{{font-size:11px;color:#333;padding:2px 6px;border-radius:4px;border:1px solid #e0e0e0;line-height:1.5;}}
+.opt{{font-size:12.5px;color:#333;padding:2px 6px;border-radius:4px;border:1px solid #e0e0e0;line-height:1.5;}}
 .opt.correct{{background:#e8f5e9;border-color:#43a047;color:#1b5e20;font-weight:700;}}
 .opt.wrong{{background:#ffebee;border-color:#e53935;color:#b71c1c;font-weight:600;}}
 .ans-row{{margin-bottom:4px;}}
-.ans-badge{{font-size:10px;font-weight:800;color:#1b5e20;background:#f1f8e9;border:1px solid #81c784;border-radius:4px;padding:1px 7px;}}
-.exp-box{{font-size:10.5px;color:#1a237e;background:#e8eaf6;border-left:3px solid #3949ab;padding:5px 7px;border-radius:0 5px 5px 0;line-height:1.55;}}
-.footer{{text-align:center;font-size:9px;color:#9e9e9e;margin-top:12px;}}
+.ans-badge{{font-size:11.5px;font-weight:800;color:#1b5e20;background:#f1f8e9;border:1px solid #81c784;border-radius:4px;padding:1px 7px;}}
+.exp-box{{font-size:12px;color:#1a237e;background:#e8eaf6;border-left:3px solid #3949ab;padding:5px 7px;border-radius:0 5px 5px 0;line-height:1.55;}}
+.footer{{text-align:center;font-size:10px;color:#9e9e9e;margin-top:12px;}}
 </style></head>
 <body>
 <div class="hdr">
