@@ -5881,6 +5881,10 @@ async def handle_message(msg: dict):
         await handle_error_command(msg)
     elif text == "/ping":
         try:
+            _t0 = time.time()
+            _r = await send_msg(chat_id, "🏓 Pong!")
+            _msg_id = _r.get("result", {}).get("message_id") if isinstance(_r, dict) else None
+
             uptime_seconds = int(time.time() - BOT_START_TIME)
             days, rem = divmod(uptime_seconds, 86400)
             hours, rem = divmod(rem, 3600)
@@ -5933,20 +5937,26 @@ async def handle_message(msg: dict):
             except Exception:
                 _wh_short = "❓ Check failed"
 
-            await send_msg(chat_id,
+            _latency_ms = int((time.time() - _t0) * 1000)
+            final_text = (
                 "🏓 <b>Pong! ATLAS QuizBot Online</b>\n\n"
+                f"⚡ <b>Latency:</b> {_latency_ms}ms\n"
                 f"🖥 <b>Running on:</b> {_platform}\n"
                 f"🔗 <b>Webhook:</b> {_wh_short}\n"
                 f"🕐 চালু হয়েছে: {started_at}\n"
                 f"⏱ Active আছে: {uptime_str}\n"
                 f"🔑 Gemini Keys: {key_count}\n"
                 f"👥 Total Users: {total_users}\n"
-                f"🟢 আজকে Active: {daily_active}",
-                parse_mode="HTML"
+                f"🟢 আজকে Active: {daily_active}"
             )
+            if _msg_id:
+                await edit_msg(chat_id, _msg_id, final_text, parse_mode="HTML")
+            else:
+                await send_msg(chat_id, final_text, parse_mode="HTML")
         except Exception as e:
             logger.error(f"[Ping] error: {e}")
             await send_msg(chat_id, f"🏓 Pong! (stats error: {e})")
+
 
 # ============================================================
 # CALLBACK HANDLER
