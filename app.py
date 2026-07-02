@@ -1513,7 +1513,7 @@ async def _send_csv_polls_to_channel(
     first_poll_link = ""
 
     for i, mcq in enumerate(mcqs):
-        opts = mcq.get("options", [])
+        opts = mcq.get("options", [])[:4]
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
 
         q_text = mcq["question"]
@@ -2478,7 +2478,7 @@ async def process_pdf_pages(
                 poll_links = []
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
-                    opts = mcq.get("options", [])
+                    opts = mcq.get("options", [])[:4]
                     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
                     q_text = mcq["question"]
                     if tag:
@@ -2825,7 +2825,7 @@ async def process_pdfm_pages(
                 poll_links = []
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
-                    opts = mcq.get("options",[])
+                    opts = mcq.get("options",[])[:4]
                     ans_idx = {"A":0,"B":1,"C":2,"D":3}.get(mcq.get("answer","A"),0)
                     q_text = mcq["question"]
                     if tag:
@@ -3408,7 +3408,7 @@ async def process_qbm_pages(
 
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
-                    opts = mcq.get("options", [])
+                    opts = mcq.get("options", [])[:4]
                     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
                     q_text = mcq["question"]
                     if tag:
@@ -4506,8 +4506,9 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
             skipped_empty += 1
             logger.warning(f"[PollAgain] skipped q{i+1}/{total}: empty question or options in cache")
             continue
-        # pad missing/empty options up to 4, and drop fully-empty ones beyond first 2
-        opts = [(o or "").strip() or f"Option {j+1}" for j, o in enumerate(opts)][:10]
+        # pad missing/empty options up to 4, cap at 4 (A-D) — defensive, even if
+        # cache has stale 5-option data from before the source-side cap existed
+        opts = [(o or "").strip() or f"Option {j+1}" for j, o in enumerate(opts)][:4]
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
         ans_idx = min(ans_idx, len(opts) - 1)
         q_text = f"({i+1}/{total}) {q_raw}"
@@ -4618,7 +4619,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
 
     poll_fail_count2 = 0
     for i, mcq in enumerate(new_mcqs):
-        opts = mcq.get("options", [])
+        opts = mcq.get("options", [])[:4]
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
         q_text = f"({i+1}/{total}) {mcq['question']}"
         if tag:
@@ -4795,7 +4796,7 @@ async def _send_quiz_question_inner(uid: int):
             await _send_quiz_question(uid)
         return
 
-    opts = [(o or "").strip() or f"Option {j+1}" for j, o in enumerate(opts)][:10]
+    opts = [(o or "").strip() or f"Option {j+1}" for j, o in enumerate(opts)][:4]
     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
     ans_idx = min(ans_idx, len(opts) - 1)
     total = len(st["mcqs"])
