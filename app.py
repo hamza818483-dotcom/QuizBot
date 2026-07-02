@@ -1006,7 +1006,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         await db_save_mcq_cache(cache_id_img, cache_id_img, 1, topic, mcqs, poll_links,
                                 image_file_id, image_msg_id, channel_id)
 
-        exam_url = f"{CF_WORKER_URL}/exam/{cache_id_img}"
+        exam_url = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={cache_id_img}"
         bot_un = await get_bot_username()
         quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id_img}"
         poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id_img}"
@@ -1572,7 +1572,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
 
             # Ending message for this batch
             ending = csv_get_ending_message(batch_topic, sent, first_link)
-            exam_url = f"{CF_WORKER_URL}/exam/{batch_cache_id}"
+            exam_url = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={batch_cache_id}"
             bot_un = await get_bot_username()
             quiz_url = f"https://t.me/{bot_un}?start=pdf_{batch_cache_id}"
             poll_url = f"https://t.me/{bot_un}?start=poll_{batch_cache_id}"
@@ -1632,8 +1632,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             thread_id=thread_id
         )
 
-        ending = csv_get_ending_message(topic, sent, first_link)
-        exam_url = f"{CF_WORKER_URL}/exam/{cache_id}"
+        exam_url = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={cache_id}"
         bot_un = await get_bot_username()
         quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
         poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
@@ -1935,10 +1934,7 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
             await send_msg(chat_id, "❌ Bookmark MCQ পাওয়া যায়নি!")
             return
 
-        cache_id = gen_session_id()
-        await db_save_mcq_cache(cache_id, cache_id, 0, "🔖 Bookmark Practice", mcqs)
-
-        exam_url = f"{CF_WORKER_URL}/exam/{cache_id}"
+        exam_url = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={cache_id}"
         bot_un = await get_bot_username()
         quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
         poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
@@ -2478,9 +2474,7 @@ async def process_pdf_pages(
                     total_polls += 1
                     await asyncio.sleep(0.3)
 
-                await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
-
-                exam_url = f"{CF_WORKER_URL}/exam/{cache_id}"
+                exam_url = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={cache_id}"
                 bot_un = await get_bot_username()
                 quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
                 poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
@@ -4935,7 +4929,7 @@ async def _finish_quiz(uid: int):
 
     motivation_text = f"\n{grade}\n\n{motivation}"
 
-    exam_url = f"{CF_WORKER_URL}/exam/{cache_id}?uid={uid}&name={st['uname']}"
+    exam_url = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={cache_id}&uid={uid}&name={st['uname']}"
     back_url = build_back_url(st["channel_id"], st["back_msg_id"])
     wrong_count = len(st["wrong_idx"])
     skip_count = len(st["skip_idx"])
