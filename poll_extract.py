@@ -68,9 +68,25 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
     await client.connect()
 
     try:
+        # Resolve entity first — raw numeric/PeerChannel IDs fail if Telethon's
+        # session hasn't cached the entity yet (account never interacted with it).
+        try:
+            entity = await client.get_entity(channel)
+        except (ValueError, TypeError) as e:
+            logger.warning(f"[poll_extract] entity not cached, refreshing dialogs: {e}")
+            await client.get_dialogs(limit=200)  # populates entity cache
+            try:
+                entity = await client.get_entity(channel)
+            except Exception:
+                raise Exception(
+                    "এই channel/group এর entity resolve করা যায়নি — "
+                    "Session account-টা কি এই channel-এ join করা আছে? "
+                    "না থাকলে join করিয়ে আবার try করো।"
+                )
+
         checked = 0
         async for message in client.iter_messages(
-            channel,
+            entity,
             min_id=start_id - 1,
             max_id=end_id + 1,
             limit=end_id - start_id + 1,
@@ -152,6 +168,16 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
 
             except Exception as e:
                 logger.warning(f"[poll_extract] msg {message.id}: {type(e).__name__}: {e}")
+
+            # Cap to 4 options (A-D) — some source polls have a stray 5th
+            # blank/placeholder option. Keep correct answer in range by
+            # swapping it into slot 4 before trimming.
+            if len(options) > 4:
+                if correct_idx >= 4:
+                    options = options[:3] + [options[correct_idx]]
+                    correct_idx = 3
+                else:
+                    options = options[:4]
 
             polls.append({
                 "question":    q_text,

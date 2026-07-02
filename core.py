@@ -305,6 +305,27 @@ async def tg_post(method: str, data: dict) -> dict:
         logger.error(f"[TG] {method} direct error: {e}")
         return {"ok": False, "error": str(e)}
 
+# ============================================================
+# BOT USERNAME — cached, real username via getMe() (never hardcode)
+# ============================================================
+_BOT_USERNAME_CACHE = {"value": None}
+
+async def get_bot_username() -> str:
+    """Real bot username getMe() diye fetch kore, process lifetime cache kore.
+    Deep-link (Quiz Solve/Poll Solve/Premium PDF) URL banate always ei
+    function use korte hobe — kokhono hardcode username diye na."""
+    if _BOT_USERNAME_CACHE["value"]:
+        return _BOT_USERNAME_CACHE["value"]
+    try:
+        info = await tg_post("getMe", {})
+        uname = info.get("result", {}).get("username")
+        if uname:
+            _BOT_USERNAME_CACHE["value"] = uname
+            return uname
+    except Exception as e:
+        logger.error(f"[BotUsername] getMe failed: {e}")
+    return "atlasQuizProBot"  # last-resort fallback only
+
 async def send_msg(chat_id, text: str, parse_mode: str = "HTML",
                    reply_markup=None, reply_to_message_id: int = None) -> dict:
     data = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}

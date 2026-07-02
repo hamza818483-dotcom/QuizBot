@@ -20,8 +20,8 @@ jobs:
         env:
           RENDER_URL: ${{ secrets.RENDER_URL }}
         run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-            "${RENDER_URL}/health")
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 \
+            "${RENDER_URL}/health" || echo "000")
           echo "primary_status=$STATUS" >> $GITHUB_OUTPUT
           echo "Render Primary: $STATUS"
 
@@ -33,8 +33,8 @@ jobs:
             echo "RENDER_URL_2 not set, skipping"
             exit 0
           fi
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-            "${RENDER_URL_2}/health")
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 \
+            "${RENDER_URL_2}/health" || echo "000")
           echo "Render Secondary: $STATUS"
           if [ "$STATUS" != "200" ]; then
             echo "::warning::Render Secondary not responding (layer 4)!"
