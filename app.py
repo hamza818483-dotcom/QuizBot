@@ -54,11 +54,117 @@ from core import (
     build_back_url, source_msg_id,
     get_recent_errors, clear_error_logs,
     add_watermark_to_pdf,
+    get_bot_username,
 )
 
 # chorcha.net mhtml/html → Premium PDF (Question Bank converter)
 from chorcha_parser import parse_chorcha_file
 from chorcha_pdf import build_chorcha_pdf_html
+
+# ATLAS full mhtml/html → CSV converter (Chorcha.net + Testmoz, LaTeX cleanup, imgbb images)
+# Ported 100% from AtlasMasterBot's mhtml_handler.py
+from atlas_mhtml import parse_mhtml_to_mcqs, results_to_csv_bytes
+
+# ============================================================
+# mhtml/html AUTO QUEUE SYSTEM (ported from AtlasMasterBot)
+# File পাঠালেই content দেখে bot নিজে সিদ্ধান্ত নেয়:
+#   - MCQ format (options সহ) পাওয়া গেলে → auto CSV বানায় (queue দিয়ে, একটার পর একটা)
+#   - Q&A/CQ format (options ছাড়া, চর্চা ক-ভান্ডার/খ-ভান্ডার/CQ স্টাইল) পাওয়া গেলে
+#     → বলে দেয় /qpdf দিয়ে PDF বানাতে (কারণ ওটা alada page structure)
+#   - দুটোর কোনোটাই না পেলে → error দেখায়
+# ============================================================
+_mhtml_auto_queue = asyncio.Queue()
+_mhtml_worker_started = False
+
+
+def _detect_mhtml_format(raw_bytes: bytes, file_name: str) -> str:
+    """
+    Content দেখে বলে দেয় এই file কোন pipeline এ যাবে:
+      "mcq"  -> atlas_mhtml (options সহ MCQ, Chorcha.net p-5/rounded-xl বা Testmoz) -> auto CSV
+      "qa"   -> chorcha_parser (Q&A/CQ, border/rounded-xl স্টাইল, options ছাড়া)   -> /qpdf বলবে
+      "none" -> কোনো চেনা format পাওয়া যায়নি
+    """
+    try:
+        parsed = parse_mhtml_to_mcqs(raw_bytes, file_name)
+        if parsed["results"]:
+            return "mcq"
+    except Exception as e:
+        logger.warning(f"[MHTML-Detect] mcq-format check failed: {e}")
+
+    try:
+        qa_data = parse_chorcha_file(raw_bytes)
+        if qa_data.get("items"):
+            return "qa"
+    except Exception as e:
+        logger.warning(f"[MHTML-Detect] qa-format check failed: {e}")
+
+    return "none"
+
+
+async def _mhtml_auto_worker():
+    """Queue worker — একটার পর একটা file process করে (AtlasMasterBot এর মতোই serial queue)."""
+    while True:
+        msg = await _mhtml_auto_queue.get()
+        try:
+            await _process_mhtml_auto(msg)
+        except Exception as e:
+            logger.error(f"[MHTML-Worker] Error: {e}")
+        finally:
+            _mhtml_auto_queue.task_done()
+
+
+async def _process_mhtml_auto(msg: dict):
+    chat_id = msg["chat"]["id"]
+    doc = msg["document"]
+    file_name = doc.get("file_name", "")
+
+    loading = await send_msg(chat_id, "🔍 File বিশ্লেষণ করা হচ্ছে...")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        raw_bytes = await download_tg_file(doc["file_id"])
+        fmt = await asyncio.to_thread(_detect_mhtml_format, raw_bytes, file_name)
+
+        if fmt == "qa":
+            if loading_id:
+                await edit_msg(chat_id, loading_id,
+                    "📋 এই file-টা Q&A/CQ ফরম্যাটের (চর্চা ক-ভান্ডার/খ-ভান্ডার/CQ)!\n\n"
+                    "এটার জন্য PDF বানাতে হলে এই file-এ <b>reply করে</b> "
+                    "<code>/qpdf</code> কমান্ড দাও।")
+            return
+
+        if fmt == "none":
+            if loading_id:
+                await edit_msg(chat_id, loading_id,
+                    "❌ কোনো চেনা প্রশ্ন/উত্তর ফরম্যাট খুঁজে পাওয়া যায়নি! "
+                    "Format ভিন্ন হতে পারে।")
+            return
+
+        # fmt == "mcq" → CSV বানাও
+        if loading_id:
+            await edit_msg(chat_id, loading_id, "⏳ MCQ CSV বানানো হচ্ছে...")
+
+        parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, raw_bytes, file_name)
+        results = parsed["results"]
+        source = parsed["source"] or "Unknown"
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"✅ {len(results)} টি MCQ পাওয়া গেছে! ({source})\n📄 CSV বানানো হচ্ছে...")
+
+        csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
+
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", file_name.rsplit(".", 1)[0])[:50] or "ATLAS_QuestionBank"
+        await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
+            caption=f"📚 Source: {source}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP",
+            mime_type="text/csv")
+
+        if loading_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
+
+    except Exception as e:
+        logger.error(f"[MHTML-Auto] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
 
 # D1 Quiz System (fully independent module — see quiz.py)
 from quiz import (
@@ -214,6 +320,20 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
         logger.warning(f"[AI-ROT] {model} err: {e}")
         return ""
 
+async def _gen_groq(img, topic, count):
+    key = os.environ.get("GROQ_API_KEY", "")
+    if not key:
+        return []
+    data_url = _img_to_data_url(img)
+    if not data_url:
+        return []
+    txt = await _post_openai_compat(
+        "https://api.groq.com/openai/v1/chat/completions",
+        key, "meta-llama/llama-4-scout-17b-16e-instruct",
+        data_url, _build_mcq_prompt(topic, count)
+    )
+    return _parse_mcq_json(txt)
+
 async def _gen_nvidia(img, topic, count):
     key = os.environ.get("NVIDIA_API_KEY", "")
     if not key:
@@ -280,11 +400,52 @@ _AI_FALLBACK_FNS = {
 
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
-    Smart wrapper: Gemini first (with internal key rotation via pdf_handler).
+    Smart wrapper: Groq first (primary), then Gemini (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
     Missing API keys are skipped silently. Never raises.
     """
-    # 1) Gemini (preferred — healthy key → use it)
+    out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
+    return _cap_mcq_options(out, 4)
+
+
+def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
+    """v4.4: some AI providers occasionally return 5 options (E) instead of 4.
+    Trim every mcq down to max_opts here — single choke point so /img's
+    Telegram poll, Web Exam page, Quiz Solve, and CSV export all stay
+    consistent without needing separate truncation logic in each consumer."""
+    if not mcqs:
+        return mcqs
+    ans_map = {0: "A", 1: "B", 2: "C", 3: "D", 4: "E"}
+    rev_map = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4}
+    for m in mcqs:
+        opts = m.get("options", [])
+        if len(opts) > max_opts:
+            ans_letter = m.get("answer", "A")
+            ans_idx = rev_map.get(ans_letter, 0)
+            # If the correct answer happens to be option 5 (E), keep it in range
+            # by swapping it into slot 4 (D) before trimming, so we never lose
+            # the right answer off the end.
+            if ans_idx >= max_opts:
+                opts = opts[:max_opts - 1] + [opts[ans_idx]]
+                m["answer"] = ans_map[max_opts - 1]
+            else:
+                opts = opts[:max_opts]
+            m["options"] = opts
+    return mcqs
+
+
+async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
+    # 1) Groq (primary — fast, set via GROQ_API_KEY)
+    try:
+        out = await _gen_groq(img, topic, mcq_count)
+        if out:
+            logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq")
+            return out
+        logger.warning(f"[AI-ROT] groq returned empty (page {page_num}); trying gemini")
+    except Exception as e:
+        logger.warning(f"[AI-ROT] groq failed (page {page_num}): {e}; trying gemini")
+
+    # 2) Gemini (secondary — healthy key → use it)
     try:
         out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
         if out:
@@ -293,7 +454,7 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     except Exception as e:
         logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {e}; rotating to fallbacks")
 
-    # 2) Fallback providers (skip silently if key missing / call fails)
+    # 3) Fallback providers (skip silently if key missing / call fails)
     for prov in _AI_PROVIDERS_ORDER:
         fn = _AI_FALLBACK_FNS.get(prov)
         if not fn:
@@ -782,49 +943,25 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             return
 
         image_msg_id = None
+        image_file_id = None  # bot-owned, reusable file_id (matches /pdf pattern)
 
-        if mode == "image":
-            caption = ""
-            if tag:
-                caption = f"{tag}\n\n"
-            caption += (
-                f"⌛ATLAS Special MCQ System\n"
-                f"🌟Topic: {topic}\n"
-                f"💎MCQ: {len(mcqs)}"
-            )
-            photo_r = await send_photo(channel_id, img_bytes, caption)
-            if photo_r.get("ok"):
-                image_msg_id = photo_r["result"]["message_id"]
+        caption = ""
+        if tag:
+            caption = f"{tag}\n\n"
+        caption += (
+            f"⌛ATLAS Special MCQ System\n"
+            f"🌟Topic: {topic}\n"
+            f"💎MCQ: {len(mcqs)}"
+        )
+        photo_r = await send_photo(channel_id, img_bytes, caption)
+        if photo_r.get("ok"):
+            image_msg_id = photo_r["result"]["message_id"]
+            image_file_id = photo_r["result"]["photo"][-1]["file_id"]
 
-        # ✅ CSV file generate করো — new format with varied answers
-        try:
-            import csv as _csv
-            from io import StringIO as _SIO
-            _out = _SIO()
-            _wr = _csv.writer(_out, quoting=_csv.QUOTE_ALL)
-            _wr.writerow(["questions","option1","option2","option3","option4","option5","answer","explanation","type","section"])
-            for m in mcqs:
-                opts = m.get("options", ["","","",""])
-                while len(opts) < 5:
-                    opts.append("")
-                padded = (opts + ["","","","",""])[:5]
-                ans_idx = {"A":0,"B":1,"C":2,"D":3,"E":4}.get(m.get("answer","A"), 0)
-                ans_numeric = ans_idx + 1  # 1-based
-                exp = m.get("explanation","")
-                _wr.writerow([m.get("question",""), padded[0], padded[1], padded[2], padded[3], padded[4], ans_numeric, exp, 1, 1])
-            csv_content = _out.getvalue().encode("utf-8-sig")
-            csv_caption = (
-                f"📄 CSV ফাইল — {topic}\n"
-                f"💎 {len(mcqs)} MCQ\n\n"
-                f"📌 Format: questions, option1-5, answer(numeric), explanation, type, section"
-            )
-            await send_document(
-                chat_id, csv_content,
-                f"ATLAS_{topic or 'MCQ'}.csv",
-                caption=csv_caption, mime_type="text/csv"
-            )
-        except Exception as csv_err:
-            logger.warning(f"[IMG] CSV send failed: {csv_err}")
+        if mode != "image" and image_msg_id:
+            # Topic Mode: photo শুধু fresh file_id নেওয়ার জন্য পাঠানো হলো, channel-এ দেখানো হবে না
+            await tg_post("deleteMessage", {"chat_id": channel_id, "message_id": image_msg_id})
+            image_msg_id = None
 
         poll_links = []
         for i, mcq in enumerate(mcqs):
@@ -860,6 +997,36 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
                     poll_links.append(f"https://t.me/{cid.lstrip('@')}/{msg_id}")
             await asyncio.sleep(0.5)
 
+        # ✅ CSV file generate করো — poll গুলো channel-এ যাওয়ার পরে পাঠানো হয়
+        try:
+            import csv as _csv
+            from io import StringIO as _SIO
+            _out = _SIO()
+            _wr = _csv.writer(_out, quoting=_csv.QUOTE_ALL)
+            _wr.writerow(["questions","option1","option2","option3","option4","option5","answer","explanation","type","section"])
+            for m in mcqs:
+                opts = m.get("options", ["","","",""])
+                while len(opts) < 5:
+                    opts.append("")
+                padded = (opts + ["","","","",""])[:5]
+                ans_idx = {"A":0,"B":1,"C":2,"D":3,"E":4}.get(m.get("answer","A"), 0)
+                ans_numeric = ans_idx + 1  # 1-based
+                exp = m.get("explanation","")
+                _wr.writerow([m.get("question",""), padded[0], padded[1], padded[2], padded[3], padded[4], ans_numeric, exp, 1, 1])
+            csv_content = _out.getvalue().encode("utf-8-sig")
+            csv_caption = (
+                f"📄 CSV ফাইল — {topic}\n"
+                f"💎 {len(mcqs)} MCQ\n\n"
+                f"📌 Format: questions, option1-5, answer(numeric), explanation, type, section"
+            )
+            await send_document(
+                chat_id, csv_content,
+                f"ATLAS_{topic or 'MCQ'}.csv",
+                caption=csv_caption, mime_type="text/csv"
+            )
+        except Exception as csv_err:
+            logger.warning(f"[IMG] CSV send failed: {csv_err}")
+
         end_text = (
             f"🎯Topic: {topic}\n"
             f"🚀MCQ: {len(mcqs)}\n"
@@ -870,17 +1037,18 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         # ✅ নতুন: cache save করো যাতে buttons কাজ করে
         cache_id_img = gen_session_id()
         await db_save_mcq_cache(cache_id_img, cache_id_img, 1, topic, mcqs, poll_links,
-                                file_id, image_msg_id, channel_id)
+                                image_file_id, image_msg_id, channel_id)
 
         exam_url = f"{CF_WORKER_URL}/exam/{cache_id_img}"
-        quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id_img}"
-        poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id_img}"
+        bot_un = await get_bot_username()
+        quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id_img}"
+        poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id_img}"
 
         end_kb = {"inline_keyboard": [
             [{"text": "📝 Quiz Solve", "url": quiz_url},
              {"text": "🔄 Poll Solve", "url": poll_url}],
             [{"text": "🌐 Web Exam", "url": exam_url},
-             {"text": "💎 Premium PDF", "url": f"https://t.me/atlasQuizProBot?start=premium_{cache_id_img}"}]
+             {"text": "💎 Premium PDF", "url": f"https://t.me/{bot_un}?start=premium_{cache_id_img}"}]
         ]}
 
         end_r = await tg_post("sendMessage", {
@@ -1347,7 +1515,7 @@ async def _send_csv_polls_to_channel(
     first_poll_link = ""
 
     for i, mcq in enumerate(mcqs):
-        opts = mcq.get("options", [])
+        opts = mcq.get("options", [])[:4]
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
 
         q_text = mcq["question"]
@@ -1438,9 +1606,10 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             # Ending message for this batch
             ending = csv_get_ending_message(batch_topic, sent, first_link)
             exam_url = f"{CF_WORKER_URL}/exam/{batch_cache_id}"
-            quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{batch_cache_id}"
-            poll_url = f"https://t.me/atlasQuizProBot?start=poll_{batch_cache_id}"
-            premium_url = f"https://t.me/atlasQuizProBot?start=premium_{batch_cache_id}"
+            bot_un = await get_bot_username()
+            quiz_url = f"https://t.me/{bot_un}?start=pdf_{batch_cache_id}"
+            poll_url = f"https://t.me/{bot_un}?start=poll_{batch_cache_id}"
+            premium_url = f"https://t.me/{bot_un}?start=premium_{batch_cache_id}"
             end_kb = {"inline_keyboard": [
                 [{"text": "📝 Quiz Solve", "url": quiz_url},
                  {"text": "🔄 Poll Solve", "url": poll_url}],
@@ -1498,9 +1667,10 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
 
         ending = csv_get_ending_message(topic, sent, first_link)
         exam_url = f"{CF_WORKER_URL}/exam/{cache_id}"
-        quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id}"
-        poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id}"
-        premium_url = f"https://t.me/atlasQuizProBot?start=premium_{cache_id}"
+        bot_un = await get_bot_username()
+        quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+        poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+        premium_url = f"https://t.me/{bot_un}?start=premium_{cache_id}"
         end_kb = {"inline_keyboard": [
             [{"text": "📝 Quiz Solve", "url": quiz_url},
              {"text": "🔄 Poll Solve", "url": poll_url}],
@@ -1802,8 +1972,9 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
         await db_save_mcq_cache(cache_id, cache_id, 0, "🔖 Bookmark Practice", mcqs)
 
         exam_url = f"{CF_WORKER_URL}/exam/{cache_id}"
-        quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id}"
-        poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id}"
+        bot_un = await get_bot_username()
+        quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+        poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
         end_kb = {"inline_keyboard": [
             [{"text": "📝 Quiz Solve", "url": quiz_url}],
             [{"text": "🔄 Poll Solve", "url": poll_url}],
@@ -1905,6 +2076,152 @@ async def handle_qpdf_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[QPDF] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+# ============================================================
+# AUTO MHTML/HTML → CSV — file পাঠালেই সাথে সাথে CSV (কোনো command লাগে না)
+# ============================================================
+async def handle_qcsv_auto(msg: dict):
+    chat_id = msg["chat"]["id"]
+    doc = msg["document"]
+    file_name = doc.get("file_name", "")
+
+    loading = await send_msg(chat_id, "⏳ File পড়া হচ্ছে...")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        raw_bytes = await download_tg_file(doc["file_id"])
+        parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, raw_bytes, file_name)
+        results = parsed["results"]
+        source = parsed["source"] or "Unknown"
+
+        if not results:
+            if loading_id:
+                await edit_msg(chat_id, loading_id, "❌ কোনো প্রশ্ন/উত্তর খুঁজে পাওয়া যায়নি! Format ভিন্ন হতে পারে।")
+            return
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"✅ {len(results)} টি MCQ পাওয়া গেছে! ({source})\n📄 CSV বানানো হচ্ছে...")
+
+        csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
+
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", file_name.rsplit(".", 1)[0])[:50] or "ATLAS_QuestionBank"
+        await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
+            caption=f"📚 Source: {source}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP",
+            mime_type="text/csv")
+
+        if loading_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
+
+    except Exception as e:
+        logger.error(f"[QCSV-AUTO] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+# ============================================================
+# MHTML/HTML → CSV — chorcha.net প্রশ্ন-উত্তর কে CSV এ export
+# ============================================================
+async def handle_qcsv_command(msg: dict):
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ chorcha.net থেকে save করা .mhtml/.html file-এ reply করে /qcsv দাও!\n\n"
+            "<b>যেভাবে file বানাবে:</b>\n"
+            "Chrome → পেজ খুলো (ক ভান্ডার/খ ভান্ডার/CQ) → Ctrl+S → "
+            "Save as type: <code>Webpage, Single File (*.mhtml)</code>"
+        )
+        return
+
+    doc = reply["document"]
+    file_name = doc.get("file_name", "")
+    if not (file_name.lower().endswith(".mhtml") or file_name.lower().endswith(".html") or file_name.lower().endswith(".htm")):
+        await send_msg(chat_id, "❌ শুধু .mhtml বা .html file support করে!")
+        return
+
+    loading = await send_msg(chat_id, "⏳ File পড়া হচ্ছে...")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        raw_bytes = await download_tg_file(doc["file_id"])
+        parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, raw_bytes, file_name)
+        results = parsed["results"]
+        source = parsed["source"] or "Unknown"
+
+        if not results:
+            if loading_id:
+                await edit_msg(chat_id, loading_id, "❌ কোনো প্রশ্ন/উত্তর খুঁজে পাওয়া যায়নি! Format ভিন্ন হতে পারে।")
+            return
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"✅ {len(results)} টি MCQ পাওয়া গেছে! ({source})\n📄 CSV বানানো হচ্ছে...")
+
+        csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
+
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", file_name.rsplit(".", 1)[0])[:50] or "ATLAS_QuestionBank"
+        await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
+            caption=f"📚 Source: {source}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP",
+            mime_type="text/csv")
+
+        if loading_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
+
+    except Exception as e:
+        logger.error(f"[QCSV] Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+# ============================================================
+# /sheet — CSV file reply থেকে সরাসরি Practice Sheet PDF
+# ============================================================
+async def handle_sheet_command(msg: dict):
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id, "❌ CSV ফাইলে reply করে /sheet দাও!")
+        return
+
+    doc = reply["document"]
+    file_name = doc.get("file_name", "")
+    if not file_name.lower().endswith(".csv"):
+        await send_msg(chat_id, "❌ শুধু .csv file support করে!")
+        return
+
+    loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        csv_bytes = await download_tg_file(doc["file_id"])
+        mcqs = _parse_csv_bytes(csv_bytes)
+
+        if not mcqs:
+            if loading_id:
+                await edit_msg(chat_id, loading_id, "❌ CSV থেকে কোনো MCQ পাওয়া যায়নি! Format ঠিক আছে কিনা দেখো।")
+            return
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n🎨 Sheet PDF বানানো হচ্ছে...")
+
+        title = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
+        html_out = _build_solve_sheet_html(title, 1, mcqs)
+        pdf_bytes = await _html_to_pdf(html_out)
+
+        if not pdf_bytes:
+            if loading_id:
+                await edit_msg(chat_id, loading_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
+            return
+
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Sheet"
+        await send_document(chat_id, pdf_bytes, f"{safe_title}_sheet.pdf",
+            caption=f"📖 Practice Sheet\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP")
+
+        if loading_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
+
+    except Exception as e:
+        logger.error(f"[SHEET] Error: {e}")
         await send_msg(chat_id, f"❌ Error: {e}")
 
 # ============================================================
@@ -2163,7 +2480,7 @@ async def process_pdf_pages(
                 poll_links = []
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
-                    opts = mcq.get("options", [])
+                    opts = mcq.get("options", [])[:4]
                     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
                     q_text = mcq["question"]
                     if tag:
@@ -2197,8 +2514,9 @@ async def process_pdf_pages(
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
 
                 exam_url = f"{CF_WORKER_URL}/exam/{cache_id}"
-                quiz_url = f"https://t.me/atlasQuizProBot?start=pdf_{cache_id}"
-                poll_url = f"https://t.me/atlasQuizProBot?start=poll_{cache_id}"
+                bot_un = await get_bot_username()
+                quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+                poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
 
                 end_data = {
                     "chat_id": channel_id,
@@ -2509,7 +2827,7 @@ async def process_pdfm_pages(
                 poll_links = []
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
-                    opts = mcq.get("options",[])
+                    opts = mcq.get("options",[])[:4]
                     ans_idx = {"A":0,"B":1,"C":2,"D":3}.get(mcq.get("answer","A"),0)
                     q_text = mcq["question"]
                     if tag:
@@ -2644,6 +2962,708 @@ def _get_bd_time() -> str:
         return now.strftime("%d %B %Y, %I:%M %p")
     except:
         return ""
+
+# ============================================================
+# FEATURE: /qbm — Question Bank Maker (EXTRACT existing MCQ from PDF)
+# Ported 100% from AtlasMasterBot's qbm_handler + process_pdf(is_qbm=True)
+# Different from /pdfm: extracts MCQs that ALREADY EXIST in the PDF,
+# never generates new ones. OCR fallback for scanned PDFs. 3x retry per page.
+# ============================================================
+QBM_EXTRACT_PROMPT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SPECIAL PERMANENT MODE. YOUR ONLY JOB IS TO EXTRACT MCQs THAT ALREADY EXIST ON THIS PAGE. YOU NEVER INVENT NEW QUESTIONS. FOLLOW EVERY RULE BELOW WITHOUT A SINGLE EXCEPTION, ALWAYS, ON EVERY PAGE, EVERY TIME.
+
+════════════════════════════════
+🔴 ABSOLUTE FORBIDDEN RULES (ZERO TOLERANCE)
+════════════════════════════════
+❌ NEVER create a new question from any text, fact, or information on the page
+❌ NEVER add even ONE extra MCQ beyond what already exists on the page/image
+❌ NEVER skip any existing MCQ — extract ALL of them, serially, in the exact order they appear
+❌ NEVER guess an answer — only detect it from actual image/page content
+❌ NEVER modify question or option text (only remove numbering prefixes)
+❌ If the page has ZERO existing MCQs → output EXACTLY [] (empty array). Do NOT invent a single MCQ.
+❌ If the page has exactly N existing MCQs → output EXACTLY those N. Never more, never fewer, never a "similar" or "extra" one.
+❌ No question count is ever given to you and none is ever needed — extract however many genuinely exist, nothing else.
+❌ This is a PERMANENT, ALWAYS-ON extraction mode — these rules apply identically to every page, every call, no matter what.
+
+════════════════════════════════
+📌 EXTRACTION RULES
+════════════════════════════════
+✅ Extract ALL MCQs that already exist on this page — Bangla, English, or mixed language
+✅ Extract from any font style — printed, handwritten, bold, italic
+✅ Extract from blurry, low quality, rotated, or scanned images
+✅ Perform MULTIPLE independent internal read-throughs of the page (at least 3) and
+   cross-check your own extraction before finalizing, so no existing MCQ is missed or misread
+✅ Remove question numbering only: (১., 1., Q1., Q.1, ক., a.) from question text
+✅ Keep original question and option wording intact (do not paraphrase or rewrite existing text)
+✅ If any obvious spelling mistake is seen, correct it — but do not alter meaning
+
+════════════════════════════════
+🎯 ANSWER DETECTION (ALL FORMATS) — triple-check before finalizing
+════════════════════════════════
+The correct answer MUST come from an actual source found in the page/image content.
+NEVER pick/guess an answer yourself — the answer must always be traceable to one of
+the source types below. Scan for ALL of these possible answer sources, in this order
+of likelihood, before concluding no answer exists:
+
+Source A — Answer marked directly on an option: circle, tick (✓), cross(✗)-elimination,
+  underline, bold, highlight, star (★), or any other visual mark on one option
+Source B — Answer given immediately with/after the MCQ itself (right after the question
+  block, before the next question starts)
+Source C — Answer table/box at the BOTTOM of the SAME page: a small table, boxed list,
+  or line like "Answer: 1-A, 2-C, 3-B..." — match question number → correct option
+Source D — Combined/consolidated answer key appearing SEVERAL PAGES LATER (not
+  necessarily the very next page — scan forward through ALL available pages, since many
+  question banks group all answers together after 2-3 pages of questions, or at the very
+  end of the document): match question number exactly → correct option
+Source E — Answer key on the page(s) immediately BEFORE or AFTER this one, in any of
+  the above formats (marked option, inline, or boxed table)
+
+Rules while scanning:
+→ Check every source type above before deciding an answer is missing — the answer for a
+  question on this page may live on a completely different page from the ones you've
+  processed so far, so scan broadly, not just this single page.
+→ Match strictly by question number (or exact question text if numbers are unclear/reused).
+→ NEVER invent, guess, or default an answer yourself under any circumstance.
+→ If — and only if — you have scanned all available pages/sources and genuinely found NO
+  answer indication anywhere for that specific question → set answer as "A" and note in
+  explanation "Answer not found in source". This is the last resort, never the first choice.
+→ Convert whatever format the source uses (number, checkmark, circled letter, bold option,
+  etc.) into the standard A/B/C/D letter for output.
+→ Re-verify each detected answer against its source at least twice before finalizing —
+  a wrong answer is worse than a missing one, so confirm carefully.
+
+════════════════════════════════
+🔀 OPTION SHUFFLE (MANDATORY, EVERY SINGLE MCQ, NO EXCEPTIONS)
+════════════════════════════════
+- After extracting the correct answer, SHUFFLE the four options into a new random order
+  before output, so the correct answer is NOT always in the same position.
+- Update the "answer" letter to match the option's NEW shuffled position.
+- Do this independently for EVERY single MCQ — never reuse the same shuffle pattern twice in a row.
+- STRICTLY FORBIDDEN: multiple extracted MCQs ending up with the same answer letter in a row
+  (e.g. all "A", or "A" repeated 3+ times consecutively). Distribute the correct answer's
+  position naturally and randomly across A/B/C/D across the full set.
+- This shuffle rule is permanently active — always apply it, on every extraction, no exceptions.
+
+════════════════════════════════
+💡 EXPLANATION RULES (STRICT PRIORITY ORDER — follow exactly, always, in this order)
+════════════════════════════════
+1) If the MCQ already has an explanation/answer-reasoning written directly below or attached
+   to it on the page → copy that explanation 100% VERBATIM, word-for-word, EXACTLY as written
+   in the source. Do not paraphrase, shorten, or rewrite it in any way.
+2) Else if there is no explanation directly under the MCQ, but the page contains other
+   relevant information related to this MCQ's topic (a paragraph, note, box, table, or fact
+   elsewhere on the page/related pages that relates to this question) → build the explanation
+   using that relevant information, stated as direct fact (see forbidden-phrase rule below).
+3) Else if there is no explanation anywhere and no relevant info anywhere on the page/source
+   related to this MCQ → then, and ONLY then, generate the BEST, most relevant, factually
+   accurate explanation yourself from your own real knowledge.
+- Whichever of the 3 cases applies, the explanation content must always convey: why the
+  correct option is correct, AND brief relevant info tied to why the other options are
+  wrong/related context — except in case 1, where you copy the source explanation exactly
+  as-is even if it doesn't explicitly cover the wrong options.
+- Max 165 characters, Bengali language, factually accurate.
+- This priority order (1 → 2 → 3) is permanent and always active — never skip a step or
+  reorder it, on every single MCQ, every time.
+
+════════════════════════════════
+🧮 MATH / CHEMISTRY FORMATTING (MANDATORY, ALWAYS ACTIVE — question, options, AND explanation)
+════════════════════════════════
+This rule is PERMANENTLY ON for every MCQ produced, with no exceptions, regardless of subject:
+- Always use proper Unicode subscript characters for chemical formula quantities and
+  proper Unicode superscript characters for exponents/powers/ionic charges — NEVER raw
+  underscore/caret notation, NEVER plain inline digits where a subscript/superscript belongs.
+- Chemical formulas: subscript quantity numbers correctly.
+  Correct: H₂O, CO₂, NaHCO₃, H₂SO₄, Ca(OH)₂, Fe₂O₃, C₆H₁₂O₆
+  Wrong: H2O, CO2, NaHCO3, H2SO4 (never output these)
+- Ionic charges/oxidation states: use superscript with correct sign.
+  Correct: Na⁺, Ca²⁺, Fe³⁺, Cl⁻, SO₄²⁻, O²⁻
+- Exponents/powers/scientific notation: superscript the exponent.
+  Correct: x², 10³, a⁻¹, E=mc², 6.02×10²³, v₀, xₙ
+  Wrong: x^2, 10^3, x_0 (never output caret/underscore literally)
+- Units, degree symbols, and multiplication signs must be correctly formatted: °C, °F, m/s²,
+  cm³, kg·m/s², use × not x for multiplication in scientific/math contexts.
+- Apply this identically and consistently across the question text, all four options, AND
+  the explanation — never mix correct and incorrect formatting within the same MCQ.
+- Double-check every number adjacent to a letter/formula/exponent before finalizing output:
+  if it should be a subscript or superscript, it MUST be rendered as one, always.
+
+════════════════════════════════
+🚫 FORBIDDEN SOURCE-REFERENCE PHRASES (PERMANENT, ALWAYS ACTIVE — question AND explanation)
+════════════════════════════════
+NEVER, under any circumstances, in the question text OR the explanation text, use any of
+these phrase patterns (or their Bengali equivalents, or any semantically similar phrase)
+that refer back to the source material itself instead of stating the fact directly:
+❌ "উল্লেখিত চিত্রে" / "চিত্রে দেখা যাচ্ছে" / "বক্সে" / "ছকে" / "উদ্দীপকে" / "সারণিতে" /
+   "টপিকে" / "পৃষ্ঠা নং এ" / "পৃষ্ঠায়" / "প্যাসেজে" / "অনুচ্ছেদে" / "লেখচিত্রে" / "গ্রাফে"
+❌ "দেখা যাচ্ছে" / "বলা আছে" / "উল্লেখ করা আছে" / "উল্লেখ আছে" / "লক্ষ করা যায়" /
+   "বর্ণনা আছে" / "দেখানো হয়েছে" / "দেওয়া আছে" / "প্রদত্ত" / "উপরে দেখানো"
+❌ Any English equivalents: "as shown in the figure/box/table/diagram/passage", "shown above",
+   "mentioned in the text/page", "as given", "according to the figure/table/passage above"
+❌ Any phrase — in any language, any wording — that talks ABOUT the source (image/box/table/
+   diagram/passage/page number/graph) instead of stating the fact/content directly and plainly.
+Instead: ALWAYS state the actual fact, information, or content directly and naturally, as if
+it were plain general knowledge — NEVER mention or imply that it came from "the shown
+image/box/table/passage/page". This rule applies permanently, always, to every single MCQ's
+question and explanation, with absolutely no exceptions, regardless of subject or source type.
+
+════════════════════════════════
+📤 OUTPUT FORMAT
+════════════════════════════════
+Output ONLY a valid JSON array. No extra text. No markdown. No explanation outside JSON.
+If NO MCQ exists on this page → return exactly: []
+
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}]"""
+
+
+def _qbm_parse_json(text: str) -> list:
+    """Parse extractor JSON output -> list of {question, options[A-D], answer(A-D), explanation}"""
+    if not text:
+        return []
+    t = text.strip()
+    if "```json" in t:
+        t = t.split("```json")[1].split("```")[0].strip()
+    elif "```" in t:
+        t = t.split("```")[1].split("```")[0].strip()
+    try:
+        m = re.search(r'\[.*\]', t, re.DOTALL)
+        raw = json.loads(m.group()) if m else json.loads(t)
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    valid = []
+    for mc in raw:
+        try:
+            q = mc.get("question", "")
+            opts = mc.get("options", {})
+            if not q or not opts:
+                continue
+            # Clean numbering prefix
+            q = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q)
+            q = re.sub(r'^\s*[\d০-৯]+\s*[.)\-:\s]+\s*', '', q)
+            q = re.sub(r'^\s*[Qq]\.?\s*[\d]+\s*[.)\-:\s]*\s*', '', q)
+            valid.append({
+                "question": q.strip(),
+                "options": [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")],
+                "answer": mc.get("answer", "A") if mc.get("answer") in ("A", "B", "C", "D") else "A",
+                "explanation": mc.get("explanation", "")
+            })
+        except Exception:
+            continue
+    return valid
+
+
+async def _qbm_single_pass(img) -> list:
+    """One extraction attempt: Groq primary -> Gemini fallback."""
+    try:
+        key = os.environ.get("GROQ_API_KEY", "")
+        if key:
+            data_url = _img_to_data_url(img)
+            if data_url:
+                txt = await _post_openai_compat(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    key, "meta-llama/llama-4-scout-17b-16e-instruct",
+                    data_url, QBM_EXTRACT_PROMPT
+                )
+                result = _qbm_parse_json(txt)
+                if result:
+                    return result
+        return await _qbm_gemini_extract(img)
+    except Exception as e:
+        logger.warning(f"[QBM] single pass failed: {e}")
+        return []
+
+
+async def _qbm_extract_from_image(img) -> list:
+    """
+    STRONG extraction with retry + cross-verification (multiple check):
+    1) Run extraction pass #1.
+    2) If pass #1 found MCQs, run a SECOND independent pass to cross-check.
+       - If both passes agree on count -> high confidence, use pass #1 (already
+         a clean, complete read).
+       - If counts disagree -> run a THIRD pass as tie-breaker, then use
+         whichever result has the MOST complete extraction (highest count),
+         since under-extraction (missing an existing MCQ) is the failure mode
+         we most want to avoid — never fabricate to make counts match.
+    3) If pass #1 found nothing, retry up to 3x total (page might have MCQs
+       that were missed on a bad first read) before concluding the page truly
+       has zero MCQs.
+    Never invents new questions across passes — cross-checking only decides
+    WHICH already-extracted set to trust, never merges or fabricates.
+    """
+    first = await _qbm_single_pass(img)
+
+    if not first:
+        # Nothing found — retry up to 2 more times before concluding "no MCQ on this page"
+        for retry in range(2):
+            await asyncio.sleep(2)
+            retry_result = await _qbm_single_pass(img)
+            if retry_result:
+                first = retry_result
+                break
+        if not first:
+            return []  # Confirmed: page genuinely has no existing MCQ
+
+    # Cross-verification pass
+    second = await _qbm_single_pass(img)
+    if second and len(second) == len(first):
+        return _cap_mcq_options(first)  # Both passes agree on count -> confident result
+
+    if second and len(second) != len(first):
+        # Disagreement -> tie-breaker third pass, then trust the most complete extraction
+        third = await _qbm_single_pass(img)
+        candidates = [c for c in (first, second, third) if c]
+        if candidates:
+            best = max(candidates, key=len)
+            logger.info(f"[QBM] Cross-check disagreement (counts: {[len(c) for c in candidates]}) -> using most complete: {len(best)} MCQ")
+            return _cap_mcq_options(best)
+
+    return _cap_mcq_options(first)
+
+
+async def _qbm_gemini_extract(img) -> list:
+    """Direct Gemini call with the strict extraction prompt (fallback path)."""
+    try:
+        from pdf_handler import key_rotator, image_to_base64
+        if not key_rotator.keys:
+            return []
+        key = key_rotator.get_key()
+        from google import genai as gai
+        from google.genai import types
+        client = gai.Client(api_key=key)
+        img_b64 = image_to_base64(img)
+
+        def _call():
+            return client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_text(text=QBM_EXTRACT_PROMPT),
+                    types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                ]
+            )
+        response = await asyncio.to_thread(_call)
+        return _qbm_parse_json(response.text)
+    except Exception as e:
+        logger.warning(f"[QBM] Gemini extract fallback failed: {e}")
+        return []
+
+
+async def handle_qbm(msg: dict):
+    """
+    /qbm -p (pages) -c (channel) -m (topic) -t (thread_id)
+    PDF-এ থাকা EXISTING MCQ extract করে (নতুন MCQ বানায় না)।
+    """
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    uname = msg["from"].get("first_name", "User")
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not (reply.get("document") or reply.get("photo")):
+        await send_msg(chat_id,
+            "❌ PDF বা Image-এ reply করে /qbm দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/qbm -p 1-5 -c @channel -m \"Topic\" -t group_id</code>\n\n"
+            "📌 এই ফিচার PDF/Image-এ আগে থেকে থাকা MCQ extract করে (নতুন বানায় না)\n"
+            "📌 -p = page range, PDF-only (না দিলে সব page)\n"
+            "📌 -c = channel id (না দিলে list দেখাবে)\n"
+            "📌 -m = topic name\n"
+            "📌 -t = topic/thread id (group হলে)"
+        )
+        return
+
+    is_image_reply = bool(reply.get("photo")) or (
+        reply.get("document") and not reply["document"].get("file_name", "").lower().endswith(".pdf")
+        and (reply["document"].get("mime_type", "").startswith("image/"))
+    )
+
+    if reply.get("document") and not is_image_reply and not reply["document"].get("file_name", "").lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF বা Image file support করে!")
+        return
+
+    params = _parse_pdfm_params(text)
+    topic = params["topic"] or "🌟ATLAS Question Bank"
+    page_range = params["page_range"]
+    channel_id = params["channel_id"]
+    thread_id = params["thread_id"]
+
+    if is_image_reply:
+        if reply.get("photo"):
+            file_id = reply["photo"][-1]["file_id"]
+        else:
+            file_id = reply["document"]["file_id"]
+        file_name = reply.get("document", {}).get("file_name", "image.jpg")
+    else:
+        file_id = reply["document"]["file_id"]
+        file_name = reply["document"].get("file_name", "document.pdf")
+
+    status_r = await send_msg(chat_id, "⏳ " + ("Image" if is_image_reply else "PDF") + " download হচ্ছে...")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    try:
+        if is_image_reply:
+            img_bytes = await download_tg_file(file_id)
+            from PIL import Image as PILImage
+            img = PILImage.open(BytesIO(img_bytes))
+            pages = [(1, img)]
+        else:
+            pdf_bytes = await download_tg_file(file_id)
+            pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, page_range)
+
+            # OCR fallback if pages look empty/unreadable (scanned PDF) — mirrors AtlasMasterBot
+            if not pages or (pages and len(str(pages[0][1])) < 100):
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "🔍 OCR Scanning (scanned PDF detected)...")
+                try:
+                    from pdf2image import convert_from_bytes
+                    ocr_pages = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+                    pages = list(enumerate(ocr_pages, 1))
+                except Exception as e:
+                    logger.warning(f"[QBM] OCR fallback failed: {e}")
+
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে...")
+
+        if not channel_id:
+            channels = await db_get_channels()
+            if not channels:
+                await process_qbm_pages(chat_id, uid, uname, pages, topic,
+                    channel_id, True, file_name, status_msg_id, thread_id)
+                return
+
+            app.state.qbm_cache = getattr(app.state, "qbm_cache", {})
+            app.state.qbm_cache[f"qbm_img_{uid}"] = pages
+            sb.table("quiz_sessions").upsert({
+                "key": f"qbm_pending_{uid}",
+                "data": json.dumps({
+                    "topic": topic, "file_name": file_name,
+                    "status_msg_id": status_msg_id, "thread_id": thread_id,
+                    "file_id": file_id, "page_range": page_range
+                }),
+                "updated_at": int(time.time())
+            }).execute()
+
+            kb = {"inline_keyboard": []}
+            for ch in channels:
+                ch_id = ch.get("channel_id", "")
+                ch_name = ch.get("channel_name", ch_id)
+                kb["inline_keyboard"].append([{
+                    "text": f"📢 {ch_name}",
+                    "callback_data": f"qbmch_{ch_id}_{uid}"
+                }])
+            kb["inline_keyboard"].append([{
+                "text": "📄 CSV Only",
+                "callback_data": f"qbmch_csv_{uid}"
+            }])
+            await send_msg(chat_id,
+                f"📋 <b>{len(pages)} page</b>\n🎯 Topic: {topic}\n\nChannel select করো:",
+                reply_markup=kb
+            )
+            return
+
+        await process_qbm_pages(chat_id, uid, uname, pages, topic,
+            channel_id, False, file_name, status_msg_id, thread_id)
+
+    except Exception as e:
+        logger.error(f"[QBM] Error: {e}", exc_info=True)
+        await send_msg(chat_id, f"❌ Error: {e}")
+
+
+async def _qbm_scan_answer_key(img, unresolved_mcqs: list) -> dict:
+    """
+    Given a page image and a list of MCQs whose answer wasn't found on their
+    own page, check if THIS page contains an answer key (table, boxed list,
+    or "1-A, 2-C..." style) that matches any of these questions by text.
+    Returns {question_text_first_80_chars: answer_letter} for matches found.
+    Never guesses — only returns a match if the page genuinely contains one.
+    """
+    if not unresolved_mcqs:
+        return {}
+    try:
+        q_list = "\n".join(
+            f"{i+1}. {(m.get('question') or '').strip()[:150]}"
+            for i, m in enumerate(unresolved_mcqs)
+        )
+        prompt = f"""This image may contain an ANSWER KEY (a table, boxed list, or a line
+like "1-A, 2-C, 3-B..." mapping question numbers to correct options).
+
+Here are questions whose answers are still missing, in order:
+{q_list}
+
+Task: If this page contains an answer key that matches ANY of these questions
+(by matching question number sequence, or by recognizing the question topic),
+return a JSON array like:
+[{{"question_index": 1, "answer": "A"}}, {{"question_index": 3, "answer": "C"}}]
+
+Only include entries where you found a genuine, confident match on this page.
+If this page has no answer key at all, or no match for these specific questions,
+return exactly: []
+Return ONLY the JSON array, nothing else."""
+
+        key = os.environ.get("GROQ_API_KEY", "")
+        result_json = None
+        if key:
+            data_url = _img_to_data_url(img)
+            if data_url:
+                txt = await _post_openai_compat(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    key, "meta-llama/llama-4-scout-17b-16e-instruct",
+                    data_url, prompt
+                )
+                result_json = _qbm_parse_json(txt) if txt else None
+
+        if not result_json:
+            try:
+                from pdf_handler import key_rotator, image_to_base64
+                if key_rotator.keys:
+                    gkey = key_rotator.get_key()
+                    from google import genai as gai
+                    from google.genai import types
+                    client = gai.Client(api_key=gkey)
+                    img_b64 = image_to_base64(img)
+
+                    def _call():
+                        return client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[
+                                types.Part.from_text(text=prompt),
+                                types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                            ]
+                        )
+                    response = await asyncio.to_thread(_call)
+                    result_json = _qbm_parse_json(response.text)
+            except Exception as e:
+                logger.warning(f"[QBM] answer-key scan gemini fallback failed: {e}")
+
+        if not result_json or not isinstance(result_json, list):
+            return {}
+
+        found = {}
+        for entry in result_json:
+            try:
+                q_idx = int(entry.get("question_index", 0)) - 1
+                ans = str(entry.get("answer", "")).strip().upper()[:1]
+                if 0 <= q_idx < len(unresolved_mcqs) and ans in ("A", "B", "C", "D"):
+                    key_text = (unresolved_mcqs[q_idx].get("question") or "").strip()[:80]
+                    found[key_text] = ans
+            except (ValueError, TypeError, AttributeError):
+                continue
+        return found
+    except Exception as e:
+        logger.warning(f"[QBM] answer-key scan failed: {e}")
+        return {}
+
+
+async def process_qbm_pages(
+    chat_id: int, uid: int, uname: str,
+    pages: list, topic: str,
+    channel_id, csv_only: bool,
+    file_name: str = "document.pdf",
+    status_msg_id: int = None,
+    thread_id: int = None
+):
+    """QBM main loop — extracts ALL existing MCQ per page, 3x retry, no target count."""
+    settings = await db_get_settings()
+    tag = settings.get("tag", "")
+    exp_footer = settings.get("exp_footer", "")
+
+    page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
+    start_time = time.time()
+    total_mcq = 0
+    total_polls = 0
+
+    if not status_msg_id:
+        r = await send_msg(chat_id, "⏳ Extraction শুরু হচ্ছে...")
+        status_msg_id = r.get("result", {}).get("message_id")
+
+    await edit_msg(chat_id, status_msg_id,
+        _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
+
+    summary_pages = []
+    all_mcqs_csv = []
+    first_image_msg_id = None
+
+    for idx, (page_num, img) in enumerate(pages):
+        page_status[idx]["current"] = True
+        await edit_msg(chat_id, status_msg_id,
+            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+
+        try:
+            mcqs = await _qbm_extract_from_image(img)
+            if not mcqs:
+                page_status[idx]["current"] = False
+                page_status[idx]["done"] = True
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+                continue
+
+            # ── Cross-page answer backfill ──
+            # If this page's MCQs came back with "Answer not found in source"
+            # (model couldn't find the answer on this page alone), the answer
+            # key is very commonly a few pages later. Look ahead at the next
+            # couple of pages specifically for an answer-key match before
+            # giving up and defaulting to "A".
+            unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
+            if unresolved and idx + 1 < len(pages):
+                for lookahead_offset in (1, 2):
+                    if idx + lookahead_offset >= len(pages):
+                        break
+                    if not unresolved:
+                        break
+                    _, lookahead_img = pages[idx + lookahead_offset]
+                    found_map = await _qbm_scan_answer_key(lookahead_img, unresolved)
+                    if found_map:
+                        for m in mcqs:
+                            key = (m.get("question") or "").strip()[:80]
+                            if key in found_map:
+                                m["answer"] = found_map[key]
+                                m["explanation"] = (m.get("explanation") or "").replace(
+                                    "Answer not found in source",
+                                    f"Answer key p.{fmt_page(pages[idx + lookahead_offset][0])} থেকে matched"
+                                )
+                        unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
+
+            img_bytes = image_to_bytes(img) if not isinstance(img, (bytes, bytearray)) else img
+
+            if csv_only:
+                for m in mcqs:
+                    opts = m.get("options", ["", "", "", ""])
+                    ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                    ans_num = ans_map.get(m.get("answer", "A"), "1")
+                    all_mcqs_csv.append([m["question"], opts[0],
+                        opts[1] if len(opts) > 1 else "",
+                        opts[2] if len(opts) > 2 else "",
+                        opts[3] if len(opts) > 3 else "",
+                        ans_num, m.get("explanation", ""), "1", "1"])
+            else:
+                caption = ""
+                if tag:
+                    caption = f"{tag}\n\n"
+                caption += (
+                    f"📋ATLAS Question Bank Extraction\n"
+                    f"🌟Topic: {topic}\n"
+                    f"📌Page No: {fmt_page(page_num)}\n"
+                    f"💎MCQ: {len(mcqs)}"
+                )
+
+                photo_r = await send_photo(channel_id, img_bytes, caption, message_thread_id=thread_id)
+                image_msg_id = None
+                if photo_r.get("ok"):
+                    image_msg_id = photo_r["result"]["message_id"]
+                    if first_image_msg_id is None:
+                        first_image_msg_id = image_msg_id
+
+                first_poll_link = ""
+                for i, mcq in enumerate(mcqs):
+                    opts = mcq.get("options", [])[:4]
+                    ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
+                    q_text = mcq["question"]
+                    if tag:
+                        q_text = f"{tag}\n\n{q_text}"
+                    exp = mcq.get("explanation", "")
+                    if exp_footer:
+                        exp = f"{exp}\n{exp_footer}"
+                    poll_r = {"ok": False}
+                    for _attempt in range(3):
+                        poll_r = await send_poll(
+                            channel_id, q_text, opts, ans_idx,
+                            explanation=exp[:200],
+                            reply_to_message_id=image_msg_id,
+                            message_thread_id=thread_id
+                        )
+                        if poll_r.get("ok"):
+                            break
+                        await asyncio.sleep(2)
+                    if poll_r.get("ok") and i == 0:
+                        pmid = poll_r["result"]["message_id"]
+                        cid = str(channel_id)
+                        first_poll_link = (
+                            f"https://t.me/c/{cid[4:]}/{pmid}"
+                            if cid.startswith("-100")
+                            else f"https://t.me/{cid.lstrip('@')}/{pmid}"
+                        )
+                    total_polls += 1
+                    await asyncio.sleep(0.3)
+
+                end_text = (
+                    f"📋Topic: {topic}\n"
+                    f"🌟Page No: {fmt_page(page_num)}\n"
+                    f"🚀MCQ: {len(mcqs)}\n"
+                    f"🔗First Poll Link:\n{first_poll_link}"
+                )
+                end_data = {
+                    "chat_id": channel_id, "text": end_text,
+                    "reply_to_message_id": image_msg_id,
+                    "disable_web_page_preview": True
+                }
+                if thread_id:
+                    end_data["message_thread_id"] = thread_id
+                await tg_post("sendMessage", end_data)
+
+                summary_pages.append({"page": page_num, "first_poll": first_poll_link, "mcq_count": len(mcqs)})
+
+                for m in mcqs:
+                    opts = m.get("options", ["", "", "", ""])
+                    ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                    ans_num = ans_map.get(m.get("answer", "A"), "1")
+                    all_mcqs_csv.append([m["question"], opts[0],
+                        opts[1] if len(opts) > 1 else "",
+                        opts[2] if len(opts) > 2 else "",
+                        opts[3] if len(opts) > 3 else "",
+                        ans_num, m.get("explanation", ""), "1", "1"])
+
+            total_mcq += len(mcqs)
+            page_status[idx]["done"] = True
+            page_status[idx]["current"] = False
+            page_status[idx]["mcq"] = len(mcqs)
+            await edit_msg(chat_id, status_msg_id,
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+
+        except Exception as e:
+            logger.error(f"[QBM] Page {page_num} error: {e}")
+            page_status[idx]["current"] = False
+            page_status[idx]["done"] = True
+
+    if all_mcqs_csv:
+        import io as _io, csv as _csv_mod
+        buf = _io.StringIO()
+        writer = _csv_mod.writer(buf)
+        writer.writerow(["questions", "option1", "option2", "option3", "option4",
+                          "answer", "explanation", "type", "section"])
+        for row in all_mcqs_csv:
+            writer.writerow(row)
+        await send_document(chat_id, buf.getvalue().encode("utf-8"),
+            f"{topic}_QBM.csv",
+            caption=f"📋 {topic} — {len(all_mcqs_csv)} MCQ (Extracted)",
+            mime_type="text/csv")
+
+    if not csv_only and summary_pages:
+        total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
+        bd_time = _get_bd_time()
+        summary = f"⚙️QBM Summary\n📋Topic: {topic}\n🚀Total Extracted MCQ: {total_mcq_sum}\n\n"
+        for p in summary_pages:
+            summary += f"🌟Page No: {fmt_page(p['page'])} ({p['mcq_count']} MCQ)\n{p['first_poll']}\n\n"
+        summary += f"📅 {bd_time}"
+
+        summary_data = {"chat_id": channel_id, "text": summary, "disable_web_page_preview": True}
+        if first_image_msg_id:
+            summary_data["reply_to_message_id"] = first_image_msg_id
+        if thread_id:
+            summary_data["message_thread_id"] = thread_id
+        sum_r = await tg_post("sendMessage", summary_data)
+        if sum_r.get("ok"):
+            await try_pin_message(channel_id, sum_r["result"]["message_id"])
+
+    elapsed = int(time.time() - start_time)
+    mins, secs = divmod(elapsed, 60)
+    await edit_msg(chat_id, status_msg_id,
+        f"✅ <b>QBM Extraction Complete!</b>\n\n📄 {file_name}\n📋 {topic}\n"
+        f"📝 Total MCQ Extracted: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ {mins}:{secs:02d}")
 
 # ============================================================
 # FEATURE: /rapid — CSV রিপ্লাই করে Topic দিলে, channel + local time select
@@ -3630,10 +4650,20 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
     await asyncio.sleep(1)
 
     poll_fail_count = 0
+    skipped_empty = 0
     for i, mcq in enumerate(mcqs):
         opts = mcq.get("options", [])
+        q_raw = (mcq.get("question") or "").strip()
+        if not q_raw or len(opts) < 2 or all(not (o or "").strip() for o in opts):
+            skipped_empty += 1
+            logger.warning(f"[PollAgain] skipped q{i+1}/{total}: empty question or options in cache")
+            continue
+        # pad missing/empty options up to 4, cap at 4 (A-D) — defensive, even if
+        # cache has stale 5-option data from before the source-side cap existed
+        opts = [(o or "").strip() or f"Option {j+1}" for j, o in enumerate(opts)][:4]
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
-        q_text = f"({i+1}/{total}) {mcq['question']}"
+        ans_idx = min(ans_idx, len(opts) - 1)
+        q_text = f"({i+1}/{total}) {q_raw}"
         if tag:
             q_text = f"{tag}\n\n{q_text}"
         exp = mcq.get("explanation", "")
@@ -3644,8 +4674,11 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
             poll_fail_count += 1
             logger.error(f"[PollAgain] sendPoll failed q{i+1}/{total}: {poll_res.get('description') or poll_res.get('error')}")
         await asyncio.sleep(1.5)
-    if poll_fail_count > 0:
-        await notify_owner(f"⚠️ Poll Practice ({cache_id[:8]}): {poll_fail_count}/{total} poll পাঠাতে ব্যর্থ হয়েছে। Render logs চেক করুন।")
+    if poll_fail_count > 0 or skipped_empty > 0:
+        await notify_owner(
+            f"⚠️ Poll Practice ({cache_id[:8]}): {poll_fail_count}/{total} poll পাঠাতে ব্যর্থ, "
+            f"{skipped_empty} টা empty question/option থাকায় skip করা হয়েছে। Render logs চেক করুন।"
+        )
 
     end_text = (
         f"✅ <b>Poll শেষ!</b>\n\n🎯 Topic: {topic}\n"
@@ -3700,7 +4733,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
     img = PILImage.open(BytesIO(img_bytes))
 
     progress_task = asyncio.create_task(update_progress())
-    new_mcqs = await generate_new_mcq(img, topic, page, count=15)
+    new_mcqs = _cap_mcq_options(await generate_new_mcq(img, topic, page, count=15))
     progress_task.cancel()
 
     if not new_mcqs:
@@ -3738,7 +4771,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
 
     poll_fail_count2 = 0
     for i, mcq in enumerate(new_mcqs):
-        opts = mcq.get("options", [])
+        opts = mcq.get("options", [])[:4]
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
         q_text = f"({i+1}/{total}) {mcq['question']}"
         if tag:
@@ -3900,10 +4933,27 @@ async def _send_quiz_question_inner(uid: int):
     i = st["idx"]
     mcq = st["mcqs"][i]
     opts = mcq.get("options", [])
+    q_raw = (mcq.get("question") or "").strip()
+
+    # Malformed MCQ (empty question / insufficient options) — skip it, don't crash the quiz
+    if not q_raw or len(opts) < 2 or all(not (o or "").strip() for o in opts):
+        logger.warning(f"[QuizSolve] skipped malformed q{i+1}/{len(st['mcqs'])}: empty question/options")
+        st["idx"] += 1
+        st["skip"] += 1
+        st["skip_idx"].append(i)
+        await qs_set(uid, st)
+        if st["idx"] >= len(st["mcqs"]):
+            await _finish_quiz(uid)
+        else:
+            await _send_quiz_question(uid)
+        return
+
+    opts = [(o or "").strip() or f"Option {j+1}" for j, o in enumerate(opts)][:4]
     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
+    ans_idx = min(ans_idx, len(opts) - 1)
     total = len(st["mcqs"])
 
-    q_text = f"({i+1}/{total}) {mcq['question']}"
+    q_text = f"({i+1}/{total}) {q_raw}"
     if st["tag"]:
         q_text = f"{st['tag']}\n\n{q_text}"
 
@@ -4128,7 +5178,7 @@ async def handle_quiz_new(cache_id: str, user: dict, chat_id: int):
     img_bytes = await download_tg_file(image_file_id)
     from PIL import Image as PILImage
     img = PILImage.open(BytesIO(img_bytes))
-    new_mcqs = await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15)
+    new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15))
     if not new_mcqs:
         await send_msg(chat_id, "❌ MCQ generate হয়নি!")
         return
@@ -4633,6 +5683,17 @@ async def handle_message(msg: dict):
         if collected:
             return
 
+    # Auto mhtml/html → smart detect (MCQ→CSV queue, Q&A/CQ→tell user to use /qpdf)
+    if msg.get("document") and not msg.get("reply_to_message"):
+        _dfn = msg["document"].get("file_name", "").lower()
+        if _dfn.endswith(".mhtml") or _dfn.endswith(".mht") or _dfn.endswith(".html") or _dfn.endswith(".htm"):
+            await _mhtml_auto_queue.put(msg)
+            qsize = _mhtml_auto_queue.qsize()
+            if qsize > 1:
+                await send_msg(chat_id, f"📥 Queue-তে যোগ হয়েছে (position: {qsize})")
+            return
+
+
     # v1.2: Watermark flow check (awaiting PDF, then awaiting text)
     if uid in WATERMARK_PENDING:
         consumed = await handle_watermark_document(msg)
@@ -4709,6 +5770,10 @@ async def handle_message(msg: dict):
         await handle_channel(msg)
     elif text == "/info2":
         await handle_info2(msg)
+    elif text.startswith("/qbm"):
+        # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
+        # 100% ported from AtlasMasterBot's qbm_handler
+        asyncio.create_task(handle_qbm(msg))
     elif text.startswith("/pdfm"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
@@ -4724,6 +5789,10 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         await handle_txt_command(msg)
+    elif text.startswith("/sheet"):
+        asyncio.create_task(handle_sheet_command(msg))
+    elif text.startswith("/qcsv"):
+        asyncio.create_task(handle_qcsv_command(msg))
     elif text.startswith("/qpdf"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
@@ -5191,6 +6260,44 @@ async def handle_callback(query: dict):
             ))
             getattr(app.state,"pdf_cache",{}).pop(f"pdfm_img_{uid}", None)
 
+        elif data.startswith("qbmch_"):
+            parts = data.split("_")
+            channel = parts[1]
+            orig_uid = int(parts[2])
+            if uid != orig_uid:
+                return
+            row = sb.table("quiz_sessions").select("data").eq("key", f"qbm_pending_{uid}").execute()
+            if not row.data:
+                await send_msg(chat_id, "❌ Session expired!")
+                return
+            pending = json.loads(row.data[0]["data"])
+            pages = getattr(app.state,"qbm_cache",{}).get(f"qbm_img_{uid}")
+            if not pages:
+                saved_file_id = pending.get("file_id")
+                if not saved_file_id:
+                    await send_msg(chat_id, "❌ Session expired!")
+                    return
+                await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
+                try:
+                    pdf_bytes = await download_tg_file(saved_file_id)
+                    pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, pending.get("page_range"))
+                except Exception as e:
+                    await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
+                    return
+                if not pages:
+                    await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
+                    return
+            csv_only = channel == "csv"
+            ch = None if csv_only else channel
+            asyncio.create_task(process_qbm_pages(
+                chat_id, uid, user.get("first_name","User"), pages,
+                pending["topic"], ch, csv_only,
+                pending.get("file_name","document.pdf"),
+                pending.get("status_msg_id"),
+                thread_id=pending.get("thread_id")
+            ))
+            getattr(app.state,"qbm_cache",{}).pop(f"qbm_img_{uid}", None)
+
         elif data.startswith("livechannel_"):
             parts    = data.split("_", 2)
             channel  = parts[1]
@@ -5594,7 +6701,7 @@ async def _run_new_exam_job(job_id: str, cache_id: str, user_id, cache: dict, im
                     job["pct"] = min(90, job["pct"] + 4)
 
         ticker_task = asyncio.create_task(_ticker())
-        new_mcqs = await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15)
+        new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15))
         ticker_task.cancel()
 
         if not new_mcqs:
@@ -5667,7 +6774,7 @@ async def generate_new_exam(request: Request):
         img_bytes = await download_tg_file(image_file_id)
         from PIL import Image as PILImage
         img = PILImage.open(BytesIO(img_bytes))
-        new_mcqs = await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15)
+        new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15))
         if not new_mcqs:
             return JSONResponse({"error": "MCQ generation failed"}, status_code=500)
         new_cache_id = gen_session_id()
@@ -5700,6 +6807,14 @@ async def startup():
     global BOT_START_TIME
     BOT_START_TIME = time.time()
     logger.info("[App] ATLAS BOT v4.1 starting...")
+
+    # Start mhtml/html auto-queue worker (serial processing, one file at a time)
+    global _mhtml_worker_started
+    if not _mhtml_worker_started:
+        asyncio.create_task(_mhtml_auto_worker())
+        _mhtml_worker_started = True
+        logger.info("[App] mhtml auto-queue worker started")
+
     if not BOT_TOKEN:
         logger.error("[App] BOT_TOKEN missing!")
         return
