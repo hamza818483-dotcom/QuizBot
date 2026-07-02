@@ -3183,7 +3183,7 @@ async def _qbm_extract_from_image(img) -> list:
     # Cross-verification pass
     second = await _qbm_single_pass(img)
     if second and len(second) == len(first):
-        return first  # Both passes agree on count -> confident result
+        return _cap_mcq_options(first)  # Both passes agree on count -> confident result
 
     if second and len(second) != len(first):
         # Disagreement -> tie-breaker third pass, then trust the most complete extraction
@@ -3192,9 +3192,9 @@ async def _qbm_extract_from_image(img) -> list:
         if candidates:
             best = max(candidates, key=len)
             logger.info(f"[QBM] Cross-check disagreement (counts: {[len(c) for c in candidates]}) -> using most complete: {len(best)} MCQ")
-            return best
+            return _cap_mcq_options(best)
 
-    return first
+    return _cap_mcq_options(first)
 
 
 async def _qbm_gemini_extract(img) -> list:
@@ -3235,21 +3235,26 @@ async def handle_qbm(msg: dict):
     text = msg.get("text", "")
     reply = msg.get("reply_to_message")
 
-    if not reply or not reply.get("document"):
+    if not reply or not (reply.get("document") or reply.get("photo")):
         await send_msg(chat_id,
-            "❌ PDF ফাইলে reply করে /qbm দাও!\n\n"
+            "❌ PDF বা Image-এ reply করে /qbm দাও!\n\n"
             "<b>Format:</b>\n"
             "<code>/qbm -p 1-5 -c @channel -m \"Topic\" -t group_id</code>\n\n"
-            "📌 এই ফিচার PDF-এ আগে থেকে থাকা MCQ extract করে (নতুন বানায় না)\n"
-            "📌 -p = page range (না দিলে সব page)\n"
+            "📌 এই ফিচার PDF/Image-এ আগে থেকে থাকা MCQ extract করে (নতুন বানায় না)\n"
+            "📌 -p = page range, PDF-only (না দিলে সব page)\n"
             "📌 -c = channel id (না দিলে list দেখাবে)\n"
             "📌 -m = topic name\n"
             "📌 -t = topic/thread id (group হলে)"
         )
         return
 
-    if not reply["document"].get("file_name", "").lower().endswith(".pdf"):
-        await send_msg(chat_id, "❌ শুধু PDF!")
+    is_image_reply = bool(reply.get("photo")) or (
+        reply.get("document") and not reply["document"].get("file_name", "").lower().endswith(".pdf")
+        and (reply["document"].get("mime_type", "").startswith("image/"))
+    )
+
+    if reply.get("document") and not is_image_reply and not reply["document"].get("file_name", "").lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF বা Image file support করে!")
         return
 
     params = _parse_pdfm_params(text)
@@ -3258,26 +3263,39 @@ async def handle_qbm(msg: dict):
     channel_id = params["channel_id"]
     thread_id = params["thread_id"]
 
-    file_id = reply["document"]["file_id"]
-    file_name = reply["document"].get("file_name", "document.pdf")
+    if is_image_reply:
+        if reply.get("photo"):
+            file_id = reply["photo"][-1]["file_id"]
+        else:
+            file_id = reply["document"]["file_id"]
+        file_name = reply.get("document", {}).get("file_name", "image.jpg")
+    else:
+        file_id = reply["document"]["file_id"]
+        file_name = reply["document"].get("file_name", "document.pdf")
 
-    status_r = await send_msg(chat_id, "⏳ PDF download হচ্ছে...")
+    status_r = await send_msg(chat_id, "⏳ " + ("Image" if is_image_reply else "PDF") + " download হচ্ছে...")
     status_msg_id = status_r.get("result", {}).get("message_id")
 
     try:
-        pdf_bytes = await download_tg_file(file_id)
-        pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, page_range)
+        if is_image_reply:
+            img_bytes = await download_tg_file(file_id)
+            from PIL import Image as PILImage
+            img = PILImage.open(BytesIO(img_bytes))
+            pages = [(1, img)]
+        else:
+            pdf_bytes = await download_tg_file(file_id)
+            pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, page_range)
 
-        # OCR fallback if pages look empty/unreadable (scanned PDF) — mirrors AtlasMasterBot
-        if not pages or (pages and len(str(pages[0][1])) < 100):
-            if status_msg_id:
-                await edit_msg(chat_id, status_msg_id, "🔍 OCR Scanning (scanned PDF detected)...")
-            try:
-                from pdf2image import convert_from_bytes
-                ocr_pages = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
-                pages = list(enumerate(ocr_pages, 1))
-            except Exception as e:
-                logger.warning(f"[QBM] OCR fallback failed: {e}")
+            # OCR fallback if pages look empty/unreadable (scanned PDF) — mirrors AtlasMasterBot
+            if not pages or (pages and len(str(pages[0][1])) < 100):
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "🔍 OCR Scanning (scanned PDF detected)...")
+                try:
+                    from pdf2image import convert_from_bytes
+                    ocr_pages = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+                    pages = list(enumerate(ocr_pages, 1))
+                except Exception as e:
+                    logger.warning(f"[QBM] OCR fallback failed: {e}")
 
         if not pages:
             if status_msg_id:

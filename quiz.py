@@ -394,6 +394,13 @@ async def send_quiz_question(chat_id: int, session: dict):
 
     opts = q.get("options", [])
     ans_idx = q.get("answer_index", 0)
+    if len(opts) > 4:
+        # keep correct answer in range — swap it into slot 4 (index 3) before trimming
+        if ans_idx >= 4:
+            opts = opts[:3] + [opts[ans_idx]]
+            ans_idx = 3
+        else:
+            opts = opts[:4]
 
     poll_r = await tg_post("sendPoll", {
         "chat_id": chat_id,
