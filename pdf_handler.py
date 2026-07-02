@@ -4,6 +4,7 @@
 # ============================================================
 
 import os
+import re
 import json
 import logging
 import random
@@ -78,7 +79,8 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 -কোনো টেক্সটের নিচে কালার মার্ক বা কোনো টেক্সট হাইলাইটেড থাকলে সেখান থেকে প্রশ্ন বানানো মিস দেওয়া যাবে না (must priority)
 -কোয়ালিটিফুল প্রশ্ন বানাতে হবে
 -ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
--টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা এসব info থেকে MCQ বানাবে না
+-টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট এসব থেকে MCQ বানাবে না — না প্রশ্নে, না অপশনে। এগুলো শুধু structural/navigation elements, প্রকৃত জ্ঞান/তথ্য না।
+-প্রতিটি অপশন অবশ্যই actual factual content হতে হবে (definition, cause, treatment, value, name of a real concept ইত্যাদি) — কখনোই কোনো section heading, card/page label, বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না
 -MUST বানাতে হবে exactly {count} টি MCQ, কম বেশি নয়
 -Highest quality MCQ বানাবে
 
@@ -109,7 +111,8 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 -কোয়ালিটিফুল প্রশ্ন বানাতে হবে
 -এমনভাবে সকল প্রশ্ন বানাবে যাতে সকল লাইন থেকে MCQ কিভাবে আসতে পারে আইডিয়া হয়ে যাবে
 -ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
--টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা এসব info থেকে MCQ বানাবে না
+-টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট এসব থেকে MCQ বানাবে না — না প্রশ্নে, না অপশনে। এগুলো শুধু structural/navigation elements, প্রকৃত জ্ঞান/তথ্য না।
+-প্রতিটি অপশন অবশ্যই actual factual content হতে হবে (definition, cause, treatment, value, name of a real concept ইত্যাদি) — কখনোই কোনো section heading, card/page label, বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না
 -হাবিজাবি MCQ বানানো যাবে না,বেশি প্রশ্ন বানানোর প্রয়োজনে একটি MCQ কেই ঘুরিয়ে ফিরিয়ে দেওয়া যেতে পারে
 -MAXIMUM possible MCQ বানাবে — প্রতিটি লাইন, বক্স, তথ্য, সোর্স use করে
 -তথ্য কম থাকলে minimum 10 টি
@@ -182,9 +185,16 @@ def _parse_mcq_json(text: str) -> list:
     if not isinstance(mcqs, list) or len(mcqs) == 0:
         raise ValueError("Empty MCQ list")
     valid = []
+    _nav_label_re = re.compile(r'^(card|page|section|chapter|part|topic|slide)\s*\d*$', re.IGNORECASE)
     for m in mcqs:
         if all(k in m for k in ["question", "options", "answer", "explanation"]):
             if len(m["options"]) == 4 and m["answer"] in ["A", "B", "C", "D"]:
+                # Defense-in-depth: navigation-label-like options (e.g. "Card 1",
+                # "Section 2") indicate the AI leaked page-structure text into the
+                # options instead of real content — reject this MCQ entirely.
+                if any(_nav_label_re.match(str(o).strip()) for o in m["options"]):
+                    logger.warning(f"[MCQ] Rejected — nav-label option detected: {m['options']}")
+                    continue
                 valid.append(m)
 
     # Post-process: answer গুলো সব একই হলে shuffle করো
@@ -345,6 +355,7 @@ RULES:
 - ৪টি option, একটি সঠিক
 - Answer A/B/C/D — MUST vary across questions, NEVER all same
 - Explanation max 200 chars
+- কোনো section heading, "Card 1"/"Card 2", page/chapter label বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না — প্রতিটি option অবশ্যই actual factual content হতে হবে
 
 TEXT:
 {text[:4000]}
@@ -363,7 +374,8 @@ Return ONLY valid JSON array, no markdown, no extra text:
         except Exception:
             return []
         return [m for m in mcqs if all(k in m for k in ["question","options","answer","explanation"])
-                and len(m.get("options", [])) >= 4 and m["answer"] in ["A","B","C","D"]]
+                and len(m.get("options", [])) >= 4 and m["answer"] in ["A","B","C","D"]
+                and not any(re.match(r'^(card|page|section|chapter|part|topic|slide)\s*\d*$', str(o).strip(), re.IGNORECASE) for o in m.get("options", []))]
 
     # ── PRIMARY: Gemini (new google.genai SDK, multi-key rotation) ──
     max_retries = len(key_rotator.keys) if key_rotator.keys else 3

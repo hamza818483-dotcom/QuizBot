@@ -169,6 +169,16 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
             except Exception as e:
                 logger.warning(f"[poll_extract] msg {message.id}: {type(e).__name__}: {e}")
 
+            # Cap to 4 options (A-D) — some source polls have a stray 5th
+            # blank/placeholder option. Keep correct answer in range by
+            # swapping it into slot 4 before trimming.
+            if len(options) > 4:
+                if correct_idx >= 4:
+                    options = options[:3] + [options[correct_idx]]
+                    correct_idx = 3
+                else:
+                    options = options[:4]
+
             polls.append({
                 "question":    q_text,
                 "options":     options,

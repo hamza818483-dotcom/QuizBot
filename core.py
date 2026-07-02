@@ -37,6 +37,9 @@ CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://atlasquizbotpro.hamza81
 HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://quizbot-s482.onrender.com")  # v4.2: HF permanently banned, Render is primary
 RENDER_URL = os.environ.get("RENDER_URL", "")
 D1_TOKEN = os.environ.get("D1_TOKEN", "")
+# v4.3: GitHub Pages exam link — CF down thakleo page load hoy (static host),
+# er bhitorer JS nijei Render->CF->Supabase try kore. Beshi robust than CF-hosted /exam/.
+GH_PAGES_EXAM_URL = os.environ.get("GH_PAGES_EXAM_URL", "https://hamza818483-dotcom.github.io/QuizBot/exam.html")
 
 # Render এ চললে directly TG API, HF এ চললে CF proxy (HF তে TG blocked)
 _running_on = os.environ.get("RUNNING_ON", "")
