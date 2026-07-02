@@ -4749,10 +4749,27 @@ async def _send_quiz_question_inner(uid: int):
     i = st["idx"]
     mcq = st["mcqs"][i]
     opts = mcq.get("options", [])
+    q_raw = (mcq.get("question") or "").strip()
+
+    # Malformed MCQ (empty question / insufficient options) — skip it, don't crash the quiz
+    if not q_raw or len(opts) < 2 or all(not (o or "").strip() for o in opts):
+        logger.warning(f"[QuizSolve] skipped malformed q{i+1}/{len(st['mcqs'])}: empty question/options")
+        st["idx"] += 1
+        st["skip"] += 1
+        st["skip_idx"].append(i)
+        await qs_set(uid, st)
+        if st["idx"] >= len(st["mcqs"]):
+            await _finish_quiz(uid)
+        else:
+            await _send_quiz_question(uid)
+        return
+
+    opts = [(o or "").strip() or f"Option {j+1}" for j, o in enumerate(opts)][:10]
     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
+    ans_idx = min(ans_idx, len(opts) - 1)
     total = len(st["mcqs"])
 
-    q_text = f"({i+1}/{total}) {mcq['question']}"
+    q_text = f"({i+1}/{total}) {q_raw}"
     if st["tag"]:
         q_text = f"{st['tag']}\n\n{q_text}"
 
