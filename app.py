@@ -2997,16 +2997,37 @@ QBM_EXTRACT_PROMPT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SPECIAL PE
 ════════════════════════════════
 🎯 ANSWER DETECTION (ALL FORMATS) — triple-check before finalizing
 ════════════════════════════════
-Format 1 — Answer beside question: detect circle/tick/underline/bold/star (★) on option
-Format 2 — Answer box at page bottom: match question number → correct option letter
-Format 3 — Answer key on a different page (few pages later):
-→ Scan ALL pages for answer keys
-→ Match question number exactly → correct option
-→ NEVER assume an answer if it's not found in the image
-→ If answer not found anywhere → set answer as "A" and note in explanation "Answer not found in source"
-Format 4 — Answer given right after each question block: read carefully
-→ Convert all answer formats to A/B/C/D in output
-→ Re-verify each detected answer against the source at least twice before finalizing
+The correct answer MUST come from an actual source found in the page/image content.
+NEVER pick/guess an answer yourself — the answer must always be traceable to one of
+the source types below. Scan for ALL of these possible answer sources, in this order
+of likelihood, before concluding no answer exists:
+
+Source A — Answer marked directly on an option: circle, tick (✓), cross(✗)-elimination,
+  underline, bold, highlight, star (★), or any other visual mark on one option
+Source B — Answer given immediately with/after the MCQ itself (right after the question
+  block, before the next question starts)
+Source C — Answer table/box at the BOTTOM of the SAME page: a small table, boxed list,
+  or line like "Answer: 1-A, 2-C, 3-B..." — match question number → correct option
+Source D — Combined/consolidated answer key appearing SEVERAL PAGES LATER (not
+  necessarily the very next page — scan forward through ALL available pages, since many
+  question banks group all answers together after 2-3 pages of questions, or at the very
+  end of the document): match question number exactly → correct option
+Source E — Answer key on the page(s) immediately BEFORE or AFTER this one, in any of
+  the above formats (marked option, inline, or boxed table)
+
+Rules while scanning:
+→ Check every source type above before deciding an answer is missing — the answer for a
+  question on this page may live on a completely different page from the ones you've
+  processed so far, so scan broadly, not just this single page.
+→ Match strictly by question number (or exact question text if numbers are unclear/reused).
+→ NEVER invent, guess, or default an answer yourself under any circumstance.
+→ If — and only if — you have scanned all available pages/sources and genuinely found NO
+  answer indication anywhere for that specific question → set answer as "A" and note in
+  explanation "Answer not found in source". This is the last resort, never the first choice.
+→ Convert whatever format the source uses (number, checkmark, circled letter, bold option,
+  etc.) into the standard A/B/C/D letter for output.
+→ Re-verify each detected answer against its source at least twice before finalizing —
+  a wrong answer is worse than a missing one, so confirm carefully.
 
 ════════════════════════════════
 🔀 OPTION SHUFFLE (MANDATORY, EVERY SINGLE MCQ, NO EXCEPTIONS)
@@ -3351,6 +3372,91 @@ async def handle_qbm(msg: dict):
         await send_msg(chat_id, f"❌ Error: {e}")
 
 
+async def _qbm_scan_answer_key(img, unresolved_mcqs: list) -> dict:
+    """
+    Given a page image and a list of MCQs whose answer wasn't found on their
+    own page, check if THIS page contains an answer key (table, boxed list,
+    or "1-A, 2-C..." style) that matches any of these questions by text.
+    Returns {question_text_first_80_chars: answer_letter} for matches found.
+    Never guesses — only returns a match if the page genuinely contains one.
+    """
+    if not unresolved_mcqs:
+        return {}
+    try:
+        q_list = "\n".join(
+            f"{i+1}. {(m.get('question') or '').strip()[:150]}"
+            for i, m in enumerate(unresolved_mcqs)
+        )
+        prompt = f"""This image may contain an ANSWER KEY (a table, boxed list, or a line
+like "1-A, 2-C, 3-B..." mapping question numbers to correct options).
+
+Here are questions whose answers are still missing, in order:
+{q_list}
+
+Task: If this page contains an answer key that matches ANY of these questions
+(by matching question number sequence, or by recognizing the question topic),
+return a JSON array like:
+[{{"question_index": 1, "answer": "A"}}, {{"question_index": 3, "answer": "C"}}]
+
+Only include entries where you found a genuine, confident match on this page.
+If this page has no answer key at all, or no match for these specific questions,
+return exactly: []
+Return ONLY the JSON array, nothing else."""
+
+        key = os.environ.get("GROQ_API_KEY", "")
+        result_json = None
+        if key:
+            data_url = _img_to_data_url(img)
+            if data_url:
+                txt = await _post_openai_compat(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    key, "meta-llama/llama-4-scout-17b-16e-instruct",
+                    data_url, prompt
+                )
+                result_json = _qbm_parse_json(txt) if txt else None
+
+        if not result_json:
+            try:
+                from pdf_handler import key_rotator, image_to_base64
+                if key_rotator.keys:
+                    gkey = key_rotator.get_key()
+                    from google import genai as gai
+                    from google.genai import types
+                    client = gai.Client(api_key=gkey)
+                    img_b64 = image_to_base64(img)
+
+                    def _call():
+                        return client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[
+                                types.Part.from_text(text=prompt),
+                                types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                            ]
+                        )
+                    response = await asyncio.to_thread(_call)
+                    result_json = _qbm_parse_json(response.text)
+            except Exception as e:
+                logger.warning(f"[QBM] answer-key scan gemini fallback failed: {e}")
+
+        if not result_json or not isinstance(result_json, list):
+            return {}
+
+        found = {}
+        for entry in result_json:
+            try:
+                q_idx = int(entry.get("question_index", 0)) - 1
+                ans = str(entry.get("answer", "")).strip().upper()[:1]
+                if 0 <= q_idx < len(unresolved_mcqs) and ans in ("A", "B", "C", "D"):
+                    key_text = (unresolved_mcqs[q_idx].get("question") or "").strip()[:80]
+                    found[key_text] = ans
+            except (ValueError, TypeError, AttributeError):
+                continue
+        return found
+    except Exception as e:
+        logger.warning(f"[QBM] answer-key scan failed: {e}")
+        return {}
+
+
 async def process_qbm_pages(
     chat_id: int, uid: int, uname: str,
     pages: list, topic: str,
@@ -3393,6 +3499,32 @@ async def process_qbm_pages(
                 await edit_msg(chat_id, status_msg_id,
                     _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
                 continue
+
+            # ── Cross-page answer backfill ──
+            # If this page's MCQs came back with "Answer not found in source"
+            # (model couldn't find the answer on this page alone), the answer
+            # key is very commonly a few pages later. Look ahead at the next
+            # couple of pages specifically for an answer-key match before
+            # giving up and defaulting to "A".
+            unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
+            if unresolved and idx + 1 < len(pages):
+                for lookahead_offset in (1, 2):
+                    if idx + lookahead_offset >= len(pages):
+                        break
+                    if not unresolved:
+                        break
+                    _, lookahead_img = pages[idx + lookahead_offset]
+                    found_map = await _qbm_scan_answer_key(lookahead_img, unresolved)
+                    if found_map:
+                        for m in mcqs:
+                            key = (m.get("question") or "").strip()[:80]
+                            if key in found_map:
+                                m["answer"] = found_map[key]
+                                m["explanation"] = (m.get("explanation") or "").replace(
+                                    "Answer not found in source",
+                                    f"Answer key p.{fmt_page(pages[idx + lookahead_offset][0])} থেকে matched"
+                                )
+                        unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
 
             img_bytes = image_to_bytes(img) if not isinstance(img, (bytes, bytearray)) else img
 
