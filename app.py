@@ -402,6 +402,37 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
     Missing API keys are skipped silently. Never raises.
     """
+    out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
+    return _cap_mcq_options(out, 4)
+
+
+def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
+    """v4.4: some AI providers occasionally return 5 options (E) instead of 4.
+    Trim every mcq down to max_opts here — single choke point so /img's
+    Telegram poll, Web Exam page, Quiz Solve, and CSV export all stay
+    consistent without needing separate truncation logic in each consumer."""
+    if not mcqs:
+        return mcqs
+    ans_map = {0: "A", 1: "B", 2: "C", 3: "D", 4: "E"}
+    rev_map = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4}
+    for m in mcqs:
+        opts = m.get("options", [])
+        if len(opts) > max_opts:
+            ans_letter = m.get("answer", "A")
+            ans_idx = rev_map.get(ans_letter, 0)
+            # If the correct answer happens to be option 5 (E), keep it in range
+            # by swapping it into slot 4 (D) before trimming, so we never lose
+            # the right answer off the end.
+            if ans_idx >= max_opts:
+                opts = opts[:max_opts - 1] + [opts[ans_idx]]
+                m["answer"] = ans_map[max_opts - 1]
+            else:
+                opts = opts[:max_opts]
+            m["options"] = opts
+    return mcqs
+
+
+async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
     # 1) Groq (primary — fast, set via GROQ_API_KEY)
     try:
         out = await _gen_groq(img, topic, mcq_count)
@@ -4549,7 +4580,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
     img = PILImage.open(BytesIO(img_bytes))
 
     progress_task = asyncio.create_task(update_progress())
-    new_mcqs = await generate_new_mcq(img, topic, page, count=15)
+    new_mcqs = _cap_mcq_options(await generate_new_mcq(img, topic, page, count=15))
     progress_task.cancel()
 
     if not new_mcqs:
@@ -4994,7 +5025,7 @@ async def handle_quiz_new(cache_id: str, user: dict, chat_id: int):
     img_bytes = await download_tg_file(image_file_id)
     from PIL import Image as PILImage
     img = PILImage.open(BytesIO(img_bytes))
-    new_mcqs = await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15)
+    new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15))
     if not new_mcqs:
         await send_msg(chat_id, "❌ MCQ generate হয়নি!")
         return
@@ -6517,7 +6548,7 @@ async def _run_new_exam_job(job_id: str, cache_id: str, user_id, cache: dict, im
                     job["pct"] = min(90, job["pct"] + 4)
 
         ticker_task = asyncio.create_task(_ticker())
-        new_mcqs = await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15)
+        new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15))
         ticker_task.cancel()
 
         if not new_mcqs:
@@ -6590,7 +6621,7 @@ async def generate_new_exam(request: Request):
         img_bytes = await download_tg_file(image_file_id)
         from PIL import Image as PILImage
         img = PILImage.open(BytesIO(img_bytes))
-        new_mcqs = await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15)
+        new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15))
         if not new_mcqs:
             return JSONResponse({"error": "MCQ generation failed"}, status_code=500)
         new_cache_id = gen_session_id()
