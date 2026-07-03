@@ -3363,14 +3363,27 @@ async def handle_qbm(msg: dict):
             pdf_bytes = await download_tg_file(file_id)
             pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, page_range)
 
-            # OCR fallback if pages look empty/unreadable (scanned PDF) — mirrors AtlasMasterBot
-            if not pages or (pages and len(str(pages[0][1])) < 100):
+            # OCR fallback if truly no pages/images came back (scanned/corrupt PDF).
+            # NOTE: previous check `len(str(pages[0][1])) < 100` was always true (PIL repr
+            # string is always short) so this branch fired on every PDF and ignored
+            # page_range — fixed to only trigger on genuine empty extraction, and to
+            # respect page_range when it does.
+            if not pages:
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id, "🔍 OCR Scanning (scanned PDF detected)...")
                 try:
                     from pdf2image import convert_from_bytes
-                    ocr_pages = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
-                    pages = list(enumerate(ocr_pages, 1))
+                    if page_range:
+                        parts = str(page_range).split("-")
+                        first = int(parts[0])
+                        last = int(parts[1]) if len(parts) > 1 else first
+                        ocr_images = await asyncio.to_thread(
+                            convert_from_bytes, pdf_bytes, dpi=150, first_page=first, last_page=last
+                        )
+                        pages = list(zip(range(first, last + 1), ocr_images))
+                    else:
+                        ocr_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+                        pages = list(enumerate(ocr_images, 1))
                 except Exception as e:
                     logger.warning(f"[QBM] OCR fallback failed: {e}")
 
