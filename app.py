@@ -2719,7 +2719,7 @@ def _parse_pdfm_params(text: str) -> dict:
 
     m = re.search(r'-p\s+([\d,\-]+)', text)
     if m:
-        result["page_range"] = parse_page_range(m.group(1))
+        result["page_range"] = m.group(1)
 
     m = re.search(r'-c\s+(@\S+|-100\d+)', text)
     if m:
