@@ -19,6 +19,7 @@ import time
 import random
 import string
 import re
+import difflib
 import base64
 from io import BytesIO
 from typing import Optional
@@ -3003,7 +3004,10 @@ QBM_EXTRACT_PROMPT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SPECIAL PE
 ✅ Extract from any font style — printed, handwritten, bold, italic
 ✅ Extract from blurry, low quality, rotated, or scanned images
 ✅ Perform MULTIPLE independent internal read-throughs of the page (at least 3) and
-   cross-check your own extraction before finalizing, so no existing MCQ is missed or misread
+   cross-check your own extraction before finalizing, so no existing MCQ is missed or misread.
+   Pay special attention to the LAST MCQ on the page/column — it is the most commonly missed one.
+   After the draft list is built, count the visible MCQs on the page and verify your list length
+   matches that count exactly before finalizing.
 ✅ Remove question numbering only: (১., 1., Q1., Q.1, ক., a.) from question text
 ✅ Keep original question and option wording intact (do not paraphrase or rewrite existing text)
 ✅ If any obvious spelling mistake is seen, correct it — but do not alter meaning
@@ -3044,16 +3048,16 @@ Rules while scanning:
   a wrong answer is worse than a missing one, so confirm carefully.
 
 ════════════════════════════════
-🔀 OPTION SHUFFLE (MANDATORY, EVERY SINGLE MCQ, NO EXCEPTIONS)
+🎯 OPTION ORDER (STRICT — কখনো শাফল/পুনর্বিন্যাস করবে না)
 ════════════════════════════════
-- After extracting the correct answer, SHUFFLE the four options into a new random order
-  before output, so the correct answer is NOT always in the same position.
-- Update the "answer" letter to match the option's NEW shuffled position.
-- Do this independently for EVERY single MCQ — never reuse the same shuffle pattern twice in a row.
-- STRICTLY FORBIDDEN: multiple extracted MCQs ending up with the same answer letter in a row
-  (e.g. all "A", or "A" repeated 3+ times consecutively). Distribute the correct answer's
-  position naturally and randomly across A/B/C/D across the full set.
-- This shuffle rule is permanently active — always apply it, on every extraction, no exceptions.
+- সোর্সে option যে ক্রমে আছে (ক,খ,গ,ঘ / A,B,C,D / ১,২,৩,৪) output-এও ঠিক সেই একই ক্রমে রাখবে।
+- answer letter অবশ্যই সোর্সের option-এর আসল position অনুযায়ী দিবে — options-এর যে position-এ
+  সঠিক উত্তর আছে, answer letter সেই position-ই নির্দেশ করবে। option-এর ক্রম কখনো পরিবর্তন করবে না।
+- প্রতিটা MCQ finalize করার আগে verify করো: options-এর যে position-এ সঠিক উত্তর, answer letter
+  ঠিক সেই position (A=1st, B=2nd, C=3rd, D=4th) নির্দেশ করছে কিনা।
+- সংখ্যা/সাল/তারিখ (Bengali সংখ্যা যেমন ১৯৭৬ বা English সংখ্যা যেমন 1976) অক্ষত হুবহু রাখবে —
+  Bengali সংখ্যাকে English-এ বা English সংখ্যাকে Bengali-তে কখনো convert করবে না। প্রতিটা
+  সংখ্যা সোর্সের সাথে digit-by-digit মিলিয়ে verify করবে (৯↔9, ৬↔6 গুলিয়ে ফেলা কড়াভাবে নিষিদ্ধ)।
 
 ════════════════════════════════
 💡 EXPLANATION RULES (STRICT PRIORITY ORDER — follow exactly, always, in this order)
@@ -3126,6 +3130,19 @@ If NO MCQ exists on this page → return exactly: []
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}]"""
 
 
+def _has_mixed_digit_script(text: str) -> bool:
+    """একই সংখ্যা token-এ Bengali+English digit মিশে থাকলে সেটা corruption সংকেত।"""
+    if not text:
+        return False
+    bn_digits = set('০১২৩৪৫৬৭৮৯')
+    for token in re.findall(r'[০-৯0-9]+', text):
+        has_bn = any(c in bn_digits for c in token)
+        has_en = any(c.isdigit() and c not in bn_digits for c in token)
+        if has_bn and has_en:
+            return True
+    return False
+
+
 def _qbm_parse_json(text: str) -> list:
     """Parse extractor JSON output -> list of {question, options[A-D], answer(A-D), explanation}"""
     if not text:
@@ -3153,11 +3170,15 @@ def _qbm_parse_json(text: str) -> list:
             q = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q)
             q = re.sub(r'^\s*[\d০-৯]+\s*[.)\-:\s]+\s*', '', q)
             q = re.sub(r'^\s*[Qq]\.?\s*[\d]+\s*[.)\-:\s]*\s*', '', q)
+            opts_list = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
+            expl = mc.get("explanation", "")
+            if _has_mixed_digit_script(q) or any(_has_mixed_digit_script(o) for o in opts_list) or _has_mixed_digit_script(expl):
+                logger.warning(f"[QBM digit-integrity] Mixed Bengali/English digits detected: {q[:60]}")
             valid.append({
                 "question": q.strip(),
-                "options": [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")],
+                "options": opts_list,
                 "answer": mc.get("answer", "A") if mc.get("answer") in ("A", "B", "C", "D") else "A",
-                "explanation": mc.get("explanation", "")
+                "explanation": expl
             })
         except Exception:
             continue
@@ -3185,51 +3206,72 @@ async def _qbm_single_pass(img) -> list:
         return []
 
 
+def _qbm_normalize_q(question: str) -> str:
+    """Whitespace/punctuation normalize করে দুইটা pass-এর একই MCQ-কে duplicate ধরার জন্য."""
+    q = re.sub(r'\s+', ' ', (question or '').strip().lower())
+    q = re.sub(r'[^\w\u0980-\u09FF ]+', '', q)
+    return q
+
+
+def _qbm_is_duplicate(norm_q: str, existing_keys: list, threshold: float = 0.85) -> bool:
+    """Exact match না থাকলেও near-identical প্রশ্ন (pass ভেদে সামান্য spelling/space
+    difference) কে duplicate হিসেবে ধরার জন্য fuzzy match।"""
+    if not norm_q:
+        return True
+    if norm_q in existing_keys:
+        return True
+    for k in existing_keys:
+        if not k:
+            continue
+        shorter, longer = (k, norm_q) if len(k) <= len(norm_q) else (norm_q, k)
+        if shorter and shorter in longer and len(shorter) >= 0.7 * len(longer):
+            return True
+        if difflib.SequenceMatcher(None, norm_q, k).ratio() >= threshold:
+            return True
+    return False
+
+
 async def _qbm_extract_from_image(img) -> list:
     """
-    STRONG extraction with retry + cross-verification (multiple check):
-    1) Run extraction pass #1.
-    2) If pass #1 found MCQs, run a SECOND independent pass to cross-check.
-       - If both passes agree on count -> high confidence, use pass #1 (already
-         a clean, complete read).
-       - If counts disagree -> run a THIRD pass as tie-breaker, then use
-         whichever result has the MOST complete extraction (highest count),
-         since under-extraction (missing an existing MCQ) is the failure mode
-         we most want to avoid — never fabricate to make counts match.
-    3) If pass #1 found nothing, retry up to 3x total (page might have MCQs
-       that were missed on a bad first read) before concluding the page truly
-       has zero MCQs.
-    Never invents new questions across passes — cross-checking only decides
-    WHICH already-extracted set to trust, never merges or fabricates.
+    STRONG extraction with 3-pass independent extraction + fuzzy-dedup UNION merge:
+    - Run 3 independent passes (page-এ readymade MCQ miss হওয়া এড়াতে একটা attempt-এর উপর
+      কখনো ভরসা করা হয় না)।
+    - সবগুলো pass-এর result একসাথে fuzzy-dedup সহ merge (union) করা হয় — কোনো একটা pass কম
+      MCQ দিলেও (partial miss) অন্য pass-এ সেই MCQ ধরা পড়লে সেটা ফাইনাল লিস্টে থাকবে।
+    - Union-এর সংখ্যা কোনো single pass-এর max count-এর চেয়ে বেশি হলে (মানে dedup miss করেছে
+      বা কোনো pass hallucinate করেছে) সবচেয়ে বেশি MCQ দেওয়া pass-এর count-এ cap করা হয়।
+    - MCQ order প্রথম যে pass-এ যে ক্রমে পাওয়া গেছে সেই ক্রমেই রাখা হয় (page serial-এর কাছাকাছি)।
+    Never invents new questions — merge শুধু coverage বাড়ায়, কখনো fabricate করে না।
     """
-    first = await _qbm_single_pass(img)
+    passes = []
+    for i in range(3):
+        result = await _qbm_single_pass(img)
+        if result:
+            passes.append(result)
+        elif i < 2:
+            await asyncio.sleep(1.5)
 
-    if not first:
-        # Nothing found — retry up to 2 more times before concluding "no MCQ on this page"
-        for retry in range(2):
-            await asyncio.sleep(2)
-            retry_result = await _qbm_single_pass(img)
-            if retry_result:
-                first = retry_result
-                break
-        if not first:
-            return []  # Confirmed: page genuinely has no existing MCQ
+    if not passes:
+        return []  # Confirmed across all attempts: page genuinely has no existing MCQ
 
-    # Cross-verification pass
-    second = await _qbm_single_pass(img)
-    if second and len(second) == len(first):
-        return _cap_mcq_options(first)  # Both passes agree on count -> confident result
+    merged: dict = {}
+    merge_order: list = []
+    for p in passes:
+        for mc in p:
+            key_q = _qbm_normalize_q(mc.get("question", ""))
+            if not key_q:
+                continue
+            if not _qbm_is_duplicate(key_q, merge_order):
+                merged[key_q] = mc
+                merge_order.append(key_q)
 
-    if second and len(second) != len(first):
-        # Disagreement -> tie-breaker third pass, then trust the most complete extraction
-        third = await _qbm_single_pass(img)
-        candidates = [c for c in (first, second, third) if c]
-        if candidates:
-            best = max(candidates, key=len)
-            logger.info(f"[QBM] Cross-check disagreement (counts: {[len(c) for c in candidates]}) -> using most complete: {len(best)} MCQ")
-            return _cap_mcq_options(best)
+    final_list = [merged[k] for k in merge_order]
+    max_count = max(len(p) for p in passes)
+    if len(final_list) > max_count:
+        logger.info(f"[QBM] Union ({len(final_list)}) exceeded max single-pass count ({max_count}) -> capping")
+        final_list = final_list[:max_count]
 
-    return _cap_mcq_options(first)
+    return _cap_mcq_options(final_list)
 
 
 async def _qbm_gemini_extract(img) -> list:
