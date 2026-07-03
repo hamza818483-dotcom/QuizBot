@@ -1,0 +1,29 @@
+name: Watchdog 2 (8min)
+
+on:
+  schedule:
+    - cron: '*/8 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render Primary
+        env:
+          RENDER_URL: ${{ secrets.RENDER_URL }}
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 "${RENDER_URL}/health" || echo "000")
+          echo "Primary: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::watchdog-2 primary ping failed ($STATUS)"
+            exit 1
+          fi
+
+      - name: Ping Render Secondary
+        env:
+          RENDER_URL_2: ${{ secrets.RENDER_URL_2 }}
+        run: |
+          if [ -z "$RENDER_URL_2" ]; then exit 0; fi
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 "${RENDER_URL_2}/health" || echo "000")
+          echo "Secondary: $STATUS"
