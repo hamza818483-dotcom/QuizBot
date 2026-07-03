@@ -3292,7 +3292,8 @@ async def _qbm_gemini_extract(img) -> list:
                 contents=[
                     types.Part.from_text(text=QBM_EXTRACT_PROMPT),
                     types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
-                ]
+                ],
+                config=types.GenerateContentConfig(temperature=0.1)
             )
         response = await asyncio.to_thread(_call)
         return _qbm_parse_json(response.text)
