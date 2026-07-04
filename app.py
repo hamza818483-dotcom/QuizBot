@@ -3607,6 +3607,9 @@ async def handle_qbm(msg: dict):
             }).execute()
 
             total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+            page_breakdown = "\n".join(
+                f"📌 Page {fmt_page(p)}: {len(mcqs)} MCQ" for p, _, mcqs in extracted_pages
+            )
             kb = {"inline_keyboard": []}
             for ch in channels:
                 ch_id = ch.get("channel_id", "")
@@ -3620,7 +3623,8 @@ async def handle_qbm(msg: dict):
                 "callback_data": f"qbmch_csv_{uid}"
             }])
             await send_msg(chat_id,
-                f"✅ Extraction Complete! {total_mcq_found} MCQ পাওয়া গেছে ({len(pages)} page)\n"
+                f"✅ Extraction Complete! {total_mcq_found} MCQ পাওয়া গেছে ({len(pages)} page)\n\n"
+                f"{page_breakdown}\n\n"
                 f"🎯 Topic: {topic}\n\nChannel select করো:",
                 reply_markup=kb
             )
@@ -3997,9 +4001,13 @@ async def process_qbm_pages(
 
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
+    page_breakdown_final = "\n".join(
+        f"📌 Page {fmt_page(p)}: {ps['mcq']} MCQ" for p, ps in zip([pp for pp, _ in display_pages], page_status)
+    )
     await edit_msg(chat_id, status_msg_id,
-        f"✅ <b>QBM Extraction Complete!</b>\n\n📄 {file_name}\n📋 {topic}\n"
-        f"📝 Total MCQ Extracted: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ {mins}:{secs:02d}")
+        f"✅ <b>QBM Extraction Complete!</b>\n\n📄 {file_name}\n📋 {topic}\n\n"
+        f"{page_breakdown_final}\n\n"
+        f"📝 Total MCQ Extracted: {total_mcq}\n📋 Pages: {len(display_pages)}\n⏱️ {mins}:{secs:02d}")
 
 # ============================================================
 # FEATURE: /rapid — CSV রিপ্লাই করে Topic দিলে, channel + local time select
