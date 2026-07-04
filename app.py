@@ -947,11 +947,77 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
         await send_msg(chat_id, "❌ কোনো channel save করা নেই! /channel দিয়ে add করো।")
         return
 
+    # ── MCQ processing ALWAYS runs here now (before channel select), same
+    # pattern as /qbm: generate/extract first -> CSV auto-sent -> THEN show
+    # channel list, so the person picks a channel already knowing the count. ──
+    loading_text = "⏳ Image থেকে MCQ তৈরি হচ্ছে... (~30s)" if source == "new" else "⏳ Image থেকে existing MCQ বের করা হচ্ছে... (~30-40s)"
+    loading = await send_msg(chat_id, loading_text)
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        img_bytes = await download_tg_file(file_id)
+        from PIL import Image as PILImage
+        img = PILImage.open(BytesIO(img_bytes))
+
+        if source == "existing":
+            # Existing MCQ mode: full /qbm prompt logic, 2-call pipeline
+            # (Call 1 extract + Call 2 miss-check) — never fabricates new
+            # questions, only extracts what's already in the image, per /qbm rules.
+            call1 = await _qbm_call1_extract(img)
+            mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
+            mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
+        else:
+            mcqs = await generate_mcq_from_image(img, topic, 1, None)
+    except Exception as e:
+        logger.error(f"[IMG] Processing error: {e}", exc_info=True)
+        await send_msg(chat_id, f"❌ Error: {e}")
+        return
+
+    if not mcqs:
+        msg = "❌ MCQ generate হয়নি!" if source == "new" else "❌ ছবিতে কোনো existing MCQ পাওয়া যায়নি!"
+        await send_msg(chat_id, msg)
+        return
+
+    # ✅ CSV auto-send — processing শেষ হওয়া মাত্রই, channel select করার আগেই
+    try:
+        import csv as _csv
+        from io import StringIO as _SIO
+        _out = _SIO()
+        _wr = _csv.writer(_out, quoting=_csv.QUOTE_ALL)
+        _wr.writerow(["questions", "option1", "option2", "option3", "option4", "option5", "answer", "explanation", "type", "section"])
+        for m in mcqs:
+            opts = m.get("options", ["", "", "", ""])
+            padded = (list(opts) + ["", "", "", "", ""])[:5]
+            ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4}.get(m.get("answer", "A"), 0)
+            ans_numeric = ans_idx + 1  # 1-based
+            exp = m.get("explanation", "")
+            _wr.writerow([m.get("question", ""), padded[0], padded[1], padded[2], padded[3], padded[4], ans_numeric, exp, 1, 1])
+        csv_content = _out.getvalue().encode("utf-8-sig")
+        csv_caption = (
+            f"📄 CSV ফাইল — {topic}\n"
+            f"💎 {len(mcqs)} MCQ\n\n"
+            f"📌 Format: questions, option1-5, answer(numeric), explanation, type, section"
+        )
+        await send_document(
+            chat_id, csv_content,
+            f"ATLAS_{topic or 'MCQ'}.csv",
+            caption=csv_caption, mime_type="text/csv"
+        )
+    except Exception as csv_err:
+        logger.warning(f"[IMG] CSV auto-send failed: {csv_err}")
+
+    # Cache the already-processed mcqs + raw image bytes so channel-select
+    # posts directly without re-running generation/extraction.
+    app.state.img_cache = getattr(app.state, "img_cache", {})
+    app.state.img_cache[f"img_mcq_{uid}"] = {"mcqs": mcqs, "img_bytes": img_bytes}
+
     sb.table("quiz_sessions").upsert({
         "key": f"img_mode_{uid}",
         "data": json.dumps({"file_id": file_id, "mode": mode, "topic": topic, "source": source}),
         "updated_at": int(time.time())
     }).execute()
+
+    await edit_msg(chat_id, loading_id, f"✅ Processing Complete! {len(mcqs)} MCQ পাওয়া গেছে")
 
     kb = {"inline_keyboard": []}
     for ch in channels:
@@ -961,7 +1027,9 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
             "text": f"📢 {ch_name}",
             "callback_data": f"imgchannel_{ch_id}_{uid}"
         }])
-    await send_msg(chat_id, f"📢 কোন channel-এ পাঠাবে?\n📌 Topic: <b>{topic}</b>", reply_markup=kb, parse_mode="HTML")
+    await send_msg(chat_id,
+        f"📌 Topic: <b>{topic}</b>\n\nকোন channel-এ পাঠাবে?",
+        reply_markup=kb, parse_mode="HTML")
 
 def _imgqbm_options_to_list(mcqs: list) -> list:
     """/qbm extraction returns options as a dict {A,B,C,D}; /img's poll-sender
@@ -985,29 +1053,39 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
 
-    loading_text = "⏳ Image থেকে MCQ তৈরি হচ্ছে... (~30s)" if source == "new" else "⏳ Image থেকে existing MCQ বের করা হচ্ছে... (~30-40s)"
-    loading = await send_msg(chat_id, loading_text)
-    loading_id = loading.get("result", {}).get("message_id")
-
-    try:
-        img_bytes = await download_tg_file(file_id)
-        from PIL import Image as PILImage
-        img = PILImage.open(BytesIO(img_bytes))
-
-        if source == "existing":
-            # Existing MCQ mode: full /qbm prompt logic, 2-call pipeline
-            # (Call 1 extract + Call 2 miss-check) — never fabricates new
-            # questions, only extracts what's already in the image, per /qbm rules.
-            call1 = await _qbm_call1_extract(img)
-            mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
-            mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
-        else:
-            mcqs = await generate_mcq_from_image(img, topic, 1, None)
-        if not mcqs:
-            msg = "❌ MCQ generate হয়নি!" if source == "new" else "❌ ছবিতে কোনো existing MCQ পাওয়া যায়নি!"
-            await send_msg(chat_id, msg)
+    # Reuse already-processed MCQs + image bytes from handle_img_mode (Phase 1)
+    # so channel select never re-triggers generation/extraction or a 2nd CSV.
+    cache = getattr(app.state, "img_cache", {}).get(f"img_mcq_{uid}")
+    loading_id = None
+    if cache:
+        mcqs = cache["mcqs"]
+        img_bytes = cache["img_bytes"]
+    else:
+        # Cache expired/missing (e.g. bot restarted) -> fall back to re-processing.
+        loading_text = "⏳ Image থেকে MCQ তৈরি হচ্ছে... (~30s)" if source == "new" else "⏳ Image থেকে existing MCQ বের করা হচ্ছে... (~30-40s)"
+        loading = await send_msg(chat_id, loading_text)
+        loading_id = loading.get("result", {}).get("message_id")
+        try:
+            img_bytes = await download_tg_file(file_id)
+            from PIL import Image as PILImage
+            img = PILImage.open(BytesIO(img_bytes))
+            if source == "existing":
+                call1 = await _qbm_call1_extract(img)
+                mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
+                mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
+            else:
+                mcqs = await generate_mcq_from_image(img, topic, 1, None)
+        except Exception as e:
+            logger.error(f"[IMG] Re-processing error: {e}", exc_info=True)
+            await send_msg(chat_id, f"❌ Error: {e}")
             return
 
+    if not mcqs:
+        msg = "❌ MCQ generate হয়নি!" if source == "new" else "❌ ছবিতে কোনো existing MCQ পাওয়া যায়নি!"
+        await send_msg(chat_id, msg)
+        return
+
+    try:
         image_msg_id = None
         image_file_id = None  # bot-owned, reusable file_id (matches /pdf pattern)
 
@@ -1063,35 +1141,8 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
                     poll_links.append(f"https://t.me/{cid.lstrip('@')}/{msg_id}")
             await asyncio.sleep(0.5)
 
-        # ✅ CSV file generate করো — poll গুলো channel-এ যাওয়ার পরে পাঠানো হয়
-        try:
-            import csv as _csv
-            from io import StringIO as _SIO
-            _out = _SIO()
-            _wr = _csv.writer(_out, quoting=_csv.QUOTE_ALL)
-            _wr.writerow(["questions","option1","option2","option3","option4","option5","answer","explanation","type","section"])
-            for m in mcqs:
-                opts = m.get("options", ["","","",""])
-                while len(opts) < 5:
-                    opts.append("")
-                padded = (opts + ["","","","",""])[:5]
-                ans_idx = {"A":0,"B":1,"C":2,"D":3,"E":4}.get(m.get("answer","A"), 0)
-                ans_numeric = ans_idx + 1  # 1-based
-                exp = m.get("explanation","")
-                _wr.writerow([m.get("question",""), padded[0], padded[1], padded[2], padded[3], padded[4], ans_numeric, exp, 1, 1])
-            csv_content = _out.getvalue().encode("utf-8-sig")
-            csv_caption = (
-                f"📄 CSV ফাইল — {topic}\n"
-                f"💎 {len(mcqs)} MCQ\n\n"
-                f"📌 Format: questions, option1-5, answer(numeric), explanation, type, section"
-            )
-            await send_document(
-                chat_id, csv_content,
-                f"ATLAS_{topic or 'MCQ'}.csv",
-                caption=csv_caption, mime_type="text/csv"
-            )
-        except Exception as csv_err:
-            logger.warning(f"[IMG] CSV send failed: {csv_err}")
+        # CSV already auto-sent in handle_img_mode right after processing —
+        # not repeated here to avoid sending it twice.
 
         end_text = (
             f"🎯Topic: {topic}\n"
@@ -1133,6 +1184,8 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         if loading_id:
             await edit_msg(chat_id, loading_id,
                 f"✅ Done! {len(mcqs)} MCQ পাঠানো হয়েছে channel-এ।")
+        else:
+            await send_msg(chat_id, f"✅ Done! {len(mcqs)} MCQ পাঠানো হয়েছে channel-এ।")
 
     except Exception as e:
         logger.error(f"[IMG] Error: {e}")
