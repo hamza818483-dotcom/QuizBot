@@ -7464,6 +7464,71 @@ async def _watchdog_task() -> None:
         await asyncio.sleep(300)
 
 
+async def _watchdog2_task() -> None:
+    """3rd independent ping layer — different offset/interval than keep-alive
+    and watchdog, so all three never crash/miss at the same moment."""
+    await asyncio.sleep(240)
+    logger.info("[App] Watchdog-2 task started")
+    fails = 0
+    while True:
+        healthy = False
+        try:
+            async with httpx.AsyncClient(timeout=25) as client:
+                if RENDER_URL:
+                    r = await client.get(f"{RENDER_URL.rstrip('/')}/health")
+                    healthy = r.status_code == 200
+        except Exception:
+            healthy = False
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            if fails >= 2:
+                try:
+                    await notify_owner(f"🚨 QuizBot WATCHDOG-2: unreachable ({fails}x) — self-wake attempt.")
+                except Exception:
+                    pass
+                if RENDER_URL:
+                    for _ in range(2):
+                        try:
+                            async with httpx.AsyncClient(timeout=30) as client:
+                                await client.get(f"{RENDER_URL.rstrip('/')}/health")
+                            break
+                        except Exception:
+                            await asyncio.sleep(5)
+        await asyncio.sleep(420)
+
+
+async def _cross_bot_watchdog_task() -> None:
+    """Mutual watchdog: pings AtlasBot's health endpoint (set via
+    ATLASBOT_URL env). If AtlasBot looks down, alerts owner — mirrors
+    AtlasBot's own cross-check on this bot."""
+    atlasbot_url = os.environ.get("ATLASBOT_URL", "").rstrip("/")
+    if not atlasbot_url:
+        return
+    await asyncio.sleep(200)
+    logger.info("[App] Cross-bot watchdog (-> AtlasBot) started")
+    fails = 0
+    while True:
+        healthy = False
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                r = await client.get(f"{atlasbot_url}/health")
+                healthy = r.status_code == 200
+        except Exception:
+            healthy = False
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            if fails >= 2:
+                try:
+                    await notify_owner(f"🚨 AtlasBot unreachable via cross-bot check ({fails}x) — checked from QuizBot.")
+                except Exception:
+                    pass
+        await asyncio.sleep(300)
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "db": sb is not None, "gemini_keys": len(key_rotator.keys), "bot_token": bool(BOT_TOKEN)}
@@ -7485,6 +7550,8 @@ async def startup():
     asyncio.create_task(_keepalive_task())
     # Independent watchdog: separate timing, detects if keep-alive itself dies.
     asyncio.create_task(_watchdog_task())
+    asyncio.create_task(_watchdog2_task())
+    asyncio.create_task(_cross_bot_watchdog_task())
 
     if not BOT_TOKEN:
         logger.error("[App] BOT_TOKEN missing!")
