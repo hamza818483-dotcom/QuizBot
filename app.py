@@ -7401,6 +7401,21 @@ async def generate_new_exam(request: Request):
 async def root():
     return {"status": "ok", "bot": "ATLAS BOT", "version": "4.2.0"}
 
+async def _keepalive_task() -> None:
+    """Self-ping own Render URL /health every ~10 min for 24/7 uptime
+    (prevents Render free-tier sleep)."""
+    await asyncio.sleep(60)
+    logger.info("[App] Keep-alive task started")
+    while True:
+        if RENDER_URL:
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    await client.get(f"{RENDER_URL.rstrip('/')}/health")
+            except Exception:
+                pass
+        await asyncio.sleep(600)
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "db": sb is not None, "gemini_keys": len(key_rotator.keys), "bot_token": bool(BOT_TOKEN)}
@@ -7417,6 +7432,9 @@ async def startup():
         asyncio.create_task(_mhtml_auto_worker())
         _mhtml_worker_started = True
         logger.info("[App] mhtml auto-queue worker started")
+
+    # Self-ping keep-alive: prevents Render free-tier from sleeping.
+    asyncio.create_task(_keepalive_task())
 
     if not BOT_TOKEN:
         logger.error("[App] BOT_TOKEN missing!")
