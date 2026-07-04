@@ -7402,18 +7402,66 @@ async def root():
     return {"status": "ok", "bot": "ATLAS BOT", "version": "4.2.0"}
 
 async def _keepalive_task() -> None:
-    """Self-ping own Render URL /health every ~10 min for 24/7 uptime
-    (prevents Render free-tier sleep)."""
+    """Self-ping own Render URL /health every 5 min for 24/7 uptime
+    (prevents Render free-tier sleep). Tracks consecutive failures and
+    alerts owner if the service looks down."""
     await asyncio.sleep(60)
     logger.info("[App] Keep-alive task started")
+    fails = 0
     while True:
         if RENDER_URL:
             try:
                 async with httpx.AsyncClient(timeout=20) as client:
-                    await client.get(f"{RENDER_URL.rstrip('/')}/health")
+                    r = await client.get(f"{RENDER_URL.rstrip('/')}/health")
+                    if r.status_code == 200:
+                        fails = 0
+                    else:
+                        fails += 1
             except Exception:
-                pass
-        await asyncio.sleep(600)
+                fails += 1
+            if fails == 3:
+                try:
+                    await notify_owner(f"🚨 QuizBot keep-alive: {fails} consecutive /health failures — bot may be down.")
+                except Exception:
+                    pass
+        await asyncio.sleep(300)
+
+
+async def _watchdog_task() -> None:
+    """Independent watchdog — separate ping loop (offset timing) that
+    double-checks the bot is alive. If keep-alive silently dies (task
+    crash) this loop still detects downtime and wakes/alerts."""
+    await asyncio.sleep(150)  # offset from _keepalive_task so they don't overlap
+    logger.info("[App] Watchdog task started")
+    fails = 0
+    while True:
+        healthy = False
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                if RENDER_URL:
+                    r = await client.get(f"{RENDER_URL.rstrip('/')}/health")
+                    healthy = r.status_code == 200
+        except Exception:
+            healthy = False
+
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            logger.warning(f"[Watchdog] health check failed ({fails} in a row)")
+            if fails >= 2:
+                try:
+                    await notify_owner(f"🚨 QuizBot WATCHDOG: service unreachable ({fails}x) — attempting self-wake.")
+                except Exception:
+                    pass
+                # self-wake attempt: hit health endpoint directly again
+                try:
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        if RENDER_URL:
+                            await client.get(f"{RENDER_URL.rstrip('/')}/health")
+                except Exception:
+                    pass
+        await asyncio.sleep(300)
 
 
 @app.get("/health")
@@ -7435,6 +7483,8 @@ async def startup():
 
     # Self-ping keep-alive: prevents Render free-tier from sleeping.
     asyncio.create_task(_keepalive_task())
+    # Independent watchdog: separate timing, detects if keep-alive itself dies.
+    asyncio.create_task(_watchdog_task())
 
     if not BOT_TOKEN:
         logger.error("[App] BOT_TOKEN missing!")
