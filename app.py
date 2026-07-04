@@ -2982,7 +2982,7 @@ def _get_bd_time() -> str:
 # Different from /pdfm: extracts MCQs that ALREADY EXIST in the PDF,
 # never generates new ones. OCR fallback for scanned PDFs. 3x retry per page.
 # ============================================================
-QBM_EXTRACT_PROMPT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SPECIAL PERMANENT MODE. YOUR ONLY JOB IS TO EXTRACT MCQs THAT ALREADY EXIST ON THIS PAGE. YOU NEVER INVENT NEW QUESTIONS. FOLLOW EVERY RULE BELOW WITHOUT A SINGLE EXCEPTION, ALWAYS, ON EVERY PAGE, EVERY TIME.
+QBM_EXTRACT_PROMPT_DEFAULT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SPECIAL PERMANENT MODE. YOUR ONLY JOB IS TO EXTRACT MCQs THAT ALREADY EXIST ON THIS PAGE. YOU NEVER INVENT NEW QUESTIONS. FOLLOW EVERY RULE BELOW WITHOUT A SINGLE EXCEPTION, ALWAYS, ON EVERY PAGE, EVERY TIME.
 
 ════════════════════════════════
 🔴 ABSOLUTE FORBIDDEN RULES (ZERO TOLERANCE)
@@ -3048,16 +3048,40 @@ Rules while scanning:
   a wrong answer is worse than a missing one, so confirm carefully.
 
 ════════════════════════════════
-🎯 OPTION ORDER (STRICT — কখনো শাফল/পুনর্বিন্যাস করবে না)
+🎯 OPTION ORDER (ABSOLUTE, ZERO-TOLERANCE — কখনো শাফল/পুনর্বিন্যাস/re-sort করবে না)
 ════════════════════════════════
-- সোর্সে option যে ক্রমে আছে (ক,খ,গ,ঘ / A,B,C,D / ১,২,৩,৪) output-এও ঠিক সেই একই ক্রমে রাখবে।
-- answer letter অবশ্যই সোর্সের option-এর আসল position অনুযায়ী দিবে — options-এর যে position-এ
-  সঠিক উত্তর আছে, answer letter সেই position-ই নির্দেশ করবে। option-এর ক্রম কখনো পরিবর্তন করবে না।
-- প্রতিটা MCQ finalize করার আগে verify করো: options-এর যে position-এ সঠিক উত্তর, answer letter
-  ঠিক সেই position (A=1st, B=2nd, C=3rd, D=4th) নির্দেশ করছে কিনা।
+- পেজে option যেই label সিস্টেমেই থাকুক (A,B,C,D / a,b,c,d / ক,খ,গ,ঘ / ১,২,৩,৪ / বুলেট/কোনো
+  label ছাড়া top-to-bottom বা left-to-right) — output-এ ঠিক সেই ভিজ্যুয়াল/সোর্স পজিশনের
+  ক্রমেই ১ম, ২য়, ৩য়, ৪র্থ option বসাবে output schema-র A,B,C,D slot-এ। Source-এর ১ম
+  option → output A slot, ২য় → B slot, ৩য় → C slot, ৪র্থ → D slot। এটা label matching নয়,
+  POSITION matching — সোর্সের label যা-ই হোক (a/ক/1/bullet), তার পজিশনই সিদ্ধান্তকারী।
+- Option-এর টেক্সট কখনো reorder/sort/rearrange করবে না (বর্ণানুক্রমিক সাজানো, মান অনুযায়ী
+  সাজানো — কোনোভাবেই না) — সোর্সে যেই sequence-এ ছিল ঠিক সেই sequence অক্ষুণ্ণ রাখবে।
+- Option সিরিয়াল ঠিকভাবে (স্ট্রিক্টলি পজিশন ম্যাচ করে) রাখা হলে answer letter ও স্বয়ংক্রিয়ভাবে
+  সঠিক সিরিয়ালেই পাওয়া যাবে — কারণ answer letter নির্ধারণ করা হয় "সঠিক উত্তরটি output-এর কোন
+  position-এ আছে" তার ভিত্তিতে, সোর্সের original label-এর ভিত্তিতে না।
+  উদাহরণ: সোর্সে option ক্রম গ,খ,ক,ঘ থাকলে এবং সঠিক উত্তর সোর্সের "ক" হলে — output-এ ক পজিশন
+  ৩ নম্বরে থাকবে (output slot C), তাই answer = "C" (পজিশন অনুযায়ী), "A" নয়।
+- প্রতিটা MCQ finalize করার আগে ৩ ধাপে verify করো (STRICT, SKIP করা যাবে না):
+  ধাপ ১: output-এর ৪টা option স্লট সোর্সের ৪টা option-এর পজিশন অনুযায়ী সঠিক কি না চেক করো।
+  ধাপ ২: সঠিক উত্তরের টেক্সট output-এর কোন slot-এ (A/B/C/D) বসেছে খুঁজে বের করো।
+  ধাপ ৩: answer letter ঠিক সেই slot-কেই নির্দেশ করছে কি না নিশ্চিত করো — অমিল থাকলে ঠিক করো।
 - সংখ্যা/সাল/তারিখ (Bengali সংখ্যা যেমন ১৯৭৬ বা English সংখ্যা যেমন 1976) অক্ষত হুবহু রাখবে —
   Bengali সংখ্যাকে English-এ বা English সংখ্যাকে Bengali-তে কখনো convert করবে না। প্রতিটা
   সংখ্যা সোর্সের সাথে digit-by-digit মিলিয়ে verify করবে (৯↔9, ৬↔6 গুলিয়ে ফেলা কড়াভাবে নিষিদ্ধ)।
+
+════════════════════════════════
+📖 উদ্দীপক (PASSAGE/STIMULUS) HANDLING — STRICT, ALWAYS ACTIVE
+════════════════════════════════
+- যদি কোনো প্রশ্ন বা প্রশ্নগোষ্ঠীর আগে একটা উদ্দীপক (passage/stimulus/scenario paragraph) থাকে,
+  সেই উদ্দীপকটি প্রথমে identify করবে এবং তার সাথে যুক্ত প্রতিটা MCQ-কে উদ্দীপকের সাথে reply/link
+  করেই ধরবে — অর্থাৎ output-এ প্রতিটা সংশ্লিষ্ট MCQ-র question টেক্সটের শুরুতে সেই উদ্দীপকের
+  পূর্ণ টেক্সট জুড়ে দিতে হবে, তারপর তার নিচে সেই নির্দিষ্ট MCQ-র প্রশ্ন — যাতে প্রতিটা MCQ standalone
+  ভাবে বোঝা যায় (উদ্দীপক ছাড়া প্রশ্নটা অসম্পূর্ণ থাকা উচিত নয়)।
+- একই উদ্দীপকের অধীনে একাধিক MCQ থাকলে প্রতিটাতেই সেই একই উদ্দীপক পুনরায় জুড়ে দিতে হবে (কপি
+  করে), প্রতিটা MCQ আলাদা আলাদা ভাবে সম্পূর্ণ (self-contained) থাকতে হবে।
+- উদ্দীপক শনাক্তকরণে সতর্ক থাকবে: সাধারণ প্রশ্নের সাথে উদ্দীপক-ভিত্তিক প্রশ্ন গুলিয়ে ফেলবে না —
+  passage/scenario/case-study টাইপ কনটেন্ট যা একাধিক প্রশ্নের বেস হিসেবে কাজ করছে, সেটাই উদ্দীপক।
 
 ════════════════════════════════
 💡 EXPLANATION RULES (STRICT PRIORITY ORDER — follow exactly, always, in this order)
@@ -3130,6 +3154,41 @@ If NO MCQ exists on this page → return exactly: []
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}]"""
 
 
+# ── QBM PERMANENT PROMPT MEMORY ──
+# Active prompt cached in-process; persisted in Supabase (quiz_sessions,
+# key="qbm_active_prompt") so it survives restarts. New page-এ গেলে DB আবার
+# পড়তে হয় না — RAM cache-এ read, update হলেই DB-তে ও RAM-এ একসাথে save হয়।
+_qbm_prompt_cache = {"prompt": None}
+
+def qbm_get_active_prompt() -> str:
+    if _qbm_prompt_cache["prompt"]:
+        return _qbm_prompt_cache["prompt"]
+    try:
+        r = sb.table("quiz_sessions").select("data").eq("key", "qbm_active_prompt").execute()
+        if r.data:
+            p = json.loads(r.data[0]["data"]).get("prompt")
+            if p:
+                _qbm_prompt_cache["prompt"] = p
+                return p
+    except Exception as e:
+        logger.warning(f"[QBM] prompt memory load failed: {e}")
+    _qbm_prompt_cache["prompt"] = QBM_EXTRACT_PROMPT_DEFAULT
+    return QBM_EXTRACT_PROMPT_DEFAULT
+
+def qbm_set_active_prompt(new_prompt: str):
+    """New prompt update এলে সেটাকে permanent করে save করে — পরের বার থেকে
+    (নতুন update না আসা অবধি) এই prompt-ই সবসময় ব্যবহার হবে।"""
+    _qbm_prompt_cache["prompt"] = new_prompt
+    try:
+        sb.table("quiz_sessions").upsert({
+            "key": "qbm_active_prompt",
+            "data": json.dumps({"prompt": new_prompt}),
+            "updated_at": int(time.time())
+        }).execute()
+    except Exception as e:
+        logger.warning(f"[QBM] prompt memory save failed: {e}")
+
+
 def _has_mixed_digit_script(text: str) -> bool:
     """একই সংখ্যা token-এ Bengali+English digit মিশে থাকলে সেটা corruption সংকেত।"""
     if not text:
@@ -3185,25 +3244,142 @@ def _qbm_parse_json(text: str) -> list:
     return valid
 
 
-async def _qbm_single_pass(img) -> list:
-    """One extraction attempt: Groq primary -> Gemini fallback."""
+async def _qbm_groq_call(img, prompt: str) -> str:
+    """Raw Groq call helper — returns raw text (caller parses)."""
+    key = os.environ.get("GROQ_API_KEY", "")
+    if not key:
+        return ""
+    data_url = _img_to_data_url(img)
+    if not data_url:
+        return ""
+    return await _post_openai_compat(
+        "https://api.groq.com/openai/v1/chat/completions",
+        key, "meta-llama/llama-4-scout-17b-16e-instruct",
+        data_url, prompt
+    )
+
+
+async def _qbm_call1_extract(img) -> list:
+    """
+    CALL 1 — OWN OCR + strict-prompt MCQ extraction + inline dedup.
+    Job: extract every existing MCQ on the page (option-serial strictly
+    preserved per active prompt), while checking-as-it-goes so no duplicate
+    /ghost MCQ enters the list. Groq primary -> Gemini fallback.
+    """
     try:
-        key = os.environ.get("GROQ_API_KEY", "")
-        if key:
-            data_url = _img_to_data_url(img)
-            if data_url:
-                txt = await _post_openai_compat(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    key, "meta-llama/llama-4-scout-17b-16e-instruct",
-                    data_url, QBM_EXTRACT_PROMPT
-                )
-                result = _qbm_parse_json(txt)
-                if result:
-                    return result
-        return await _qbm_gemini_extract(img)
+        prompt = qbm_get_active_prompt()
+        txt = await _qbm_groq_call(img, prompt)
+        result = _qbm_parse_json(txt) if txt else []
+        if result:
+            return _qbm_dedup_list(result)
+        gem = await _qbm_gemini_extract(img, prompt)
+        return _qbm_dedup_list(gem)
     except Exception as e:
-        logger.warning(f"[QBM] single pass failed: {e}")
+        logger.warning(f"[QBM Call1] failed: {e}")
         return []
+
+
+async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
+    """
+    CALL 2 — MAIN JOB: verify Call-1 caught every existing MCQ on the page;
+    if any were missed, add them (never remove valid ones). Then re-runs a
+    fast duplicate/ghost-MCQ check on the combined list.
+    Connected to Call-1: audits Call-1's specific output rather than
+    re-extracting independently from scratch.
+    """
+    try:
+        q_summary = "\n".join(
+            f"{i+1}. {(m.get('question') or '')[:100]}" for i, m in enumerate(call1_mcqs)
+        )
+        prompt = f"""You already extracted these MCQs from this exact page image (Call 1 result):
+{q_summary if q_summary else "(none found)"}
+
+TASK (fast audit, connected to Call 1 — do not redo full extraction):
+1) Look at the page again and check if ANY existing MCQ was MISSED by the list above
+   (especially the LAST MCQ on the page — most commonly missed).
+2) If you find missed MCQ(s), extract them in the SAME strict format (options in the exact
+   source position order, A/B/C/D slots by position — never relabeled/sorted).
+3) Do NOT re-list MCQs already shown above. Only output NEW ones that were missed.
+4) If nothing was missed, output exactly: []
+
+Output ONLY a JSON array of the MISSED MCQs (same schema as before):
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
+        txt = await _qbm_groq_call(img, prompt)
+        missed = _qbm_parse_json(txt) if txt else []
+        if not missed:
+            gem_txt = await _qbm_gemini_raw(img, prompt)
+            missed = _qbm_parse_json(gem_txt) if gem_txt else []
+
+        combined = list(call1_mcqs) + missed
+        # 2nd dedup pass (fast, since Call-1 already deduped once) — catches any
+        # duplicate/ghost MCQ that slipped in via the miss-check addition.
+        return _qbm_dedup_list(combined)
+    except Exception as e:
+        logger.warning(f"[QBM Call2] failed: {e}")
+        return call1_mcqs
+
+
+async def _qbm_call3_verify(img, mcqs: list, page_confirmed_complete: bool) -> list:
+    """
+    CALL 3 — per-MCQ verification, connected to Call 1+2:
+    - If Call 1 & 2 already agree the page/MCQ set is 100% confirmed (no misses,
+      no duplicates), this call SKIPS the heavy re-extraction and only does one
+      fast recheck pass — it does not redundantly re-verify from scratch.
+    - Confirms for each MCQ: answer letter matches the correct option's actual
+      output position (option-serial integrity), the answer itself matches what
+      the source page shows, and no spelling mistakes (Bangla/English) remain.
+    - If any MCQ's answer is unclear from the page, tries twice to reason it out;
+      if still unclear, picks the AI's best answer (last resort) and builds the
+      explanation from that chosen answer.
+    """
+    if not mcqs:
+        return mcqs
+    try:
+        mcq_json = json.dumps([
+            {"question": m.get("question", ""), "options": m.get("options", []),
+             "answer": m.get("answer", "A"), "explanation": m.get("explanation", "")}
+            for m in mcqs
+        ], ensure_ascii=False)
+
+        mode_note = (
+            "Call 1 and Call 2 already fully confirmed this page (no misses, no "
+            "duplicates) — so do ONE FAST recheck pass only, do not over-analyze."
+            if page_confirmed_complete else
+            "Do a careful full verification pass on every MCQ below."
+        )
+
+        prompt = f"""{mode_note}
+
+Here is the current MCQ list extracted from this page image (Call 1 + Call 2 combined):
+{mcq_json}
+
+VERIFY each MCQ against the actual page image, in this exact order of checks:
+1) OPTION-SERIAL INTEGRITY: is the answer letter (A/B/C/D) pointing to the option that is
+   actually in that position in THIS output list (not the source's original label)? If the
+   correct option's text sits in position 2 of the output, answer must be "B", etc. Fix any
+   mismatch.
+2) ANSWER SOURCE MATCH: does the answer actually match what is marked/given on the page
+   (marked option, inline answer, bottom-of-page answer box/table, or answer key found on
+   another page — scan forward/backward through all pages as needed)? Fix if wrong.
+3) If an MCQ's answer is genuinely unclear from any source → try twice, reasoning it out from
+   context, to determine the most likely correct answer. If STILL unclear after 2 tries, choose
+   your own best answer, and base the explanation on that chosen answer.
+4) SPELLING CHECK: check question + all options + explanation for spelling mistakes (Bangla or
+   English) and correct them, without changing meaning.
+5) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
+   Na⁺ etc.) are correctly rendered everywhere.
+
+Output ONLY the corrected full JSON array (same length as input, same schema, all fixes applied):
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
+
+        txt = await _qbm_groq_call(img, prompt)
+        verified = _qbm_parse_json(txt) if txt else []
+        if verified and len(verified) >= len(mcqs) * 0.8:
+            return _cap_mcq_options(verified)
+        return mcqs  # verify failed/degraded -> keep Call1+2 result, never lose data
+    except Exception as e:
+        logger.warning(f"[QBM Call3] failed: {e}")
+        return mcqs
 
 
 def _qbm_normalize_q(question: str) -> str:
@@ -3231,55 +3407,54 @@ def _qbm_is_duplicate(norm_q: str, existing_keys: list, threshold: float = 0.85)
     return False
 
 
+def _qbm_dedup_list(mcqs: list) -> list:
+    """Fuzzy-dedup a list in place order, dropping duplicate/ghost MCQs."""
+    seen_keys: list = []
+    out = []
+    for mc in mcqs:
+        key_q = _qbm_normalize_q(mc.get("question", ""))
+        if not key_q:
+            continue
+        if not _qbm_is_duplicate(key_q, seen_keys):
+            seen_keys.append(key_q)
+            out.append(mc)
+    return out
+
+
 async def _qbm_extract_from_image(img) -> list:
     """
-    STRONG extraction with 3-pass independent extraction + fuzzy-dedup UNION merge:
-    - Run 3 independent passes (page-এ readymade MCQ miss হওয়া এড়াতে একটা attempt-এর উপর
-      কখনো ভরসা করা হয় না)।
-    - সবগুলো pass-এর result একসাথে fuzzy-dedup সহ merge (union) করা হয় — কোনো একটা pass কম
-      MCQ দিলেও (partial miss) অন্য pass-এ সেই MCQ ধরা পড়লে সেটা ফাইনাল লিস্টে থাকবে।
-    - Union-এর সংখ্যা কোনো single pass-এর max count-এর চেয়ে বেশি হলে (মানে dedup miss করেছে
-      বা কোনো pass hallucinate করেছে) সবচেয়ে বেশি MCQ দেওয়া pass-এর count-এ cap করা হয়।
-    - MCQ order প্রথম যে pass-এ যে ক্রমে পাওয়া গেছে সেই ক্রমেই রাখা হয় (page serial-এর কাছাকাছি)।
-    Never invents new questions — merge শুধু coverage বাড়ায়, কখনো fabricate করে না।
+    3-CALL CONNECTED PIPELINE (per page), replacing the old independent-pass
+    system. Each call has one distinct job and is connected to the others —
+    a call that already confirms something tells the next call to skip
+    redundant re-work instead of re-verifying everything from scratch.
+
+    Call 1 (extract): own-OCR + strict prompt MCQ extraction, inline dedup.
+    Call 2 (miss-check, MAIN job): confirms Call 1 caught every MCQ on the
+        page; adds any missed one; fast re-dedup on the combined list.
+    Call 3 (verify): if Call 1+2 found zero misses and zero duplicates, this
+        page is "confirmed complete" -> Call 3 only does one fast recheck
+        pass (option-serial + answer-source + spelling). Otherwise it does a
+        careful full verification pass.
+    Never fabricates new questions — only extracts/fixes what already exists.
     """
-    passes = []
-    for i in range(3):
-        result = await _qbm_single_pass(img)
-        if result:
-            passes.append(result)
-        elif i < 2:
-            await asyncio.sleep(1.5)
+    call1 = await _qbm_call1_extract(img)
+    if not call1:
+        return []  # Confirmed: page genuinely has no existing MCQ
 
-    if not passes:
-        return []  # Confirmed across all attempts: page genuinely has no existing MCQ
+    before_call2 = len(call1)
+    call2 = await _qbm_call2_miss_check(img, call1)
+    page_confirmed_complete = (len(call2) == before_call2)  # no misses added, no dupes removed
 
-    merged: dict = {}
-    merge_order: list = []
-    for p in passes:
-        for mc in p:
-            key_q = _qbm_normalize_q(mc.get("question", ""))
-            if not key_q:
-                continue
-            if not _qbm_is_duplicate(key_q, merge_order):
-                merged[key_q] = mc
-                merge_order.append(key_q)
-
-    final_list = [merged[k] for k in merge_order]
-    max_count = max(len(p) for p in passes)
-    if len(final_list) > max_count:
-        logger.info(f"[QBM] Union ({len(final_list)}) exceeded max single-pass count ({max_count}) -> capping")
-        final_list = final_list[:max_count]
-
-    return _cap_mcq_options(final_list)
+    call3 = await _qbm_call3_verify(img, call2, page_confirmed_complete)
+    return _cap_mcq_options(call3)
 
 
-async def _qbm_gemini_extract(img) -> list:
-    """Direct Gemini call with the strict extraction prompt (fallback path)."""
+async def _qbm_gemini_raw(img, prompt: str) -> str:
+    """Direct Gemini call with any given prompt -> raw text (caller parses)."""
     try:
         from pdf_handler import key_rotator, image_to_base64
         if not key_rotator.keys:
-            return []
+            return ""
         key = key_rotator.get_key()
         from google import genai as gai
         from google.genai import types
@@ -3290,16 +3465,22 @@ async def _qbm_gemini_extract(img) -> list:
             return client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=[
-                    types.Part.from_text(text=QBM_EXTRACT_PROMPT),
+                    types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
                 ],
                 config=types.GenerateContentConfig(temperature=0.1)
             )
         response = await asyncio.to_thread(_call)
-        return _qbm_parse_json(response.text)
+        return response.text or ""
     except Exception as e:
-        logger.warning(f"[QBM] Gemini extract fallback failed: {e}")
-        return []
+        logger.warning(f"[QBM] Gemini raw call failed: {e}")
+        return ""
+
+
+async def _qbm_gemini_extract(img, prompt: str = None) -> list:
+    """Direct Gemini call with the strict extraction prompt (fallback path)."""
+    txt = await _qbm_gemini_raw(img, prompt or qbm_get_active_prompt())
+    return _qbm_parse_json(txt) if txt else []
 
 
 async def handle_qbm(msg: dict):
@@ -3397,15 +3578,23 @@ async def handle_qbm(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে...")
 
+        # ── MCQ Extraction ALWAYS runs first (3-call pipeline, per page) ──
+        # Channel selection + CSV file generation happen only AFTER extraction
+        # is fully complete, so the person picks a channel already knowing
+        # exactly how many MCQs were found.
+        extracted_pages = await qbm_extract_all_pages(
+            chat_id, pages, topic, file_name, status_msg_id
+        )
+
         if not channel_id:
             channels = await db_get_channels()
             if not channels:
-                await process_qbm_pages(chat_id, uid, uname, pages, topic,
-                    channel_id, True, file_name, status_msg_id, thread_id)
+                await process_qbm_pages(chat_id, uid, uname, extracted_pages, topic,
+                    channel_id, True, file_name, status_msg_id, thread_id, skip_extract=True)
                 return
 
             app.state.qbm_cache = getattr(app.state, "qbm_cache", {})
-            app.state.qbm_cache[f"qbm_img_{uid}"] = pages
+            app.state.qbm_cache[f"qbm_img_{uid}"] = extracted_pages
             _cap_page_cache(app.state.qbm_cache)
             sb.table("quiz_sessions").upsert({
                 "key": f"qbm_pending_{uid}",
@@ -3417,6 +3606,7 @@ async def handle_qbm(msg: dict):
                 "updated_at": int(time.time())
             }).execute()
 
+            total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
             kb = {"inline_keyboard": []}
             for ch in channels:
                 ch_id = ch.get("channel_id", "")
@@ -3430,13 +3620,14 @@ async def handle_qbm(msg: dict):
                 "callback_data": f"qbmch_csv_{uid}"
             }])
             await send_msg(chat_id,
-                f"📋 <b>{len(pages)} page</b>\n🎯 Topic: {topic}\n\nChannel select করো:",
+                f"✅ Extraction Complete! {total_mcq_found} MCQ পাওয়া গেছে ({len(pages)} page)\n"
+                f"🎯 Topic: {topic}\n\nChannel select করো:",
                 reply_markup=kb
             )
             return
 
-        await process_qbm_pages(chat_id, uid, uname, pages, topic,
-            channel_id, False, file_name, status_msg_id, thread_id)
+        await process_qbm_pages(chat_id, uid, uname, extracted_pages, topic,
+            channel_id, False, file_name, status_msg_id, thread_id, skip_extract=True)
 
     except Exception as e:
         logger.error(f"[QBM] Error: {e}", exc_info=True)
@@ -3528,55 +3719,36 @@ Return ONLY the JSON array, nothing else."""
         return {}
 
 
-async def process_qbm_pages(
-    chat_id: int, uid: int, uname: str,
-    pages: list, topic: str,
-    channel_id, csv_only: bool,
-    file_name: str = "document.pdf",
-    status_msg_id: int = None,
-    thread_id: int = None
-):
-    """QBM main loop — extracts ALL existing MCQ per page, 3x retry, no target count."""
-    settings = await db_get_settings()
-    tag = settings.get("tag", "")
-    exp_footer = settings.get("exp_footer", "")
-
+async def qbm_extract_all_pages(
+    chat_id: int, pages: list, topic: str,
+    file_name: str, status_msg_id: int = None
+) -> list:
+    """
+    Phase 1 -- runs the full 3-call connected extraction pipeline for every
+    page BEFORE any channel selection or posting happens. Also performs the
+    cross-page answer backfill lookahead here (same as before), so by the
+    time this returns, every page's MCQ list is fully final.
+    Returns list of (page_num, img, mcqs) tuples.
+    """
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
     start_time = time.time()
     total_mcq = 0
-    total_polls = 0
+    results = []
 
-    if not status_msg_id:
-        r = await send_msg(chat_id, "⏳ Extraction শুরু হচ্ছে...")
-        status_msg_id = r.get("result", {}).get("message_id")
-
-    await edit_msg(chat_id, status_msg_id,
-        _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
-
-    summary_pages = []
-    all_mcqs_csv = []
-    first_image_msg_id = None
+    if status_msg_id:
+        await edit_msg(chat_id, status_msg_id,
+            _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
 
     for idx, (page_num, img) in enumerate(pages):
         page_status[idx]["current"] = True
-        await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
 
+        mcqs = []
         try:
             mcqs = await _qbm_extract_from_image(img)
-            if not mcqs:
-                page_status[idx]["current"] = False
-                page_status[idx]["done"] = True
-                await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
-                continue
 
-            # ── Cross-page answer backfill ──
-            # If this page's MCQs came back with "Answer not found in source"
-            # (model couldn't find the answer on this page alone), the answer
-            # key is very commonly a few pages later. Look ahead at the next
-            # couple of pages specifically for an answer-key match before
-            # giving up and defaulting to "A".
             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
             if unresolved and idx + 1 < len(pages):
                 for lookahead_offset in (1, 2):
@@ -3596,6 +3768,101 @@ async def process_qbm_pages(
                                     f"Answer key p.{fmt_page(pages[idx + lookahead_offset][0])} থেকে matched"
                                 )
                         unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
+        except Exception as e:
+            logger.error(f"[QBM Extract] Page {page_num} error: {e}")
+
+        results.append((page_num, img, mcqs))
+        total_mcq += len(mcqs)
+        page_status[idx]["current"] = False
+        page_status[idx]["done"] = True
+        page_status[idx]["mcq"] = len(mcqs)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+
+    return results
+
+
+async def process_qbm_pages(
+    chat_id: int, uid: int, uname: str,
+    pages: list, topic: str,
+    channel_id, csv_only: bool,
+    file_name: str = "document.pdf",
+    status_msg_id: int = None,
+    thread_id: int = None,
+    skip_extract: bool = False
+):
+    """
+    QBM posting loop. If skip_extract=True, `pages` is already a list of
+    (page_num, img, mcqs) tuples from qbm_extract_all_pages() -- extraction
+    (and the 3-call pipeline + answer backfill) already happened in Phase 1,
+    so this function only posts to Telegram / builds the CSV.
+    """
+    settings = await db_get_settings()
+    tag = settings.get("tag", "")
+    exp_footer = settings.get("exp_footer", "")
+
+    if skip_extract:
+        page_tuples = pages  # (page_num, img, mcqs)
+        display_pages = [(p, img) for p, img, _ in page_tuples]
+    else:
+        page_tuples = None
+        display_pages = pages
+
+    page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in display_pages]
+    start_time = time.time()
+    total_mcq = 0
+    total_polls = 0
+
+    if not status_msg_id:
+        r = await send_msg(chat_id, "⏳ Posting শুরু হচ্ছে...")
+        status_msg_id = r.get("result", {}).get("message_id")
+
+    await edit_msg(chat_id, status_msg_id,
+        _build_dashboard(file_name, topic, display_pages, page_status, start_time, 0, 0))
+
+    summary_pages = []
+    all_mcqs_csv = []
+    first_image_msg_id = None
+
+    iterable = page_tuples if skip_extract else [(p, img, None) for p, img in pages]
+
+    for idx, (page_num, img, precomputed_mcqs) in enumerate(iterable):
+        page_status[idx]["current"] = True
+        await edit_msg(chat_id, status_msg_id,
+            _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
+
+        try:
+            mcqs = precomputed_mcqs if skip_extract else await _qbm_extract_from_image(img)
+            if not mcqs:
+                page_status[idx]["current"] = False
+                page_status[idx]["done"] = True
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
+                continue
+
+            # ── Cross-page answer backfill — SKIPPED here if skip_extract=True
+            # (Phase 1 / qbm_extract_all_pages already ran this lookahead) ──
+            if not skip_extract:
+                unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
+                if unresolved and idx + 1 < len(display_pages):
+                    for lookahead_offset in (1, 2):
+                        if idx + lookahead_offset >= len(display_pages):
+                            break
+                        if not unresolved:
+                            break
+                        _, lookahead_img = display_pages[idx + lookahead_offset]
+                        found_map = await _qbm_scan_answer_key(lookahead_img, unresolved)
+                        if found_map:
+                            for m in mcqs:
+                                key = (m.get("question") or "").strip()[:80]
+                                if key in found_map:
+                                    m["answer"] = found_map[key]
+                                    m["explanation"] = (m.get("explanation") or "").replace(
+                                        "Answer not found in source",
+                                        f"Answer key p.{fmt_page(display_pages[idx + lookahead_offset][0])} থেকে matched"
+                                    )
+                            unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
 
             img_bytes = image_to_bytes(img) if not isinstance(img, (bytes, bytearray)) else img
 
@@ -3691,7 +3958,7 @@ async def process_qbm_pages(
             page_status[idx]["current"] = False
             page_status[idx]["mcq"] = len(mcqs)
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+                _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
 
         except Exception as e:
             logger.error(f"[QBM] Page {page_num} error: {e}")
@@ -5839,6 +6106,22 @@ async def handle_message(msg: dict):
         await handle_channel(msg)
     elif text == "/info2":
         await handle_info2(msg)
+    elif text.startswith("/qbmprompt"):
+        # /qbmprompt <new prompt text> -> permanently overrides the active
+        # QBM extraction prompt (Call 1). Persists in Supabase (quiz_sessions,
+        # key="qbm_active_prompt") so it's remembered on every future page/
+        # future run, until the next /qbmprompt update.
+        # /qbmprompt reset -> restores the built-in default prompt.
+        # /qbmprompt (no args) -> shows the currently active prompt.
+        new_prompt = text[len("/qbmprompt"):].strip()
+        if not new_prompt:
+            await send_msg(chat_id, f"📋 Active QBM Prompt:\n\n<code>{qbm_get_active_prompt()[:3500]}</code>")
+        elif new_prompt.lower() == "reset":
+            qbm_set_active_prompt(QBM_EXTRACT_PROMPT_DEFAULT)
+            await send_msg(chat_id, "✅ QBM prompt default-এ reset হয়ে গেছে।")
+        else:
+            qbm_set_active_prompt(new_prompt)
+            await send_msg(chat_id, "✅ QBM prompt permanently update হয়ে গেছে। এখন থেকে সব page-এ এই prompt-ই ব্যবহার হবে।")
     elif text.startswith("/qbm"):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
         # 100% ported from AtlasMasterBot's qbm_handler
@@ -6351,7 +6634,22 @@ async def handle_callback(query: dict):
                 return
             pending = json.loads(row.data[0]["data"])
             pages = getattr(app.state,"qbm_cache",{}).get(f"qbm_img_{uid}")
-            if not pages:
+            csv_only = channel == "csv"
+            ch = None if csv_only else channel
+            if pages:
+                # Cache hit: `pages` is already the extracted (page_num, img, mcqs)
+                # tuples from Phase 1 — skip re-extraction entirely.
+                asyncio.create_task(process_qbm_pages(
+                    chat_id, uid, user.get("first_name","User"), pages,
+                    pending["topic"], ch, csv_only,
+                    pending.get("file_name","document.pdf"),
+                    pending.get("status_msg_id"),
+                    thread_id=pending.get("thread_id"),
+                    skip_extract=True
+                ))
+            else:
+                # Cache expired -> re-download and re-run the full 3-call
+                # extraction pipeline (Phase 1) before posting.
                 saved_file_id = pending.get("file_id")
                 if not saved_file_id:
                     await send_msg(chat_id, "❌ Session expired!")
@@ -6359,22 +6657,28 @@ async def handle_callback(query: dict):
                 await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
                 try:
                     pdf_bytes = await download_tg_file(saved_file_id)
-                    pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, pending.get("page_range"))
+                    raw_pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, pending.get("page_range"))
                 except Exception as e:
                     await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
                     return
-                if not pages:
+                if not raw_pages:
                     await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
                     return
-            csv_only = channel == "csv"
-            ch = None if csv_only else channel
-            asyncio.create_task(process_qbm_pages(
-                chat_id, uid, user.get("first_name","User"), pages,
-                pending["topic"], ch, csv_only,
-                pending.get("file_name","document.pdf"),
-                pending.get("status_msg_id"),
-                thread_id=pending.get("thread_id")
-            ))
+                async def _reextract_and_post():
+                    extracted = await qbm_extract_all_pages(
+                        chat_id, raw_pages, pending["topic"],
+                        pending.get("file_name","document.pdf"),
+                        pending.get("status_msg_id")
+                    )
+                    await process_qbm_pages(
+                        chat_id, uid, user.get("first_name","User"), extracted,
+                        pending["topic"], ch, csv_only,
+                        pending.get("file_name","document.pdf"),
+                        pending.get("status_msg_id"),
+                        thread_id=pending.get("thread_id"),
+                        skip_extract=True
+                    )
+                asyncio.create_task(_reextract_and_post())
             getattr(app.state,"qbm_cache",{}).pop(f"qbm_img_{uid}", None)
 
         elif data.startswith("livechannel_"):
