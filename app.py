@@ -3299,8 +3299,10 @@ TASK (fast audit, connected to Call 1 — do not redo full extraction):
    (especially the LAST MCQ on the page — most commonly missed).
 2) If you find missed MCQ(s), extract them in the SAME strict format (options in the exact
    source position order, A/B/C/D slots by position — never relabeled/sorted).
-3) Do NOT re-list MCQs already shown above. Only output NEW ones that were missed.
-4) If nothing was missed, output exactly: []
+3) UDDIPOK CHECK: if a missed MCQ belongs under a passage/উদ্দীপক, prepend that passage's full
+   text to its question (self-contained), same as Call 1's rule.
+4) Do NOT re-list MCQs already shown above. Only output NEW ones that were missed.
+5) If nothing was missed, output exactly: []
 
 Output ONLY a JSON array of the MISSED MCQs (same schema as before):
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
@@ -3368,6 +3370,8 @@ VERIFY each MCQ against the actual page image, in this exact order of checks:
    English) and correct them, without changing meaning.
 5) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
    Na⁺ etc.) are correctly rendered everywhere.
+6) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
+   is prepended to the question (self-contained). Fix/add if missing.
 
 Output ONLY the corrected full JSON array (same length as input, same schema, all fixes applied):
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
