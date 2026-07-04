@@ -165,7 +165,7 @@ async def _process_mhtml_auto(msg: dict):
 
     except Exception as e:
         logger.error(f"[MHTML-Auto] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # D1 Quiz System (fully independent module — see quiz.py)
 from quiz import (
@@ -245,6 +245,17 @@ def _img_to_data_url(img) -> str:
         return "data:image/jpeg;base64," + _b64_ai.b64encode(data).decode()
     except Exception:
         return ""
+
+async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
+    """SECURITY: never leak raw exception text to the user — log full detail,
+    notify owner privately, and show the user a generic Bengali fallback."""
+    logger.error(f"[ERROR]{f' [{context}]' if context else ''}: {e}", exc_info=True)
+    try:
+        await notify_owner(f"🚨 QuizBot ERROR{f' [{context}]' if context else ''}:\n{e}"[:4000])
+    except Exception:
+        pass
+    await send_msg(chat_id, "❌ কিছু একটা সমস্যা হয়েছে। একটু পর আবার চেষ্টা করুন।")
+
 
 def _build_mcq_prompt(topic: str, count) -> str:
     n_txt = f"{count}" if count else "যতগুলো প্রশ্ন/MCQ ছবিতে আছে সব"
@@ -983,7 +994,7 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
             mcqs = await generate_mcq_from_image(img, topic, 1, None)
     except Exception as e:
         logger.error(f"[IMG] Processing error: {e}", exc_info=True)
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
         return
 
     if not mcqs:
@@ -1096,7 +1107,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
                 mcqs = await generate_mcq_from_image(img, topic, 1, None)
         except Exception as e:
             logger.error(f"[IMG] Re-processing error: {e}", exc_info=True)
-            await send_msg(chat_id, f"❌ Error: {e}")
+            await _safe_error_reply(chat_id, e)
             return
 
     if not mcqs:
@@ -1220,7 +1231,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
 
     except Exception as e:
         logger.error(f"[IMG] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # FEATURE: /txt — Text reply → Poll
@@ -1326,7 +1337,7 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
 
     except Exception as e:
         logger.error(f"[TXT] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # STEP 7 (ATLAS_CSV_GUIDE) — /csv + /csvS CORRECT IMPLEMENTATION
@@ -1504,7 +1515,7 @@ async def handle_csv_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[CSV] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # /csvS COMMAND HANDLER
@@ -1602,7 +1613,7 @@ async def handle_csvs_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[CSVS] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # SHARED CSV PARSER
@@ -1957,7 +1968,7 @@ async def handle_info2(msg: dict):
             txt += f"{medals[i]} {u['name']} — {u['count']} exams\n"
         await send_msg(chat_id, txt)
     except Exception as e:
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # FEATURE 7: /bm — Practice Sheet Style PDF
@@ -1984,7 +1995,7 @@ async def handle_bm(msg: dict):
             await send_msg(chat_id, "❌ PDF generate হয়নি!")
     except Exception as e:
         logger.error(f"[BM] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # BM HTML — Practice Sheet exact style (2-col, boxed, Q+opts+ans+exp)
@@ -2085,7 +2096,7 @@ async def handle_bmexam(msg: dict):
         )
     except Exception as e:
         logger.error(f"[BMEXAM] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 
 async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: str):
@@ -2137,7 +2148,7 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
         )
     except Exception as e:
         logger.error(f"[BMEXAM] start error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # HTML → PDF (Chromium)
@@ -2226,7 +2237,7 @@ async def handle_qpdf_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[QPDF] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # AUTO MHTML/HTML → CSV — file পাঠালেই সাথে সাথে CSV (কোনো command লাগে না)
@@ -2266,7 +2277,7 @@ async def handle_qcsv_auto(msg: dict):
 
     except Exception as e:
         logger.error(f"[QCSV-AUTO] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # MHTML/HTML → CSV — chorcha.net প্রশ্ন-উত্তর কে CSV এ export
@@ -2320,7 +2331,7 @@ async def handle_qcsv_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[QCSV] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # /sheet — CSV file reply থেকে সরাসরি Practice Sheet PDF
@@ -2372,7 +2383,7 @@ async def handle_sheet_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[SHEET] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # SOLVE SHEET PDF — Practice Sheet same style (2-col, boxed)
@@ -2520,7 +2531,7 @@ async def handle_pdf(msg: dict):
         await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count, channel_id, False, file_name, status_msg_id, thread_id=thread_id)
     except Exception as e:
         logger.error(f"[PDF] Handle error: {e}", exc_info=True)
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
         await notify_owner(f"[PDF] Error for user {uid}:\n{e}")
 
 # ============================================================
@@ -2843,7 +2854,7 @@ async def handle_pdfm(msg: dict):
 
     except Exception as e:
         logger.error(f"[PDFM] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 def _parse_pdfm_params(text: str) -> dict:
     """
@@ -3780,7 +3791,7 @@ async def handle_qbm(msg: dict):
 
     except Exception as e:
         logger.error(f"[QBM] Error: {e}", exc_info=True)
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 
 async def _qbm_scan_answer_key(img, unresolved_mcqs: list) -> dict:
@@ -4244,7 +4255,7 @@ async def handle_rapid_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[RAPID] error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 
 def _parse_local_time_text(text: str):
@@ -4603,7 +4614,7 @@ async def handle_live_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[LIVE] error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 
 async def start_live_quiz(group_id, session_id: str, topic: str,
@@ -5852,7 +5863,7 @@ async def handle_merge_command(msg: dict):
             }).execute()
             await send_msg(chat_id, f"📎 File {len(files)} received! Total: {len(files)}\n/merge done when ready")
         except Exception as e:
-            await send_msg(chat_id, f"❌ Error: {e}")
+            await _safe_error_reply(chat_id, e)
         return
 
     await send_msg(chat_id,
@@ -6022,7 +6033,7 @@ async def handle_convert_command(msg: dict):
         else:
             await send_msg(chat_id, "❌ Only CSV or JSON files!")
     except Exception as e:
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 
 # ============================================================
@@ -6973,7 +6984,7 @@ async def handle_callback(query: dict):
 
     except Exception as e:
         logger.error(f"[CB] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # POLL LEADERBOARD
