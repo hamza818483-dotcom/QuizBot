@@ -2530,7 +2530,8 @@ async def process_pdf_pages(
     channel_id: str, csv_only: bool,
     file_name: str = "document.pdf",
     status_msg_id: int = None,
-    thread_id: int = None
+    thread_id: int = None,
+    with_image: bool = True
 ):
     settings = await db_get_settings()
     tag = settings.get("tag", "")
@@ -2583,19 +2584,20 @@ async def process_pdf_pages(
                     all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, m.get("explanation", ""), "1", "1"])
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs)
             else:
-                caption = ""
-                if tag:
-                    caption = f"{tag}\n\n"
-                caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}"
-
-                photo_r = await send_photo(channel_id, img_bytes, caption, message_thread_id=thread_id)
                 image_msg_id = None
                 image_file_id = None
-                if photo_r.get("ok"):
-                    image_msg_id = photo_r["result"]["message_id"]
-                    image_file_id = photo_r["result"]["photo"][-1]["file_id"]
-                    if first_image_msg_id is None:
-                        first_image_msg_id = image_msg_id
+                if with_image:
+                    caption = ""
+                    if tag:
+                        caption = f"{tag}\n\n"
+                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}"
+
+                    photo_r = await send_photo(channel_id, img_bytes, caption, message_thread_id=thread_id)
+                    if photo_r.get("ok"):
+                        image_msg_id = photo_r["result"]["message_id"]
+                        image_file_id = photo_r["result"]["photo"][-1]["file_id"]
+                        if first_image_msg_id is None:
+                            first_image_msg_id = image_msg_id
 
                 poll_links = []
                 first_poll_link = ""
@@ -6453,6 +6455,59 @@ async def handle_callback(query: dict):
                 await send_msg(chat_id, "❌ Session expired!")
                 return
             pending = json.loads(row.data[0]["data"])
+
+            if channel == "csv":
+                saved_thread_id = pending.get("thread_id")
+                pages = getattr(app.state, "pdf_cache", {}).get(f"pdf_img_{uid}")
+                if not pages:
+                    saved_file_id = pending.get("file_id")
+                    if not saved_file_id:
+                        await send_msg(chat_id, "❌ Session expired!")
+                        return
+                    await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
+                    try:
+                        pdf_bytes = await download_tg_file(saved_file_id)
+                        pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, pending.get("page_range"))
+                    except Exception as e:
+                        await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
+                        return
+                    if not pages:
+                        await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
+                        return
+                await process_pdf_pages(chat_id, uid, user.get("first_name", "User"), pages,
+                    pending["topic"], pending.get("mcq_count"), None, True,
+                    pending.get("file_name", "document.pdf"), pending.get("status_msg_id"),
+                    thread_id=saved_thread_id)
+                getattr(app.state, "pdf_cache", {}).pop(f"pdf_img_{uid}", None)
+                return
+
+            # ── NEW STEP: channel picked -> ask With Image vs Without Image
+            # (Without Image = photo skipped, only MCQ polls go to channel,
+            # same pattern as /img's Topic Mode) ──
+            pending["channel_id"] = channel
+            sb.table("quiz_sessions").upsert({
+                "key": f"pdf_pending_{uid}",
+                "data": json.dumps(pending),
+                "updated_at": int(time.time())
+            }).execute()
+            kb = {"inline_keyboard": [
+                [{"text": "🖼️ With Image (present system)", "callback_data": f"pdfimg_with_{uid}"}],
+                [{"text": "📝 Without Image (শুধু MCQ Poll)", "callback_data": f"pdfimg_without_{uid}"}]
+            ]}
+            await send_msg(chat_id, "কোন mode-এ পাঠাবে?", reply_markup=kb)
+
+        elif data.startswith("pdfimg_"):
+            parts = data.split("_")
+            img_choice = parts[1]  # "with" or "without"
+            orig_uid = int(parts[2])
+            if uid != orig_uid:
+                return
+            row = sb.table("quiz_sessions").select("data").eq("key", f"pdf_pending_{uid}").execute()
+            if not row.data:
+                await send_msg(chat_id, "❌ Session expired!")
+                return
+            pending = json.loads(row.data[0]["data"])
+            channel = pending.get("channel_id")
             saved_thread_id = pending.get("thread_id")
             pages = getattr(app.state, "pdf_cache", {}).get(f"pdf_img_{uid}")
             if not pages:
@@ -6470,16 +6525,10 @@ async def handle_callback(query: dict):
                 if not pages:
                     await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
                     return
-            if channel == "csv":
-                await process_pdf_pages(chat_id, uid, user.get("first_name", "User"), pages,
-                    pending["topic"], pending.get("mcq_count"), None, True,
-                    pending.get("file_name", "document.pdf"), pending.get("status_msg_id"),
-                    thread_id=saved_thread_id)
-            else:
-                await process_pdf_pages(chat_id, uid, user.get("first_name", "User"), pages,
-                    pending["topic"], pending.get("mcq_count"), channel, False,
-                    pending.get("file_name", "document.pdf"), pending.get("status_msg_id"),
-                    thread_id=saved_thread_id)
+            await process_pdf_pages(chat_id, uid, user.get("first_name", "User"), pages,
+                pending["topic"], pending.get("mcq_count"), channel, False,
+                pending.get("file_name", "document.pdf"), pending.get("status_msg_id"),
+                thread_id=saved_thread_id, with_image=(img_choice == "with"))
             getattr(app.state, "pdf_cache", {}).pop(f"pdf_img_{uid}", None)
 
         elif data.startswith("pollagain_"):
