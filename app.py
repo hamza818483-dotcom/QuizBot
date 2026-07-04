@@ -7401,6 +7401,28 @@ async def generate_new_exam(request: Request):
 async def root():
     return {"status": "ok", "bot": "ATLAS BOT", "version": "4.2.0"}
 
+async def _memory_cleanup_task() -> None:
+    """v-RAM-fix: periodic gc + re-enforce cache caps every 30 min, so leaks
+    never accumulate over days/weeks/months even if a cap write is missed."""
+    import gc
+    await asyncio.sleep(300)
+    while True:
+        try:
+            for attr in ("pdf_cache", "qbm_cache", "img_cache"):
+                cache = getattr(app.state, attr, None)
+                if cache is not None:
+                    _cap_page_cache(cache)
+            gc.collect()
+            logger.info(
+                f"[MemCleanup] pdf_cache={len(getattr(app.state,'pdf_cache',{}) or {})} "
+                f"qbm_cache={len(getattr(app.state,'qbm_cache',{}) or {})} "
+                f"img_cache={len(getattr(app.state,'img_cache',{}) or {})}"
+            )
+        except Exception as e:
+            logger.warning(f"[MemCleanup] {e}")
+        await asyncio.sleep(1800)
+
+
 async def _keepalive_task() -> None:
     """Self-ping own Render URL /health every 5 min for 24/7 uptime
     (prevents Render free-tier sleep). Tracks consecutive failures and
@@ -7548,6 +7570,7 @@ async def startup():
 
     # Self-ping keep-alive: prevents Render free-tier from sleeping.
     asyncio.create_task(_keepalive_task())
+    asyncio.create_task(_memory_cleanup_task())
     # Independent watchdog: separate timing, detects if keep-alive itself dies.
     asyncio.create_task(_watchdog_task())
     asyncio.create_task(_watchdog2_task())
