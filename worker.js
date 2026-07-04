@@ -79,16 +79,96 @@ export default {
     return jsonResp({ ok: true, service: 'ATLAS Bot Proxy', version: '2.0' });
   },
 
-  // ── Cron: Render keep-alive + daily Supabase→D1 sync ──
+  // ── Cron: Render keep-alive + Primary→Secondary failover + daily Supabase→D1 sync ──
   async scheduled(event, env) {
-    const RENDER_URL = env.RENDER_URL   || 'https://quizbot-s482.onrender.com';
+    const RENDER_URL   = env.RENDER_URL   || 'https://quizbot-s482.onrender.com';
+    const RENDER_URL_2 = env.RENDER_URL_2 || '';
+    const BOT_TOKEN     = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
+    const OWNER_ID      = env.OWNER_ID || '';
 
     // Render ping — 15min sleep না করতে (HF permanently banned, removed)
+    let primaryStatus = 0;
     try {
       const r2 = await fetch(RENDER_URL + '/health', { signal: AbortSignal.timeout(10000) });
+      primaryStatus = r2.status;
       console.log(`[cron] Render ping: ${r2.status}`);
     } catch(e) {
       console.warn(`[cron] Render ping failed: ${e.message}`);
+    }
+
+    // ── Confirmed Primary→Secondary failover (independent 2nd system, mirrors GitHub Actions watchdog-1) ──
+    if (RENDER_URL_2 && BOT_TOKEN) {
+      try {
+        // Confirm down: retry twice more (3 total) before acting — avoid false trigger on blip
+        let downCount = primaryStatus === 200 ? 0 : 1;
+        for (let i = 0; i < 2 && downCount > 0; i++) {
+          await new Promise(r => setTimeout(r, 4000));
+          try {
+            const retry = await fetch(RENDER_URL + '/health', { signal: AbortSignal.timeout(10000) });
+            if (retry.status === 200) { downCount = 0; break; }
+            downCount++;
+          } catch (_) { downCount++; }
+        }
+        const primaryConfirmedDown = downCount >= 2; // at least 2 of 3 checks failed
+
+        const webhookInfoRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo`);
+        const webhookInfo = await webhookInfoRes.json();
+        const currentUrl = webhookInfo?.result?.url || '';
+        const primaryHost = RENDER_URL.replace(/^https?:\/\//, '');
+        const secondaryHost = RENDER_URL_2.replace(/^https?:\/\//, '');
+
+        if (primaryConfirmedDown && currentUrl.includes(primaryHost)) {
+          // Verify Secondary healthy before switching
+          const secCheck = await fetch(RENDER_URL_2 + '/health', { signal: AbortSignal.timeout(10000) }).catch(() => null);
+          if (secCheck && secCheck.status === 200) {
+            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: `url=${encodeURIComponent(RENDER_URL_2 + '/webhook')}&drop_pending_updates=false`
+            });
+            await new Promise(r => setTimeout(r, 2000));
+            const confirmRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo`);
+            const confirmInfo = await confirmRes.json();
+            const confirmedSwitched = (confirmInfo?.result?.url || '').includes(secondaryHost);
+            console.log(`[cron][CF-failover] Primary down confirmed, switch to Secondary: ${confirmedSwitched}`);
+            if (OWNER_ID) {
+              const msg = confirmedSwitched
+                ? `🔄 CF WORKER FAILOVER (independent check)!%0A%0APrimary Render DOWN confirmed by Cloudflare Worker.%0ASecondary te switch hoyeche + verify kora hoyeche.%0A%0APrimary: ${RENDER_URL}%0ASecondary: ${RENDER_URL_2}`
+                : `🚨 CF WORKER FAILOVER ATTEMPT FAILED!%0A%0APrimary DOWN but webhook switch confirm hoyni (CF check).%0ACurrent: ${confirmInfo?.result?.url || 'unknown'}`;
+              await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: `chat_id=${OWNER_ID}&text=${msg}`
+              }).catch(() => {});
+            }
+          } else if (OWNER_ID) {
+            const msg = `🚨 CRITICAL (CF check): BOTH Render DOWN!%0A%0APrimary: ${RENDER_URL}%0ASecondary: ${RENDER_URL_2}%0A%0AManual check needed NOW.`;
+            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: `chat_id=${OWNER_ID}&text=${msg}`
+            }).catch(() => {});
+          }
+        } else if (!primaryConfirmedDown && currentUrl.includes(secondaryHost)) {
+          // Primary recovered — switch back
+          await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `url=${encodeURIComponent(RENDER_URL + '/webhook')}&drop_pending_updates=false`
+          });
+          console.log('[cron][CF-failover] Primary recovered, switched back');
+          if (OWNER_ID) {
+            const msg = `✅ CF WORKER: PRIMARY RECOVERED!%0A%0AWebhook Primary te switch back hoyeche (Cloudflare independent check).`;
+            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: `chat_id=${OWNER_ID}&text=${msg}`
+            }).catch(() => {});
+          }
+        }
+      } catch (e) {
+        console.error(`[cron][CF-failover] error: ${e.message}`);
+      }
     }
 
     const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
