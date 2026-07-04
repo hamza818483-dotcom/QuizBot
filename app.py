@@ -893,12 +893,40 @@ async def handle_img_command(msg: dict):
         "updated_at": int(time.time())
     }).execute()
 
+    # STEP 0 (NEW): source select — New MCQ (AI-generated, present system)
+    # vs Existing MCQ (extract already-existing MCQ from the image, qbm-style).
+    kb = {"inline_keyboard": [
+        [{"text": "🆕 New MCQ (AI generate করবে)", "callback_data": f"imgsrc_new_{uid}"}],
+        [{"text": "📋 Existing MCQ (ছবিতে যা আছে তাই বের করবে)", "callback_data": f"imgsrc_existing_{uid}"}]
+    ]}
+    await send_msg(chat_id,
+        f"📸 Image পাওয়া গেছে!\n📌 Topic: <b>{topic}</b>\n\nMCQ কোথা থেকে আসবে?",
+        reply_markup=kb, parse_mode="HTML"
+    )
+
+async def handle_img_source(source: str, uid: int, chat_id: int, user: dict):
+    """source: 'new' (present AI-generate system) or 'existing' (qbm-style extraction, 2-call)."""
+    session_key = f"img_cmd_{uid}"
+    row = sb.table("quiz_sessions").select("data").eq("key", session_key).execute()
+    if not row.data:
+        await send_msg(chat_id, "❌ Session expired!")
+        return
+
+    img_data = json.loads(row.data[0]["data"])
+    img_data["source"] = source
+    sb.table("quiz_sessions").upsert({
+        "key": session_key,
+        "data": json.dumps(img_data),
+        "updated_at": int(time.time())
+    }).execute()
+
     kb = {"inline_keyboard": [
         [{"text": "🖼️ Image Mode (image সহ channel-এ যাবে)", "callback_data": f"imgmode_image_{uid}"}],
         [{"text": "📝 Topic Mode (শুধু MCQ Poll)", "callback_data": f"imgmode_topic_{uid}"}]
     ]}
+    src_label = "🆕 New MCQ" if source == "new" else "📋 Existing MCQ"
     await send_msg(chat_id,
-        f"📸 Image পাওয়া গেছে!\n📌 Topic: <b>{topic}</b>\n\nকোন mode-এ পাঠাবে?",
+        f"{src_label} নির্বাচিত।\n📌 Topic: <b>{img_data.get('topic', 'ATLAS Special MCQ')}</b>\n\nকোন mode-এ পাঠাবে?",
         reply_markup=kb, parse_mode="HTML"
     )
 
@@ -912,6 +940,7 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
     img_data = json.loads(row.data[0]["data"])
     file_id = img_data["file_id"]
     topic = img_data.get("topic", "ATLAS Special MCQ")
+    source = img_data.get("source", "new")
 
     channels = await db_get_channels()
     if not channels:
@@ -920,7 +949,7 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
 
     sb.table("quiz_sessions").upsert({
         "key": f"img_mode_{uid}",
-        "data": json.dumps({"file_id": file_id, "mode": mode, "topic": topic}),
+        "data": json.dumps({"file_id": file_id, "mode": mode, "topic": topic, "source": source}),
         "updated_at": int(time.time())
     }).execute()
 
@@ -934,13 +963,30 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
         }])
     await send_msg(chat_id, f"📢 কোন channel-এ পাঠাবে?\n📌 Topic: <b>{topic}</b>", reply_markup=kb, parse_mode="HTML")
 
+def _imgqbm_options_to_list(mcqs: list) -> list:
+    """/qbm extraction returns options as a dict {A,B,C,D}; /img's poll-sender
+    (and _cap_mcq_options) expect options as a list. Convert format only —
+    never touch question text/answer/explanation content or order."""
+    out = []
+    for m in mcqs:
+        opts = m.get("options")
+        if isinstance(opts, dict):
+            opts = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
+        m2 = dict(m)
+        m2["options"] = opts or []
+        out.append(m2)
+    return out
+
+
 async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
-                               chat_id: int, uid: int, uname: str, topic: str = "ATLAS Special MCQ"):
+                               chat_id: int, uid: int, uname: str, topic: str = "ATLAS Special MCQ",
+                               source: str = "new"):
     settings = await db_get_settings()
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
 
-    loading = await send_msg(chat_id, "⏳ Image থেকে MCQ তৈরি হচ্ছে... (~30s)")
+    loading_text = "⏳ Image থেকে MCQ তৈরি হচ্ছে... (~30s)" if source == "new" else "⏳ Image থেকে existing MCQ বের করা হচ্ছে... (~30-40s)"
+    loading = await send_msg(chat_id, loading_text)
     loading_id = loading.get("result", {}).get("message_id")
 
     try:
@@ -948,9 +994,18 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         from PIL import Image as PILImage
         img = PILImage.open(BytesIO(img_bytes))
 
-        mcqs = await generate_mcq_from_image(img, topic, 1, None)
+        if source == "existing":
+            # Existing MCQ mode: full /qbm prompt logic, 2-call pipeline
+            # (Call 1 extract + Call 2 miss-check) — never fabricates new
+            # questions, only extracts what's already in the image, per /qbm rules.
+            call1 = await _qbm_call1_extract(img)
+            mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
+            mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
+        else:
+            mcqs = await generate_mcq_from_image(img, topic, 1, None)
         if not mcqs:
-            await send_msg(chat_id, "❌ MCQ generate হয়নি!")
+            msg = "❌ MCQ generate হয়নি!" if source == "new" else "❌ ছবিতে কোনো existing MCQ পাওয়া যায়নি!"
+            await send_msg(chat_id, msg)
             return
 
         image_msg_id = None
@@ -6413,6 +6468,14 @@ async def handle_callback(query: dict):
             fake_msg = {"chat": {"id": chat_id}, "from": {"id": uid, "first_name": uname}}
             asyncio.create_task(handle_bmexam(fake_msg))
 
+        elif data.startswith("imgsrc_"):
+            parts = data.split("_")
+            source = parts[1]  # "new" or "existing"
+            orig_uid = int(parts[2])
+            if uid != orig_uid:
+                return
+            await handle_img_source(source, uid, chat_id, user)
+
         elif data.startswith("imgmode_"):
             parts = data.split("_")
             mode = parts[1]  # "image" or "topic"
@@ -6434,7 +6497,8 @@ async def handle_callback(query: dict):
             img_data = json.loads(row.data[0]["data"])
             asyncio.create_task(process_img_to_poll(
                 img_data["file_id"], channel, img_data["mode"],
-                chat_id, uid, uname, topic=img_data.get("topic", "ATLAS Special MCQ")
+                chat_id, uid, uname, topic=img_data.get("topic", "ATLAS Special MCQ"),
+                source=img_data.get("source", "new")
             ))
 
         elif data.startswith("txtchannel_"):
