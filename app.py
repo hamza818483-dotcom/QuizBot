@@ -7401,6 +7401,14 @@ async def generate_new_exam(request: Request):
 async def root():
     return {"status": "ok", "bot": "ATLAS BOT", "version": "4.2.0"}
 
+async def _scheduled_restart_task() -> None:
+    """v-RAM-fix: clean self-exit every 12h so Render restarts the process
+    fresh, fully resetting RAM regardless of any leak."""
+    await asyncio.sleep(12 * 3600)
+    logger.info("[Restart] Scheduled restart: exiting cleanly for fresh RAM")
+    os._exit(0)
+
+
 async def _memory_cleanup_task() -> None:
     """v-RAM-fix: periodic gc + re-enforce cache caps every 30 min, so leaks
     never accumulate over days/weeks/months even if a cap write is missed."""
@@ -7571,6 +7579,7 @@ async def startup():
     # Self-ping keep-alive: prevents Render free-tier from sleeping.
     asyncio.create_task(_keepalive_task())
     asyncio.create_task(_memory_cleanup_task())
+    asyncio.create_task(_scheduled_restart_task())
     # Independent watchdog: separate timing, detects if keep-alive itself dies.
     asyncio.create_task(_watchdog_task())
     asyncio.create_task(_watchdog2_task())
