@@ -1103,9 +1103,21 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             image_file_id = photo_r["result"]["photo"][-1]["file_id"]
 
         if mode != "image" and image_msg_id:
-            # Topic Mode: photo শুধু fresh file_id নেওয়ার জন্য পাঠানো হলো, channel-এ দেখানো হবে না
+            # Topic Mode: photo শুধু fresh file_id নেওয়ার জন্য পাঠানো হলো, channel-এ দেখানো হবে না।
+            # কিন্তু polls/end message-এর reply করার জন্য কিছু একটা লাগবে, তাই photo delete করে
+            # তার জায়গায় একটা text pre-message পাঠানো হচ্ছে (RononBot-এর Without-Image
+            # pattern-এর মতো) — সেটাকেই এখন থেকে reply_to_message_id হিসেবে ব্যবহার করা হবে।
             await tg_post("deleteMessage", {"chat_id": channel_id, "message_id": image_msg_id})
-            image_msg_id = None
+            pre_text = ""
+            if tag:
+                pre_text = f"{tag}\n\n"
+            pre_text += (
+                f"⌛ATLAS Special MCQ System\n"
+                f"🌟Topic: {topic}\n"
+                f"💎MCQ: {len(mcqs)}"
+            )
+            pre_r = await tg_post("sendMessage", {"chat_id": channel_id, "text": pre_text})
+            image_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
 
         poll_links = []
         for i, mcq in enumerate(mcqs):
