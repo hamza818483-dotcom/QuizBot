@@ -390,13 +390,11 @@ DEFAULT_LIVE_TIME = 10
 # ============================================================
 # MULTI-AI MODEL ROTATION (Vision MCQ generation)
 # Order: Gemini (via pdf_handler) → NVIDIA Llama 3.2 11B Vision
-#        → OpenRouter Qwen2-VL 72B → Nemotron Nano Omni → Gemma
+#        → OpenRouter Qwen2-VL 72B → Nemotron Nano Omni → Gemma → Hugging Face
 # Missing keys are skipped silently — never raise.
 # ============================================================
 import base64 as _b64_ai
 from pdf_handler import generate_mcq_from_image as _gemini_gen_mcq
-
-_AI_PROVIDERS_ORDER = ["nvidia", "openrouter_qwen", "nemotron", "gemma"]
 
 def _img_to_data_url(img) -> str:
     try:
@@ -595,11 +593,52 @@ async def _gen_gemma(img, topic, count):
     )
     return _parse_mcq_json(txt)
 
+async def _gen_hf(img, topic, count):
+    """Hugging Face Inference API — free tier vision fallback (last resort)."""
+    key = os.environ.get("HF_API_KEY", "")
+    if not key:
+        return []
+    data_url = _img_to_data_url(img)
+    if not data_url:
+        return []
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    model = os.environ.get("HF_VISION_MODEL", "meta-llama/Llama-3.2-11B-Vision-Instruct")
+    payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _build_mcq_prompt(topic, count)},
+                {"type": "image_url", "image_url": {"url": data_url}}
+            ]
+        }],
+        "max_tokens": 4096,
+        "temperature": 0.3,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120) as c:
+            r = await c.post(
+                "https://router.huggingface.co/v1/chat/completions",
+                headers=headers, json=payload
+            )
+            if r.status_code >= 400:
+                logger.warning(f"[AI-ROT] hf HTTP {r.status_code}: {r.text[:200]}")
+                return []
+            j = r.json()
+            txt = j.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+    except Exception as e:
+        logger.warning(f"[AI-ROT] hf err: {e}")
+        return []
+    return _parse_mcq_json(txt)
+
+_AI_PROVIDERS_ORDER = ["nvidia", "openrouter_qwen", "nemotron", "gemma", "hf"]
+
 _AI_FALLBACK_FNS = {
     "nvidia":          _gen_nvidia,
     "openrouter_qwen": _gen_openrouter_qwen,
     "nemotron":        _gen_nemotron,
     "gemma":           _gen_gemma,
+    "hf":              _gen_hf,
 }
 
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
