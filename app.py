@@ -1236,13 +1236,16 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
         logger.warning(f"[IMG] CSV auto-send failed: {csv_err}")
 
     # Cache the already-processed mcqs + raw image bytes so channel-select
-    # posts directly without re-running generation/extraction.
+    # posts directly without re-running generation/extraction. In-memory cache
+    # is the fast path; mcqs are ALSO persisted in the DB session below so a
+    # server restart between steps never forces a redo of the AI call —
+    # only img_bytes would need a cheap re-download from Telegram (no AI cost).
     app.state.img_cache = getattr(app.state, "img_cache", {})
     app.state.img_cache[f"img_mcq_{uid}"] = {"mcqs": mcqs, "img_bytes": img_bytes}
 
     sb.table("quiz_sessions").upsert({
         "key": f"img_mode_{uid}",
-        "data": json.dumps({"file_id": file_id, "topic": topic, "source": source, "mcq_count": mcq_count}),
+        "data": json.dumps({"file_id": file_id, "topic": topic, "source": source, "mcq_count": mcq_count, "mcqs": mcqs}),
         "updated_at": int(time.time())
     }).execute()
 
@@ -1290,24 +1293,46 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         mcqs = cache["mcqs"]
         img_bytes = cache["img_bytes"]
     else:
-        # Cache expired/missing (e.g. bot restarted) -> fall back to re-processing.
-        loading_text = "⏳ Image থেকে MCQ তৈরি হচ্ছে... (~30s)" if source == "new" else "⏳ Image থেকে existing MCQ বের করা হচ্ছে... (~30-40s)"
-        loading = await send_msg(chat_id, loading_text)
-        loading_id = loading.get("result", {}).get("message_id")
+        # In-memory cache missing (e.g. server restarted between steps) —
+        # check DB-persisted mcqs first (saved in handle_img_process) so we
+        # NEVER re-run the AI generation/extraction a 2nd time. Only the raw
+        # image bytes need a cheap re-download from Telegram (no AI cost).
+        db_mcqs = None
         try:
-            img_bytes = await download_tg_file(file_id)
-            from PIL import Image as PILImage
-            img = PILImage.open(BytesIO(img_bytes))
-            if source == "existing":
-                call1 = await _qbm_call1_extract(img)
-                mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
-                mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
-            else:
-                mcqs = await generate_mcq_from_image(img, topic, 1, mcq_count)
+            row = sb.table("quiz_sessions").select("data").eq("key", f"img_mode_{uid}").execute()
+            if row.data:
+                saved = json.loads(row.data[0]["data"])
+                db_mcqs = saved.get("mcqs")
         except Exception as e:
-            logger.error(f"[IMG] Re-processing error: {e}", exc_info=True)
-            await _safe_error_reply(chat_id, e)
-            return
+            logger.warning(f"[IMG] DB mcqs lookup failed: {e}")
+
+        if db_mcqs:
+            mcqs = db_mcqs
+            try:
+                img_bytes = await download_tg_file(file_id)
+            except Exception as e:
+                logger.error(f"[IMG] Image re-download error: {e}", exc_info=True)
+                await _safe_error_reply(chat_id, e)
+                return
+        else:
+            # Truly nothing saved anywhere (very first run edge-case) -> full re-processing.
+            loading_text = "⏳ Image থেকে MCQ তৈরি হচ্ছে... (~30s)" if source == "new" else "⏳ Image থেকে existing MCQ বের করা হচ্ছে... (~30-40s)"
+            loading = await send_msg(chat_id, loading_text)
+            loading_id = loading.get("result", {}).get("message_id")
+            try:
+                img_bytes = await download_tg_file(file_id)
+                from PIL import Image as PILImage
+                img = PILImage.open(BytesIO(img_bytes))
+                if source == "existing":
+                    call1 = await _qbm_call1_extract(img)
+                    mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
+                    mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
+                else:
+                    mcqs = await generate_mcq_from_image(img, topic, 1, mcq_count)
+            except Exception as e:
+                logger.error(f"[IMG] Re-processing error: {e}", exc_info=True)
+                await _safe_error_reply(chat_id, e)
+                return
 
     if not mcqs:
         msg = "❌ MCQ generate হয়নি!" if source == "new" else "❌ ছবিতে কোনো existing MCQ পাওয়া যায়নি!"
