@@ -7420,9 +7420,12 @@ async def _ram_guard_task() -> None:
     """Proactive RSS watchdog for 512MB Render instances: checks own process
     RSS every 60s. On free tier, hitting the OS memory limit means Render
     hard-kills the process with no cleanup/logging -- so this self-restarts
-    cleanly at 85% (~435MB) BEFORE that happens, same as the safe process
-    exit used by _scheduled_restart_task (Render's start command relaunches
-    it immediately)."""
+    cleanly at 85% (~435MB) BEFORE that happens.
+    Auto-failover: right before self-restarting, if RENDER_URL_2 (secondary
+    instance) is configured, switches Telegram's webhook to it FIRST -- so
+    users get zero downtime (secondary picks up traffic immediately) instead
+    of waiting ~30-60s for this instance to restart and re-set the webhook
+    back to itself."""
     try:
         import psutil
     except ImportError:
@@ -7436,7 +7439,23 @@ async def _ram_guard_task() -> None:
         try:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
             if rss_mb >= threshold_mb:
-                logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> clean self-restart")
+                logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> failover + self-restart")
+                secondary = (os.environ.get("RENDER_URL_2", "") or "").strip()
+                if secondary and BOT_TOKEN:
+                    try:
+                        import httpx as _hx
+                        webhook_url = secondary.rstrip("/") + "/webhook"
+                        async with _hx.AsyncClient(timeout=8) as _c:
+                            r = await _c.post(
+                                f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                                json={"url": webhook_url, "drop_pending_updates": False, "max_connections": 40}
+                            )
+                            if r.json().get("ok"):
+                                logger.warning(f"[RAMGuard] ✅ Webhook switched to SECONDARY: {webhook_url}")
+                            else:
+                                logger.error(f"[RAMGuard] Failover webhook switch failed: {r.json().get('description')}")
+                    except Exception as fe:
+                        logger.error(f"[RAMGuard] Failover attempt error: {fe}")
                 await asyncio.sleep(1)
                 os._exit(0)
             elif rss_mb >= threshold_mb * 0.9:
