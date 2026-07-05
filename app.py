@@ -3380,23 +3380,39 @@ Rules while scanning:
 ════════════════════════════════
 💡 EXPLANATION RULES (STRICT PRIORITY ORDER — follow exactly, always, in this order)
 ════════════════════════════════
+🔴 ABSOLUTE TOP PRIORITY — READ FIRST:
+If the page/image contains ANY explanation/answer-reasoning/ব্যাখ্যা text that is directly
+attached to, written below, or clearly associated with this specific MCQ — you MUST use
+that EXACT text as the explanation, with ZERO exceptions. This overrides every other rule
+in this section, including the character-length limit below. Do NOT summarize, shorten,
+paraphrase, translate, "clean up", or improve it in ANY way — copy it byte-for-byte,
+word-for-word, character-for-character, EXACTLY as it appears in the source (same spelling,
+same punctuation, same wording, same everything). This is a 100% verbatim, same-to-same,
+mandatory copy — never a rewritten or condensed version. Only if this case does not apply
+(no explanation exists anywhere near/for this MCQ) do you move to case 2 below.
+
 1) If the MCQ already has an explanation/answer-reasoning written directly below or attached
-   to it on the page → copy that explanation 100% VERBATIM, word-for-word, EXACTLY as written
-   in the source. Do not paraphrase, shorten, or rewrite it in any way.
+   to it on the page → copy that explanation 100% VERBATIM, word-for-word, character-for-
+   character, EXACTLY as written in the source — same spelling, same punctuation, same
+   wording. Do NOT paraphrase, shorten, rewrite, "improve", or apply the 165-character limit
+   to this case — the source explanation is used as-is regardless of its length. This is the
+   single highest-priority rule in this entire section and is NEVER skipped when applicable.
 2) Else if there is no explanation directly under the MCQ, but the page contains other
    relevant information related to this MCQ's topic (a paragraph, note, box, table, or fact
    elsewhere on the page/related pages that relates to this question) → build the explanation
    using that relevant information, stated as direct fact (see forbidden-phrase rule below).
+   Max 165 characters, Bengali language, factually accurate.
 3) Else if there is no explanation anywhere and no relevant info anywhere on the page/source
    related to this MCQ → then, and ONLY then, generate the BEST, most relevant, factually
    accurate explanation yourself from your own real knowledge.
+   Max 165 characters, Bengali language, factually accurate.
 - Whichever of the 3 cases applies, the explanation content must always convey: why the
   correct option is correct, AND brief relevant info tied to why the other options are
   wrong/related context — except in case 1, where you copy the source explanation exactly
-  as-is even if it doesn't explicitly cover the wrong options.
-- Max 165 characters, Bengali language, factually accurate.
+  as-is even if it doesn't explicitly cover the wrong options and even if it exceeds 165 chars.
 - This priority order (1 → 2 → 3) is permanent and always active — never skip a step or
-  reorder it, on every single MCQ, every time.
+  reorder it, on every single MCQ, every time. Case 1 (verbatim source copy) is checked FIRST
+  for every MCQ, before considering generating any explanation yourself.
 
 ════════════════════════════════
 🧮 MATH / CHEMISTRY FORMATTING (MANDATORY, ALWAYS ACTIVE — question, options, AND explanation)
