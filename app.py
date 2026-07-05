@@ -127,8 +127,17 @@ def _fmt_eta(sec: int) -> str:
     return f"{m}m {s}s"
 
 
+_MHTML_PHASE_LABELS = {
+    "downloading": "📥 File ডাউনলোড হচ্ছে...",
+    "detecting": "🔍 Format যাচাই করা হচ্ছে...",
+    "parsing": "⏳ MCQ প্রসেসিং চলছে...",
+    "csv_building": "📄 CSV বানানো হচ্ছে...",
+    "sending": "📤 CSV পাঠানো হচ্ছে...",
+}
+
+
 async def _mhtml_live_updater(job_id: str, chat_id: int, loading_id: int):
-    """Edits the TG loading message every ~2s with live %, ETA, done/total."""
+    """Edits the TG loading message every ~2s with live phase, %, ETA, done/total."""
     last_text = ""
     while True:
         job = MHTML_JOBS.get(job_id)
@@ -136,14 +145,14 @@ async def _mhtml_live_updater(job_id: str, chat_id: int, loading_id: int):
             break
         pct = job["pct"]
         done, total = job["done"], job["total"]
+        phase = job.get("phase", "parsing")
         bar = _mhtml_progress_bar(pct)
         dash_url = f"{RENDER_URL}/mhtml-status/{job_id}" if RENDER_URL else ""
-        text = (
-            f"⏳ MCQ প্রসেসিং চলছে...\n"
-            f"[{bar}] {pct}%\n"
-            f"📝 হয়েছে: {done}/{total if total else '?'}\n"
-            f"⏱ ETA: {_fmt_eta(job['eta_sec'])}"
-        )
+        label = _MHTML_PHASE_LABELS.get(phase, "⏳ প্রসেসিং চলছে...")
+        text = f"{label}\n[{bar}] {pct}%"
+        if phase in ("parsing", "csv_building", "sending"):
+            text += f"\n📝 হয়েছে: {done}/{total if total else '?'}"
+            text += f"\n⏱ ETA: {_fmt_eta(job['eta_sec'])}"
         if dash_url:
             text += f"\n🔗 লাইভ ডাশবোর্ড: {dash_url}"
         if text != last_text and loading_id:
@@ -163,11 +172,27 @@ async def _process_mhtml_auto(msg: dict):
     loading = await send_msg(chat_id, "🔍 File বিশ্লেষণ করা হচ্ছে...")
     loading_id = loading.get("result", {}).get("message_id")
 
+    job_id = gen_session_id()
+    MHTML_JOBS[job_id] = {
+        "status": "running", "phase": "downloading", "done": 0, "total": 0, "pct": 0,
+        "eta_sec": 0, "started_at": time.time(), "source": None,
+        "file_name": file_name, "chat_id": chat_id, "loading_id": loading_id,
+        "csv_ready": False, "error": None,
+    }
+    updater_task = asyncio.create_task(_mhtml_live_updater(job_id, chat_id, loading_id))
+
     try:
         raw_bytes = await download_tg_file(doc["file_id"])
+        job = MHTML_JOBS.get(job_id)
+        if job:
+            job["phase"] = "detecting"
+            job["pct"] = 5
+
         fmt = await asyncio.to_thread(_detect_mhtml_format, raw_bytes, file_name)
 
         if fmt == "qa":
+            updater_task.cancel()
+            MHTML_JOBS.pop(job_id, None)
             if loading_id:
                 await edit_msg(chat_id, loading_id,
                     "📋 এই file-টা Q&A/CQ ফরম্যাটের (চর্চা ক-ভান্ডার/খ-ভান্ডার/CQ)!\n\n"
@@ -176,6 +201,8 @@ async def _process_mhtml_auto(msg: dict):
             return
 
         if fmt == "none":
+            updater_task.cancel()
+            MHTML_JOBS.pop(job_id, None)
             if loading_id:
                 await edit_msg(chat_id, loading_id,
                     "❌ কোনো চেনা প্রশ্ন/উত্তর ফরম্যাট খুঁজে পাওয়া যায়নি! "
@@ -183,22 +210,17 @@ async def _process_mhtml_auto(msg: dict):
             return
 
         # fmt == "mcq" → CSV বানাও, লাইভ progress সহ
-        job_id = gen_session_id()
-        MHTML_JOBS[job_id] = {
-            "status": "running", "done": 0, "total": 0, "pct": 0,
-            "eta_sec": 0, "started_at": time.time(), "source": None,
-            "file_name": file_name, "chat_id": chat_id, "loading_id": loading_id,
-            "csv_ready": False, "error": None,
-        }
-        updater_task = asyncio.create_task(_mhtml_live_updater(job_id, chat_id, loading_id))
+        if job:
+            job["phase"] = "parsing"
 
         def _progress_cb(done, total):
             job = MHTML_JOBS.get(job_id)
             if not job:
                 return
+            job["phase"] = "parsing"
             job["done"] = done
             job["total"] = total
-            job["pct"] = min(95, round((done / total) * 90)) if total else 0
+            job["pct"] = min(95, 5 + round((done / total) * 85)) if total else 5
             elapsed = time.time() - job["started_at"]
             if done > 0 and total:
                 per_item = elapsed / done
@@ -211,6 +233,7 @@ async def _process_mhtml_auto(msg: dict):
 
         job = MHTML_JOBS.get(job_id)
         if job:
+            job["phase"] = "csv_building"
             job["pct"] = 95
             job["source"] = source
             job["done"] = len(results)
@@ -219,6 +242,7 @@ async def _process_mhtml_auto(msg: dict):
         csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
 
         if job:
+            job["phase"] = "sending"
             job["pct"] = 100
             job["eta_sec"] = 0
             job["status"] = "done"
@@ -238,13 +262,9 @@ async def _process_mhtml_auto(msg: dict):
 
     except Exception as e:
         logger.error(f"[MHTML-Auto] Error: {e}")
-        job = MHTML_JOBS.get(job_id) if "job_id" in dir() else None
-        try:
-            if job_id in MHTML_JOBS:
-                MHTML_JOBS[job_id]["status"] = "error"
-                MHTML_JOBS[job_id]["error"] = str(e)
-        except Exception:
-            pass
+        if job_id in MHTML_JOBS:
+            MHTML_JOBS[job_id]["status"] = "error"
+            MHTML_JOBS[job_id]["error"] = str(e)
         await _safe_error_reply(chat_id, e)
 
 # D1 Quiz System (fully independent module — see quiz.py)
@@ -7359,6 +7379,7 @@ async def get_mhtml_status(job_id: str):
     return JSONResponse({
         "ok": True,
         "status": job["status"],
+        "phase": job.get("phase", "parsing"),
         "done": job["done"],
         "total": job["total"],
         "pct": job["pct"],
@@ -7432,7 +7453,14 @@ async function poll(){
       document.getElementById("status-msg").textContent = "❌ Error: " + (d.error||"unknown");
       return;
     }
-    document.getElementById("status-msg").textContent = "⏳ প্রসেসিং চলছে...";
+    const phaseLabels = {
+      "downloading": "📥 File ডাউনলোড হচ্ছে...",
+      "detecting": "🔍 Format যাচাই করা হচ্ছে...",
+      "parsing": "⏳ MCQ প্রসেসিং চলছে...",
+      "csv_building": "📄 CSV বানানো হচ্ছে...",
+      "sending": "📤 CSV পাঠানো হচ্ছে..."
+    };
+    document.getElementById("status-msg").textContent = phaseLabels[d.phase] || "⏳ প্রসেসিং চলছে...";
     setTimeout(poll, 1500);
   }catch(e){
     setTimeout(poll, 3000);
