@@ -35,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from supabase.client import Client
 
 from pdf_handler import (
-    pdf_to_images, image_to_bytes, generate_mcq_from_image,
+    pdf_to_images, pdf_to_images_safe, image_to_bytes, generate_mcq_from_image,
     generate_new_mcq, parse_pdf_command, parse_page_range,
     fmt_page, gen_session_id, get_random_ayat, get_motivation,
     key_rotator
@@ -2487,7 +2487,10 @@ async def handle_pdf(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ Download complete!\n📄 File: {file_name}\n[██████████ 100%]\n⏳ PDF → Images converting...")
 
-        pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, page_range)
+        ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
         if not pages:
             await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
             return
@@ -2787,7 +2790,10 @@ async def handle_pdfm(msg: dict):
 
     try:
         pdf_bytes = await download_tg_file(file_id)
-        pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, page_range)
+        ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
 
         if not pages:
             await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
@@ -3687,7 +3693,10 @@ async def handle_qbm(msg: dict):
             pages = [(1, img)]
         else:
             pdf_bytes = await download_tg_file(file_id)
-            pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, page_range)
+            ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
+            if not ok:
+                await send_msg(chat_id, pages)
+                return
 
             # OCR fallback if truly no pages/images came back (scanned/corrupt PDF).
             # NOTE: previous check `len(str(pages[0][1])) < 100` was always true (PIL repr
@@ -6473,9 +6482,12 @@ async def handle_callback(query: dict):
                     await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
                     try:
                         pdf_bytes = await download_tg_file(saved_file_id)
-                        pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, pending.get("page_range"))
+                        ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
                     except Exception as e:
                         await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
+                        return
+                    if not ok:
+                        await send_msg(chat_id, pages)
                         return
                     if not pages:
                         await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
@@ -6524,7 +6536,10 @@ async def handle_callback(query: dict):
                 await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
                 try:
                     pdf_bytes = await download_tg_file(saved_file_id)
-                    pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, pending.get("page_range"))
+                    ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
+                    if not ok:
+                        await send_msg(chat_id, pages)
+                        return
                 except Exception as e:
                     await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
                     return
@@ -6788,7 +6803,10 @@ async def handle_callback(query: dict):
                 await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
                 try:
                     pdf_bytes = await download_tg_file(saved_file_id)
-                    pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, pending.get("page_range"))
+                    ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
+                    if not ok:
+                        await send_msg(chat_id, pages)
+                        return
                 except Exception as e:
                     await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
                     return
@@ -6841,7 +6859,10 @@ async def handle_callback(query: dict):
                 await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
                 try:
                     pdf_bytes = await download_tg_file(saved_file_id)
-                    raw_pages = await asyncio.to_thread(pdf_to_images, pdf_bytes, pending.get("page_range"))
+                    raw_ok, raw_pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
+                    if not raw_ok:
+                        await send_msg(chat_id, raw_pages)
+                        return
                 except Exception as e:
                     await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
                     return
