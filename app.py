@@ -158,6 +158,7 @@ async def _mhtml_live_updater(job_id: str, chat_id: int, loading_id: int):
         bar = _mhtml_progress_bar(pct)
         label = _MHTML_PHASE_LABELS.get(phase, "⏳ প্রসেসিং চলছে...")
         text = f"{label}\n[{bar}] {pct}%"
+        elapsed_sec = int(time.time() - job["started_at"])
         if phase == "downloading":
             dl_done = job.get("dl_done", 0)
             dl_total = job.get("dl_total", 0)
@@ -165,10 +166,10 @@ async def _mhtml_live_updater(job_id: str, chat_id: int, loading_id: int):
             text += f"\n📦 {_fmt_bytes(dl_done)}/{_fmt_bytes(dl_total) if dl_total else '?'}"
             if dl_speed:
                 text += f" @ {_fmt_bytes(dl_speed)}/s"
-            text += f"\n⏱ ETA: {_fmt_eta(job['eta_sec'])}"
+            text += f"\n⌛ শুরু: {_fmt_eta(elapsed_sec)} আগে | বাকি ETA: {_fmt_eta(job['eta_sec'])}"
         elif phase in ("parsing", "csv_building", "sending"):
             text += f"\n📝 হয়েছে: {done}/{total if total else '?'}"
-            text += f"\n⏱ ETA: {_fmt_eta(job['eta_sec'])}"
+            text += f"\n⌛ শুরু: {_fmt_eta(elapsed_sec)} আগে | বাকি ETA: {_fmt_eta(job['eta_sec'])}"
         if text != last_text and loading_id:
             try:
                 await edit_msg(chat_id, loading_id, text)
