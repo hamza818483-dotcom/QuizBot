@@ -923,7 +923,7 @@ async def handle_img_command(msg: dict):
     )
 
 async def handle_img_source(source: str, uid: int, chat_id: int, user: dict):
-    """source: 'new' (present AI-generate system) or 'existing' (qbm-style extraction, 2-call)."""
+    """source: 'new' (present AI-generate system) or 'existing' (qbm-style extraction, 3-call: extract+miss-check+verify)."""
     session_key = f"img_cmd_{uid}"
     row = sb.table("quiz_sessions").select("data").eq("key", session_key).execute()
     if not row.data:
@@ -978,8 +978,8 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
         img = PILImage.open(BytesIO(img_bytes))
 
         if source == "existing":
-            # Existing MCQ mode: full /qbm prompt logic, 2-call pipeline
-            # (Call 1 extract + Call 2 miss-check) — never fabricates new
+            # Existing MCQ mode: full /qbm prompt logic, 3-call pipeline
+            # (Call 1 extract + Call 2 miss-check + Call 3 verify) — never fabricates new
             # questions, only extracts what's already in the image, per /qbm rules.
             call1 = await _qbm_call1_extract(img)
             if call1:
