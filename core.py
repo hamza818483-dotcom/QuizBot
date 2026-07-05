@@ -6,6 +6,7 @@
 # ============================================================
 
 import os
+import re
 import json
 import logging
 import time
@@ -422,23 +423,73 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
         logger.error(f"[sendDoc] direct failed: {e}")
         return {"ok": False, "error": str(e)}
 
+def extract_image_url(text: str):
+    """<img src="URL"> ট্যাগ থেকে image URL বের করে, বাকি টেক্সট ক্লিন করে রিটার্ন করে।"""
+    if not text:
+        return None, text
+    match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', text)
+    if not match:
+        return None, text
+    url = match.group(1)
+    clean_text = re.sub(r'<img[^>]+>', '', text).strip()
+    return url, clean_text
+
+
 async def send_poll(chat_id, question: str, options: list, correct_idx: int,
                     explanation: str = "", reply_to_message_id: int = None,
                     message_thread_id: int = None) -> dict:
-    data = {
+    # প্রতিটা অংশ (question/option/explanation) থেকে <img> ট্যাগ থাকলে আলাদা করা হচ্ছে —
+    # Bot API 10.0 (May 2026)-এ InputPollMedia/InputPollOptionMedia/explanation_media
+    # যোগ হয়েছে, যেটা দিয়ে poll question/option/explanation-এ ছবি embed করা যায়।
+    q_img_url, q_clean = extract_image_url(question)
+    exp_img_url, exp_clean = extract_image_url(explanation)
+
+    options_list = []
+    api_options = []
+    has_opt_image = False
+    for opt in options:
+        img_url, clean_opt = extract_image_url(opt)
+        clean_opt = (clean_opt or opt)[:100]
+        options_list.append(clean_opt)
+        if img_url:
+            has_opt_image = True
+            api_options.append({"text": clean_opt, "media": {"type": "photo", "media": img_url}})
+        else:
+            api_options.append({"text": clean_opt})
+
+    base_data = {
         "chat_id": chat_id,
-        "question": question[:300],
-        "options": [o[:100] for o in options],
         "type": "quiz",
         "correct_option_id": correct_idx,
         "is_anonymous": True,
-        "explanation": explanation[:200]
     }
     if reply_to_message_id:
-        data["reply_to_message_id"] = reply_to_message_id
+        base_data["reply_to_message_id"] = reply_to_message_id
     if message_thread_id:
-        data["message_thread_id"] = message_thread_id
-    return await tg_post("sendPoll", data)
+        base_data["message_thread_id"] = message_thread_id
+
+    has_any_image = bool(q_img_url or has_opt_image or exp_img_url)
+
+    if has_any_image:
+        media_data = dict(base_data)
+        media_data["question"] = (q_clean or question)[:300]
+        media_data["options"] = api_options
+        media_data["explanation"] = (exp_clean or explanation)[:200]
+        if q_img_url:
+            media_data["media"] = {"type": "photo", "media": q_img_url}
+        if exp_img_url:
+            media_data["explanation_media"] = {"type": "photo", "media": exp_img_url}
+        result = await tg_post("sendPoll", media_data)
+        if result.get("ok"):
+            return result
+        logger.warning(f"[send_poll] Media poll failed, falling back to text-only: {result.get('description')}")
+
+    # Fallback: প্লেইন টেক্সট poll (image ছাড়া) — media schema fail করলে বা কোনো image না থাকলে
+    plain_data = dict(base_data)
+    plain_data["question"] = (q_clean or question)[:300]
+    plain_data["options"] = options_list
+    plain_data["explanation"] = (exp_clean or explanation)[:200]
+    return await tg_post("sendPoll", plain_data)
 
 async def notify_owner(text: str):
     if OWNER_ID:
