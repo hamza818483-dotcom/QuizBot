@@ -3571,6 +3571,14 @@ def _qbm_dedup_list(mcqs: list) -> list:
     return out
 
 
+# v-RAM-fix: caps how many pages (across ALL users) run the 3-call extraction
+# pipeline at once. Each in-flight page holds a decoded PIL image + growing
+# MCQ list in RAM; on a 512MB free instance, many users uploading at the same
+# time without this cap could still spike RAM even with the PDF-convert lock
+# (that lock only guards the pdf2image step, not the extraction step after).
+_QBM_EXTRACT_SEMAPHORE = asyncio.Semaphore(3)
+
+
 async def _qbm_extract_from_image(img) -> list:
     """
     3-CALL CONNECTED PIPELINE (per page), replacing the old independent-pass
@@ -3587,16 +3595,17 @@ async def _qbm_extract_from_image(img) -> list:
         careful full verification pass.
     Never fabricates new questions — only extracts/fixes what already exists.
     """
-    call1 = await _qbm_call1_extract(img)
-    if not call1:
-        return []  # Confirmed: page genuinely has no existing MCQ
+    async with _QBM_EXTRACT_SEMAPHORE:
+        call1 = await _qbm_call1_extract(img)
+        if not call1:
+            return []  # Confirmed: page genuinely has no existing MCQ
 
-    before_call2 = len(call1)
-    call2 = await _qbm_call2_miss_check(img, call1)
-    page_confirmed_complete = (len(call2) == before_call2)  # no misses added, no dupes removed
+        before_call2 = len(call1)
+        call2 = await _qbm_call2_miss_check(img, call1)
+        page_confirmed_complete = (len(call2) == before_call2)  # no misses added, no dupes removed
 
-    call3 = await _qbm_call3_verify(img, call2, page_confirmed_complete)
-    return _cap_mcq_options(call3)
+        call3 = await _qbm_call3_verify(img, call2, page_confirmed_complete)
+        return _cap_mcq_options(call3)
 
 
 async def _qbm_gemini_raw(img, prompt: str) -> str:
