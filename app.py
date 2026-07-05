@@ -640,6 +640,9 @@ async def _gemini_bbox_lookup(img, mcqs: list) -> dict:
         )
         txt = await _qbm_gemini_raw(img, prompt)
         if not txt:
+            # One retry — transient API hiccups shouldn't sacrifice image reliability.
+            txt = await _qbm_gemini_raw(img, prompt)
+        if not txt:
             return {}
         t = txt.strip()
         if "```" in t:
@@ -685,6 +688,7 @@ async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
         gemini_bboxes = await _gemini_bbox_lookup(img, pending)
 
     full_img_url = None  # lazily uploaded once, reused for every remaining miss
+    full_img_attempted = False
 
     for m in mcqs or []:
         exp = m.get("explanation", "") or ""
@@ -702,14 +706,19 @@ async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
         if not url:
             # Final fallback — no bbox found anywhere -> attach the FULL page
             # image so the explanation still has a visual reference instead
-            # of silently having none.
-            try:
-                if full_img_url is None:
-                    b64 = await asyncio.to_thread(image_to_base64, img)
-                    full_img_url = await asyncio.to_thread(upload_to_imgbb, b64) or ""
-                url = full_img_url
-            except Exception as e:
-                logger.warning(f"[ExplanationCrop] full-image fallback failed: {e}")
+            # of silently having none. One retry on upload for reliability;
+            # attempted-once flag avoids hammering imgbb if it's genuinely down.
+            if full_img_url is None and not full_img_attempted:
+                for _try in range(2):
+                    try:
+                        b64 = await asyncio.to_thread(image_to_base64, img)
+                        full_img_url = await asyncio.to_thread(upload_to_imgbb, b64) or ""
+                        if full_img_url:
+                            break
+                    except Exception as e:
+                        logger.warning(f"[ExplanationCrop] full-image fallback attempt {_try+1} failed: {e}")
+                full_img_attempted = True
+            url = full_img_url or ""
 
         if url:
             m["explanation"] = f'{exp} <img src="{url}">'.strip()
