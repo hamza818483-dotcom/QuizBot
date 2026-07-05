@@ -614,29 +614,106 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     return out
 
 
+async def _gemini_bbox_lookup(img, mcqs: list) -> dict:
+    """
+    Lightweight follow-up call — ONLY for MCQs whose primary provider (Groq/
+    NVIDIA/Qwen/Nemotron/Gemma) failed to return exp_bbox (very common, since
+    those are general-purpose VLMs with weak/no visual-grounding ability;
+    asking for bbox in the prompt alone is not reliable for them).
+    Gemini has real grounding support, so we ask it — once, batched — to
+    locate the source region for each of the given questions.
+    Returns {question_text: [x_min,y_min,x_max,y_max]} for whatever it can find.
+    """
+    if not mcqs:
+        return {}
+    try:
+        q_list = "\n".join(f"{i+1}. {(m.get('question') or '')[:150]}" for i, m in enumerate(mcqs))
+        prompt = (
+            "For each numbered question below, find the exact line/paragraph/table "
+            "on this page image that the question and its explanation are based on. "
+            "Return ONLY a JSON array, one entry per question, in the SAME order:\n"
+            f"{q_list}\n\n"
+            "Schema: [{\"i\":1,\"bbox\":[x_min,y_min,x_max,y_max]}] — bbox normalized "
+            "0-1000 (top-left=[0,0], bottom-right=[1000,1000]), include a small margin "
+            "above/below. If you genuinely cannot locate a question's source region, "
+            "use \"bbox\": null for that entry. No prose, no markdown fences."
+        )
+        txt = await _qbm_gemini_raw(img, prompt)
+        if not txt:
+            return {}
+        t = txt.strip()
+        if "```" in t:
+            t = t.split("```")[1] if t.count("```") >= 2 else t
+            t = t.replace("json", "", 1).strip()
+        m = re.search(r'\[.*\]', t, re.DOTALL)
+        raw = json.loads(m.group()) if m else json.loads(t)
+        out = {}
+        for entry in raw:
+            idx = entry.get("i")
+            bbox = entry.get("bbox")
+            if isinstance(idx, int) and 1 <= idx <= len(mcqs) and isinstance(bbox, list) and len(bbox) == 4:
+                out[mcqs[idx - 1].get("question", "")] = bbox
+        return out
+    except Exception as e:
+        logger.warning(f"[GeminiBBoxLookup] failed: {e}")
+        return {}
+
+
 async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
     """
     সব image-mode AI provider (Groq/NVIDIA/Qwen/Nemotron/Gemma/Gemini) একই জায়গা
     দিয়ে যায় এখানে — যাদের explanation-এ এখনো <img> tag নাই (Gemini path আগেই
     attach করে ফেলে, তাই সেগুলো স্কিপ হবে) তাদের exp_bbox থাকলে crop+upload করে।
+
+    Non-Gemini providers rarely return a usable exp_bbox (prompt-only bbox
+    instructions aren't reliable for them) — for those MCQs, a single batched
+    Gemini follow-up call is used to locate the source region. If even that
+    fails, the FULL page image is attached instead of leaving explanation
+    with no visual reference at all.
     """
     try:
-        from pdf_handler import crop_explanation_image
+        from pdf_handler import crop_explanation_image, image_to_base64
+        from atlas_mhtml import upload_to_imgbb
     except Exception:
         return mcqs
+
+    pending = [m for m in (mcqs or [])
+               if "<img" not in (m.get("explanation", "") or "").lower() and not m.get("exp_bbox")]
+
+    gemini_bboxes = {}
+    if pending:
+        gemini_bboxes = await _gemini_bbox_lookup(img, pending)
+
+    full_img_url = None  # lazily uploaded once, reused for every remaining miss
+
     for m in mcqs or []:
         exp = m.get("explanation", "") or ""
         if "<img" in exp.lower():
-            continue  # আগে থেকেই attach হয়ে গেছে (Gemini path)
-        bbox = m.get("exp_bbox")
-        if not bbox:
-            continue
-        try:
-            url = await asyncio.to_thread(crop_explanation_image, img, bbox)
-            if url:
-                m["explanation"] = f'{exp} <img src="{url}">'.strip()
-        except Exception as e:
-            logger.warning(f"[ExplanationCrop] wrapper-attach failed: {e}")
+            continue  # আগে থেকেই attach হয়ে গেছে (Gemini extraction path)
+
+        bbox = m.get("exp_bbox") or gemini_bboxes.get(m.get("question", ""))
+        url = ""
+        if bbox:
+            try:
+                url = await asyncio.to_thread(crop_explanation_image, img, bbox)
+            except Exception as e:
+                logger.warning(f"[ExplanationCrop] wrapper-attach failed: {e}")
+
+        if not url:
+            # Final fallback — no bbox found anywhere -> attach the FULL page
+            # image so the explanation still has a visual reference instead
+            # of silently having none.
+            try:
+                if full_img_url is None:
+                    b64 = await asyncio.to_thread(image_to_base64, img)
+                    full_img_url = await asyncio.to_thread(upload_to_imgbb, b64) or ""
+                url = full_img_url
+            except Exception as e:
+                logger.warning(f"[ExplanationCrop] full-image fallback failed: {e}")
+
+        if url:
+            m["explanation"] = f'{exp} <img src="{url}">'.strip()
+
     return mcqs
 
 
