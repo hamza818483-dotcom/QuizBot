@@ -157,40 +157,68 @@ MUST Return ONLY valid JSON array, no markdown:
 # same pattern already used for exam PDF rendering in exam_server.py.
 import threading as _threading
 _PDF_CONVERT_LOCK = _threading.Semaphore(1)
-
-# v-RAM-fix: a single huge PDF (e.g. 300+ pages) converted in one shot at
-# dpi=150 can itself exceed 512MB even with only one conversion running --
-# the concurrency lock above doesn't help here since it's one call using too
-# much RAM, not multiple calls overlapping. Hard-cap pages per single call;
-# batches beyond this must be requested via page_range in separate chunks.
 _PDF_MAX_PAGES_PER_CALL = 60
 
 
 def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
-    with _PDF_CONVERT_LOCK:
-        try:
-            from pdf2image import convert_from_bytes
-            if page_range:
-                parts = page_range.split("-")
-                first = int(parts[0])
-                last = int(parts[1]) if len(parts) > 1 else first
-                if last - first + 1 > _PDF_MAX_PAGES_PER_CALL:
-                    last = first + _PDF_MAX_PAGES_PER_CALL - 1
-                    logger.warning(f"[PDF] page_range capped to {_PDF_MAX_PAGES_PER_CALL} pages ({first}-{last})")
-                images = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150)
-                page_numbers = list(range(first, last + 1))
-            else:
-                images = convert_from_bytes(pdf_bytes, dpi=150,
-                    first_page=1, last_page=_PDF_MAX_PAGES_PER_CALL)
-                page_numbers = list(range(1, len(images) + 1))
-                if len(images) == _PDF_MAX_PAGES_PER_CALL:
-                    logger.warning(f"[PDF] Possibly truncated at {_PDF_MAX_PAGES_PER_CALL} pages -- "
-                                    f"PDF may have more; caller should check and use page_range for the rest")
-            logger.info(f"[PDF] Converted {len(images)} pages")
-            return list(zip(page_numbers, images))
-        except Exception as e:
-            logger.error(f"[PDF] Convert error: {e}")
-            raise
+    # Bounded wait (5 min) instead of indefinite block -- avoids thread-pool
+    # exhaustion if many uploads queue up at once; caller gets a clear error
+    # instead of the request hanging forever.
+    if not _PDF_CONVERT_LOCK.acquire(timeout=300):
+        raise RuntimeError("PDF conversion queue busy -- try again in a moment")
+    try:
+        from pdf2image import convert_from_bytes
+        if page_range:
+            parts = page_range.split("-")
+            first = int(parts[0])
+            last = int(parts[1]) if len(parts) > 1 else first
+            if last - first + 1 > _PDF_MAX_PAGES_PER_CALL:
+                raise ValueError(
+                    f"PDF_RANGE_TOO_LARGE:{first}:{last}:{_PDF_MAX_PAGES_PER_CALL}"
+                )
+            images = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150)
+            page_numbers = list(range(first, last + 1))
+        else:
+            images = convert_from_bytes(pdf_bytes, dpi=150,
+                first_page=1, last_page=_PDF_MAX_PAGES_PER_CALL)
+            page_numbers = list(range(1, len(images) + 1))
+            if len(images) == _PDF_MAX_PAGES_PER_CALL:
+                # Don't silently drop remaining pages -- signal caller explicitly
+                # so the user is told to re-request via page_range in chunks.
+                raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
+        logger.info(f"[PDF] Converted {len(images)} pages")
+        return list(zip(page_numbers, images))
+    except Exception as e:
+        logger.error(f"[PDF] Convert error: {e}")
+        raise
+    finally:
+        _PDF_CONVERT_LOCK.release()
+
+
+def pdf_to_images_safe(pdf_bytes: bytes, page_range: str = None):
+    """Wrapper for pdf_to_images() that turns the RAM-safety exceptions into
+    a friendly (ok: bool, result) tuple instead of a raw crash/traceback to
+    the user -- result is the page list on success, or a Bengali user-facing
+    error string on failure (queue busy / PDF too large / range too large)."""
+    try:
+        return True, pdf_to_images(pdf_bytes, page_range)
+    except ValueError as e:
+        msg = str(e)
+        if msg.startswith("PDF_TRUNCATED_AT:"):
+            cap = msg.split(":")[1]
+            return False, (f"❌ PDF-টি {cap} page-এর বেশি! RAM safety-র জন্য একসাথে সর্বোচ্চ "
+                            f"{cap} page process করা যায়।\nদয়া করে page range দিয়ে ভাগ করে পাঠাও "
+                            f"(যেমন: pages 1-{cap}, তারপর {int(cap)+1}-{int(cap)*2})।")
+        if msg.startswith("PDF_RANGE_TOO_LARGE:"):
+            _, first, last, cap = msg.split(":")
+            return False, (f"❌ এই range-এ {int(last)-int(first)+1} page, কিন্তু সর্বোচ্চ {cap} page "
+                            f"একসাথে process করা যায়।\nদয়া করে ছোট range দিয়ে আবার চেষ্টা করো।")
+        return False, f"❌ PDF process করতে সমস্যা হয়েছে: {msg}"
+    except RuntimeError:
+        return False, "⏳ Server এখন busy (অন্য একটা PDF process হচ্ছে), কিছুক্ষণ পর আবার চেষ্টা করো।"
+    except Exception as e:
+        logger.error(f"[PDF] pdf_to_images_safe unexpected error: {e}")
+        return False, "❌ PDF process করতে সমস্যা হয়েছে।"
 
 # ============================================================
 # IMAGE HELPERS
