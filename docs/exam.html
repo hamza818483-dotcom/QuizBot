@@ -622,17 +622,17 @@ async function doSubmit(){
   let html=`
   <div class="result-score-card">
     <div class="result-name">📝 ${examData.topic||'ATLAS Exam'}</div>
-    <div><span class="result-big">${fin}</span><span class="result-denom">/${questions.length}</span></div>
-    <div class="result-total-lbl">Final Score (${pct}%)</div>
+    <div><span class="result-big">${bn(fin)}</span><span class="result-denom">/${bn(questions.length)}</span></div>
+    <div class="result-total-lbl">চূড়ান্ত স্কোর (${bn(pct)}%)</div>
   </div>
   <div class="result-grid">
-    <div class="result-stat"><div class="r-val c-val">✅ ${correct}</div><div class="r-lbl">সঠিক</div></div>
-    <div class="result-stat"><div class="r-val w-val">❌ ${wrong}</div><div class="r-lbl">ভুল</div></div>
-    <div class="result-stat"><div class="r-val s-val">⏭️ ${skipped}</div><div class="r-lbl">স্কিপ</div></div>
+    <div class="result-stat"><div class="r-val c-val">✅ ${bn(correct)}</div><div class="r-lbl">সঠিক</div></div>
+    <div class="result-stat"><div class="r-val w-val">❌ ${bn(wrong)}</div><div class="r-lbl">ভুল</div></div>
+    <div class="result-stat"><div class="r-val s-val">⏭️ ${bn(skipped)}</div><div class="r-lbl">স্কিপ</div></div>
   </div>
-  <div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-${neg} (${wrong}×0.25)</span></div>
-  <div class="info-row2"><span>🏆 Final Score</span><span style="color:var(--accent);font-weight:700">${fin}/${questions.length} (${pct}%)</span></div>
-  <div class="info-row2" style="margin-bottom:14px"><span>⏱️ সময়</span><span>${mins}m ${secs}s</span></div>
+  <div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-${bn(neg)} (${bn(wrong)}×০.২৫)</span></div>
+  <div class="info-row2"><span>🏆 চূড়ান্ত স্কোর</span><span style="color:var(--accent);font-weight:700">${bn(fin)}/${bn(questions.length)} (${bn(pct)}%)</span></div>
+  <div class="info-row2" style="margin-bottom:14px"><span>⏱️ সময়</span><span>${bn(mins)}m ${bn(secs)}s</span></div>
   <div id="motAyatSlot"></div>`;
 
   html+=`<div class="result-btns">
@@ -969,6 +969,10 @@ function buildBackUrl(chId,msgId){
 }
 
 function zp(n){return String(n).padStart(2,'0');}
+function bn(n){
+  const map={'0':'০','1':'১','2':'২','3':'৩','4':'৪','5':'৫','6':'৬','7':'৭','8':'৮','9':'৯'};
+  return String(n).replace(/[0-9]/g,d=>map[d]);
+}
 
 function setMode(m){
   document.querySelectorAll('.mode').forEach(el=>el.classList.remove('active'));
