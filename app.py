@@ -422,7 +422,7 @@ async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
 
 
 def _build_mcq_prompt(topic: str, count) -> str:
-    n_txt = f"{count}" if count else "যতগুলো প্রশ্ন/MCQ ছবিতে আছে সব"
+    n_txt = f"{count}" if count else "সর্বোচ্চ যতগুলো সম্ভব (এই পেজের সব তথ্য থেকে)"
     return (
         f"You are an MCQ extraction expert for Bengali/English academic content.\n"
         f"Topic: {topic}\n"
@@ -439,6 +439,17 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"explanation in that exact same language. Never translate — if the "
         f"source is English, output English; if the source is Bengali, output "
         f"Bengali.\n"
+        f"EXPLANATION RULE — এটাই সবচেয়ে গুরুত্বপূর্ণ, STRICTLY FOLLOW করতে হবে:\n"
+        f"- শুধু 'সঠিক উত্তর হলো X' এই টাইপ ১ লাইনে থামা যাবে না — এটা একটা "
+        f"SEVERE FAILURE হবে।\n"
+        f"- Explanation-এ থাকতে হবে: (1) কেন এই answer টাই সঠিক তার reasoning, "
+        f"(2) সোর্স ইমেজে ওই টপিকের আশেপাশে/related যত তথ্য আছে তার সবটুকু, "
+        f"যাতে ইউজার MCQ solve করে ওই বিষয়ে সম্পূর্ণ ধারণা পায় — শুধু answer "
+        f"বলে দেওয়াই যথেষ্ট নয়।\n"
+        f"- সব তথ্য অবশ্যই সোর্স ইমেজ থেকেই নিতে হবে (কল্পনা করা/বাইরের জ্ঞান "
+        f"যুক্ত করা নিষেধ)।\n"
+        f"- Explanation কমপক্ষে ২-৩ বাক্যের হতে হবে, ১ লাইনের ছোট answer-বলা "
+        f"explanation একদমই acceptable না।\n"
         f"For EACH MCQ, also give 'exp_bbox': the bounding box of the exact "
         f"line/paragraph/table this MCQ was made from, with a few extra lines "
         f"of margin above and below so the full relevant context is visible. "
