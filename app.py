@@ -119,6 +119,15 @@ def _mhtml_progress_bar(pct: int) -> str:
     return "█" * filled + "░" * (10 - filled)
 
 
+def _fmt_bytes(n: float) -> str:
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f}{unit}" if unit != "B" else f"{int(n)}{unit}"
+        n /= 1024
+    return f"{n:.1f}TB"
+
+
 def _fmt_eta(sec: int) -> str:
     sec = max(0, int(sec))
     if sec < 60:
@@ -149,7 +158,15 @@ async def _mhtml_live_updater(job_id: str, chat_id: int, loading_id: int):
         bar = _mhtml_progress_bar(pct)
         label = _MHTML_PHASE_LABELS.get(phase, "⏳ প্রসেসিং চলছে...")
         text = f"{label}\n[{bar}] {pct}%"
-        if phase in ("parsing", "csv_building", "sending"):
+        if phase == "downloading":
+            dl_done = job.get("dl_done", 0)
+            dl_total = job.get("dl_total", 0)
+            dl_speed = job.get("dl_speed", 0)
+            text += f"\n📦 {_fmt_bytes(dl_done)}/{_fmt_bytes(dl_total) if dl_total else '?'}"
+            if dl_speed:
+                text += f" @ {_fmt_bytes(dl_speed)}/s"
+            text += f"\n⏱ ETA: {_fmt_eta(job['eta_sec'])}"
+        elif phase in ("parsing", "csv_building", "sending"):
             text += f"\n📝 হয়েছে: {done}/{total if total else '?'}"
             text += f"\n⏱ ETA: {_fmt_eta(job['eta_sec'])}"
         if text != last_text and loading_id:
@@ -175,11 +192,28 @@ async def _process_mhtml_auto(msg: dict):
         "eta_sec": 0, "started_at": time.time(), "source": None,
         "file_name": file_name, "chat_id": chat_id, "loading_id": loading_id,
         "csv_ready": False, "error": None,
+        "dl_done": 0, "dl_total": 0, "dl_speed": 0,
     }
     updater_task = asyncio.create_task(_mhtml_live_updater(job_id, chat_id, loading_id))
 
     try:
-        raw_bytes = await download_tg_file(doc["file_id"])
+        _dl_start = time.time()
+
+        def _dl_progress_cb(downloaded, total):
+            job = MHTML_JOBS.get(job_id)
+            if not job:
+                return
+            job["dl_done"] = downloaded
+            job["dl_total"] = total
+            job["pct"] = min(5, round((downloaded / total) * 5)) if total else 0
+            elapsed = time.time() - _dl_start
+            if elapsed > 0:
+                speed = downloaded / elapsed
+                job["dl_speed"] = speed
+                if total and speed > 0:
+                    job["eta_sec"] = round((total - downloaded) / speed)
+
+        raw_bytes = await download_tg_file(doc["file_id"], _dl_progress_cb)
         job = MHTML_JOBS.get(job_id)
         if job:
             job["phase"] = "detecting"
@@ -7384,6 +7418,9 @@ async def get_mhtml_status(job_id: str):
         "source": job["source"],
         "file_name": job["file_name"],
         "error": job.get("error"),
+        "dl_done": job.get("dl_done", 0),
+        "dl_total": job.get("dl_total", 0),
+        "dl_speed": job.get("dl_speed", 0),
     })
 
 
@@ -7422,6 +7459,13 @@ h2{margin:0 0 20px;font-size:20px;text-align:center}
 </div>
 <script>
 const jobId = "%s";
+function fmtBytes(n){
+  n = n || 0;
+  const units = ["B","KB","MB","GB"];
+  let i = 0;
+  while(n >= 1024 && i < units.length-1){ n /= 1024; i++; }
+  return (i===0? Math.round(n) : n.toFixed(1)) + units[i];
+}
 function fmtEta(s){
   if(s<=0) return "0s";
   if(s<60) return s+"s";
@@ -7438,9 +7482,15 @@ async function poll(){
     const remaining = Math.max(0, (d.total||0) - (d.done||0));
     document.getElementById("bar").style.width = d.pct + "%%";
     document.getElementById("bar").textContent = d.pct + "%%";
-    document.getElementById("done").textContent = d.done;
-    document.getElementById("total").textContent = d.total || "?";
-    document.getElementById("remaining").textContent = remaining;
+    if(d.phase === "downloading"){
+      document.getElementById("done").textContent = fmtBytes(d.dl_done);
+      document.getElementById("total").textContent = d.dl_total ? fmtBytes(d.dl_total) : "?";
+      document.getElementById("remaining").textContent = d.dl_speed ? fmtBytes(d.dl_speed)+"/s" : "-";
+    } else {
+      document.getElementById("done").textContent = d.done;
+      document.getElementById("total").textContent = d.total || "?";
+      document.getElementById("remaining").textContent = remaining;
+    }
     document.getElementById("eta").textContent = fmtEta(d.eta_sec);
     if(d.status === "done"){
       document.getElementById("status-msg").textContent = "✅ সম্পন্ন! (" + (d.source||"") + ") — CSV Telegram-এ পাঠানো হয়েছে।";
