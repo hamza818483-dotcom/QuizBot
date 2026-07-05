@@ -441,9 +441,14 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"explanation in that exact same language. Never translate — if the "
         f"source is English, output English; if the source is Bengali, output "
         f"Bengali.\n"
+        f"For EACH MCQ, also give 'exp_bbox': the bounding box of the exact "
+        f"line/paragraph/table this MCQ was made from, with a few extra lines "
+        f"of margin above and below so the full relevant context is visible. "
+        f"Normalize to 0-1000 scale ([x_min,y_min,x_max,y_max], top-left=[0,0], "
+        f"bottom-right=[1000,1000]). If unsure, use null.\n"
         f"Return STRICT JSON array only, no prose, no markdown fences. Schema:\n"
         f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
-        f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\"}}]"
+        f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"exp_bbox\":[100,200,900,350]}}]"
     )
 
 def _parse_mcq_json(text: str) -> list:
@@ -479,11 +484,15 @@ def _parse_mcq_json(text: str) -> list:
                 ans = "A"
             if any(re.match(r'^(card|page|section|chapter|part|topic|slide)\s*\d*$', str(o).strip(), re.IGNORECASE) for o in opts):
                 continue
+            bbox = it.get("exp_bbox")
+            if not (isinstance(bbox, list) and len(bbox) == 4):
+                bbox = None
             out.append({
                 "question": q,
                 "options": opts,
                 "answer": ans,
                 "explanation": str(it.get("explanation",""))[:500],
+                "exp_bbox": bbox,
             })
     return out
 
@@ -600,7 +609,35 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     Missing API keys are skipped silently. Never raises.
     """
     out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
-    return _cap_mcq_options(out, 4)
+    out = _cap_mcq_options(out, 4)
+    out = await _attach_explanation_images_if_missing(out, img)
+    return out
+
+
+async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
+    """
+    সব image-mode AI provider (Groq/NVIDIA/Qwen/Nemotron/Gemma/Gemini) একই জায়গা
+    দিয়ে যায় এখানে — যাদের explanation-এ এখনো <img> tag নাই (Gemini path আগেই
+    attach করে ফেলে, তাই সেগুলো স্কিপ হবে) তাদের exp_bbox থাকলে crop+upload করে।
+    """
+    try:
+        from pdf_handler import crop_explanation_image
+    except Exception:
+        return mcqs
+    for m in mcqs or []:
+        exp = m.get("explanation", "") or ""
+        if "<img" in exp.lower():
+            continue  # আগে থেকেই attach হয়ে গেছে (Gemini path)
+        bbox = m.get("exp_bbox")
+        if not bbox:
+            continue
+        try:
+            url = await asyncio.to_thread(crop_explanation_image, img, bbox)
+            if url:
+                m["explanation"] = f'{exp} <img src="{url}">'.strip()
+        except Exception as e:
+            logger.warning(f"[ExplanationCrop] wrapper-attach failed: {e}")
+    return mcqs
 
 
 def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
