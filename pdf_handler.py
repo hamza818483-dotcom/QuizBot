@@ -608,13 +608,18 @@ def parse_pdf_command(text: str) -> dict:
             m_match = re.search(r'-m\s+(\S+)', text)
             if m_match:
                 result["topic"] = m_match.group(1)
-        cmd_part = text.split('/pdf')[1] if '/pdf' in text else text
-        nums = re.findall(r'(?<!\d)(\d+)(?!\d)', cmd_part)
-        if nums:
-            last_num = int(nums[-1])
-            page_nums = result["page_range"].replace("-", " ").split() if result["page_range"] else []
-            if str(last_num) not in page_nums and last_num < 200:
-                result["mcq_count"] = last_num
+        # [.N.] bracket syntax — explicit per-page MCQ count
+        bracket_match = re.search(r'\[\.?(\d+)\.?\]', text)
+        if bracket_match:
+            result["mcq_count"] = int(bracket_match.group(1))
+        else:
+            cmd_part = text.split('/pdf')[1] if '/pdf' in text else text
+            nums = re.findall(r'(?<!\d)(\d+)(?!\d)', cmd_part)
+            if nums:
+                last_num = int(nums[-1])
+                page_nums = result["page_range"].replace("-", " ").split() if result["page_range"] else []
+                if str(last_num) not in page_nums and last_num < 200:
+                    result["mcq_count"] = last_num
     except Exception as e:
         logger.error(f"[Parse] PDF command error: {e}")
     return result
