@@ -149,23 +149,34 @@ MUST Return ONLY valid JSON array, no markdown:
 # ============================================================
 # PDF TO IMAGES
 # ============================================================
+# v-RAM-fix: pdf2image (poppler) rendering is the single biggest RAM spike
+# risk on a 512MB Render instance -- a large PDF at dpi=150 can use 100-300MB
+# during conversion. If two users' /qbm or /pdf uploads convert at the same
+# time, RAM can spike well past the limit and get OOM-killed. This semaphore
+# forces conversions to run one-at-a-time (others queue, run right after) --
+# same pattern already used for exam PDF rendering in exam_server.py.
+import threading as _threading
+_PDF_CONVERT_LOCK = _threading.Semaphore(1)
+
+
 def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
-    try:
-        from pdf2image import convert_from_bytes
-        if page_range:
-            parts = page_range.split("-")
-            first = int(parts[0])
-            last = int(parts[1]) if len(parts) > 1 else first
-            images = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150)
-            page_numbers = list(range(first, last + 1))
-        else:
-            images = convert_from_bytes(pdf_bytes, dpi=150)
-            page_numbers = list(range(1, len(images) + 1))
-        logger.info(f"[PDF] Converted {len(images)} pages")
-        return list(zip(page_numbers, images))
-    except Exception as e:
-        logger.error(f"[PDF] Convert error: {e}")
-        raise
+    with _PDF_CONVERT_LOCK:
+        try:
+            from pdf2image import convert_from_bytes
+            if page_range:
+                parts = page_range.split("-")
+                first = int(parts[0])
+                last = int(parts[1]) if len(parts) > 1 else first
+                images = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150)
+                page_numbers = list(range(first, last + 1))
+            else:
+                images = convert_from_bytes(pdf_bytes, dpi=150)
+                page_numbers = list(range(1, len(images) + 1))
+            logger.info(f"[PDF] Converted {len(images)} pages")
+            return list(zip(page_numbers, images))
+        except Exception as e:
+            logger.error(f"[PDF] Convert error: {e}")
+            raise
 
 # ============================================================
 # IMAGE HELPERS
