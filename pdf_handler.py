@@ -158,6 +158,13 @@ MUST Return ONLY valid JSON array, no markdown:
 import threading as _threading
 _PDF_CONVERT_LOCK = _threading.Semaphore(1)
 
+# v-RAM-fix: a single huge PDF (e.g. 300+ pages) converted in one shot at
+# dpi=150 can itself exceed 512MB even with only one conversion running --
+# the concurrency lock above doesn't help here since it's one call using too
+# much RAM, not multiple calls overlapping. Hard-cap pages per single call;
+# batches beyond this must be requested via page_range in separate chunks.
+_PDF_MAX_PAGES_PER_CALL = 60
+
 
 def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
     with _PDF_CONVERT_LOCK:
@@ -167,11 +174,18 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                 parts = page_range.split("-")
                 first = int(parts[0])
                 last = int(parts[1]) if len(parts) > 1 else first
+                if last - first + 1 > _PDF_MAX_PAGES_PER_CALL:
+                    last = first + _PDF_MAX_PAGES_PER_CALL - 1
+                    logger.warning(f"[PDF] page_range capped to {_PDF_MAX_PAGES_PER_CALL} pages ({first}-{last})")
                 images = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150)
                 page_numbers = list(range(first, last + 1))
             else:
-                images = convert_from_bytes(pdf_bytes, dpi=150)
+                images = convert_from_bytes(pdf_bytes, dpi=150,
+                    first_page=1, last_page=_PDF_MAX_PAGES_PER_CALL)
                 page_numbers = list(range(1, len(images) + 1))
+                if len(images) == _PDF_MAX_PAGES_PER_CALL:
+                    logger.warning(f"[PDF] Possibly truncated at {_PDF_MAX_PAGES_PER_CALL} pages -- "
+                                    f"PDF may have more; caller should check and use page_range for the rest")
             logger.info(f"[PDF] Converted {len(images)} pages")
             return list(zip(page_numbers, images))
         except Exception as e:
