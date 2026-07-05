@@ -626,31 +626,49 @@ async function handleWebQuiz(request, url, env) {
   }
 }
 async function forwardToHF(request, env) {
-  // v4.2: HF account permanently banned (ToS violation) — Render is now
-  // the sole/primary target. HF attempt removed entirely so every
-  // message goes straight to Render with no wasted timeout/delay.
-  const BOT_TOKEN  = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
-  const RENDER_URL = (env.RENDER_URL || 'https://quizbot-s482.onrender.com') + '/webhook';
-  const TG_API     = `https://api.telegram.org/bot${BOT_TOKEN}`;
+  // v-loadsplit: real per-request load splitting across primary + secondary
+  // Render (not just failover-on-crash) -- alternates requests between the
+  // two so under high concurrent traffic (e.g. 100 users at once) neither
+  // single 512MB instance carries the full load alone. Falls back instantly
+  // to the other instance if the picked one fails, so no request is lost.
+  const BOT_TOKEN    = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
+  const PRIMARY      = (env.RENDER_URL   || 'https://quizbot-s482.onrender.com') + '/webhook';
+  const SECONDARY    = env.RENDER_URL_2 ? (env.RENDER_URL_2 + '/webhook') : '';
+  const TG_API       = `https://api.telegram.org/bot${BOT_TOKEN}`;
   const body = await request.text();
 
-  try {
-    const r = await fetch(RENDER_URL, {
+  const targets = SECONDARY ? [PRIMARY, SECONDARY] : [PRIMARY];
+  // Simple alternating pick using a Worker-global counter (best-effort even
+  // split across isolates -- doesn't need to be perfectly exact, just spread
+  // load roughly evenly instead of hammering one instance).
+  globalThis.__rrCounter = ((globalThis.__rrCounter || 0) + 1) % targets.length;
+  const picked = targets[globalThis.__rrCounter];
+  const other = targets.find(t => t !== picked);
+
+  async function tryTarget(target) {
+    return await fetch(target, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body,
-      signal: AbortSignal.timeout(45000), // background now — safe to wait out a cold start
+      signal: AbortSignal.timeout(45000),
     });
-    const kv = await env.DB.prepare("SELECT value FROM kv_store WHERE key='active_webhook'").first().catch(()=>null);
-    if (!kv || kv.value !== 'render') {
-      await fetch(`${TG_API}/setWebhook?url=${encodeURIComponent(RENDER_URL)}&drop_pending_updates=false`).catch(()=>{});
-      await env.DB.prepare("INSERT OR REPLACE INTO kv_store(key,value) VALUES('active_webhook','render')").run().catch(()=>{});
-      console.log('[webhook] Confirmed Render as active (HF permanently disabled)');
+  }
+
+  try {
+    const r = await tryTarget(picked);
+    if (r.ok) return new Response('OK');
+    throw new Error(`status ${r.status}`);
+  } catch (e) {
+    console.warn(`[webhook] ${picked} failed (${e.message}), trying fallback...`);
+    if (other) {
+      try {
+        const r2 = await tryTarget(other);
+        if (r2.ok) return new Response('OK');
+      } catch (e2) {
+        console.warn(`[webhook] fallback ${other} also failed:`, e2.message);
+      }
     }
-    return r.ok ? new Response('OK') : new Response('Render error', { status: 502 });
-  } catch(e) {
-    console.warn('[webhook] Render forward failed:', e.message);
-    return new Response('Render unavailable', { status: 502 });
+    return new Response('All Render instances unavailable', { status: 502 });
   }
 }
 
