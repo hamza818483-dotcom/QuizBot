@@ -628,7 +628,14 @@ def _ocr_bbox_lookup(img, mcqs: list) -> dict:
     try:
         import pytesseract
         w, h = img.size
-        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+        try:
+            data = pytesseract.image_to_data(img, lang="ben+eng", output_type=pytesseract.Output.DICT)
+        except pytesseract.TesseractError as te:
+            # ben traineddata not installed yet on this running container
+            # (e.g. before a fresh deploy picks up the updated Dockerfile) —
+            # fall back to English-only rather than crashing the whole pass.
+            logger.warning(f"[OCRBBoxLookup] ben+eng unavailable ({te}); falling back to eng")
+            data = pytesseract.image_to_data(img, lang="eng", output_type=pytesseract.Output.DICT)
 
         # Group words into lines using (block, par, line) keys, keep bbox + text per line
         lines = {}
