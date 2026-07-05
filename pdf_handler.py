@@ -9,7 +9,6 @@ import json
 import logging
 import random
 import base64
-import io
 import asyncio
 import time
 from io import BytesIO
@@ -101,14 +100,13 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position (A, B, C, or D) — vary them naturally across questions.
 💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
-
-💥bbox (MUST দিতে হবে প্রতিটি MCQ-তে): যে লাইন/প্যারা/ছক থেকে এই নির্দিষ্ট MCQ-টা বানানো হয়েছে, ঠিক সেই অংশের bounding box — উপরে ও নিচে সামান্য কয়েক লাইন extra margin সহ (পুরো প্রাসঙ্গিক প্যারাগ্রাফ/টপিক দেখা যাবে এমনভাবে), 0-1000 normalized scale-এ [x_min, y_min, x_max, y_max] আকারে। পুরো ছবির প্রস্থ/উচ্চতাকে 0-1000 ধরে হিসাব করবে (top-left = [0,0], bottom-right = [1000,1000])।
+💥exp_bbox: যদি ব্যাখ্যার প্রমাণ সরাসরি image-এর কোনো নির্দিষ্ট অংশে (প্যারাগ্রাফ/লাইন/ছক) visible থাকে, সেই অংশের bounding box দাও [x_min,y_min,x_max,y_max] হিসেবে, image-এর প্রস্থ/উচ্চতার 0-1000 scale-এ normalize করে। প্রমাণ visible না থাকলে বা নিশ্চিত না হলে null দাও।
 
 Topic: {topic}
 Page: {page}
 
 MUST Return ONLY valid JSON array, no markdown:
-[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"...","bbox":[120,80,880,340]}}]"""
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"...","exp_bbox":[100,200,900,350]}}]"""
 
 MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 
@@ -142,14 +140,13 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position — vary them naturally so answers are spread across A, B, C, D positions.
 💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
-
-💥bbox (MUST দিতে হবে প্রতিটি MCQ-তে): যে লাইন/প্যারা/ছক থেকে এই নির্দিষ্ট MCQ-টা বানানো হয়েছে, ঠিক সেই অংশের bounding box — উপরে ও নিচে সামান্য কয়েক লাইন extra margin সহ (পুরো প্রাসঙ্গিক প্যারাগ্রাফ/টপিক দেখা যাবে এমনভাবে), 0-1000 normalized scale-এ [x_min, y_min, x_max, y_max] আকারে। পুরো ছবির প্রস্থ/উচ্চতাকে 0-1000 ধরে হিসাব করবে (top-left = [0,0], bottom-right = [1000,1000])।
+💥exp_bbox: যদি ব্যাখ্যার প্রমাণ সরাসরি image-এর কোনো নির্দিষ্ট অংশে (প্যারাগ্রাফ/লাইন/ছক) visible থাকে, সেই অংশের bounding box দাও [x_min,y_min,x_max,y_max] হিসেবে, image-এর প্রস্থ/উচ্চতার 0-1000 scale-এ normalize করে। প্রমাণ visible না থাকলে বা নিশ্চিত না হলে null দাও।
 
 Topic: {topic}
 Page: {page}
 
 MUST Return ONLY valid JSON array, no markdown:
-[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"...","bbox":[120,80,880,340]}}]"""
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"...","exp_bbox":[100,200,900,350]}}]"""
 
 # ============================================================
 # PDF TO IMAGES
@@ -262,6 +259,12 @@ def _parse_mcq_json(text: str) -> list:
                 if any(_nav_label_re.match(str(o).strip()) for o in m["options"]):
                     logger.warning(f"[MCQ] Rejected — nav-label option detected: {m['options']}")
                     continue
+                bbox = m.get("exp_bbox")
+                if (isinstance(bbox, list) and len(bbox) == 4
+                        and all(isinstance(v, (int, float)) for v in bbox)):
+                    m["exp_bbox"] = [max(0, min(1000, int(v))) for v in bbox]
+                else:
+                    m["exp_bbox"] = None
                 valid.append(m)
 
     # Post-process: answer গুলো সব একই হলে shuffle করো
@@ -282,6 +285,37 @@ def _parse_mcq_json(text: str) -> list:
                 m["answer"] = new_ans_label
 
     return valid
+
+
+def crop_explanation_image(img: Image.Image, bbox: list) -> str:
+    """
+    Gemini-এর দেওয়া exp_bbox (0-1000 normalized [x_min,y_min,x_max,y_max]) দিয়ে
+    page image থেকে crop করে, existing Supabase/imgbb storage pipeline দিয়ে
+    upload করে public URL রিটার্ন করে। bbox None বা invalid হলে "" রিটার্ন করে।
+    """
+    if not bbox or len(bbox) != 4:
+        return ""
+    try:
+        from atlas_mhtml import upload_to_imgbb
+        w, h = img.size
+        x_min, y_min, x_max, y_max = bbox
+        left = int((x_min / 1000) * w)
+        top = int((y_min / 1000) * h)
+        right = int((x_max / 1000) * w)
+        bottom = int((y_max / 1000) * h)
+        pad = 8
+        left = max(0, left - pad)
+        top = max(0, top - pad)
+        right = min(w, right + pad)
+        bottom = min(h, bottom + pad)
+        if right <= left or bottom <= top:
+            return ""
+        cropped = img.crop((left, top, right, bottom))
+        b64 = image_to_base64(cropped)
+        return upload_to_imgbb(b64)
+    except Exception as e:
+        logger.warning(f"[ExplanationCrop] Failed: {e}")
+        return ""
 
 # ============================================================
 # OPENROUTER FALLBACK — Qwen2.5-VL
@@ -343,7 +377,6 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
             data = r.json()
             text = data["choices"][0]["message"]["content"]
             valid = _parse_mcq_json(text)
-            valid = await _attach_bbox_crops(valid, img)
             logger.info(f"[OpenRouter] Page {page}: {len(valid)} MCQs via {model}")
             return valid
 
@@ -359,54 +392,6 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
 # ============================================================
 # GENERATE MCQ FROM IMAGE — Gemini primary + OpenRouter fallback
 # ============================================================
-async def _attach_bbox_crops(mcqs: list, img: Image.Image) -> list:
-    """
-    প্রতিটি MCQ-এর 'bbox' (0-1000 normalized [x_min,y_min,x_max,y_max]) থাকলে,
-    সোর্স page image থেকে সেই অংশ crop করে Supabase Storage-এ upload করে —
-    আপলোড হওয়া URL explanation-এ <img src="..."> হিসেবে জুড়ে দেওয়া হয়, যাতে
-    poll-এর explanation_media এবং CSV দুই জায়গাতেই এই cropped ছবিটা embed হয়।
-    bbox না থাকলে বা crop/upload fail করলে সেই MCQ টেক্সট-explanation নিয়েই থেকে যাবে (silent skip)।
-    """
-    if not mcqs:
-        return mcqs
-    try:
-        from atlas_mhtml import upload_to_imgbb
-    except Exception:
-        return mcqs  # upload helper না পেলে crop স্কিপ, বাকি সব ঠিক থাকবে
-
-    W, H = img.size
-    for m in mcqs:
-        bbox = m.get("bbox")
-        if not bbox or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-            continue
-        try:
-            x1, y1, x2, y2 = bbox
-            # normalized (0-1000) -> pixel coords, সাথে সামান্য safety margin
-            pad = 15  # normalized units, উপরে-নিচে/পাশে একটু extra যোগ
-            x1 = max(0, x1 - pad); y1 = max(0, y1 - pad)
-            x2 = min(1000, x2 + pad); y2 = min(1000, y2 + pad)
-            left = int(x1 / 1000 * W)
-            top = int(y1 / 1000 * H)
-            right = int(x2 / 1000 * W)
-            bottom = int(y2 / 1000 * H)
-            if right - left < 20 or bottom - top < 20:
-                continue  # অস্বাভাবিক ছোট bbox — স্কিপ করো
-            cropped = img.crop((left, top, right, bottom))
-
-            buf = io.BytesIO()
-            cropped.convert("RGB").save(buf, format="JPEG", quality=85)
-            crop_b64 = base64.b64encode(buf.getvalue()).decode()
-
-            url = await asyncio.to_thread(upload_to_imgbb, crop_b64)
-            if url:
-                exp = m.get("explanation", "") or ""
-                m["explanation"] = f'{exp}<img src="{url}">'.strip()
-        except Exception as e:
-            logger.warning(f"[BBoxCrop] Skipped one MCQ crop: {e}")
-            continue
-    return mcqs
-
-
 async def generate_mcq_from_image(
     img: Image.Image,
     topic: str,
@@ -445,7 +430,6 @@ async def generate_mcq_from_image(
 
             response = await asyncio.to_thread(_call_gemini)
             valid = _parse_mcq_json(response.text)
-            valid = await _attach_bbox_crops(valid, img)
             logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1})")
             return valid
 

@@ -38,7 +38,7 @@ from pdf_handler import (
     pdf_to_images, pdf_to_images_safe, image_to_bytes, generate_mcq_from_image,
     generate_new_mcq, parse_pdf_command, parse_page_range,
     fmt_page, gen_session_id, get_random_ayat, get_motivation,
-    key_rotator
+    key_rotator, crop_explanation_image
 )
 
 from core import (
@@ -2780,7 +2780,13 @@ async def process_pdf_pages(
                     opts = [re.sub(r'^[A-Da-dক-ঘ][)\.।]\s*', '', str(o)) for o in opts]
                     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
                     ans_num = ans_map.get(m.get("answer", "A"), "1")
-                    all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, m.get("explanation", ""), "1", "1"])
+                    exp = m.get("explanation", "")
+                    bbox = m.get("exp_bbox")
+                    if bbox:
+                        crop_url = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                        if crop_url:
+                            exp = f'<img src="{crop_url}"> {exp}'
+                    all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, exp, "1", "1"])
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs)
             else:
                 image_msg_id = None
@@ -2809,6 +2815,14 @@ async def process_pdf_pages(
                     exp = mcq.get("explanation", "")
                     if exp_footer:
                         exp = f"{exp}\n{exp_footer}"
+                    # exp_bbox থাকলে page image থেকে সেই অংশ crop করে upload করে
+                    # explanation-এ <img> tag embed করা হচ্ছে — send_poll() নিজে থেকেই
+                    # এটা detect করে explanation_media হিসেবে ছবি দেখাবে (আগের fix)।
+                    bbox = mcq.get("exp_bbox")
+                    if bbox:
+                        crop_url = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                        if crop_url:
+                            exp = f'<img src="{crop_url}"> {exp}'
                     # Retry logic — poll অবশ্যই যেতে হবে
                     poll_r = {"ok": False}
                     for _attempt in range(3):
