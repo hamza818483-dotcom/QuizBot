@@ -7395,6 +7395,36 @@ async def _memory_cleanup_task() -> None:
         await asyncio.sleep(1800)
 
 
+async def _ram_guard_task() -> None:
+    """Proactive RSS watchdog for 512MB Render instances: checks own process
+    RSS every 60s. On free tier, hitting the OS memory limit means Render
+    hard-kills the process with no cleanup/logging -- so this self-restarts
+    cleanly at 85% (~435MB) BEFORE that happens, same as the safe process
+    exit used by _scheduled_restart_task (Render's start command relaunches
+    it immediately)."""
+    try:
+        import psutil
+    except ImportError:
+        logger.warning("[RAMGuard] psutil not installed -> proactive RAM guard disabled")
+        return
+    proc = psutil.Process(os.getpid())
+    limit_mb = 512
+    threshold_mb = int(limit_mb * 0.85)
+    await asyncio.sleep(60)
+    while True:
+        try:
+            rss_mb = proc.memory_info().rss / (1024 * 1024)
+            if rss_mb >= threshold_mb:
+                logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> clean self-restart")
+                await asyncio.sleep(1)
+                os._exit(0)
+            elif rss_mb >= threshold_mb * 0.9:
+                logger.info(f"[RAMGuard] RSS {rss_mb:.0f}MB approaching threshold ({threshold_mb}MB)")
+        except Exception as e:
+            logger.warning(f"[RAMGuard] check failed: {e}")
+        await asyncio.sleep(60)
+
+
 async def _keepalive_task() -> None:
     """Self-ping own Render URL /health every 5 min for 24/7 uptime
     (prevents Render free-tier sleep). Tracks consecutive failures and
@@ -7543,6 +7573,7 @@ async def startup():
     # Self-ping keep-alive: prevents Render free-tier from sleeping.
     asyncio.create_task(_keepalive_task())
     asyncio.create_task(_memory_cleanup_task())
+    asyncio.create_task(_ram_guard_task())
     asyncio.create_task(_scheduled_restart_task())
     # Independent watchdog: separate timing, detects if keep-alive itself dies.
     asyncio.create_task(_watchdog_task())
