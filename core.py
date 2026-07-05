@@ -447,21 +447,35 @@ async def notify_owner(text: str):
 # ============================================================
 # DOWNLOAD FILE VIA CF PROXY
 # ============================================================
-async def download_tg_file(file_id: str) -> bytes:
+async def download_tg_file(file_id: str, progress_cb=None) -> bytes:
     file_res = await tg_post("getFile", {"file_id": file_id})
     if not file_res.get("ok"):
         raise Exception(f"getFile failed: {file_res.get('description')}")
     file_path = file_res["result"]["file_path"]
-    try:
+    total_size = file_res["result"].get("file_size", 0)
+
+    async def _stream_download(url: str) -> bytes:
+        chunks = []
+        downloaded = 0
         async with httpx.AsyncClient(timeout=300) as client:
-            r = await client.get(f"{CF_WORKER_URL}/tg-file", params={"path": file_path})
-            if r.status_code == 200:
-                return r.content
+            async with client.stream("GET", url) as r:
+                if r.status_code != 200:
+                    raise Exception(f"HTTP {r.status_code}")
+                async for chunk in r.aiter_bytes(chunk_size=65536):
+                    chunks.append(chunk)
+                    downloaded += len(chunk)
+                    if progress_cb:
+                        try:
+                            progress_cb(downloaded, total_size)
+                        except Exception:
+                            pass
+        return b"".join(chunks)
+
+    try:
+        return await _stream_download(f"{CF_WORKER_URL}/tg-file?path={file_path}")
     except Exception as e:
         logger.warning(f"[Download] CF proxy file failed: {e}")
-    async with httpx.AsyncClient(timeout=300) as client:
-        r = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
-        return r.content
+    return await _stream_download(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
 
 # ============================================================
 # SUPABASE HELPERS (shared)
