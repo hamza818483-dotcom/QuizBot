@@ -147,14 +147,11 @@ async def _mhtml_live_updater(job_id: str, chat_id: int, loading_id: int):
         done, total = job["done"], job["total"]
         phase = job.get("phase", "parsing")
         bar = _mhtml_progress_bar(pct)
-        dash_url = f"{RENDER_URL}/mhtml-status/{job_id}" if RENDER_URL else ""
         label = _MHTML_PHASE_LABELS.get(phase, "⏳ প্রসেসিং চলছে...")
         text = f"{label}\n[{bar}] {pct}%"
         if phase in ("parsing", "csv_building", "sending"):
             text += f"\n📝 হয়েছে: {done}/{total if total else '?'}"
             text += f"\n⏱ ETA: {_fmt_eta(job['eta_sec'])}"
-        if dash_url:
-            text += f"\n🔗 লাইভ ডাশবোর্ড: {dash_url}"
         if text != last_text and loading_id:
             try:
                 await edit_msg(chat_id, loading_id, text)
