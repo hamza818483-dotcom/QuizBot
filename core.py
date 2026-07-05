@@ -6,6 +6,7 @@
 # ============================================================
 
 import os
+import tempfile
 import re
 import json
 import logging
@@ -506,27 +507,34 @@ async def download_tg_file(file_id: str, progress_cb=None) -> bytes:
     total_size = file_res["result"].get("file_size", 0)
 
     async def _stream_download(url: str) -> bytes:
-        chunks = []
         downloaded = 0
-        async with httpx.AsyncClient(timeout=300) as client:
-            async with client.stream("GET", url) as r:
-                if r.status_code != 200:
-                    raise Exception(f"HTTP {r.status_code}")
-                async for chunk in r.aiter_bytes(chunk_size=262144):
-                    chunks.append(chunk)
-                    downloaded += len(chunk)
-                    if progress_cb:
-                        try:
-                            progress_cb(downloaded, total_size)
-                        except Exception:
-                            pass
-        return b"".join(chunks)
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp_path = tmp.name
+            async with httpx.AsyncClient(timeout=300) as client:
+                async with client.stream("GET", url) as r:
+                    if r.status_code != 200:
+                        raise Exception(f"HTTP {r.status_code}")
+                    async for chunk in r.aiter_bytes(chunk_size=262144):
+                        tmp.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_cb:
+                            try:
+                                progress_cb(downloaded, total_size)
+                            except Exception:
+                                pass
+        try:
+            with open(tmp_path, "rb") as f:
+                return f.read()
+        finally:
+            os.remove(tmp_path)
 
+    # CF proxy আগে try না করে সরাসরি direct Telegram file API — ছোট/মাঝারি
+    # ফাইলে (mhtml/csv/pdf) extra proxy hop-এর কোনো লাভ নেই, শুধু latency বাড়ায়।
     try:
-        return await _stream_download(f"{CF_WORKER_URL}/tg-file?path={file_path}")
+        return await _stream_download(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
     except Exception as e:
-        logger.warning(f"[Download] CF proxy file failed: {e}")
-    return await _stream_download(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
+        logger.warning(f"[Download] Direct Telegram failed, trying CF proxy: {e}")
+    return await _stream_download(f"{CF_WORKER_URL}/tg-file?path={file_path}")
 
 # ============================================================
 # SUPABASE HELPERS (shared)
