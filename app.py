@@ -1093,13 +1093,14 @@ async def handle_img_command(msg: dict):
     reply = msg.get("reply_to_message")
 
     # Topic extract from command: /img Physics Chapter 3
-    # Also support trailing count: /img 5  or  /img Physics 5  -> count=5
+    # Count can appear anywhere in the command: /img 5, /img 5 Physics, /img Physics 5
     raw = re.sub(r"^/img\s*", "", text, flags=re.IGNORECASE).strip()
     mcq_count = None
-    m_count = re.search(r'(?:^|\s)(\d+)\s*$', raw)
+    m_count = re.search(r'(?:^|\s)(\d+)(?=\s|$)', raw)
     if m_count:
         mcq_count = int(m_count.group(1))
-        raw = raw[:m_count.start()].strip()
+        raw = (raw[:m_count.start()] + raw[m_count.end():]).strip()
+        raw = re.sub(r'\s+', ' ', raw)
     topic = raw or "ATLAS Special MCQ"
 
     if not reply:
