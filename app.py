@@ -482,12 +482,35 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"- Exactly one of A/B/C/D.\n"
         f"- Double-check: the correct answer must be unambiguous and options must "
         f"be genuinely different from each other (never near-duplicate options).\n\n"
-        f"🟨 EXPLANATION:\n"
-        f"- State the correct answer AND add related context/facts from the same "
-        f"source topic, so reading the explanation teaches the student a bit more "
-        f"than just the bare answer.\n"
-        f"- Everything must come from the source image — never introduce outside facts.\n"
-        f"- Keep it concise (roughly under 200 characters).\n\n"
+        f"🟨 EXPLANATION — TWO PARTS, BOTH MANDATORY, NO EXCEPTIONS:\n"
+        f"An explanation that ONLY names/restates the correct answer (a single "
+        f"short line like 'সঠিক উত্তর X' or 'The answer is X') is INVALID and "
+        f"REJECTED — that is not an explanation, that is just repeating the answer. "
+        f"Every explanation MUST contain BOTH of the following parts, in this order:\n"
+        f"  PART 1 (answer confirmation): State which option is correct.\n"
+        f"  PART 2 (source-derived surrounding context — MUST, never optional): "
+        f"Add 1-2 sentences of ADDITIONAL related facts/details pulled directly "
+        f"from the same source image — information near/around this specific "
+        f"fact on the page (nearby lines, the same paragraph, a related row in "
+        f"the same table, a definition/number/date/name that appears close to "
+        f"this fact in the source). This must be genuinely new information beyond "
+        f"the bare answer — not a restatement of the question, not a restatement "
+        f"of the correct option's text, not a generic filler sentence.\n"
+        f"- If you cannot find any nearby related fact in the source for part 2, "
+        f"you MUST look again at the surrounding lines/paragraph/table before "
+        f"giving up — nearly every source page has at least one adjacent fact "
+        f"(a number, a name, a related term, a cause/effect, a definition) that "
+        f"can serve as part 2. Only if the source page is truly a single isolated "
+        f"fact with absolutely nothing else nearby may part 2 be a brief factual "
+        f"elaboration on the answer itself, still from the source, never invented.\n"
+        f"- Everything in both parts must come from the source image — never "
+        f"introduce outside facts, never guess, never use general knowledge not "
+        f"visible in the source.\n"
+        f"- Self-check before finalizing EVERY explanation: if it reads as one "
+        f"short clause with no additional fact beyond naming the answer, it FAILS "
+        f"this rule — rewrite it to add the required part-2 context before output.\n"
+        f"- Length: roughly 100-200 characters — long enough to fit both parts, "
+        f"but still concise.\n\n"
         f"🟩 STRICT LANGUAGE RULE: Detect the language of the source image text "
         f"(Bengali or English) and write the question, ALL options, and the "
         f"explanation in that exact same language. Never translate — if the "
@@ -695,6 +718,105 @@ _AI_FALLBACK_FNS = {
     "hf":              _gen_hf,
 }
 
+_THIN_EXPLANATION_PATTERNS = [
+    r'^সঠিক\s*উত্তর\s*[:\-—]?\s*[a-dA-D১-৪]?\s*[.।]?$',
+    r'^উত্তর\s*[:\-—]?\s*[a-dA-D১-৪]?\s*[.।]?$',
+    r'^the\s*(correct\s*)?answer\s*is\s*[a-d]?\.?$',
+    r'^answer\s*[:\-—]\s*[a-d]\.?$',
+    r'^option\s*[a-d]\s*is\s*(the\s*)?correct\.?$',
+]
+
+def _is_thin_explanation(exp: str) -> bool:
+    """
+    Detects an explanation that ONLY names the answer (Part 1) with no
+    source-derived surrounding context (Part 2) — heuristic check used to
+    catch cases where the model ignored the two-part explanation rule.
+    """
+    e = (exp or "").strip()
+    if not e:
+        return True
+    # strip any already-attached <img> tag before judging length/content
+    e_no_img = re.sub(r'<img[^>]*>', '', e, flags=re.IGNORECASE).strip()
+    if not e_no_img:
+        return True
+    if len(e_no_img) < 40:  # a genuine 2-part explanation rarely fits under this
+        return True
+    for pat in _THIN_EXPLANATION_PATTERNS:
+        if re.match(pat, e_no_img, re.IGNORECASE):
+            return True
+    return False
+
+async def _repair_thin_explanations(mcqs: list, img, topic: str) -> list:
+    """
+    Targeted, single-pass repair for MCQs whose explanation only names the
+    answer with no source-derived context — re-asks the model for JUST the
+    explanation of those specific questions (not the whole page again), with
+    an even stricter reminder of the two-part rule. Falls back to leaving the
+    original explanation untouched if the repair call fails or still comes
+    back thin (never blocks the MCQ from being delivered).
+    """
+    thin = [m for m in (mcqs or []) if _is_thin_explanation(m.get("explanation", ""))]
+    if not thin:
+        return mcqs
+    questions_block = "\n".join(
+        f'{i+1}. Q: {m["question"]}\n   Correct option: {m["options"][{"A":0,"B":1,"C":2,"D":3}.get(m["answer"],0)]}'
+        for i, m in enumerate(thin)
+    )
+    repair_prompt = (
+        f"Topic: {topic}\n"
+        f"For EACH numbered question below, write a proper explanation using the "
+        f"attached source image. A valid explanation has TWO mandatory parts: "
+        f"(1) confirm the correct option, (2) add 1-2 sentences of ADDITIONAL "
+        f"related facts pulled from NEAR this fact in the source image (a nearby "
+        f"line, a related row, a nearby number/name/date) — never just repeat "
+        f"the answer alone, never invent facts outside the source. Same language "
+        f"as the source (Bengali or English). ~100-200 characters each.\n\n"
+        f"{questions_block}\n\n"
+        f"Return STRICT JSON array only, same order, no prose: "
+        f'[{{"explanation":"..."}}, ...]'
+    )
+    try:
+        fixed_txt = await _gen_groq_raw_text(img, repair_prompt)
+        fixed = _parse_explanation_only_json(fixed_txt)
+        if fixed and len(fixed) == len(thin):
+            for m, new_exp in zip(thin, fixed):
+                if new_exp and not _is_thin_explanation(new_exp):
+                    m["explanation"] = new_exp
+    except Exception as e:
+        logger.warning(f"[ExplanationRepair] failed, keeping originals: {e}")
+    return mcqs
+
+def _parse_explanation_only_json(text: str) -> list:
+    if not text:
+        return []
+    s = text.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s)
+        s = re.sub(r"\s*```$", "", s)
+    a, b = s.find("["), s.rfind("]")
+    if a != -1 and b != -1 and b > a:
+        s = s[a:b+1]
+    try:
+        data = json.loads(s)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(it.get("explanation", "")).strip()[:500] if isinstance(it, dict) else "" for it in data]
+
+async def _gen_groq_raw_text(img, prompt: str) -> str:
+    key = os.environ.get("GROQ_API_KEY", "")
+    if not key:
+        return ""
+    data_url = _img_to_data_url(img)
+    if not data_url:
+        return ""
+    return await _post_openai_compat(
+        "https://api.groq.com/openai/v1/chat/completions",
+        key, "meta-llama/llama-4-scout-17b-16e-instruct",
+        data_url, prompt
+    )
+
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     Smart wrapper: Groq first (primary), then Gemini (internal key rotation via pdf_handler).
@@ -703,8 +825,13 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
     out = _cap_mcq_options(out, 4)
+    # কোনো MCQ-র explanation যদি শুধু উত্তর বলেই থেমে যায় (আশেপাশের সোর্স-তথ্য
+    # ছাড়া) — সেটার জন্য একটা targeted repair pass চালানো হয়, পুরো পেইজ আবার
+    # generate না করেই। ব্যর্থ হলেও মূল MCQ ডেলিভারি আটকায় না।
+    out = await _repair_thin_explanations(out, img, topic)
     out = await _attach_explanation_images_if_missing(out, img)
     return out
+
 
 
 def _ocr_bbox_lookup(img, mcqs: list) -> dict:
