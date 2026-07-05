@@ -175,7 +175,7 @@ async def _mhtml_live_updater(job_id: str, chat_id: int, loading_id: int):
                 last_text = text
             except Exception:
                 pass
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
 
 async def _cleanup_job_later(job_id: str, delay: int = 30):
