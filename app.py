@@ -225,9 +225,24 @@ async def _process_mhtml_auto(msg: dict):
         if job:
             job["phase"] = "detecting"
             job["pct"] = 5
-            job["eta_sec"] = 2  # ছোট, নির্দিষ্ট ধাপ — সাধারণত ১-৩ সেকেন্ডে শেষ হয়
+            job["eta_sec"] = 3
 
-        fmt = await asyncio.to_thread(_detect_mhtml_format, raw_bytes, file_name)
+        async def _detect_ticker():
+            # detect_mhtml_format ব্লকিং কল — বড় ফাইলে সময় লাগতে পারে।
+            # এই ticker pct/eta কে নিজে থেকে ধীরে ধীরে বাড়ায়, যাতে user দেখতে
+            # পায় প্রসেস চলছে, স্থির আটকে নেই।
+            j = MHTML_JOBS.get(job_id)
+            while j and j.get("phase") == "detecting":
+                j["pct"] = min(15, j["pct"] + 1)
+                j["eta_sec"] = max(1, j["eta_sec"] - 1)
+                await asyncio.sleep(1)
+                j = MHTML_JOBS.get(job_id)
+
+        ticker_task = asyncio.create_task(_detect_ticker())
+        try:
+            fmt = await asyncio.to_thread(_detect_mhtml_format, raw_bytes, file_name)
+        finally:
+            ticker_task.cancel()
 
         if fmt == "qa":
             updater_task.cancel()
