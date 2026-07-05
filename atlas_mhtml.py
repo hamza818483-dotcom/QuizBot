@@ -21,6 +21,7 @@ from bs4 import BeautifulSoup
 from PIL import Image
 
 logger = logging.getLogger("atlas.mhtml")
+_http_client = httpx.Client(timeout=30)
 
 # ============================================================
 # IMGBB UPLOAD (key rotation, sync — called via asyncio.to_thread)
@@ -103,10 +104,9 @@ class ImgBBKeyManager:
             tried.add(key)
             try:
                 b64 = base64.b64encode(image_bytes).decode("utf-8")
-                resp = httpx.post(
+                resp = _http_client.post(
                     "https://api.imgbb.com/1/upload",
                     data={"key": key, "image": b64},
-                    timeout=30
                 )
                 data = resp.json()
                 if data.get("success"):
@@ -135,14 +135,21 @@ def compress_image(b64_str):
         return b64_str
 
 
+_upload_cache = {}
+
+
 def upload_to_imgbb(b64):
     """
     Supabase Storage-এ image upload করে permanent public URL রিটার্ন করে।
     imgbb-এর বদলে Supabase Storage — কোনো key rotation লাগে না, permanent, free tier যথেষ্ট।
     Env vars: SUPABASE_URL, SUPABASE_KEY (আগে থেকেই bot-এ সেট আছে)
+    একই base64 image দ্বিতীয়বার এলে cache থেকে URL রিটার্ন করে (duplicate image reupload skip)।
     """
     if not b64:
         return ""
+    cache_key = b64[:64] + str(len(b64))
+    if cache_key in _upload_cache:
+        return _upload_cache[cache_key]
     try:
         compressed = compress_image(b64)
         img_bytes = base64.b64decode(compressed)
@@ -153,7 +160,7 @@ def upload_to_imgbb(b64):
 
         bucket = "quiz-images"
         filename = f"{uuid.uuid4().hex}.jpg"
-        resp = httpx.post(
+        resp = _http_client.post(
             f"{supabase_url}/storage/v1/object/{bucket}/{filename}",
             headers={
                 "Authorization": f"Bearer {supabase_key}",
@@ -161,10 +168,11 @@ def upload_to_imgbb(b64):
                 "Content-Type": "image/jpeg",
             },
             content=img_bytes,
-            timeout=30,
         )
         if resp.status_code in (200, 201):
-            return f"{supabase_url}/storage/v1/object/public/{bucket}/{filename}"
+            url = f"{supabase_url}/storage/v1/object/public/{bucket}/{filename}"
+            _upload_cache[cache_key] = url
+            return url
         logger.warning(f"[SupabaseStorage] Upload failed {resp.status_code}: {resp.text[:200]}")
         return imgbb_manager.upload(img_bytes)  # fallback to imgbb on failure
     except Exception as e:
@@ -367,7 +375,7 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
     else:
         html_body = file_bytes.decode('utf-8', errors='ignore')
 
-    soup = BeautifulSoup(html_body, 'html.parser')
+    soup = BeautifulSoup(html_body, 'lxml')
 
     # ============================================================
     # CHORCHA.NET

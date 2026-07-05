@@ -461,7 +461,7 @@ async def download_tg_file(file_id: str, progress_cb=None) -> bytes:
             async with client.stream("GET", url) as r:
                 if r.status_code != 200:
                     raise Exception(f"HTTP {r.status_code}")
-                async for chunk in r.aiter_bytes(chunk_size=65536):
+                async for chunk in r.aiter_bytes(chunk_size=262144):
                     chunks.append(chunk)
                     downloaded += len(chunk)
                     if progress_cb:
