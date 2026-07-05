@@ -165,7 +165,7 @@ async def _process_mhtml_auto(msg: dict):
 
     except Exception as e:
         logger.error(f"[MHTML-Auto] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # D1 Quiz System (fully independent module — see quiz.py)
 from quiz import (
@@ -246,12 +246,30 @@ def _img_to_data_url(img) -> str:
     except Exception:
         return ""
 
+async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
+    """SECURITY: never leak raw exception text to the user — log full detail,
+    notify owner privately, and show the user a generic Bengali fallback."""
+    logger.error(f"[ERROR]{f' [{context}]' if context else ''}: {e}", exc_info=True)
+    try:
+        await notify_owner(f"🚨 QuizBot ERROR{f' [{context}]' if context else ''}:\n{e}"[:4000])
+    except Exception:
+        pass
+    await send_msg(chat_id, "❌ কিছু একটা সমস্যা হয়েছে। একটু পর আবার চেষ্টা করুন।")
+
+
 def _build_mcq_prompt(topic: str, count) -> str:
     n_txt = f"{count}" if count else "যতগুলো প্রশ্ন/MCQ ছবিতে আছে সব"
     return (
         f"You are an MCQ extraction expert for Bengali/English academic content.\n"
         f"Topic: {topic}\n"
         f"From the given page image, extract {n_txt} MCQs.\n"
+        f"MUST-PRIORITY RULE — never miss lines that are marked in ANY way:\n"
+        f"- Any line/paragraph highlighted or marked with ANY color (green, red, "
+        f"orange, yellow are most common highlighter colors)\n"
+        f"- Any paragraph/line boxed or color-marked\n"
+        f"- Any line underlined with pen ink (red, black, blue, green — any color)\n"
+        f"- If you see ANY extra color, mark, box, or underline added on top of the "
+        f"book's original line, you MUST make an MCQ from it — do not skip it.\n"
         f"STRICT LANGUAGE RULE: Detect the language of the source image text "
         f"(Bengali or English) and write the question, ALL options, and the "
         f"explanation in that exact same language. Never translate — if the "
@@ -964,13 +982,19 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
             # (Call 1 extract + Call 2 miss-check) — never fabricates new
             # questions, only extracts what's already in the image, per /qbm rules.
             call1 = await _qbm_call1_extract(img)
-            mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
+            if call1:
+                before_call2 = len(call1)
+                call2 = await _qbm_call2_miss_check(img, call1)
+                page_confirmed_complete = (len(call2) == before_call2)
+                mcqs = await _qbm_call3_verify(img, call2, page_confirmed_complete)
+            else:
+                mcqs = []
             mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
         else:
             mcqs = await generate_mcq_from_image(img, topic, 1, None)
     except Exception as e:
         logger.error(f"[IMG] Processing error: {e}", exc_info=True)
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
         return
 
     if not mcqs:
@@ -1071,13 +1095,19 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             img = PILImage.open(BytesIO(img_bytes))
             if source == "existing":
                 call1 = await _qbm_call1_extract(img)
-                mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
+                if call1:
+                    before_call2 = len(call1)
+                    call2 = await _qbm_call2_miss_check(img, call1)
+                    page_confirmed_complete = (len(call2) == before_call2)
+                    mcqs = await _qbm_call3_verify(img, call2, page_confirmed_complete)
+                else:
+                    mcqs = []
                 mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
             else:
                 mcqs = await generate_mcq_from_image(img, topic, 1, None)
         except Exception as e:
             logger.error(f"[IMG] Re-processing error: {e}", exc_info=True)
-            await send_msg(chat_id, f"❌ Error: {e}")
+            await _safe_error_reply(chat_id, e)
             return
 
     if not mcqs:
@@ -1201,7 +1231,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
 
     except Exception as e:
         logger.error(f"[IMG] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # FEATURE: /txt — Text reply → Poll
@@ -1307,7 +1337,7 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
 
     except Exception as e:
         logger.error(f"[TXT] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # STEP 7 (ATLAS_CSV_GUIDE) — /csv + /csvS CORRECT IMPLEMENTATION
@@ -1485,7 +1515,7 @@ async def handle_csv_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[CSV] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # /csvS COMMAND HANDLER
@@ -1583,7 +1613,7 @@ async def handle_csvs_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[CSVS] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # SHARED CSV PARSER
@@ -1938,7 +1968,7 @@ async def handle_info2(msg: dict):
             txt += f"{medals[i]} {u['name']} — {u['count']} exams\n"
         await send_msg(chat_id, txt)
     except Exception as e:
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # FEATURE 7: /bm — Practice Sheet Style PDF
@@ -1965,7 +1995,7 @@ async def handle_bm(msg: dict):
             await send_msg(chat_id, "❌ PDF generate হয়নি!")
     except Exception as e:
         logger.error(f"[BM] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # BM HTML — Practice Sheet exact style (2-col, boxed, Q+opts+ans+exp)
@@ -2066,7 +2096,7 @@ async def handle_bmexam(msg: dict):
         )
     except Exception as e:
         logger.error(f"[BMEXAM] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 
 async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: str):
@@ -2118,7 +2148,7 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
         )
     except Exception as e:
         logger.error(f"[BMEXAM] start error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # HTML → PDF (Chromium)
@@ -2207,7 +2237,7 @@ async def handle_qpdf_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[QPDF] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # AUTO MHTML/HTML → CSV — file পাঠালেই সাথে সাথে CSV (কোনো command লাগে না)
@@ -2247,7 +2277,7 @@ async def handle_qcsv_auto(msg: dict):
 
     except Exception as e:
         logger.error(f"[QCSV-AUTO] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # MHTML/HTML → CSV — chorcha.net প্রশ্ন-উত্তর কে CSV এ export
@@ -2301,7 +2331,7 @@ async def handle_qcsv_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[QCSV] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # /sheet — CSV file reply থেকে সরাসরি Practice Sheet PDF
@@ -2353,7 +2383,7 @@ async def handle_sheet_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[SHEET] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # SOLVE SHEET PDF — Practice Sheet same style (2-col, boxed)
@@ -2501,7 +2531,7 @@ async def handle_pdf(msg: dict):
         await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count, channel_id, False, file_name, status_msg_id, thread_id=thread_id)
     except Exception as e:
         logger.error(f"[PDF] Handle error: {e}", exc_info=True)
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
         await notify_owner(f"[PDF] Error for user {uid}:\n{e}")
 
 # ============================================================
@@ -2824,7 +2854,7 @@ async def handle_pdfm(msg: dict):
 
     except Exception as e:
         logger.error(f"[PDFM] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 def _parse_pdfm_params(text: str) -> dict:
     """
@@ -3761,7 +3791,7 @@ async def handle_qbm(msg: dict):
 
     except Exception as e:
         logger.error(f"[QBM] Error: {e}", exc_info=True)
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 
 async def _qbm_scan_answer_key(img, unresolved_mcqs: list) -> dict:
@@ -4225,7 +4255,7 @@ async def handle_rapid_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[RAPID] error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 
 def _parse_local_time_text(text: str):
@@ -4584,7 +4614,7 @@ async def handle_live_command(msg: dict):
 
     except Exception as e:
         logger.error(f"[LIVE] error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 
 async def start_live_quiz(group_id, session_id: str, topic: str,
@@ -5833,7 +5863,7 @@ async def handle_merge_command(msg: dict):
             }).execute()
             await send_msg(chat_id, f"📎 File {len(files)} received! Total: {len(files)}\n/merge done when ready")
         except Exception as e:
-            await send_msg(chat_id, f"❌ Error: {e}")
+            await _safe_error_reply(chat_id, e)
         return
 
     await send_msg(chat_id,
@@ -5979,7 +6009,7 @@ async def handle_convert_command(msg: dict):
         else:
             await send_msg(chat_id, "❌ Only CSV or JSON files!")
     except Exception as e:
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 
 # ============================================================
@@ -6930,7 +6960,7 @@ async def handle_callback(query: dict):
 
     except Exception as e:
         logger.error(f"[CB] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await _safe_error_reply(chat_id, e)
 
 # ============================================================
 # POLL LEADERBOARD
@@ -7347,6 +7377,164 @@ async def generate_new_exam(request: Request):
 async def root():
     return {"status": "ok", "bot": "ATLAS BOT", "version": "4.2.0"}
 
+async def _scheduled_restart_task() -> None:
+    """v-RAM-fix: clean self-exit every 12h so Render restarts the process
+    fresh, fully resetting RAM regardless of any leak."""
+    await asyncio.sleep(12 * 3600)
+    logger.info("[Restart] Scheduled restart: exiting cleanly for fresh RAM")
+    os._exit(0)
+
+
+async def _memory_cleanup_task() -> None:
+    """v-RAM-fix: periodic gc + re-enforce cache caps every 30 min, so leaks
+    never accumulate over days/weeks/months even if a cap write is missed."""
+    import gc
+    await asyncio.sleep(300)
+    while True:
+        try:
+            for attr in ("pdf_cache", "qbm_cache", "img_cache"):
+                cache = getattr(app.state, attr, None)
+                if cache is not None:
+                    _cap_page_cache(cache)
+            gc.collect()
+            logger.info(
+                f"[MemCleanup] pdf_cache={len(getattr(app.state,'pdf_cache',{}) or {})} "
+                f"qbm_cache={len(getattr(app.state,'qbm_cache',{}) or {})} "
+                f"img_cache={len(getattr(app.state,'img_cache',{}) or {})}"
+            )
+        except Exception as e:
+            logger.warning(f"[MemCleanup] {e}")
+        await asyncio.sleep(1800)
+
+
+async def _keepalive_task() -> None:
+    """Self-ping own Render URL /health every 5 min for 24/7 uptime
+    (prevents Render free-tier sleep). Tracks consecutive failures and
+    alerts owner if the service looks down."""
+    await asyncio.sleep(60)
+    logger.info("[App] Keep-alive task started")
+    fails = 0
+    while True:
+        if RENDER_URL:
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    r = await client.get(f"{RENDER_URL.rstrip('/')}/health")
+                    if r.status_code == 200:
+                        fails = 0
+                    else:
+                        fails += 1
+            except Exception:
+                fails += 1
+            if fails == 3:
+                try:
+                    await notify_owner(f"🚨 QuizBot keep-alive: {fails} consecutive /health failures — bot may be down.")
+                except Exception:
+                    pass
+        await asyncio.sleep(300)
+
+
+async def _watchdog_task() -> None:
+    """Independent watchdog — separate ping loop (offset timing) that
+    double-checks the bot is alive. If keep-alive silently dies (task
+    crash) this loop still detects downtime and wakes/alerts."""
+    await asyncio.sleep(150)  # offset from _keepalive_task so they don't overlap
+    logger.info("[App] Watchdog task started")
+    fails = 0
+    while True:
+        healthy = False
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                if RENDER_URL:
+                    r = await client.get(f"{RENDER_URL.rstrip('/')}/health")
+                    healthy = r.status_code == 200
+        except Exception:
+            healthy = False
+
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            logger.warning(f"[Watchdog] health check failed ({fails} in a row)")
+            if fails >= 2:
+                try:
+                    await notify_owner(f"🚨 QuizBot WATCHDOG: service unreachable ({fails}x) — attempting self-wake.")
+                except Exception:
+                    pass
+                # self-wake attempt: hit health endpoint directly again
+                try:
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        if RENDER_URL:
+                            await client.get(f"{RENDER_URL.rstrip('/')}/health")
+                except Exception:
+                    pass
+        await asyncio.sleep(300)
+
+
+async def _watchdog2_task() -> None:
+    """3rd independent ping layer — different offset/interval than keep-alive
+    and watchdog, so all three never crash/miss at the same moment."""
+    await asyncio.sleep(240)
+    logger.info("[App] Watchdog-2 task started")
+    fails = 0
+    while True:
+        healthy = False
+        try:
+            async with httpx.AsyncClient(timeout=25) as client:
+                if RENDER_URL:
+                    r = await client.get(f"{RENDER_URL.rstrip('/')}/health")
+                    healthy = r.status_code == 200
+        except Exception:
+            healthy = False
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            if fails >= 2:
+                try:
+                    await notify_owner(f"🚨 QuizBot WATCHDOG-2: unreachable ({fails}x) — self-wake attempt.")
+                except Exception:
+                    pass
+                if RENDER_URL:
+                    for _ in range(2):
+                        try:
+                            async with httpx.AsyncClient(timeout=30) as client:
+                                await client.get(f"{RENDER_URL.rstrip('/')}/health")
+                            break
+                        except Exception:
+                            await asyncio.sleep(5)
+        await asyncio.sleep(420)
+
+
+async def _cross_bot_watchdog_task() -> None:
+    """Mutual watchdog: pings AtlasBot's health endpoint (set via
+    ATLASBOT_URL env). If AtlasBot looks down, alerts owner — mirrors
+    AtlasBot's own cross-check on this bot."""
+    atlasbot_url = os.environ.get("ATLASBOT_URL", "").rstrip("/")
+    if not atlasbot_url:
+        return
+    await asyncio.sleep(200)
+    logger.info("[App] Cross-bot watchdog (-> AtlasBot) started")
+    fails = 0
+    while True:
+        healthy = False
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                r = await client.get(f"{atlasbot_url}/health")
+                healthy = r.status_code == 200
+        except Exception:
+            healthy = False
+        if healthy:
+            fails = 0
+        else:
+            fails += 1
+            if fails >= 2:
+                try:
+                    await notify_owner(f"🚨 AtlasBot unreachable via cross-bot check ({fails}x) — checked from QuizBot.")
+                except Exception:
+                    pass
+        await asyncio.sleep(300)
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "db": sb is not None, "gemini_keys": len(key_rotator.keys), "bot_token": bool(BOT_TOKEN)}
@@ -7363,6 +7551,15 @@ async def startup():
         asyncio.create_task(_mhtml_auto_worker())
         _mhtml_worker_started = True
         logger.info("[App] mhtml auto-queue worker started")
+
+    # Self-ping keep-alive: prevents Render free-tier from sleeping.
+    asyncio.create_task(_keepalive_task())
+    asyncio.create_task(_memory_cleanup_task())
+    asyncio.create_task(_scheduled_restart_task())
+    # Independent watchdog: separate timing, detects if keep-alive itself dies.
+    asyncio.create_task(_watchdog_task())
+    asyncio.create_task(_watchdog2_task())
+    asyncio.create_task(_cross_bot_watchdog_task())
 
     if not BOT_TOKEN:
         logger.error("[App] BOT_TOKEN missing!")
