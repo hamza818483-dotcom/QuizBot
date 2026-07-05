@@ -5845,8 +5845,8 @@ async def handle_merge_command(msg: dict):
 
 
 async def handle_error_command(msg: dict):
-    """Owner/Admin only — সাম্প্রতিক bot error/crash গুলো clearly দেখায়
-    (file, line number, function, message সহ) যাতে AI/dev দ্রুত debug করতে পারে।"""
+    """Owner/Admin only — আজকের error log file-এর শেষ অংশ raw text হিসেবে
+    দেখায় (AtlasBot-style, simple file-based, কোনো DB/structured parsing ছাড়াই)."""
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     text = msg.get("text", "").strip()
@@ -5860,37 +5860,13 @@ async def handle_error_command(msg: dict):
         await send_msg(chat_id, "✅ Error log clear করা হয়েছে!")
         return
 
-    parts = text.split()
-    limit = 10
-    if len(parts) > 1 and parts[1].isdigit():
-        limit = min(int(parts[1]), 30)
-
-    errors = await get_recent_errors(limit)
-    if not errors:
-        await send_msg(chat_id, "✅ কোনো error পাওয়া যায়নি! Bot ক্লিন আছে।")
+    content = await get_recent_errors()
+    if not content.strip():
+        await send_msg(chat_id, "✅ আজ কোনো error নেই!")
         return
 
-    import html as _html
-    lines = [f"🛑 <b>সাম্প্রতিক {len(errors)}টি Error</b>\n"]
-    for i, e in enumerate(errors, 1):
-        ts = e.get("created_at")
-        when = datetime.fromtimestamp(ts, pytz.timezone("Asia/Dhaka")).strftime("%d-%b %I:%M %p") if ts else "N/A"
-        fname = _html.escape((e.get("filename") or "?").split("/")[-1])
-        lineno = e.get("lineno") or "?"
-        func = _html.escape(e.get("funcname") or "?")
-        message = _html.escape((e.get("message") or "")[:300])
-        lines.append(
-            f"<b>{i}.</b> 📄 <code>{fname}:{lineno}</code> — <code>{func}()</code>\n"
-            f"🕐 {when}\n"
-            f"💬 {message}\n"
-        )
-
-    full_text = "\n".join(lines)
-    # Telegram message limit safety — split if too long
-    if len(full_text) > 3800:
-        full_text = full_text[:3800] + "\n\n…(আরও আছে, /error 5 দিয়ে কম দেখাও)"
-
-    await send_msg(chat_id, full_text)
+    tail = content[-3800:]
+    await send_msg(chat_id, f"🚨 Latest Errors:\n\n{tail}")
 
 
 async def handle_watermark_command(msg: dict):

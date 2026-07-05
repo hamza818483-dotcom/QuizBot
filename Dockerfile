@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data /app/logs
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
 
