@@ -377,6 +377,7 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
             data = r.json()
             text = data["choices"][0]["message"]["content"]
             valid = _parse_mcq_json(text)
+            valid = await _attach_explanation_images(valid, img)
             logger.info(f"[OpenRouter] Page {page}: {len(valid)} MCQs via {model}")
             return valid
 
@@ -392,6 +393,22 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
 # ============================================================
 # GENERATE MCQ FROM IMAGE — Gemini primary + OpenRouter fallback
 # ============================================================
+async def _attach_explanation_images(mcqs: list, img: Image.Image) -> list:
+    """প্রতিটি MCQ-এর exp_bbox থাকলে crop করে upload করে explanation-এ <img> tag জুড়ে দেয়।"""
+    for m in mcqs:
+        bbox = m.get("exp_bbox")
+        if not bbox:
+            continue
+        try:
+            url = await asyncio.to_thread(crop_explanation_image, img, bbox)
+            if url:
+                exp = m.get("explanation", "") or ""
+                m["explanation"] = f'{exp} <img src="{url}">'.strip()
+        except Exception as e:
+            logger.warning(f"[ExplanationCrop] Attach failed: {e}")
+    return mcqs
+
+
 async def generate_mcq_from_image(
     img: Image.Image,
     topic: str,
@@ -430,6 +447,7 @@ async def generate_mcq_from_image(
 
             response = await asyncio.to_thread(_call_gemini)
             valid = _parse_mcq_json(response.text)
+            valid = await _attach_explanation_images(valid, img)
             logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1})")
             return valid
 
