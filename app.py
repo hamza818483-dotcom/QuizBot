@@ -1179,9 +1179,33 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     # ── MCQ processing ALWAYS runs here now (before channel select), same
     # pattern as /qbm: generate/extract first -> CSV auto-sent -> THEN show
     # channel list, so the person picks a channel already knowing the count. ──
-    loading_text = "⏳ Image থেকে MCQ তৈরি হচ্ছে... (~30s)" if source == "new" else "⏳ Image থেকে existing MCQ বের করা হচ্ছে... (~30-40s)"
-    loading = await send_msg(chat_id, loading_text)
+    est_secs = 30 if source == "new" else 38
+    label = "MCQ তৈরি হচ্ছে" if source == "new" else "Existing MCQ বের করা হচ্ছে"
+    loading = await send_msg(chat_id, f"⏳ Image থেকে {label}... 0%")
     loading_id = loading.get("result", {}).get("message_id")
+
+    _progress_stop = asyncio.Event()
+
+    async def _progress_ticker():
+        """Elapsed-time based approximate % — real AI-call progress isn't
+        observable mid-call, so this gives the user visible movement instead
+        of a static message. Caps at 90% until actual completion sets 100%."""
+        start = time.time()
+        try:
+            while not _progress_stop.is_set():
+                await asyncio.sleep(3)
+                if _progress_stop.is_set():
+                    break
+                elapsed = time.time() - start
+                pct = min(90, int((elapsed / est_secs) * 100))
+                try:
+                    await edit_msg(chat_id, loading_id, f"⏳ Image থেকে {label}... {pct}%")
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
+    ticker_task = asyncio.create_task(_progress_ticker())
 
     try:
         img_bytes = await download_tg_file(file_id)
@@ -1198,9 +1222,14 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
         else:
             mcqs = await generate_mcq_from_image(img, topic, 1, mcq_count)
     except Exception as e:
+        _progress_stop.set()
+        ticker_task.cancel()
         logger.error(f"[IMG] Processing error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
         return
+
+    _progress_stop.set()
+    ticker_task.cancel()
 
     if not mcqs:
         msg = "❌ MCQ generate হয়নি!" if source == "new" else "❌ ছবিতে কোনো existing MCQ পাওয়া যায়নি!"
