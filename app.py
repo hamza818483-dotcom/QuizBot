@@ -178,6 +178,11 @@ async def _mhtml_live_updater(job_id: str, chat_id: int, loading_id: int):
         await asyncio.sleep(2)
 
 
+async def _cleanup_job_later(job_id: str, delay: int = 30):
+    await asyncio.sleep(delay)
+    MHTML_JOBS.pop(job_id, None)
+
+
 async def _process_mhtml_auto(msg: dict):
     chat_id = msg["chat"]["id"]
     doc = msg["document"]
@@ -296,6 +301,11 @@ async def _process_mhtml_auto(msg: dict):
         if job_id in MHTML_JOBS:
             MHTML_JOBS[job_id]["status"] = "error"
             MHTML_JOBS[job_id]["error"] = str(e)
+        try:
+            updater_task.cancel()
+        except Exception:
+            pass
+        asyncio.create_task(_cleanup_job_later(job_id))
         await _safe_error_reply(chat_id, e)
 
 # D1 Quiz System (fully independent module — see quiz.py)
