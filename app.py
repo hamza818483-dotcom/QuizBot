@@ -614,51 +614,81 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     return out
 
 
-async def _gemini_bbox_lookup(img, mcqs: list) -> dict:
+def _ocr_bbox_lookup(img, mcqs: list) -> dict:
     """
-    Lightweight follow-up call — ONLY for MCQs whose primary provider (Groq/
-    NVIDIA/Qwen/Nemotron/Gemma) failed to return exp_bbox (very common, since
-    those are general-purpose VLMs with weak/no visual-grounding ability;
-    asking for bbox in the prompt alone is not reliable for them).
-    Gemini has real grounding support, so we ask it — once, batched — to
-    locate the source region for each of the given questions.
-    Returns {question_text: [x_min,y_min,x_max,y_max]} for whatever it can find.
+    ZERO extra AI/API cost — runs Tesseract OCR once on the page (local CPU,
+    already installed in the Dockerfile), groups words into lines with their
+    pixel bounding boxes, then fuzzy-matches each MCQ's question text against
+    those OCR lines to find where on the page it came from.
+    Returns {question_text: [x_min,y_min,x_max,y_max]} normalized 0-1000,
+    for whatever it can confidently match (skips low-confidence matches).
     """
     if not mcqs:
         return {}
     try:
-        q_list = "\n".join(f"{i+1}. {(m.get('question') or '')[:150]}" for i, m in enumerate(mcqs))
-        prompt = (
-            "For each numbered question below, find the exact line/paragraph/table "
-            "on this page image that the question and its explanation are based on. "
-            "Return ONLY a JSON array, one entry per question, in the SAME order:\n"
-            f"{q_list}\n\n"
-            "Schema: [{\"i\":1,\"bbox\":[x_min,y_min,x_max,y_max]}] — bbox normalized "
-            "0-1000 (top-left=[0,0], bottom-right=[1000,1000]), include a small margin "
-            "above/below. If you genuinely cannot locate a question's source region, "
-            "use \"bbox\": null for that entry. No prose, no markdown fences."
-        )
-        txt = await _qbm_gemini_raw(img, prompt)
-        if not txt:
-            # One retry — transient API hiccups shouldn't sacrifice image reliability.
-            txt = await _qbm_gemini_raw(img, prompt)
-        if not txt:
+        import pytesseract
+        w, h = img.size
+        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+
+        # Group words into lines using (block, par, line) keys, keep bbox + text per line
+        lines = {}
+        n = len(data.get("text", []))
+        for i in range(n):
+            word = (data["text"][i] or "").strip()
+            if not word:
+                continue
+            key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+            x, y, ww, hh = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
+            if key not in lines:
+                lines[key] = {"text": [], "x0": x, "y0": y, "x1": x + ww, "y1": y + hh}
+            L = lines[key]
+            L["text"].append(word)
+            L["x0"] = min(L["x0"], x)
+            L["y0"] = min(L["y0"], y)
+            L["x1"] = max(L["x1"], x + ww)
+            L["y1"] = max(L["y1"], y + hh)
+
+        line_list = [(" ".join(v["text"]), v) for v in lines.values() if v["text"]]
+        if not line_list:
             return {}
-        t = txt.strip()
-        if "```" in t:
-            t = t.split("```")[1] if t.count("```") >= 2 else t
-            t = t.replace("json", "", 1).strip()
-        m = re.search(r'\[.*\]', t, re.DOTALL)
-        raw = json.loads(m.group()) if m else json.loads(t)
+
         out = {}
-        for entry in raw:
-            idx = entry.get("i")
-            bbox = entry.get("bbox")
-            if isinstance(idx, int) and 1 <= idx <= len(mcqs) and isinstance(bbox, list) and len(bbox) == 4:
-                out[mcqs[idx - 1].get("question", "")] = bbox
+        for m in mcqs:
+            q = (m.get("question") or "").strip()
+            if not q:
+                continue
+            q_key = q[:80]  # first chunk is usually enough and most stable to match
+            best_ratio = 0.0
+            best_box = None
+            best_idx = None
+            # Find the best matching single line, then extend a small window
+            # around it (question text usually spans 1-3 OCR lines).
+            for idx, (ltext, lbox) in enumerate(line_list):
+                ratio = difflib.SequenceMatcher(None, q_key.lower(), ltext.lower()).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_box = lbox
+                    best_idx = idx
+            if best_ratio < 0.35 or best_box is None:
+                continue  # not confident enough — leave for fallback
+
+            # Extend window: include 1 line before/after to capture full context
+            x0, y0, x1, y1 = best_box["x0"], best_box["y0"], best_box["x1"], best_box["y1"]
+            for j in (best_idx - 1, best_idx + 1):
+                if 0 <= j < len(line_list):
+                    _, lb = line_list[j]
+                    x0 = min(x0, lb["x0"]); y0 = min(y0, lb["y0"])
+                    x1 = max(x1, lb["x1"]); y1 = max(y1, lb["y1"])
+
+            # Normalize to 0-1000 scale (same convention as exp_bbox elsewhere)
+            bbox_norm = [
+                int((x0 / w) * 1000), int((y0 / h) * 1000),
+                int((x1 / w) * 1000), int((y1 / h) * 1000)
+            ]
+            out[q] = bbox_norm
         return out
     except Exception as e:
-        logger.warning(f"[GeminiBBoxLookup] failed: {e}")
+        logger.warning(f"[OCRBBoxLookup] failed: {e}")
         return {}
 
 
@@ -669,9 +699,10 @@ async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
     attach করে ফেলে, তাই সেগুলো স্কিপ হবে) তাদের exp_bbox থাকলে crop+upload করে।
 
     Non-Gemini providers rarely return a usable exp_bbox (prompt-only bbox
-    instructions aren't reliable for them) — for those MCQs, a single batched
-    Gemini follow-up call is used to locate the source region. If even that
-    fails, the FULL page image is attached instead of leaving explanation
+    instructions aren't reliable for them) — for those MCQs, a ZERO-cost local
+    OCR + fuzzy-text-match pass (Tesseract, already installed) locates the
+    source region instead of any extra AI call. If OCR match confidence is
+    too low, the FULL page image is attached instead of leaving explanation
     with no visual reference at all.
     """
     try:
@@ -683,9 +714,9 @@ async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
     pending = [m for m in (mcqs or [])
                if "<img" not in (m.get("explanation", "") or "").lower() and not m.get("exp_bbox")]
 
-    gemini_bboxes = {}
+    ocr_bboxes = {}
     if pending:
-        gemini_bboxes = await _gemini_bbox_lookup(img, pending)
+        ocr_bboxes = await asyncio.to_thread(_ocr_bbox_lookup, img, pending)
 
     full_img_url = None  # lazily uploaded once, reused for every remaining miss
     full_img_attempted = False
@@ -695,7 +726,7 @@ async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
         if "<img" in exp.lower():
             continue  # আগে থেকেই attach হয়ে গেছে (Gemini extraction path)
 
-        bbox = m.get("exp_bbox") or gemini_bboxes.get(m.get("question", ""))
+        bbox = m.get("exp_bbox") or ocr_bboxes.get(m.get("question", ""))
         url = ""
         if bbox:
             try:
