@@ -1319,7 +1319,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             for _attempt in range(3):
                 poll_r = await send_poll(
                     channel_id, q_text, opts, ans_idx,
-                    explanation=exp[:200],
+                    explanation=exp,
                     reply_to_message_id=image_msg_id
                 )
                 if poll_r.get("ok"):
@@ -1482,7 +1482,7 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
             exp = mcq.get("explanation","")
             if exp_footer:
                 exp = f"{exp}\n{exp_footer}"
-            await send_poll(channel_id, q_text, opts, ans_idx, explanation=exp[:200])
+            await send_poll(channel_id, q_text, opts, ans_idx, explanation=exp)
             await asyncio.sleep(0.3)
 
         if loading_id:
@@ -1845,7 +1845,7 @@ async def _send_csv_polls_to_channel(
         for attempt in range(3):
             poll_r = await send_poll(
                 channel_id, q_text, opts, ans_idx,
-                explanation=exp[:200],
+                explanation=exp,
                 reply_to_message_id=pre_msg_id,
                 message_thread_id=thread_id
             )
@@ -2814,7 +2814,7 @@ async def process_pdf_pages(
                     for _attempt in range(3):
                         poll_r = await send_poll(
                             channel_id, q_text, opts, ans_idx,
-                            explanation=exp[:200],
+                            explanation=exp,
                             reply_to_message_id=image_msg_id,
                             message_thread_id=thread_id
                         )
@@ -3165,7 +3165,7 @@ async def process_pdfm_pages(
                     for _attempt in range(3):
                         poll_r = await send_poll(
                             channel_id, q_text, opts, ans_idx,
-                            explanation=exp[:200],
+                            explanation=exp,
                             reply_to_message_id=image_msg_id,
                             message_thread_id=thread_id
                         )
@@ -4283,7 +4283,7 @@ async def process_qbm_pages(
                     for _attempt in range(3):
                         poll_r = await send_poll(
                             channel_id, q_text, opts, ans_idx,
-                            explanation=exp[:200],
+                            explanation=exp,
                             reply_to_message_id=image_msg_id,
                             message_thread_id=thread_id
                         )
@@ -5384,7 +5384,7 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
         exp = mcq.get("explanation", "")
         if exp_footer:
             exp = f"{exp}\n{exp_footer}"
-        poll_res = await send_poll(chat_id, q_text, opts, ans_idx, explanation=exp[:200])
+        poll_res = await send_poll(chat_id, q_text, opts, ans_idx, explanation=exp)
         if not poll_res.get("ok"):
             poll_fail_count += 1
             logger.error(f"[PollAgain] sendPoll failed q{i+1}/{total}: {poll_res.get('description') or poll_res.get('error')}")
@@ -5494,7 +5494,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
         exp = mcq.get("explanation", "")
         if exp_footer:
             exp = f"{exp}\n{exp_footer}"
-        poll_res2 = await send_poll(chat_id, q_text, opts, ans_idx, explanation=exp[:200])
+        poll_res2 = await send_poll(chat_id, q_text, opts, ans_idx, explanation=exp)
         if not poll_res2.get("ok"):
             poll_fail_count2 += 1
             logger.error(f"[PollNew] sendPoll failed q{i+1}/{total}: {poll_res2.get('description') or poll_res2.get('error')}")
