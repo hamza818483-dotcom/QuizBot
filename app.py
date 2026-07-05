@@ -2698,19 +2698,37 @@ async def handle_pdf(msg: dict):
             await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
             return
 
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Generation শুরু হচ্ছে...")
+
+        # ── MCQ Generation ALWAYS runs first (per /qbm pattern) ──
+        # Channel selection + CSV/With-Without-Image happen only AFTER
+        # generation is fully complete, so the person picks a channel already
+        # knowing exactly how many MCQs were made.
+        generated_pages = await pdf_generate_all_pages(
+            chat_id, pages, topic, mcq_count, file_name, status_msg_id
+        )
+
         if not channel_id:
             channels = await db_get_channels()
             if not channels:
-                await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count, None, True, file_name, status_msg_id, thread_id=thread_id)
+                await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, mcq_count,
+                    None, True, file_name, status_msg_id, thread_id=thread_id, skip_generate=True)
                 return
             app.state.pdf_cache = getattr(app.state, "pdf_cache", {})
-            app.state.pdf_cache[f"pdf_img_{uid}"] = pages
+            app.state.pdf_cache[f"pdf_img_{uid}"] = generated_pages
             _cap_page_cache(app.state.pdf_cache)
             sb.table("quiz_sessions").upsert({
                 "key": f"pdf_pending_{uid}",
                 "data": json.dumps({"topic": topic, "mcq_count": mcq_count, "file_name": file_name, "status_msg_id": status_msg_id, "thread_id": thread_id, "file_id": file_id, "page_range": page_range}),
                 "updated_at": int(time.time())
             }).execute()
+
+            total_mcq_found = sum(len(mcqs) for _, _, mcqs in generated_pages)
+            page_breakdown = "\n".join(
+                f"📌 Page {fmt_page(p)}: {len(mcqs)} MCQ" for p, _, mcqs in generated_pages
+            )
             kb = {"inline_keyboard": []}
             for ch in channels:
                 ch_id = ch.get("channel_id", "")
@@ -2718,11 +2736,14 @@ async def handle_pdf(msg: dict):
                 kb["inline_keyboard"].append([{"text": f"📢 {ch_name}", "callback_data": f"pdfch_{ch_id}_{uid}"}])
             kb["inline_keyboard"].append([{"text": "📄 CSV File Only", "callback_data": f"pdfch_csv_{uid}"}])
             await send_msg(chat_id,
-                f"📋 <b>{len(pages)} page পাওয়া গেছে</b>\n🎯 Topic: {topic}\n\nChannel select করো:",
+                f"✅ Generation Complete! {total_mcq_found} MCQ পাওয়া গেছে ({len(pages)} page)\n\n"
+                f"{page_breakdown}\n\n"
+                f"🎯 Topic: {topic}\n\nChannel select করো:",
                 reply_markup=kb)
             return
 
-        await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count, channel_id, False, file_name, status_msg_id, thread_id=thread_id)
+        await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, mcq_count,
+            channel_id, False, file_name, status_msg_id, thread_id=thread_id, skip_generate=True)
     except Exception as e:
         logger.error(f"[PDF] Handle error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -2760,6 +2781,47 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
     ]
     return "\n".join(lines)
 
+async def pdf_generate_all_pages(
+    chat_id: int, pages: list, topic: str, mcq_count: int,
+    file_name: str, status_msg_id: int = None
+) -> list:
+    """
+    /qbm-এর মতোই Phase 1 -- channel select/posting-এর আগে সব page-এর MCQ
+    generate করে ফেলে। Returns list of (page_num, img, mcqs) tuples.
+    """
+    page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
+    start_time = time.time()
+    total_mcq = 0
+    results = []
+
+    if status_msg_id:
+        await edit_msg(chat_id, status_msg_id,
+            _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
+
+    for idx, (page_num, img) in enumerate(pages):
+        page_status[idx]["current"] = True
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+
+        mcqs = []
+        try:
+            mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+        except Exception as e:
+            logger.error(f"[PDF Generate] Page {page_num} error: {e}")
+
+        results.append((page_num, img, mcqs))
+        total_mcq += len(mcqs)
+        page_status[idx]["current"] = False
+        page_status[idx]["done"] = True
+        page_status[idx]["mcq"] = len(mcqs)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+
+    return results
+
+
 async def process_pdf_pages(
     chat_id: int, uid: int, uname: str,
     pages: list, topic: str, mcq_count: int,
@@ -2767,7 +2829,8 @@ async def process_pdf_pages(
     file_name: str = "document.pdf",
     status_msg_id: int = None,
     thread_id: int = None,
-    with_image: bool = True
+    with_image: bool = True,
+    skip_generate: bool = False
 ):
     settings = await db_get_settings()
     tag = settings.get("tag", "")
@@ -2779,9 +2842,9 @@ async def process_pdf_pages(
         "processed_pages": 0, "status": "processing"
     })
 
-    page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
+    page_status = [{"page": p[0], "done": False, "current": False, "mcq": (len(p[2]) if skip_generate else 0)} for p in pages]
     start_time = time.time()
-    total_mcq = 0
+    total_mcq = sum(len(p[2]) for p in pages) if skip_generate else 0
     total_polls = 0
 
     if not status_msg_id:
@@ -2795,13 +2858,18 @@ async def process_pdf_pages(
     all_mcqs_csv = []
     first_image_msg_id = None
 
-    for idx, (page_num, img) in enumerate(pages):
+    for idx, page_tuple in enumerate(pages):
+        if skip_generate:
+            page_num, img, mcqs = page_tuple
+        else:
+            page_num, img = page_tuple
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
             _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
 
         try:
-            mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+            if not skip_generate:
+                mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
@@ -6742,30 +6810,35 @@ async def handle_callback(query: dict):
 
             if channel == "csv":
                 saved_thread_id = pending.get("thread_id")
-                pages = getattr(app.state, "pdf_cache", {}).get(f"pdf_img_{uid}")
+                cached_pages = getattr(app.state, "pdf_cache", {}).get(f"pdf_img_{uid}")
+                if cached_pages:
+                    await process_pdf_pages(chat_id, uid, user.get("first_name", "User"), cached_pages,
+                        pending["topic"], pending.get("mcq_count"), None, True,
+                        pending.get("file_name", "document.pdf"), pending.get("status_msg_id"),
+                        thread_id=saved_thread_id, skip_generate=True)
+                    getattr(app.state, "pdf_cache", {}).pop(f"pdf_img_{uid}", None)
+                    return
+                saved_file_id = pending.get("file_id")
+                if not saved_file_id:
+                    await send_msg(chat_id, "❌ Session expired!")
+                    return
+                await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
+                try:
+                    pdf_bytes = await download_tg_file(saved_file_id)
+                    ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
+                except Exception as e:
+                    await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
+                    return
+                if not ok:
+                    await send_msg(chat_id, pages)
+                    return
                 if not pages:
-                    saved_file_id = pending.get("file_id")
-                    if not saved_file_id:
-                        await send_msg(chat_id, "❌ Session expired!")
-                        return
-                    await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
-                    try:
-                        pdf_bytes = await download_tg_file(saved_file_id)
-                        ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
-                    except Exception as e:
-                        await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
-                        return
-                    if not ok:
-                        await send_msg(chat_id, pages)
-                        return
-                    if not pages:
-                        await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
-                        return
+                    await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
+                    return
                 await process_pdf_pages(chat_id, uid, user.get("first_name", "User"), pages,
                     pending["topic"], pending.get("mcq_count"), None, True,
                     pending.get("file_name", "document.pdf"), pending.get("status_msg_id"),
                     thread_id=saved_thread_id)
-                getattr(app.state, "pdf_cache", {}).pop(f"pdf_img_{uid}", None)
                 return
 
             # ── NEW STEP: channel picked -> ask With Image vs Without Image
@@ -6796,30 +6869,35 @@ async def handle_callback(query: dict):
             pending = json.loads(row.data[0]["data"])
             channel = pending.get("channel_id")
             saved_thread_id = pending.get("thread_id")
-            pages = getattr(app.state, "pdf_cache", {}).get(f"pdf_img_{uid}")
+            cached_pages = getattr(app.state, "pdf_cache", {}).get(f"pdf_img_{uid}")
+            if cached_pages:
+                await process_pdf_pages(chat_id, uid, user.get("first_name", "User"), cached_pages,
+                    pending["topic"], pending.get("mcq_count"), channel, False,
+                    pending.get("file_name", "document.pdf"), pending.get("status_msg_id"),
+                    thread_id=saved_thread_id, with_image=(img_choice == "with"), skip_generate=True)
+                getattr(app.state, "pdf_cache", {}).pop(f"pdf_img_{uid}", None)
+                return
+            saved_file_id = pending.get("file_id")
+            if not saved_file_id:
+                await send_msg(chat_id, "❌ Session expired!")
+                return
+            await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
+            try:
+                pdf_bytes = await download_tg_file(saved_file_id)
+                ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
+                if not ok:
+                    await send_msg(chat_id, pages)
+                    return
+            except Exception as e:
+                await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
+                return
             if not pages:
-                saved_file_id = pending.get("file_id")
-                if not saved_file_id:
-                    await send_msg(chat_id, "❌ Session expired!")
-                    return
-                await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
-                try:
-                    pdf_bytes = await download_tg_file(saved_file_id)
-                    ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
-                    if not ok:
-                        await send_msg(chat_id, pages)
-                        return
-                except Exception as e:
-                    await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
-                    return
-                if not pages:
-                    await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
-                    return
+                await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
+                return
             await process_pdf_pages(chat_id, uid, user.get("first_name", "User"), pages,
                 pending["topic"], pending.get("mcq_count"), channel, False,
                 pending.get("file_name", "document.pdf"), pending.get("status_msg_id"),
                 thread_id=saved_thread_id, with_image=(img_choice == "with"))
-            getattr(app.state, "pdf_cache", {}).pop(f"pdf_img_{uid}", None)
 
         elif data.startswith("pollagain_"):
             cache_id = data.replace("pollagain_", "")
