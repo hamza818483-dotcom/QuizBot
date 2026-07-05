@@ -841,7 +841,7 @@ async def handle_start(msg: dict):
             "• <code>/pdfm</code> — PDF pagewise MCQ with image\n"
             "  Format: <code>/pdfm -p 1-5 -c @channel -m \"Topic\" 10</code>\n\n"
             "📸 <b>Image Commands:</b>\n"
-            "• <code>/img</code> — Image reply করে MCQ poll channel-এ\n"
+            "• <code>/img</code> — Image reply করে MCQ poll channel-এ (e.g. <code>/img Physics 5</code>)\n"
             "• <code>/pdfc</code> — একাধিক image → PDF বানাও\n"
             "• <code>/done</code> — Image collection শেষ করো\n\n"
             "📝 <b>Text/CSV Commands:</b>\n"
@@ -1093,7 +1093,14 @@ async def handle_img_command(msg: dict):
     reply = msg.get("reply_to_message")
 
     # Topic extract from command: /img Physics Chapter 3
-    topic = re.sub(r"^/img\s*", "", text, flags=re.IGNORECASE).strip() or "ATLAS Special MCQ"
+    # Also support trailing count: /img 5  or  /img Physics 5  -> count=5
+    raw = re.sub(r"^/img\s*", "", text, flags=re.IGNORECASE).strip()
+    mcq_count = None
+    m_count = re.search(r'(?:^|\s)(\d+)\s*$', raw)
+    if m_count:
+        mcq_count = int(m_count.group(1))
+        raw = raw[:m_count.start()].strip()
+    topic = raw or "ATLAS Special MCQ"
 
     if not reply:
         await send_msg(chat_id, "❌ কোনো image-এ reply করে /img দাও!\n\nExample: image-এ reply করে <code>/img Physics</code>", parse_mode="HTML")
@@ -1110,7 +1117,7 @@ async def handle_img_command(msg: dict):
     session_key = f"img_cmd_{uid}"
     sb.table("quiz_sessions").upsert({
         "key": session_key,
-        "data": json.dumps({"file_id": file_id, "msg_id": reply["message_id"], "topic": topic}),
+        "data": json.dumps({"file_id": file_id, "msg_id": reply["message_id"], "topic": topic, "mcq_count": mcq_count}),
         "updated_at": int(time.time())
     }).execute()
 
@@ -1161,6 +1168,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     file_id = img_data["file_id"]
     topic = img_data.get("topic", "ATLAS Special MCQ")
     source = img_data.get("source", "new")
+    mcq_count = img_data.get("mcq_count")
 
     channels = await db_get_channels()
     if not channels:
@@ -1187,7 +1195,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
             mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
         else:
-            mcqs = await generate_mcq_from_image(img, topic, 1, None)
+            mcqs = await generate_mcq_from_image(img, topic, 1, mcq_count)
     except Exception as e:
         logger.error(f"[IMG] Processing error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -1233,7 +1241,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
 
     sb.table("quiz_sessions").upsert({
         "key": f"img_mode_{uid}",
-        "data": json.dumps({"file_id": file_id, "topic": topic, "source": source}),
+        "data": json.dumps({"file_id": file_id, "topic": topic, "source": source, "mcq_count": mcq_count}),
         "updated_at": int(time.time())
     }).execute()
 
@@ -1268,7 +1276,7 @@ def _imgqbm_options_to_list(mcqs: list) -> list:
 
 async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
                                chat_id: int, uid: int, uname: str, topic: str = "ATLAS Special MCQ",
-                               source: str = "new"):
+                               source: str = "new", mcq_count=None):
     settings = await db_get_settings()
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
@@ -1294,7 +1302,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
                 mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
                 mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
             else:
-                mcqs = await generate_mcq_from_image(img, topic, 1, None)
+                mcqs = await generate_mcq_from_image(img, topic, 1, mcq_count)
         except Exception as e:
             logger.error(f"[IMG] Re-processing error: {e}", exc_info=True)
             await _safe_error_reply(chat_id, e)
@@ -6989,7 +6997,7 @@ async def handle_callback(query: dict):
             asyncio.create_task(process_img_to_poll(
                 img_data["file_id"], channel, mode,
                 chat_id, uid, uname, topic=img_data.get("topic", "ATLAS Special MCQ"),
-                source=img_data.get("source", "new")
+                source=img_data.get("source", "new"), mcq_count=img_data.get("mcq_count")
             ))
 
         elif data.startswith("txtchannel_"):
