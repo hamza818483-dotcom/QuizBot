@@ -6,6 +6,7 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y \
     poppler-utils \
     tesseract-ocr \
+    tesseract-ocr-ben \
     fonts-noto \
     curl \
     gcc \
