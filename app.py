@@ -978,17 +978,11 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
         img = PILImage.open(BytesIO(img_bytes))
 
         if source == "existing":
-            # Existing MCQ mode: full /qbm prompt logic, 3-call pipeline
-            # (Call 1 extract + Call 2 miss-check + Call 3 verify) — never fabricates new
+            # Existing MCQ mode: /qbm prompt logic, 2-call pipeline
+            # (Call 1 extract + Call 2 miss-check) — never fabricates new
             # questions, only extracts what's already in the image, per /qbm rules.
             call1 = await _qbm_call1_extract(img)
-            if call1:
-                before_call2 = len(call1)
-                call2 = await _qbm_call2_miss_check(img, call1)
-                page_confirmed_complete = (len(call2) == before_call2)
-                mcqs = await _qbm_call3_verify(img, call2, page_confirmed_complete)
-            else:
-                mcqs = []
+            mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
             mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
         else:
             mcqs = await generate_mcq_from_image(img, topic, 1, None)
@@ -1095,13 +1089,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             img = PILImage.open(BytesIO(img_bytes))
             if source == "existing":
                 call1 = await _qbm_call1_extract(img)
-                if call1:
-                    before_call2 = len(call1)
-                    call2 = await _qbm_call2_miss_check(img, call1)
-                    page_confirmed_complete = (len(call2) == before_call2)
-                    mcqs = await _qbm_call3_verify(img, call2, page_confirmed_complete)
-                else:
-                    mcqs = []
+                mcqs = await _qbm_call2_miss_check(img, call1) if call1 else []
                 mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
             else:
                 mcqs = await generate_mcq_from_image(img, topic, 1, None)
