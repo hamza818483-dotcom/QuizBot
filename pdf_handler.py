@@ -100,12 +100,13 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position (A, B, C, or D) — vary them naturally across questions.
 💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
+💥exp_bbox: যদি ব্যাখ্যার প্রমাণ সরাসরি image-এর কোনো নির্দিষ্ট অংশে (প্যারাগ্রাফ/লাইন/ছক) visible থাকে, সেই অংশের bounding box দাও [x_min,y_min,x_max,y_max] হিসেবে, image-এর প্রস্থ/উচ্চতার 0-1000 scale-এ normalize করে। প্রমাণ visible না থাকলে বা নিশ্চিত না হলে null দাও।
 
 Topic: {topic}
 Page: {page}
 
 MUST Return ONLY valid JSON array, no markdown:
-[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"...","exp_bbox":[100,200,900,350]}}]"""
 
 MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 
@@ -139,12 +140,13 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position — vary them naturally so answers are spread across A, B, C, D positions.
 💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
+💥exp_bbox: যদি ব্যাখ্যার প্রমাণ সরাসরি image-এর কোনো নির্দিষ্ট অংশে (প্যারাগ্রাফ/লাইন/ছক) visible থাকে, সেই অংশের bounding box দাও [x_min,y_min,x_max,y_max] হিসেবে, image-এর প্রস্থ/উচ্চতার 0-1000 scale-এ normalize করে। প্রমাণ visible না থাকলে বা নিশ্চিত না হলে null দাও।
 
 Topic: {topic}
 Page: {page}
 
 MUST Return ONLY valid JSON array, no markdown:
-[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"..."}}]"""
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"...","exp_bbox":[100,200,900,350]}}]"""
 
 # ============================================================
 # PDF TO IMAGES
@@ -257,6 +259,12 @@ def _parse_mcq_json(text: str) -> list:
                 if any(_nav_label_re.match(str(o).strip()) for o in m["options"]):
                     logger.warning(f"[MCQ] Rejected — nav-label option detected: {m['options']}")
                     continue
+                bbox = m.get("exp_bbox")
+                if (isinstance(bbox, list) and len(bbox) == 4
+                        and all(isinstance(v, (int, float)) for v in bbox)):
+                    m["exp_bbox"] = [max(0, min(1000, int(v))) for v in bbox]
+                else:
+                    m["exp_bbox"] = None
                 valid.append(m)
 
     # Post-process: answer গুলো সব একই হলে shuffle করো
@@ -277,6 +285,37 @@ def _parse_mcq_json(text: str) -> list:
                 m["answer"] = new_ans_label
 
     return valid
+
+
+def crop_explanation_image(img: Image.Image, bbox: list) -> str:
+    """
+    Gemini-এর দেওয়া exp_bbox (0-1000 normalized [x_min,y_min,x_max,y_max]) দিয়ে
+    page image থেকে crop করে, existing Supabase/imgbb storage pipeline দিয়ে
+    upload করে public URL রিটার্ন করে। bbox None বা invalid হলে "" রিটার্ন করে।
+    """
+    if not bbox or len(bbox) != 4:
+        return ""
+    try:
+        from atlas_mhtml import upload_to_imgbb
+        w, h = img.size
+        x_min, y_min, x_max, y_max = bbox
+        left = int((x_min / 1000) * w)
+        top = int((y_min / 1000) * h)
+        right = int((x_max / 1000) * w)
+        bottom = int((y_max / 1000) * h)
+        pad = 8
+        left = max(0, left - pad)
+        top = max(0, top - pad)
+        right = min(w, right + pad)
+        bottom = min(h, bottom + pad)
+        if right <= left or bottom <= top:
+            return ""
+        cropped = img.crop((left, top, right, bottom))
+        b64 = image_to_base64(cropped)
+        return upload_to_imgbb(b64)
+    except Exception as e:
+        logger.warning(f"[ExplanationCrop] Failed: {e}")
+        return ""
 
 # ============================================================
 # OPENROUTER FALLBACK — Qwen2.5-VL

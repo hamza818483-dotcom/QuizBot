@@ -38,7 +38,7 @@ from pdf_handler import (
     pdf_to_images, pdf_to_images_safe, image_to_bytes, generate_mcq_from_image,
     generate_new_mcq, parse_pdf_command, parse_page_range,
     fmt_page, gen_session_id, get_random_ayat, get_motivation,
-    key_rotator
+    key_rotator, crop_explanation_image
 )
 
 from core import (
@@ -2809,6 +2809,14 @@ async def process_pdf_pages(
                     exp = mcq.get("explanation", "")
                     if exp_footer:
                         exp = f"{exp}\n{exp_footer}"
+                    # exp_bbox থাকলে page image থেকে সেই অংশ crop করে upload করে
+                    # explanation-এ <img> tag embed করা হচ্ছে — send_poll() নিজে থেকেই
+                    # এটা detect করে explanation_media হিসেবে ছবি দেখাবে (আগের fix)।
+                    bbox = mcq.get("exp_bbox")
+                    if bbox:
+                        crop_url = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                        if crop_url:
+                            exp = f'<img src="{crop_url}"> {exp}'
                     # Retry logic — poll অবশ্যই যেতে হবে
                     poll_r = {"ok": False}
                     for _attempt in range(3):
