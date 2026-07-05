@@ -214,73 +214,75 @@ async def d1_run(sql: str, params: list = None) -> bool:
     return False
 
 # ============================================================
-# /error COMMAND — CENTRAL ERROR CAPTURE
-# Every logger.error(...) call anywhere in the codebase is
-# automatically captured here (no need to touch existing
-# try/except blocks) and stored in D1 for the /error command.
+# /error COMMAND — SIMPLE FILE-BASED ERROR CAPTURE (AtlasBot-style)
+# Every logger.error(...) call anywhere in the codebase is automatically
+# captured here (no need to touch existing try/except blocks) and appended
+# to a plain daily local log file for the /error command to tail. Replaces
+# the previous D1 (Cloudflare)-backed structured logging system.
 # ============================================================
-import asyncio as _asyncio
 import traceback as _traceback
+from datetime import datetime as _datetime
+import pytz as _pytz
 
-_ERROR_TABLE_READY = False
+BD_TZ = _pytz.timezone("Asia/Dhaka")
+LOG_DIR = os.environ.get("LOG_DIR", "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
 
-async def _ensure_error_table():
-    global _ERROR_TABLE_READY
-    if _ERROR_TABLE_READY:
-        return
-    await d1_run(
-        "CREATE TABLE IF NOT EXISTS bot_error_logs ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "module TEXT, filename TEXT, lineno INTEGER, "
-        "funcname TEXT, message TEXT, traceback TEXT, "
-        "created_at INTEGER DEFAULT (unixepoch()))"
-    )
-    _ERROR_TABLE_READY = True
 
-async def _save_error_log(record: logging.LogRecord):
+def _error_log_path() -> str:
+    return os.path.join(LOG_DIR, f"errors_{_datetime.now(BD_TZ).strftime('%Y-%m-%d')}.log")
+
+
+def _append_error_log(record: logging.LogRecord):
     try:
-        await _ensure_error_table()
+        timestamp = _datetime.now(BD_TZ).strftime("%Y-%m-%d %H:%M:%S")
         tb = ""
         if record.exc_info:
-            tb = "".join(_traceback.format_exception(*record.exc_info))[-3000:]
-        await d1_run(
-            "INSERT INTO bot_error_logs (module, filename, lineno, funcname, message, traceback) "
-            "VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            [
-                record.name, record.filename, record.lineno,
-                record.funcName, record.getMessage()[:1000], tb
-            ]
-        )
+            tb = "".join(_traceback.format_exception(*record.exc_info))
+        with open(_error_log_path(), "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {record.getMessage()}\n{tb}{'='*50}\n")
     except Exception:
         pass  # never let error logging itself crash the bot
 
-class _D1ErrorCaptureHandler(logging.Handler):
-    """Captures every logger.error()/logger.exception() call and
-    persists it to D1 asynchronously, without blocking the caller."""
+
+class _FileErrorCaptureHandler(logging.Handler):
+    """Captures every logger.error()/logger.exception() call and appends it
+    to today's local log file, without blocking the caller."""
     def emit(self, record: logging.LogRecord):
         if record.levelno < logging.ERROR:
             return
         try:
-            loop = _asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(_save_error_log(record))
+            _append_error_log(record)
         except Exception:
             pass  # logging must never raise
 
-logging.getLogger().addHandler(_D1ErrorCaptureHandler())
 
-async def get_recent_errors(limit: int = 10) -> list:
-    """Used by the /error command to fetch the most recent captured errors."""
-    await _ensure_error_table()
-    return await d1_select(
-        "SELECT module, filename, lineno, funcname, message, created_at "
-        "FROM bot_error_logs ORDER BY id DESC LIMIT ?1",
-        [limit]
-    )
+logging.getLogger().addHandler(_FileErrorCaptureHandler())
+
+
+async def get_recent_errors(limit: int = 10) -> str:
+    """Used by the /error command — returns the tail of today's plain-text
+    error log file (AtlasBot-style), or '' if no errors logged today."""
+    path = _error_log_path()
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return content.strip()
+    except Exception:
+        return ""
+
 
 async def clear_error_logs():
-    await _ensure_error_table()
-    await d1_run("DELETE FROM bot_error_logs")
+    """Deletes today's error log file (AtlasBot-style /error clear)."""
+    path = _error_log_path()
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
 
 # ============================================================
 # TELEGRAM HELPERS
