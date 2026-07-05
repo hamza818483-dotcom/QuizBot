@@ -1126,7 +1126,11 @@ async def handle_img_command(msg: dict):
     )
 
 async def handle_img_source(source: str, uid: int, chat_id: int, user: dict):
-    """source: 'new' (present AI-generate system) or 'existing' (qbm-style extraction, 3-call: extract+miss-check+verify)."""
+    """source: 'new' (present AI-generate system) or 'existing' (qbm-style extraction, 3-call: extract+miss-check+verify).
+
+    NEW ORDER: source select -> processing (with CSV auto-send) -> channel select -> mode select -> post.
+    Mode selection no longer happens here; it happens after the channel is picked
+    (see imgchannel_ callback), right before the poll is actually sent."""
     session_key = f"img_cmd_{uid}"
     row = sb.table("quiz_sessions").select("data").eq("key", session_key).execute()
     if not row.data:
@@ -1141,17 +1145,12 @@ async def handle_img_source(source: str, uid: int, chat_id: int, user: dict):
         "updated_at": int(time.time())
     }).execute()
 
-    kb = {"inline_keyboard": [
-        [{"text": "🖼️ Image Mode (image সহ channel-এ যাবে)", "callback_data": f"imgmode_image_{uid}"}],
-        [{"text": "📝 Topic Mode (শুধু MCQ Poll)", "callback_data": f"imgmode_topic_{uid}"}]
-    ]}
-    src_label = "🆕 New MCQ" if source == "new" else "📋 Existing MCQ"
-    await send_msg(chat_id,
-        f"{src_label} নির্বাচিত।\n📌 Topic: <b>{img_data.get('topic', 'ATLAS Special MCQ')}</b>\n\nকোন mode-এ পাঠাবে?",
-        reply_markup=kb, parse_mode="HTML"
-    )
+    # Straight into processing — no mode prompt here anymore.
+    await handle_img_process(uid, chat_id, user)
 
-async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
+async def handle_img_process(uid: int, chat_id: int, user: dict):
+    """Runs MCQ generation/extraction, auto-sends CSV, then shows channel list.
+    Mode (Image/Topic) is asked AFTER channel is chosen, not here."""
     session_key = f"img_cmd_{uid}"
     row = sb.table("quiz_sessions").select("data").eq("key", session_key).execute()
     if not row.data:
@@ -1234,7 +1233,7 @@ async def handle_img_mode(mode: str, uid: int, chat_id: int, user: dict):
 
     sb.table("quiz_sessions").upsert({
         "key": f"img_mode_{uid}",
-        "data": json.dumps({"file_id": file_id, "mode": mode, "topic": topic, "source": source}),
+        "data": json.dumps({"file_id": file_id, "topic": topic, "source": source}),
         "updated_at": int(time.time())
     }).execute()
 
@@ -1274,7 +1273,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
 
-    # Reuse already-processed MCQs + image bytes from handle_img_mode (Phase 1)
+    # Reuse already-processed MCQs + image bytes from handle_img_process (Phase 1)
     # so channel select never re-triggers generation/extraction or a 2nd CSV.
     cache = getattr(app.state, "img_cache", {}).get(f"img_mcq_{uid}")
     loading_id = None
@@ -1374,7 +1373,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
                     poll_links.append(f"https://t.me/{cid.lstrip('@')}/{msg_id}")
             await asyncio.sleep(0.5)
 
-        # CSV already auto-sent in handle_img_mode right after processing —
+        # CSV already auto-sent in handle_img_process right after processing —
         # not repeated here to avoid sending it twice.
 
         end_text = (
@@ -6946,14 +6945,6 @@ async def handle_callback(query: dict):
                 return
             await handle_img_source(source, uid, chat_id, user)
 
-        elif data.startswith("imgmode_"):
-            parts = data.split("_")
-            mode = parts[1]  # "image" or "topic"
-            orig_uid = int(parts[2])
-            if uid != orig_uid:
-                return
-            await handle_img_mode(mode, uid, chat_id, user)
-
         elif data.startswith("imgchannel_"):
             parts = data.split("_", 2)
             channel = parts[1]
@@ -6965,8 +6956,38 @@ async def handle_callback(query: dict):
                 await send_msg(chat_id, "❌ Session expired!")
                 return
             img_data = json.loads(row.data[0]["data"])
+            img_data["channel"] = channel
+            sb.table("quiz_sessions").upsert({
+                "key": f"img_mode_{uid}",
+                "data": json.dumps(img_data),
+                "updated_at": int(time.time())
+            }).execute()
+            kb = {"inline_keyboard": [
+                [{"text": "🖼️ Image Mode (image সহ channel-এ যাবে)", "callback_data": f"imgfinal_image_{uid}"}],
+                [{"text": "📝 Topic Mode (শুধু MCQ Poll)", "callback_data": f"imgfinal_topic_{uid}"}]
+            ]}
+            await send_msg(chat_id,
+                f"📌 Topic: <b>{img_data.get('topic', 'ATLAS Special MCQ')}</b>\n\nকোন mode-এ পাঠাবে?",
+                reply_markup=kb, parse_mode="HTML"
+            )
+
+        elif data.startswith("imgfinal_"):
+            parts = data.split("_")
+            mode = parts[1]  # "image" or "topic"
+            orig_uid = int(parts[2])
+            if uid != orig_uid:
+                return
+            row = sb.table("quiz_sessions").select("data").eq("key", f"img_mode_{uid}").execute()
+            if not row.data:
+                await send_msg(chat_id, "❌ Session expired!")
+                return
+            img_data = json.loads(row.data[0]["data"])
+            channel = img_data.get("channel")
+            if not channel:
+                await send_msg(chat_id, "❌ Channel select করা হয়নি!")
+                return
             asyncio.create_task(process_img_to_poll(
-                img_data["file_id"], channel, img_data["mode"],
+                img_data["file_id"], channel, mode,
                 chat_id, uid, uname, topic=img_data.get("topic", "ATLAS Special MCQ"),
                 source=img_data.get("source", "new")
             ))
