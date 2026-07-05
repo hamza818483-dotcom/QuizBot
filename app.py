@@ -2780,7 +2780,13 @@ async def process_pdf_pages(
                     opts = [re.sub(r'^[A-Da-dক-ঘ][)\.।]\s*', '', str(o)) for o in opts]
                     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
                     ans_num = ans_map.get(m.get("answer", "A"), "1")
-                    all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, m.get("explanation", ""), "1", "1"])
+                    exp = m.get("explanation", "")
+                    bbox = m.get("exp_bbox")
+                    if bbox:
+                        crop_url = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                        if crop_url:
+                            exp = f'<img src="{crop_url}"> {exp}'
+                    all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, exp, "1", "1"])
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs)
             else:
                 image_msg_id = None
