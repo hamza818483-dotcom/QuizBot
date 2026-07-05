@@ -3576,7 +3576,31 @@ def _qbm_dedup_list(mcqs: list) -> list:
 # MCQ list in RAM; on a 512MB free instance, many users uploading at the same
 # time without this cap could still spike RAM even with the PDF-convert lock
 # (that lock only guards the pdf2image step, not the extraction step after).
-_QBM_EXTRACT_SEMAPHORE = asyncio.Semaphore(3)
+# v-RAM-fix: dynamic RAM-aware gate instead of a fixed slot count. Each
+# in-flight page holds a decoded image + growing MCQ list; under heavy
+# concurrent load (many users at once) a FIXED cap either wastes headroom
+# (too low) or risks OOM (too high). This checks live RSS before admitting
+# a new page into the pipeline -- lets many run in parallel while RAM is
+# free, throttles automatically as it fills, protecting against a 100-user
+# spike without hardcoding a number that's wrong for either extreme.
+_QBM_EXTRACT_HARD_CAP = asyncio.Semaphore(20)  # absolute ceiling, never exceed even if RAM looks fine
+_qbm_ram_gate_lock = asyncio.Lock()
+
+async def _qbm_ram_aware_acquire():
+    """Blocks until (a) a hard-cap slot is free AND (b) live RSS has headroom."""
+    await _QBM_EXTRACT_HARD_CAP.acquire()
+    try:
+        import psutil
+        proc = psutil.Process(os.getpid())
+        limit_mb = 512
+        safe_ceiling_mb = int(limit_mb * 0.75)  # leave margin under the 85% RAMGuard threshold
+        while True:
+            rss_mb = proc.memory_info().rss / (1024 * 1024)
+            if rss_mb < safe_ceiling_mb:
+                return
+            await asyncio.sleep(0.5)
+    except ImportError:
+        return  # psutil unavailable -> fall back to hard cap only
 
 
 async def _qbm_extract_from_image(img) -> list:
@@ -3595,7 +3619,8 @@ async def _qbm_extract_from_image(img) -> list:
         careful full verification pass.
     Never fabricates new questions — only extracts/fixes what already exists.
     """
-    async with _QBM_EXTRACT_SEMAPHORE:
+    await _qbm_ram_aware_acquire()
+    try:
         call1 = await _qbm_call1_extract(img)
         if not call1:
             return []  # Confirmed: page genuinely has no existing MCQ
@@ -3606,6 +3631,8 @@ async def _qbm_extract_from_image(img) -> list:
 
         call3 = await _qbm_call3_verify(img, call2, page_confirmed_complete)
         return _cap_mcq_options(call3)
+    finally:
+        _QBM_EXTRACT_HARD_CAP.release()
 
 
 async def _qbm_gemini_raw(img, prompt: str) -> str:

@@ -153,10 +153,11 @@ MUST Return ONLY valid JSON array, no markdown:
 # risk on a 512MB Render instance -- a large PDF at dpi=150 can use 100-300MB
 # during conversion. If two users' /qbm or /pdf uploads convert at the same
 # time, RAM can spike well past the limit and get OOM-killed. This semaphore
-# forces conversions to run one-at-a-time (others queue, run right after) --
-# same pattern already used for exam PDF rendering in exam_server.py.
+# limits concurrent conversions -- now that page count per call is hard-capped
+# at 60 (below), 2 simultaneous conversions is still safe headroom-wise while
+# cutting queue wait roughly in half under 100-concurrent-user load.
 import threading as _threading
-_PDF_CONVERT_LOCK = _threading.Semaphore(1)
+_PDF_CONVERT_LOCK = _threading.Semaphore(2)
 _PDF_MAX_PAGES_PER_CALL = 60
 
 
