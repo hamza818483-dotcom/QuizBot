@@ -598,7 +598,8 @@ def parse_pdf_command(text: str) -> dict:
         c_match = re.search(r'-c\s+(\S+)', text)
         if c_match:
             result["channel_id"] = c_match.group(1)
-        t_match = re.search(r'-t\s+(\d+)', text)
+        # -t থ্রেড আইডি: কোটেশন সহ (-t "447") বা ছাড়া (-t 447) দুই ফরম্যাটেই কাজ করবে
+        t_match = re.search(r'-t\s+"(\d+)"', text) or re.search(r"-t\s+'(\d+)'", text) or re.search(r'-t\s+(\d+)', text)
         if t_match:
             result["thread_id"] = int(t_match.group(1))
         m_match = re.search(r'-m\s+"([^"]+)"', text)
@@ -608,13 +609,19 @@ def parse_pdf_command(text: str) -> dict:
             m_match = re.search(r'-m\s+(\S+)', text)
             if m_match:
                 result["topic"] = m_match.group(1)
-        cmd_part = text.split('/pdf')[1] if '/pdf' in text else text
-        nums = re.findall(r'(?<!\d)(\d+)(?!\d)', cmd_part)
-        if nums:
-            last_num = int(nums[-1])
-            page_nums = result["page_range"].replace("-", " ").split() if result["page_range"] else []
-            if str(last_num) not in page_nums and last_num < 200:
-                result["mcq_count"] = last_num
+        # [N] ব্র্যাকেট: প্রতি পেইজে কতগুলো MCQ বানাতে হবে সেটা স্পষ্টভাবে বোঝায়
+        # (কমান্ডের শেষে থাকা bare সংখ্যার অস্পষ্ট অনুমানের চেয়ে অগ্রাধিকার পাবে)
+        bracket_match = re.search(r'\[\s*(\d+)\s*\]', text)
+        if bracket_match:
+            result["mcq_count"] = int(bracket_match.group(1))
+        else:
+            cmd_part = text.split('/pdf')[1] if '/pdf' in text else text
+            nums = re.findall(r'(?<!\d)(\d+)(?!\d)', cmd_part)
+            if nums:
+                last_num = int(nums[-1])
+                page_nums = result["page_range"].replace("-", " ").split() if result["page_range"] else []
+                if str(last_num) not in page_nums and last_num < 200:
+                    result["mcq_count"] = last_num
     except Exception as e:
         logger.error(f"[Parse] PDF command error: {e}")
     return result

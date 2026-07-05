@@ -2881,8 +2881,10 @@ async def handle_pdf(msg: dict):
         await send_msg(chat_id,
             "❌ PDF ফাইলে reply করে <code>/pdf</code> দাও!\n\n"
             "<b>Example:</b>\n"
-            "<code>/pdf -p 1-5 -c @channel -m \"Topic\" 10</code>\n"
-            "<code>/pdf -p 2 -c -100xxx -t \"Group Topic\" 10</code>"
+            "<code>/pdf -p 1-5 -c @channel -m \"Topic\" [10]</code>\n"
+            "<code>/pdf -p 2 -c -100xxx -t 447 -m \"Group Topic\" [10]</code>\n\n"
+            "<code>[N]</code> = প্রতি পেইজে কতগুলো MCQ বানাতে হবে (ঐচ্ছিক)\n"
+            "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
         )
         return
     params = parse_pdf_command(text)
