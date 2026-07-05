@@ -114,6 +114,47 @@ async def _mhtml_auto_worker():
             _mhtml_auto_queue.task_done()
 
 
+def _mhtml_progress_bar(pct: int) -> str:
+    filled = round(pct / 10)
+    return "█" * filled + "░" * (10 - filled)
+
+
+def _fmt_eta(sec: int) -> str:
+    sec = max(0, int(sec))
+    if sec < 60:
+        return f"{sec}s"
+    m, s = divmod(sec, 60)
+    return f"{m}m {s}s"
+
+
+async def _mhtml_live_updater(job_id: str, chat_id: int, loading_id: int):
+    """Edits the TG loading message every ~2s with live %, ETA, done/total."""
+    last_text = ""
+    while True:
+        job = MHTML_JOBS.get(job_id)
+        if not job or job["status"] != "running":
+            break
+        pct = job["pct"]
+        done, total = job["done"], job["total"]
+        bar = _mhtml_progress_bar(pct)
+        dash_url = f"{RENDER_URL}/mhtml-status/{job_id}" if RENDER_URL else ""
+        text = (
+            f"⏳ MCQ প্রসেসিং চলছে...\n"
+            f"[{bar}] {pct}%\n"
+            f"📝 হয়েছে: {done}/{total if total else '?'}\n"
+            f"⏱ ETA: {_fmt_eta(job['eta_sec'])}"
+        )
+        if dash_url:
+            text += f"\n🔗 লাইভ ডাশবোর্ড: {dash_url}"
+        if text != last_text and loading_id:
+            try:
+                await edit_msg(chat_id, loading_id, text)
+                last_text = text
+            except Exception:
+                pass
+        await asyncio.sleep(2)
+
+
 async def _process_mhtml_auto(msg: dict):
     chat_id = msg["chat"]["id"]
     doc = msg["document"]
@@ -141,19 +182,49 @@ async def _process_mhtml_auto(msg: dict):
                     "Format ভিন্ন হতে পারে।")
             return
 
-        # fmt == "mcq" → CSV বানাও
-        if loading_id:
-            await edit_msg(chat_id, loading_id, "⏳ MCQ CSV বানানো হচ্ছে...")
+        # fmt == "mcq" → CSV বানাও, লাইভ progress সহ
+        job_id = gen_session_id()
+        MHTML_JOBS[job_id] = {
+            "status": "running", "done": 0, "total": 0, "pct": 0,
+            "eta_sec": 0, "started_at": time.time(), "source": None,
+            "file_name": file_name, "chat_id": chat_id, "loading_id": loading_id,
+            "csv_ready": False, "error": None,
+        }
+        updater_task = asyncio.create_task(_mhtml_live_updater(job_id, chat_id, loading_id))
 
-        parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, raw_bytes, file_name)
+        def _progress_cb(done, total):
+            job = MHTML_JOBS.get(job_id)
+            if not job:
+                return
+            job["done"] = done
+            job["total"] = total
+            job["pct"] = min(95, round((done / total) * 90)) if total else 0
+            elapsed = time.time() - job["started_at"]
+            if done > 0 and total:
+                per_item = elapsed / done
+                remaining = max(0, total - done)
+                job["eta_sec"] = round(per_item * remaining)
+
+        parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, raw_bytes, file_name, _progress_cb)
         results = parsed["results"]
         source = parsed["source"] or "Unknown"
 
-        if loading_id:
-            await edit_msg(chat_id, loading_id,
-                f"✅ {len(results)} টি MCQ পাওয়া গেছে! ({source})\n📄 CSV বানানো হচ্ছে...")
+        job = MHTML_JOBS.get(job_id)
+        if job:
+            job["pct"] = 95
+            job["source"] = source
+            job["done"] = len(results)
+            job["total"] = max(job["total"], len(results))
 
         csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
+
+        if job:
+            job["pct"] = 100
+            job["eta_sec"] = 0
+            job["status"] = "done"
+            job["csv_ready"] = True
+
+        updater_task.cancel()
 
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", file_name.rsplit(".", 1)[0])[:50] or "ATLAS_QuestionBank"
         await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
@@ -163,8 +234,17 @@ async def _process_mhtml_auto(msg: dict):
         if loading_id:
             await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
 
+        MHTML_JOBS.pop(job_id, None)
+
     except Exception as e:
         logger.error(f"[MHTML-Auto] Error: {e}")
+        job = MHTML_JOBS.get(job_id) if "job_id" in dir() else None
+        try:
+            if job_id in MHTML_JOBS:
+                MHTML_JOBS[job_id]["status"] = "error"
+                MHTML_JOBS[job_id]["error"] = str(e)
+        except Exception:
+            pass
         await _safe_error_reply(chat_id, e)
 
 # D1 Quiz System (fully independent module — see quiz.py)
@@ -214,6 +294,13 @@ RAPID_TASKS = {}
 # job_id -> {"status": "running"|"done"|"error", "pct": int, "eta_sec": int,
 #            "started_at": float, "new_cache_id": str, "error": str}
 NEW_EXAM_JOBS = {}
+
+# v-mhtml-live: MHTML/HTML → CSV job state for live dashboard + live TG progress msg
+# job_id -> {"status": "running"|"done"|"error", "done": int, "total": int,
+#            "pct": int, "eta_sec": int, "started_at": float, "source": str,
+#            "file_name": str, "chat_id": int, "loading_id": int,
+#            "csv_ready": bool, "error": str}
+MHTML_JOBS = {}
 
 # v1.2: /ping status command — set at startup, used to compute uptime
 BOT_START_TIME = time.time()
@@ -7263,6 +7350,99 @@ async def delete_bookmark(request: Request):
         return JSONResponse({"ok": True})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/mhtml-status/{job_id}")
+async def get_mhtml_status(job_id: str):
+    job = MHTML_JOBS.get(job_id)
+    if not job:
+        return JSONResponse({"error": "job_not_found"}, status_code=404)
+    return JSONResponse({
+        "ok": True,
+        "status": job["status"],
+        "done": job["done"],
+        "total": job["total"],
+        "pct": job["pct"],
+        "eta_sec": job["eta_sec"],
+        "source": job["source"],
+        "file_name": job["file_name"],
+        "error": job.get("error"),
+    })
+
+
+@app.get("/mhtml-status/{job_id}", response_class=HTMLResponse)
+async def mhtml_status_page(job_id: str):
+    html = """<!DOCTYPE html>
+<html lang="bn"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCQ Processing Live Dashboard</title>
+<style>
+body{font-family:sans-serif;background:#0f172a;color:#e2e8f0;display:flex;
+  align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#1e293b;padding:32px;border-radius:16px;max-width:420px;width:90%;
+  box-shadow:0 8px 24px rgba(0,0,0,.4)}
+h2{margin:0 0 20px;font-size:20px;text-align:center}
+.bar-wrap{background:#334155;border-radius:8px;height:22px;overflow:hidden;margin-bottom:16px}
+.bar{height:100%;background:linear-gradient(90deg,#22c55e,#16a34a);width:0%;
+  transition:width .4s;display:flex;align-items:center;justify-content:center;
+  font-size:12px;font-weight:600;color:#fff}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:14px}
+.stat{background:#0f172a;padding:10px;border-radius:8px;text-align:center}
+.stat b{display:block;font-size:18px;color:#22c55e}
+#status-msg{text-align:center;margin-top:14px;font-size:13px;color:#94a3b8}
+</style></head>
+<body>
+<div class="card">
+<h2>📊 MCQ Live Processing</h2>
+<div class="bar-wrap"><div class="bar" id="bar">0%</div></div>
+<div class="stats">
+  <div class="stat"><b id="done">0</b>হয়েছে</div>
+  <div class="stat"><b id="total">0</b>মোট</div>
+  <div class="stat"><b id="remaining">0</b>বাকি</div>
+  <div class="stat"><b id="eta">-</b>ETA</div>
+</div>
+<div id="status-msg">প্রসেসিং শুরু হচ্ছে...</div>
+</div>
+<script>
+const jobId = "%s";
+function fmtEta(s){
+  if(s<=0) return "0s";
+  if(s<60) return s+"s";
+  return Math.floor(s/60)+"m "+(s%%60)+"s";
+}
+async function poll(){
+  try{
+    const r = await fetch("/api/mhtml-status/"+jobId);
+    const d = await r.json();
+    if(d.error){
+      document.getElementById("status-msg").textContent = "❌ " + d.error;
+      return;
+    }
+    const remaining = Math.max(0, (d.total||0) - (d.done||0));
+    document.getElementById("bar").style.width = d.pct + "%%";
+    document.getElementById("bar").textContent = d.pct + "%%";
+    document.getElementById("done").textContent = d.done;
+    document.getElementById("total").textContent = d.total || "?";
+    document.getElementById("remaining").textContent = remaining;
+    document.getElementById("eta").textContent = fmtEta(d.eta_sec);
+    if(d.status === "done"){
+      document.getElementById("status-msg").textContent = "✅ সম্পন্ন! (" + (d.source||"") + ") — CSV Telegram-এ পাঠানো হয়েছে।";
+      return;
+    }
+    if(d.status === "error"){
+      document.getElementById("status-msg").textContent = "❌ Error: " + (d.error||"unknown");
+      return;
+    }
+    document.getElementById("status-msg").textContent = "⏳ প্রসেসিং চলছে...";
+    setTimeout(poll, 1500);
+  }catch(e){
+    setTimeout(poll, 3000);
+  }
+}
+poll();
+</script>
+</body></html>""" % job_id
+    return HTMLResponse(content=html)
+
 
 @app.post("/api/new-exam/start")
 async def generate_new_exam_start(request: Request):

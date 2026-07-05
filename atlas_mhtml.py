@@ -342,7 +342,11 @@ def post_process(results: list) -> list:
 # MAIN PARSE FUNCTION (sync, run via asyncio.to_thread)
 # Returns dict: {"source": "Chorcha.net"|"Testmoz"|None, "results": [...]}
 # ============================================================
-def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str) -> dict:
+def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> dict:
+    """
+    progress_cb(done:int, total:int) — optional callback, called after each
+    question is parsed, for live progress/ETA reporting by the caller.
+    """
     import email
     from email import policy as _policy
 
@@ -373,8 +377,9 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str) -> dict:
     if chorcha_cards:
         results = []
         ans_map = {'ক': '1', 'খ': '2', 'গ': '3', 'ঘ': '4'}
+        _total_cards = len(chorcha_cards)
 
-        for card in chorcha_cards:
+        for _ci, card in enumerate(chorcha_cards, 1):
             q_div = card.find('div', class_=lambda x: x and 'font-medium' in x)
             if not q_div:
                 continue
@@ -403,6 +408,12 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str) -> dict:
                              "option3": options[2], "option4": options[3], "option5": "",
                              "answer": ans_idx, "explanation": exp_text, "type": 1, "section": 1})
 
+            if progress_cb:
+                try:
+                    progress_cb(_ci, _total_cards)
+                except Exception:
+                    pass
+
         results = post_process(results)
         gc.collect()
         return {"source": "Chorcha.net", "results": results}
@@ -412,8 +423,9 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str) -> dict:
     # ============================================================
     cards = soup.find_all('div', class_=lambda x: x and 'rounded-lg' in x and 'shadow-md' in x)
     results = []
+    _total_cards = len(cards)
 
-    for card in cards:
+    for _ci, card in enumerate(cards, 1):
         q_p = card.find('p', class_='text-[17px]')
         q_text = re.sub(r'^\s*[0-9০-৯]+\s*[\.\)\-ঃ:]\s*',
                          '', format_content(q_p, img_map)) if q_p else ""
@@ -454,6 +466,12 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str) -> dict:
         results.append({"questions": q_text, "option1": options[0], "option2": options[1],
                          "option3": options[2], "option4": options[3], "option5": "",
                          "answer": ans_idx, "explanation": exp_text, "type": 1, "section": 1})
+
+        if progress_cb:
+            try:
+                progress_cb(_ci, _total_cards)
+            except Exception:
+                pass
 
     results = post_process(results)
     gc.collect()
