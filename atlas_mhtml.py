@@ -11,6 +11,7 @@ import io
 import gc
 import time
 import base64
+import uuid
 import logging
 import urllib.parse
 
@@ -135,13 +136,43 @@ def compress_image(b64_str):
 
 
 def upload_to_imgbb(b64):
+    """
+    Supabase Storage-এ image upload করে permanent public URL রিটার্ন করে।
+    imgbb-এর বদলে Supabase Storage — কোনো key rotation লাগে না, permanent, free tier যথেষ্ট।
+    Env vars: SUPABASE_URL, SUPABASE_KEY (আগে থেকেই bot-এ সেট আছে)
+    """
     if not b64:
         return ""
     try:
         compressed = compress_image(b64)
-        return imgbb_manager.upload(base64.b64decode(compressed))
-    except Exception:
-        return ""
+        img_bytes = base64.b64decode(compressed)
+        supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+        supabase_key = os.environ.get("SUPABASE_KEY", "")
+        if not supabase_url or not supabase_key:
+            return imgbb_manager.upload(img_bytes)  # fallback যদি supabase env না থাকে
+
+        bucket = "quiz-images"
+        filename = f"{uuid.uuid4().hex}.jpg"
+        resp = httpx.post(
+            f"{supabase_url}/storage/v1/object/{bucket}/{filename}",
+            headers={
+                "Authorization": f"Bearer {supabase_key}",
+                "apikey": supabase_key,
+                "Content-Type": "image/jpeg",
+            },
+            content=img_bytes,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return f"{supabase_url}/storage/v1/object/public/{bucket}/{filename}"
+        logger.warning(f"[SupabaseStorage] Upload failed {resp.status_code}: {resp.text[:200]}")
+        return imgbb_manager.upload(img_bytes)  # fallback to imgbb on failure
+    except Exception as e:
+        logger.warning(f"[SupabaseStorage] Exception: {e} — falling back to imgbb")
+        try:
+            return imgbb_manager.upload(base64.b64decode(compress_image(b64)))
+        except Exception:
+            return ""
 
 
 # ============================================================
