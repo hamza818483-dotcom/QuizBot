@@ -8124,7 +8124,7 @@ async def handle_callback(query: dict):
                                "explanation": q.get("explanation","")}
                               for q in mcqs_row["mcq_data"]]
                     quiz_id = await save_quiz_to_d1(polls, topic_cb, uid)
-                    web_url = f"https://atlasquizbotpro.hamza818483.workers.dev/quiz/{quiz_id}"
+                    web_url = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={quiz_id}"
                     await send_msg(chat_id,
                         f"🌐 <b>Web Exam Link:</b>\n{web_url}",
                         parse_mode="HTML"
