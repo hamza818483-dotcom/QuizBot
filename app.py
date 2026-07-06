@@ -8523,7 +8523,9 @@ async def startup():
         logger.info("[App] mhtml auto-queue worker started")
 
     async def _supervised(coro_fn, name):
-        """Core background task crash korle silently die na kore auto-restart hobe."""
+        """Core background task crash korle silently die na kore auto-restart hobe.
+        Exponential backoff + alert-spam prevent (repeated crash e max 3 alert)."""
+        fail_count = 0
         while True:
             try:
                 await coro_fn()
@@ -8531,12 +8533,15 @@ async def startup():
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error(f"⚠️ [Supervisor] {name} crashed: {e} — restarting in 10s")
-                try:
-                    await send_msg(OWNER_ID, f"⚠️ Background task '{name}' crashed, auto-restarting: {e}")
-                except Exception:
-                    pass
-                await asyncio.sleep(10)
+                fail_count += 1
+                wait = min(10 * (2 ** min(fail_count - 1, 5)), 300)
+                logger.error(f"⚠️ [Supervisor] {name} crashed ({fail_count}x): {e} — restarting in {wait}s")
+                if fail_count <= 3:
+                    try:
+                        await send_msg(OWNER_ID, f"⚠️ Background task '{name}' crashed ({fail_count}x), auto-restarting: {e}")
+                    except Exception:
+                        pass
+                await asyncio.sleep(wait)
 
     # Self-ping keep-alive: prevents Render free-tier from sleeping.
     asyncio.create_task(_supervised(_keepalive_task, "_keepalive_task"))
