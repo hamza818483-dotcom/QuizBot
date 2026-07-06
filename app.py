@@ -1997,7 +1997,7 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
     try:
         from pdf_handler import generate_mcq_from_text
         line_count = len([l for l in text_content.splitlines() if l.strip()])
-        auto_count = max(15, line_count)
+        auto_count = line_count  # soft hint only; prompt enforces quality-driven count
 
         async def _progress_updater():
             bars = ["▰▱▱▱▱▱▱","▰▰▰▱▱▱▱","▰▰▰▰▰▱▱","▰▰▰▰▰▰▰"]
