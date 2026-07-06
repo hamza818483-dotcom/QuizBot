@@ -324,9 +324,37 @@ def crop_explanation_image(img: Image.Image, bbox: list) -> dict:
         x_min, y_min, x_max, y_max = bbox
         box_top = (y_min / 1000) * h
         box_bottom = (y_max / 1000) * h
-        context_margin = max(2, round(h * 0.003))
-        py = max(0, int(box_top - context_margin))
-        bottom = min(h, int(box_bottom + context_margin))
+
+        # Snap top/bottom to the nearest "blank" row (mostly whitespace) so
+        # a line of text or a box border is never cut mid-way — expand
+        # outward from the bbox edges until a clean gap is found, capped so
+        # we don't accidentally grab the whole page.
+        gray = img.convert("L")
+        import numpy as np
+        arr = np.asarray(gray, dtype=np.uint8)
+        row_min = arr.min(axis=1)  # darkest pixel per row; near-255 == blank row
+        max_extend = int(h * 0.12)  # don't extend more than 12% of page height either way
+
+        def _snap_top(y0):
+            y = int(y0)
+            limit = max(0, y - max_extend)
+            i = y
+            while i > limit and row_min[i] < 245:
+                i -= 1
+            return max(0, i)
+
+        def _snap_bottom(y0):
+            y = int(y0)
+            limit = min(h - 1, y + max_extend)
+            i = y
+            while i < limit and row_min[i] < 245:
+                i += 1
+            return min(h, i + 1)
+
+        py = _snap_top(box_top)
+        bottom = _snap_bottom(box_bottom)
+        if bottom <= py:
+            py, bottom = int(box_top), int(box_bottom)
         ph = bottom - py
         if ph < 10:
             return {}
