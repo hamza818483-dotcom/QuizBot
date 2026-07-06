@@ -3710,6 +3710,7 @@ async def process_pdf_pages(
                 poll_links = []
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
+                  try:
                     opts = mcq.get("options", [])[:4]
                     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
                     q_text = mcq["question"]
@@ -3723,9 +3724,12 @@ async def process_pdf_pages(
                     # এটা detect করে explanation_media হিসেবে ছবি দেখাবে (আগের fix)।
                     bbox = mcq.get("exp_bbox")
                     if bbox:
-                        crop_url = await asyncio.to_thread(crop_explanation_image, img, bbox)
-                        if crop_url:
-                            exp = f'<img src="{crop_url}"> {exp}'
+                        try:
+                            crop_url = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                            if crop_url:
+                                exp = f'<img src="{crop_url}"> {exp}'
+                        except Exception as _crop_e:
+                            logger.warning(f"[Poll] crop failed for MCQ {i+1}: {_crop_e}")
                     # Retry logic — poll অবশ্যই যেতে হবে
                     poll_r = {"ok": False}
                     for _attempt in range(3):
@@ -3748,6 +3752,9 @@ async def process_pdf_pages(
                         poll_links.append(first_poll_link)
                     total_polls += 1
                     await asyncio.sleep(0.3)
+                  except Exception as _mcq_e:
+                    logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
+                    continue
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
 
@@ -3768,9 +3775,17 @@ async def process_pdf_pages(
                 }
                 if thread_id:
                     end_data["message_thread_id"] = thread_id
-                end_r = await tg_post("sendMessage", end_data)
+                end_r = {"ok": False}
+                for _end_attempt in range(3):
+                    end_r = await tg_post("sendMessage", end_data)
+                    if end_r.get("ok"):
+                        break
+                    logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
+                    await asyncio.sleep(2)
                 if end_r.get("ok"):
                     await db_update_cache(cache_id, {"end_msg_id": end_r["result"]["message_id"]})
+                else:
+                    await notify_owner(f"⚠️ End message (Quiz/Poll/Web buttons) failed after 3 tries for page {fmt_page(page_num)}, topic: {topic}")
 
                 # /pdf on hole ending message er por auto Style1+Style2 Sheet PDF channel e jabe
                 if await should_autosend_pdf(channel_id):
