@@ -384,7 +384,7 @@ async def handle_cancel_command(msg: dict):
         if not t.done():
             t.cancel()
             cancelled_count += 1
-    await send_msg(chat_id, f"🛑 বন্ধ করা হলো। ({cancelled_count} টি চলমান কাজ বাতিল হয়েছে)" if cancelled_count else "🛑 কোনো চলমান কাজ ছিল না, তবে পরবর্তী ধাপে থামানো নিশ্চিত করা হলো।")
+    await send_msg(chat_id, f"🛑 বন্ধ করা হলো।\nথামবে: PDF/Image MCQ generation ও Poll posting (চলমান page-by-page কাজ)।\nথামবে না: /rapid, /collect, /merge, Live Quiz — এগুলোর নিজস্ব cancel বাটন/কমান্ড আছে।")
 
 # LIVE QUIZ CONFIG
 LIVE_QUIZ_STATE = {}  # channel_id -> live quiz state
