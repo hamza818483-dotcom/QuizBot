@@ -1667,8 +1667,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
                 try:
                     await edit_msg(chat_id, loading_id,
                         f"⏳ Image থেকে {label}...\n"
-                        f"📊 Progress: {bars[bar_idx]} {pct}%\n"
-                        f"✅ তৈরি হয়েছে: {_img_progress['done']} টি MCQ")
+                        f"📊 Progress: {bars[bar_idx]} {pct}%")
                 except Exception:
                     pass
         except asyncio.CancelledError:
