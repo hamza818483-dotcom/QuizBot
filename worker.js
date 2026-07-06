@@ -96,6 +96,14 @@ export default {
       console.warn(`[cron] Render ping failed: ${e.message}`);
     }
 
+    // ── SaveContentAtlas cross-ping — 15min sleep prevent (internal, no external login needed) ──
+    try {
+      const scaR = await fetch('https://savecontentatlas.onrender.com', { signal: AbortSignal.timeout(10000) });
+      console.log(`[cron] SaveContentAtlas ping: ${scaR.status}`);
+    } catch(e) {
+      console.warn(`[cron] SaveContentAtlas ping failed: ${e.message}`);
+    }
+
     // ── Confirmed Primary→Secondary failover (independent 2nd system, mirrors GitHub Actions watchdog-1) ──
     if (RENDER_URL_2 && BOT_TOKEN) {
       try {
