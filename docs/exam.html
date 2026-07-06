@@ -1,6 +1,10 @@
 <!DOCTYPE html>
 <html lang="bn">
 <head>
+<link rel="preconnect" href="https://wbdyjpjbczfunyhhmtry.supabase.co">
+<link rel="preconnect" href="https://atlasquizbotpro.hamza818483.workers.dev">
+<link rel="dns-prefetch" href="https://wbdyjpjbczfunyhhmtry.supabase.co">
+<link rel="dns-prefetch" href="https://atlasquizbotpro.hamza818483.workers.dev">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ATLAS Special Exam</title>
@@ -373,11 +377,14 @@ async function fetchExamData() {
   return { error: 'all sources failed' };
 }
 
+// Fetch shuru instantly (script load hobar shathe shathe) — DOMContentLoaded wait na kore
+let _examDataPromise = fetchExamData();
+
 // ── INIT ──
 async function init() {
   setMode('Loading');
   try {
-    const d = await fetchExamData();
+    const d = await _examDataPromise;
     if (d.error) { showErr('❌ Exam পাওয়া যায়নি!'); return; }
     examData   = d;
     questions  = d.mcqs || [];
