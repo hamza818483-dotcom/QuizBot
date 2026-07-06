@@ -177,11 +177,16 @@ def upload_to_imgbb(b64):
             # webquiz result page). If unreachable, fall back to imgbb so the
             # crop image still displays instead of silently breaking.
             try:
-                check = _http_client.head(url, timeout=8)
-                if check.status_code == 200:
+                check = None
+                for _attempt in range(2):
+                    check = _http_client.head(url, timeout=8)
+                    if check.status_code == 200:
+                        break
+                    time.sleep(0.6)  # tiny propagation delay before retry
+                if check is not None and check.status_code == 200:
                     _upload_cache[cache_key] = url
                     return url
-                logger.warning(f"[SupabaseStorage] Public URL unreachable ({check.status_code}), falling back to imgbb: {url}")
+                logger.warning(f"[SupabaseStorage] Public URL unreachable ({check.status_code if check else '?'}), falling back to imgbb: {url}")
             except Exception as e:
                 logger.warning(f"[SupabaseStorage] Public URL check failed ({e}), falling back to imgbb")
             fallback_url = imgbb_manager.upload(img_bytes)
