@@ -1971,11 +1971,16 @@ async def handle_txt_command(msg: dict):
             progress["done"] = n
 
         async def _progress_updater():
-            bars = ["▱▱▱▱▱▱▱","▰▱▱▱▱▱▱","▰▰▱▱▱▱▱","▰▰▰▱▱▱▱","▰▰▰▰▱▱▱","▰▰▰▰▰▱▱","▰▰▰▰▰▰▱"]
+            bars = ["▱▱▱▱▱▱▱▱▱▱","▰▱▱▱▱▱▱▱▱▱","▰▰▱▱▱▱▱▱▱▱","▰▰▰▱▱▱▱▱▱▱","▰▰▰▰▱▱▱▱▱▱",
+                    "▰▰▰▰▰▱▱▱▱▱","▰▰▰▰▰▰▱▱▱▱","▰▰▰▰▰▰▰▱▱▱","▰▰▰▰▰▰▰▰▱▱","▰▰▰▰▰▰▰▰▰▱"]
+            smooth_pct = 0.0
             while True:
-                await asyncio.sleep(1.0)
-                pct = min(int((progress["done"] / progress["total"]) * 100), 95)
-                bar_idx = min(int(pct / 15), len(bars) - 1)
+                await asyncio.sleep(0.4)
+                real_pct = (progress["done"] / progress["total"]) * 100
+                target = min(max(real_pct, smooth_pct + 2), 95)
+                smooth_pct = min(smooth_pct + max((target - smooth_pct) * 0.3, 1.0), 95)
+                pct = int(smooth_pct)
+                bar_idx = min(int(pct / 10), len(bars) - 1)
                 if loading_id:
                     try:
                         await edit_msg(chat_id, loading_id,
@@ -2016,8 +2021,30 @@ async def handle_txt_command(msg: dict):
                              ans_num, m.get("explanation",""), "1", "1"])
         csv_bytes = buf.getvalue().encode("utf-8")
 
+        caption = f"📄 {len(mcqs)} MCQ CSV"
+        try:
+            from quiz import create_quiz_from_mcqs
+            bot_quiz_id = await create_quiz_from_mcqs(mcqs, "ATLAS MCQ", uid)
+            bot_info = await tg_post("getMe", {})
+            bot_un = bot_info.get("result", {}).get("username", "")
+
+            from poll_extract import save_quiz_to_d1
+            polls = [{"question": m["question"], "options": m.get("options", ["","","",""]),
+                       "correct_idx": {"A":0,"B":1,"C":2,"D":3}.get(m.get("answer","A"), 0),
+                       "explanation": m.get("explanation","")}
+                      for m in mcqs]
+            web_quiz_id = await save_quiz_to_d1(polls, "ATLAS MCQ", uid)
+            web_url = f"https://atlasquizbotpro.hamza818483.workers.dev/quiz/{web_quiz_id}"
+
+            caption += (
+                f"\n\n🌐 Web Quiz: {web_url}"
+                f"\n🤖 Bot Quiz: https://t.me/{bot_un}?start={bot_quiz_id}"
+            )
+        except Exception as e:
+            logger.error(f"[TXT] link gen error: {e}")
+
         await send_document(chat_id, csv_bytes,
-            "ATLAS_mcq.csv", caption=f"📄 {len(mcqs)} MCQ CSV", mime_type="text/csv")
+            "ATLAS_mcq.csv", caption=caption, mime_type="text/csv")
 
         # MCQ result cache করে রাখা হচ্ছে channel select করার সময় ব্যবহারের জন্য
         sb.table("quiz_sessions").upsert({
