@@ -2828,7 +2828,7 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
 # ============================================================
 # HTML → PDF (Chromium)
 # ============================================================
-_PDF_SEMAPHORE = asyncio.Semaphore(2)
+_PDF_SEMAPHORE = asyncio.Semaphore(1)
 
 async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
   async with _PDF_SEMAPHORE:
@@ -2849,7 +2849,7 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
             chromium_bin, "--headless=new", "--no-sandbox",
             "--disable-gpu", "--disable-dev-shm-usage",
             "--disable-extensions", "--disable-background-networking",
-            "--js-flags=--max-old-space-size=256",
+            "--js-flags=--max-old-space-size=128",
             f"--remote-debugging-port={debug_port}",
             "--remote-debugging-address=127.0.0.1",
             f"file://{html_path}",
