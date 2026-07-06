@@ -486,14 +486,17 @@ async def generate_mcq_from_text(text: str, topic: str = "MCQ", count: int = 15)
     """Text থেকে MCQ generate করে — same SDK + multi-key + fallback as generate_mcq_from_image"""
     import json as _json
 
-    prompt = f"""নিচের text থেকে {count}টি MCQ বানাও।
+    prompt = f"""তুমি একজন expert MCQ writer। নিচের text-টি লাইন-বাই-লাইন সম্পূর্ণ পড়ো এবং যত বেশি সম্ভব MCQ বানাও (target: কমপক্ষে {count}টি, প্রয়োজনে আরও বেশি)।
 
-RULES:
-- প্রশ্ন text এর ভাষায় (বাংলা হলে বাংলা, ইংরেজি হলে ইংরেজি)
-- ৪টি option, একটি সঠিক
-- Answer A/B/C/D — MUST vary across questions, NEVER all same
-- Explanation max 200 chars
-- কোনো section heading, "Card 1"/"Card 2", page/chapter label বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না — প্রতিটি option অবশ্যই actual factual content হতে হবে
+MANDATORY RULES (কোনোটাই skip করা যাবে না):
+1. Text-এর প্রতিটি লাইন/তথ্য থেকে MUST অন্তত একটি MCQ বানাতে হবে — কোনো লাইন বাদ দেওয়া যাবে না। যত বেশি লাইন, তত বেশি MCQ — সর্বোচ্চ সংখ্যক MCQ বানানোই লক্ষ্য।
+2. Explanation-এ সঠিক answer confirm করার পাশাপাশি সেই তথ্যের ঠিক আশেপাশের (আগের/পরের লাইনের) source text থেকে অতিরিক্ত related info যোগ করতে হবে — শুধু answer repeat করা চলবে না।
+3. সঠিক answer (A/B/C/D) প্রতিটি প্রশ্নে ভিন্ন ভিন্ন option-এ থাকতে হবে — কখনোই sequential pattern বা একই option বারবার না।
+4. যত ধরনের সম্ভব MCQ variety বানাও — direct fact, definition, cause-effect, comparison, fill-in-the-blank style, "কোনটি সঠিক নয়" ধরনের প্রশ্ন — সব ধরনের প্রশ্ন mix করে বানাও, শুধু এক প্যাটার্নে আটকে থেকো না।
+5. প্রশ্ন text এর ভাষায় (বাংলা হলে বাংলা, ইংরেজি হলে ইংরেজি)
+6. ৪টি option, একটি সঠিক, বাকি ৩টি plausible কিন্তু ভুল distractor (random/অর্থহীন option চলবে না)
+7. Explanation max 200 chars
+8. কোনো section heading, "Card 1"/"Card 2", page/chapter label বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না — প্রতিটি option অবশ্যই actual factual content হতে হবে
 
 TEXT:
 {text[:4000]}

@@ -1996,7 +1996,9 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
 
     try:
         from pdf_handler import generate_mcq_from_text
-        mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=15)
+        line_count = len([l for l in text_content.splitlines() if l.strip()])
+        auto_count = max(15, line_count)
+        mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count)
 
         if not mcqs:
             await send_msg(chat_id, "❌ MCQ generate হয়নি!")
