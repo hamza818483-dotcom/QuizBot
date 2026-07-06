@@ -507,7 +507,7 @@ function confirmSubmit(){
 
 function stopAll(){ clearInterval(totalTimer); }
 
-async function doSubmit(){
+function doSubmit(){
   if(submitted) return;
   submitted=true;
   stopAll();
@@ -533,17 +533,30 @@ async function doSubmit(){
 
   _saveAnswerSnapshot();
 
-  let motivation='',ayat='';
-  try{
-    const res=await fetch(`${HF_URL}/api/exam/result`,{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({cache_id:CACHE_ID,user_id:USER_ID,user_name:USER_NAME,
-        topic:examData.topic,page:examData.page,total:questions.length,
-        correct,wrong,skipped,time_taken:timeTaken})
-    });
-    const rd=await res.json();
-    motivation=rd.motivation||''; ayat=rd.ayat||'';
-  }catch(e){}
+  // ── Instant result: motivation/ayat নেটওয়ার্ক কলের জন্য অপেক্ষা না করেই
+  // result page সাথে সাথে render হয় (আগে এটা `await fetch(...)` এর পরে হতো,
+  // তাই নেট স্লো হলে সাবমিটের পর কয়েক সেকেন্ড ফাঁকা স্ক্রিন দেখাতো)। fetch
+  // background-এ চলে, শেষ হলে motAyatSlot placeholder-এ বসিয়ে দেওয়া হয়।
+  fetch(`${HF_URL}/api/exam/result`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({cache_id:CACHE_ID,user_id:USER_ID,user_name:USER_NAME,
+      topic:examData.topic,page:examData.page,total:questions.length,
+      correct,wrong,skipped,time_taken:timeTaken})
+  }).then(r=>r.json()).then(rd=>{
+    const motivation=rd.motivation||'', ayat=rd.ayat||'';
+    if(!motivation && !ayat) return;
+    const grade = pct>=80?'🏆 অসাধারণ! অনেক ভালো করেছো!':
+                  pct>=60?'✅ মোটামুটি ভালো! চেষ্টা চালিয়ে যাও!':
+                  pct>=40?'📚 আরো পড়তে হবে! হাল ছেড়ো না!':
+                          '💪 পড়া হয়নি! আবার পড়ে practice করো!';
+    const slot = document.getElementById('motAyatSlot');
+    if(slot) slot.innerHTML = `<div class="mot-box">
+      <div class="mot-grade">${grade}</div>
+      <div class="mot-divider"></div>
+      ${motivation?`<div class="mot-text">${motivation}</div>`:''}
+      ${ayat?`<div class="ayat-text">📖 ${ayat}</div>`:''}
+    </div>`;
+  }).catch(()=>{});
 
   const backUrl = buildBackUrl(channelId, endMsgId || imageMsgId);
 
@@ -560,23 +573,8 @@ async function doSubmit(){
   </div>
   <div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-${neg} (${wrong}×0.25)</span></div>
   <div class="info-row2"><span>🏆 Final Score</span><span style="color:var(--accent);font-weight:700">${fin}/${questions.length} (${pct}%)</span></div>
-  <div class="info-row2" style="margin-bottom:14px"><span>⏱️ সময়</span><span>${mins}m ${secs}s</span></div>`;
-
-  // FIX: Motivation 1 line gap — grade আলাদা, তারপর divider, তারপর motivation+ayat
-  if(motivation||ayat){
-    const grade = pct>=80?'🏆 অসাধারণ! অনেক ভালো করেছো!':
-                  pct>=60?'✅ মোটামুটি ভালো! চেষ্টা চালিয়ে যাও!':
-                  pct>=40?'📚 আরো পড়তে হবে! হাল ছেড়ো না!':
-                          '💪 পড়া হয়নি! আবার পড়ে practice করো!';
-    html+=`<div class="mot-box">
-      <div class="mot-grade">${grade}</div>
-      <div class="mot-divider"></div>
-      ${motivation?`<div class="mot-text">${motivation}</div>`:''}
-      ${ayat?`<div class="ayat-text">📖 ${ayat}</div>`:''}
-    </div>`;
-  }
-
-  html+=`<div class="result-btns">
+  <div class="info-row2" style="margin-bottom:14px"><span>⏱️ সময়</span><span>${mins}m ${secs}s</span></div>
+  <div id="motAyatSlot"></div>`;  html+=`<div class="result-btns">
     <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
     <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (Only Wrong)</button>
     <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (Wrong+Skip)</button>`;
