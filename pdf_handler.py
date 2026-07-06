@@ -308,28 +308,33 @@ def _parse_mcq_json(text: str) -> list:
 
 def crop_explanation_image(img: Image.Image, bbox: list) -> str:
     """
-    Gemini-এর দেওয়া exp_bbox (0-1000 normalized [x_min,y_min,x_max,y_max]) দিয়ে
-    page image থেকে crop করে, existing Supabase/imgbb storage pipeline দিয়ে
-    upload করে public URL রিটার্ন করে। bbox None বা invalid হলে "" রিটার্ন করে।
+    AtlasApp mulboi-admin.js এর pattern অনুসরণ করে: bbox অনুযায়ী পুরো page width
+    নিয়ে (x কখনো crop করা হয় না, নাহলে ডান/বাম টেক্সট কাটা পড়ে) শুধু vertical
+    অংশ crop করে, exp_box boundary-তে বোল্ড লাল বর্ডার আঁকা হয় যাতে ঠিক কোন
+    অংশ থেকে answer/explanation এসেছে সেটা স্পষ্ট বোঝা যায়।
     """
     if not bbox or len(bbox) != 4:
         return ""
     try:
         from atlas_mhtml import upload_to_imgbb
+        from PIL import ImageDraw
         w, h = img.size
         x_min, y_min, x_max, y_max = bbox
-        left = int((x_min / 1000) * w)
-        top = int((y_min / 1000) * h)
-        right = int((x_max / 1000) * w)
-        bottom = int((y_max / 1000) * h)
-        pad = 4
-        left = max(0, left - pad)
-        top = max(0, top - pad)
-        right = min(w, right + pad)
-        bottom = min(h, bottom + pad)
-        if right <= left or bottom <= top:
+        box_top = (y_min / 1000) * h
+        box_bottom = (y_max / 1000) * h
+        context_margin = max(2, round(h * 0.003))
+        py = max(0, int(box_top - context_margin))
+        bottom = min(h, int(box_bottom + context_margin))
+        ph = bottom - py
+        if ph < 10:
             return ""
-        cropped = img.crop((left, top, right, bottom))
+        cropped = img.crop((0, py, w, bottom)).convert("RGB")
+        draw = ImageDraw.Draw(cropped)
+        b_top = max(0, int(box_top - py))
+        b_bottom = min(ph, int(box_bottom - py))
+        b_h = b_bottom - b_top
+        if b_h > 0:
+            draw.rectangle([6, b_top + 6, w - 6, max(b_top + 7, b_bottom - 6)], outline=(220, 38, 38), width=6)
         b64 = image_to_base64(cropped)
         return upload_to_imgbb(b64)
     except Exception as e:
