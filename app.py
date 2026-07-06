@@ -8522,15 +8522,31 @@ async def startup():
         _mhtml_worker_started = True
         logger.info("[App] mhtml auto-queue worker started")
 
+    async def _supervised(coro_fn, name):
+        """Core background task crash korle silently die na kore auto-restart hobe."""
+        while True:
+            try:
+                await coro_fn()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"⚠️ [Supervisor] {name} crashed: {e} — restarting in 10s")
+                try:
+                    await send_msg(OWNER_ID, f"⚠️ Background task '{name}' crashed, auto-restarting: {e}")
+                except Exception:
+                    pass
+                await asyncio.sleep(10)
+
     # Self-ping keep-alive: prevents Render free-tier from sleeping.
-    asyncio.create_task(_keepalive_task())
-    asyncio.create_task(_memory_cleanup_task())
-    asyncio.create_task(_ram_guard_task())
-    asyncio.create_task(_scheduled_restart_task())
+    asyncio.create_task(_supervised(_keepalive_task, "_keepalive_task"))
+    asyncio.create_task(_supervised(_memory_cleanup_task, "_memory_cleanup_task"))
+    asyncio.create_task(_supervised(_ram_guard_task, "_ram_guard_task"))
+    asyncio.create_task(_supervised(_scheduled_restart_task, "_scheduled_restart_task"))
     # Independent watchdog: separate timing, detects if keep-alive itself dies.
-    asyncio.create_task(_watchdog_task())
-    asyncio.create_task(_watchdog2_task())
-    asyncio.create_task(_cross_bot_watchdog_task())
+    asyncio.create_task(_supervised(_watchdog_task, "_watchdog_task"))
+    asyncio.create_task(_supervised(_watchdog2_task, "_watchdog2_task"))
+    asyncio.create_task(_supervised(_cross_bot_watchdog_task, "_cross_bot_watchdog_task"))
 
     if not BOT_TOKEN:
         logger.error("[App] BOT_TOKEN missing!")
