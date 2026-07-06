@@ -191,9 +191,10 @@ async def d1_select(sql: str, params: list = None) -> list:
 
 async def d1_run(sql: str, params: list = None) -> bool:
     r = await d1_query(sql, params, False)
-    if r.get("ok"):
-        return True
-    # ── CF down → Supabase fallback for quiz INSERT/REPLACE ──
+    ok = r.get("ok")
+
+    # ── Always mirror quiz INSERT/REPLACE to BOTH Supabase accounts, ──
+    # ── regardless of D1 success, so web quiz has a backup even when D1 is fine. ──
     try:
         sql_lower = sql.lower()
         if "quizzes" in sql_lower and ("insert" in sql_lower or "replace" in sql_lower) and params and len(params) >= 9:
@@ -204,16 +205,24 @@ async def d1_run(sql: str, params: list = None) -> bool:
                 "quiz_id": params[0], "name": params[1],
                 "questions": questions, "created_by": params[8] or 0,
             }
-            headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
-                       "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"}
+            SB2_URL = "https://xnkuuzstschdovcyomfk.supabase.co"
+            SB2_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4"
             async with httpx.AsyncClient(timeout=10) as c:
-                rr = await c.post(f"{SUPABASE_URL}/rest/v1/quiz_backups",
-                                  headers=headers, json=payload)
-            logger.info(f"[D1] Supabase write fallback: {rr.status_code}")
-            return rr.status_code in (200, 201, 204)
+                for url, key in ((SUPABASE_URL, SUPABASE_KEY), (SB2_URL, SB2_KEY)):
+                    if not url or not key:
+                        continue
+                    try:
+                        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                                   "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"}
+                        rr = await c.post(f"{url}/rest/v1/quiz_backups",
+                                          headers=headers, json=payload)
+                        logger.info(f"[D1] Supabase mirror ({url}): {rr.status_code}")
+                    except Exception as e2:
+                        logger.warning(f"[D1] Supabase mirror failed ({url}): {e2}")
     except Exception as e:
-        logger.warning(f"[D1] Supabase write fallback failed: {e}")
-    return False
+        logger.warning(f"[D1] Supabase mirror step failed: {e}")
+
+    return bool(ok)
 
 # ============================================================
 # /error COMMAND — SIMPLE FILE-BASED ERROR CAPTURE (AtlasBot-style)
@@ -297,6 +306,10 @@ async def tg_post(method: str, data: dict) -> dict:
             result = r.json()
             if result.get("ok"):
                 return result
+            if result.get("error_code") == 429:
+                retry_after = result.get("parameters", {}).get("retry_after", 5)
+                logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
+                await asyncio.sleep(min(retry_after, 30) + 0.5)
             logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
     except Exception as e:
         logger.warning(f"[TG] {method} proxy error: {e}")
@@ -306,6 +319,10 @@ async def tg_post(method: str, data: dict) -> dict:
             r = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=data)
             result = r.json()
             if not result.get("ok"):
+                if result.get("error_code") == 429:
+                    retry_after = result.get("parameters", {}).get("retry_after", 5)
+                    logger.warning(f"[TG] {method} direct 429, waiting {retry_after}s")
+                    await asyncio.sleep(min(retry_after, 30) + 0.5)
                 logger.warning(f"[TG] {method} direct failed: {result.get('description')}")
             return result
     except Exception as e:
