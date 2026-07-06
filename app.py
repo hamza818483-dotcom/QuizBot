@@ -2839,10 +2839,12 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
         if progress_cb:
             await progress_cb(20)
         proc = await asyncio.create_subprocess_exec(
-            chromium_bin, "--headless", "--no-sandbox",
+            chromium_bin, "--headless=new", "--no-sandbox",
             "--disable-gpu", "--disable-dev-shm-usage",
             "--print-to-pdf-no-header",
+            "--no-pdf-header-footer",
             f"--print-to-pdf={pdf_path}",
+            "--virtual-time-budget=10000",
             f"file://{html_path}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
@@ -3127,25 +3129,31 @@ def _build_print_style2(data, heading):
     body += '</tbody></table></div>'
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_PRINT_CSS}</head><body>{body}</body></html>'
 
-def _build_print_style3(data, heading):
-    """Style 3: Compact Exam - 2-col Questions + Horizontal Answer Key"""
-    body = f'<div class="exam-header"><h1>{heading}</h1></div><div class="content-columns">'
-    for d in data:
-        short = _check_short_option(d["opts"])
-        body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]}.</span><div class="question-text">{d["q"]}</div></div>'
-        if short:
-            body += f'<table class="options-table-short"><tr><td>(a) {d["opts"][0]}</td><td>(b) {d["opts"][1]}</td></tr><tr><td>(c) {d["opts"][2]}</td><td>(d) {d["opts"][3]}</td></tr></table>'
-        else:
-            body += f'<ul class="options-list"><li>(a) {d["opts"][0]}</li><li>(b) {d["opts"][1]}</li><li>(c) {d["opts"][2]}</li><li>(d) {d["opts"][3]}</li></ul>'
-        body += '</div>'
-    body += '</div><div class="answer-key-section"><div class="answer-key-header">সঠিক উত্তর যাচাই কর :)</div><table class="answer-key-table"><thead><tr><th>প্রশ্ন</th>'
-    for d in data:
-        body += f'<th>{d["n"]}</th>'
-    body += '</tr></thead><tbody><tr><th>উত্তর</th>'
-    for d in data:
-        body += f'<td>{d["al"]}</td>'
-    body += '</tr></tbody></table></div>'
-    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_PRINT_CSS}</head><body>{body}</body></html>'
+def _build_print_style3(data, heading, per_page=10):
+    """Style 3: Compact Exam - paginated, each page's answer key directly below that page's questions"""
+    pages_html = ""
+    for start in range(0, len(data), per_page):
+        chunk = data[start:start + per_page]
+        body = f'<div class="exam-header"><h1>{heading}</h1></div><div class="content-columns" style="column-count:2;break-inside:avoid;">'
+        for d in chunk:
+            short = _check_short_option(d["opts"])
+            body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]}.</span><div class="question-text">{d["q"]}</div></div>'
+            if short:
+                body += f'<table class="options-table-short"><tr><td>(a) {d["opts"][0]}</td><td>(b) {d["opts"][1]}</td></tr><tr><td>(c) {d["opts"][2]}</td><td>(d) {d["opts"][3]}</td></tr></table>'
+            else:
+                body += f'<ul class="options-list"><li>(a) {d["opts"][0]}</li><li>(b) {d["opts"][1]}</li><li>(c) {d["opts"][2]}</li><li>(d) {d["opts"][3]}</li></ul>'
+            body += '</div>'
+        body += '</div><div class="answer-key-section"><div class="answer-key-header">সঠিক উত্তর যাচাই কর :)</div><table class="answer-key-table"><thead><tr><th>প্রশ্ন</th>'
+        for d in chunk:
+            body += f'<th>{d["n"]}</th>'
+        body += '</tr></thead><tbody><tr><th>উত্তর</th>'
+        for d in chunk:
+            body += f'<td>{d["al"]}</td>'
+        body += '</tr></tbody></table></div>'
+        if start + per_page < len(data):
+            body += '<div class="page-break"></div>'
+        pages_html += body
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_PRINT_CSS}</head><body>{pages_html}</body></html>'
 
 PRINT_STYLE_BUILDERS = {
     "style1": _build_print_style1,
