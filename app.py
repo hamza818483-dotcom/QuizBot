@@ -3469,7 +3469,7 @@ async def process_pdf_pages(
                             safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
                             await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_sheet.pdf",
                                 caption=f"📖 Practice Sheet\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
-                                message_thread_id=thread_id, reply_to_message_id=image_msg_id)
+                                message_thread_id=thread_id, reply_to_message_id=first_image_msg_id or image_msg_id)
                     except Exception as e:
                         logger.error(f"[PDF-AUTOSEND] Error: {e}")
 
@@ -3835,7 +3835,7 @@ async def process_pdfm_pages(
                             safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
                             await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_sheet.pdf",
                                 caption=f"📖 Practice Sheet\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
-                                message_thread_id=thread_id, reply_to_message_id=image_msg_id)
+                                message_thread_id=thread_id, reply_to_message_id=first_image_msg_id or image_msg_id)
                     except Exception as e:
                         logger.error(f"[PDF-AUTOSEND] Error: {e}")
 
