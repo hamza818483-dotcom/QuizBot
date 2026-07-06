@@ -138,26 +138,9 @@ def compress_image(b64_str):
 _upload_cache = {}
 
 
-def upload_to_imgbb(b64):
-    """
-    Supabase Storage-এ image upload করে permanent public URL রিটার্ন করে।
-    imgbb-এর বদলে Supabase Storage — কোনো key rotation লাগে না, permanent, free tier যথেষ্ট।
-    Env vars: SUPABASE_URL, SUPABASE_KEY (আগে থেকেই bot-এ সেট আছে)
-    একই base64 image দ্বিতীয়বার এলে cache থেকে URL রিটার্ন করে (duplicate image reupload skip)।
-    """
-    if not b64:
-        return ""
-    cache_key = b64[:64] + str(len(b64))
-    if cache_key in _upload_cache:
-        return _upload_cache[cache_key]
+def _try_supabase_upload(supabase_url, supabase_key, img_bytes):
+    """One Supabase Storage upload attempt + reachability verify. Returns url or ''."""
     try:
-        compressed = compress_image(b64)
-        img_bytes = base64.b64decode(compressed)
-        supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
-        supabase_key = os.environ.get("SUPABASE_KEY", "")
-        if not supabase_url or not supabase_key:
-            return imgbb_manager.upload(img_bytes)  # fallback যদি supabase env না থাকে
-
         bucket = "quiz-images"
         filename = f"{uuid.uuid4().hex}.jpg"
         resp = _http_client.post(
@@ -169,39 +152,62 @@ def upload_to_imgbb(b64):
             },
             content=img_bytes,
         )
-        if resp.status_code in (200, 201):
-            url = f"{supabase_url}/storage/v1/object/public/{bucket}/{filename}"
-            # Verify the public URL is actually reachable (bucket may not be
-            # set to public in Supabase dashboard -> upload "succeeds" but the
-            # URL 400/403s for everyone, showing a broken-image icon on the
-            # webquiz result page). If unreachable, fall back to imgbb so the
-            # crop image still displays instead of silently breaking.
-            try:
-                check = None
-                for _attempt in range(2):
-                    check = _http_client.head(url, timeout=8)
-                    if check.status_code == 200:
-                        break
-                    time.sleep(0.6)  # tiny propagation delay before retry
-                if check is not None and check.status_code == 200:
-                    _upload_cache[cache_key] = url
-                    return url
-                logger.warning(f"[SupabaseStorage] Public URL unreachable ({check.status_code if check else '?'}), falling back to imgbb: {url}")
-            except Exception as e:
-                logger.warning(f"[SupabaseStorage] Public URL check failed ({e}), falling back to imgbb")
-            fallback_url = imgbb_manager.upload(img_bytes)
-            if fallback_url:
-                _upload_cache[cache_key] = fallback_url
-            return fallback_url
-        logger.warning(f"[SupabaseStorage] Upload failed {resp.status_code}: {resp.text[:200]}")
-        fallback_url = imgbb_manager.upload(img_bytes)  # fallback to imgbb on failure
+        if resp.status_code not in (200, 201):
+            logger.warning(f"[SupabaseStorage] Upload failed {resp.status_code}: {resp.text[:200]}")
+            return ""
+        url = f"{supabase_url}/storage/v1/object/public/{bucket}/{filename}"
+        check = None
+        for _attempt in range(2):
+            check = _http_client.head(url, timeout=8)
+            if check.status_code == 200:
+                return url
+            time.sleep(0.6)
+        logger.warning(f"[SupabaseStorage] Public URL unreachable ({check.status_code if check else '?'}): {url}")
+        return ""
+    except Exception as e:
+        logger.warning(f"[SupabaseStorage] Exception: {e}")
+        return ""
+
+
+def upload_to_imgbb(b64):
+    """
+    Image upload: Supabase Storage S1 -> S2 -> imgbb, in order.
+    Env vars: SUPABASE_URL/SUPABASE_KEY (S1), SB2_URL/SB2_KEY (S2, same as core.py's DB fallback account).
+    একই base64 image দ্বিতীয়বার এলে cache থেকে URL রিটার্ন করে।
+    """
+    if not b64:
+        return ""
+    cache_key = b64[:64] + str(len(b64))
+    if cache_key in _upload_cache:
+        return _upload_cache[cache_key]
+    try:
+        compressed = compress_image(b64)
+        img_bytes = base64.b64decode(compressed)
+
+        s1_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+        s1_key = os.environ.get("SUPABASE_KEY", "")
+        s2_url = os.environ.get("SB2_URL", "https://xnkuuzstschdovcyomfk.supabase.co").rstrip("/")
+        s2_key = os.environ.get("SB2_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4")
+
+        for s_url, s_key in ((s1_url, s1_key), (s2_url, s2_key)):
+            if not s_url or not s_key:
+                continue
+            url = _try_supabase_upload(s_url, s_key, img_bytes)
+            if url:
+                _upload_cache[cache_key] = url
+                return url
+
+        fallback_url = imgbb_manager.upload(img_bytes)
         if fallback_url:
             _upload_cache[cache_key] = fallback_url
         return fallback_url
     except Exception as e:
-        logger.warning(f"[SupabaseStorage] Exception: {e} — falling back to imgbb")
+        logger.warning(f"[ImageUpload] Exception: {e} — falling back to imgbb")
         try:
-            return imgbb_manager.upload(base64.b64decode(compress_image(b64)))
+            fb = imgbb_manager.upload(base64.b64decode(compress_image(b64)))
+            if fb:
+                _upload_cache[cache_key] = fb
+            return fb
         except Exception:
             return ""
 
