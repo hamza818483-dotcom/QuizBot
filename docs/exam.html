@@ -356,7 +356,11 @@ async function fetchFromSupabaseBackup(url, key) {
 
 async function fetchExamData() {
   // 1) CF Worker (full 6-layer server-side fallback)
-  try { return await fetchFromWorker(); } catch(e) { console.warn('[exam] worker failed:', e.message); }
+  try {
+    const d = await fetchFromWorker();
+    if (d) { try { localStorage.setItem('atlas_exam_cache_'+CACHE_ID, JSON.stringify(d)); } catch(e){} }
+    return d;
+  } catch(e) { console.warn('[exam] worker failed:', e.message); }
 
   // Worker unreachable/down — direct client-side fallback, both Supabase accounts, both tables
   const attempts = [
@@ -366,8 +370,16 @@ async function fetchExamData() {
     () => fetchFromSupabaseBackup(SB2_URL, SB2_KEY),
   ];
   for (const attempt of attempts) {
-    try { return await attempt(); } catch(e) { console.warn('[exam] fallback failed:', e.message); }
+    try {
+      const d = await attempt();
+      if (d) { try { localStorage.setItem('atlas_exam_cache_'+CACHE_ID, JSON.stringify(d)); } catch(e){} }
+      return d;
+    } catch(e) { console.warn('[exam] fallback failed:', e.message); }
   }
+  try {
+    const cached = localStorage.getItem('atlas_exam_cache_'+CACHE_ID);
+    if (cached) return JSON.parse(cached);
+  } catch(e) {}
   return null;
 }
 
