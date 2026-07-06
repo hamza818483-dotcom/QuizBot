@@ -307,6 +307,7 @@ let totalSec = 0, totalLeft = 0, totalTimer = null;
 async function fetchExamData() {
   const ANS = ["A","B","C","D","E"];
   const RENDER    = 'https://quizbot-s482.onrender.com';
+  const RENDER2   = 'https://quizbot-zo6x.onrender.com';
   const CF_WORKER = 'https://atlasquizbotpro.hamza818483.workers.dev';
   const SB_URL    = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
   const SB_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
@@ -345,6 +346,15 @@ async function fetchExamData() {
     return d;
   })();
 
+  // Render2 (secondary duplicate backup)
+  const render2Fetch = (async () => {
+    const r = await fetch(`${RENDER2}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(9000) });
+    if (!r.ok) throw new Error('render2 failed');
+    const d = await r.json();
+    if (!d || !d.mcqs || !d.mcqs.length) throw new Error('render2 empty');
+    return d;
+  })();
+
   // Supabase Primary
   const sbFetch = (async () => {
     const r = await fetch(`${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`,
@@ -375,7 +385,7 @@ async function fetchExamData() {
 
   // Sob 6 source ekshathe race — fastest jeta hoy oitai use hobe
   try {
-    return await Promise.any([directCacheFetch, cfFetch, renderFetch, sbFetch, sb2Fetch]);
+    return await Promise.any([directCacheFetch, cfFetch, renderFetch, render2Fetch, sbFetch, sb2Fetch]);
   } catch (e) {}
   return { error: 'all sources failed' };
 }
