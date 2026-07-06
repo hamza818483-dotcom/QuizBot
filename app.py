@@ -2082,6 +2082,13 @@ async def handle_txt_command(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 async def process_txt_to_poll(channel_id: str, chat_id: int, uid: int, uname: str):
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    try:
+        return await _process_txt_to_poll_inner(channel_id, chat_id, uid, uname)
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+async def _process_txt_to_poll_inner(channel_id: str, chat_id: int, uid: int, uname: str):
     """Cache করা MCQ থেকে সরাসরি poll পাঠাও (আবার generate করবে না)"""
     row = sb.table("quiz_sessions").select("data").eq("key", f"txt_cmd_{uid}").execute()
     if not row.data:
@@ -2452,6 +2459,13 @@ def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 async def handle_split_command(msg: dict):
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    try:
+        return await _handle_split_command_inner(msg)
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+async def _handle_split_command_inner(msg: dict):
     """/split <chunk_size> — reply to a CSV file, splits it into multiple
     smaller CSV files of chunk_size MCQs each."""
     chat_id = msg["chat"]["id"]
@@ -3836,6 +3850,26 @@ async def pdf_generate_all_pages(
 
 
 async def process_pdf_pages(
+    chat_id: int, uid: int, uname: str,
+    pages: list, topic: str, mcq_count: int,
+    channel_id: str, csv_only: bool,
+    file_name: str = "document.pdf",
+    status_msg_id: int = None,
+    thread_id: int = None,
+    with_image: bool = True,
+    skip_generate: bool = False
+):
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    try:
+        return await _process_pdf_pages_inner(
+            chat_id, uid, uname, pages, topic, mcq_count,
+            channel_id, csv_only, file_name, status_msg_id,
+            thread_id, with_image, skip_generate
+        )
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+async def _process_pdf_pages_inner(
     chat_id: int, uid: int, uname: str,
     pages: list, topic: str, mcq_count: int,
     channel_id: str, csv_only: bool,
@@ -8965,6 +8999,8 @@ async def _memory_cleanup_task() -> None:
         await asyncio.sleep(1800)
 
 
+_active_jobs = {"count": 0}
+
 async def _ram_guard_task() -> None:
     """Proactive RSS watchdog for 512MB Render instances: checks own process
     RSS every 60s. On free tier, hitting the OS memory limit means Render
@@ -8987,10 +9023,18 @@ async def _ram_guard_task() -> None:
     while True:
         try:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
-            if rss_mb >= threshold_mb:
-                logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> clean self-restart")
+            hard_cap_mb = int(limit_mb * 0.95)
+            if rss_mb >= hard_cap_mb:
+                logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= hard cap {hard_cap_mb}MB -> forced restart (job or not)")
                 await asyncio.sleep(1)
                 os._exit(0)
+            if rss_mb >= threshold_mb:
+                if _active_jobs["count"] > 0:
+                    logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= threshold but {_active_jobs['count']} job(s) active -> deferring restart")
+                else:
+                    logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> clean self-restart")
+                    await asyncio.sleep(1)
+                    os._exit(0)
             elif rss_mb >= threshold_mb * 0.9:
                 logger.info(f"[RAMGuard] RSS {rss_mb:.0f}MB approaching threshold ({threshold_mb}MB)")
         except Exception as e:
