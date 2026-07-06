@@ -3011,6 +3011,136 @@ async def handle_qcsv_command(msg: dict):
 # ============================================================
 # /sheet — CSV file reply থেকে সরাসরি Practice Sheet PDF
 # ============================================================
+def _adapt_mcqs_for_print(mcqs: list) -> list:
+    """Convert QuizBot mcq dicts (question/options list/answer letter/explanation)
+    to AtlasMasterBot print-style data format."""
+    BN = ['A', 'B', 'C', 'D', 'E']
+    labels_map = {"A": 0, "B": 1, "C": 2, "D": 3}
+    data = []
+    for i, q in enumerate(mcqs):
+        opts = q.get("options", ["", "", "", ""])
+        opts = (opts + ["", "", "", ""])[:4]
+        ans = q.get("answer", "A")
+        ai = labels_map.get(str(ans).strip().upper(), 0) if not str(ans).isdigit() else int(ans) - 1
+        data.append({
+            'n': i + 1,
+            'q': q.get('question', ''),
+            'qi': '',
+            'opts': opts,
+            'oimgs': ['', '', '', ''],
+            'exp': q.get('explanation', ''),
+            'ei': '',
+            'ai': ai,
+            'al': BN[ai] if 0 <= ai < len(BN) else '?'
+        })
+    return data
+
+_PRINT_CSS = """<style>
+@page{size:A4 portrait;margin:10mm 10mm}
+body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:12pt;line-height:1.2;color:#000;margin:0;padding:10px;width:210mm;max-width:210mm}
+.exam-header{text-align:center;border:2px solid #4169E1;background-color:#F0F8FF;border-radius:6px;padding:10px;margin-bottom:15px}
+.exam-header h1{color:#191970;margin:0;font-size:15pt;font-weight:bold}
+.content-columns{column-count:2;column-gap:15px;column-fill:balance;column-rule:1px solid #ddd}
+.question{margin-bottom:7px;break-inside:avoid;page-break-inside:avoid}
+.question-header{margin-bottom:4px;display:flex;align-items:flex-start}
+.question-num{font-weight:bold;color:#1E64B7;font-size:12pt;margin-right:5px;white-space:nowrap;flex-shrink:0}
+.question-text{flex:1;line-height:1.4;font-size:13pt;color:#000;word-wrap:break-word}
+.options-table-short{width:100%;border-collapse:collapse;margin:4px 0 4px 8px;table-layout:fixed}
+.options-table-short td{border:none;padding:2px 8px 2px 0;vertical-align:top;font-size:13pt;color:#000;width:40%}
+.options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;font-weight:600;font-size:12pt;color:#000;padding-left:10px}
+.answer-circle{font-weight:300;font-size:12pt;line-height:1}
+.options-list{margin:4px 0 4px 8px;padding:0;list-style:none}
+.options-list li{margin:1px 0;font-size:13pt;color:#000;word-wrap:break-word}
+.option-with-answer{display:flex;justify-content:space-between;align-items:flex-start}
+.explanation{margin:4px 0 2px 8px;padding:4px;color:#000;background-color:rgba(66,153,225,0.1);border-left:3px solid #4299e1;font-size:12pt;font-style:italic;break-inside:avoid}
+.explanation-label{font-weight:bold;color:#2c5282}
+.page-break{page-break-before:always;break-before:page}
+.answers-section{column-count:1;margin-top:0}
+.answer-table{width:100%;border-collapse:collapse;margin-top:0;border:1px solid #333}
+.answer-table th,.answer-table td{border:1px solid #333;padding:6px;text-align:left;vertical-align:top;word-wrap:break-word}
+.answer-table th{background-color:#f5f5f5;font-weight:bold;text-align:center;font-size:13pt}
+.qno-col{width:8%;text-align:center}.ans-col{width:8%;text-align:center;font-weight:bold;font-size:14pt}.exp-col{width:84%;font-size:12pt}
+.answer-key-section{margin-top:20px;page-break-inside:avoid}
+.answer-key-header{text-align:center;font-weight:bold;font-size:13pt;margin-bottom:10px;color:#000}
+.answer-key-table{width:100%;border-collapse:collapse;border:1px solid #333;margin:0 auto}
+.answer-key-table th,.answer-key-table td{border:1px solid #333;padding:6px;text-align:center;font-size:11pt}
+.answer-key-table th{background-color:#f5f5f5;font-weight:bold}
+img{max-width:35%!important;height:auto!important;vertical-align:middle}
+</style>"""
+
+def _check_short_option(opts):
+    for v in opts:
+        if v and len(str(v).strip()) > 16:
+            return False
+    return True
+
+def _build_print_style1(data, heading):
+    """Style 1: Study Material - Q + Options + inline Answer + Explanation"""
+    body = f'<div class="exam-header"><h1>{heading} - Practice Sheet</h1></div><div class="content-columns">'
+    for d in data:
+        short = _check_short_option(d["opts"])
+        body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}</div></div>'
+        ans_circle = f'[{d["al"]}]'
+        if short:
+            body += f'<table class="options-table-short"><tr><td>(A) {d["opts"][0]}</td><td>(B) {d["opts"][1]}</td><td rowspan="2" class="answer-col"><span class="answer-circle">{ans_circle}</span></td></tr><tr><td>(C) {d["opts"][2]}</td><td>(D) {d["opts"][3]}</td></tr></table>'
+        else:
+            body += f'<ul class="options-list"><li>(A) {d["opts"][0]}</li><li>(B) {d["opts"][1]}</li><li>(C) {d["opts"][2]}</li><li class="option-with-answer"><span>(D) {d["opts"][3]}</span><span class="answer-circle">{ans_circle}</span></li></ul>'
+        if d['exp']:
+            body += f'<div class="explanation"><span class="explanation-label">ব্যাখ্যা:</span> {d["exp"]}</div>'
+        body += '</div>'
+    body += '</div>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_PRINT_CSS}</head><body>{body}</body></html>'
+
+def _build_print_style2(data, heading):
+    """Style 2: Exam Style - Questions page then separate Answer Table"""
+    body = f'<div class="exam-header"><h1>{heading} - Questions</h1></div><div class="content-columns">'
+    for d in data:
+        short = _check_short_option(d["opts"])
+        body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}</div></div>'
+        if short:
+            body += f'<table class="options-table-short"><tr><td>(A) {d["opts"][0]}</td><td>(B) {d["opts"][1]}</td></tr><tr><td>(C) {d["opts"][2]}</td><td>(D) {d["opts"][3]}</td></tr></table>'
+        else:
+            body += f'<ul class="options-list"><li>(A) {d["opts"][0]}</li><li>(B) {d["opts"][1]}</li><li>(C) {d["opts"][2]}</li><li>(D) {d["opts"][3]}</li></ul>'
+        body += '</div>'
+    body += '</div><div class="page-break"></div><div class="answers-section"><table class="answer-table"><thead><tr><th class="qno-col">Q.No.</th><th class="ans-col">Ans</th><th class="exp-col">Explanation</th></tr></thead><tbody>'
+    for d in data:
+        body += f'<tr><td class="qno-col">{d["n"]}</td><td class="ans-col">{d["al"]}</td><td class="exp-col">{d["exp"] if d["exp"] else "-"}</td></tr>'
+    body += '</tbody></table></div>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_PRINT_CSS}</head><body>{body}</body></html>'
+
+def _build_print_style3(data, heading):
+    """Style 3: Compact Exam - 2-col Questions + Horizontal Answer Key"""
+    body = f'<div class="exam-header"><h1>{heading}</h1></div><div class="content-columns">'
+    for d in data:
+        short = _check_short_option(d["opts"])
+        body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]}.</span><div class="question-text">{d["q"]}</div></div>'
+        if short:
+            body += f'<table class="options-table-short"><tr><td>(a) {d["opts"][0]}</td><td>(b) {d["opts"][1]}</td></tr><tr><td>(c) {d["opts"][2]}</td><td>(d) {d["opts"][3]}</td></tr></table>'
+        else:
+            body += f'<ul class="options-list"><li>(a) {d["opts"][0]}</li><li>(b) {d["opts"][1]}</li><li>(c) {d["opts"][2]}</li><li>(d) {d["opts"][3]}</li></ul>'
+        body += '</div>'
+    body += '</div><div class="answer-key-section"><div class="answer-key-header">সঠিক উত্তর যাচাই কর :)</div><table class="answer-key-table"><thead><tr><th>প্রশ্ন</th>'
+    for d in data:
+        body += f'<th>{d["n"]}</th>'
+    body += '</tr></thead><tbody><tr><th>উত্তর</th>'
+    for d in data:
+        body += f'<td>{d["al"]}</td>'
+    body += '</tr></tbody></table></div>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_PRINT_CSS}</head><body>{body}</body></html>'
+
+PRINT_STYLE_BUILDERS = {
+    "style1": _build_print_style1,
+    "style2": _build_print_style2,
+    "style3": _build_print_style3,
+}
+PRINT_STYLE_NAMES = {
+    "style1": "🖨️ Style 1: Study Material",
+    "style2": "🖨️ Style 2: Exam Style",
+    "style3": "🖨️ Style 3: Compact Exam",
+}
+
+_sheet_cache = {}
+
 async def handle_sheet_command(msg: dict):
     chat_id = msg["chat"]["id"]
     reply = msg.get("reply_to_message")
@@ -3038,26 +3168,61 @@ async def handle_sheet_command(msg: dict):
             return
 
         if loading_id:
-            await edit_msg(chat_id, loading_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n🎨 Sheet PDF বানানো হচ্ছে...")
+            await edit_msg(chat_id, loading_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n🎨 Print Style বেছে নাও:")
 
         title = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
-        html_out = _build_solve_sheet_html(title, 1, mcqs)
-        pdf_bytes = await _html_to_pdf(html_out)
+        cache_key = f"{chat_id}:{loading_id}"
+        _sheet_cache[cache_key] = {"mcqs": mcqs, "title": title}
 
+        buttons = [[{"text": name, "callback_data": f"sheetstyle:{key}:{cache_key}"}]
+                   for key, name in PRINT_STYLE_NAMES.items()]
+        buttons.append([{"text": "📄 Default Style", "callback_data": f"sheetstyle:default:{cache_key}"}])
+
+        if loading_id:
+            await tg_post("editMessageReplyMarkup", {
+                "chat_id": chat_id, "message_id": loading_id,
+                "reply_markup": {"inline_keyboard": buttons}
+            })
+
+    except Exception as e:
+        logger.error(f"[SHEET] Error: {e}")
+        await _safe_error_reply(chat_id, e)
+
+async def handle_sheet_style_callback(callback_query: dict):
+    data = callback_query.get("data", "")
+    chat_id = callback_query["message"]["chat"]["id"]
+    message_id = callback_query["message"]["message_id"]
+    parts = data.split(":", 2)
+    if len(parts) != 3:
+        return
+    _, style_key, cache_key = parts
+    cached = _sheet_cache.get(cache_key)
+    if not cached:
+        await edit_msg(chat_id, message_id, "❌ Session expired, আবার /sheet দাও।")
+        return
+
+    mcqs, title = cached["mcqs"], cached["title"]
+    await edit_msg(chat_id, message_id, "🎨 Sheet PDF বানানো হচ্ছে...")
+
+    try:
+        if style_key == "default":
+            html_out = _build_solve_sheet_html(title, 1, mcqs)
+        else:
+            data_adapted = _adapt_mcqs_for_print(mcqs)
+            html_out = PRINT_STYLE_BUILDERS[style_key](data_adapted, title)
+
+        pdf_bytes = await _html_to_pdf(html_out)
         if not pdf_bytes:
-            if loading_id:
-                await edit_msg(chat_id, loading_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
+            await edit_msg(chat_id, message_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
             return
 
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Sheet"
         await send_document(chat_id, pdf_bytes, f"{safe_title}_sheet.pdf",
             caption=f"📖 Practice Sheet\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP")
-
-        if loading_id:
-            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
-
+        await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+        _sheet_cache.pop(cache_key, None)
     except Exception as e:
-        logger.error(f"[SHEET] Error: {e}")
+        logger.error(f"[SHEET STYLE] Error: {e}")
         await _safe_error_reply(chat_id, e)
 
 # ============================================================
@@ -7312,6 +7477,9 @@ async def handle_callback(query: dict):
     uname = user.get("username") or user.get("first_name", "User")
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
+        if data.startswith("sheetstyle:"):
+            await handle_sheet_style_callback(query)
+            return
         if data.startswith("pdfch_"):
             parts = data.split("_")
             channel = parts[1]
