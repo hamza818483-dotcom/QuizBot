@@ -160,7 +160,7 @@ MUST Return ONLY valid JSON array, no markdown:
 # cutting queue wait roughly in half under 100-concurrent-user load.
 import threading as _threading
 _PDF_CONVERT_LOCK = _threading.Semaphore(2)
-_PDF_MAX_PAGES_PER_CALL = 60
+_PDF_MAX_PAGES_PER_CALL = 20
 
 
 def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
@@ -179,18 +179,28 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                 raise ValueError(
                     f"PDF_RANGE_TOO_LARGE:{first}:{last}:{_PDF_MAX_PAGES_PER_CALL}"
                 )
-            images = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150)
-            page_numbers = list(range(first, last + 1))
+            result = []
+            for p in range(first, last + 1):
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                if imgs:
+                    result.append((p, imgs[0]))
+            logger.info(f"[PDF] Converted {len(result)} pages")
+            return result
         else:
-            images = convert_from_bytes(pdf_bytes, dpi=150,
-                first_page=1, last_page=_PDF_MAX_PAGES_PER_CALL)
-            page_numbers = list(range(1, len(images) + 1))
-            if len(images) == _PDF_MAX_PAGES_PER_CALL:
-                # Don't silently drop remaining pages -- signal caller explicitly
-                # so the user is told to re-request via page_range in chunks.
-                raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
-        logger.info(f"[PDF] Converted {len(images)} pages")
-        return list(zip(page_numbers, images))
+            result = []
+            p = 1
+            while p <= _PDF_MAX_PAGES_PER_CALL:
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                if not imgs:
+                    break
+                result.append((p, imgs[0]))
+                p += 1
+            if p > _PDF_MAX_PAGES_PER_CALL:
+                extra = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                if extra:
+                    raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
+            logger.info(f"[PDF] Converted {len(result)} pages")
+            return result
     except Exception as e:
         logger.error(f"[PDF] Convert error: {e}")
         raise
