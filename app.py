@@ -353,6 +353,34 @@ def _cap_page_cache(cache: dict) -> None:
 PIN_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB)
 PDF_AUTO_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB) — /pdf on|off
 
+# ============================================================
+# /cancel — instantly stop any running activity for this chat (bot stays alive)
+# ============================================================
+ACTIVE_TASKS = {}  # chat_id -> set of asyncio.Task
+CANCEL_FLAGS = {}  # chat_id -> bool, checked by long loops between steps
+
+def register_task(chat_id, task):
+    ACTIVE_TASKS.setdefault(chat_id, set()).add(task)
+    task.add_done_callback(lambda t: ACTIVE_TASKS.get(chat_id, set()).discard(t))
+    return task
+
+def is_cancelled(chat_id):
+    return CANCEL_FLAGS.get(chat_id, False)
+
+def clear_cancel(chat_id):
+    CANCEL_FLAGS[chat_id] = False
+
+async def handle_cancel_command(msg: dict):
+    chat_id = msg["chat"]["id"]
+    CANCEL_FLAGS[chat_id] = True
+    tasks = ACTIVE_TASKS.get(chat_id, set())
+    cancelled_count = 0
+    for t in list(tasks):
+        if not t.done():
+            t.cancel()
+            cancelled_count += 1
+    await send_msg(chat_id, f"🛑 বন্ধ করা হলো। ({cancelled_count} টি চলমান কাজ বাতিল হয়েছে)" if cancelled_count else "🛑 কোনো চলমান কাজ ছিল না, তবে পরবর্তী ধাপে থামানো নিশ্চিত করা হলো।")
+
 # LIVE QUIZ CONFIG
 LIVE_QUIZ_STATE = {}  # channel_id -> live quiz state
 LIVE_TIMERS = {}      # channel_id -> timer task
@@ -3554,6 +3582,8 @@ async def pdf_generate_all_pages(
             _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
 
     for idx, (page_num, img) in enumerate(pages):
+        if is_cancelled(chat_id):
+            break
         page_status[idx]["current"] = True
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
@@ -3992,6 +4022,8 @@ async def process_pdfm_pages(
     first_image_msg_id = None
 
     for idx, (page_num, img) in enumerate(pages):
+        if is_cancelled(chat_id):
+            break
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
             _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
@@ -5021,6 +5053,8 @@ async def qbm_extract_all_pages(
             _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
 
     for idx, (page_num, img) in enumerate(pages):
+        if is_cancelled(chat_id):
+            break
         page_status[idx]["current"] = True
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
@@ -5109,6 +5143,8 @@ async def process_qbm_pages(
     iterable = page_tuples if skip_extract else [(p, img, None) for p, img in pages]
 
     for idx, (page_num, img, precomputed_mcqs) in enumerate(iterable):
+        if is_cancelled(chat_id):
+            break
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
             _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
@@ -7344,6 +7380,7 @@ async def handle_message(msg: dict):
         if arg in ("on", "off"):
             await handle_pdf_autosend_toggle(msg, arg)
             return
+        clear_cancel(chat_id)
         await handle_pdf(msg)
         return
     if text == "/bm":
@@ -7395,6 +7432,7 @@ async def handle_message(msg: dict):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
+        clear_cancel(chat_id)
         await handle_pdfm(msg)
     elif text.startswith("/img"):
         if not is_auth:
@@ -7406,6 +7444,8 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         await handle_txt_command(msg)
+    elif text.startswith("/cancel"):
+        asyncio.create_task(handle_cancel_command(msg))
     elif text.startswith("/sheet"):
         asyncio.create_task(handle_sheet_command(msg))
     elif text.startswith("/qcsv"):
