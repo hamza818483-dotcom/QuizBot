@@ -322,7 +322,7 @@ def crop_explanation_image(img: Image.Image, bbox: list) -> str:
         top = int((y_min / 1000) * h)
         right = int((x_max / 1000) * w)
         bottom = int((y_max / 1000) * h)
-        pad = 8
+        pad = 4
         left = max(0, left - pad)
         top = max(0, top - pad)
         right = min(w, right + pad)
