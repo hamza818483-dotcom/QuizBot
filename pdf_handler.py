@@ -609,9 +609,9 @@ def parse_pdf_command(text: str) -> dict:
             m_match = re.search(r'-m\s+(\S+)', text)
             if m_match:
                 result["topic"] = m_match.group(1)
-        # [N] ব্র্যাকেট: প্রতি পেইজে কতগুলো MCQ বানাতে হবে সেটা স্পষ্টভাবে বোঝায়
-        # (কমান্ডের শেষে থাকা bare সংখ্যার অস্পষ্ট অনুমানের চেয়ে অগ্রাধিকার পাবে)
-        bracket_match = re.search(r'\[\s*(\d+)\s*\]', text)
+        # [.N.] বা [N] ব্র্যাকেট: প্রতি পেইজে কতগুলো MCQ বানাতে হবে সেটা স্পষ্টভাবে
+        # বোঝায় (কমান্ডের শেষে থাকা bare সংখ্যার অস্পষ্ট অনুমানের চেয়ে অগ্রাধিকার পাবে)
+        bracket_match = re.search(r'\[\.?(\d+)\.?\]', text)
         if bracket_match:
             result["mcq_count"] = int(bracket_match.group(1))
         else:
