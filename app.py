@@ -584,9 +584,12 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"language. Never translate — if the source is English, output English; "
         f"if the source is Bengali, output Bengali.\n\n"
 
-        f"For EACH MCQ, also give 'exp_bbox': the bounding box of the exact "
-        f"line/paragraph/table this MCQ was made from, with a few extra lines "
-        f"of margin above and below so the full relevant context is visible. "
+        f"For EACH MCQ, also give 'exp_bbox': a TIGHT bounding box centered exactly "
+        f"on the specific line/paragraph/table this MCQ's answer came from — include "
+        f"ONLY that fact/content with minimal margin (just enough to show the full "
+        f"sentence/row, not neighboring unrelated facts or other MCQs' content). "
+        f"The bbox must be centered on the source text vertically and horizontally, "
+        f"not offset toward unrelated page content. "
         f"Normalize to 0-1000 scale ([x_min,y_min,x_max,y_max], top-left=[0,0], "
         f"bottom-right=[1000,1000]). If unsure, use null.\n\n"
         f"Return STRICT JSON array only, no prose, no markdown fences. Schema:\n"
@@ -3980,6 +3983,7 @@ async def _process_pdf_pages_inner(
                             crop_url = await asyncio.to_thread(crop_explanation_image, img, bbox)
                             if crop_url:
                                 exp = f'<img src="{crop_url}"> {exp}'
+                                mcq["explanation"] = exp
                         except Exception as _crop_e:
                             logger.warning(f"[Poll] crop failed for MCQ {i+1}: {_crop_e}")
                     # Retry logic — poll অবশ্যই যেতে হবে
