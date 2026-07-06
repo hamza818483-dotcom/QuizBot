@@ -3498,15 +3498,14 @@ async def handle_pdf(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Generation শুরু হচ্ছে...")
 
-        # ── MCQ Generation ALWAYS runs first (per /qbm pattern) ──
-        # Channel selection + CSV/With-Without-Image happen only AFTER
-        # generation is fully complete, so the person picks a channel already
-        # knowing exactly how many MCQs were made.
-        generated_pages = await pdf_generate_all_pages(
-            chat_id, pages, topic, mcq_count, file_name, status_msg_id
-        )
-
         if not channel_id:
+            # ── MCQ Generation ALWAYS runs first (per /qbm pattern) ──
+            # Channel selection + CSV/With-Without-Image happen only AFTER
+            # generation is fully complete, so the person picks a channel already
+            # knowing exactly how many MCQs were made.
+            generated_pages = await pdf_generate_all_pages(
+                chat_id, pages, topic, mcq_count, file_name, status_msg_id
+            )
             channels = await db_get_channels()
             if not channels:
                 await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, mcq_count,
@@ -3538,8 +3537,11 @@ async def handle_pdf(msg: dict):
                 reply_markup=kb)
             return
 
-        await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, mcq_count,
-            channel_id, False, file_name, status_msg_id, thread_id=thread_id, skip_generate=True)
+        # ── Channel already known (-c flag) → stream per-page: ──
+        # generate MCQ for a page and send its poll immediately,
+        # instead of waiting for the whole PDF to finish generating.
+        await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count,
+            channel_id, False, file_name, status_msg_id, thread_id=thread_id, skip_generate=False)
     except Exception as e:
         logger.error(f"[PDF] Handle error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
