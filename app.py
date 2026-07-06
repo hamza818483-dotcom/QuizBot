@@ -1643,21 +1643,27 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     loading_id = loading.get("result", {}).get("message_id")
 
     _progress_stop = asyncio.Event()
+    _img_progress = {"done": 0, "total": max(mcq_count or 10, 1)}
 
     async def _progress_ticker():
-        """Elapsed-time based approximate % — real AI-call progress isn't
-        observable mid-call, so this gives the user visible movement instead
-        of a static message. Caps at 90% until actual completion sets 100%."""
-        start = time.time()
+        bars = ["▱▱▱▱▱▱▱▱▱▱","▰▱▱▱▱▱▱▱▱▱","▰▰▱▱▱▱▱▱▱▱","▰▰▰▱▱▱▱▱▱▱","▰▰▰▰▱▱▱▱▱▱",
+                "▰▰▰▰▰▱▱▱▱▱","▰▰▰▰▰▰▱▱▱▱","▰▰▰▰▰▰▰▱▱▱","▰▰▰▰▰▰▰▰▱▱","▰▰▰▰▰▰▰▰▰▱"]
+        smooth_pct = 0.0
         try:
             while not _progress_stop.is_set():
-                await asyncio.sleep(3)
+                await asyncio.sleep(0.5)
                 if _progress_stop.is_set():
                     break
-                elapsed = time.time() - start
-                pct = min(90, int((elapsed / est_secs) * 100))
+                real_pct = (_img_progress["done"] / _img_progress["total"]) * 100
+                target = min(max(real_pct, smooth_pct + 1.5), 95)
+                smooth_pct = min(smooth_pct + max((target - smooth_pct) * 0.25, 0.8), 95)
+                pct = int(smooth_pct)
+                bar_idx = min(int(pct / 10), len(bars) - 1)
                 try:
-                    await edit_msg(chat_id, loading_id, f"⏳ Image থেকে {label}... {pct}%")
+                    await edit_msg(chat_id, loading_id,
+                        f"⏳ Image থেকে {label}...\n"
+                        f"📊 Progress: {bars[bar_idx]} {pct}%\n"
+                        f"✅ তৈরি হয়েছে: {_img_progress['done']} টি MCQ")
                 except Exception:
                     pass
         except asyncio.CancelledError:
