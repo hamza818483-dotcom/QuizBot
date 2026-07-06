@@ -88,6 +88,8 @@ async function init(){
 
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+
+function imgLoadFail(el){ el.outerHTML = '<div class="exp-img-broken" style="font-size:12px;color:#888;margin:4px 0;">🖼️ ছবি লোড হয়নি</div>'; }
 function renderExpWithImg(exp){
   const srcMatch = exp.match(/<img[^>]*\ssrc="([^"]+)"/i);
   const fullMatch = exp.match(/data-full="([^"]*)"/i);
@@ -96,7 +98,7 @@ function renderExpWithImg(exp){
   const rest = esc(exp.replace(imgTagMatch[0], '').trim());
   const thumbSrc = srcMatch[1];
   const fullSrc = (fullMatch && fullMatch[1]) || thumbSrc;
-  return `<img src="${thumbSrc}" class="exp-crop-img" onclick="openImgModal('${fullSrc}')" onerror="this.style.display='none'" style="max-width:100%;border-radius:6px;margin:6px 0;cursor:zoom-in;display:block;">` + rest;
+  return `<img src="${thumbSrc}" class="exp-crop-img" onclick="openImgModal('${fullSrc}')" onerror="imgLoadFail(this)" style="max-width:100%;border-radius:6px;margin:6px 0;cursor:zoom-in;display:block;">` + rest;
 }
 
 function openImgModal(src){
