@@ -267,6 +267,7 @@ const _qs = new URLSearchParams(location.search);
 const CACHE_ID  = _qs.get('id') || '{{CACHE_ID}}';
 const HF_URL    = 'https://atlasquizbotpro.hamza818483.workers.dev';
 const HF_DIRECT = 'https://quizbot-s482.onrender.com';
+const HF_DIRECT2 = 'https://quizbot-zo6x.onrender.com';
 const SEC_PER_Q = 30;
 
 // Direct Supabase fallback config (used if CF Worker fails/times out)
@@ -315,6 +316,14 @@ async function fetchFromWorker() {
 
 async function fetchFromRenderDirect() {
   const r = await fetch(`${HF_DIRECT}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(20000) });
+  const d = await r.json();
+  if (d && d.mcqs && d.mcqs.length > 0) return d;
+  if (d && d.error) throw new Error(d.error);
+  throw new Error('empty');
+}
+
+async function fetchFromRenderDirect2() {
+  const r = await fetch(`${HF_DIRECT2}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(20000) });
   const d = await r.json();
   if (d && d.mcqs && d.mcqs.length > 0) return d;
   if (d && d.error) throw new Error(d.error);
@@ -376,6 +385,12 @@ async function fetchExamData() {
     if (d) { try { localStorage.setItem('atlas_exam_cache_'+CACHE_ID, JSON.stringify(d)); } catch(e){} }
     return d;
   } catch(e) { console.warn('[exam] render direct failed:', e.message); }
+
+  try {
+    const d = await fetchFromRenderDirect2();
+    if (d) { try { localStorage.setItem('atlas_exam_cache_'+CACHE_ID, JSON.stringify(d)); } catch(e){} }
+    return d;
+  } catch(e) { console.warn('[exam] render direct2 failed:', e.message); }
 
   // Worker unreachable/down — direct client-side fallback, both Supabase accounts, both tables
   const attempts = [
