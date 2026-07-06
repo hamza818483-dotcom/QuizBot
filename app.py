@@ -3106,7 +3106,7 @@ def _adapt_mcqs_for_print(mcqs: list) -> list:
 
 _PRINT_CSS = """<style>
 @page{size:A4 portrait;margin:10mm 10mm}
-body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:12pt;line-height:1.2;color:#000;margin:0;padding:10px;width:210mm;max-width:210mm}
+body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:13pt;line-height:1.2;color:#000;margin:0;padding:10px;width:210mm;max-width:210mm}
 .exam-header{text-align:center;border:2px solid #4169E1;background-color:#F0F8FF;border-radius:6px;padding:10px;margin-bottom:15px}
 .exam-header h1{color:#191970;margin:0;font-size:15pt;font-weight:bold}
 .content-columns{column-count:2;column-gap:15px;column-fill:balance;column-rule:1px solid #ddd}
@@ -3724,20 +3724,22 @@ async def process_pdf_pages(
                 if end_r.get("ok"):
                     await db_update_cache(cache_id, {"end_msg_id": end_r["result"]["message_id"]})
 
-                # /pdf on hole ending message er por auto Sheet PDF channel e jabe
+                # /pdf on hole ending message er por auto Style1+Style2 Sheet PDF channel e jabe
                 if await should_autosend_pdf(channel_id):
                     try:
-                        pdf_html = _build_solve_sheet_html(topic, page_num, mcqs)
-                        pdf_bytes = await _html_to_pdf(pdf_html)
-                        if pdf_bytes:
-                            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
-                            await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_sheet.pdf",
-                                caption=f"📖 Practice Sheet\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
-                                message_thread_id=thread_id, reply_to_message_id=first_image_msg_id or image_msg_id)
+                        data_adapted = _adapt_mcqs_for_print(mcqs)
+                        reply_target = first_image_msg_id or image_msg_id
+                        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                        for style_key in ("style1", "style2"):
+                            html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
+                            pdf_bytes = await _html_to_pdf(html_s)
+                            if pdf_bytes:
+                                style_name = PRINT_STYLE_NAMES[style_key]
+                                await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
+                                    caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
+                                    message_thread_id=thread_id, reply_to_message_id=reply_target)
                     except Exception as e:
                         logger.error(f"[PDF-AUTOSEND] Error: {e}")
-
-                summary_pages.append({"page": page_num, "first_poll": first_poll_link, "mcq_count": len(mcqs)})
 
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
@@ -4090,16 +4092,20 @@ async def process_pdfm_pages(
                     end_msg_id = end_r["result"]["message_id"]
                     await db_update_cache(cache_id, {"end_msg_id": end_msg_id})
 
-                # /pdf on hole ending message er por auto Sheet PDF channel e jabe
+                # /pdf on hole ending message er por auto Style1+Style2 Sheet PDF channel e jabe
                 if await should_autosend_pdf(channel_id):
                     try:
-                        pdf_html = _build_solve_sheet_html(topic, page_num, mcqs)
-                        pdf_bytes = await _html_to_pdf(pdf_html)
-                        if pdf_bytes:
-                            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
-                            await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_sheet.pdf",
-                                caption=f"📖 Practice Sheet\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
-                                message_thread_id=thread_id, reply_to_message_id=first_image_msg_id or image_msg_id)
+                        data_adapted = _adapt_mcqs_for_print(mcqs)
+                        reply_target = first_image_msg_id or image_msg_id
+                        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                        for style_key in ("style1", "style2"):
+                            html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
+                            pdf_bytes = await _html_to_pdf(html_s)
+                            if pdf_bytes:
+                                style_name = PRINT_STYLE_NAMES[style_key]
+                                await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
+                                    caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
+                                    message_thread_id=thread_id, reply_to_message_id=reply_target)
                     except Exception as e:
                         logger.error(f"[PDF-AUTOSEND] Error: {e}")
 
