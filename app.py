@@ -3669,7 +3669,8 @@ async def process_pdf_pages(
 
         try:
             if not skip_generate:
-                mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+                mcqs = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
+                mcqs = _cap_mcq_options(mcqs, 4)
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
@@ -3712,6 +3713,8 @@ async def process_pdf_pages(
                 poll_links = []
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
+                    mcq, = await _repair_thin_explanations([mcq], img, topic)
+                    mcq, = await _attach_explanation_images_if_missing([mcq], img)
                     opts = mcq.get("options", [])[:4]
                     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
                     q_text = mcq["question"]
