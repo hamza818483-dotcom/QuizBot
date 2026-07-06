@@ -3144,6 +3144,9 @@ _sheet_cache = {}
 async def handle_sheet_command(msg: dict):
     chat_id = msg["chat"]["id"]
     reply = msg.get("reply_to_message")
+    text = msg.get("text", "")
+    parts = text.split(None, 1)
+    custom_title = parts[1].strip() if len(parts) > 1 else None
 
     if not reply or not reply.get("document"):
         await send_msg(chat_id, "❌ CSV ফাইলে reply করে /sheet দাও!")
@@ -3170,7 +3173,7 @@ async def handle_sheet_command(msg: dict):
         if loading_id:
             await edit_msg(chat_id, loading_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n🎨 Print Style বেছে নাও:")
 
-        title = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
+        title = custom_title or (file_name.rsplit(".", 1)[0] if "." in file_name else file_name)
         cache_key = f"{chat_id}:{loading_id}"
         _sheet_cache[cache_key] = {"mcqs": mcqs, "title": title}
 
