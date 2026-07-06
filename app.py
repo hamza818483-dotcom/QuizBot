@@ -1942,8 +1942,11 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
 # ============================================================
 async def handle_txt_command(msg: dict):
     """
-    Text message-এ reply করে /txt দিলে MCQ CSV + channel list দেবে
+    Text message-এ reply করে /txt দিলে সাথে সাথে MCQ generate + CSV তৈরি হয়ে যাবে,
+    এরপর channel select করার অপশন আসবে (poll পাঠানোর জন্য)।
     """
+    import io, csv as csv_mod
+
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     reply = msg.get("reply_to_message")
@@ -1954,44 +1957,7 @@ async def handle_txt_command(msg: dict):
 
     text_content = reply["text"]
 
-    sb.table("quiz_sessions").upsert({
-        "key": f"txt_cmd_{uid}",
-        "data": json.dumps({"text": text_content[:5000]}),
-        "updated_at": int(time.time())
-    }).execute()
-
-    channels = await db_get_channels()
-    if not channels:
-        await send_msg(chat_id, "❌ কোনো channel নেই! /channel দিয়ে add করো।")
-        return
-
-    kb = {"inline_keyboard": []}
-    for ch in channels:
-        ch_id = ch.get("channel_id", "")
-        ch_name = ch.get("channel_name", ch_id)
-        kb["inline_keyboard"].append([{
-            "text": f"📢 {ch_name}",
-            "callback_data": f"txtchannel_{ch_id}_{uid}"
-        }])
-    kb["inline_keyboard"].append([{
-        "text": "📄 CSV File Only",
-        "callback_data": f"txtchannel_csv_{uid}"
-    }])
-    await send_msg(chat_id,
-        f"📝 Text পাওয়া গেছে! ({len(text_content)} chars)\nChannel select করো:",
-        reply_markup=kb
-    )
-
-async def process_txt_to_poll(text_content: str, channel_id: str,
-                               chat_id: int, uid: int, uname: str):
-    """Text থেকে MCQ generate করে CSV + Poll পাঠাও"""
-    import io, csv as csv_mod
-
-    settings = await db_get_settings()
-    tag = settings.get("tag", "")
-    exp_footer = settings.get("exp_footer", "")
-
-    loading = await send_msg(chat_id, "🔄 Text থেকে MCQ তৈরি হচ্ছে...\n📊 Progress: ▱▱▱▱▱▱▱ 0%")
+    loading = await send_msg(chat_id, "🔄 Text থেকে MCQ তৈরি হচ্ছে...\n⏱️ আনুমানিক সময়: 7 সেকেন্ড\n📊 Progress: ▱▱▱▱▱▱▱ 0%\n✅ তৈরি হয়েছে: 0 টি MCQ")
     loading_id = loading.get("result", {}).get("message_id")
 
     try:
@@ -1999,20 +1965,32 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
         line_count = len([l for l in text_content.splitlines() if l.strip()])
         auto_count = line_count  # soft hint only; prompt enforces quality-driven count
 
+        progress = {"done": 0, "total": max(auto_count, 1)}
+
+        def _on_mcq_done(n: int):
+            progress["done"] = n
+
         async def _progress_updater():
-            bars = ["▰▱▱▱▱▱▱","▰▰▰▱▱▱▱","▰▰▰▰▰▱▱","▰▰▰▰▰▰▰"]
-            pcts = [15, 40, 70, 95]
-            for bar, pct in zip(bars, pcts):
-                await asyncio.sleep(2.5)
+            bars = ["▱▱▱▱▱▱▱","▰▱▱▱▱▱▱","▰▰▱▱▱▱▱","▰▰▰▱▱▱▱","▰▰▰▰▱▱▱","▰▰▰▰▰▱▱","▰▰▰▰▰▰▱"]
+            while True:
+                await asyncio.sleep(1.0)
+                pct = min(int((progress["done"] / progress["total"]) * 100), 95)
+                bar_idx = min(int(pct / 15), len(bars) - 1)
                 if loading_id:
                     try:
                         await edit_msg(chat_id, loading_id,
-                            f"🔄 Text থেকে MCQ তৈরি হচ্ছে...\n📊 Progress: {bar} {pct}%")
+                            f"🔄 Text থেকে MCQ তৈরি হচ্ছে...\n⏱️ আনুমানিক সময়: 7 সেকেন্ড\n"
+                            f"📊 Progress: {bars[bar_idx]} {pct}%\n✅ তৈরি হয়েছে: {progress['done']} টি MCQ")
                     except Exception:
                         pass
 
         progress_task = asyncio.create_task(_progress_updater())
-        mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count)
+        try:
+            mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count,
+                                                 on_progress=_on_mcq_done)
+        except TypeError:
+            # pdf_handler.generate_mcq_from_text doesn't support on_progress yet
+            mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count)
         progress_task.cancel()
 
         if not mcqs:
@@ -2036,42 +2014,85 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
                              opts[2] if len(opts)>2 else "",
                              opts[3] if len(opts)>3 else "",
                              ans_num, m.get("explanation",""), "1", "1"])
-        await send_document(chat_id, buf.getvalue().encode("utf-8"),
+        csv_bytes = buf.getvalue().encode("utf-8")
+
+        await send_document(chat_id, csv_bytes,
             "ATLAS_mcq.csv", caption=f"📄 {len(mcqs)} MCQ CSV", mime_type="text/csv")
 
-        if channel_id == "csv":
-            if loading_id:
-                await edit_msg(chat_id, loading_id, f"✅ CSV done! {len(mcqs)} MCQ")
+        # MCQ result cache করে রাখা হচ্ছে channel select করার সময় ব্যবহারের জন্য
+        sb.table("quiz_sessions").upsert({
+            "key": f"txt_cmd_{uid}",
+            "data": json.dumps({"mcqs": mcqs}),
+            "updated_at": int(time.time())
+        }).execute()
+
+        channels = await db_get_channels()
+        if not channels:
+            await send_msg(chat_id, "✅ CSV তৈরি হয়ে গেছে। কোনো channel নেই তাই poll পাঠানো যাবে না। /channel দিয়ে add করো।")
             return
 
-        sent, failed = 0, 0
-        for i, mcq in enumerate(mcqs):
-            opts = [o[:100] for o in mcq.get("options", [])[:4]]
-            ans_idx = {"A":0,"B":1,"C":2,"D":3}.get(mcq.get("answer","A"), 0)
-            q_text = mcq["question"][:295]
-            if tag:
-                q_text = f"{tag}\n\n{q_text}"
-            q_text = q_text[:300]
-            exp = mcq.get("explanation","")
-            if exp_footer:
-                exp = f"{exp}\n{exp_footer}"
-            poll_r = await send_poll(channel_id, q_text, opts, ans_idx, explanation=exp)
-            if poll_r and poll_r.get("ok"):
-                sent += 1
-            else:
-                failed += 1
-                logger.error(f"[TXT] sendPoll failed q{i+1}: {poll_r.get('description') if poll_r else 'no response'}")
-            await asyncio.sleep(0.3)
-
-        if loading_id:
-            status = f"✅ {sent} MCQ poll পাঠানো হয়েছে!"
-            if failed:
-                status += f"\n⚠️ {failed}টা পাঠাতে ব্যর্থ (channel এ bot admin আছে কিনা চেক করো)।"
-            await edit_msg(chat_id, loading_id, status)
+        kb = {"inline_keyboard": []}
+        for ch in channels:
+            ch_id = ch.get("channel_id", "")
+            ch_name = ch.get("channel_name", ch_id)
+            kb["inline_keyboard"].append([{
+                "text": f"📢 {ch_name}",
+                "callback_data": f"txtchannel_{ch_id}_{uid}"
+            }])
+        await send_msg(chat_id,
+            f"✅ {len(mcqs)} টি MCQ তৈরি ও CSV পাঠানো হয়েছে!\nPoll পাঠাতে channel select করো:",
+            reply_markup=kb
+        )
 
     except Exception as e:
         logger.error(f"[TXT] Error: {e}")
         await _safe_error_reply(chat_id, e)
+
+async def process_txt_to_poll(channel_id: str, chat_id: int, uid: int, uname: str):
+    """Cache করা MCQ থেকে সরাসরি poll পাঠাও (আবার generate করবে না)"""
+    row = sb.table("quiz_sessions").select("data").eq("key", f"txt_cmd_{uid}").execute()
+    if not row.data:
+        await send_msg(chat_id, "❌ Session expired!")
+        return
+    txt_data = json.loads(row.data[0]["data"])
+    mcqs = txt_data.get("mcqs", [])
+    if not mcqs:
+        await send_msg(chat_id, "❌ MCQ data পাওয়া যায়নি!")
+        return
+
+    settings = await db_get_settings()
+    tag = settings.get("tag", "")
+    exp_footer = settings.get("exp_footer", "")
+
+    status_msg = await send_msg(chat_id, f"📤 {len(mcqs)} টি poll পাঠানো হচ্ছে...")
+    status_id = status_msg.get("result", {}).get("message_id")
+
+    sent, failed = 0, 0
+    for i, mcq in enumerate(mcqs):
+        opts = [o[:100] for o in mcq.get("options", [])[:4]]
+        ans_idx = {"A":0,"B":1,"C":2,"D":3}.get(mcq.get("answer","A"), 0)
+        q_text = mcq["question"][:295]
+        if tag:
+            q_text = f"{tag}\n\n{q_text}"
+        q_text = q_text[:300]
+        exp = mcq.get("explanation","")
+        if exp_footer:
+            exp = f"{exp}\n{exp_footer}"
+        poll_r = await send_poll(channel_id, q_text, opts, ans_idx, explanation=exp)
+        if poll_r and poll_r.get("ok"):
+            sent += 1
+        else:
+            failed += 1
+            logger.error(f"[TXT] sendPoll failed q{i+1}: {poll_r.get('description') if poll_r else 'no response'}")
+        await asyncio.sleep(0.3)
+
+    status = f"✅ {sent} MCQ poll পাঠানো হয়েছে!"
+    if failed:
+        status += f"\n⚠️ {failed}টা পাঠাতে ব্যর্থ (channel এ bot admin আছে কিনা চেক করো)।"
+    if status_id:
+        await edit_msg(chat_id, status_id, status)
+    else:
+        await send_msg(chat_id, status)
 
 # ============================================================
 # STEP 7 (ATLAS_CSV_GUIDE) — /csv + /csvS CORRECT IMPLEMENTATION
@@ -8015,14 +8036,7 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            row = sb.table("quiz_sessions").select("data").eq("key", f"txt_cmd_{uid}").execute()
-            if not row.data:
-                await send_msg(chat_id, "❌ Session expired!")
-                return
-            txt_data = json.loads(row.data[0]["data"])
-            asyncio.create_task(process_txt_to_poll(
-                txt_data["text"], channel, chat_id, uid, uname
-            ))
+            asyncio.create_task(process_txt_to_poll(channel, chat_id, uid, uname))
 
         elif data.startswith("csvact_"):
             # csvact_{action}_{cache_id}_{uid}
