@@ -3112,14 +3112,14 @@ body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:1
 .content-columns{column-count:2;column-gap:15px;column-fill:balance;column-rule:1px solid #ddd}
 .question{margin-bottom:7px;break-inside:avoid;page-break-inside:avoid}
 .question-header{margin-bottom:4px;display:flex;align-items:flex-start}
-.question-num{font-weight:bold;color:#1E64B7;font-size:14pt;margin-right:5px;white-space:nowrap;flex-shrink:0}
-.question-text{flex:1;line-height:1.6;font-size:15pt;color:#000;word-wrap:break-word}
-.options-table-short{width:100%;border-collapse:collapse;margin:6px 0 6px 8px;table-layout:fixed}
-.options-table-short td{border:none;padding:3px 8px 3px 0;vertical-align:top;font-size:15pt;color:#000;width:40%}
-.options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;font-weight:600;font-size:14pt;color:#000;padding-left:10px}
-.answer-circle{font-weight:300;font-size:14pt;line-height:1}
-.options-list{margin:6px 0 6px 8px;padding:0;list-style:none}
-.options-list li{margin:2px 0;font-size:15pt;color:#000;word-wrap:break-word}
+.question-num{font-weight:bold;color:#1E64B7;font-size:12pt;margin-right:5px;white-space:nowrap;flex-shrink:0}
+.question-text{flex:1;line-height:1.4;font-size:13pt;color:#000;word-wrap:break-word}
+.options-table-short{width:100%;border-collapse:collapse;margin:4px 0 4px 8px;table-layout:fixed}
+.options-table-short td{border:none;padding:2px 8px 2px 0;vertical-align:top;font-size:13pt;color:#000;width:40%}
+.options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;font-weight:600;font-size:12pt;color:#000;padding-left:10px}
+.answer-circle{font-weight:300;font-size:12pt;line-height:1}
+.options-list{margin:4px 0 4px 8px;padding:0;list-style:none}
+.options-list li{margin:1px 0;font-size:13pt;color:#000;word-wrap:break-word}
 .option-with-answer{display:flex;justify-content:space-between;align-items:flex-start}
 .explanation{margin:4px 0 2px 8px;padding:4px;color:#000;background-color:rgba(66,153,225,0.1);border-left:3px solid #4299e1;font-size:12pt;font-style:italic;break-inside:avoid}
 .explanation-label{font-weight:bold;color:#2c5282}
@@ -3129,7 +3129,8 @@ body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:1
 .answer-table th,.answer-table td{border:1px solid #333;padding:6px;text-align:left;vertical-align:top;word-wrap:break-word}
 .answer-table th{background-color:#f5f5f5;font-weight:bold;text-align:center;font-size:13pt}
 .qno-col{width:8%;text-align:center}.ans-col{width:8%;text-align:center;font-weight:bold;font-size:14pt}.exp-col{width:84%;font-size:12pt}
-.answer-key-section{margin-top:20px;page-break-inside:avoid}
+.print-page{display:flex;flex-direction:column;min-height:277mm}
+.answer-key-section{margin-top:auto;page-break-inside:avoid}
 .answer-key-header{text-align:center;font-weight:bold;font-size:13pt;margin-bottom:10px;color:#000}
 .answer-key-table{width:100%;border-collapse:collapse;border:1px solid #333;margin:0 auto}
 .answer-key-table th,.answer-key-table td{border:1px solid #333;padding:6px;text-align:center;font-size:11pt}
@@ -3177,12 +3178,12 @@ def _build_print_style2(data, heading):
     body += '</tbody></table></div>'
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_PRINT_CSS}</head><body>{body}</body></html>'
 
-def _build_print_style3(data, heading, per_page=8):
+def _build_print_style3(data, heading, per_page=10):
     """Style 3: Compact Exam - paginated, each page's answer key directly below that page's questions"""
     pages_html = ""
     for start in range(0, len(data), per_page):
         chunk = data[start:start + per_page]
-        body = f'<div class="exam-header"><h1>{heading}</h1></div><div class="content-columns" style="column-count:2;break-inside:avoid;">'
+        body = f'<div class="print-page"><div class="exam-header"><h1>{heading}</h1></div><div class="content-columns" style="column-count:2;break-inside:avoid;">'
         for d in chunk:
             short = _check_short_option(d["opts"])
             body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]}.</span><div class="question-text">{d["q"]}</div></div>'
@@ -3197,7 +3198,7 @@ def _build_print_style3(data, heading, per_page=8):
         body += '</tr></thead><tbody><tr><th>উত্তর</th>'
         for d in chunk:
             body += f'<td>{d["al"]}</td>'
-        body += '</tr></tbody></table></div>'
+        body += '</tr></tbody></table></div></div>'
         if start + per_page < len(data):
             body += '<div class="page-break"></div>'
         pages_html += body
