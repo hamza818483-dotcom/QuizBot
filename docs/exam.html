@@ -794,14 +794,16 @@ function doSubmit(){
 }
 
 function renderExpWithImg(exp){
-  const imgMatch = exp.match(/<img\s+src="([^"]+)"[^>]*?(?:data-full="([^"]*)")?[^>]*>/i);
+  const srcMatch = exp.match(/<img[^>]*\ssrc="([^"]+)"/i);
+  const fullMatch = exp.match(/data-full="([^"]*)"/i);
+  const imgTagMatch = exp.match(/<img\b[^>]*>/i);
   let rest = exp;
   let imgHtml = '';
-  if(imgMatch){
-    rest = exp.replace(imgMatch[0], '').trim();
-    const thumbSrc = imgMatch[1];
-    const fullSrc = imgMatch[2] || imgMatch[1];
-    imgHtml = `<img src="${thumbSrc}" class="exp-crop-img" onclick="openImgModal('${fullSrc}')" style="max-width:100%;border-radius:6px;margin:6px 0;cursor:zoom-in;display:block;">`;
+  if(srcMatch && imgTagMatch){
+    rest = exp.replace(imgTagMatch[0], '').trim();
+    const thumbSrc = srcMatch[1];
+    const fullSrc = (fullMatch && fullMatch[1]) || thumbSrc;
+    imgHtml = `<img src="${thumbSrc}" class="exp-crop-img" onclick="openImgModal('${fullSrc}')" onerror="this.style.display='none'" style="max-width:100%;border-radius:6px;margin:6px 0;cursor:zoom-in;display:block;">`;
   }
   return imgHtml + rest.replace(/\n/g,'<br>');
 }
