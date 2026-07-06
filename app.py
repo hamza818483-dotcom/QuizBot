@@ -38,7 +38,8 @@ from pdf_handler import (
     pdf_to_images, pdf_to_images_safe, image_to_bytes, generate_mcq_from_image,
     generate_new_mcq, parse_pdf_command, parse_page_range,
     fmt_page, gen_session_id, get_random_ayat, get_motivation,
-    key_rotator, crop_explanation_image
+    key_rotator, crop_explanation_image, get_pdf_page_count,
+    _PDF_MAX_PAGES_PER_CALL
 )
 
 from core import (
@@ -372,6 +373,10 @@ def clear_cancel(chat_id):
 
 async def handle_cancel_command(msg: dict):
     chat_id = msg["chat"]["id"]
+    uid = msg.get("from", {}).get("id")
+    if not await db_is_owner_or_admin(uid):
+        await send_msg(chat_id, "❌ এই কমান্ড শুধু Admin/Owner ব্যবহার করতে পারবে।")
+        return
     CANCEL_FLAGS[chat_id] = True
     tasks = ACTIVE_TASKS.get(chat_id, set())
     cancelled_count = 0
@@ -379,7 +384,7 @@ async def handle_cancel_command(msg: dict):
         if not t.done():
             t.cancel()
             cancelled_count += 1
-    await send_msg(chat_id, f"🛑 বন্ধ করা হলো। ({cancelled_count} টি চলমান কাজ বাতিল হয়েছে)" if cancelled_count else "🛑 কোনো চলমান কাজ ছিল না, তবে পরবর্তী ধাপে থামানো নিশ্চিত করা হলো।")
+    await send_msg(chat_id, f"🛑 বন্ধ করা হলো।\nথামবে: PDF/Image MCQ generation ও Poll posting (চলমান page-by-page কাজ)।\nথামবে না: /rapid, /collect, /merge, Live Quiz — এগুলোর নিজস্ব cancel বাটন/কমান্ড আছে।")
 
 # LIVE QUIZ CONFIG
 LIVE_QUIZ_STATE = {}  # channel_id -> live quiz state
@@ -1147,7 +1152,7 @@ async def db_get_pdf_autosend_setting(chat_id) -> bool:
             return r.data[0]["value"] == "on"
     except:
         pass
-    return False
+    return True
 
 async def db_set_pdf_autosend_setting(chat_id, enabled: bool):
     try:
@@ -1375,7 +1380,7 @@ async def handle_remove(msg: dict):
 # ============================================================
 async def handle_tagQ(msg: dict):
     chat_id = msg["chat"]["id"]
-    text = msg.get("text", "").replace("/tagQ", "").strip()
+    text = re.sub(r'(?i)^/tagq', '', msg.get("text", "")).strip()
     if text:
         sb.table("quiz_settings").upsert({"id": 1, "tag": text}).execute()
         await send_msg(chat_id, f"✅ Tag set:\n{text}")
@@ -1385,7 +1390,7 @@ async def handle_tagQ(msg: dict):
 
 async def handle_expQ(msg: dict):
     chat_id = msg["chat"]["id"]
-    text = msg.get("text", "").replace("/expQ", "").strip()
+    text = re.sub(r'(?i)^/expq', '', msg.get("text", "")).strip()
     if text:
         sb.table("quiz_settings").upsert({"id": 1, "exp_footer": text}).execute()
         await send_msg(chat_id, f"✅ Footer set:\n{text}")
@@ -1890,8 +1895,9 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         # not repeated here to avoid sending it twice.
 
         end_text = (
-            f"🎯Topic: {topic}\n"
-            f"🚀MCQ: {len(mcqs)}\n"
+            f"🚀Topic: {topic}\n"
+            f"🌟Page No: N/A\n"
+            f"✅MCQ: {len(mcqs)}\n"
         )
         if poll_links:
             end_text += f"🔗First Poll Link:\n{poll_links[0]}"
@@ -1941,8 +1947,11 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
 # ============================================================
 async def handle_txt_command(msg: dict):
     """
-    Text message-এ reply করে /txt দিলে MCQ CSV + channel list দেবে
+    Text message-এ reply করে /txt দিলে সাথে সাথে MCQ generate + CSV তৈরি হয়ে যাবে,
+    এরপর channel select করার অপশন আসবে (poll পাঠানোর জন্য)।
     """
+    import io, csv as csv_mod
+
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     reply = msg.get("reply_to_message")
@@ -1953,53 +1962,55 @@ async def handle_txt_command(msg: dict):
 
     text_content = reply["text"]
 
-    sb.table("quiz_sessions").upsert({
-        "key": f"txt_cmd_{uid}",
-        "data": json.dumps({"text": text_content[:5000]}),
-        "updated_at": int(time.time())
-    }).execute()
-
-    channels = await db_get_channels()
-    if not channels:
-        await send_msg(chat_id, "❌ কোনো channel নেই! /channel দিয়ে add করো।")
-        return
-
-    kb = {"inline_keyboard": []}
-    for ch in channels:
-        ch_id = ch.get("channel_id", "")
-        ch_name = ch.get("channel_name", ch_id)
-        kb["inline_keyboard"].append([{
-            "text": f"📢 {ch_name}",
-            "callback_data": f"txtchannel_{ch_id}_{uid}"
-        }])
-    kb["inline_keyboard"].append([{
-        "text": "📄 CSV File Only",
-        "callback_data": f"txtchannel_csv_{uid}"
-    }])
-    await send_msg(chat_id,
-        f"📝 Text পাওয়া গেছে! ({len(text_content)} chars)\nChannel select করো:",
-        reply_markup=kb
-    )
-
-async def process_txt_to_poll(text_content: str, channel_id: str,
-                               chat_id: int, uid: int, uname: str):
-    """Text থেকে MCQ generate করে CSV + Poll পাঠাও"""
-    import io, csv as csv_mod
-
-    settings = await db_get_settings()
-    tag = settings.get("tag", "")
-    exp_footer = settings.get("exp_footer", "")
-
-    loading = await send_msg(chat_id, "⏳ Text থেকে MCQ তৈরি হচ্ছে...")
+    loading = await send_msg(chat_id, "🔄 Text থেকে MCQ তৈরি হচ্ছে...\n⏱️ আনুমানিক সময়: 7 সেকেন্ড\n📊 Progress: ▱▱▱▱▱▱▱ 0%\n✅ তৈরি হয়েছে: 0 টি MCQ")
     loading_id = loading.get("result", {}).get("message_id")
 
     try:
         from pdf_handler import generate_mcq_from_text
-        mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=15)
+        line_count = len([l for l in text_content.splitlines() if l.strip()])
+        auto_count = line_count  # soft hint only; prompt enforces quality-driven count
+
+        progress = {"done": 0, "total": max(auto_count, 1)}
+
+        def _on_mcq_done(n: int):
+            progress["done"] = n
+
+        async def _progress_updater():
+            bars = ["▱▱▱▱▱▱▱▱▱▱","▰▱▱▱▱▱▱▱▱▱","▰▰▱▱▱▱▱▱▱▱","▰▰▰▱▱▱▱▱▱▱","▰▰▰▰▱▱▱▱▱▱",
+                    "▰▰▰▰▰▱▱▱▱▱","▰▰▰▰▰▰▱▱▱▱","▰▰▰▰▰▰▰▱▱▱","▰▰▰▰▰▰▰▰▱▱","▰▰▰▰▰▰▰▰▰▱"]
+            smooth_pct = 0.0
+            while True:
+                await asyncio.sleep(0.4)
+                real_pct = (progress["done"] / progress["total"]) * 100
+                target = min(max(real_pct, smooth_pct + 2), 95)
+                smooth_pct = min(smooth_pct + max((target - smooth_pct) * 0.3, 1.0), 95)
+                pct = int(smooth_pct)
+                bar_idx = min(int(pct / 10), len(bars) - 1)
+                if loading_id:
+                    try:
+                        await edit_msg(chat_id, loading_id,
+                            f"🔄 Text থেকে MCQ তৈরি হচ্ছে...\n⏱️ আনুমানিক সময়: 7 সেকেন্ড\n"
+                            f"📊 Progress: {bars[bar_idx]} {pct}%\n✅ তৈরি হয়েছে: {progress['done']} টি MCQ")
+                    except Exception:
+                        pass
+
+        progress_task = asyncio.create_task(_progress_updater())
+        try:
+            mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count,
+                                                 on_progress=_on_mcq_done)
+        except TypeError:
+            # pdf_handler.generate_mcq_from_text doesn't support on_progress yet
+            mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count)
+        progress_task.cancel()
 
         if not mcqs:
-            await send_msg(chat_id, "❌ MCQ generate হয়নি!")
+            if loading_id:
+                await edit_msg(chat_id, loading_id, "❌ MCQ generate হয়নি!")
             return
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"✅ তৈরি হয়েছে: {len(mcqs)} টি MCQ\n📊 Progress: ▰▰▰▰▰▰▰ 100%")
 
         buf = io.StringIO()
         writer = csv_mod.writer(buf)
@@ -2013,34 +2024,115 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
                              opts[2] if len(opts)>2 else "",
                              opts[3] if len(opts)>3 else "",
                              ans_num, m.get("explanation",""), "1", "1"])
-        await send_document(chat_id, buf.getvalue().encode("utf-8"),
-            "ATLAS_mcq.csv", caption=f"📄 {len(mcqs)} MCQ CSV", mime_type="text/csv")
+        csv_bytes = buf.getvalue().encode("utf-8")
 
-        if channel_id == "csv":
-            if loading_id:
-                await edit_msg(chat_id, loading_id, f"✅ CSV done! {len(mcqs)} MCQ")
+        caption = f"📄 {len(mcqs)} MCQ CSV"
+        try:
+            from quiz import create_quiz_from_mcqs
+            bot_quiz_id = await create_quiz_from_mcqs(mcqs, "ATLAS MCQ", uid)
+            bot_info = await tg_post("getMe", {})
+            bot_un = bot_info.get("result", {}).get("username", "")
+
+            from poll_extract import save_quiz_to_d1
+            polls = [{"question": m["question"], "options": m.get("options", ["","","",""]),
+                       "correct_idx": {"A":0,"B":1,"C":2,"D":3}.get(m.get("answer","A"), 0),
+                       "explanation": m.get("explanation","")}
+                      for m in mcqs]
+            web_quiz_id = await save_quiz_to_d1(polls, "ATLAS MCQ", uid)
+            web_url = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={web_quiz_id}"
+
+            caption += (
+                f"\n\n🌐 Web Quiz: {web_url}"
+                f"\n🤖 Bot Quiz: https://t.me/{bot_un}?start={bot_quiz_id}"
+            )
+
+        except Exception as e:
+            logger.error(f"[TXT] link gen error: {e}")
+
+        await send_document(chat_id, csv_bytes,
+            "ATLAS_mcq.csv", caption=caption, mime_type="text/csv")
+
+        # MCQ result cache করে রাখা হচ্ছে channel select করার সময় ব্যবহারের জন্য
+        sb.table("quiz_sessions").upsert({
+            "key": f"txt_cmd_{uid}",
+            "data": json.dumps({"mcqs": mcqs}),
+            "updated_at": int(time.time())
+        }).execute()
+
+        channels = await db_get_channels()
+        if not channels:
+            await send_msg(chat_id, "✅ CSV তৈরি হয়ে গেছে। কোনো channel নেই তাই poll পাঠানো যাবে না। /channel দিয়ে add করো।")
             return
 
-        for i, mcq in enumerate(mcqs):
-            opts = [o[:100] for o in mcq.get("options", [])[:4]]
-            ans_idx = {"A":0,"B":1,"C":2,"D":3}.get(mcq.get("answer","A"), 0)
-            q_text = mcq["question"][:295]
-            if tag:
-                q_text = f"{tag}\n\n{q_text}"
-            q_text = q_text[:300]
-            exp = mcq.get("explanation","")
-            if exp_footer:
-                exp = f"{exp}\n{exp_footer}"
-            await send_poll(channel_id, q_text, opts, ans_idx, explanation=exp)
-            await asyncio.sleep(0.3)
-
-        if loading_id:
-            await edit_msg(chat_id, loading_id,
-                f"✅ {len(mcqs)} MCQ poll পাঠানো হয়েছে!")
+        kb = {"inline_keyboard": []}
+        for ch in channels:
+            ch_id = ch.get("channel_id", "")
+            ch_name = ch.get("channel_name", ch_id)
+            kb["inline_keyboard"].append([{
+                "text": f"📢 {ch_name}",
+                "callback_data": f"txtchannel_{ch_id}_{uid}"
+            }])
+        await send_msg(chat_id,
+            f"✅ {len(mcqs)} টি MCQ তৈরি ও CSV পাঠানো হয়েছে!\nPoll পাঠাতে channel select করো:",
+            reply_markup=kb
+        )
 
     except Exception as e:
         logger.error(f"[TXT] Error: {e}")
         await _safe_error_reply(chat_id, e)
+
+async def process_txt_to_poll(channel_id: str, chat_id: int, uid: int, uname: str):
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    try:
+        return await _process_txt_to_poll_inner(channel_id, chat_id, uid, uname)
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+async def _process_txt_to_poll_inner(channel_id: str, chat_id: int, uid: int, uname: str):
+    """Cache করা MCQ থেকে সরাসরি poll পাঠাও (আবার generate করবে না)"""
+    row = sb.table("quiz_sessions").select("data").eq("key", f"txt_cmd_{uid}").execute()
+    if not row.data:
+        await send_msg(chat_id, "❌ Session expired!")
+        return
+    txt_data = json.loads(row.data[0]["data"])
+    mcqs = txt_data.get("mcqs", [])
+    if not mcqs:
+        await send_msg(chat_id, "❌ MCQ data পাওয়া যায়নি!")
+        return
+
+    settings = await db_get_settings()
+    tag = settings.get("tag", "")
+    exp_footer = settings.get("exp_footer", "")
+
+    status_msg = await send_msg(chat_id, f"📤 {len(mcqs)} টি poll পাঠানো হচ্ছে...")
+    status_id = status_msg.get("result", {}).get("message_id")
+
+    sent, failed = 0, 0
+    for i, mcq in enumerate(mcqs):
+        opts = [o[:100] for o in mcq.get("options", [])[:4]]
+        ans_idx = {"A":0,"B":1,"C":2,"D":3}.get(mcq.get("answer","A"), 0)
+        q_text = mcq["question"][:295]
+        if tag:
+            q_text = f"{tag}\n\n{q_text}"
+        q_text = q_text[:300]
+        exp = mcq.get("explanation","")
+        if exp_footer:
+            exp = f"{exp}\n{exp_footer}"
+        poll_r = await send_poll(channel_id, q_text, opts, ans_idx, explanation=exp)
+        if poll_r and poll_r.get("ok"):
+            sent += 1
+        else:
+            failed += 1
+            logger.error(f"[TXT] sendPoll failed q{i+1}: {poll_r.get('description') if poll_r else 'no response'}")
+        await asyncio.sleep(1.0)
+
+    status = f"✅ {sent} MCQ poll পাঠানো হয়েছে!"
+    if failed:
+        status += f"\n⚠️ {failed}টা পাঠাতে ব্যর্থ (channel এ bot admin আছে কিনা চেক করো)।"
+    if status_id:
+        await edit_msg(chat_id, status_id, status)
+    else:
+        await send_msg(chat_id, status)
 
 # ============================================================
 # STEP 7 (ATLAS_CSV_GUIDE) — /csv + /csvS CORRECT IMPLEMENTATION
@@ -2322,6 +2414,119 @@ async def handle_csvs_command(msg: dict):
 # SHARED CSV PARSER
 # ============================================================
 def _parse_csv_bytes(csv_bytes: bytes) -> list:
+    """CSV bytes থেকে MCQ list বানাও."""
+    import io, csv as csv_mod_local
+    try:
+        content = csv_bytes.decode("utf-8-sig")
+        reader = csv_mod_local.DictReader(io.StringIO(content))
+        mcqs = []
+        for row in reader:
+            q = row.get("questions") or row.get("question", "")
+            if not q:
+                continue
+            opts_raw = [
+                row.get("option1", ""), row.get("option2", ""),
+                row.get("option3", ""), row.get("option4", "")
+            ]
+            opts = [o.strip() for o in opts_raw if o.strip()]
+            if len(opts) < 2:
+                continue
+            ans_raw = str(row.get("answer", "1")).strip().upper()
+            ans_map = {"1": "A", "2": "B", "3": "C", "4": "D", "A": "A", "B": "B", "C": "C", "D": "D"}
+            ans = ans_map.get(ans_raw, "A")
+            mcqs.append({
+                "question": q.strip(), "options": opts, "answer": ans,
+                "explanation": row.get("explanation", "").strip()
+            })
+        return mcqs
+    except Exception as e:
+        logger.error(f"[CSV Parse] Error: {e}")
+        return []
+
+def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
+    """MCQ list → CSV bytes, matching _parse_csv_bytes column layout."""
+    import io, csv as csv_mod_local
+    buf = io.StringIO()
+    w = csv_mod_local.writer(buf)
+    w.writerow(["questions", "option1", "option2", "option3", "option4", "answer", "explanation"])
+    ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+    for m in mcqs:
+        opts = (m.get("options", []) + ["", "", "", ""])[:4]
+        w.writerow([
+            m.get("question", ""), opts[0], opts[1], opts[2], opts[3],
+            ans_map.get(m.get("answer", "A"), "1"), m.get("explanation", "")
+        ])
+    return buf.getvalue().encode("utf-8-sig")
+
+async def handle_split_command(msg: dict):
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    try:
+        return await _handle_split_command_inner(msg)
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+async def _handle_split_command_inner(msg: dict):
+    """/split <chunk_size> — reply to a CSV file, splits it into multiple
+    smaller CSV files of chunk_size MCQs each."""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+    reply = msg.get("reply_to_message")
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id, "❌ CSV ফাইলে reply করে <code>/split 20</code> দাও")
+        return
+    parts = text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await send_msg(chat_id, "❌ সংখ্যা দাও! যেমন: <code>/split 20</code>")
+        return
+    chunk_size = int(parts[1])
+    if chunk_size < 1:
+        await send_msg(chat_id, "❌ সংখ্যা ১ বা তার বেশি হতে হবে!")
+        return
+
+    status_r = await send_msg(chat_id, "⏳ ফাইল ডাউনলোড হচ্ছে...")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    file_id = reply["document"]["file_id"]
+    file_name = reply["document"].get("file_name", "file.csv")
+    try:
+        csv_bytes = await download_tg_file(file_id)
+        mcqs = _parse_csv_bytes(csv_bytes)
+    except Exception as e:
+        logger.error(f"[Split] error: {e}", exc_info=True)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
+        return
+    if not mcqs:
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, "❌ ফাইলে কোনো MCQ পাওয়া যায়নি!")
+        return
+
+    total = len(mcqs)
+    total_parts = (total + chunk_size - 1) // chunk_size
+    if status_msg_id:
+        await edit_msg(chat_id, status_msg_id, f"⏳ {total}টি MCQ → {total_parts}টি ফাইলে ভাগ হচ্ছে...")
+
+    base_name = re.sub(r'\.(csv|json)$', '', file_name, flags=re.I)
+    try:
+        for i in range(total_parts):
+            chunk = mcqs[i * chunk_size:(i + 1) * chunk_size]
+            part_bytes = _mcqs_to_csv_bytes(chunk)
+            part_name = f"{base_name}_part{i+1:02d}.csv"
+            r = await send_document(chat_id, part_bytes, part_name,
+                caption=f"📄 Part-{i+1:02d} | 📊 {len(chunk)}টি MCQ")
+            if not r.get("ok"):
+                logger.error(f"[Split] send_document failed: {r}")
+            await asyncio.sleep(0.5)
+    except Exception as e:
+        logger.error(f"[Split] send loop error: {e}", exc_info=True)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
+        return
+
+    if status_msg_id:
+        await edit_msg(chat_id, status_msg_id, f"✅ সম্পন্ন! {total}টি MCQ → {total_parts}টি ফাইল")
+
+
     """
     CSV bytes থেকে MCQ list বানাও।
     Reference: parse_csv_to_mcqs() from services.py
@@ -2905,7 +3110,7 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
 
         ws_url = None
         for _ in range(30):
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(1.0)
             try:
                 async with _httpx.AsyncClient(timeout=2) as client:
                     r = await client.get(f"http://127.0.0.1:{debug_port}/json")
@@ -3486,6 +3691,28 @@ async def handle_pdf(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ Download complete!\n📄 File: {file_name}\n[██████████ 100%]\n⏳ PDF → Images converting...")
 
+        # ── Auto-chunking: user didn't specify a page range and PDF is bigger
+        # than the RAM-safe per-call cap → process it as sequential batches
+        # automatically instead of erroring out and asking the user to split it.
+        if not page_range:
+            total_pages = await asyncio.to_thread(get_pdf_page_count, pdf_bytes)
+            if total_pages > _PDF_MAX_PAGES_PER_CALL:
+                for batch_start in range(1, total_pages + 1, _PDF_MAX_PAGES_PER_CALL):
+                    batch_end = min(batch_start + _PDF_MAX_PAGES_PER_CALL - 1, total_pages)
+                    batch_range = f"{batch_start}-{batch_end}"
+                    if status_msg_id:
+                        await edit_msg(chat_id, status_msg_id,
+                            f"⏳ Batch {batch_start}-{batch_end}/{total_pages} processing...")
+                    ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, batch_range)
+                    if not ok:
+                        await send_msg(chat_id, pages)
+                        continue
+                    if not pages:
+                        continue
+                    await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count,
+                        channel_id, False, file_name, None, thread_id=thread_id, skip_generate=False)
+                return
+
         ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
         if not ok:
             await send_msg(chat_id, pages)
@@ -3498,15 +3725,14 @@ async def handle_pdf(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Generation শুরু হচ্ছে...")
 
-        # ── MCQ Generation ALWAYS runs first (per /qbm pattern) ──
-        # Channel selection + CSV/With-Without-Image happen only AFTER
-        # generation is fully complete, so the person picks a channel already
-        # knowing exactly how many MCQs were made.
-        generated_pages = await pdf_generate_all_pages(
-            chat_id, pages, topic, mcq_count, file_name, status_msg_id
-        )
-
         if not channel_id:
+            # ── MCQ Generation ALWAYS runs first (per /qbm pattern) ──
+            # Channel selection + CSV/With-Without-Image happen only AFTER
+            # generation is fully complete, so the person picks a channel already
+            # knowing exactly how many MCQs were made.
+            generated_pages = await pdf_generate_all_pages(
+                chat_id, pages, topic, mcq_count, file_name, status_msg_id
+            )
             channels = await db_get_channels()
             if not channels:
                 await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, mcq_count,
@@ -3538,8 +3764,11 @@ async def handle_pdf(msg: dict):
                 reply_markup=kb)
             return
 
-        await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, mcq_count,
-            channel_id, False, file_name, status_msg_id, thread_id=thread_id, skip_generate=True)
+        # ── Channel already known (-c flag) → stream per-page: ──
+        # generate MCQ for a page and send its poll immediately,
+        # instead of waiting for the whole PDF to finish generating.
+        await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count,
+            channel_id, False, file_name, status_msg_id, thread_id=thread_id, skip_generate=False)
     except Exception as e:
         logger.error(f"[PDF] Handle error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
@@ -3630,6 +3859,26 @@ async def process_pdf_pages(
     with_image: bool = True,
     skip_generate: bool = False
 ):
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    try:
+        return await _process_pdf_pages_inner(
+            chat_id, uid, uname, pages, topic, mcq_count,
+            channel_id, csv_only, file_name, status_msg_id,
+            thread_id, with_image, skip_generate
+        )
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+async def _process_pdf_pages_inner(
+    chat_id: int, uid: int, uname: str,
+    pages: list, topic: str, mcq_count: int,
+    channel_id: str, csv_only: bool,
+    file_name: str = "document.pdf",
+    status_msg_id: int = None,
+    thread_id: int = None,
+    with_image: bool = True,
+    skip_generate: bool = False
+):
     settings = await db_get_settings()
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
@@ -3667,7 +3916,8 @@ async def process_pdf_pages(
 
         try:
             if not skip_generate:
-                mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+                mcqs = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
+                mcqs = _cap_mcq_options(mcqs, 4)
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
@@ -3711,6 +3961,8 @@ async def process_pdf_pages(
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
                   try:
+                    mcq, = await _repair_thin_explanations([mcq], img, topic)
+                    mcq, = await _attach_explanation_images_if_missing([mcq], img)
                     opts = mcq.get("options", [])[:4]
                     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
                     q_text = mcq["question"]
@@ -3751,7 +4003,7 @@ async def process_pdf_pages(
                             first_poll_link = f"https://t.me/{str(channel_id).lstrip('@')}/{msg_id}"
                         poll_links.append(first_poll_link)
                     total_polls += 1
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(1.0)
                   except Exception as _mcq_e:
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
@@ -3765,7 +4017,7 @@ async def process_pdf_pages(
 
                 end_data = {
                     "chat_id": channel_id,
-                    "text": f"🚀🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n🔗First Poll: {first_poll_link}",
+                    "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "📝 Quiz Solve", "url": quiz_url}],
                         [{"text": "🔄 Poll Again", "url": poll_url}],
@@ -4132,15 +4384,15 @@ async def process_pdfm_pages(
                         )
                         poll_links.append(first_poll_link)
                     total_polls += 1
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(1.0)
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs,
                     poll_links, image_file_id, image_msg_id, channel_id)
 
                 end_text = (
-                    f"🎯Topic: {topic}\n"
+                    f"🚀Topic: {topic}\n"
                     f"🌟Page No: {fmt_page(page_num)}\n"
-                    f"🚀MCQ: {len(mcqs)}\n"
+                    f"✅MCQ: {len(mcqs)}\n"
                     f"🔗First Poll Link:\n{first_poll_link}"
                 )
                 end_data = {
@@ -5269,12 +5521,12 @@ async def process_qbm_pages(
                             else f"https://t.me/{cid.lstrip('@')}/{pmid}"
                         )
                     total_polls += 1
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(1.0)
 
                 end_text = (
-                    f"📋Topic: {topic}\n"
+                    f"🚀Topic: {topic}\n"
                     f"🌟Page No: {fmt_page(page_num)}\n"
-                    f"🚀MCQ: {len(mcqs)}\n"
+                    f"✅MCQ: {len(mcqs)}\n"
                     f"🔗First Poll Link:\n{first_poll_link}"
                 )
                 end_data = {
@@ -7428,9 +7680,9 @@ async def handle_message(msg: dict):
         await handle_permit(msg)
     elif text.startswith("/remove"):
         await handle_remove(msg)
-    elif text.startswith("/tagQ"):
+    elif text.lower().startswith("/tagq"):
         await handle_tagQ(msg)
-    elif text.startswith("/expQ"):
+    elif text.lower().startswith("/expq"):
         await handle_expQ(msg)
     elif text.startswith("/channel") or text == "/channelist":
         await handle_channel(msg)
@@ -7483,6 +7735,11 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         asyncio.create_task(handle_qpdf_command(msg))
+    elif text.startswith("/split"):
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        asyncio.create_task(handle_split_command(msg))
     elif text.startswith("/csvS"):
         # /csvS অবশ্যই /csv এর আগে check করতে হবে
         if not is_auth:
@@ -7861,14 +8118,7 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            row = sb.table("quiz_sessions").select("data").eq("key", f"txt_cmd_{uid}").execute()
-            if not row.data:
-                await send_msg(chat_id, "❌ Session expired!")
-                return
-            txt_data = json.loads(row.data[0]["data"])
-            asyncio.create_task(process_txt_to_poll(
-                txt_data["text"], channel, chat_id, uid, uname
-            ))
+            asyncio.create_task(process_txt_to_poll(channel, chat_id, uid, uname))
 
         elif data.startswith("csvact_"):
             # csvact_{action}_{cache_id}_{uid}
@@ -7928,7 +8178,7 @@ async def handle_callback(query: dict):
                                "explanation": q.get("explanation","")}
                               for q in mcqs_row["mcq_data"]]
                     quiz_id = await save_quiz_to_d1(polls, topic_cb, uid)
-                    web_url = f"https://atlasquizbotpro.hamza818483.workers.dev/quiz/{quiz_id}"
+                    web_url = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={quiz_id}"
                     await send_msg(chat_id,
                         f"🌐 <b>Web Exam Link:</b>\n{web_url}",
                         parse_mode="HTML"
@@ -8764,6 +9014,8 @@ async def _memory_cleanup_task() -> None:
         await asyncio.sleep(1800)
 
 
+_active_jobs = {"count": 0}
+
 async def _ram_guard_task() -> None:
     """Proactive RSS watchdog for 512MB Render instances: checks own process
     RSS every 60s. On free tier, hitting the OS memory limit means Render
@@ -8786,10 +9038,18 @@ async def _ram_guard_task() -> None:
     while True:
         try:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
-            if rss_mb >= threshold_mb:
-                logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> clean self-restart")
+            hard_cap_mb = int(limit_mb * 0.95)
+            if rss_mb >= hard_cap_mb:
+                logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= hard cap {hard_cap_mb}MB -> forced restart (job or not)")
                 await asyncio.sleep(1)
                 os._exit(0)
+            if rss_mb >= threshold_mb:
+                if _active_jobs["count"] > 0:
+                    logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= threshold but {_active_jobs['count']} job(s) active -> deferring restart")
+                else:
+                    logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= {threshold_mb}MB threshold -> clean self-restart")
+                    await asyncio.sleep(1)
+                    os._exit(0)
             elif rss_mb >= threshold_mb * 0.9:
                 logger.info(f"[RAMGuard] RSS {rss_mb:.0f}MB approaching threshold ({threshold_mb}MB)")
         except Exception as e:

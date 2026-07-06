@@ -99,7 +99,7 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 -অপশনে সঠিক উত্তর অবশ্যই একটিই থাকবে
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position (A, B, C, or D) — vary them naturally across questions.
-💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
+💥ব্যাখ্যা (STRICT — MUST FOLLOW): শুধু সঠিক উত্তর কেন সঠিক তা বললেই হবে না — উত্তর + বাকি ৩টি ভুল অপশন সম্পর্কিত অতিরিক্ত তথ্য মিলিয়ে মোট ৪-৫ লাইনের একটি সম্পূর্ণ তথ্যবহুল ব্যাখ্যা লিখতে হবে। এই তথ্য অবশ্যই source image-এর মধ্যেই থাকা কনটেন্ট থেকে নিতে হবে (image-এ যা নেই তা বানিয়ে লেখা যাবে না)। প্রতিটি অপশন নিয়ে সংক্ষেপে বলবে কেনো সেটি সঠিক/ভুল, যাতে পুরো প্রশ্নের বিষয়টি সম্পর্কে একটি সম্পূর্ণ ধারণা পাওয়া যায়। ভাষা source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)। STRICTLY NISHIDDHO: "টেক্সট অনুসারে", "টপিক অনুসারে", "ছবিতে দেখা যাচ্ছে", "উপরের তথ্য অনুযায়ী", "উক্ত অংশে উল্লেখ আছে" — এমন কোনো source-reference কথা explanation-এ লেখা যাবে না, সরাসরি fact বলবে।
 💥exp_bbox: যদি ব্যাখ্যার প্রমাণ সরাসরি image-এর কোনো নির্দিষ্ট অংশে (প্যারাগ্রাফ/লাইন/ছক) visible থাকে, সেই অংশের bounding box দাও [x_min,y_min,x_max,y_max] হিসেবে, image-এর প্রস্থ/উচ্চতার 0-1000 scale-এ normalize করে। প্রমাণ visible না থাকলে বা নিশ্চিত না হলে null দাও।
 
 Topic: {topic}
@@ -139,7 +139,7 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 -অপশনে সঠিক উত্তর একটিই
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position — vary them naturally so answers are spread across A, B, C, D positions.
-💥ব্যাখ্যা: max 200 chars, source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)
+💥ব্যাখ্যা (STRICT — MUST FOLLOW): শুধু সঠিক উত্তর কেন সঠিক তা বললেই হবে না — উত্তর + বাকি ৩টি ভুল অপশন সম্পর্কিত অতিরিক্ত তথ্য মিলিয়ে মোট ৪-৫ লাইনের একটি সম্পূর্ণ তথ্যবহুল ব্যাখ্যা লিখতে হবে। এই তথ্য অবশ্যই source image-এর মধ্যেই থাকা কনটেন্ট থেকে নিতে হবে (image-এ যা নেই তা বানিয়ে লেখা যাবে না)। প্রতিটি অপশন নিয়ে সংক্ষেপে বলবে কেনো সেটি সঠিক/ভুল, যাতে পুরো প্রশ্নের বিষয়টি সম্পর্কে একটি সম্পূর্ণ ধারণা পাওয়া যায়। ভাষা source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)। STRICTLY NISHIDDHO: "টেক্সট অনুসারে", "টপিক অনুসারে", "ছবিতে দেখা যাচ্ছে", "উপরের তথ্য অনুযায়ী", "উক্ত অংশে উল্লেখ আছে" — এমন কোনো source-reference কথা explanation-এ লেখা যাবে না, সরাসরি fact বলবে।
 💥exp_bbox: যদি ব্যাখ্যার প্রমাণ সরাসরি image-এর কোনো নির্দিষ্ট অংশে (প্যারাগ্রাফ/লাইন/ছক) visible থাকে, সেই অংশের bounding box দাও [x_min,y_min,x_max,y_max] হিসেবে, image-এর প্রস্থ/উচ্চতার 0-1000 scale-এ normalize করে। প্রমাণ visible না থাকলে বা নিশ্চিত না হলে null দাও।
 
 Topic: {topic}
@@ -160,7 +160,7 @@ MUST Return ONLY valid JSON array, no markdown:
 # cutting queue wait roughly in half under 100-concurrent-user load.
 import threading as _threading
 _PDF_CONVERT_LOCK = _threading.Semaphore(2)
-_PDF_MAX_PAGES_PER_CALL = 60
+_PDF_MAX_PAGES_PER_CALL = 40
 
 
 def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
@@ -179,24 +179,43 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                 raise ValueError(
                     f"PDF_RANGE_TOO_LARGE:{first}:{last}:{_PDF_MAX_PAGES_PER_CALL}"
                 )
-            images = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150)
-            page_numbers = list(range(first, last + 1))
+            result = []
+            for p in range(first, last + 1):
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                if imgs:
+                    result.append((p, imgs[0]))
+            logger.info(f"[PDF] Converted {len(result)} pages")
+            return result
         else:
-            images = convert_from_bytes(pdf_bytes, dpi=150,
-                first_page=1, last_page=_PDF_MAX_PAGES_PER_CALL)
-            page_numbers = list(range(1, len(images) + 1))
-            if len(images) == _PDF_MAX_PAGES_PER_CALL:
-                # Don't silently drop remaining pages -- signal caller explicitly
-                # so the user is told to re-request via page_range in chunks.
-                raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
-        logger.info(f"[PDF] Converted {len(images)} pages")
-        return list(zip(page_numbers, images))
+            result = []
+            p = 1
+            while p <= _PDF_MAX_PAGES_PER_CALL:
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                if not imgs:
+                    break
+                result.append((p, imgs[0]))
+                p += 1
+            if p > _PDF_MAX_PAGES_PER_CALL:
+                extra = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                if extra:
+                    raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
+            logger.info(f"[PDF] Converted {len(result)} pages")
+            return result
     except Exception as e:
         logger.error(f"[PDF] Convert error: {e}")
         raise
     finally:
         _PDF_CONVERT_LOCK.release()
 
+
+def get_pdf_page_count(pdf_bytes: bytes) -> int:
+    """Lightweight page count (no rasterization, minimal RAM) — used for auto-chunking."""
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(BytesIO(pdf_bytes)).pages)
+    except Exception as e:
+        logger.warning(f"[PDF] page count failed: {e}")
+        return 0
 
 def pdf_to_images_safe(pdf_bytes: bytes, page_range: str = None):
     """Wrapper for pdf_to_images() that turns the RAM-safety exceptions into
@@ -467,14 +486,24 @@ async def generate_mcq_from_text(text: str, topic: str = "MCQ", count: int = 15)
     """Text থেকে MCQ generate করে — same SDK + multi-key + fallback as generate_mcq_from_image"""
     import json as _json
 
-    prompt = f"""নিচের text থেকে {count}টি MCQ বানাও।
+    prompt = f"""তুমি একজন expert MCQ writer। নিচের text-টি লাইন-বাই-লাইন সম্পূর্ণ পড়ো এবং QUALITY বজায় রেখে MCQ বানাও। সংখ্যা কোনো target না — শর্ত মেনে যতগুলো ভালো MCQ বানানো সম্ভব ঠিক ততগুলোই বানাবে, বেশি দেখানোর জন্য জোর করে কম মানের MCQ বানাবে না।
 
-RULES:
-- প্রশ্ন text এর ভাষায় (বাংলা হলে বাংলা, ইংরেজি হলে ইংরেজি)
-- ৪টি option, একটি সঠিক
-- Answer A/B/C/D — MUST vary across questions, NEVER all same
-- Explanation max 200 chars
-- কোনো section heading, "Card 1"/"Card 2", page/chapter label বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না — প্রতিটি option অবশ্যই actual factual content হতে হবে
+MANDATORY RULES (কোনোটাই skip করা যাবে না):
+0. STRICT SOURCE-ONLY RULE: শুধুমাত্র নিচের TEXT-এ যা লেখা আছে সেখান থেকেই MCQ বানাতে হবে। Text-এ নেই এমন কোনো তথ্য, fact, নাম, সংখ্যা নিজে থেকে বানানো/অনুমান করা সম্পূর্ণ নিষেধ। প্রশ্ন ও option ঘুরিয়ে-পেঁচিয়ে (rephrase করে) লেখা যাবে, কিন্তু অর্থ/তথ্য অবশ্যই মূল text থেকেই আসতে হবে — বাইরের কোনো knowledge ব্যবহার করা যাবে না।
+1. MANDATORY: Text-এর প্রতিটি লাইন/তথ্যপূর্ণ vakko থেকে অবশ্যই কমপক্ষে একটি MCQ বানাতে হবে — কোনো লাইন বাদ দেওয়া যাবে না (শুধু pure heading/tag/navigation line ছাড়া, যেগুলোতে কোনো factual তথ্যই নেই)। কোনো লাইন সংক্ষিপ্ত/সাধারণ মনে হলেও সেটা থেকে rephrase/context ব্যবহার করে MCQ বানানোর সর্বোচ্চ চেষ্টা করবে।
+2. এরপর কয়েকটা লাইনের তথ্য মিক্স/combine করে additional MCQ বানাবে — যেখানে প্রশ্ন বা option একাধিক লাইনের তথ্য একসাথে ব্যবহার করে (যেমন দুইটা ভিন্ন লাইনের ফ্যাক্ট মিলিয়ে comparison/relation ভিত্তিক প্রশ্ন)।
+3. এছাড়াও পুরো text থেকে overall বুঝে কিছু brainstorming MCQ বানাবে — একাধিক তথ্য যুক্তি দিয়ে সংযুক্ত করে গভীর প্রশ্ন (এখনও strictly text-এর তথ্যের ভিত্তিতেই, বাইরের knowledge না)।
+3a. এদের মধ্যে কিছু MCQ ইচ্ছাকৃতভাবে "কঠিন/verification-type" হতে হবে — যেগুলো শুধু sample/superficial পড়লে উত্তর দেওয়া যাবে না, বরং পুরো text মনোযোগ দিয়ে ভালোভাবে পড়লেই সঠিক উত্তর দেওয়া সম্ভব হবে (যেমন: দুইটা কাছাকাছি/similar তথ্যের মধ্যে সূক্ষ্ম পার্থক্য ধরিয়ে দেওয়া, ব্যতিক্রম/exception ধরনের তথ্য, একাধিক শর্ত একসাথে মেলানো, বা easily-confused নাম/সংখ্যার মধ্যে সঠিকটা বাছাই)। এগুলো দিয়ে বোঝা যাবে ইউজার সত্যিই মনোযোগ দিয়ে পুরো text পড়েছে কি না।
+4. Explanation-এ সঠিক answer confirm করার পাশাপাশি সংশ্লিষ্ট তথ্যের ঠিক আশেপাশের (আগের/পরের লাইনের) অতিরিক্ত related info যোগ করতে হবে — শুধু answer repeat করা চলবে না।
+4a. STRICTLY NISHIDDHO (explanation-এ): "টেক্সট অনুসারে", "টপিক অনুসারে", "টেক্সটে লিখা আছে", "উপরের তথ্য অনুযায়ী", "প্রদত্ত অংশে বলা হয়েছে", "উক্ত অনুচ্ছেদে উল্লেখ আছে" বা এই জাতীয় কোনো source/reference-উল্লেখকারী কথা explanation-এ কখনোই লেখা যাবে না। Explanation সরাসরি fact-টুকু বলবে, কোনো source-এর দিকে ইঙ্গিত করবে না।
+5. সঠিক answer (A/B/C/D) প্রতিটি প্রশ্নে ভিন্ন ভিন্ন option-এ থাকতে হবে — কখনোই sequential pattern বা একই option বারবার না।
+6. যত ধরনের সম্ভব MCQ variety বানাও — direct fact, definition, cause-effect, comparison, fill-in-the-blank style, "কোনটি সঠিক নয়" ধরনের প্রশ্ন — সব ধরনের প্রশ্ন mix করে বানাও, শুধু এক প্যাটার্নে আটকে থেকো না।
+7. প্রশ্ন text এর ভাষায় (বাংলা হলে বাংলা, ইংরেজি হলে ইংরেজি)
+8. ৪টি option, একটি সঠিক (text থেকে সরাসরি), বাকি ৩টি distractor অবশ্যই text-এর অন্য অংশের প্রকৃত তথ্য/নাম/সংখ্যা থেকে নেওয়া (অন্য লাইনের সত্যিকার তথ্য এখানে ভুল option হিসেবে ব্যবহার করো) — সম্পূর্ণ কল্পনাপ্রসূত/বানানো distractor চলবে না
+9. Explanation max 200 chars
+10. কোনো section heading, "Card 1"/"Card 2", page/chapter label বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না — প্রতিটি option অবশ্যই actual factual content হতে হবে
+11. STRICTLY NISHIDDHO: প্রশ্নে বা option-এ কখনোই এই ধরনের কথা লেখা যাবে না — "টপিকের নাম কি", "এখানে কি বলা হয়েছে", "প্রদত্ত বর্ণনায় আছে যে", "পাঠ্যবস্তুটির টপিক", "উক্ত অনুচ্ছেদে/টেক্সটে উল্লেখিত", "...কী হিসেবে উল্লেখ করা হয়েছে", "...হিসেবে উল্লেখ করা হয়েছে", বা এই জাতীয় কোনো meta/source-reference কথা। প্রশ্ন সরাসরি বিষয়বস্তু নিয়ে হবে, যেন টেক্সট পড়ে না জানলেও প্রশ্নটা independent একটা knowledge question মনে হয়।
+12. Text-এ থাকা যেকোনো #tag, @mention, © copyright line, channel/page/credit name, promotional line — এসব থেকে কোনো MCQ বানানো যাবে না এবং এসব কখনোই question বা option এর content হিসেবে ব্যবহার করা যাবে না।
 
 TEXT:
 {text[:4000]}
