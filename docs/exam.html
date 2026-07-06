@@ -268,6 +268,12 @@ const CACHE_ID  = _qs.get('id') || '{{CACHE_ID}}';
 const HF_URL    = 'https://atlasquizbotpro.hamza818483.workers.dev';
 const SEC_PER_Q = 30;
 
+// Direct Supabase fallback config (used if CF Worker fails/times out)
+const SB_URL  = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+const SB_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
+const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
+
 // USER ID
 let USER_ID   = Number(_qs.get('uid') || '{{USER_ID}}') || 0;
 let USER_NAME = decodeURIComponent(_qs.get('name') || 'Student');
@@ -298,12 +304,78 @@ let isNewGen = false;
 let totalSec = 0, totalLeft = 0, totalTimer = null;
 
 // ── INIT ──
+async function fetchFromWorker() {
+  const r = await fetch(`${HF_URL}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(20000) });
+  const d = await r.json();
+  if (d && d.mcqs && d.mcqs.length > 0) return d;
+  if (d && d.error) throw new Error(d.error);
+  throw new Error('empty');
+}
+
+function pdfCacheRowToExam(c) {
+  return {
+    cache_id: CACHE_ID, topic: c.topic || 'Quiz', page: c.page_number || 1,
+    mcqs: c.mcq_data || [], tag: '', exp_footer: '',
+    channel_id: c.channel_id || '', image_msg_id: c.image_msg_id || null,
+    end_msg_id: c.end_msg_id || null, image_file_id: c.image_file_id || null,
+    is_new_gen: !!c.is_new_gen,
+  };
+}
+
+function backupRowToExam(b) {
+  const ANS = ["A","B","C","D","E"];
+  return {
+    cache_id: CACHE_ID, topic: b.name || 'Quiz', page: 1,
+    mcqs: (b.questions || []).map(q => ({
+      question: q.question || '', options: q.options || [],
+      answer: ANS[q.answer_index ?? 0] || 'A', explanation: q.explanation || '',
+    })),
+    tag: '', exp_footer: '', channel_id: '', image_msg_id: null, end_msg_id: null, is_new_gen: false,
+  };
+}
+
+async function fetchFromSupabaseDirect(url, key) {
+  const r = await fetch(
+    `${url}/rest/v1/pdf_mcq_cache?id=eq.${CACHE_ID}&select=*`,
+    { headers: { apikey: key, Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10000) }
+  );
+  const data = await r.json();
+  if (data && data[0]) return pdfCacheRowToExam(data[0]);
+  throw new Error('not found in pdf_mcq_cache');
+}
+
+async function fetchFromSupabaseBackup(url, key) {
+  const r = await fetch(
+    `${url}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`,
+    { headers: { apikey: key, Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10000) }
+  );
+  const data = await r.json();
+  if (data && data[0]) return backupRowToExam(data[0]);
+  throw new Error('not found in quiz_backups');
+}
+
+async function fetchExamData() {
+  // 1) CF Worker (full 6-layer server-side fallback)
+  try { return await fetchFromWorker(); } catch(e) { console.warn('[exam] worker failed:', e.message); }
+
+  // Worker unreachable/down — direct client-side fallback, both Supabase accounts, both tables
+  const attempts = [
+    () => fetchFromSupabaseDirect(SB_URL, SB_KEY),
+    () => fetchFromSupabaseBackup(SB_URL, SB_KEY),
+    () => fetchFromSupabaseDirect(SB2_URL, SB2_KEY),
+    () => fetchFromSupabaseBackup(SB2_URL, SB2_KEY),
+  ];
+  for (const attempt of attempts) {
+    try { return await attempt(); } catch(e) { console.warn('[exam] fallback failed:', e.message); }
+  }
+  return null;
+}
+
 async function init() {
   setMode('Loading');
   try {
-    const r = await fetch(`${HF_URL}/api/exam/${CACHE_ID}`);
-    const d = await r.json();
-    if (d.error) { showErr('❌ Exam পাওয়া যায়নি!'); return; }
+    const d = await fetchExamData();
+    if (!d) { showErr('❌ Exam পাওয়া যায়নি!'); return; }
     examData   = d;
     questions  = d.mcqs || [];
     origQs     = [...questions];
