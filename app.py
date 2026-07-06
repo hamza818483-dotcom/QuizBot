@@ -2117,7 +2117,7 @@ async def process_txt_to_poll(channel_id: str, chat_id: int, uid: int, uname: st
         else:
             failed += 1
             logger.error(f"[TXT] sendPoll failed q{i+1}: {poll_r.get('description') if poll_r else 'no response'}")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(1.0)
 
     status = f"✅ {sent} MCQ poll পাঠানো হয়েছে!"
     if failed:
@@ -3096,7 +3096,7 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
 
         ws_url = None
         for _ in range(30):
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(1.0)
             try:
                 async with _httpx.AsyncClient(timeout=2) as client:
                     r = await client.get(f"http://127.0.0.1:{debug_port}/json")
@@ -3965,7 +3965,7 @@ async def process_pdf_pages(
                             first_poll_link = f"https://t.me/{str(channel_id).lstrip('@')}/{msg_id}"
                         poll_links.append(first_poll_link)
                     total_polls += 1
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(1.0)
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
 
@@ -4335,7 +4335,7 @@ async def process_pdfm_pages(
                         )
                         poll_links.append(first_poll_link)
                     total_polls += 1
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(1.0)
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs,
                     poll_links, image_file_id, image_msg_id, channel_id)
@@ -5472,7 +5472,7 @@ async def process_qbm_pages(
                             else f"https://t.me/{cid.lstrip('@')}/{pmid}"
                         )
                     total_polls += 1
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(1.0)
 
                 end_text = (
                     f"🚀Topic: {topic}\n"
