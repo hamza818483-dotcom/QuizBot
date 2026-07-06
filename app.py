@@ -955,7 +955,12 @@ def _ocr_bbox_lookup(img, mcqs: list) -> dict:
             q = (m.get("question") or "").strip()
             if not q:
                 continue
-            q_key = q[:80]  # first chunk is usually enough and most stable to match
+            # Match against the EXPLANATION text, not the question — the
+            # explanation's supporting evidence (a law/definition/paragraph)
+            # is often located elsewhere on the page than the question line
+            # itself, so matching on the question was marking the wrong spot.
+            exp_text = re.sub(r'<img\b[^>]*>', '', m.get("explanation") or "", flags=re.IGNORECASE).strip()
+            q_key = (exp_text or q)[:80]
             best_ratio = 0.0
             best_box = None
             best_idx = None
@@ -967,7 +972,7 @@ def _ocr_bbox_lookup(img, mcqs: list) -> dict:
                     best_ratio = ratio
                     best_box = lbox
                     best_idx = idx
-            if best_ratio < 0.35 or best_box is None:
+            if best_ratio < 0.45 or best_box is None:
                 continue  # not confident enough — leave for fallback
 
             # Extend window: include 1 line before/after to capture full context
@@ -1130,6 +1135,12 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
 # QUIZ_SESSIONS / QUIZ_TIMERS (D1 quiz in-memory state) now live in quiz.py
 
 DEFAULT_TOPIC = "Pagewise MCQ Solve By ATLAS"
+
+
+def _strip_img_tag(exp: str) -> str:
+    """CSV-তে <img> tag থাকার দরকার নেই (ওটা শুধু webquiz result page-এর জন্য) —
+    CSV export-এর সব জায়গায় ব্যবহার করো explanation-কে plain রাখতে।"""
+    return re.sub(r'\s*<img\b[^>]*>\s*', ' ', exp or "", flags=re.IGNORECASE).strip()
 QUIZ_Q_SEC = 35
 
 # ============================================================
@@ -1716,7 +1727,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             padded = (list(opts) + ["", "", "", "", ""])[:5]
             ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4}.get(m.get("answer", "A"), 0)
             ans_numeric = ans_idx + 1  # 1-based
-            exp = m.get("explanation", "")
+            exp = _strip_img_tag(m.get("explanation", ""))
             _wr.writerow([m.get("question", ""), padded[0], padded[1], padded[2], padded[3], padded[4], ans_numeric, exp, 1, 1])
         csv_content = _out.getvalue().encode("utf-8-sig")
         csv_caption = (
@@ -2056,7 +2067,7 @@ async def handle_txt_command(msg: dict):
             writer.writerow([m["question"], opts[0], opts[1],
                              opts[2] if len(opts)>2 else "",
                              opts[3] if len(opts)>3 else "",
-                             ans_num, m.get("explanation",""), "1", "1"])
+                             ans_num, _strip_img_tag(m.get("explanation","")), "1", "1"])
         csv_bytes = buf.getvalue().encode("utf-8")
 
         caption = f"📄 {len(mcqs)} MCQ CSV"
@@ -2487,7 +2498,7 @@ def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
         opts = (m.get("options", []) + ["", "", "", ""])[:4]
         w.writerow([
             m.get("question", ""), opts[0], opts[1], opts[2], opts[3],
-            ans_map.get(m.get("answer", "A"), "1"), m.get("explanation", "")
+            ans_map.get(m.get("answer", "A"), "1"), _strip_img_tag(m.get("explanation", ""))
         ])
     return buf.getvalue().encode("utf-8-sig")
 
@@ -3975,7 +3986,7 @@ async def _process_pdf_pages_inner(
                         if crop_url:
                             data_full = f' data-full="{full_url}"' if full_url else ""
                             exp = f'<img src="{crop_url}"{data_full}> {exp}'
-                    all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, exp, "1", "1"])
+                    all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, _strip_img_tag(exp), "1", "1"])
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs)
             else:
                 image_msg_id = None
@@ -4101,7 +4112,7 @@ async def _process_pdf_pages_inner(
                     opts = [re.sub(r'^[A-Da-dক-ঘ][)\.।]\s*', '', str(o)) for o in opts]
                     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
                     ans_num = ans_map.get(m.get("answer", "A"), "1")
-                    all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, m.get("explanation", ""), "1", "1"])
+                    all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, _strip_img_tag(m.get("explanation", "")), "1", "1"])
 
             total_mcq += len(mcqs)
             page_status[idx]["done"] = True
@@ -4367,7 +4378,7 @@ async def process_pdfm_pages(
                         opts[1] if len(opts)>1 else "",
                         opts[2] if len(opts)>2 else "",
                         opts[3] if len(opts)>3 else "",
-                        ans_num, m.get("explanation",""),"1","1"])
+                        ans_num, _strip_img_tag(m.get("explanation","")),"1","1"])
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs)
             else:
                 caption = ""
@@ -4480,7 +4491,7 @@ async def process_pdfm_pages(
                         opts[1] if len(opts)>1 else "",
                         opts[2] if len(opts)>2 else "",
                         opts[3] if len(opts)>3 else "",
-                        ans_num, m.get("explanation",""),"1","1"])
+                        ans_num, _strip_img_tag(m.get("explanation","")),"1","1"])
 
             total_mcq += len(mcqs)
             page_status[idx]["done"] = True
@@ -5512,7 +5523,7 @@ async def process_qbm_pages(
                         opts[1] if len(opts) > 1 else "",
                         opts[2] if len(opts) > 2 else "",
                         opts[3] if len(opts) > 3 else "",
-                        ans_num, m.get("explanation", ""), "1", "1"])
+                        ans_num, _strip_img_tag(m.get("explanation", "")), "1", "1"])
             else:
                 caption = ""
                 if tag:
@@ -5588,7 +5599,7 @@ async def process_qbm_pages(
                         opts[1] if len(opts) > 1 else "",
                         opts[2] if len(opts) > 2 else "",
                         opts[3] if len(opts) > 3 else "",
-                        ans_num, m.get("explanation", ""), "1", "1"])
+                        ans_num, _strip_img_tag(m.get("explanation", "")), "1", "1"])
 
             total_mcq += len(mcqs)
             page_status[idx]["done"] = True
@@ -7477,7 +7488,7 @@ async def handle_convert_command(msg: dict):
                     item.get("question", ""),
                     opts.get("A", ""), opts.get("B", ""),
                     opts.get("C", ""), opts.get("D", ""),
-                    ans, item.get("explanation", ""), "1", "1"
+                    ans, _strip_img_tag(item.get("explanation", "")), "1", "1"
                 ])
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 file_name.replace(".json", ".csv"),
