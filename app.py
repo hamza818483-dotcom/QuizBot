@@ -2024,6 +2024,7 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
                 await edit_msg(chat_id, loading_id, f"✅ CSV done! {len(mcqs)} MCQ")
             return
 
+        sent, failed = 0, 0
         for i, mcq in enumerate(mcqs):
             opts = [o[:100] for o in mcq.get("options", [])[:4]]
             ans_idx = {"A":0,"B":1,"C":2,"D":3}.get(mcq.get("answer","A"), 0)
@@ -2034,12 +2035,19 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
             exp = mcq.get("explanation","")
             if exp_footer:
                 exp = f"{exp}\n{exp_footer}"
-            await send_poll(channel_id, q_text, opts, ans_idx, explanation=exp)
+            poll_r = await send_poll(channel_id, q_text, opts, ans_idx, explanation=exp)
+            if poll_r and poll_r.get("ok"):
+                sent += 1
+            else:
+                failed += 1
+                logger.error(f"[TXT] sendPoll failed q{i+1}: {poll_r.get('description') if poll_r else 'no response'}")
             await asyncio.sleep(0.3)
 
         if loading_id:
-            await edit_msg(chat_id, loading_id,
-                f"✅ {len(mcqs)} MCQ poll পাঠানো হয়েছে!")
+            status = f"✅ {sent} MCQ poll পাঠানো হয়েছে!"
+            if failed:
+                status += f"\n⚠️ {failed}টা পাঠাতে ব্যর্থ (channel এ bot admin আছে কিনা চেক করো)।"
+            await edit_msg(chat_id, loading_id, status)
 
     except Exception as e:
         logger.error(f"[TXT] Error: {e}")
