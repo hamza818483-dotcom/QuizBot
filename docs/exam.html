@@ -263,13 +263,14 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 
 <script>
 // ── CONFIG ──
-const CACHE_ID  = '{{CACHE_ID}}';
-const HF_URL    = '{{HF_SPACE_URL}}';
+const _qs = new URLSearchParams(location.search);
+const CACHE_ID  = _qs.get('id') || '{{CACHE_ID}}';
+const HF_URL    = 'https://atlasquizbotpro.hamza818483.workers.dev';
 const SEC_PER_Q = 30;
 
 // USER ID
-let USER_ID   = Number('{{USER_ID}}') || 0;
-let USER_NAME = decodeURIComponent('{{USER_NAME}}' || 'Student');
+let USER_ID   = Number(_qs.get('uid') || '{{USER_ID}}') || 0;
+let USER_NAME = decodeURIComponent(_qs.get('name') || 'Student');
 const FROM_TELEGRAM = USER_ID !== 0;
 
 try {
