@@ -794,12 +794,14 @@ function doSubmit(){
 }
 
 function renderExpWithImg(exp){
-  const imgMatch = exp.match(/<img\s+src="([^"]+)"[^>]*>/i);
+  const imgMatch = exp.match(/<img\s+src="([^"]+)"[^>]*?(?:data-full="([^"]*)")?[^>]*>/i);
   let rest = exp;
   let imgHtml = '';
   if(imgMatch){
     rest = exp.replace(imgMatch[0], '').trim();
-    imgHtml = `<img src="${imgMatch[1]}" class="exp-crop-img" onclick="openImgModal('${imgMatch[1]}')" style="max-width:100%;border-radius:6px;margin:6px 0;cursor:zoom-in;display:block;">`;
+    const thumbSrc = imgMatch[1];
+    const fullSrc = imgMatch[2] || imgMatch[1];
+    imgHtml = `<img src="${thumbSrc}" class="exp-crop-img" onclick="openImgModal('${fullSrc}')" style="max-width:100%;border-radius:6px;margin:6px 0;cursor:zoom-in;display:block;">`;
   }
   return imgHtml + rest.replace(/\n/g,'<br>');
 }

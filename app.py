@@ -1026,9 +1026,12 @@ async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
 
         bbox = m.get("exp_bbox") or ocr_bboxes.get(m.get("question", ""))
         url = ""
+        full_url_for_click = ""
         if bbox:
             try:
-                url = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                result = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                url = result.get("thumb", "")
+                full_url_for_click = result.get("full", "")
             except Exception as e:
                 logger.warning(f"[ExplanationCrop] wrapper-attach failed: {e}")
 
@@ -1048,9 +1051,11 @@ async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
                         logger.warning(f"[ExplanationCrop] full-image fallback attempt {_try+1} failed: {e}")
                 full_img_attempted = True
             url = full_img_url or ""
+            full_url_for_click = full_img_url or ""
 
         if url:
-            m["explanation"] = f'{exp} <img src="{url}">'.strip()
+            data_full = f' data-full="{full_url_for_click}"' if full_url_for_click else ""
+            m["explanation"] = f'{exp} <img src="{url}"{data_full}>'.strip()
 
     return mcqs
 
@@ -3965,9 +3970,12 @@ async def _process_pdf_pages_inner(
                     exp = m.get("explanation", "")
                     bbox = m.get("exp_bbox")
                     if bbox:
-                        crop_url = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                        crop_result = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                        crop_url = crop_result.get("thumb", "")
+                        full_url = crop_result.get("full", "")
                         if crop_url:
-                            exp = f'<img src="{crop_url}"> {exp}'
+                            data_full = f' data-full="{full_url}"' if full_url else ""
+                            exp = f'<img src="{crop_url}"{data_full}> {exp}'
                     all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, exp, "1", "1"])
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs)
             else:
@@ -4006,9 +4014,12 @@ async def _process_pdf_pages_inner(
                     bbox = mcq.get("exp_bbox")
                     if bbox:
                         try:
-                            crop_url = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                            crop_result = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                            crop_url = crop_result.get("thumb", "")
+                            full_url = crop_result.get("full", "")
                             if crop_url:
-                                exp = f'<img src="{crop_url}"> {exp}'
+                                data_full = f' data-full="{full_url}"' if full_url else ""
+                                exp = f'<img src="{crop_url}"{data_full}> {exp}'
                                 mcq["explanation"] = exp
                         except Exception as _crop_e:
                             logger.warning(f"[Poll] crop failed for MCQ {i+1}: {_crop_e}")
