@@ -171,10 +171,28 @@ def upload_to_imgbb(b64):
         )
         if resp.status_code in (200, 201):
             url = f"{supabase_url}/storage/v1/object/public/{bucket}/{filename}"
-            _upload_cache[cache_key] = url
-            return url
+            # Verify the public URL is actually reachable (bucket may not be
+            # set to public in Supabase dashboard -> upload "succeeds" but the
+            # URL 400/403s for everyone, showing a broken-image icon on the
+            # webquiz result page). If unreachable, fall back to imgbb so the
+            # crop image still displays instead of silently breaking.
+            try:
+                check = _http_client.head(url, timeout=8)
+                if check.status_code == 200:
+                    _upload_cache[cache_key] = url
+                    return url
+                logger.warning(f"[SupabaseStorage] Public URL unreachable ({check.status_code}), falling back to imgbb: {url}")
+            except Exception as e:
+                logger.warning(f"[SupabaseStorage] Public URL check failed ({e}), falling back to imgbb")
+            fallback_url = imgbb_manager.upload(img_bytes)
+            if fallback_url:
+                _upload_cache[cache_key] = fallback_url
+            return fallback_url
         logger.warning(f"[SupabaseStorage] Upload failed {resp.status_code}: {resp.text[:200]}")
-        return imgbb_manager.upload(img_bytes)  # fallback to imgbb on failure
+        fallback_url = imgbb_manager.upload(img_bytes)  # fallback to imgbb on failure
+        if fallback_url:
+            _upload_cache[cache_key] = fallback_url
+        return fallback_url
     except Exception as e:
         logger.warning(f"[SupabaseStorage] Exception: {e} — falling back to imgbb")
         try:
