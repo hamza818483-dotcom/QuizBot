@@ -310,6 +310,8 @@ async function fetchExamData() {
   const CF_WORKER = 'https://atlasquizbotpro.hamza818483.workers.dev';
   const SB_URL    = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
   const SB_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+  const SB2_URL   = 'https://xnkuuzstschdovcyomfk.supabase.co';
+  const SB2_KEY   = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
 
   // Fast path: direct Supabase pdf_mcq_cache query (skips Render/CF entirely — no cold-start wait)
   const directCacheFetch = (async () => {
@@ -334,46 +336,47 @@ async function fetchExamData() {
     return d;
   })();
 
-  // Race the two fast paths — whichever resolves first with real data wins
-  try {
-    return await Promise.any([directCacheFetch, cfFetch]);
-  } catch (e) { /* both failed, fall through to slower fallbacks */ }
+  // Render direct (primary)
+  const renderFetch = (async () => {
+    const r = await fetch(`${RENDER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(9000) });
+    if (!r.ok) throw new Error('render failed');
+    const d = await r.json();
+    if (!d || !d.mcqs || !d.mcqs.length) throw new Error('render empty');
+    return d;
+  })();
 
-  // 2) Render direct (cold-start prone on free tier, slower fallback)
-  try {
-    const r = await fetch(`${RENDER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(12000) });
-    if (r.ok) { const d = await r.json(); if (d && d.mcqs && d.mcqs.length) return d; }
-  } catch(e) {}
-  // 3) Supabase Primary
-  try {
+  // Supabase Primary
+  const sbFetch = (async () => {
     const r = await fetch(`${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`,
-      { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
+      { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` }, signal: AbortSignal.timeout(8000) });
     const data = await r.json();
-    if (data && data[0]) {
-      const b = data[0];
-      return { cache_id: CACHE_ID, topic: b.name || 'Special Topic', page: 1,
-        mcqs: (b.questions||[]).map(q => ({ question: q.question||'', options: q.options||[],
-          answer: ANS[q.answer_index != null ? q.answer_index : 0]||'A', explanation: q.explanation||'' })),
-        tag:'', exp_footer:'', channel_id:'', image_msg_id:null,
-        end_msg_id:null, image_file_id:null, is_new_gen:false, timer:30 };
-    }
-  } catch(e) {}
-  // 4) Supabase Secondary (backup of backup)
-  try {
-    const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
-    const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
+    if (!data || !data[0]) throw new Error('sb empty');
+    const b = data[0];
+    return { cache_id: CACHE_ID, topic: b.name || 'Special Topic', page: 1,
+      mcqs: (b.questions||[]).map(q => ({ question: q.question||'', options: q.options||[],
+        answer: ANS[q.answer_index != null ? q.answer_index : 0]||'A', explanation: q.explanation||'' })),
+      tag:'', exp_footer:'', channel_id:'', image_msg_id:null,
+      end_msg_id:null, image_file_id:null, is_new_gen:false, timer:30 };
+  })();
+
+  // Supabase Secondary (backup of backup)
+  const sb2Fetch = (async () => {
     const r = await fetch(`${SB2_URL}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`,
-      { headers: { apikey: SB2_KEY, Authorization: `Bearer ${SB2_KEY}` } });
+      { headers: { apikey: SB2_KEY, Authorization: `Bearer ${SB2_KEY}` }, signal: AbortSignal.timeout(8000) });
     const data = await r.json();
-    if (data && data[0]) {
-      const b = data[0];
-      return { cache_id: CACHE_ID, topic: b.name || 'Special Topic', page: 1,
-        mcqs: (b.questions||[]).map(q => ({ question: q.question||'', options: q.options||[],
-          answer: ANS[q.answer_index != null ? q.answer_index : 0]||'A', explanation: q.explanation||'' })),
-        tag:'', exp_footer:'', channel_id:'', image_msg_id:null,
-        end_msg_id:null, image_file_id:null, is_new_gen:false, timer:30 };
-    }
-  } catch(e) {}
+    if (!data || !data[0]) throw new Error('sb2 empty');
+    const b2 = data[0];
+    return { cache_id: CACHE_ID, topic: b2.name || 'Special Topic', page: 1,
+      mcqs: (b2.questions||[]).map(q => ({ question: q.question||'', options: q.options||[],
+        answer: ANS[q.answer_index != null ? q.answer_index : 0]||'A', explanation: q.explanation||'' })),
+      tag:'', exp_footer:'', channel_id:'', image_msg_id:null,
+      end_msg_id:null, image_file_id:null, is_new_gen:false, timer:30 };
+  })();
+
+  // Sob 6 source ekshathe race — fastest jeta hoy oitai use hobe
+  try {
+    return await Promise.any([directCacheFetch, cfFetch, renderFetch, sbFetch, sb2Fetch]);
+  } catch (e) {}
   return { error: 'all sources failed' };
 }
 
