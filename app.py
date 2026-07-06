@@ -2034,12 +2034,13 @@ async def handle_txt_command(msg: dict):
                        "explanation": m.get("explanation","")}
                       for m in mcqs]
             web_quiz_id = await save_quiz_to_d1(polls, "ATLAS MCQ", uid)
-            web_url = f"https://atlasquizbotpro.hamza818483.workers.dev/quiz/{web_quiz_id}"
+            web_url = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={web_quiz_id}"
 
             caption += (
                 f"\n\n🌐 Web Quiz: {web_url}"
                 f"\n🤖 Bot Quiz: https://t.me/{bot_un}?start={bot_quiz_id}"
             )
+
         except Exception as e:
             logger.error(f"[TXT] link gen error: {e}")
 

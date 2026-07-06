@@ -193,7 +193,6 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
   <div class="loading"><span class="spin">⏳</span><div>লোড হচ্ছে...</div></div>
 </div>
 
-<!-- Pre Exam -->
 <!-- Exam Hall -->
 <div class="mode" id="modeHall">
   <div class="hall-area" id="hallArea"></div>
@@ -202,7 +201,7 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 </div>
 
 <!-- v4.2: Floating name prompt — শুধু anonymous user-দের প্রথমবার exam চলাকালীন
-     দেখায় (leaderboard-এর জন্য), exam block করে না, নিজে থেকে বন্ধ হয়ে যায়। -->
+     দেখায় (leaderboard-এর জন্য), exam block করে না। -->
 <div class="name-overlay" id="nameOverlay" style="display:none;position:fixed;bottom:80px;left:12px;right:12px;z-index:500;background:var(--bg-secondary,#1c1c1e);border-radius:14px;padding:14px;box-shadow:0 4px 20px rgba(0,0,0,.3)">
   <div style="font-size:13px;margin-bottom:8px;color:var(--text-secondary,#999)">👤 তোমার নাম লেখো (Leaderboard এ দেখাবে)</div>
   <div style="display:flex;gap:8px">
@@ -263,20 +262,14 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 <div class="toast" id="toast"></div>
 
 <script>
-// ── CONFIG (GitHub Pages — runtime resolve) ──
-const _qp = new URLSearchParams(location.search);
-let _CACHE_ID = _qp.get('id') || '';
-if (!_CACHE_ID) {
-  const _m = location.pathname.match(/\/exam\/(qz_[A-Za-z0-9_-]+)/);
-  if (_m) _CACHE_ID = _m[1];
-}
-const CACHE_ID  = _CACHE_ID;
-const HF_URL    = 'https://atlasquizbotpro.hamza818483.workers.dev';
+// ── CONFIG ──
+const CACHE_ID  = '{{CACHE_ID}}';
+const HF_URL    = '{{HF_SPACE_URL}}';
 const SEC_PER_Q = 30;
 
 // USER ID
-let USER_ID   = Number(_qp.get('uid')) || 0;
-let USER_NAME = decodeURIComponent(_qp.get('name') || 'Student');
+let USER_ID   = Number('{{USER_ID}}') || 0;
+let USER_NAME = decodeURIComponent('{{USER_NAME}}' || 'Student');
 const FROM_TELEGRAM = USER_ID !== 0;
 
 try {
@@ -303,101 +296,12 @@ let tag = '', expFooter = '', channelId = '', imageMsgId = null, endMsgId = null
 let isNewGen = false;
 let totalSec = 0, totalLeft = 0, totalTimer = null;
 
-// ── FETCH (direct Supabase + CF Worker in parallel → Render → Supabase backup; HF permanently banned) ──
-async function fetchExamData() {
-  const ANS = ["A","B","C","D","E"];
-  const RENDER    = 'https://quizbot-s482.onrender.com';
-  const RENDER2   = 'https://quizbot-zo6x.onrender.com';
-  const CF_WORKER = 'https://atlasquizbotpro.hamza818483.workers.dev';
-  const SB_URL    = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
-  const SB_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
-  const SB2_URL   = 'https://xnkuuzstschdovcyomfk.supabase.co';
-  const SB2_KEY   = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
-
-  // Fast path: direct Supabase pdf_mcq_cache query (skips Render/CF entirely — no cold-start wait)
-  const directCacheFetch = (async () => {
-    if (CACHE_ID.startsWith('qz_')) throw new Error('skip'); // D1 quiz, not in pdf_mcq_cache
-    const r = await fetch(`${SB_URL}/rest/v1/pdf_mcq_cache?id=eq.${CACHE_ID}&select=*`,
-      { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` }, signal: AbortSignal.timeout(6000) });
-    const data = await r.json();
-    if (!data || !data[0] || !data[0].mcq_data || !data[0].mcq_data.length) throw new Error('not found');
-    const row = data[0];
-    return { cache_id: CACHE_ID, topic: row.topic || 'Quiz', page: row.page_number || 1,
-      mcqs: row.mcq_data, tag: '', exp_footer: '', channel_id: row.channel_id || '',
-      image_msg_id: row.image_msg_id, end_msg_id: row.end_msg_id,
-      image_file_id: row.image_file_id, is_new_gen: !!row.is_new_gen, timer: 30 };
-  })();
-
-  // CF Worker (always-warm, has its own Render→D1→Supabase fallback — needed for qz_ IDs)
-  const cfFetch = (async () => {
-    const r = await fetch(`${CF_WORKER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(9000) });
-    if (!r.ok) throw new Error('cf failed');
-    const d = await r.json();
-    if (!d || !d.mcqs || !d.mcqs.length) throw new Error('cf empty');
-    return d;
-  })();
-
-  // Render direct (primary)
-  const renderFetch = (async () => {
-    const r = await fetch(`${RENDER}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(9000) });
-    if (!r.ok) throw new Error('render failed');
-    const d = await r.json();
-    if (!d || !d.mcqs || !d.mcqs.length) throw new Error('render empty');
-    return d;
-  })();
-
-  // Render2 (secondary duplicate backup)
-  const render2Fetch = (async () => {
-    const r = await fetch(`${RENDER2}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(9000) });
-    if (!r.ok) throw new Error('render2 failed');
-    const d = await r.json();
-    if (!d || !d.mcqs || !d.mcqs.length) throw new Error('render2 empty');
-    return d;
-  })();
-
-  // Supabase Primary
-  const sbFetch = (async () => {
-    const r = await fetch(`${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`,
-      { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` }, signal: AbortSignal.timeout(8000) });
-    const data = await r.json();
-    if (!data || !data[0]) throw new Error('sb empty');
-    const b = data[0];
-    return { cache_id: CACHE_ID, topic: b.name || 'Special Topic', page: 1,
-      mcqs: (b.questions||[]).map(q => ({ question: q.question||'', options: q.options||[],
-        answer: ANS[q.answer_index != null ? q.answer_index : 0]||'A', explanation: q.explanation||'' })),
-      tag:'', exp_footer:'', channel_id:'', image_msg_id:null,
-      end_msg_id:null, image_file_id:null, is_new_gen:false, timer:30 };
-  })();
-
-  // Supabase Secondary (backup of backup)
-  const sb2Fetch = (async () => {
-    const r = await fetch(`${SB2_URL}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`,
-      { headers: { apikey: SB2_KEY, Authorization: `Bearer ${SB2_KEY}` }, signal: AbortSignal.timeout(8000) });
-    const data = await r.json();
-    if (!data || !data[0]) throw new Error('sb2 empty');
-    const b2 = data[0];
-    return { cache_id: CACHE_ID, topic: b2.name || 'Special Topic', page: 1,
-      mcqs: (b2.questions||[]).map(q => ({ question: q.question||'', options: q.options||[],
-        answer: ANS[q.answer_index != null ? q.answer_index : 0]||'A', explanation: q.explanation||'' })),
-      tag:'', exp_footer:'', channel_id:'', image_msg_id:null,
-      end_msg_id:null, image_file_id:null, is_new_gen:false, timer:30 };
-  })();
-
-  // Sob 6 source ekshathe race — fastest jeta hoy oitai use hobe
-  try {
-    return await Promise.any([directCacheFetch, cfFetch, renderFetch, render2Fetch, sbFetch, sb2Fetch]);
-  } catch (e) {}
-  return { error: 'all sources failed' };
-}
-
-// Fetch shuru instantly (script load hobar shathe shathe) — DOMContentLoaded wait na kore
-let _examDataPromise = fetchExamData();
-
 // ── INIT ──
 async function init() {
   setMode('Loading');
   try {
-    const d = await _examDataPromise;
+    const r = await fetch(`${HF_URL}/api/exam/${CACHE_ID}`);
+    const d = await r.json();
     if (d.error) { showErr('❌ Exam পাওয়া যায়নি!'); return; }
     examData   = d;
     questions  = d.mcqs || [];
@@ -413,9 +317,7 @@ async function init() {
 
     totalSec = Math.max(30, Math.ceil(questions.length * SEC_PER_Q));
 
-    // v4.2: Pre-exam screen totally removed — exam shuru hoye jay instantly.
-    // Anonymous (non-Telegram) user-er jonno, jodi name age save kora na
-    // thake, exam-er upor ekta floating prompt dekhabe (block kore na).
+    // v4.2: Pre-exam screen totally removed — instant exam start always.
     startHall();
     if (!FROM_TELEGRAM && !localStorage.getItem('atlas_name')) {
       const overlay = document.getElementById('nameOverlay');
@@ -544,8 +446,6 @@ function toggleBm(qi) {
   const q = questions[qi];
   const payload = {user_id:USER_ID,cache_id:CACHE_ID,question_index:qi,
     question_data:q,topic:examData?.topic||'',page:examData?.page||0};
-  // v4.3: Render → fail হলে সরাসরি Supabase (bookmark/leaderboard শুধু
-  // Supabase wrapper, তাই Render/CF সম্পূর্ণ bypass করেও কাজ করতে পারে)
   fetch(`${HF_URL}/api/bookmark`, {
     method: bookmarks[qi]?'POST':'DELETE',
     headers:{'Content-Type':'application/json'},
@@ -611,7 +511,7 @@ function confirmSubmit(){
 
 function stopAll(){ clearInterval(totalTimer); }
 
-async function doSubmit(){
+function doSubmit(){
   if(submitted) return;
   submitted=true;
   stopAll();
@@ -637,28 +537,61 @@ async function doSubmit(){
 
   _saveAnswerSnapshot();
 
+  // ── Instant result: motivation/ayat নেটওয়ার্ক কলের জন্য অপেক্ষা না করেই
+  // result page সাথে সাথে render হয় (আগে এটা `await fetch(...)` এর পরে হতো,
+  // তাই নেট স্লো হলে সাবমিটের পর কয়েক সেকেন্ড ফাঁকা স্ক্রিন দেখাতো)। fetch
+  // background-এ চলে, শেষ হলে motAyatSlot placeholder-এ বসিয়ে দেওয়া হয়।
+  fetch(`${HF_URL}/api/exam/result`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({cache_id:CACHE_ID,user_id:USER_ID,user_name:USER_NAME,
+      topic:examData.topic,page:examData.page,total:questions.length,
+      correct,wrong,skipped,time_taken:timeTaken})
+  }).then(r=>r.json()).then(rd=>{
+    const motivation=rd.motivation||'', ayat=rd.ayat||'';
+    if(!motivation && !ayat) return;
+    const grade = pct>=80?'🏆 অসাধারণ! অনেক ভালো করেছো!':
+                  pct>=60?'✅ মোটামুটি ভালো! চেষ্টা চালিয়ে যাও!':
+                  pct>=40?'📚 আরো পড়তে হবে! হাল ছেড়ো না!':
+                          '💪 পড়া হয়নি! আবার পড়ে practice করো!';
+    const slot = document.getElementById('motAyatSlot');
+    if(slot) slot.innerHTML = `<div class="mot-box">
+      <div class="mot-grade">${grade}</div>
+      <div class="mot-divider"></div>
+      ${motivation?`<div class="mot-text">${motivation}</div>`:''}
+      ${ayat?`<div class="ayat-text">📖 ${ayat}</div>`:''}
+    </div>`;
+  }).catch(()=>{});
+
   const backUrl = buildBackUrl(channelId, endMsgId || imageMsgId);
 
   let html=`
   <div class="result-score-card">
     <div class="result-name">📝 ${examData.topic||'ATLAS Exam'}</div>
-    <div><span class="result-big">${bn(fin)}</span><span class="result-denom">/${bn(questions.length)}</span></div>
-    <div class="result-total-lbl">Final Score (${bn(pct)}%)</div>
+    <div><span class="result-big">${fin}</span><span class="result-denom">/${questions.length}</span></div>
+    <div class="result-total-lbl">Final Score (${pct}%)</div>
   </div>
   <div class="result-grid">
-    <div class="result-stat"><div class="r-val c-val">✅ ${bn(correct)}</div><div class="r-lbl">সঠিক</div></div>
-    <div class="result-stat"><div class="r-val w-val">❌ ${bn(wrong)}</div><div class="r-lbl">ভুল</div></div>
-    <div class="result-stat"><div class="r-val s-val">⏭️ ${bn(skipped)}</div><div class="r-lbl">স্কিপ</div></div>
+    <div class="result-stat"><div class="r-val c-val">✅ ${correct}</div><div class="r-lbl">সঠিক</div></div>
+    <div class="result-stat"><div class="r-val w-val">❌ ${wrong}</div><div class="r-lbl">ভুল</div></div>
+    <div class="result-stat"><div class="r-val s-val">⏭️ ${skipped}</div><div class="r-lbl">স্কিপ</div></div>
   </div>
-  <div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-${bn(neg)} (${bn(wrong)}×০.২৫)</span></div>
-  <div class="info-row2"><span>🏆 Final Score</span><span style="color:var(--accent);font-weight:700">${bn(fin)}/${bn(questions.length)} (${bn(pct)}%)</span></div>
-  <div class="info-row2" style="margin-bottom:14px"><span>⏱️ সময়</span><span>${bn(mins)}m ${bn(secs)}s</span></div>
-  <div id="motAyatSlot"></div>`;
-
+  <div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-${neg} (${wrong}×0.25)</span></div>
+  <div class="info-row2"><span>🏆 Final Score</span><span style="color:var(--accent);font-weight:700">${fin}/${questions.length} (${pct}%)</span></div>
+  <div class="info-row2" style="margin-bottom:14px"><span>⏱️ সময়</span><span>${mins}m ${secs}s</span></div>
+  <div id="motAyatSlot"></div>`;  const _mistakeCnt = questions.filter((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=userAnswers[i];
+    return ua!==undefined && ua!==ci;
+  }).length;
+  const _specialCnt = questions.filter((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=userAnswers[i];
+    return ua===undefined || ua!==ci;
+  }).length;
   html+=`<div class="result-btns">
     <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
-    <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (Only Wrong)</button>
-    <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (Wrong+Skip)</button>`;
+    <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (${_mistakeCnt})</button>
+    <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>`;
   if(!isNewGen)
     html+=`<button class="result-btn warning" onclick="openLb()">🏆 Leaderboard</button>`;
   html+=`
@@ -707,28 +640,6 @@ async function doSubmit(){
   setTimeout(() => {
     window.scrollTo({top: 0, behavior: 'instant'});
   }, 100);
-
-  // Motivation/ayat — background fetch, result already dekhano hoye geche
-  fetch(`${HF_URL}/api/exam/result`,{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({cache_id:CACHE_ID,user_id:USER_ID,user_name:USER_NAME,
-      topic:examData.topic,page:examData.page,total:questions.length,
-      correct,wrong,skipped,time_taken:timeTaken})
-  }).then(r=>r.json()).then(rd=>{
-    const motivation=rd.motivation||'', ayat=rd.ayat||'';
-    if(!motivation && !ayat) return;
-    const grade = pct>=80?'🏆 অসাধারণ! অনেক ভালো করেছো!':
-                  pct>=60?'✅ মোটামুটি ভালো! চেষ্টা চালিয়ে যাও!':
-                  pct>=40?'📚 আরো পড়তে হবে! হাল ছেড়ো না!':
-                          '💪 পড়া হয়নি! আবার পড়ে practice করো!';
-    const slot=document.getElementById('motAyatSlot');
-    if(slot) slot.innerHTML=`<div class="mot-box">
-      <div class="mot-grade">${grade}</div>
-      <div class="mot-divider"></div>
-      ${motivation?`<div class="mot-text">${motivation}</div>`:''}
-      ${ayat?`<div class="ayat-text">📖 ${ayat}</div>`:''}
-    </div>`;
-  }).catch(()=>{});
 }
 
 function filt(e,t){
@@ -938,7 +849,6 @@ async function openLb(){
       d=await r.json();
       if (!r.ok || d.error) throw new Error('proxy failed');
     } catch(_e) {
-      // v4.3: Render/CF উভয়ই fail করলে সরাসরি Supabase থেকে leaderboard আনা
       const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
       const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
       const r2 = await fetch(
@@ -989,10 +899,6 @@ function buildBackUrl(chId,msgId){
 }
 
 function zp(n){return String(n).padStart(2,'0');}
-function bn(n){
-  const map={'0':'০','1':'১','2':'২','3':'৩','4':'৪','5':'৫','6':'৬','7':'৭','8':'৮','9':'৯'};
-  return String(n).replace(/[0-9]/g,d=>map[d]);
-}
 
 function setMode(m){
   document.querySelectorAll('.mode').forEach(el=>el.classList.remove('active'));
