@@ -2828,7 +2828,7 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
 # ============================================================
 # HTML → PDF (Chromium)
 # ============================================================
-async def _html_to_pdf(html: str) -> bytes:
+async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
     import tempfile
     chromium_bin = os.environ.get("CHROMIUM_PATH", "chromium")
     try:
@@ -2836,20 +2836,39 @@ async def _html_to_pdf(html: str) -> bytes:
             f.write(html)
             html_path = f.name
         pdf_path = html_path.replace(".html", ".pdf")
+        if progress_cb:
+            await progress_cb(20)
         proc = await asyncio.create_subprocess_exec(
             chromium_bin, "--headless", "--no-sandbox",
             "--disable-gpu", "--disable-dev-shm-usage",
+            "--print-to-pdf-no-header",
             f"--print-to-pdf={pdf_path}",
             f"file://{html_path}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
+        if progress_cb:
+            await progress_cb(50)
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+        if progress_cb:
+            await progress_cb(90)
         if os.path.exists(pdf_path):
             with open(pdf_path, "rb") as f:
-                return f.read()
+                result = f.read()
+            if progress_cb:
+                await progress_cb(100)
+            try:
+                os.remove(html_path)
+                os.remove(pdf_path)
+            except Exception:
+                pass
+            return result
         else:
             logger.error(f"[PDF Gen] chromium produced no file. stderr: {stderr.decode(errors='ignore')[:500]}")
+        try:
+            os.remove(html_path)
+        except Exception:
+            pass
     except FileNotFoundError:
         logger.error(f"[PDF Gen] chromium binary not found at '{chromium_bin}' — check Dockerfile install")
     except Exception as e:
@@ -3191,6 +3210,9 @@ async def handle_sheet_command(msg: dict):
         logger.error(f"[SHEET] Error: {e}")
         await _safe_error_reply(chat_id, e)
 
+import asyncio as _asyncio_sheet
+_sheet_lock = _asyncio_sheet.Lock()
+
 async def handle_sheet_style_callback(callback_query: dict):
     data = callback_query.get("data", "")
     chat_id = callback_query["message"]["chat"]["id"]
@@ -3205,26 +3227,45 @@ async def handle_sheet_style_callback(callback_query: dict):
         return
 
     mcqs, title = cached["mcqs"], cached["title"]
-    await tg_post("answerCallbackQuery", {"callback_query_id": callback_query["id"], "text": "🎨 PDF বানানো হচ্ছে..."})
+    await tg_post("answerCallbackQuery", {"callback_query_id": callback_query["id"]})
+
+    style_label = PRINT_STYLE_NAMES.get(style_key, "Default")
+    status_msg = await send_msg(chat_id, f"🎨 {style_label}\n⏳ 0% — শুরু হচ্ছে...")
+    status_id = status_msg.get("result", {}).get("message_id")
+    start_t = time.time()
+
+    async def _progress(pct):
+        if not status_id:
+            return
+        elapsed = time.time() - start_t
+        try:
+            await edit_msg(chat_id, status_id, f"🎨 {style_label}\n⏳ {pct}% — {elapsed:.1f}s")
+        except Exception:
+            pass
 
     try:
-        if style_key == "default":
-            html_out = _build_solve_sheet_html(title, 1, mcqs)
-        else:
-            data_adapted = _adapt_mcqs_for_print(mcqs)
-            html_out = PRINT_STYLE_BUILDERS[style_key](data_adapted, title)
+        async with _sheet_lock:
+            await _progress(10)
+            if style_key == "default":
+                html_out = _build_solve_sheet_html(title, 1, mcqs)
+            else:
+                data_adapted = _adapt_mcqs_for_print(mcqs)
+                html_out = PRINT_STYLE_BUILDERS[style_key](data_adapted, title)
 
-        pdf_bytes = await _html_to_pdf(html_out)
+            pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress)
+
         if not pdf_bytes:
-            await tg_post("sendMessage", {"chat_id": chat_id, "text": "❌ PDF generate করতে সমস্যা হয়েছে!"})
+            await edit_msg(chat_id, status_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
             return
 
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Sheet"
         await send_document(chat_id, pdf_bytes, f"{safe_title}_sheet.pdf",
             caption=f"📖 Practice Sheet\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP")
+        await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_id})
     except Exception as e:
         logger.error(f"[SHEET STYLE] Error: {e}")
-        await _safe_error_reply(chat_id, e)
+        if status_id:
+            await edit_msg(chat_id, status_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
 
 # ============================================================
 # SOLVE SHEET PDF — Practice Sheet same style (2-col, boxed)
