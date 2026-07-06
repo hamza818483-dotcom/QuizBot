@@ -2841,10 +2841,9 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
         proc = await asyncio.create_subprocess_exec(
             chromium_bin, "--headless=new", "--no-sandbox",
             "--disable-gpu", "--disable-dev-shm-usage",
-            "--print-to-pdf-no-header",
-            "--no-pdf-header-footer",
+            "--run-all-compositor-stages-before-draw",
             f"--print-to-pdf={pdf_path}",
-            "--virtual-time-budget=10000",
+            "--print-to-pdf-no-header",
             f"file://{html_path}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
