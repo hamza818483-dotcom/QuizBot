@@ -1991,18 +1991,38 @@ async def process_txt_to_poll(text_content: str, channel_id: str,
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
 
-    loading = await send_msg(chat_id, "⏳ Text থেকে MCQ তৈরি হচ্ছে...")
+    loading = await send_msg(chat_id, "🔄 Text থেকে MCQ তৈরি হচ্ছে...\n📊 Progress: ▱▱▱▱▱▱▱ 0%")
     loading_id = loading.get("result", {}).get("message_id")
 
     try:
         from pdf_handler import generate_mcq_from_text
         line_count = len([l for l in text_content.splitlines() if l.strip()])
         auto_count = max(15, line_count)
+
+        async def _progress_updater():
+            bars = ["▰▱▱▱▱▱▱","▰▰▰▱▱▱▱","▰▰▰▰▰▱▱","▰▰▰▰▰▰▰"]
+            pcts = [15, 40, 70, 95]
+            for bar, pct in zip(bars, pcts):
+                await asyncio.sleep(2.5)
+                if loading_id:
+                    try:
+                        await edit_msg(chat_id, loading_id,
+                            f"🔄 Text থেকে MCQ তৈরি হচ্ছে...\n📊 Progress: {bar} {pct}%")
+                    except Exception:
+                        pass
+
+        progress_task = asyncio.create_task(_progress_updater())
         mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count)
+        progress_task.cancel()
 
         if not mcqs:
-            await send_msg(chat_id, "❌ MCQ generate হয়নি!")
+            if loading_id:
+                await edit_msg(chat_id, loading_id, "❌ MCQ generate হয়নি!")
             return
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"✅ তৈরি হয়েছে: {len(mcqs)} টি MCQ\n📊 Progress: ▰▰▰▰▰▰▰ 100%")
 
         buf = io.StringIO()
         writer = csv_mod.writer(buf)
