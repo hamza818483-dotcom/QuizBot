@@ -1714,6 +1714,26 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             f"💎 {len(mcqs)} MCQ\n\n"
             f"📌 Format: questions, option1-5, answer(numeric), explanation, type, section"
         )
+        try:
+            from quiz import create_quiz_from_mcqs
+            bot_quiz_id = await create_quiz_from_mcqs(mcqs, topic or "ATLAS MCQ", uid)
+            bot_info = await tg_post("getMe", {})
+            bot_un = bot_info.get("result", {}).get("username", "")
+
+            from poll_extract import save_quiz_to_d1
+            polls = [{"question": m["question"], "options": m.get("options", ["", "", "", ""]),
+                       "correct_idx": {"A": 0, "B": 1, "C": 2, "D": 3}.get(m.get("answer", "A"), 0),
+                       "explanation": m.get("explanation", "")}
+                      for m in mcqs]
+            web_quiz_id = await save_quiz_to_d1(polls, topic or "ATLAS MCQ", uid)
+            web_url = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={web_quiz_id}"
+
+            csv_caption += (
+                f"\n\n🌐 Web Quiz: {web_url}"
+                f"\n🤖 Bot Quiz: https://t.me/{bot_un}?start={bot_quiz_id}"
+            )
+        except Exception as link_err:
+            logger.warning(f"[IMG] Quiz link generation failed: {link_err}")
         await send_document(
             chat_id, csv_content,
             f"ATLAS_{topic or 'MCQ'}.csv",
