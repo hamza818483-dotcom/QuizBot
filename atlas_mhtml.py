@@ -143,18 +143,39 @@ def _try_supabase_upload(supabase_url, supabase_key, img_bytes):
     try:
         bucket = "quiz-images"
         filename = f"{uuid.uuid4().hex}.jpg"
-        resp = _http_client.post(
-            f"{supabase_url}/storage/v1/object/{bucket}/{filename}",
-            headers={
-                "Authorization": f"Bearer {supabase_key}",
-                "apikey": supabase_key,
-                "Content-Type": "image/jpeg",
-            },
-            content=img_bytes,
-        )
+
+        def _do_post():
+            return _http_client.post(
+                f"{supabase_url}/storage/v1/object/{bucket}/{filename}",
+                headers={
+                    "Authorization": f"Bearer {supabase_key}",
+                    "apikey": supabase_key,
+                    "Content-Type": "image/jpeg",
+                },
+                content=img_bytes,
+            )
+
+        resp = _do_post()
         if resp.status_code not in (200, 201):
-            logger.warning(f"[SupabaseStorage] Upload failed {resp.status_code}: {resp.text[:200]}")
-            return ""
+            body = resp.text[:200]
+            if resp.status_code in (400, 404) and "not found" in body.lower():
+                # Bucket doesn't exist on this project yet — create it public, retry once.
+                try:
+                    _http_client.post(
+                        f"{supabase_url}/storage/v1/bucket",
+                        headers={
+                            "Authorization": f"Bearer {supabase_key}",
+                            "apikey": supabase_key,
+                            "Content-Type": "application/json",
+                        },
+                        json={"id": bucket, "name": bucket, "public": True},
+                    )
+                    resp = _do_post()
+                except Exception as e:
+                    logger.warning(f"[SupabaseStorage] Bucket auto-create failed: {e}")
+            if resp.status_code not in (200, 201):
+                logger.warning(f"[SupabaseStorage] Upload failed {resp.status_code}: {resp.text[:200]}")
+                return ""
         url = f"{supabase_url}/storage/v1/object/public/{bucket}/{filename}"
         check = None
         for _attempt in range(2):
