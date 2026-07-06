@@ -1152,7 +1152,7 @@ async def db_get_pdf_autosend_setting(chat_id) -> bool:
             return r.data[0]["value"] == "on"
     except:
         pass
-    return False
+    return True
 
 async def db_set_pdf_autosend_setting(chat_id, enabled: bool):
     try:
