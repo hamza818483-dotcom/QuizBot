@@ -466,10 +466,13 @@ async def _attach_explanation_images(mcqs: list, img: Image.Image) -> list:
         if not bbox:
             continue
         try:
-            url = await asyncio.to_thread(crop_explanation_image, img, bbox)
-            if url:
+            result = await asyncio.to_thread(crop_explanation_image, img, bbox)
+            thumb_url = (result or {}).get("thumb", "")
+            full_url = (result or {}).get("full", "") or thumb_url
+            if thumb_url:
                 exp = m.get("explanation", "") or ""
-                m["explanation"] = f'{exp} <img src="{url}">'.strip()
+                data_full = f' data-full="{full_url}"' if full_url else ""
+                m["explanation"] = f'{exp} <img src="{thumb_url}"{data_full}>'.strip()
         except Exception as e:
             logger.warning(f"[ExplanationCrop] Attach failed: {e}")
     return mcqs
