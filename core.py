@@ -395,7 +395,8 @@ async def send_photo_by_id(chat_id, file_id: str, caption: str = "",
 
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
-                        reply_to_message_id: int = None, parse_mode: str = "HTML") -> dict:
+                        reply_to_message_id: int = None, parse_mode: str = "HTML",
+                        message_thread_id: int = None) -> dict:
     # ── Primary: CF Worker (b64 proxy) ──
     try:
         data = {
@@ -404,6 +405,7 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
             "doc_b64": base64.b64encode(file_bytes).decode()
         }
         if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
+        if message_thread_id: data["message_thread_id"] = message_thread_id
         async with httpx.AsyncClient(timeout=60) as c:
             r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data)
             result = r.json()
@@ -414,6 +416,7 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
     try:
         fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode}
         if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
+        if message_thread_id: fields["message_thread_id"] = str(message_thread_id)
         files = {"document": (filename, file_bytes, mime_type)}
         async with httpx.AsyncClient(timeout=120) as c:
             r = await c.post(

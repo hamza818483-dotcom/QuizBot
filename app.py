@@ -351,6 +351,7 @@ def _cap_page_cache(cache: dict) -> None:
         cache.pop(next(iter(cache)), None)
 
 PIN_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB)
+PDF_AUTO_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB) — /pdf on|off
 
 # LIVE QUIZ CONFIG
 LIVE_QUIZ_STATE = {}  # channel_id -> live quiz state
@@ -1111,6 +1112,24 @@ async def db_set_pin_setting(chat_id, enabled: bool):
     except Exception as e:
         logger.error(f"[DB] set_pin error: {e}")
 
+async def db_get_pdf_autosend_setting(chat_id) -> bool:
+    try:
+        r = sb.table("bot_settings").select("value").eq("key", f"pdfauto_{chat_id}").execute()
+        if r.data:
+            return r.data[0]["value"] == "on"
+    except:
+        pass
+    return False
+
+async def db_set_pdf_autosend_setting(chat_id, enabled: bool):
+    try:
+        sb.table("bot_settings").upsert({
+            "key": f"pdfauto_{chat_id}",
+            "value": "on" if enabled else "off"
+        }).execute()
+    except Exception as e:
+        logger.error(f"[DB] set_pdf_autosend error: {e}")
+
 async def db_get_live_time(chat_id) -> int:
     try:
         r = sb.table("bot_settings").select("value").eq("key", f"livetime_{chat_id}").execute()
@@ -1432,6 +1451,31 @@ async def try_pin_message(chat_id, message_id: int):
             "message_id": message_id,
             "disable_notification": True
         })
+
+# ============================================================
+# FEATURE: /pdf on | /pdf off — ending message er por auto Sheet PDF channel e jabe kina
+# ============================================================
+async def handle_pdf_autosend_toggle(msg: dict, arg: str):
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    if not await db_is_owner_or_admin(uid):
+        await send_msg(chat_id, "❌ Admin only!")
+        return
+    if arg == "on":
+        await db_set_pdf_autosend_setting(chat_id, True)
+        PDF_AUTO_ENABLED[chat_id] = True
+        await send_msg(chat_id, "📄 /pdf auto-PDF চালু! এখন থেকে প্রতিটা page/ending message এর পরে Sheet PDF অটো channel এ যাবে।")
+    else:
+        await db_set_pdf_autosend_setting(chat_id, False)
+        PDF_AUTO_ENABLED[chat_id] = False
+        await send_msg(chat_id, "📄 /pdf auto-PDF বন্ধ!")
+
+async def should_autosend_pdf(chat_id) -> bool:
+    enabled = PDF_AUTO_ENABLED.get(chat_id)
+    if enabled is None:
+        enabled = await db_get_pdf_autosend_setting(chat_id)
+        PDF_AUTO_ENABLED[chat_id] = enabled
+    return enabled
 
 # ============================================================
 # FEATURE: /livetime (seconds)
@@ -3416,6 +3460,19 @@ async def process_pdf_pages(
                 if end_r.get("ok"):
                     await db_update_cache(cache_id, {"end_msg_id": end_r["result"]["message_id"]})
 
+                # /pdf on hole ending message er por auto Sheet PDF channel e jabe
+                if await should_autosend_pdf(channel_id):
+                    try:
+                        pdf_html = _build_solve_sheet_html(topic, page_num, mcqs)
+                        pdf_bytes = await _html_to_pdf(pdf_html)
+                        if pdf_bytes:
+                            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                            await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_sheet.pdf",
+                                caption=f"📖 Practice Sheet\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
+                                message_thread_id=thread_id, reply_to_message_id=image_msg_id)
+                    except Exception as e:
+                        logger.error(f"[PDF-AUTOSEND] Error: {e}")
+
                 summary_pages.append({"page": page_num, "first_poll": first_poll_link, "mcq_count": len(mcqs)})
 
                 for m in mcqs:
@@ -3768,6 +3825,19 @@ async def process_pdfm_pages(
                 if end_r.get("ok"):
                     end_msg_id = end_r["result"]["message_id"]
                     await db_update_cache(cache_id, {"end_msg_id": end_msg_id})
+
+                # /pdf on hole ending message er por auto Sheet PDF channel e jabe
+                if await should_autosend_pdf(channel_id):
+                    try:
+                        pdf_html = _build_solve_sheet_html(topic, page_num, mcqs)
+                        pdf_bytes = await _html_to_pdf(pdf_html)
+                        if pdf_bytes:
+                            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                            await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_sheet.pdf",
+                                caption=f"📖 Practice Sheet\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
+                                message_thread_id=thread_id, reply_to_message_id=image_msg_id)
+                    except Exception as e:
+                        logger.error(f"[PDF-AUTOSEND] Error: {e}")
 
                 summary_pages.append({
                     "page": page_num,
@@ -6994,6 +7064,10 @@ async def handle_message(msg: dict):
         if not is_auth:
             if is_private:
                 await send_msg(chat_id, UNAUTH_MSG)
+            return
+        arg = text.replace("/pdf", "").strip().lower()
+        if arg in ("on", "off"):
+            await handle_pdf_autosend_toggle(msg, arg)
             return
         await handle_pdf(msg)
         return
