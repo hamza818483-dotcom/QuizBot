@@ -547,7 +547,29 @@ async function saveBookmarkDirectSupabase(qi, payload) {
         headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}` }
       });
     }
-  } catch(e) { console.warn('[bookmark] direct Supabase fallback failed:', e.message); }
+  } catch(e) { await saveBookmarkDirectSupabase2(qi, payload); }
+}
+
+async function saveBookmarkDirectSupabase2(qi, payload) {
+  const SB_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
+  const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
+  try {
+    if (bookmarks[qi]) {
+      await fetch(`${SB_URL}/rest/v1/bookmarks?on_conflict=user_id,cache_id,question_index`, {
+        method: 'POST',
+        headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}`,
+                   'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates' },
+        body: JSON.stringify({ user_id: payload.user_id, cache_id: payload.cache_id,
+          question_index: payload.question_index, question_data: payload.question_data,
+          topic: payload.topic, page_number: payload.page })
+      });
+    } else {
+      await fetch(`${SB_URL}/rest/v1/bookmarks?user_id=eq.${payload.user_id}&cache_id=eq.${payload.cache_id}&question_index=eq.${qi}`, {
+        method: 'DELETE',
+        headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}` }
+      });
+    }
+  } catch(e) { console.warn('[bookmark] SB2 fallback failed:', e.message); }
 }
 
 function openNav() {
@@ -634,14 +656,17 @@ function doSubmit(){
       ${ayat?`<div class="ayat-text">📖 ${ayat}</div>`:''}
     </div>`;
   }).catch(()=>{
-    const _SBU='https://wbdyjpjbczfunyhhmtry.supabase.co', _SBK='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
-    fetch(`${_SBU}/rest/v1/quiz_results`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','apikey':_SBK,'Authorization':`Bearer ${_SBK}`,'Prefer':'return=minimal'},
-      body:JSON.stringify({cache_id:CACHE_ID,user_id:USER_ID,user_name:USER_NAME,
+    const _payload = {cache_id:CACHE_ID,user_id:USER_ID,user_name:USER_NAME,
         topic:examData.topic,page:examData.page,total:questions.length,
-        correct,wrong,skipped,time_taken:timeTaken})
-    }).catch(()=>{});
+        correct,wrong,skipped,time_taken:timeTaken};
+    const _try=(u,k)=>fetch(`${u}/rest/v1/quiz_results`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':k,'Authorization':`Bearer ${k}`,'Prefer':'return=minimal'},
+      body:JSON.stringify(_payload)
+    });
+    _try('https://wbdyjpjbczfunyhhmtry.supabase.co','eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg')
+      .catch(()=>_try('https://xnkuuzstschdovcyomfk.supabase.co','eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4'))
+      .catch(()=>{});
   });
 
   const backUrl = buildBackUrl(channelId, endMsgId || imageMsgId);
@@ -931,13 +956,19 @@ async function openLb(){
       d=await r.json();
       if (!r.ok || d.error) throw new Error('proxy failed');
     } catch(_e) {
-      const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
-      const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
-      const r2 = await fetch(
-        `${SB_URL}/rest/v1/web_exam_leaderboard?cache_id=eq.${CACHE_ID}&select=*&order=final_score.desc&limit=50`,
-        { headers: { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}` } }
-      );
-      d = { ok: true, data: await r2.json() };
+      const _lbTry=async(u,k)=>{
+        const rr=await fetch(`${u}/rest/v1/web_exam_leaderboard?cache_id=eq.${CACHE_ID}&select=*&order=final_score.desc&limit=50`,
+          { headers:{'apikey':k,'Authorization':`Bearer ${k}`} });
+        if(!rr.ok) throw new Error('sb failed');
+        return await rr.json();
+      };
+      try {
+        const data1 = await _lbTry('https://wbdyjpjbczfunyhhmtry.supabase.co','eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg');
+        d = { ok: true, data: data1 };
+      } catch(_e2) {
+        const data2 = await _lbTry('https://xnkuuzstschdovcyomfk.supabase.co','eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4');
+        d = { ok: true, data: data2 };
+      }
     }
     if(d.disabled){
       document.getElementById('lbBody').innerHTML=
