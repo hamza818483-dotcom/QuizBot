@@ -1376,7 +1376,7 @@ async def handle_remove(msg: dict):
 # ============================================================
 async def handle_tagQ(msg: dict):
     chat_id = msg["chat"]["id"]
-    text = msg.get("text", "").replace("/tagQ", "").strip()
+    text = re.sub(r'(?i)^/tagq', '', msg.get("text", "")).strip()
     if text:
         sb.table("quiz_settings").upsert({"id": 1, "tag": text}).execute()
         await send_msg(chat_id, f"✅ Tag set:\n{text}")
@@ -1386,7 +1386,7 @@ async def handle_tagQ(msg: dict):
 
 async def handle_expQ(msg: dict):
     chat_id = msg["chat"]["id"]
-    text = msg.get("text", "").replace("/expQ", "").strip()
+    text = re.sub(r'(?i)^/expq', '', msg.get("text", "")).strip()
     if text:
         sb.table("quiz_settings").upsert({"id": 1, "exp_footer": text}).execute()
         await send_msg(chat_id, f"✅ Footer set:\n{text}")
@@ -7625,9 +7625,9 @@ async def handle_message(msg: dict):
         await handle_permit(msg)
     elif text.startswith("/remove"):
         await handle_remove(msg)
-    elif text.startswith("/tagQ"):
+    elif text.lower().startswith("/tagq"):
         await handle_tagQ(msg)
-    elif text.startswith("/expQ"):
+    elif text.lower().startswith("/expq"):
         await handle_expQ(msg)
     elif text.startswith("/channel") or text == "/channelist":
         await handle_channel(msg)

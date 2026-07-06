@@ -574,10 +574,20 @@ function doSubmit(){
   <div class="info-row2"><span>📊 Negative</span><span style="color:var(--error)">-${neg} (${wrong}×0.25)</span></div>
   <div class="info-row2"><span>🏆 Final Score</span><span style="color:var(--accent);font-weight:700">${fin}/${questions.length} (${pct}%)</span></div>
   <div class="info-row2" style="margin-bottom:14px"><span>⏱️ সময়</span><span>${mins}m ${secs}s</span></div>
-  <div id="motAyatSlot"></div>`;  html+=`<div class="result-btns">
+  <div id="motAyatSlot"></div>`;  const _mistakeCnt = questions.filter((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=userAnswers[i];
+    return ua!==undefined && ua!==ci;
+  }).length;
+  const _specialCnt = questions.filter((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=userAnswers[i];
+    return ua===undefined || ua!==ci;
+  }).length;
+  html+=`<div class="result-btns">
     <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
-    <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (Only Wrong)</button>
-    <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (Wrong+Skip)</button>`;
+    <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (${_mistakeCnt})</button>
+    <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>`;
   if(!isNewGen)
     html+=`<button class="result-btn warning" onclick="openLb()">🏆 Leaderboard</button>`;
   html+=`
