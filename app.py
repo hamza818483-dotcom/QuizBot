@@ -2322,7 +2322,69 @@ async def handle_csvs_command(msg: dict):
 # ============================================================
 # SHARED CSV PARSER
 # ============================================================
-def _parse_csv_bytes(csv_bytes: bytes) -> list:
+def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
+    """MCQ list → CSV bytes, matching _parse_csv_bytes column layout."""
+    import io, csv as csv_mod_local
+    buf = io.StringIO()
+    w = csv_mod_local.writer(buf)
+    w.writerow(["questions", "option1", "option2", "option3", "option4", "answer", "explanation"])
+    ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+    for m in mcqs:
+        opts = (m.get("options", []) + ["", "", "", ""])[:4]
+        w.writerow([
+            m.get("question", ""), opts[0], opts[1], opts[2], opts[3],
+            ans_map.get(m.get("answer", "A"), "1"), m.get("explanation", "")
+        ])
+    return buf.getvalue().encode("utf-8-sig")
+
+async def handle_split_command(msg: dict):
+    """/split <chunk_size> — reply to a CSV file, splits it into multiple
+    smaller CSV files of chunk_size MCQs each."""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+    reply = msg.get("reply_to_message")
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id, "❌ CSV ফাইলে reply করে <code>/split 20</code> দাও")
+        return
+    parts = text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await send_msg(chat_id, "❌ সংখ্যা দাও! যেমন: <code>/split 20</code>")
+        return
+    chunk_size = int(parts[1])
+    if chunk_size < 1:
+        await send_msg(chat_id, "❌ সংখ্যা ১ বা তার বেশি হতে হবে!")
+        return
+
+    status_r = await send_msg(chat_id, "⏳ ফাইল ডাউনলোড হচ্ছে...")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    file_id = reply["document"]["file_id"]
+    file_name = reply["document"].get("file_name", "file.csv")
+    csv_bytes = await download_tg_file(file_id)
+    mcqs = _parse_csv_bytes(csv_bytes)
+    if not mcqs:
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, "❌ ফাইলে কোনো MCQ পাওয়া যায়নি!")
+        return
+
+    total = len(mcqs)
+    total_parts = (total + chunk_size - 1) // chunk_size
+    if status_msg_id:
+        await edit_msg(chat_id, status_msg_id, f"⏳ {total}টি MCQ → {total_parts}টি ফাইলে ভাগ হচ্ছে...")
+
+    base_name = re.sub(r'\.(csv|json)$', '', file_name, flags=re.I)
+    for i in range(total_parts):
+        chunk = mcqs[i * chunk_size:(i + 1) * chunk_size]
+        part_bytes = _mcqs_to_csv_bytes(chunk)
+        part_name = f"{base_name}_part{i+1:02d}.csv"
+        await send_document(chat_id, part_bytes, part_name,
+            caption=f"📄 Part-{i+1:02d} | 📊 {len(chunk)}টি MCQ")
+        await asyncio.sleep(0.5)
+
+    if status_msg_id:
+        await edit_msg(chat_id, status_msg_id, f"✅ সম্পন্ন! {total}টি MCQ → {total_parts}টি ফাইল")
+
+
     """
     CSV bytes থেকে MCQ list বানাও।
     Reference: parse_csv_to_mcqs() from services.py
@@ -7496,6 +7558,11 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         asyncio.create_task(handle_qpdf_command(msg))
+    elif text.startswith("/split"):
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        asyncio.create_task(handle_split_command(msg))
     elif text.startswith("/csvS"):
         # /csvS অবশ্যই /csv এর আগে check করতে হবে
         if not is_auth:
