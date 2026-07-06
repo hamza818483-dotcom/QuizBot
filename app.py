@@ -373,6 +373,10 @@ def clear_cancel(chat_id):
 
 async def handle_cancel_command(msg: dict):
     chat_id = msg["chat"]["id"]
+    uid = msg.get("from", {}).get("id")
+    if not await db_is_owner_or_admin(uid):
+        await send_msg(chat_id, "❌ এই কমান্ড শুধু Admin/Owner ব্যবহার করতে পারবে।")
+        return
     CANCEL_FLAGS[chat_id] = True
     tasks = ACTIVE_TASKS.get(chat_id, set())
     cancelled_count = 0
