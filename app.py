@@ -38,7 +38,8 @@ from pdf_handler import (
     pdf_to_images, pdf_to_images_safe, image_to_bytes, generate_mcq_from_image,
     generate_new_mcq, parse_pdf_command, parse_page_range,
     fmt_page, gen_session_id, get_random_ayat, get_motivation,
-    key_rotator, crop_explanation_image
+    key_rotator, crop_explanation_image, get_pdf_page_count,
+    _PDF_MAX_PAGES_PER_CALL
 )
 
 from core import (
@@ -3485,6 +3486,28 @@ async def handle_pdf(msg: dict):
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
                 f"✅ Download complete!\n📄 File: {file_name}\n[██████████ 100%]\n⏳ PDF → Images converting...")
+
+        # ── Auto-chunking: user didn't specify a page range and PDF is bigger
+        # than the RAM-safe per-call cap → process it as sequential batches
+        # automatically instead of erroring out and asking the user to split it.
+        if not page_range:
+            total_pages = await asyncio.to_thread(get_pdf_page_count, pdf_bytes)
+            if total_pages > _PDF_MAX_PAGES_PER_CALL:
+                for batch_start in range(1, total_pages + 1, _PDF_MAX_PAGES_PER_CALL):
+                    batch_end = min(batch_start + _PDF_MAX_PAGES_PER_CALL - 1, total_pages)
+                    batch_range = f"{batch_start}-{batch_end}"
+                    if status_msg_id:
+                        await edit_msg(chat_id, status_msg_id,
+                            f"⏳ Batch {batch_start}-{batch_end}/{total_pages} processing...")
+                    ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, batch_range)
+                    if not ok:
+                        await send_msg(chat_id, pages)
+                        continue
+                    if not pages:
+                        continue
+                    await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count,
+                        channel_id, False, file_name, None, thread_id=thread_id, skip_generate=False)
+                return
 
         ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
         if not ok:

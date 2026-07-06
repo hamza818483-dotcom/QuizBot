@@ -208,6 +208,15 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
         _PDF_CONVERT_LOCK.release()
 
 
+def get_pdf_page_count(pdf_bytes: bytes) -> int:
+    """Lightweight page count (no rasterization, minimal RAM) — used for auto-chunking."""
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(BytesIO(pdf_bytes)).pages)
+    except Exception as e:
+        logger.warning(f"[PDF] page count failed: {e}")
+        return 0
+
 def pdf_to_images_safe(pdf_bytes: bytes, page_range: str = None):
     """Wrapper for pdf_to_images() that turns the RAM-safety exceptions into
     a friendly (ok: bool, result) tuple instead of a raw crash/traceback to
