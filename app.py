@@ -2360,8 +2360,14 @@ async def handle_split_command(msg: dict):
 
     file_id = reply["document"]["file_id"]
     file_name = reply["document"].get("file_name", "file.csv")
-    csv_bytes = await download_tg_file(file_id)
-    mcqs = _parse_csv_bytes(csv_bytes)
+    try:
+        csv_bytes = await download_tg_file(file_id)
+        mcqs = _parse_csv_bytes(csv_bytes)
+    except Exception as e:
+        logger.error(f"[Split] error: {e}", exc_info=True)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
+        return
     if not mcqs:
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, "❌ ফাইলে কোনো MCQ পাওয়া যায়নি!")
@@ -2373,13 +2379,21 @@ async def handle_split_command(msg: dict):
         await edit_msg(chat_id, status_msg_id, f"⏳ {total}টি MCQ → {total_parts}টি ফাইলে ভাগ হচ্ছে...")
 
     base_name = re.sub(r'\.(csv|json)$', '', file_name, flags=re.I)
-    for i in range(total_parts):
-        chunk = mcqs[i * chunk_size:(i + 1) * chunk_size]
-        part_bytes = _mcqs_to_csv_bytes(chunk)
-        part_name = f"{base_name}_part{i+1:02d}.csv"
-        await send_document(chat_id, part_bytes, part_name,
-            caption=f"📄 Part-{i+1:02d} | 📊 {len(chunk)}টি MCQ")
-        await asyncio.sleep(0.5)
+    try:
+        for i in range(total_parts):
+            chunk = mcqs[i * chunk_size:(i + 1) * chunk_size]
+            part_bytes = _mcqs_to_csv_bytes(chunk)
+            part_name = f"{base_name}_part{i+1:02d}.csv"
+            r = await send_document(chat_id, part_bytes, part_name,
+                caption=f"📄 Part-{i+1:02d} | 📊 {len(chunk)}টি MCQ")
+            if not r.get("ok"):
+                logger.error(f"[Split] send_document failed: {r}")
+            await asyncio.sleep(0.5)
+    except Exception as e:
+        logger.error(f"[Split] send loop error: {e}", exc_info=True)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
+        return
 
     if status_msg_id:
         await edit_msg(chat_id, status_msg_id, f"✅ সম্পন্ন! {total}টি MCQ → {total_parts}টি ফাইল")
