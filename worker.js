@@ -600,16 +600,33 @@ async function handleWebQuiz(request, url, env) {
   const uid  = url.searchParams.get('uid') || '0';
   const name = url.searchParams.get('name') || 'Student';
 
-  // index.html GitHub raw থেকে fetch করো
+  // index.html fetch করো — raw.githubusercontent rate-limit (429) হলে GH Pages fallback + retry
   const WORKER_ORIGIN = `https://atlasquizbotpro.hamza818483.workers.dev`;
+  const HTML_SOURCES = [
+    'https://raw.githubusercontent.com/hamza818483-dotcom/QuizBot/main/index.html',
+    'https://hamza818483-dotcom.github.io/QuizBot/index.html',
+  ];
   try {
-    const r = await fetch(
-      'https://raw.githubusercontent.com/hamza818483-dotcom/QuizBot/main/index.html',
-      { cf: { cacheEverything: true, cacheTtl: 300 } }
-    );
-    if (!r.ok) throw new Error('index.html fetch failed');
+    let html = null;
+    let lastErr = 'unknown';
+    for (const src of HTML_SOURCES) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const r = await fetch(src, {
+            cf: { cacheEverything: true, cacheTtl: 300 },
+            signal: AbortSignal.timeout(8000)
+          });
+          if (r.ok) { html = await r.text(); break; }
+          lastErr = `HTTP ${r.status} from ${src}`;
+        } catch (e) {
+          lastErr = `${e.message} from ${src}`;
+        }
+        if (!html) await new Promise(res => setTimeout(res, 400));
+      }
+      if (html) break;
+    }
+    if (!html) throw new Error(lastErr);
 
-    let html = await r.text();
 
     // Template variables replace — HF_SPACE_URL কে worker নিজেই handle করবে
     html = html.replace(/\{\{CACHE_ID\}\}/g,      quizId);
