@@ -633,7 +633,16 @@ function doSubmit(){
       ${motivation?`<div class="mot-text">${motivation}</div>`:''}
       ${ayat?`<div class="ayat-text">📖 ${ayat}</div>`:''}
     </div>`;
-  }).catch(()=>{});
+  }).catch(()=>{
+    const _SBU='https://wbdyjpjbczfunyhhmtry.supabase.co', _SBK='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+    fetch(`${_SBU}/rest/v1/quiz_results`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':_SBK,'Authorization':`Bearer ${_SBK}`,'Prefer':'return=minimal'},
+      body:JSON.stringify({cache_id:CACHE_ID,user_id:USER_ID,user_name:USER_NAME,
+        topic:examData.topic,page:examData.page,total:questions.length,
+        correct,wrong,skipped,time_taken:timeTaken})
+    }).catch(()=>{});
+  });
 
   const backUrl = buildBackUrl(channelId, endMsgId || imageMsgId);
 
