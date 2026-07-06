@@ -422,39 +422,139 @@ async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
 
 
 def _build_mcq_prompt(topic: str, count) -> str:
-    n_txt = f"{count}" if count else "সর্বোচ্চ যতগুলো সম্ভব (এই পেজের সব তথ্য থেকে)"
+    if count:
+        count_rule = (
+            f"EXACT COUNT REQUIRED: Extract exactly {count} MCQs from this page. "
+            f"If the page genuinely doesn't have enough distinct information for "
+            f"{count}, get as close as possible by rephrasing/re-angling the same "
+            f"facts from different angles (different question style, different "
+            f"correct option position) — never stop early just because it feels repetitive."
+        )
+    else:
+        count_rule = (
+            "MAXIMUM COUNT REQUIRED (no fixed number given): Extract the HIGHEST "
+            "POSSIBLE number of quality MCQs from every piece of information on "
+            "this page — do not stop at a small number just because the obvious "
+            "MCQs ran out. Re-angle the same facts into different question styles "
+            "(direct fact, true/false-style, definition, comparison, cause-effect) "
+            "so nothing usable on the page is left unused. Minimum 15-35 MCQs if "
+            "the page has enough content; only go below that if the page has "
+            "genuinely very little text (then at least 10)."
+        )
     return (
-        f"You are an MCQ extraction expert for Bengali/English academic content.\n"
-        f"Topic: {topic}\n"
-        f"From the given page image, extract {n_txt} MCQs.\n"
-        f"MUST-PRIORITY RULE — never miss lines that are marked in ANY way:\n"
+        f"You are an expert MCQ-extraction engine for Bengali/English academic "
+        f"textbook pages (medical/HSC/admission-standard quality).\n"
+        f"Topic: {topic}\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 OVERALL RULES\n"
+        f"═══════════════════════════════\n"
+        f"- Whether the image already looks like ready-made MCQs or plain "
+        f"information, generate MCQs from EVERY part of it — nothing is off-limits.\n"
+        f"- {count_rule}\n"
+        f"- Never make junk/filler MCQs just to hit a number — if you must reuse "
+        f"the same fact to reach the target count, rephrase it into a genuinely "
+        f"different question angle, not a copy-paste.\n"
+        f"- NEVER generate MCQs from topic names, chapter titles, headlines, or "
+        f"page numbers — these are structural labels, not content.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 MUST-PRIORITY — NEVER skip lines that are marked in ANY way\n"
+        f"═══════════════════════════════\n"
         f"- Any line/paragraph highlighted or marked with ANY color (green, red, "
-        f"orange, yellow are most common highlighter colors)\n"
-        f"- Any paragraph/line boxed or color-marked\n"
+        f"orange, yellow are the most common highlighter colors)\n"
+        f"- Any paragraph/line boxed, circled, or color-marked\n"
         f"- Any line underlined with pen ink (red, black, blue, green — any color)\n"
-        f"- If you see ANY extra color, mark, box, or underline added on top of the "
-        f"book's original line, you MUST make an MCQ from it — do not skip it.\n"
-        f"STRICT LANGUAGE RULE: Detect the language of the source image text "
-        f"(Bengali or English) and write the question, ALL options, and the "
-        f"explanation in that exact same language. Never translate — if the "
-        f"source is English, output English; if the source is Bengali, output "
-        f"Bengali.\n"
-        f"EXPLANATION RULE — এটাই সবচেয়ে গুরুত্বপূর্ণ, STRICTLY FOLLOW করতে হবে:\n"
-        f"- শুধু 'সঠিক উত্তর হলো X' এই টাইপ ১ লাইনে থামা যাবে না — এটা একটা "
-        f"SEVERE FAILURE হবে।\n"
-        f"- Explanation-এ থাকতে হবে: (1) কেন এই answer টাই সঠিক তার reasoning, "
-        f"(2) সোর্স ইমেজে ওই টপিকের আশেপাশে/related যত তথ্য আছে তার সবটুকু, "
-        f"যাতে ইউজার MCQ solve করে ওই বিষয়ে সম্পূর্ণ ধারণা পায় — শুধু answer "
-        f"বলে দেওয়াই যথেষ্ট নয়।\n"
-        f"- সব তথ্য অবশ্যই সোর্স ইমেজ থেকেই নিতে হবে (কল্পনা করা/বাইরের জ্ঞান "
-        f"যুক্ত করা নিষেধ)।\n"
-        f"- Explanation কমপক্ষে ২-৩ বাক্যের হতে হবে, ১ লাইনের ছোট answer-বলা "
-        f"explanation একদমই acceptable না।\n"
+        f"- ANY extra color, mark, box, star, or underline added on top of the "
+        f"book's original printed line means this content is high-priority and "
+        f"you MUST make an MCQ from it — do not skip it under any circumstance.\n"
+        f"- Tables/charts get special priority — use every cell of information "
+        f"in them for MCQs, don't just describe the table.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 প্রশ্ন (QUESTION)\n"
+        f"═══════════════════════════════\n"
+        f"- Short and clear (roughly 1-1.5-2 lines), never needlessly wordy or convoluted.\n"
+        f"- Cover every plausible angle the source content could be tested on, but "
+        f"never invent facts not present in the source image.\n"
+        f"- Should not be unnecessarily hard/tricky — quality and clarity matter more "
+        f"than difficulty.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 অপশন (OPTIONS) — exactly 4\n"
+        f"═══════════════════════════════\n"
+        f"- Size: options are generally short (often a single word/term), with some "
+        f"variation — roughly a 20% mix of longer options (a short phrase) is fine; "
+        f"don't force every option to the exact same length artificially.\n"
+        f"- All 4 options must be filled with real, substantive content from the "
+        f"source — never single-word filler like 'yes/no/true/false' as an option.\n"
+        f"- Not limited to one specific topic/box on the page — mix in related "
+        f"information from elsewhere in the same source as distractors, that's fine.\n"
+        f"- Prefer distractors that are CLOSE/CONFUSABLE with the correct answer "
+        f"(pulled from nearby/related information in the same source — HIGH PRIORITY), "
+        f"so a student actually has to know the material rather than guess by "
+        f"elimination, and genuinely has to think about which option is correct.\n"
+        f"- Exactly ONE option must be correct — verify there is no ambiguity "
+        f"where two options could both be defended as correct.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 উত্তর (ANSWER)\n"
+        f"═══════════════════════════════\n"
+        f"- Exactly one of A/B/C/D.\n"
+        f"- Give the highest priority to making sure more than one option can never "
+        f"be defended as correct — double-check this for every single MCQ.\n"
+        f"- Across the full set of MCQs you generate, vary WHICH option letter is "
+        f"correct from question to question (don't let the correct answer always "
+        f"land on the same letter/position) — the answer's position must be genuinely "
+        f"determined by where the correct option ended up, not forced into a pattern.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 ব্যাখ্যা (EXPLANATION) — TWO PARTS, BOTH MANDATORY, NO EXCEPTIONS\n"
+        f"═══════════════════════════════\n"
+        f"An explanation that ONLY names/restates the correct answer (a single "
+        f"short line like 'সঠিক উত্তর X' or 'The answer is X') is INVALID and "
+        f"REJECTED — that is not an explanation, that is just repeating the answer. "
+        f"Every explanation MUST contain BOTH of the following parts, in this order:\n"
+        f"  PART 1 (answer confirmation): State which option is correct.\n"
+        f"  PART 2 (source-derived surrounding context — MUST, never optional): "
+        f"Add 1-2 sentences of ADDITIONAL related facts/details pulled directly "
+        f"from the same source image — information near/around this specific "
+        f"fact on the page (nearby lines, the same paragraph, a related row in "
+        f"the same table, a definition/number/date/name that appears close to "
+        f"this fact in the source), so that solving this MCQ and reading the "
+        f"explanation teaches the student a bit more than just the bare answer. "
+        f"This must be genuinely new information beyond the bare answer — not a "
+        f"restatement of the question, not a restatement of the correct option's "
+        f"text, not a generic filler sentence.\n"
+        f"- If you cannot find any nearby related fact in the source for part 2, "
+        f"you MUST look again at the surrounding lines/paragraph/table before "
+        f"giving up — nearly every source page has at least one adjacent fact "
+        f"(a number, a name, a related term, a cause/effect, a definition) that "
+        f"can serve as part 2. Only if the source page is truly a single isolated "
+        f"fact with absolutely nothing else nearby may part 2 be a brief factual "
+        f"elaboration on the answer itself, still from the source, never invented.\n"
+        f"- Everything in both parts must come from the source image — never "
+        f"introduce outside facts, never guess, never use general knowledge not "
+        f"visible in the source.\n"
+        f"- Self-check before finalizing EVERY explanation: if it reads as one "
+        f"short clause with no additional fact beyond naming the answer, it FAILS "
+        f"this rule — rewrite it to add the required part-2 context before output.\n"
+        f"- Length: roughly 100-200 characters — long enough to fit both parts, "
+        f"but still concise.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟩 STRICT LANGUAGE RULE\n"
+        f"═══════════════════════════════\n"
+        f"Detect the language of the source image text (Bengali or English) and "
+        f"write the question, ALL options, and the explanation in that exact same "
+        f"language. Never translate — if the source is English, output English; "
+        f"if the source is Bengali, output Bengali.\n\n"
+
         f"For EACH MCQ, also give 'exp_bbox': the bounding box of the exact "
         f"line/paragraph/table this MCQ was made from, with a few extra lines "
         f"of margin above and below so the full relevant context is visible. "
         f"Normalize to 0-1000 scale ([x_min,y_min,x_max,y_max], top-left=[0,0], "
-        f"bottom-right=[1000,1000]). If unsure, use null.\n"
+        f"bottom-right=[1000,1000]). If unsure, use null.\n\n"
         f"Return STRICT JSON array only, no prose, no markdown fences. Schema:\n"
         f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"exp_bbox\":[100,200,900,350]}}]"
@@ -652,6 +752,105 @@ _AI_FALLBACK_FNS = {
     "hf":              _gen_hf,
 }
 
+_THIN_EXPLANATION_PATTERNS = [
+    r'^সঠিক\s*উত্তর\s*[:\-—]?\s*[a-dA-D১-৪]?\s*[.।]?$',
+    r'^উত্তর\s*[:\-—]?\s*[a-dA-D১-৪]?\s*[.।]?$',
+    r'^the\s*(correct\s*)?answer\s*is\s*[a-d]?\.?$',
+    r'^answer\s*[:\-—]\s*[a-d]\.?$',
+    r'^option\s*[a-d]\s*is\s*(the\s*)?correct\.?$',
+]
+
+def _is_thin_explanation(exp: str) -> bool:
+    """
+    Detects an explanation that ONLY names the answer (Part 1) with no
+    source-derived surrounding context (Part 2) — heuristic check used to
+    catch cases where the model ignored the two-part explanation rule.
+    """
+    e = (exp or "").strip()
+    if not e:
+        return True
+    # strip any already-attached <img> tag before judging length/content
+    e_no_img = re.sub(r'<img[^>]*>', '', e, flags=re.IGNORECASE).strip()
+    if not e_no_img:
+        return True
+    if len(e_no_img) < 40:  # a genuine 2-part explanation rarely fits under this
+        return True
+    for pat in _THIN_EXPLANATION_PATTERNS:
+        if re.match(pat, e_no_img, re.IGNORECASE):
+            return True
+    return False
+
+async def _repair_thin_explanations(mcqs: list, img, topic: str) -> list:
+    """
+    Targeted, single-pass repair for MCQs whose explanation only names the
+    answer with no source-derived context — re-asks the model for JUST the
+    explanation of those specific questions (not the whole page again), with
+    an even stricter reminder of the two-part rule. Falls back to leaving the
+    original explanation untouched if the repair call fails or still comes
+    back thin (never blocks the MCQ from being delivered).
+    """
+    thin = [m for m in (mcqs or []) if _is_thin_explanation(m.get("explanation", ""))]
+    if not thin:
+        return mcqs
+    questions_block = "\n".join(
+        f'{i+1}. Q: {m["question"]}\n   Correct option: {m["options"][{"A":0,"B":1,"C":2,"D":3}.get(m["answer"],0)]}'
+        for i, m in enumerate(thin)
+    )
+    repair_prompt = (
+        f"Topic: {topic}\n"
+        f"For EACH numbered question below, write a proper explanation using the "
+        f"attached source image. A valid explanation has TWO mandatory parts: "
+        f"(1) confirm the correct option, (2) add 1-2 sentences of ADDITIONAL "
+        f"related facts pulled from NEAR this fact in the source image (a nearby "
+        f"line, a related row, a nearby number/name/date) — never just repeat "
+        f"the answer alone, never invent facts outside the source. Same language "
+        f"as the source (Bengali or English). ~100-200 characters each.\n\n"
+        f"{questions_block}\n\n"
+        f"Return STRICT JSON array only, same order, no prose: "
+        f'[{{"explanation":"..."}}, ...]'
+    )
+    try:
+        fixed_txt = await _gen_groq_raw_text(img, repair_prompt)
+        fixed = _parse_explanation_only_json(fixed_txt)
+        if fixed and len(fixed) == len(thin):
+            for m, new_exp in zip(thin, fixed):
+                if new_exp and not _is_thin_explanation(new_exp):
+                    m["explanation"] = new_exp
+    except Exception as e:
+        logger.warning(f"[ExplanationRepair] failed, keeping originals: {e}")
+    return mcqs
+
+def _parse_explanation_only_json(text: str) -> list:
+    if not text:
+        return []
+    s = text.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s)
+        s = re.sub(r"\s*```$", "", s)
+    a, b = s.find("["), s.rfind("]")
+    if a != -1 and b != -1 and b > a:
+        s = s[a:b+1]
+    try:
+        data = json.loads(s)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(it.get("explanation", "")).strip()[:500] if isinstance(it, dict) else "" for it in data]
+
+async def _gen_groq_raw_text(img, prompt: str) -> str:
+    key = os.environ.get("GROQ_API_KEY", "")
+    if not key:
+        return ""
+    data_url = _img_to_data_url(img)
+    if not data_url:
+        return ""
+    return await _post_openai_compat(
+        "https://api.groq.com/openai/v1/chat/completions",
+        key, "meta-llama/llama-4-scout-17b-16e-instruct",
+        data_url, prompt
+    )
+
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     Smart wrapper: Groq first (primary), then Gemini (internal key rotation via pdf_handler).
@@ -660,8 +859,13 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
     out = _cap_mcq_options(out, 4)
+    # কোনো MCQ-র explanation যদি শুধু উত্তর বলেই থেমে যায় (আশেপাশের সোর্স-তথ্য
+    # ছাড়া) — সেটার জন্য একটা targeted repair pass চালানো হয়, পুরো পেইজ আবার
+    # generate না করেই। ব্যর্থ হলেও মূল MCQ ডেলিভারি আটকায় না।
+    out = await _repair_thin_explanations(out, img, topic)
     out = await _attach_explanation_images_if_missing(out, img)
     return out
+
 
 
 def _ocr_bbox_lookup(img, mcqs: list) -> dict:
@@ -2892,8 +3096,10 @@ async def handle_pdf(msg: dict):
         await send_msg(chat_id,
             "❌ PDF ফাইলে reply করে <code>/pdf</code> দাও!\n\n"
             "<b>Example:</b>\n"
-            "<code>/pdf -p 1-5 -c @channel -m \"Topic\" 10</code>\n"
-            "<code>/pdf -p 2 -c -100xxx -t \"Group Topic\" 10</code>"
+            "<code>/pdf -p 1-5 -c @channel -m \"Topic\" [10]</code>\n"
+            "<code>/pdf -p 2 -c -100xxx -t 447 -m \"Group Topic\" [10]</code>\n\n"
+            "<code>[N]</code> = প্রতি পেইজে কতগুলো MCQ বানাতে হবে (ঐচ্ছিক)\n"
+            "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
         )
         return
     params = parse_pdf_command(text)
