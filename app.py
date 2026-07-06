@@ -1895,8 +1895,9 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         # not repeated here to avoid sending it twice.
 
         end_text = (
-            f"🎯Topic: {topic}\n"
-            f"🚀MCQ: {len(mcqs)}\n"
+            f"🚀Topic: {topic}\n"
+            f"🌟Page No: N/A\n"
+            f"✅MCQ: {len(mcqs)}\n"
         )
         if poll_links:
             end_text += f"🔗First Poll Link:\n{poll_links[0]}"
@@ -3975,7 +3976,7 @@ async def process_pdf_pages(
 
                 end_data = {
                     "chat_id": channel_id,
-                    "text": f"🚀🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n🔗First Poll: {first_poll_link}",
+                    "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "📝 Quiz Solve", "url": quiz_url}],
                         [{"text": "🔄 Poll Again", "url": poll_url}],
@@ -4340,9 +4341,9 @@ async def process_pdfm_pages(
                     poll_links, image_file_id, image_msg_id, channel_id)
 
                 end_text = (
-                    f"🎯Topic: {topic}\n"
+                    f"🚀Topic: {topic}\n"
                     f"🌟Page No: {fmt_page(page_num)}\n"
-                    f"🚀MCQ: {len(mcqs)}\n"
+                    f"✅MCQ: {len(mcqs)}\n"
                     f"🔗First Poll Link:\n{first_poll_link}"
                 )
                 end_data = {
@@ -5474,9 +5475,9 @@ async def process_qbm_pages(
                     await asyncio.sleep(0.3)
 
                 end_text = (
-                    f"📋Topic: {topic}\n"
+                    f"🚀Topic: {topic}\n"
                     f"🌟Page No: {fmt_page(page_num)}\n"
-                    f"🚀MCQ: {len(mcqs)}\n"
+                    f"✅MCQ: {len(mcqs)}\n"
                     f"🔗First Poll Link:\n{first_poll_link}"
                 )
                 end_data = {
