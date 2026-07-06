@@ -3173,7 +3173,7 @@ async def handle_sheet_command(msg: dict):
         if loading_id:
             await edit_msg(chat_id, loading_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n🎨 Print Style বেছে নাও:")
 
-        title = custom_title or (file_name.rsplit(".", 1)[0] if "." in file_name else file_name)
+        title = custom_title or "ATLAS Special"
         cache_key = f"{chat_id}:{loading_id}"
         _sheet_cache[cache_key] = {"mcqs": mcqs, "title": title}
 
@@ -3201,11 +3201,11 @@ async def handle_sheet_style_callback(callback_query: dict):
     _, style_key, cache_key = parts
     cached = _sheet_cache.get(cache_key)
     if not cached:
-        await edit_msg(chat_id, message_id, "❌ Session expired, আবার /sheet দাও।")
+        await tg_post("answerCallbackQuery", {"callback_query_id": callback_query["id"], "text": "❌ Session expired, আবার /sheet দাও।", "show_alert": True})
         return
 
     mcqs, title = cached["mcqs"], cached["title"]
-    await edit_msg(chat_id, message_id, "🎨 Sheet PDF বানানো হচ্ছে...")
+    await tg_post("answerCallbackQuery", {"callback_query_id": callback_query["id"], "text": "🎨 PDF বানানো হচ্ছে..."})
 
     try:
         if style_key == "default":
@@ -3216,14 +3216,12 @@ async def handle_sheet_style_callback(callback_query: dict):
 
         pdf_bytes = await _html_to_pdf(html_out)
         if not pdf_bytes:
-            await edit_msg(chat_id, message_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
+            await tg_post("sendMessage", {"chat_id": chat_id, "text": "❌ PDF generate করতে সমস্যা হয়েছে!"})
             return
 
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Sheet"
         await send_document(chat_id, pdf_bytes, f"{safe_title}_sheet.pdf",
             caption=f"📖 Practice Sheet\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP")
-        await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
-        _sheet_cache.pop(cache_key, None)
     except Exception as e:
         logger.error(f"[SHEET STYLE] Error: {e}")
         await _safe_error_reply(chat_id, e)
