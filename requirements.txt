@@ -8,6 +8,7 @@ pdf2image
 pytesseract
 reportlab
 httpx
+websockets
 python-dotenv
 fastapi
 uvicorn

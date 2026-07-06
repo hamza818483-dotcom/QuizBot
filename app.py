@@ -2829,51 +2829,100 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
 # HTML → PDF (Chromium)
 # ============================================================
 async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
-    import tempfile
+    import tempfile, json as _json
     chromium_bin = os.environ.get("CHROMIUM_PATH", "chromium")
+    import random
+    debug_port = random.randint(9300, 9999)
+    html_path = None
+    proc = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".html", mode="w", encoding="utf-8", delete=False) as f:
             f.write(html)
             html_path = f.name
-        pdf_path = html_path.replace(".html", ".pdf")
         if progress_cb:
-            await progress_cb(20)
+            await progress_cb(15)
+
         proc = await asyncio.create_subprocess_exec(
             chromium_bin, "--headless=new", "--no-sandbox",
             "--disable-gpu", "--disable-dev-shm-usage",
-            "--run-all-compositor-stages-before-draw",
-            f"--print-to-pdf={pdf_path}",
-            "--print-to-pdf-no-header",
+            f"--remote-debugging-port={debug_port}",
+            "--remote-debugging-address=127.0.0.1",
             f"file://{html_path}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         if progress_cb:
-            await progress_cb(50)
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+            await progress_cb(30)
+
+        import httpx as _httpx
+        import websockets
+
+        ws_url = None
+        for _ in range(30):
+            await asyncio.sleep(0.3)
+            try:
+                async with _httpx.AsyncClient(timeout=2) as client:
+                    r = await client.get(f"http://127.0.0.1:{debug_port}/json")
+                    tabs = r.json()
+                    if tabs:
+                        ws_url = tabs[0]["webSocketDebuggerUrl"]
+                        break
+            except Exception:
+                continue
+        if not ws_url:
+            raise RuntimeError("Chromium debug port not ready")
+
+        if progress_cb:
+            await progress_cb(55)
+
+        async with websockets.connect(ws_url, max_size=None) as ws:
+            await ws.send(_json.dumps({"id": 1, "method": "Page.enable"}))
+            await ws.recv()
+            await asyncio.sleep(0.5)
+            await ws.send(_json.dumps({
+                "id": 2,
+                "method": "Page.printToPDF",
+                "params": {
+                    "displayHeaderFooter": False,
+                    "printBackground": True,
+                    "preferCSSPageSize": True,
+                }
+            }))
+            result = None
+            while True:
+                msg = _json.loads(await ws.recv())
+                if msg.get("id") == 2:
+                    result = msg
+                    break
+            if "error" in result:
+                raise RuntimeError(f"CDP error: {result['error']}")
+            pdf_b64 = result["result"]["data"]
+
         if progress_cb:
             await progress_cb(90)
-        if os.path.exists(pdf_path):
-            with open(pdf_path, "rb") as f:
-                result = f.read()
-            if progress_cb:
-                await progress_cb(100)
-            try:
-                os.remove(html_path)
-                os.remove(pdf_path)
-            except Exception:
-                pass
-            return result
-        else:
-            logger.error(f"[PDF Gen] chromium produced no file. stderr: {stderr.decode(errors='ignore')[:500]}")
-        try:
-            os.remove(html_path)
-        except Exception:
-            pass
-    except FileNotFoundError:
-        logger.error(f"[PDF Gen] chromium binary not found at '{chromium_bin}' — check Dockerfile install")
+
+        import base64 as _b64
+        pdf_bytes = _b64.b64decode(pdf_b64)
+        if progress_cb:
+            await progress_cb(100)
+        return pdf_bytes
     except Exception as e:
         logger.error(f"[PDF Gen] Error: {e}")
+    finally:
+        if proc:
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        if html_path and os.path.exists(html_path):
+            try:
+                os.remove(html_path)
+            except Exception:
+                pass
     return None
 
 # ============================================================
