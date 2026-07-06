@@ -2322,6 +2322,36 @@ async def handle_csvs_command(msg: dict):
 # ============================================================
 # SHARED CSV PARSER
 # ============================================================
+def _parse_csv_bytes(csv_bytes: bytes) -> list:
+    """CSV bytes থেকে MCQ list বানাও."""
+    import io, csv as csv_mod_local
+    try:
+        content = csv_bytes.decode("utf-8-sig")
+        reader = csv_mod_local.DictReader(io.StringIO(content))
+        mcqs = []
+        for row in reader:
+            q = row.get("questions") or row.get("question", "")
+            if not q:
+                continue
+            opts_raw = [
+                row.get("option1", ""), row.get("option2", ""),
+                row.get("option3", ""), row.get("option4", "")
+            ]
+            opts = [o.strip() for o in opts_raw if o.strip()]
+            if len(opts) < 2:
+                continue
+            ans_raw = str(row.get("answer", "1")).strip().upper()
+            ans_map = {"1": "A", "2": "B", "3": "C", "4": "D", "A": "A", "B": "B", "C": "C", "D": "D"}
+            ans = ans_map.get(ans_raw, "A")
+            mcqs.append({
+                "question": q.strip(), "options": opts, "answer": ans,
+                "explanation": row.get("explanation", "").strip()
+            })
+        return mcqs
+    except Exception as e:
+        logger.error(f"[CSV Parse] Error: {e}")
+        return []
+
 def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
     """MCQ list → CSV bytes, matching _parse_csv_bytes column layout."""
     import io, csv as csv_mod_local
