@@ -306,6 +306,10 @@ async def tg_post(method: str, data: dict) -> dict:
             result = r.json()
             if result.get("ok"):
                 return result
+            if result.get("error_code") == 429:
+                retry_after = result.get("parameters", {}).get("retry_after", 5)
+                logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
+                await asyncio.sleep(min(retry_after, 30) + 0.5)
             logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
     except Exception as e:
         logger.warning(f"[TG] {method} proxy error: {e}")
@@ -315,6 +319,10 @@ async def tg_post(method: str, data: dict) -> dict:
             r = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=data)
             result = r.json()
             if not result.get("ok"):
+                if result.get("error_code") == 429:
+                    retry_after = result.get("parameters", {}).get("retry_after", 5)
+                    logger.warning(f"[TG] {method} direct 429, waiting {retry_after}s")
+                    await asyncio.sleep(min(retry_after, 30) + 0.5)
                 logger.warning(f"[TG] {method} direct failed: {result.get('description')}")
             return result
     except Exception as e:
