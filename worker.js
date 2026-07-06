@@ -46,8 +46,8 @@ export default {
     // Web Quiz — CF serves index.html, API data via HF→D1→Supabase chain
     if (url.pathname.startsWith('/quiz/')) return await handleWebQuiz(request, url, env);
     if (url.pathname.startsWith('/exam/')) return await handleWebQuiz(request, url, env);
-    if (url.pathname.startsWith('/api/exam/')) return await handleQuizData(request, url);
-    if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url);
+    if (url.pathname.startsWith('/api/exam/')) return await handleQuizData(request, url, env);
+    if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url, env);
 
     // v4.2: HF account permanently banned — these routes now go to Render.
     const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
@@ -466,16 +466,19 @@ async function handleTgSendDoc(request) {
 // ============================================================
 // WEB QUIZ — Same index.html style, runs entirely on CF
 // ============================================================
-async function handleQuizData(request, url) {
+async function handleQuizData(request, url, env) {
   try {
     let id = url.searchParams.get('id');
     if (!id) id = url.pathname.replace('/api/exam/', '').split('?')[0].trim();
     if (!id) return jsonResp({ ok: false, error: 'No id' }, 400);
 
     const ANS = ["A","B","C","D","E"];
-    const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
-    const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
-    const RENDER_URL = 'https://quizbot-s482.onrender.com';
+    const SB_URL  = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+    const SB_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+    const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
+    const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
+    const RENDER_URL   = (env && env.RENDER_URL)   || 'https://quizbot-s482.onrender.com';
+    const RENDER_URL_2 = (env && env.RENDER_URL_2) || '';
 
     function toMcqs(questions) {
       return questions.map(q => ({
@@ -499,30 +502,29 @@ async function handleQuizData(request, url) {
       });
     }
 
-    // ── Layer 1: Render (primary — has all data including image_file_id; HF permanently banned) ──
-    // v4.4: 8s→25s timeout + 2 retries with short backoff, since Render free tier
-    // cold start commonly takes 30-50s. A single 8s shot was failing on every
-    // cold request and falling through to layers that don't cover pdf_mcq_cache.
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const r = await fetch(`${RENDER_URL}/api/exam/${id}`, {
-          signal: AbortSignal.timeout(25000)
-        });
-        if (r.ok) {
-          const d = await r.json();
-          if (d && d.mcqs && d.mcqs.length > 0) {
-            // Forward Render response as-is (preserves image_file_id, channel_id, etc.)
-            return jsonResp(d);
+    // ── Layer 1: Render primary + secondary account (each retried 3x/25s before moving on) ──
+    const renderHosts = [RENDER_URL, RENDER_URL_2].filter(Boolean);
+    for (const host of renderHosts) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const r = await fetch(`${host}/api/exam/${id}`, {
+            signal: AbortSignal.timeout(25000)
+          });
+          if (r.ok) {
+            const d = await r.json();
+            if (d && d.mcqs && d.mcqs.length > 0) {
+              return jsonResp(d);
+            }
+            break; // this host answered but no mcqs — real 404 on this host, try next host
           }
-          break; // Render responded OK but no mcqs — real 404, don't retry
+        } catch(e) {
+          console.warn(`[quiz] Render (${host}) attempt ${attempt} failed:`, e.message);
+          if (attempt < 3) await new Promise(res => setTimeout(res, 1500));
         }
-      } catch(e) {
-        console.warn(`[quiz] Render primary attempt ${attempt} failed:`, e.message);
-        if (attempt < 3) await new Promise(res => setTimeout(res, 1500));
       }
     }
 
-    // ── Layer 1.5: Supabase direct — pdf_mcq_cache table (covers /img, /pdf, /csv sources) ──
+    // ── Layer 1.5: Supabase project 1 direct — pdf_mcq_cache table (covers /img, /pdf, /csv sources) ──
     try {
       const r = await fetch(
         `${SB_URL}/rest/v1/pdf_mcq_cache?id=eq.${id}&select=*`,
@@ -556,11 +558,11 @@ async function handleQuizData(request, url) {
       }
     }
 
-    // ── Layer 3: Supabase quiz_backups ──
+    // ── Layer 3: Supabase primary account quiz_backups ──
     try {
       const r = await fetch(
         `${SB_URL}/rest/v1/quiz_backups?quiz_id=eq.${id}&select=*`,
-        { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } }
+        { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` }, signal: AbortSignal.timeout(10000) }
       );
       const data = await r.json();
       if (data && data[0]) {
@@ -578,13 +580,11 @@ async function handleQuizData(request, url) {
       console.error('[quiz] Supabase primary failed:', e.message);
     }
 
-    // ── Layer 4: Supabase Secondary (backup of backup) ──
+    // ── Layer 4: Supabase Secondary account (backup of backup) ──
     try {
-      const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
-      const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
       const r = await fetch(
         `${SB2_URL}/rest/v1/quiz_backups?quiz_id=eq.${id}&select=*`,
-        { headers: { apikey: SB2_KEY, Authorization: `Bearer ${SB2_KEY}` } }
+        { headers: { apikey: SB2_KEY, Authorization: `Bearer ${SB2_KEY}` }, signal: AbortSignal.timeout(10000) }
       );
       const data = await r.json();
       if (data && data[0]) {
