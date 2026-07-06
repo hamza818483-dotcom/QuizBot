@@ -3113,7 +3113,7 @@ body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:1
 .question{margin-bottom:7px;break-inside:avoid;page-break-inside:avoid}
 .question-header{margin-bottom:4px;display:flex;align-items:flex-start}
 .question-num{font-weight:bold;color:#1E64B7;font-size:14pt;margin-right:5px;white-space:nowrap;flex-shrink:0}
-.question-text{flex:1;line-height:1.6;font-size:15pt;color:#000;word-wrap:break-word}
+.question-text{flex:1;line-height:1.6;font-size:16pt;font-weight:600;color:#000;word-wrap:break-word}
 .options-table-short{width:100%;border-collapse:collapse;margin:6px 0 6px 8px;table-layout:fixed}
 .options-table-short td{border:none;padding:3px 8px 3px 0;vertical-align:top;font-size:15pt;color:#000;width:40%}
 .options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;font-weight:600;font-size:14pt;color:#000;padding-left:10px}
