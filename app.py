@@ -2860,6 +2860,19 @@ _PDF_SEMAPHORE = asyncio.Semaphore(1)
 
 async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
   async with _PDF_SEMAPHORE:
+    task = asyncio.ensure_future(_html_to_pdf_impl(html, progress_cb))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=60)
+    except asyncio.TimeoutError:
+        logger.error("[PDF Gen] Timed out after 60s")
+        task.cancel()
+        try:
+            await task
+        except Exception:
+            pass
+        return None
+
+async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
     import tempfile, json as _json
     chromium_bin = os.environ.get("CHROMIUM_PATH", "chromium")
     import random
