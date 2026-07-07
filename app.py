@@ -3765,27 +3765,52 @@ async def handle_pdf(msg: dict):
                     channel_id, False, file_name, None, thread_id=thread_id, skip_generate=False)
             return
 
-        ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
-        pdf_bytes = None  # RAM fix: raw PDF no longer needed once page images are extracted
-        if not ok:
-            await send_msg(chat_id, pages)
-            return
-        if not pages:
-            await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
-            return
+        if channel_id:
+            ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
+            pdf_bytes = None  # RAM fix: raw PDF no longer needed once page images are extracted
+            if not ok:
+                await send_msg(chat_id, pages)
+                return
+            if not pages:
+                await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
+                return
 
-        if status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Generation শুরু হচ্ছে...")
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Generation শুরু হচ্ছে...")
 
         if not channel_id:
-            # ── MCQ Generation ALWAYS runs first (per /qbm pattern) ──
-            # Channel selection + CSV/With-Without-Image happen only AFTER
-            # generation is fully complete, so the person picks a channel already
-            # knowing exactly how many MCQs were made.
-            generated_pages = await pdf_generate_all_pages(
-                chat_id, pages, topic, mcq_count, file_name, status_msg_id
-            )
+            # ── No -c given: decode + generate in RAM-safe batches of
+            # _PDF_MAX_PAGES_PER_CALL pages at a time (avoids decoding the
+            # entire PDF's pages into memory upfront for large docs).
+            # Channel selection happens only AFTER all batches are generated.
+            if page_range:
+                parts = page_range.split("-")
+                req_first = int(parts[0])
+                req_last = int(parts[1]) if len(parts) > 1 else req_first
+            else:
+                total_pages = await asyncio.to_thread(get_pdf_page_count, pdf_bytes)
+                req_first, req_last = 1, total_pages
+
+            generated_pages = []
+            for batch_start in range(req_first, req_last + 1, _PDF_MAX_PAGES_PER_CALL):
+                batch_end = min(batch_start + _PDF_MAX_PAGES_PER_CALL - 1, req_last)
+                batch_range = f"{batch_start}-{batch_end}"
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id,
+                        f"⏳ Batch {batch_start}-{batch_end}/{req_last} generating MCQ...")
+                ok, batch_pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, batch_range)
+                if not ok:
+                    await send_msg(chat_id, batch_pages)
+                    continue
+                if not batch_pages:
+                    continue
+                batch_result = await pdf_generate_all_pages(
+                    chat_id, batch_pages, topic, mcq_count, file_name, status_msg_id
+                )
+                generated_pages.extend(batch_result)
+            pdf_bytes = None  # RAM fix: raw PDF no longer needed after all batches decoded
+
             channels = await db_get_channels()
             if not channels:
                 await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, mcq_count,
@@ -3811,7 +3836,7 @@ async def handle_pdf(msg: dict):
                 kb["inline_keyboard"].append([{"text": f"📢 {ch_name}", "callback_data": f"pdfch_{ch_id}_{uid}"}])
             kb["inline_keyboard"].append([{"text": "📄 CSV File Only", "callback_data": f"pdfch_csv_{uid}"}])
             await send_msg(chat_id,
-                f"✅ Generation Complete! {total_mcq_found} MCQ পাওয়া গেছে ({len(pages)} page)\n\n"
+                f"✅ Generation Complete! {total_mcq_found} MCQ পাওয়া গেছে ({len(generated_pages)} page)\n\n"
                 f"{page_breakdown}\n\n"
                 f"🎯 Topic: {topic}\n\nChannel select করো:",
                 reply_markup=kb)
