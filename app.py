@@ -3896,33 +3896,37 @@ async def pdf_generate_all_pages(
     start_time = time.time()
     total_mcq = 0
     results = []
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
 
-    if status_msg_id:
-        await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
-
-    for idx, (page_num, img) in enumerate(pages):
-        if is_cancelled(chat_id):
-            break
-        page_status[idx]["current"] = True
+    try:
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+                _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
 
-        mcqs = []
-        try:
-            mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
-        except Exception as e:
-            logger.error(f"[PDF Generate] Page {page_num} error: {e}")
+        for idx, (page_num, img) in enumerate(pages):
+            if is_cancelled(chat_id):
+                break
+            page_status[idx]["current"] = True
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
 
-        results.append((page_num, img, mcqs))
-        total_mcq += len(mcqs)
-        page_status[idx]["current"] = False
-        page_status[idx]["done"] = True
-        page_status[idx]["mcq"] = len(mcqs)
-        if status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+            mcqs = []
+            try:
+                mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+            except Exception as e:
+                logger.error(f"[PDF Generate] Page {page_num} error: {e}")
+
+            results.append((page_num, img, mcqs))
+            total_mcq += len(mcqs)
+            page_status[idx]["current"] = False
+            page_status[idx]["done"] = True
+            page_status[idx]["mcq"] = len(mcqs)
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
 
     return results
 
