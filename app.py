@@ -3735,27 +3735,32 @@ async def handle_pdf(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ Download complete!\n📄 File: {file_name}\n[██████████ 100%]\n⏳ PDF → Images converting...")
 
-        # ── Auto-chunking: user didn't specify a page range and PDF is bigger
-        # than the RAM-safe per-call cap → process it as sequential batches
-        # automatically instead of erroring out and asking the user to split it.
-        if not page_range:
+        # ── Auto-chunking: if requested range (or full doc) exceeds RAM-safe
+        # per-call cap → process it as sequential batches automatically.
+        if page_range:
+            parts = page_range.split("-")
+            req_first = int(parts[0])
+            req_last = int(parts[1]) if len(parts) > 1 else req_first
+        else:
             total_pages = await asyncio.to_thread(get_pdf_page_count, pdf_bytes)
-            if total_pages > _PDF_MAX_PAGES_PER_CALL:
-                for batch_start in range(1, total_pages + 1, _PDF_MAX_PAGES_PER_CALL):
-                    batch_end = min(batch_start + _PDF_MAX_PAGES_PER_CALL - 1, total_pages)
-                    batch_range = f"{batch_start}-{batch_end}"
-                    if status_msg_id:
-                        await edit_msg(chat_id, status_msg_id,
-                            f"⏳ Batch {batch_start}-{batch_end}/{total_pages} processing...")
-                    ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, batch_range)
-                    if not ok:
-                        await send_msg(chat_id, pages)
-                        continue
-                    if not pages:
-                        continue
-                    await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count,
-                        channel_id, False, file_name, None, thread_id=thread_id, skip_generate=False)
-                return
+            req_first, req_last = 1, total_pages
+
+        if (req_last - req_first + 1) > _PDF_MAX_PAGES_PER_CALL:
+            for batch_start in range(req_first, req_last + 1, _PDF_MAX_PAGES_PER_CALL):
+                batch_end = min(batch_start + _PDF_MAX_PAGES_PER_CALL - 1, req_last)
+                batch_range = f"{batch_start}-{batch_end}"
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id,
+                        f"⏳ Batch {batch_start}-{batch_end}/{req_last} processing...")
+                ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, batch_range)
+                if not ok:
+                    await send_msg(chat_id, pages)
+                    continue
+                if not pages:
+                    continue
+                await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count,
+                    channel_id, False, file_name, None, thread_id=thread_id, skip_generate=False)
+            return
 
         ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
         pdf_bytes = None  # RAM fix: raw PDF no longer needed once page images are extracted
