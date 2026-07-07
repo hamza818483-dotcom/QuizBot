@@ -9378,8 +9378,24 @@ async def startup():
                 else:
                     logger.info(f"[App] Webhook currently on '{current_url}' (not Render) — leaving as-is, CF cron handles failover")
         else:
-            # HF তে আছি — TG API blocked, CF Worker webhook handle করে
-            logger.info("[App] HF mode — CF Worker handles webhook, no auto-set needed")
+            # HF তে আছি — webhook CF Worker URL-এ থাকা উচিত, প্রতি startup-এ verify+force-set করি
+            worker_webhook = CF_WORKER_URL.rstrip("/") + "/webhook"
+            async with _hx.AsyncClient(timeout=10) as _c:
+                info_r = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
+                current_url = info_r.json().get("result", {}).get("url", "")
+
+                if current_url != worker_webhook:
+                    r = await _c.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                        json={"url": worker_webhook, "drop_pending_updates": False, "max_connections": 40}
+                    )
+                    result = r.json()
+                    if result.get("ok"):
+                        logger.info(f"[App] ✅ HF: webhook was '{current_url}' → corrected to {worker_webhook}")
+                    else:
+                        logger.warning(f"[App] HF: webhook correction failed: {result.get('description')}")
+                else:
+                    logger.info(f"[App] HF: webhook already correct → {worker_webhook}")
     except Exception as e:
         logger.error(f"[App] Webhook setup error: {e}")
 
