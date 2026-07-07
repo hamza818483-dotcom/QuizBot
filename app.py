@@ -4094,7 +4094,18 @@ async def _process_pdf_pages_inner(
                 if end_r.get("ok"):
                     await db_update_cache(cache_id, {"end_msg_id": end_r["result"]["message_id"]})
                 else:
-                    await notify_owner(f"⚠️ End message (Quiz/Poll/Web buttons) failed after 3 tries for page {fmt_page(page_num)}, topic: {topic}")
+                    err_desc = end_r.get("description") or end_r.get("error") or "unknown"
+                    logger.error(f"[EndMsg] Page {page_num} FINAL FAIL: {err_desc}")
+                    if "reply" in str(err_desc).lower() or "not found" in str(err_desc).lower():
+                        # Reply target message missing/deleted -> retry once without reply_to_message_id
+                        end_data.pop("reply_to_message_id", None)
+                        retry_r = await tg_post("sendMessage", end_data)
+                        if retry_r.get("ok"):
+                            await db_update_cache(cache_id, {"end_msg_id": retry_r["result"]["message_id"]})
+                        else:
+                            await notify_owner(f"⚠️ End message failed for page {fmt_page(page_num)}, topic: {topic}\nReason: {err_desc}")
+                    else:
+                        await notify_owner(f"⚠️ End message failed for page {fmt_page(page_num)}, topic: {topic}\nReason: {err_desc}")
 
                 # /pdf on hole ending message er por auto Style1+Style2 Sheet PDF channel e jabe
                 if await should_autosend_pdf(channel_id):
