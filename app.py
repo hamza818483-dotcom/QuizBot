@@ -9096,12 +9096,12 @@ async def _ram_guard_task() -> None:
         return
     proc = psutil.Process(os.getpid())
     limit_mb = 512
-    threshold_mb = int(limit_mb * 0.85)
+    threshold_mb = int(limit_mb * 0.75)
     await asyncio.sleep(60)
     while True:
         try:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
-            hard_cap_mb = int(limit_mb * 0.95)
+            hard_cap_mb = int(limit_mb * 0.88)
             if rss_mb >= hard_cap_mb:
                 logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= hard cap {hard_cap_mb}MB -> forced restart (job or not)")
                 await asyncio.sleep(1)

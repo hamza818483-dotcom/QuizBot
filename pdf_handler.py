@@ -159,8 +159,8 @@ MUST Return ONLY valid JSON array, no markdown:
 # at 60 (below), 2 simultaneous conversions is still safe headroom-wise while
 # cutting queue wait roughly in half under 100-concurrent-user load.
 import threading as _threading
-_PDF_CONVERT_LOCK = _threading.Semaphore(2)
-_PDF_MAX_PAGES_PER_CALL = 40
+_PDF_CONVERT_LOCK = _threading.Semaphore(1)
+_PDF_MAX_PAGES_PER_CALL = 15
 
 
 def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
