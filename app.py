@@ -3758,6 +3758,7 @@ async def handle_pdf(msg: dict):
                 return
 
         ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
+        pdf_bytes = None  # RAM fix: raw PDF no longer needed once page images are extracted
         if not ok:
             await send_msg(chat_id, pages)
             return
@@ -4127,6 +4128,17 @@ async def _process_pdf_pages_inner(
             page_status[idx]["current"] = False
             page_status[idx]["done"] = True
             await notify_owner(f"[PDF] Page {page_num} error:\n{e}")
+        finally:
+            # RAM fix: each page's decoded PIL image (dpi=150) can be several MB.
+            # Holding all pages of a batch in memory for the whole poll-sending
+            # duration was causing OOM kills mid-send on low-RAM instances
+            # (looked like the bot dying / auto-restarting mid-channel-post).
+            # Drop this page's image the moment we're done with it.
+            try:
+                pages[idx] = (page_num, None, None) if skip_generate else (page_num, None)
+            except Exception:
+                pass
+            img = None
 
     if all_mcqs_csv:
         import io, csv as csv_mod
