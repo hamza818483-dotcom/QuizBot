@@ -44,7 +44,7 @@ D1_TOKEN = os.environ.get("D1_TOKEN", "")
 GH_PAGES_EXAM_URL = os.environ.get("GH_PAGES_EXAM_URL", "https://hamza818483-dotcom.github.io/QuizBot/exam.html")
 
 # Render এ চললে directly TG API, HF এ চললে CF proxy (HF তে TG blocked)
-_running_on = os.environ.get("RUNNING_ON", "")
+_running_on = os.environ.get("RUNNING_ON", "") or "HuggingFace Space"
 if _running_on == "Render" or (RENDER_URL and "onrender.com" in RENDER_URL):
     TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
     _tg_mode = "direct"
@@ -236,7 +236,7 @@ from datetime import datetime as _datetime
 import pytz as _pytz
 
 BD_TZ = _pytz.timezone("Asia/Dhaka")
-LOG_DIR = os.environ.get("LOG_DIR", "logs")
+LOG_DIR = os.environ.get("LOG_DIR", "") or "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 

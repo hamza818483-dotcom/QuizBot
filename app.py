@@ -3123,7 +3123,7 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
 
 async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
     import tempfile, json as _json
-    chromium_bin = os.environ.get("CHROMIUM_PATH", "chromium")
+    chromium_bin = os.environ.get("CHROMIUM_PATH", "") or "chromium"
     import random
     debug_port = random.randint(9300, 9999)
     html_path = None
@@ -7964,7 +7964,7 @@ async def handle_message(msg: dict):
             key_count = len(key_rotator.keys)
 
             import os as _os, httpx as _hx
-            _platform = _os.environ.get("RUNNING_ON", "HuggingFace Space")
+            _platform = _os.environ.get("RUNNING_ON", "") or "HuggingFace Space"
 
             # Current webhook check
             _wh_url = "Unknown"
@@ -9355,7 +9355,7 @@ async def startup():
     # HF সচল থাকলে HF থেকে কেড়ে নেবে না, CF cron-ই auto-switch handle করে।
     try:
         import httpx as _hx, os as _os
-        running_on = _os.environ.get("RUNNING_ON", "")
+        running_on = _os.environ.get("RUNNING_ON", "") or "HuggingFace Space"
         self_url = RENDER_URL or ""
 
         if running_on == "Render" or (self_url and "onrender.com" in self_url):
