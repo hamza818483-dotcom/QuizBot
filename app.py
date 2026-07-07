@@ -3735,17 +3735,20 @@ async def handle_pdf(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ Download complete!\n📄 File: {file_name}\n[██████████ 100%]\n⏳ PDF → Images converting...")
 
-        # ── Auto-chunking: if requested range (or full doc) exceeds RAM-safe
-        # per-call cap → process it as sequential batches automatically.
-        if page_range:
+        # ── Auto-chunking: only when channel_id is already known (-c given).
+        # If no channel_id, we must NOT bypass the channel-picker below —
+        # so batching for that case is handled inside the no-channel branch.
+        if channel_id and page_range:
             parts = page_range.split("-")
             req_first = int(parts[0])
             req_last = int(parts[1]) if len(parts) > 1 else req_first
-        else:
+        elif channel_id:
             total_pages = await asyncio.to_thread(get_pdf_page_count, pdf_bytes)
             req_first, req_last = 1, total_pages
+        else:
+            req_first = req_last = None
 
-        if (req_last - req_first + 1) > _PDF_MAX_PAGES_PER_CALL:
+        if channel_id and (req_last - req_first + 1) > _PDF_MAX_PAGES_PER_CALL:
             for batch_start in range(req_first, req_last + 1, _PDF_MAX_PAGES_PER_CALL):
                 batch_end = min(batch_start + _PDF_MAX_PAGES_PER_CALL - 1, req_last)
                 batch_range = f"{batch_start}-{batch_end}"
