@@ -36,7 +36,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://atlasquizbotpro.hamza818483.workers.dev")
-HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://quizbot-s482.onrender.com")  # v4.2: HF permanently banned, Render is primary
+HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://hamza-02-quizbot.hf.space")
 RENDER_URL = os.environ.get("RENDER_URL", "")
 D1_TOKEN = os.environ.get("D1_TOKEN", "")
 # v4.3: GitHub Pages exam link — CF down thakleo page load hoy (static host),
