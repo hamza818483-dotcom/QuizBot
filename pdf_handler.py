@@ -179,7 +179,7 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                 )
             result = []
             for p in range(first, last + 1):
-                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
                 if imgs:
                     result.append((p, imgs[0]))
             logger.info(f"[PDF] Converted {len(result)} pages")
@@ -188,13 +188,13 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
             result = []
             p = 1
             while p <= _PDF_MAX_PAGES_PER_CALL:
-                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
                 if not imgs:
                     break
                 result.append((p, imgs[0]))
                 p += 1
             if p > _PDF_MAX_PAGES_PER_CALL:
-                extra = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                extra = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
                 if extra:
                     raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
             logger.info(f"[PDF] Converted {len(result)} pages")

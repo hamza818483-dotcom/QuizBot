@@ -5437,20 +5437,16 @@ async def qbm_extract_all_pages(
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
     start_time = time.time()
     total_mcq = 0
-    results = []
+    results = [None] * len(pages)
 
     if status_msg_id:
         await edit_msg(chat_id, status_msg_id,
             _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
 
-    for idx, (page_num, img) in enumerate(pages):
+    async def _extract_one(idx, page_num, img):
         if is_cancelled(chat_id):
-            break
+            return idx, page_num, img, []
         page_status[idx]["current"] = True
-        if status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
-
         mcqs = []
         try:
             mcqs = await _qbm_extract_from_image(img)
@@ -5476,17 +5472,33 @@ async def qbm_extract_all_pages(
                         unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
         except Exception as e:
             logger.error(f"[QBM Extract] Page {page_num} error: {e}")
+        return idx, page_num, img, mcqs
 
-        results.append((page_num, img, mcqs))
-        total_mcq += len(mcqs)
-        page_status[idx]["current"] = False
-        page_status[idx]["done"] = True
-        page_status[idx]["mcq"] = len(mcqs)
+    # Windowed concurrency: extract several pages in parallel instead of one at
+    # a time -- the RAM-aware semaphore (_QBM_EXTRACT_HARD_CAP) still throttles
+    # actual concurrent Gemini calls, this just stops needlessly serializing
+    # pages that don't depend on each other's extraction result.
+    WINDOW = 5
+    for start in range(0, len(pages), WINDOW):
+        if is_cancelled(chat_id):
+            break
+        chunk = pages[start:start + WINDOW]
+        tasks = [
+            _extract_one(start + i, page_num, img)
+            for i, (page_num, img) in enumerate(chunk)
+        ]
+        chunk_results = await asyncio.gather(*tasks)
+        for idx, page_num, img, mcqs in chunk_results:
+            results[idx] = (page_num, img, mcqs)
+            total_mcq += len(mcqs)
+            page_status[idx]["current"] = False
+            page_status[idx]["done"] = True
+            page_status[idx]["mcq"] = len(mcqs)
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
 
-    return results
+    return [r for r in results if r is not None]
 
 
 async def process_qbm_pages(
