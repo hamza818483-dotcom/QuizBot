@@ -237,3 +237,39 @@ core message handling is unaffected.
 6. If CF Pages routes return 405 on `/tg-proxy/*` paths → Build output
    directory setting is wrong / `_worker.js` isn't being picked up. Check
    Settings → Builds & deployments → Build output directory = `pages_deploy`.
+
+---
+
+## Lesson: Webhook Secret Token (added after 2026-07-08 incident)
+
+**What happened:** Added `WEBHOOK_SECRET` env var + verification on `/webhook`
+to stop unauthenticated POSTs. Broke the bot with 403 on every update. Took
+two follow-up fixes to actually resolve. Root causes, in order found:
+
+1. **CF Pages proxy silently dropped the header.** `pages_deploy/_worker.js`
+   (`forwardToHF` → `tryTarget`) only forwarded `Content-Type` when relaying
+   `/webhook` POSTs to the HF backend — the `X-Telegram-Bot-Api-Secret-Token`
+   header from Telegram never reached app.py. Any proxy/relay layer between
+   Telegram and the final handler must explicitly forward this header; it is
+   NOT part of a generic pass-through unless coded that way.
+
+2. **Startup webhook-set logic skipped re-registration when the URL was
+   already correct.** `setWebhook` was only called `if current_url !=
+   worker_webhook`. Since the URL didn't change when `WEBHOOK_SECRET` was
+   first set, Telegram kept using the OLD (secret-less) webhook config —
+   `getWebhookInfo` does not expose whether a secret_token is set or what it
+   is, so URL-equality is not a sufficient check. Fix: when `WEBHOOK_SECRET`
+   is configured, always re-run `setWebhook` on startup regardless of
+   whether the URL matches, so the secret is (re-)pushed to Telegram.
+
+**Takeaway for future changes that touch `/webhook` auth or routing:**
+- Trace the FULL path: Telegram → CF Pages (`_worker.js`) → HF (`app.py`).
+  A fix applied only at the endpoint is not enough if a proxy sits in front.
+- After changing anything that Telegram needs to know via `setWebhook`
+  (secret_token, allowed_updates, etc.), verify the startup logic actually
+  re-sends it — don't rely on "URL unchanged = nothing to do" logic.
+- Confirm via HF Space startup logs: look for the `webhook set → ...
+  (secret=yes)` line, not just "webhook already correct".
+- Test end-to-end (send a real Telegram message) after any webhook-related
+  deploy, not just "no errors in logs".
+
