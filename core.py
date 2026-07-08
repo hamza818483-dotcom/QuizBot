@@ -392,6 +392,14 @@ async def edit_msg(chat_id, message_id: int, text: str, parse_mode: str = "HTML"
         "parse_mode": parse_mode
     })
 
+async def edit_msg_caption(chat_id, message_id: int, caption: str, parse_mode: str = "HTML") -> dict:
+    return await tg_post("editMessageCaption", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "caption": caption,
+        "parse_mode": parse_mode
+    })
+
 async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
                      reply_markup=None, reply_to_message_id: int = None,
                      message_thread_id: int = None) -> dict:
