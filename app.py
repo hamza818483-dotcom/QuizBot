@@ -1094,17 +1094,27 @@ async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
     return mcqs
 
 
+def _strip_option_prefix(text: str) -> str:
+    """Removes leading option labels like 'A.', 'B)', 'ক.', 'খ)', 'a.', etc.
+    so the model's own numbering never leaks into the displayed option text."""
+    if not text:
+        return text
+    return re.sub(r'^\s*[A-Da-dক-ঘ]\s*[).।:]\s*', '', str(text)).strip()
+
 def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
     """v4.4: some AI providers occasionally return 5 options (E) instead of 4.
     Trim every mcq down to max_opts here — single choke point so /img's
     Telegram poll, Web Exam page, Quiz Solve, and CSV export all stay
-    consistent without needing separate truncation logic in each consumer."""
+    consistent without needing separate truncation logic in each consumer.
+    Also strips any leading option-label prefix (A./ক./a) etc.) the model
+    may have echoed into the option text itself — same choke point."""
     if not mcqs:
         return mcqs
     ans_map = {0: "A", 1: "B", 2: "C", 3: "D", 4: "E"}
     rev_map = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4}
     for m in mcqs:
         opts = m.get("options", [])
+        opts = [_strip_option_prefix(o) for o in opts]
         if len(opts) > max_opts:
             ans_letter = m.get("answer", "A")
             ans_idx = rev_map.get(ans_letter, 0)
@@ -1116,7 +1126,7 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
                 m["answer"] = ans_map[max_opts - 1]
             else:
                 opts = opts[:max_opts]
-            m["options"] = opts
+        m["options"] = opts
     return mcqs
 
 
@@ -2080,6 +2090,8 @@ async def handle_txt_command(msg: dict):
             if loading_id:
                 await edit_msg(chat_id, loading_id, "❌ MCQ generate হয়নি!")
             return
+
+        mcqs = _cap_mcq_options(mcqs, 4)
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
