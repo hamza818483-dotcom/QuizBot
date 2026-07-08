@@ -4082,6 +4082,8 @@ async def _process_pdf_pages_inner(
                         image_file_id = photo_r["result"]["photo"][-1]["file_id"]
                         if first_image_msg_id is None:
                             first_image_msg_id = image_msg_id
+                            # Item 3: auto-pin the very first image of the job
+                            await try_pin_message(channel_id, image_msg_id)
 
                 mcqs = await _repair_thin_explanations(mcqs, img, topic)
                 mcqs = await _attach_explanation_images_if_missing(mcqs, img)
@@ -4192,9 +4194,14 @@ async def _process_pdf_pages_inner(
                             pdf_bytes = await _html_to_pdf(html_s)
                             if pdf_bytes:
                                 style_name = PRINT_STYLE_NAMES[style_key]
-                                await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
+                                doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
                                     caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
                                     message_thread_id=thread_id, reply_to_message_id=reply_target)
+                                # Item 3: both auto-sent PDFs (style1 + style2) get pinned
+                                if doc_r and doc_r.get("ok"):
+                                    doc_msg_id = doc_r.get("result", {}).get("message_id")
+                                    if doc_msg_id:
+                                        await try_pin_message(channel_id, doc_msg_id)
                     except Exception as e:
                         logger.error(f"[PDF-AUTOSEND] Error: {e}")
 
@@ -4539,6 +4546,8 @@ async def _process_pdfm_pages_impl(
                     image_file_id = photo_r["result"]["photo"][-1]["file_id"]
                     if first_image_msg_id is None:
                         first_image_msg_id = image_msg_id
+                        # Item 3: auto-pin the very first image of the job
+                        await try_pin_message(channel_id, image_msg_id)
 
                 poll_links = []
                 first_poll_link = ""
@@ -4610,9 +4619,14 @@ async def _process_pdfm_pages_impl(
                             pdf_bytes = await _html_to_pdf(html_s)
                             if pdf_bytes:
                                 style_name = PRINT_STYLE_NAMES[style_key]
-                                await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
+                                doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
                                     caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
                                     message_thread_id=thread_id, reply_to_message_id=reply_target)
+                                # Item 3: both auto-sent PDFs (style1 + style2) get pinned
+                                if doc_r and doc_r.get("ok"):
+                                    doc_msg_id = doc_r.get("result", {}).get("message_id")
+                                    if doc_msg_id:
+                                        await try_pin_message(channel_id, doc_msg_id)
                     except Exception as e:
                         logger.error(f"[PDF-AUTOSEND] Error: {e}")
 
@@ -5708,6 +5722,8 @@ async def process_qbm_pages(
                     image_msg_id = photo_r["result"]["message_id"]
                     if first_image_msg_id is None:
                         first_image_msg_id = image_msg_id
+                        # Item 3: auto-pin the very first image of the job
+                        await try_pin_message(channel_id, image_msg_id)
 
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
