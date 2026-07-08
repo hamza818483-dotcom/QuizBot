@@ -369,6 +369,12 @@ def crop_explanation_image(img: Image.Image, bbox: list) -> dict:
             full_draw = ImageDraw.Draw(full_img)
             full_draw.rectangle([6, fb_top + 6, w - 6, max(fb_top + 7, fb_bottom - 6)], outline=(220, 38, 38), width=8)
         full_url = upload_to_imgbb(image_to_base64(full_img))
+        if not full_url:
+            # Retry once — full-page uploads are larger and more prone to
+            # transient failures than the small thumb crop; a silent failure
+            # here means the "click cropped image -> see full image" feature
+            # breaks for that specific MCQ (item 6 fix).
+            full_url = upload_to_imgbb(image_to_base64(full_img))
 
         # Tight thumb crop: same orange highlight + bold red box
         cropped = img.crop((0, py, w, bottom)).convert("RGB")
