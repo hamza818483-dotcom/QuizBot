@@ -9398,13 +9398,13 @@ async def startup():
             info_r = await tg_post("getWebhookInfo", {})
             current_url = info_r.get("result", {}).get("url", "")
 
-            if current_url != worker_webhook:
+            if current_url != worker_webhook or WEBHOOK_SECRET:
                 _wh_payload = {"url": worker_webhook, "drop_pending_updates": False, "max_connections": 40}
                 if WEBHOOK_SECRET:
                     _wh_payload["secret_token"] = WEBHOOK_SECRET
                 result = await tg_post("setWebhook", _wh_payload)
                 if result.get("ok"):
-                    logger.info(f"[App] ✅ HF: webhook was '{current_url}' → corrected to {worker_webhook}")
+                    logger.info(f"[App] ✅ HF: webhook set → {worker_webhook} (secret={'yes' if WEBHOOK_SECRET else 'no'})")
                 else:
                     logger.warning(f"[App] HF: webhook correction failed: {result.get('description')}")
             else:
