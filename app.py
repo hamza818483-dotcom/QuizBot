@@ -7149,16 +7149,10 @@ async def _send_quiz_question_inner(uid: int):
     if st["exp_footer"]:
         exp = f"{exp}\n{st['exp_footer']}"
 
-    poll_r = await tg_post("sendPoll", {
-        "chat_id": st["chat_id"],
-        "question": q_text[:300],
-        "options": [o[:100] for o in opts],
-        "type": "quiz",
-        "correct_option_id": ans_idx,
-        "is_anonymous": False,
-        "explanation": exp[:200],
-        "open_period": QUIZ_Q_SEC
-    })
+    poll_r = await send_poll(
+        st["chat_id"], q_text[:300], [o[:100] for o in opts], ans_idx,
+        explanation=exp[:200], is_anonymous=False, open_period=QUIZ_Q_SEC
+    )
 
     if not poll_r.get("ok"):
         logger.error(f"[QuizSolve] sendPoll failed q{i+1}/{total}: {poll_r.get('description') or poll_r.get('error')}")
