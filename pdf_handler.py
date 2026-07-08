@@ -83,10 +83,12 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
   • বইয়ের মূল লাইনের সাথে হাতে/কলমে এক্সট্রা কোনো কালার, দাগ, মার্ক, আন্ডারলাইন দেখা গেলেই MUST তা থেকে MCQ বানাতে হবে, মিস করা যাবে না
 -কোয়ালিটিফুল প্রশ্ন বানাতে হবে
 -ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
+-🟥 বক্স/ছক STYLE তথ্য থাকলে (bordered box, info-card, ছক/সারণির প্রতিটি সেল): প্রতিটি বক্স/ছক থেকে MUST কমপক্ষে ১টি MCQ বানাতে হবে, সর্বোচ্চ ২-৩টি একেবারে তুচ্ছ/খালি বক্স বাদ দেওয়া যাবে — এর বেশি বাদ দেওয়া যাবে না। কোনো বক্সে তথ্য বেশি/ঘন থাকলে সেই একটি বক্স থেকেই একাধিক MCQ (সর্বোচ্চ ১৫টি পর্যন্ত) বানাতে হবে।
 -টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট এসব থেকে MCQ বানাবে না — না প্রশ্নে, না অপশনে। এগুলো শুধু structural/navigation elements, প্রকৃত জ্ঞান/তথ্য না।
 -প্রতিটি অপশন অবশ্যই actual factual content হতে হবে (definition, cause, treatment, value, name of a real concept ইত্যাদি) — কখনোই কোনো section heading, card/page label, বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না
 -MUST বানাতে হবে exactly {count} টি MCQ, কম বেশি নয়
 -Highest quality MCQ বানাবে
+-মাঝে মাঝে একই তথ্যকে উল্টিয়েও প্রশ্ন করবে (যেমন "বাংলাদেশের রাজধানী কোথায়?" এর পাশাপাশি অন্য কোথাও "ঢাকা কোন দেশের রাজধানী?" ধরনের reverse angle প্রশ্নও রাখবে, যেখানে যুক্তিসঙ্গত)
 
 🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
 -Source image-এর মূল ভাষা যা থাকবে (Bengali বা English), Question + Options + Explanation সবকিছু সেই একই ভাষায় লিখতে হবে
@@ -120,11 +122,13 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 -কোয়ালিটিফুল প্রশ্ন বানাতে হবে
 -এমনভাবে সকল প্রশ্ন বানাবে যাতে সকল লাইন থেকে MCQ কিভাবে আসতে পারে আইডিয়া হয়ে যাবে
 -ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
+-🟥 বক্স/ছক STYLE তথ্য থাকলে (bordered box, info-card, ছক/সারণির প্রতিটি সেল): প্রতিটি বক্স/ছক থেকে MUST কমপক্ষে ১টি MCQ বানাতে হবে, সর্বোচ্চ ২-৩টি একেবারে তুচ্ছ/খালি বক্স বাদ দেওয়া যাবে — এর বেশি বাদ দেওয়া যাবে না। কোনো বক্সে তথ্য বেশি/ঘন থাকলে সেই একটি বক্স থেকেই একাধিক MCQ (সর্বোচ্চ ১৫টি পর্যন্ত) বানাতে হবে।
 -টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট এসব থেকে MCQ বানাবে না — না প্রশ্নে, না অপশনে। এগুলো শুধু structural/navigation elements, প্রকৃত জ্ঞান/তথ্য না।
 -প্রতিটি অপশন অবশ্যই actual factual content হতে হবে (definition, cause, treatment, value, name of a real concept ইত্যাদি) — কখনোই কোনো section heading, card/page label, বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না
 -হাবিজাবি MCQ বানানো যাবে না,বেশি প্রশ্ন বানানোর প্রয়োজনে একটি MCQ কেই ঘুরিয়ে ফিরিয়ে দেওয়া যেতে পারে
 -MAXIMUM possible MCQ বানাবে — প্রতিটি লাইন, বক্স, তথ্য, সোর্স use করে
 -তথ্য কম থাকলে minimum 10 টি
+-মাঝে মাঝে একই তথ্যকে উল্টিয়েও প্রশ্ন করবে (যেমন "বাংলাদেশের রাজধানী কোথায়?" এর পাশাপাশি অন্য কোথাও "ঢাকা কোন দেশের রাজধানী?" ধরনের reverse angle প্রশ্নও রাখবে, যেখানে যুক্তিসঙ্গত)
 
 🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
 -Source image-এর মূল ভাষা যা থাকবে (Bengali বা English), Question + Options + Explanation সবকিছু সেই একই ভাষায় লিখতে হবে

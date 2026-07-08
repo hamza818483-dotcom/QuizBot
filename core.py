@@ -308,13 +308,17 @@ import re as _re_opt
 
 def _strip_option_prefix(text: str) -> str:
     """Strip a leading 'A.'/'A)'/'A:'/'ক.'/'(A)' style label from a poll option,
-    so options never show A,B,C,D (or ক,খ,গ,ঘ) prefixes to the user (item 2)."""
+    so options never show A,B,C,D (or ক,খ,গ,ঘ) prefixes to the user (item 2).
+    Requires the separator to be followed by whitespace so legitimate content
+    like 'ক-অক্ষর দিয়ে...' (a word that happens to start with ক-) is never
+    mistaken for an option label and mangled."""
     if not isinstance(text, str):
         return text
-    return _re_opt.sub(
-        r"^\s*[\(\[]?\s*[A-Da-dকখগঘ]\s*[\.\)\:\-।]\s*",
+    stripped = _re_opt.sub(
+        r"^\s*[\(\[]?\s*[A-Da-dকখগঘ]\s*[\.\)\:।]\s+",
         "", text, count=1
-    ).strip() or text
+    ).strip()
+    return stripped if stripped else text
 
 def _sanitize_poll_options(data: dict) -> dict:
     if isinstance(data.get("options"), list):
