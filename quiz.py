@@ -544,14 +544,21 @@ async def finish_d1_quiz(session: dict):
         )
         attempt = (cnt[0]["cnt"] if cnt else 0) + 1
 
-        await d1_run(
+        _ok, result_id = await d1_run(
             "INSERT INTO quiz_results (user_id, user_name, quiz_id, right_count, wrong_count, skip_count, total, score, attempt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            [uid, uname, quiz_id, right, wrong, skip, tot, score, attempt]
+            [uid, uname, quiz_id, right, wrong, skip, tot, score, attempt],
+            return_id=True
         )
 
+        # Fallback: if meta.last_row_id unavailable, look it up via a fresh SELECT
+        if not result_id:
+            rid_rows = await d1_select(
+                "SELECT id FROM quiz_results WHERE user_id=?1 AND quiz_id=?2 AND attempt=?3 ORDER BY id DESC LIMIT 1",
+                [uid, quiz_id, attempt]
+            )
+            result_id = rid_rows[0]["id"] if rid_rows else None
+
         # Save per-question results
-        result_id_rows = await d1_select("SELECT last_insert_rowid() as id")
-        result_id = result_id_rows[0]["id"] if result_id_rows else None
         if result_id:
             for qr in session.get("q_results", []):
                 if qr.get("type"):
