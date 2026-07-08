@@ -4366,7 +4366,44 @@ def _parse_pdfm_params(text: str) -> dict:
 
     return result
 
+# Item 10: per-user serialization — if a user fires multiple /pdf, /qbm, /pdfm
+# jobs at the same time, queue them so each finishes in order instead of racing
+# (which caused RAM spikes / corrupted interleaved output).
+_PDFM_USER_LOCKS: dict = {}
+_PDFM_USER_QUEUE_LEN: dict = {}
+
+def _get_pdfm_lock(uid: int) -> asyncio.Lock:
+    lock = _PDFM_USER_LOCKS.get(uid)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PDFM_USER_LOCKS[uid] = lock
+    return lock
+
 async def process_pdfm_pages(
+    chat_id: int, uid: int, uname: str,
+    pages: list, topic: str, mcq_count,
+    channel_id, csv_only: bool,
+    file_name: str = "document.pdf",
+    status_msg_id: int = None,
+    thread_id: int = None
+):
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _process_pdfm_pages_impl(
+            chat_id, uid, uname, pages, topic, mcq_count,
+            channel_id, csv_only, file_name, status_msg_id, thread_id
+        )
+
+
+async def _process_pdfm_pages_impl(
     chat_id: int, uid: int, uname: str,
     pages: list, topic: str, mcq_count,
     channel_id, csv_only: bool,
@@ -5185,6 +5222,22 @@ async def handle_qbm(msg: dict):
     /qbm -p (pages) -c (channel) -m (topic) -t (thread_id)
     PDF-এ থাকা EXISTING MCQ extract করে (নতুন MCQ বানায় না)।
     """
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _handle_qbm_impl(msg)
+
+
+async def _handle_qbm_impl(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     uname = msg["from"].get("first_name", "User")
