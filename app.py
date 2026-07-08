@@ -506,6 +506,35 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"in them for MCQs, don't just describe the table.\n\n"
 
         f"═══════════════════════════════\n"
+        f"🟥 বক্স/ছক STYLE INFO — MANDATORY NEAR-FULL COVERAGE\n"
+        f"═══════════════════════════════\n"
+        f"If the page contains info laid out in boxes/ছক (bordered boxes, "
+        f"info-cards, terms-in-boxes, ছক/সারণি cells, or any visually separated "
+        f"box-style content blocks):\n"
+        f"- You MUST generate at least one MCQ from EVERY box/ছক cell on the page, "
+        f"EXCEPT at most 2-3 boxes that are genuinely too trivial/empty/purely "
+        f"decorative to support a real question — skipping more than 2-3 boxes "
+        f"is NOT allowed.\n"
+        f"- If a box contains rich/dense information (multiple facts, sub-points, "
+        f"comparisons), generate MORE THAN ONE MCQ from that single box — as many "
+        f"as the information genuinely supports, up to a HIGHEST cap of 15 MCQs "
+        f"from any single box if that box is unusually information-dense.\n"
+        f"- Do not treat boxes as a single combined source — walk through them "
+        f"one by one and make sure each one is individually represented in the "
+        f"output, not just the first few.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟦 QUESTION-ANGLE VARIATION\n"
+        f"═══════════════════════════════\n"
+        f"Occasionally reverse the direction of a fact-based question instead of "
+        f"always asking it the same way — e.g. if one MCQ asks 'বাংলাদেশের রাজধানী "
+        f"কোথায়?' (answer: ঢাকা), elsewhere in the set also ask the reverse angle "
+        f"like 'ঢাকা কোন দেশের রাজধানী?' (answer: বাংলাদেশ) where the same fact "
+        f"supports it. Don't do this for every fact — just mix it in naturally "
+        f"for facts that genuinely have a sensible reverse phrasing, so the set "
+        f"isn't monotonous.\n\n"
+
+        f"═══════════════════════════════\n"
         f"💥 প্রশ্ন (QUESTION)\n"
         f"═══════════════════════════════\n"
         f"- Short and clear (roughly 1-1.5-2 lines), never needlessly wordy or convoluted.\n"
@@ -4367,7 +4396,44 @@ def _parse_pdfm_params(text: str) -> dict:
 
     return result
 
+# Item 10: per-user serialization — if a user fires multiple /pdf, /qbm, /pdfm
+# jobs at the same time, queue them so each finishes in order instead of racing
+# (which caused RAM spikes / corrupted interleaved output).
+_PDFM_USER_LOCKS: dict = {}
+_PDFM_USER_QUEUE_LEN: dict = {}
+
+def _get_pdfm_lock(uid: int) -> asyncio.Lock:
+    lock = _PDFM_USER_LOCKS.get(uid)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PDFM_USER_LOCKS[uid] = lock
+    return lock
+
 async def process_pdfm_pages(
+    chat_id: int, uid: int, uname: str,
+    pages: list, topic: str, mcq_count,
+    channel_id, csv_only: bool,
+    file_name: str = "document.pdf",
+    status_msg_id: int = None,
+    thread_id: int = None
+):
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _process_pdfm_pages_impl(
+            chat_id, uid, uname, pages, topic, mcq_count,
+            channel_id, csv_only, file_name, status_msg_id, thread_id
+        )
+
+
+async def _process_pdfm_pages_impl(
     chat_id: int, uid: int, uname: str,
     pages: list, topic: str, mcq_count,
     channel_id, csv_only: bool,
@@ -5186,6 +5252,22 @@ async def handle_qbm(msg: dict):
     /qbm -p (pages) -c (channel) -m (topic) -t (thread_id)
     PDF-এ থাকা EXISTING MCQ extract করে (নতুন MCQ বানায় না)।
     """
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _handle_qbm_impl(msg)
+
+
+async def _handle_qbm_impl(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     uname = msg["from"].get("first_name", "User")
@@ -8319,7 +8401,6 @@ async def handle_callback(query: dict):
                 if not mcqs_row:
                     await send_msg(chat_id, "❌ Session expired!")
                     return
-                uname = msg.get("from", {}).get("username", "user")
                 pages = [mcqs_row["mcq_data"]]
                 asyncio.create_task(process_pdfm_pages(
                     chat_id, uid, uname, pages, topic_cb,
