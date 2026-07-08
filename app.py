@@ -47,7 +47,7 @@ from core import (
     BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
     CF_WORKER_URL, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
-    tg_post, send_msg, edit_msg, send_photo, send_photo_by_id,
+    tg_post, send_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
     send_document, send_poll, notify_owner, download_tg_file,
     db_get_settings, db_is_owner_or_admin, db_track_user, db_save_session,
     db_save_mcq_cache, db_update_cache, db_get_mcq_cache,
@@ -6775,9 +6775,13 @@ async def handle_incoming_image_for_collection(msg: dict):
 # FEATURE 10: POLL FLOW
 # ============================================================
 def _poll_end_kb(cache_id: str, cache: dict) -> dict:
+    exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
     kb = {"inline_keyboard": [
-        [{"text": "🔄 Again Practice", "callback_data": f"pollagain_{cache_id}"}],
-        [{"text": "🆕 New Poll (নতুন MCQ)", "callback_data": f"pollnew_{cache_id}"}]
+        [{"text": "🔄 Same Quiz", "callback_data": f"qsame_{cache_id}"},
+         {"text": "🆕 New Quiz", "callback_data": f"qnew_{cache_id}"}],
+        [{"text": "🔄 Same Poll", "callback_data": f"pollagain_{cache_id}"},
+         {"text": "🆕 New Poll", "callback_data": f"pollnew_{cache_id}"}],
+        [{"text": "🌐 Website Exam", "url": exam_url}]
     ]}
     back_url = build_back_url(cache.get("channel_id", ""), source_msg_id(cache))
     if back_url:
@@ -6887,21 +6891,31 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
         await send_msg(chat_id, "❌ Original image পাওয়া যায়নি!")
         return
 
-    eta = 30
-    loading_msg = await send_msg(chat_id, f"New Poll বানানো হচ্ছে\nঅনুমানিত সময়: {eta}s\n[░░░░░░░░░░ 0%]\n{eta}s বাকি...")
-    loading_id = loading_msg.get("result", {}).get("message_id")
-
-    async def update_progress():
-        for pct in [20, 40, 60, 80]:
-            await asyncio.sleep(eta * 0.2)
-            bars = "█" * (pct // 10) + "░" * (10 - pct // 10)
-            remaining = int(eta * (1 - pct / 100))
-            if loading_id:
-                await edit_msg(chat_id, loading_id, f"New Poll বানানো হচ্ছে\nঅনুমানিত সময়: {eta}s\n[{bars} {pct}%]\n{remaining}s বাকি...")
-
+    AVG_GEN_SECONDS = 16
+    started_at = time.time()
     img_bytes = await download_tg_file(image_file_id)
     from PIL import Image as PILImage
     img = PILImage.open(BytesIO(img_bytes))
+
+    loading_caption = f"🆕 New Poll বানানো হচ্ছে...\n🌟 Topic: {topic}\n[░░░░░░░░░░ 0%]\nআনুমানিক {AVG_GEN_SECONDS}s বাকি..."
+    loading_msg = await send_photo(chat_id, img_bytes, loading_caption)
+    loading_id = loading_msg.get("result", {}).get("message_id")
+
+    pct_box = {"pct": 8}
+
+    async def update_progress():
+        while pct_box["pct"] < 90:
+            await asyncio.sleep(1)
+            elapsed = time.time() - started_at
+            pct_box["pct"] = min(90, pct_box["pct"] + 4)
+            remaining = max(0, round(AVG_GEN_SECONDS - elapsed))
+            bars = "█" * (pct_box["pct"] // 10) + "░" * (10 - pct_box["pct"] // 10)
+            if loading_id:
+                try:
+                    await edit_msg_caption(chat_id, loading_id,
+                        f"🆕 New Poll বানানো হচ্ছে...\n🌟 Topic: {topic}\n[{bars} {pct_box['pct']}%]\n{remaining}s বাকি...")
+                except Exception:
+                    pass
 
     progress_task = asyncio.create_task(update_progress())
     new_mcqs = _cap_mcq_options(await generate_new_mcq(img, topic, page, count=15))
@@ -6913,7 +6927,10 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
 
     await db_increment_gen_count(cache_id, uid)
     if loading_id:
-        await edit_msg(chat_id, loading_id, f"✅ {len(new_mcqs)} টি নতুন MCQ ready!\n\nশুরু হচ্ছে...")
+        try:
+            await edit_msg_caption(chat_id, loading_id, f"✅ {len(new_mcqs)} টি নতুন MCQ ready!\n\nশুরু হচ্ছে...")
+        except Exception:
+            pass
 
     new_cache_id = gen_session_id()
     await db_save_mcq_cache(new_cache_id, new_cache_id, page, topic, new_mcqs, [],
@@ -7297,17 +7314,24 @@ async def _finish_quiz(uid: int):
     special_count = len(set(st["wrong_idx"] + st["skip_idx"]))
 
     kb = {"inline_keyboard": []}
-    kb["inline_keyboard"].append([{"text": "🆕 New Quiz (নতুন MCQ)", "callback_data": f"qnew_{cache_id}"}])
+    # Item 4: fixed 3-row layout
+    kb["inline_keyboard"].append([
+        {"text": "🔄 Same Quiz", "callback_data": f"qsame_{cache_id}"},
+        {"text": "🆕 New Quiz", "callback_data": f"qnew_{cache_id}"}
+    ])
+    kb["inline_keyboard"].append([
+        {"text": "🔄 Same Poll", "callback_data": f"pollagain_{cache_id}"},
+        {"text": "🆕 New Poll", "callback_data": f"pollnew_{cache_id}"}
+    ])
+    kb["inline_keyboard"].append([{"text": "🌐 Website Exam", "url": exam_url}])
     if wrong_count > 0:
         kb["inline_keyboard"].append([{"text": f"❌ Mistake Practice ({wrong_count} টি ভুল)", "callback_data": "qmis"}])
     if special_count > 0:
         kb["inline_keyboard"].append([{"text": f"🔥 Special Practice ({special_count} টি wrong+skip)", "callback_data": "qspe"}])
-    kb["inline_keyboard"].append([{"text": "🌐 Website Exam দাও", "url": exam_url}])
     if not st["is_new_gen"] and st["mode"] == "quiz":
         kb["inline_keyboard"].append([{"text": "🏆 Leaderboard দেখো", "callback_data": f"polllb_{cache_id}"}])
     if back_url:
         kb["inline_keyboard"].append([{"text": "↩️ Back to Source", "url": back_url}])
-    kb["inline_keyboard"].append([{"text": "🔄 Poll হিসেবে আবার দেখো", "callback_data": f"pollagain_{cache_id}"}])
 
     img_id = st.get("image_file_id")
 
@@ -7325,6 +7349,13 @@ async def handle_quiz_solve(msg: dict, cache_id: str):
     uname = msg["from"].get("username") or msg["from"].get("first_name", "User")
     await db_track_user(uid, uname)
     await start_sequential_quiz(chat_id, uid, uname, cache_id)
+
+async def handle_quiz_same(cache_id: str, user: dict, chat_id: int):
+    """Item 4: 'Same Quiz' button — replay the exact same cached MCQ set as a quiz."""
+    uid = user["id"]
+    uname = user.get("username") or user.get("first_name", "User")
+    await db_track_user(uid, uname)
+    await start_sequential_quiz(chat_id, uid, uname, cache_id, title="🔄 <b>Same Quiz আবার শুরু হচ্ছে!</b>")
 
 # ============================================================
 # NEW QUIZ
@@ -7344,12 +7375,36 @@ async def handle_quiz_new(cache_id: str, user: dict, chat_id: int):
     if not image_file_id:
         await send_msg(chat_id, "❌ Original image পাওয়া যায়নি!")
         return
-    loading = await send_msg(chat_id, "⏳ নতুন MCQ তৈরি হচ্ছে... (~30s)")
-    loading_id = loading.get("result", {}).get("message_id")
+    AVG_GEN_SECONDS = 16
+    started_at = time.time()
     img_bytes = await download_tg_file(image_file_id)
     from PIL import Image as PILImage
     img = PILImage.open(BytesIO(img_bytes))
+
+    loading_caption = f"🆕 New Quiz বানানো হচ্ছে...\n🌟 Topic: {cache['topic']}\n[░░░░░░░░░░ 0%]\nআনুমানিক {AVG_GEN_SECONDS}s বাকি..."
+    loading = await send_photo(chat_id, img_bytes, loading_caption)
+    loading_id = loading.get("result", {}).get("message_id")
+
+    pct_box = {"pct": 8}
+
+    async def update_progress():
+        while pct_box["pct"] < 90:
+            await asyncio.sleep(1)
+            elapsed = time.time() - started_at
+            pct_box["pct"] = min(90, pct_box["pct"] + 4)
+            remaining = max(0, round(AVG_GEN_SECONDS - elapsed))
+            bars = "█" * (pct_box["pct"] // 10) + "░" * (10 - pct_box["pct"] // 10)
+            if loading_id:
+                try:
+                    await edit_msg_caption(chat_id, loading_id,
+                        f"🆕 New Quiz বানানো হচ্ছে...\n🌟 Topic: {cache['topic']}\n[{bars} {pct_box['pct']}%]\n{remaining}s বাকি...")
+                except Exception:
+                    pass
+
+    progress_task = asyncio.create_task(update_progress())
     new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15))
+    progress_task.cancel()
+
     if not new_mcqs:
         await send_msg(chat_id, "❌ MCQ generate হয়নি!")
         return
@@ -7359,7 +7414,10 @@ async def handle_quiz_new(cache_id: str, user: dict, chat_id: int):
                             new_mcqs, [], image_file_id, cache.get("image_msg_id"),
                             cache.get("channel_id"), is_new_gen=True, end_msg_id=cache.get("end_msg_id"))
     if loading_id:
-        await edit_msg(chat_id, loading_id, f"✅ {len(new_mcqs)} টি নতুন MCQ ready!")
+        try:
+            await edit_msg_caption(chat_id, loading_id, f"✅ {len(new_mcqs)} টি নতুন MCQ ready!")
+        except Exception:
+            pass
     await start_sequential_quiz(chat_id, uid, uname, new_cache_id, title="🆕 <b>New Quiz শুরু হচ্ছে!</b>")
 
 # ============================================================
@@ -8260,6 +8318,10 @@ async def handle_callback(query: dict):
         elif data.startswith("pollagain_"):
             cache_id = data.replace("pollagain_", "")
             asyncio.create_task(handle_poll_again(cache_id, user, chat_id))
+
+        elif data.startswith("qsame_"):
+            cache_id = data.replace("qsame_", "")
+            asyncio.create_task(handle_quiz_same(cache_id, user, chat_id))
 
         elif data.startswith("pollnew_"):
             cache_id = data.replace("pollnew_", "")
