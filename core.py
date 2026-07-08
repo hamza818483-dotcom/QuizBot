@@ -491,7 +491,8 @@ def extract_image_url(text: str):
 
 async def send_poll(chat_id, question: str, options: list, correct_idx: int,
                     explanation: str = "", reply_to_message_id: int = None,
-                    message_thread_id: int = None) -> dict:
+                    message_thread_id: int = None, is_anonymous: bool = True,
+                    open_period: int = None, poll_type: str = "quiz") -> dict:
     # প্রতিটা অংশ (question/option/explanation) থেকে <img> ট্যাগ থাকলে আলাদা করা হচ্ছে —
     # Bot API 10.0 (May 2026)-এ InputPollMedia/InputPollOptionMedia/explanation_media
     # যোগ হয়েছে, যেটা দিয়ে poll question/option/explanation-এ ছবি embed করা যায়।
@@ -513,10 +514,12 @@ async def send_poll(chat_id, question: str, options: list, correct_idx: int,
 
     base_data = {
         "chat_id": chat_id,
-        "type": "quiz",
+        "type": poll_type,
         "correct_option_id": correct_idx,
-        "is_anonymous": True,
+        "is_anonymous": is_anonymous,
     }
+    if open_period:
+        base_data["open_period"] = open_period
     if reply_to_message_id:
         base_data["reply_to_message_id"] = reply_to_message_id
     if message_thread_id:

@@ -19,7 +19,7 @@ import pytz
 from core import (
     logger, sb, OWNER_ID,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
-    tg_post, send_msg, edit_msg, send_photo_by_id,
+    tg_post, send_msg, edit_msg, send_photo_by_id, send_poll,
     download_tg_file, db_get_settings,
 )
 
@@ -402,16 +402,10 @@ async def send_quiz_question(chat_id: int, session: dict):
         else:
             opts = opts[:4]
 
-    poll_r = await tg_post("sendPoll", {
-        "chat_id": chat_id,
-        "question": q_text,
-        "options": [o[:100] for o in opts],
-        "type": "quiz",
-        "correct_option_id": ans_idx,
-        "open_period": session["timer"],
-        "is_anonymous": False,
-        "explanation": exp
-    })
+    poll_r = await send_poll(
+        chat_id, q_text, [o[:100] for o in opts], ans_idx,
+        explanation=exp, is_anonymous=False, open_period=session["timer"]
+    )
 
     if poll_r.get("ok"):
         poll_id = poll_r["result"].get("poll", {}).get("id", "")
