@@ -312,7 +312,7 @@ async def tg_post(method: str, data: dict) -> dict:
                 await asyncio.sleep(min(retry_after, 30) + 0.5)
             logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
     except Exception as e:
-        logger.warning(f"[TG] {method} proxy error: {e}")
+        logger.warning(f"[TG] {method} proxy error: {type(e).__name__}: {e}")
     # ── Fallback: Direct Telegram API (CF down হলেও কাজ করবে) ──
     try:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -326,7 +326,7 @@ async def tg_post(method: str, data: dict) -> dict:
                 logger.warning(f"[TG] {method} direct failed: {result.get('description')}")
             return result
     except Exception as e:
-        logger.error(f"[TG] {method} direct error: {e}")
+        logger.error(f"[TG] {method} direct error: {type(e).__name__}: {e}")
         return {"ok": False, "error": str(e)}
 
 # ============================================================
