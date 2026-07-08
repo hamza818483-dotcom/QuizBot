@@ -189,9 +189,13 @@ async def d1_select(sql: str, params: list = None) -> list:
         logger.warning(f"[D1] Supabase fallback failed: {e}")
     return []
 
-async def d1_run(sql: str, params: list = None) -> bool:
+async def d1_run(sql: str, params: list = None, return_id: bool = False):
     r = await d1_query(sql, params, False)
     ok = r.get("ok")
+    last_id = None
+    if ok:
+        meta = r.get("meta") or {}
+        last_id = meta.get("last_row_id")
 
     # ── Always mirror quiz INSERT/REPLACE to BOTH Supabase accounts, ──
     # ── regardless of D1 success, so web quiz has a backup even when D1 is fine. ──
@@ -222,6 +226,8 @@ async def d1_run(sql: str, params: list = None) -> bool:
     except Exception as e:
         logger.warning(f"[D1] Supabase mirror step failed: {e}")
 
+    if return_id:
+        return (bool(ok), last_id)
     return bool(ok)
 
 # ============================================================
