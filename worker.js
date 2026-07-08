@@ -94,6 +94,7 @@ export default {
     const RENDER_URL_2 = env.RENDER_URL_2 || '';
     const BOT_TOKEN     = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
     const OWNER_ID      = env.OWNER_ID || '';
+    const WEBHOOK_SECRET = env.WEBHOOK_SECRET || '';
 
     // Render ping — 15min sleep না করতে (HF permanently banned, removed)
     let primaryStatus = 0;
@@ -141,7 +142,7 @@ export default {
             await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-              body: `url=${encodeURIComponent(RENDER_URL_2 + '/webhook')}&drop_pending_updates=false`
+              body: `url=${encodeURIComponent(RENDER_URL_2 + '/webhook')}&drop_pending_updates=false` + (WEBHOOK_SECRET ? `&secret_token=${encodeURIComponent(WEBHOOK_SECRET)}` : '')
             });
             await new Promise(r => setTimeout(r, 2000));
             const confirmRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo`);
@@ -171,7 +172,7 @@ export default {
           await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: `url=${encodeURIComponent(RENDER_URL + '/webhook')}&drop_pending_updates=false`
+            body: `url=${encodeURIComponent(RENDER_URL + '/webhook')}&drop_pending_updates=false` + (WEBHOOK_SECRET ? `&secret_token=${encodeURIComponent(WEBHOOK_SECRET)}` : '')
           });
           console.log('[cron][CF-failover] Primary recovered, switched back');
           if (OWNER_ID) {
