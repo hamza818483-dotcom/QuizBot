@@ -304,7 +304,26 @@ async def clear_error_logs():
 # ============================================================
 # TELEGRAM HELPERS
 # ============================================================
+import re as _re_opt
+
+def _strip_option_prefix(text: str) -> str:
+    """Strip a leading 'A.'/'A)'/'A:'/'ক.'/'(A)' style label from a poll option,
+    so options never show A,B,C,D (or ক,খ,গ,ঘ) prefixes to the user (item 2)."""
+    if not isinstance(text, str):
+        return text
+    return _re_opt.sub(
+        r"^\s*[\(\[]?\s*[A-Da-dকখগঘ]\s*[\.\)\:\-।]\s*",
+        "", text, count=1
+    ).strip() or text
+
+def _sanitize_poll_options(data: dict) -> dict:
+    if isinstance(data.get("options"), list):
+        data["options"] = [_strip_option_prefix(o) for o in data["options"]]
+    return data
+
 async def tg_post(method: str, data: dict) -> dict:
+    if method == "sendPoll":
+        data = _sanitize_poll_options(data)
     # ── Primary: CF Worker TG proxy ──
     try:
         async with httpx.AsyncClient(timeout=60) as client:
