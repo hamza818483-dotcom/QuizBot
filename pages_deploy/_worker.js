@@ -688,7 +688,10 @@ async function forwardToHF(request, env) {
   async function tryTarget(target) {
     return await fetch(target, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Telegram-Bot-Api-Secret-Token': request.headers.get('X-Telegram-Bot-Api-Secret-Token') || '',
+      },
       body,
       signal: AbortSignal.timeout(45000),
     });
