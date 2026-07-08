@@ -122,7 +122,61 @@ Production branch:     main
 
 ---
 
-## Failover Runbook: HF Down → Switch to Render
+## Uptime / Sleep Prevention / Downtime Detection
+
+There's already a 5-layer external watchdog system running on **GitHub
+Actions** (fully external to both HF and CF — always-on, free, doesn't
+depend on the bot process being alive to detect the bot being down):
+
+| Workflow | Interval | Purpose |
+|---|---|---|
+| `watchdog-1.yml` | 5 min | Confirmed-down check (3 retries) + auto-failover to `RENDER_URL_2` if set |
+| `watchdog-2.yml` | 8 min | Independent ping, offset timing |
+| `watchdog-3.yml` | 13 min | Independent ping, offset timing |
+| `watchdog-backup-a.yml` | 6 min | Pings + checks if watchdog-1/2/3 failed last run, re-triggers them if so |
+| `watchdog-backup-b.yml` | 10 min | Same as backup-a, different offset |
+
+All of these read the **`RENDER_URL` GitHub secret** (Settings → Secrets and
+variables → Actions), which is currently set to the **HF Space URL**
+(`https://hamza-02-quizbot.hf.space`) — so despite the "Render" naming,
+they're actively keeping the HF Space warm and monitoring it every ~5 minutes,
+24/7, regardless of whether the bot process itself is healthy enough to
+watchdog itself.
+
+**Important:** if you ever switch primary backend (HF ↔ Render), update
+**both**:
+1. CF Pages env var `RENDER_URL` (controls actual request routing)
+2. GitHub secret `RENDER_URL` (controls external watchdog/keepalive target)
+
+These are two separate places holding conceptually the same "current primary
+backend URL" — they don't sync automatically.
+
+### In-app watchdogs (secondary layer, inside app.py)
+
+The bot process itself also runs `_keepalive_task`, `_watchdog_task`,
+`_watchdog2_task` — these self-ping `RENDER_URL` from inside the running
+process every 5/8/12 min and alert the owner via Telegram DM on repeated
+failures. These are a secondary signal only — if the process itself is
+dead/hung, these obviously can't fire, which is why the GitHub Actions layer
+above is the real safety net.
+
+### `worker.js`'s `scheduled()` cron — NOT ACTIVE on Cloudflare Pages
+
+The `scheduled()` handler and `[triggers] crons` config in `wrangler.toml`
+were written for Cloudflare **Workers**. **Cloudflare Pages Functions do not
+support Cron Triggers at all** — this code is present in `pages_deploy/_worker.js`
+but Cloudflare will simply never invoke it. All the failover/keepalive-ping
+logic inside `scheduled()` is currently dead code. The GitHub Actions
+watchdogs above are what's actually doing this job now.
+
+If genuine Workers-based cron is wanted again in the future, it would need a
+small separate Workers script (not Pages) purely for the cron job, or continue
+relying on GitHub Actions (simpler, already working, no HF network-block issue
+since GitHub Actions runs from GitHub's own servers, not from HF).
+
+---
+
+
 
 1. Render dashboard → **Resume/redeploy** the suspended service
 2. Wait for Render's own `/health` endpoint to return 200
