@@ -4042,12 +4042,13 @@ async def _process_pdf_pages_inner(
                         if first_image_msg_id is None:
                             first_image_msg_id = image_msg_id
 
+                mcqs = await _repair_thin_explanations(mcqs, img, topic)
+                mcqs = await _attach_explanation_images_if_missing(mcqs, img)
+
                 poll_links = []
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
                   try:
-                    mcq, = await _repair_thin_explanations([mcq], img, topic)
-                    mcq, = await _attach_explanation_images_if_missing([mcq], img)
                     opts = mcq.get("options", [])[:4]
                     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
                     q_text = mcq["question"]
@@ -4092,7 +4093,7 @@ async def _process_pdf_pages_inner(
                             first_poll_link = f"https://t.me/{str(channel_id).lstrip('@')}/{msg_id}"
                         poll_links.append(first_poll_link)
                     total_polls += 1
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.5)
                   except Exception as _mcq_e:
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
