@@ -7575,8 +7575,13 @@ async def handle_convert_command(msg: dict):
 # ============================================================
 # WEBHOOK HANDLER
 # ============================================================
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+
 @app.post("/webhook")
 async def webhook(request: Request):
+    if WEBHOOK_SECRET:
+        if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+            return Response(status_code=403)
     try:
         update = await request.json()
         asyncio.create_task(process_update(update))
@@ -9372,9 +9377,12 @@ async def startup():
 
                 if "onrender.com" in current_url:
                     # ইতিমধ্যেই Render-এ ছিল — restart এর পর re-confirm করছি
+                    _r_payload = {"url": webhook_url, "drop_pending_updates": False, "max_connections": 40}
+                    if WEBHOOK_SECRET:
+                        _r_payload["secret_token"] = WEBHOOK_SECRET
                     r = await _c.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-                        json={"url": webhook_url, "drop_pending_updates": False, "max_connections": 40}
+                        json=_r_payload
                     )
                     result = r.json()
                     if result.get("ok"):
@@ -9391,7 +9399,10 @@ async def startup():
             current_url = info_r.get("result", {}).get("url", "")
 
             if current_url != worker_webhook:
-                result = await tg_post("setWebhook", {"url": worker_webhook, "drop_pending_updates": False, "max_connections": 40})
+                _wh_payload = {"url": worker_webhook, "drop_pending_updates": False, "max_connections": 40}
+                if WEBHOOK_SECRET:
+                    _wh_payload["secret_token"] = WEBHOOK_SECRET
+                result = await tg_post("setWebhook", _wh_payload)
                 if result.get("ok"):
                     logger.info(f"[App] ✅ HF: webhook was '{current_url}' → corrected to {worker_webhook}")
                 else:
