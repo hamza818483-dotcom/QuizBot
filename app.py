@@ -5094,7 +5094,7 @@ def _qbm_dedup_list(mcqs: list) -> list:
 # a new page into the pipeline -- lets many run in parallel while RAM is
 # free, throttles automatically as it fills, protecting against a 100-user
 # spike without hardcoding a number that's wrong for either extreme.
-_QBM_EXTRACT_HARD_CAP = asyncio.Semaphore(20)  # absolute ceiling, never exceed even if RAM looks fine
+_QBM_EXTRACT_HARD_CAP = asyncio.Semaphore(150)  # was 20 on 512MB Render; raised for 16GB HF Space
 _qbm_ram_gate_lock = asyncio.Lock()
 
 async def _qbm_ram_aware_acquire():
@@ -5103,7 +5103,7 @@ async def _qbm_ram_aware_acquire():
     try:
         import psutil
         proc = psutil.Process(os.getpid())
-        limit_mb = 512
+        limit_mb = 14000  # 16GB instance ceiling, matches _ram_guard_task
         safe_ceiling_mb = int(limit_mb * 0.75)  # leave margin under the 85% RAMGuard threshold
         while True:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
@@ -9128,22 +9128,16 @@ async def _memory_cleanup_task() -> None:
 _active_jobs = {"count": 0}
 
 async def _ram_guard_task() -> None:
-    """Proactive RSS watchdog for 512MB Render instances: checks own process
-    RSS every 60s. On free tier, hitting the OS memory limit means Render
-    hard-kills the process with no cleanup/logging -- so this self-restarts
-    cleanly at 85% (~435MB) BEFORE that happens.
-    NOTE: direct webhook-switch-to-secondary removed here -- the CF Worker
-    now does real round-robin load-splitting + automatic per-request
-    fallback between primary/secondary Render (see worker.js forwardToHF),
-    so Telegram's webhook should stay pointed at the CF Worker permanently.
-    This task now only handles the self-restart, not webhook routing."""
+    """Proactive RSS watchdog. Was tuned for 512MB Render free tier; now on
+    16GB HF Space, threshold raised proportionally so restarts only trigger
+    on genuine leaks, not normal heavy-load usage."""
     try:
         import psutil
     except ImportError:
         logger.warning("[RAMGuard] psutil not installed -> proactive RAM guard disabled")
         return
     proc = psutil.Process(os.getpid())
-    limit_mb = 512
+    limit_mb = 14000  # 16GB instance, ~14GB usable ceiling (leave OS/runtime headroom)
     threshold_mb = int(limit_mb * 0.75)
     await asyncio.sleep(60)
     while True:

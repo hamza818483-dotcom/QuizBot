@@ -151,16 +151,14 @@ MUST Return ONLY valid JSON array, no markdown:
 # ============================================================
 # PDF TO IMAGES
 # ============================================================
-# v-RAM-fix: pdf2image (poppler) rendering is the single biggest RAM spike
-# risk on a 512MB Render instance -- a large PDF at dpi=150 can use 100-300MB
-# during conversion. If two users' /qbm or /pdf uploads convert at the same
-# time, RAM can spike well past the limit and get OOM-killed. This semaphore
-# limits concurrent conversions -- now that page count per call is hard-capped
-# at 60 (below), 2 simultaneous conversions is still safe headroom-wise while
-# cutting queue wait roughly in half under 100-concurrent-user load.
+# v-RAM-fix: pdf2image (poppler) rendering was the biggest RAM spike risk on
+# the old 512MB Render instance -- a large PDF at dpi=150 could use 100-300MB
+# during conversion, so concurrency was capped hard at 1 and pages/call at 10.
+# Now on 16GB HF Space there's ample headroom, so both are raised substantially
+# while still keeping some ceiling as a sanity guard against runaway usage.
 import threading as _threading
-_PDF_CONVERT_LOCK = _threading.Semaphore(1)
-_PDF_MAX_PAGES_PER_CALL = 10
+_PDF_CONVERT_LOCK = _threading.Semaphore(6)
+_PDF_MAX_PAGES_PER_CALL = 60
 
 
 def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
