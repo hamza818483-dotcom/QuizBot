@@ -8318,7 +8318,6 @@ async def handle_callback(query: dict):
                 if not mcqs_row:
                     await send_msg(chat_id, "❌ Session expired!")
                     return
-                uname = msg.get("from", {}).get("username", "user")
                 pages = [mcqs_row["mcq_data"]]
                 asyncio.create_task(process_pdfm_pages(
                     chat_id, uid, uname, pages, topic_cb,
