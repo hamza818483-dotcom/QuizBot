@@ -980,6 +980,35 @@ def _parse_explanation_only_json(text: str) -> list:
         return []
     return [str(it.get("explanation", "")).strip()[:500] if isinstance(it, dict) else "" for it in data]
 
+async def _gemini_verify_raw_text(img, prompt: str) -> str:
+    """Same job as _gen_groq_raw_text but via Gemini — used to get a second,
+    provider-diverse opinion on missed-content verification. Best-effort:
+    empty string on any failure, never raises (caller treats empty as
+    'nothing extra found')."""
+    try:
+        if not key_rotator.keys:
+            return ""
+        from google import genai as gai
+        from google.genai import types
+        from pdf_handler import image_to_base64
+        key = key_rotator.get_key()
+        client = gai.Client(api_key=key)
+        img_b64 = image_to_base64(img)
+
+        def _call():
+            return client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_text(text=prompt),
+                    types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                ]
+            )
+        response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=20)
+        return response.text or ""
+    except Exception as e:
+        logger.warning(f"[GeminiVerify] failed: {e}")
+        return ""
+
 async def _gen_groq_raw_text(img, prompt: str) -> str:
     keys = groq_key_rotator.all_keys()
     if not keys:
@@ -1060,12 +1089,31 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
             f"If nothing is missing and coverage is already complete, return exactly: []\n"
             f"Never invent facts not present on the page. No prose, JSON only."
         )
-        extra_txt = await _gen_groq_raw_text(img, verify_prompt)
+        # Two independent verify passes from DIFFERENT providers (Groq +
+        # Gemini) run concurrently — genuine second-opinion diversity catches
+        # misses a single model's blind spots would let through, at the cost
+        # of one extra parallel call (not sequential, so latency impact is
+        # small since both run at once).
+        groq_task = asyncio.create_task(_gen_groq_raw_text(img, verify_prompt))
+        gemini_task = asyncio.create_task(_gemini_verify_raw_text(img, verify_prompt))
+        extra_txt, extra_txt_gemini = await asyncio.gather(groq_task, gemini_task)
+
         extra = _parse_mcq_json(extra_txt) if extra_txt else []
-        if extra:
-            extra = _cap_mcq_options(extra, 4)
-            logger.info(f"[Verify] page {page_num}: call-2 added {len(extra)} missed MCQs")
-            mcqs = (mcqs or []) + extra
+        extra_g = _parse_mcq_json(extra_txt_gemini) if extra_txt_gemini else []
+
+        combined_extra = list(extra)
+        if extra_g:
+            existing_q_texts = {(m.get("question") or "").strip().lower()[:60] for m in combined_extra}
+            for m in extra_g:
+                qk = (m.get("question") or "").strip().lower()[:60]
+                if qk and qk not in existing_q_texts:
+                    combined_extra.append(m)
+                    existing_q_texts.add(qk)
+
+        if combined_extra:
+            combined_extra = _cap_mcq_options(combined_extra, 4)
+            logger.info(f"[Verify] page {page_num}: call-2 added {len(combined_extra)} missed MCQs (groq={len(extra)}, gemini_extra={len(combined_extra)-len(extra)})")
+            mcqs = (mcqs or []) + combined_extra
     except Exception as e:
         logger.warning(f"[Verify] page {page_num} verification skipped: {e}")
     return mcqs
