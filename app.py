@@ -3148,201 +3148,80 @@ _PDF_SEMAPHORE = asyncio.Semaphore(8)
 
 _last_pdf_error = {"msg": ""}
 
-async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
-  async with _PDF_SEMAPHORE:
-    task = asyncio.ensure_future(_html_to_pdf_impl(html, progress_cb))
-    try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=300)
-    except asyncio.TimeoutError:
-        _last_pdf_error["msg"] = "Timed out after 300s"
-        logger.error("[PDF Gen] Timed out after 300s")
-        task.cancel()
-        try:
-            await task
-        except Exception:
-            pass
-        return None
+_PW_BROWSER = {"browser": None, "playwright": None}
+_PW_LOCK = asyncio.Lock()
 
-async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
-    import tempfile, json as _json
-    chromium_bin = os.environ.get("CHROMIUM_PATH", "") or "chromium"
-    import random
-    debug_port = random.randint(9300, 9999)
-    html_path = None
-    proc = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".html", mode="w", encoding="utf-8", delete=False) as f:
-            f.write(html)
-            html_path = f.name
-        if progress_cb:
-            await progress_cb(15)
-
-        import tempfile as _tf
-        user_data_dir = _tf.mkdtemp(prefix="chromium-profile-")
-        proc = None
-        stderr_snapshot = ""
-        stderr_buffer = []
-
-        async def _drain_stderr(p):
-            try:
-                while True:
-                    line = await p.stderr.readline()
-                    if not line:
-                        break
-                    stderr_buffer.append(line.decode(errors="ignore"))
-                    if len(stderr_buffer) > 200:
-                        stderr_buffer.pop(0)
-            except Exception:
-                pass
-
-        for _launch_attempt in range(2):
-            if _launch_attempt == 0:
-                try:
-                    ver_proc = await asyncio.create_subprocess_exec(
-                        chromium_bin, "--version",
-                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    ver_out, ver_err = await asyncio.wait_for(ver_proc.communicate(), timeout=5)
-                    logger.info(f"[PDF Gen] Chromium binary check: path={chromium_bin}, version_out={ver_out.decode(errors='ignore').strip()}, version_err={ver_err.decode(errors='ignore').strip()}")
-                except Exception as _ver_e:
-                    logger.error(f"[PDF Gen] Chromium binary check FAILED: {_ver_e}")
-            proc = await asyncio.create_subprocess_exec(
-                chromium_bin, "--headless=new", "--no-sandbox",
-                "--disable-gpu", "--disable-dev-shm-usage",
-                "--disable-extensions", "--disable-background-networking",
-                "--disable-setuid-sandbox", "--no-zygote", "--single-process",
-                "--disable-namespace-sandbox", "--disable-seccomp-filter-sandbox",
-                "--disable-dbus", "--disable-features=DBus",
-                "--disable-crash-reporter", "--no-crash-upload",
-                f"--user-data-dir={user_data_dir}",
-                f"--remote-debugging-port={debug_port}",
-                f"file://{html_path}",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE
+async def _get_pw_browser():
+    """Reuses a single Playwright browser instance across all PDF generations —
+    matches AtlasMasterBot's AsyncPDFExporter pattern (proven working system)."""
+    async with _PW_LOCK:
+        if _PW_BROWSER["browser"] is None:
+            from playwright.async_api import async_playwright
+            _PW_BROWSER["playwright"] = await async_playwright().start()
+            _PW_BROWSER["browser"] = await _PW_BROWSER["playwright"].chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
             )
-            drain_task = asyncio.ensure_future(_drain_stderr(proc))
+        return _PW_BROWSER["browser"]
+
+async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
+    """Playwright-based HTML->PDF, ported 1:1 from AtlasMasterBot's
+    AsyncPDFExporter.html_to_pdf (proven working in production there)."""
+    async with _PDF_SEMAPHORE:
+        import tempfile
+        temp_path = None
+        output_path = None
+        page = None
+        try:
+            if progress_cb:
+                await progress_cb(15)
+            browser = await _get_pw_browser()
+            page = await browser.new_page()
             if progress_cb:
                 await progress_cb(30)
 
-            import httpx as _httpx
-            import websockets
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
+                f.write(html)
+                temp_path = f.name
 
-            ws_url = None
-            for _ in range(30):
-                await asyncio.sleep(1.0)
-                for host in ("127.0.0.1", "localhost"):
-                    try:
-                        async with _httpx.AsyncClient(timeout=2) as client:
-                            r = await client.get(f"http://{host}:{debug_port}/json")
-                            tabs = r.json()
-                            if tabs:
-                                ws_url = tabs[0]["webSocketDebuggerUrl"]
-                                break
-                    except Exception:
-                        continue
-                if ws_url:
-                    break
-                if proc.returncode is not None:
-                    logger.error(f"[PDF Gen] Chromium process exited early with code {proc.returncode}")
-                    break
-            if ws_url:
-                drain_task.cancel()
-                break
-            noise_markers = ["dbus", "cpufreq", "crashpad", "scaling_cur_freq", "scaling_max_freq"]
-            useful_lines = [l for l in stderr_buffer if l.strip() and not any(n in l.lower() for n in noise_markers)]
-            if useful_lines:
-                stderr_snapshot = "".join(useful_lines[-20:])
-            else:
-                # Nothing useful after filtering — show raw unfiltered output
-                # instead, since the filter itself may be hiding the real cause.
-                stderr_snapshot = f"(exit_code={proc.returncode}) RAW: " + "".join(stderr_buffer[-30:])
-            logger.error(f"[PDF Gen] Chromium launch attempt {_launch_attempt+1} failed. stderr: {stderr_snapshot}")
-            drain_task.cancel()
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            debug_port = random.randint(9300, 9999)
-            stderr_buffer.clear()
+            await page.goto(f"file://{os.path.abspath(temp_path)}", wait_until="networkidle")
+            await page.evaluate("document.fonts.ready")
+            await asyncio.sleep(1.5)
+            if progress_cb:
+                await progress_cb(70)
 
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as pf:
+                output_path = pf.name
 
-        if not ws_url:
-            raise RuntimeError(f"Chromium debug port not ready after 2 attempts (may be crashed/OOM). stderr: {stderr_snapshot}")
+            await page.pdf(
+                path=output_path, format="A4",
+                margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"},
+                print_background=True
+            )
+            if progress_cb:
+                await progress_cb(95)
 
-        if progress_cb:
-            await progress_cb(55)
-
-        async with websockets.connect(ws_url, max_size=None) as ws:
-            await ws.send(_json.dumps({"id": 1, "method": "Page.enable"}))
-            await ws.recv()
-
-            # Wait for the actual load event instead of a fixed sleep —
-            # important for style3/large sheets with many embedded images.
-            load_fired = False
-            try:
-                deadline = asyncio.get_event_loop().time() + 40
-                while asyncio.get_event_loop().time() < deadline:
-                    msg = _json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
-                    if msg.get("method") == "Page.loadEventFired":
-                        load_fired = True
-                        break
-            except asyncio.TimeoutError:
-                pass
-            if not load_fired:
-                await asyncio.sleep(1.5)  # fallback grace period
-
-            await ws.send(_json.dumps({
-                "id": 2,
-                "method": "Page.printToPDF",
-                "params": {
-                    "displayHeaderFooter": False,
-                    "printBackground": True,
-                    "preferCSSPageSize": True,
-                }
-            }))
-            result = None
-            while True:
-                msg = _json.loads(await asyncio.wait_for(ws.recv(), timeout=120))
-                if msg.get("id") == 2:
-                    result = msg
-                    break
-            if "error" in result:
-                raise RuntimeError(f"CDP error: {result['error']}")
-            pdf_b64 = result["result"]["data"]
-
-        if progress_cb:
-            await progress_cb(90)
-
-        import base64 as _b64
-        pdf_bytes = _b64.b64decode(pdf_b64)
-        if progress_cb:
-            await progress_cb(100)
-        return pdf_bytes
-    except Exception as e:
-        _last_pdf_error["msg"] = str(e)
-        logger.error(f"[PDF Gen] Error: {e}")
-    finally:
-        if proc:
-            try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except Exception:
+            with open(output_path, "rb") as f:
+                pdf_bytes = f.read()
+            if progress_cb:
+                await progress_cb(100)
+            return pdf_bytes
+        except Exception as e:
+            logger.error(f"[PDF Gen] Playwright error: {e}")
+            _last_pdf_error["msg"] = str(e)
+            return None
+        finally:
+            if page:
                 try:
-                    proc.kill()
+                    await page.close()
                 except Exception:
                     pass
-        if html_path and os.path.exists(html_path):
-            try:
-                os.remove(html_path)
-            except Exception:
-                pass
-        try:
-            import shutil as _sh
-            if 'user_data_dir' in dir() and os.path.isdir(user_data_dir):
-                _sh.rmtree(user_data_dir, ignore_errors=True)
-        except Exception:
-            pass
-    return None
+            for p in (temp_path, output_path):
+                if p and os.path.exists(p):
+                    try:
+                        os.unlink(p)
+                    except Exception:
+                        pass
 
 # ============================================================
 # FEATURE: /qpdf — chorcha.net mhtml/html (ক/খ ভান্ডার, CQ) → Premium PDF
