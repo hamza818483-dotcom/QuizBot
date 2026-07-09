@@ -3146,12 +3146,15 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
 # ============================================================
 _PDF_SEMAPHORE = asyncio.Semaphore(8)
 
+_last_pdf_error = {"msg": ""}
+
 async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
   async with _PDF_SEMAPHORE:
     task = asyncio.ensure_future(_html_to_pdf_impl(html, progress_cb))
     try:
         return await asyncio.wait_for(asyncio.shield(task), timeout=300)
     except asyncio.TimeoutError:
+        _last_pdf_error["msg"] = "Timed out after 300s"
         logger.error("[PDF Gen] Timed out after 300s")
         task.cancel()
         try:
@@ -3260,6 +3263,7 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
             await progress_cb(100)
         return pdf_bytes
     except Exception as e:
+        _last_pdf_error["msg"] = str(e)
         logger.error(f"[PDF Gen] Error: {e}")
     finally:
         if proc:
@@ -3667,7 +3671,7 @@ async def handle_sheet_style_callback(callback_query: dict):
         if not pdf_bytes:
             await edit_msg(chat_id, status_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
             try:
-                await notify_owner(f"⚠️ /sheet PDF gen failed (empty result), style={style_key}, title={title}, mcqs={len(mcqs)}")
+                await notify_owner(f"⚠️ /sheet PDF gen failed, style={style_key}, title={title}, mcqs={len(mcqs)}\nError: {_last_pdf_error['msg']}")
             except Exception:
                 pass
             return
