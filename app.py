@@ -670,9 +670,10 @@ def _parse_mcq_json(text: str) -> list:
             })
     return out
 
-async def _post_openai_compat(url: str, key: str, model: str, data_url: str, prompt: str) -> str:
+async def _post_openai_compat(url: str, key: str, model: str, data_url: str, prompt: str) -> tuple:
+    """Returns (text, status_code). status_code=0 means network/exception (no HTTP response)."""
     if not key:
-        return ""
+        return "", 0
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     payload = {
         "model": model,
@@ -691,26 +692,56 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
             r = await c.post(url, headers=headers, json=payload)
             if r.status_code >= 400:
                 logger.warning(f"[AI-ROT] {model} HTTP {r.status_code}: {r.text[:200]}")
-                return ""
+                return "", r.status_code
             j = r.json()
-            return j.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+            return j.get("choices", [{}])[0].get("message", {}).get("content", "") or "", r.status_code
     except Exception as e:
         logger.warning(f"[AI-ROT] {model} err: {e}")
-        return ""
+        return "", 0
+
+class GroqKeyRotator:
+    """Rotates across multiple Groq keys (GROQ_KEYS comma-separated, falls back
+    to single GROQ_API_KEY). On quota/rate-limit (429) for one key, tries the
+    next key immediately within the same page-call before giving up to Gemini."""
+    def __init__(self):
+        self.keys = []
+        self.current = 0
+        self._load_keys()
+
+    def _load_keys(self):
+        raw = os.environ.get("GROQ_KEYS", "") or os.environ.get("GROQ_API_KEY", "")
+        if raw:
+            self.keys = [k.strip() for k in raw.split(",") if k.strip()]
+        logger.info(f"[Groq] Loaded {len(self.keys)} keys")
+
+    def all_keys(self):
+        if not self.keys:
+            self._load_keys()
+        return list(self.keys)
+
+groq_key_rotator = GroqKeyRotator()
 
 async def _gen_groq(img, topic, count):
-    key = os.environ.get("GROQ_API_KEY", "")
-    if not key:
+    keys = groq_key_rotator.all_keys()
+    if not keys:
         return []
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
-    txt = await _post_openai_compat(
-        "https://api.groq.com/openai/v1/chat/completions",
-        key, "meta-llama/llama-4-scout-17b-16e-instruct",
-        data_url, _build_mcq_prompt(topic, count)
-    )
-    return _parse_mcq_json(txt)
+    prompt = _build_mcq_prompt(topic, count)
+    for i, key in enumerate(keys):
+        txt, status = await _post_openai_compat(
+            "https://api.groq.com/openai/v1/chat/completions",
+            key, "meta-llama/llama-4-scout-17b-16e-instruct",
+            data_url, prompt
+        )
+        if txt:
+            return _parse_mcq_json(txt)
+        if status == 429:
+            logger.warning(f"[Groq] key #{i+1}/{len(keys)} quota exhausted (429), trying next key")
+            continue
+        break
+    return []
 
 async def _gen_nvidia(img, topic, count):
     key = os.environ.get("NVIDIA_API_KEY", "")
@@ -719,7 +750,7 @@ async def _gen_nvidia(img, topic, count):
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
-    txt = await _post_openai_compat(
+    txt, _st = await _post_openai_compat(
         "https://integrate.api.nvidia.com/v1/chat/completions",
         key, "meta/llama-3.2-11b-vision-instruct",
         data_url, _build_mcq_prompt(topic, count)
@@ -733,7 +764,7 @@ async def _gen_openrouter_qwen(img, topic, count):
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
-    txt = await _post_openai_compat(
+    txt, _st = await _post_openai_compat(
         "https://openrouter.ai/api/v1/chat/completions",
         key, "qwen/qwen-2-vl-72b-instruct",
         data_url, _build_mcq_prompt(topic, count)
@@ -747,7 +778,7 @@ async def _gen_nemotron(img, topic, count):
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
-    txt = await _post_openai_compat(
+    txt, _st = await _post_openai_compat(
         "https://integrate.api.nvidia.com/v1/chat/completions",
         key, "nvidia/nemotron-nano-12b-v2-vl",
         data_url, _build_mcq_prompt(topic, count)
@@ -762,7 +793,7 @@ async def _gen_gemma(img, topic, count):
     if not data_url:
         return []
     # Gemma 3 27B IT vision via OpenRouter
-    txt = await _post_openai_compat(
+    txt, _st = await _post_openai_compat(
         "https://openrouter.ai/api/v1/chat/completions",
         key, "google/gemma-3-27b-it",
         data_url, _build_mcq_prompt(topic, count)
@@ -910,11 +941,12 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
     data_url = _img_to_data_url(img)
     if not data_url:
         return ""
-    return await _post_openai_compat(
+    txt, _st = await _post_openai_compat(
         "https://api.groq.com/openai/v1/chat/completions",
         key, "meta-llama/llama-4-scout-17b-16e-instruct",
         data_url, prompt
     )
+    return txt
 
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
@@ -5266,11 +5298,12 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     data_url = _img_to_data_url(img)
     if not data_url:
         return ""
-    return await _post_openai_compat(
+    txt, _st = await _post_openai_compat(
         "https://api.groq.com/openai/v1/chat/completions",
         key, "meta-llama/llama-4-scout-17b-16e-instruct",
         data_url, prompt
     )
+    return txt
 
 
 async def _qbm_call1_extract(img) -> list:
@@ -5800,7 +5833,7 @@ Return ONLY the JSON array, nothing else."""
         if key:
             data_url = _img_to_data_url(img)
             if data_url:
-                txt = await _post_openai_compat(
+                txt, _st = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
                     key, "meta-llama/llama-4-scout-17b-16e-instruct",
                     data_url, prompt
