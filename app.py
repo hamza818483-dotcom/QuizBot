@@ -1026,20 +1026,17 @@ async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
 
         bbox = m.get("exp_bbox") or ocr_bboxes.get(m.get("question", ""))
         url = ""
-        full_url_for_click = ""
+        top_pct = bottom_pct = None
         if bbox:
             try:
                 result = await asyncio.to_thread(crop_explanation_image, img, bbox)
-                url = result.get("thumb", "")
-                full_url_for_click = result.get("full", "")
+                url = result.get("url", "")
+                top_pct = result.get("top_pct")
+                bottom_pct = result.get("bottom_pct")
             except Exception as e:
                 logger.warning(f"[ExplanationCrop] wrapper-attach failed: {e}")
 
         if not url:
-            # Final fallback — no bbox found anywhere -> attach the FULL page
-            # image so the explanation still has a visual reference instead
-            # of silently having none. One retry on upload for reliability;
-            # attempted-once flag avoids hammering imgbb if it's genuinely down.
             if full_img_url is None and not full_img_attempted:
                 for _try in range(2):
                     try:
@@ -1051,11 +1048,12 @@ async def _attach_explanation_images_if_missing(mcqs: list, img) -> list:
                         logger.warning(f"[ExplanationCrop] full-image fallback attempt {_try+1} failed: {e}")
                 full_img_attempted = True
             url = full_img_url or ""
-            full_url_for_click = full_img_url or ""
 
         if url:
-            data_full = f' data-full="{full_url_for_click}"' if full_url_for_click else ""
-            m["explanation"] = f'{exp} <img src="{url}"{data_full}>'.strip()
+            crop_attrs = ""
+            if top_pct is not None and bottom_pct is not None:
+                crop_attrs = f' data-crop-top="{top_pct}" data-crop-bottom="{bottom_pct}"'
+            m["explanation"] = f'{exp} <img src="{url}"{crop_attrs}>'.strip()
 
     return mcqs
 
@@ -3970,11 +3968,11 @@ async def _process_pdf_pages_inner(
                     bbox = m.get("exp_bbox")
                     if bbox:
                         crop_result = await asyncio.to_thread(crop_explanation_image, img, bbox)
-                        crop_url = crop_result.get("thumb", "")
-                        full_url = crop_result.get("full", "")
+                        crop_url = crop_result.get("url", "")
                         if crop_url:
-                            data_full = f' data-full="{full_url}"' if full_url else ""
-                            exp = f'<img src="{crop_url}"{data_full}> {exp}'
+                            tp, bp = crop_result.get("top_pct"), crop_result.get("bottom_pct")
+                            crop_attrs = f' data-crop-top="{tp}" data-crop-bottom="{bp}"' if tp is not None else ""
+                            exp = f'<img src="{crop_url}"{crop_attrs}> {exp}'
                     all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, exp, "1", "1"])
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs)
             else:
@@ -4014,11 +4012,11 @@ async def _process_pdf_pages_inner(
                     if bbox:
                         try:
                             crop_result = await asyncio.to_thread(crop_explanation_image, img, bbox)
-                            crop_url = crop_result.get("thumb", "")
-                            full_url = crop_result.get("full", "")
+                            crop_url = crop_result.get("url", "")
                             if crop_url:
-                                data_full = f' data-full="{full_url}"' if full_url else ""
-                                exp = f'<img src="{crop_url}"{data_full}> {exp}'
+                                tp, bp = crop_result.get("top_pct"), crop_result.get("bottom_pct")
+                                crop_attrs = f' data-crop-top="{tp}" data-crop-bottom="{bp}"' if tp is not None else ""
+                                exp = f'<img src="{crop_url}"{crop_attrs}> {exp}'
                                 mcq["explanation"] = exp
                         except Exception as _crop_e:
                             logger.warning(f"[Poll] crop failed for MCQ {i+1}: {_crop_e}")
@@ -9130,6 +9128,7 @@ async def _watchdog_task() -> None:
     await asyncio.sleep(150)  # offset from _keepalive_task so they don't overlap
     logger.info("[App] Watchdog task started")
     fails = 0
+    was_down = False
     while True:
         healthy = False
         try:
@@ -9142,14 +9141,22 @@ async def _watchdog_task() -> None:
 
         if healthy:
             fails = 0
+            if was_down:
+                try:
+                    await notify_owner("✅ QuizBot WATCHDOG: service reachable again.")
+                except Exception:
+                    pass
+                was_down = False
         else:
             fails += 1
             logger.warning(f"[Watchdog] health check failed ({fails} in a row)")
             if fails >= 2:
-                try:
-                    await notify_owner(f"🚨 QuizBot WATCHDOG: service unreachable ({fails}x) — attempting self-wake.")
-                except Exception:
-                    pass
+                if not was_down:
+                    try:
+                        await notify_owner(f"🚨 QuizBot WATCHDOG: service unreachable ({fails}x) — attempting self-wake.")
+                    except Exception:
+                        pass
+                    was_down = True
                 # self-wake attempt: hit health endpoint directly again
                 try:
                     async with httpx.AsyncClient(timeout=30) as client:
@@ -9166,6 +9173,7 @@ async def _watchdog2_task() -> None:
     await asyncio.sleep(240)
     logger.info("[App] Watchdog-2 task started")
     fails = 0
+    was_down2 = False
     while True:
         healthy = False
         try:
@@ -9177,13 +9185,21 @@ async def _watchdog2_task() -> None:
             healthy = False
         if healthy:
             fails = 0
+            if was_down2:
+                try:
+                    await notify_owner("✅ QuizBot WATCHDOG-2: service reachable again.")
+                except Exception:
+                    pass
+                was_down2 = False
         else:
             fails += 1
             if fails >= 2:
-                try:
-                    await notify_owner(f"🚨 QuizBot WATCHDOG-2: unreachable ({fails}x) — self-wake attempt.")
-                except Exception:
-                    pass
+                if not was_down2:
+                    try:
+                        await notify_owner(f"🚨 QuizBot WATCHDOG-2: unreachable ({fails}x) — self-wake attempt.")
+                    except Exception:
+                        pass
+                    was_down2 = True
                 if RENDER_URL:
                     for _ in range(2):
                         try:
