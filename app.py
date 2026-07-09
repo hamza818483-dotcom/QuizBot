@@ -3177,41 +3177,54 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
         if progress_cb:
             await progress_cb(15)
 
-        proc = await asyncio.create_subprocess_exec(
-            chromium_bin, "--headless=new", "--no-sandbox",
-            "--disable-gpu", "--disable-dev-shm-usage",
-            "--disable-extensions", "--disable-background-networking",
-            f"--remote-debugging-port={debug_port}",
-            "--remote-debugging-address=127.0.0.1",
-            f"file://{html_path}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        if progress_cb:
-            await progress_cb(30)
+        proc = None
+        stderr_snapshot = ""
+        for _launch_attempt in range(2):
+            proc = await asyncio.create_subprocess_exec(
+                chromium_bin, "--headless=new", "--no-sandbox",
+                "--disable-gpu", "--disable-dev-shm-usage",
+                "--disable-extensions", "--disable-background-networking",
+                "--disable-setuid-sandbox", "--no-zygote",
+                f"--remote-debugging-port={debug_port}",
+                "--remote-debugging-address=127.0.0.1",
+                f"file://{html_path}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            if progress_cb:
+                await progress_cb(30)
 
-        import httpx as _httpx
-        import websockets
+            import httpx as _httpx
+            import websockets
 
-        ws_url = None
-        for _ in range(30):
-            await asyncio.sleep(1.0)
-            try:
-                async with _httpx.AsyncClient(timeout=2) as client:
-                    r = await client.get(f"http://127.0.0.1:{debug_port}/json")
-                    tabs = r.json()
-                    if tabs:
-                        ws_url = tabs[0]["webSocketDebuggerUrl"]
-                        break
-            except Exception:
-                continue
-        if not ws_url:
+            ws_url = None
+            for _ in range(30):
+                await asyncio.sleep(1.0)
+                try:
+                    async with _httpx.AsyncClient(timeout=2) as client:
+                        r = await client.get(f"http://127.0.0.1:{debug_port}/json")
+                        tabs = r.json()
+                        if tabs:
+                            ws_url = tabs[0]["webSocketDebuggerUrl"]
+                            break
+                except Exception:
+                    continue
+            if ws_url:
+                break
             try:
                 stderr_data = await asyncio.wait_for(proc.stderr.read(4000), timeout=2)
-                logger.error(f"[PDF Gen] Chromium never opened debug port. stderr: {stderr_data.decode(errors='ignore')[:1000]}")
+                stderr_snapshot = stderr_data.decode(errors="ignore")[:1000]
+                logger.error(f"[PDF Gen] Chromium launch attempt {_launch_attempt+1} failed. stderr: {stderr_snapshot}")
             except Exception:
                 pass
-            raise RuntimeError("Chromium debug port not ready (process may have crashed/OOM)")
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            debug_port = random.randint(9300, 9999)
+
+        if not ws_url:
+            raise RuntimeError(f"Chromium debug port not ready after 2 attempts (may be crashed/OOM). stderr: {stderr_snapshot}")
 
         if progress_cb:
             await progress_cb(55)
