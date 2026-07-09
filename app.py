@@ -935,18 +935,23 @@ def _parse_explanation_only_json(text: str) -> list:
     return [str(it.get("explanation", "")).strip()[:500] if isinstance(it, dict) else "" for it in data]
 
 async def _gen_groq_raw_text(img, prompt: str) -> str:
-    key = os.environ.get("GROQ_API_KEY", "")
-    if not key:
+    keys = groq_key_rotator.all_keys()
+    if not keys:
         return ""
     data_url = _img_to_data_url(img)
     if not data_url:
         return ""
-    txt, _st = await _post_openai_compat(
-        "https://api.groq.com/openai/v1/chat/completions",
-        key, "meta-llama/llama-4-scout-17b-16e-instruct",
-        data_url, prompt
-    )
-    return txt
+    for key in keys:
+        txt, status = await _post_openai_compat(
+            "https://api.groq.com/openai/v1/chat/completions",
+            key, "meta-llama/llama-4-scout-17b-16e-instruct",
+            data_url, prompt
+        )
+        if txt:
+            return txt
+        if status != 429:
+            break
+    return ""
 
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
@@ -5306,18 +5311,23 @@ def _qbm_parse_json(text: str) -> list:
 
 async def _qbm_groq_call(img, prompt: str) -> str:
     """Raw Groq call helper — returns raw text (caller parses)."""
-    key = os.environ.get("GROQ_API_KEY", "")
-    if not key:
+    keys = groq_key_rotator.all_keys()
+    if not keys:
         return ""
     data_url = _img_to_data_url(img)
     if not data_url:
         return ""
-    txt, _st = await _post_openai_compat(
-        "https://api.groq.com/openai/v1/chat/completions",
-        key, "meta-llama/llama-4-scout-17b-16e-instruct",
-        data_url, prompt
-    )
-    return txt
+    for key in keys:
+        txt, status = await _post_openai_compat(
+            "https://api.groq.com/openai/v1/chat/completions",
+            key, "meta-llama/llama-4-scout-17b-16e-instruct",
+            data_url, prompt
+        )
+        if txt:
+            return txt
+        if status != 429:
+            break
+    return ""
 
 
 async def _qbm_call1_extract(img) -> list:
@@ -5842,17 +5852,22 @@ If this page has no answer key at all, or no match for these specific questions,
 return exactly: []
 Return ONLY the JSON array, nothing else."""
 
-        key = os.environ.get("GROQ_API_KEY", "")
+        keys = groq_key_rotator.all_keys()
         result_json = None
-        if key:
+        if keys:
             data_url = _img_to_data_url(img)
             if data_url:
-                txt, _st = await _post_openai_compat(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    key, "meta-llama/llama-4-scout-17b-16e-instruct",
-                    data_url, prompt
-                )
-                result_json = _qbm_parse_json(txt) if txt else None
+                for key in keys:
+                    txt, status = await _post_openai_compat(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        key, "meta-llama/llama-4-scout-17b-16e-instruct",
+                        data_url, prompt
+                    )
+                    if txt:
+                        result_json = _qbm_parse_json(txt)
+                        break
+                    if status != 429:
+                        break
 
         if not result_json:
             try:
