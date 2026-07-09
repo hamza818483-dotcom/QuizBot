@@ -638,7 +638,10 @@ function doSubmit(){
     if(expFooter) exp=exp?exp+'\n'+expFooter:expFooter;
     html+=`<div class="mcq-card solve-item" data-status="${st}">
       <span class="q-result-badge ${st}">${stL}</span>
-      <div class="q-head"><span class="q-num">প্রশ্ন ${i+1}/${questions.length}</span></div>
+      <div class="q-head">
+        <span class="q-num">প্রশ্ন ${i+1}/${questions.length}</span>
+        <button class="bm-btn${bookmarks[i]?' active':''}" id="bmBtn${i}" onclick="toggleBm(${i})">🔖</button>
+      </div>
       <div class="q-text">${qTxt.replace(/\n/g,'<br>')}</div>`;
     q.options.forEach((opt,oi)=>{
       let cls='opt locked',icon='';
