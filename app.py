@@ -7075,10 +7075,8 @@ async def handle_incoming_image_for_collection(msg: dict):
 def _poll_end_kb(cache_id: str, cache: dict) -> dict:
     exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
     kb = {"inline_keyboard": [
-        [{"text": "🔄 Same Quiz", "callback_data": f"qsame_{cache_id}"},
-         {"text": "🆕 New Quiz", "callback_data": f"qnew_{cache_id}"}],
-        [{"text": "🔄 Same Poll", "callback_data": f"pollagain_{cache_id}"},
-         {"text": "🆕 New Poll", "callback_data": f"pollnew_{cache_id}"}],
+        [{"text": "🔄 Same Quiz", "callback_data": f"qsame_{cache_id}"}],
+        [{"text": "🔄 Same Poll", "callback_data": f"pollagain_{cache_id}"}],
         [{"text": "🌐 Website Exam", "url": exam_url}]
     ]}
     back_url = build_back_url(cache.get("channel_id", ""), source_msg_id(cache))
