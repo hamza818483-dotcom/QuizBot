@@ -358,13 +358,8 @@ PDF_AUTO_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB) — /pdf 
 # ============================================================
 # /cancel — instantly stop any running activity for this chat (bot stays alive)
 # ============================================================
-ACTIVE_TASKS = {}  # chat_id -> set of asyncio.Task
 CANCEL_FLAGS = {}  # chat_id -> bool, checked by long loops between steps
-
-def register_task(chat_id, task):
-    ACTIVE_TASKS.setdefault(chat_id, set()).add(task)
-    task.add_done_callback(lambda t: ACTIVE_TASKS.get(chat_id, set()).discard(t))
-    return task
+ACTIVE_JOB_LABEL = {}  # chat_id -> human-readable label of the job currently running
 
 def is_cancelled(chat_id):
     return CANCEL_FLAGS.get(chat_id, False)
@@ -372,20 +367,23 @@ def is_cancelled(chat_id):
 def clear_cancel(chat_id):
     CANCEL_FLAGS[chat_id] = False
 
+def set_active_job(chat_id, label):
+    ACTIVE_JOB_LABEL[chat_id] = label
+
+def clear_active_job(chat_id):
+    ACTIVE_JOB_LABEL.pop(chat_id, None)
+
 async def handle_cancel_command(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg.get("from", {}).get("id")
     if not await db_is_owner_or_admin(uid):
-        await send_msg(chat_id, "❌ এই কমান্ড শুধু Admin/Owner ব্যবহার করতে পারবে।")
         return
     CANCEL_FLAGS[chat_id] = True
-    tasks = ACTIVE_TASKS.get(chat_id, set())
-    cancelled_count = 0
-    for t in list(tasks):
-        if not t.done():
-            t.cancel()
-            cancelled_count += 1
-    await send_msg(chat_id, f"🛑 বন্ধ করা হলো।\nথামবে: PDF/Image MCQ generation ও Poll posting (চলমান page-by-page কাজ)।\nথামবে না: /rapid, /collect, /merge, Live Quiz — এগুলোর নিজস্ব cancel বাটন/কমান্ড আছে।")
+    running_label = ACTIVE_JOB_LABEL.get(chat_id)
+    if running_label:
+        await send_msg(chat_id, "🛑 বন্ধ করা হলো।\nযে কাজ থামলো: " + running_label)
+    else:
+        await send_msg(chat_id, "🛑 এই মুহূর্তে এই চ্যাটে cancel-able কোনো কাজ চলছে না।")
 
 # LIVE QUIZ CONFIG
 LIVE_QUIZ_STATE = {}  # channel_id -> live quiz state
@@ -4170,6 +4168,7 @@ async def pdf_generate_all_pages(
     total_mcq = 0
     results = []
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    set_active_job(chat_id, f"PDF MCQ generation ({file_name}, page-by-page)")
 
     try:
         if status_msg_id:
@@ -4200,6 +4199,7 @@ async def pdf_generate_all_pages(
                     _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
     finally:
         _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+        clear_active_job(chat_id)
 
     return results
 
@@ -4732,9 +4732,11 @@ async def _process_pdfm_pages_impl(
     summary_pages = []
     all_mcqs_csv = []
     first_image_msg_id = None
+    set_active_job(chat_id, f"PDFM MCQ generation + Poll posting ({file_name}, page-by-page)")
 
     for idx, (page_num, img) in enumerate(pages):
         if is_cancelled(chat_id):
+            clear_active_job(chat_id)
             break
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
@@ -4892,6 +4894,8 @@ async def _process_pdfm_pages_impl(
             logger.error(f"[PDFM] Page {page_num} error: {e}")
             page_status[idx]["current"] = False
             page_status[idx]["done"] = True
+
+    clear_active_job(chat_id)
 
     # CSV send
     if all_mcqs_csv:
@@ -5835,6 +5839,7 @@ async def qbm_extract_all_pages(
     start_time = time.time()
     total_mcq = 0
     results = [None] * len(pages)
+    set_active_job(chat_id, f"QBM extraction ({file_name}, page-by-page)")
 
     if status_msg_id:
         await edit_msg(chat_id, status_msg_id,
@@ -5895,6 +5900,7 @@ async def qbm_extract_all_pages(
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
 
+    clear_active_job(chat_id)
     return [r for r in results if r is not None]
 
 
@@ -5939,11 +5945,13 @@ async def process_qbm_pages(
     summary_pages = []
     all_mcqs_csv = []
     first_image_msg_id = None
+    set_active_job(chat_id, f"QBM Poll posting ({file_name}, page-by-page)")
 
     iterable = page_tuples if skip_extract else [(p, img, None) for p, img in pages]
 
     for idx, (page_num, img, precomputed_mcqs) in enumerate(iterable):
         if is_cancelled(chat_id):
+            clear_active_job(chat_id)
             break
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
@@ -6083,6 +6091,8 @@ async def process_qbm_pages(
             logger.error(f"[QBM] Page {page_num} error: {e}")
             page_status[idx]["current"] = False
             page_status[idx]["done"] = True
+
+    clear_active_job(chat_id)
 
     if all_mcqs_csv:
         import io as _io, csv as _csv_mod
