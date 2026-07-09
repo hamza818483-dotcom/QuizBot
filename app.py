@@ -352,6 +352,28 @@ def _cap_page_cache(cache: dict) -> None:
     while len(cache) > _PAGE_CACHE_MAX_ENTRIES:
         cache.pop(next(iter(cache)), None)
 
+# SPEED: cache raw downloaded PDF bytes by file_id so re-running /pdf on the
+# SAME file (retry, different page range, re-generate) skips the Telegram
+# download entirely. Small cap + oldest-eviction, same safety pattern as
+# _cap_page_cache. In-memory only — resets on deploy/restart, which is fine
+# since it's purely a speed optimization, never a correctness dependency.
+_PDF_BYTES_CACHE_MAX = 8
+_pdf_bytes_cache = {}  # file_id -> bytes
+
+def _cap_pdf_bytes_cache() -> None:
+    while len(_pdf_bytes_cache) > _PDF_BYTES_CACHE_MAX:
+        _pdf_bytes_cache.pop(next(iter(_pdf_bytes_cache)), None)
+
+async def _download_pdf_cached(file_id: str, chat_id: int = None, message_id: int = None) -> bytes:
+    cached = _pdf_bytes_cache.get(file_id)
+    if cached is not None:
+        logger.info(f"[PDF Cache] hit for file_id={file_id[:16]}... skipping download")
+        return cached
+    data = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
+    _pdf_bytes_cache[file_id] = data
+    _cap_pdf_bytes_cache()
+    return data
+
 PIN_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB)
 PDF_AUTO_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB) — /pdf on|off
 
@@ -4098,7 +4120,7 @@ async def handle_pdf(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[░░░░░░░░░░ 0%]")
 
-        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id, message_id=reply["message_id"])
 
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
@@ -4625,7 +4647,7 @@ async def handle_pdfm(msg: dict):
     status_msg_id = status_r.get("result",{}).get("message_id")
 
     try:
-        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id, message_id=reply["message_id"])
         ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
         if not ok:
             await send_msg(chat_id, pages)
@@ -5722,7 +5744,7 @@ async def _handle_qbm_impl(msg: dict):
             img = PILImage.open(BytesIO(img_bytes))
             pages = [(1, img)]
         else:
-            pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
+            pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id, message_id=reply["message_id"])
             ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
             if not ok:
                 await send_msg(chat_id, pages)
