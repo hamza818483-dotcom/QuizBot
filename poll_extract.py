@@ -21,6 +21,25 @@ API_ID       = int(os.environ.get("API_ID", "33312774"))
 API_HASH     = os.environ.get("API_HASH", "883db3366f8759d1d14c861c0d628232")
 SESSION_STR  = os.environ.get("SESSION_STRING", "")
 
+# URL matcher — http(s) links and bare t.me/telegram.me links
+_URL_RE = re.compile(
+    r'(?:https?://\S+|(?:t\.me|telegram\.me)/\S+)',
+    re.IGNORECASE
+)
+
+def _clean_extracted_text(text: str) -> str:
+    """Applied to question, every option, and explanation of extracted polls:
+    - 'sabas'/'SABAS'/'Sabas' (any case, with or without brackets) → 'ATLAS'
+    - any link/URL → '✅Join:@MediAtlas'
+    """
+    if not text:
+        return text
+    t = str(text)
+    t = re.sub(r'\[sabas\]', '[ATLAS]', t, flags=re.IGNORECASE)
+    t = re.sub(r'\bsabas\b', 'ATLAS', t, flags=re.IGNORECASE)
+    t = _URL_RE.sub('✅Join:@MediAtlas', t)
+    return t
+
 
 # ── Link parser ──────────────────────────────────────────────
 def parse_tg_link(link: str):
@@ -117,16 +136,13 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
 
             # Question text
             q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
-
-            # [SABAS] বা যেকোনো case → [ATLAS] replace
-            q_text = re.sub(r'\[sabas\]', '[ATLAS]', q_text, flags=re.IGNORECASE)
-            q_text = re.sub(r'\bsabas\b', 'ATLAS', q_text, flags=re.IGNORECASE)
+            q_text = _clean_extracted_text(q_text)
 
             # Options
             options = []
             for ans in p.answers:
                 opt = ans.text.text if hasattr(ans.text, "text") else str(ans.text)
-                options.append(opt)
+                options.append(_clean_extracted_text(opt))
 
             # ── Correct answer ──
             correct_idx = 0
@@ -168,6 +184,8 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
 
             except Exception as e:
                 logger.warning(f"[poll_extract] msg {message.id}: {type(e).__name__}: {e}")
+
+            explanation = _clean_extracted_text(explanation)
 
             # Cap to 4 options (A-D) — some source polls have a stray 5th
             # blank/placeholder option. Keep correct answer in range by

@@ -1,13 +1,14 @@
-name: Deploy Worker to Cloudflare
+name: "[DISABLED] Deploy Worker to Cloudflare (obsolete - now using Pages auto-deploy)"
+
+# NOTE (2026-07-08): This workflow deployed to Cloudflare WORKERS, which HF
+# Space cannot reach (*.workers.dev is blocked from HF's network). Migrated to
+# Cloudflare PAGES (quizbot.pages.dev) instead, which HF can reach fine.
+# The Pages project is Git-connected and auto-deploys on every push to main —
+# no GitHub Action needed for that anymore. Kept here disabled for reference.
+# See docs/DEPLOYMENT_SETUP.md for full details.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'worker.js'
-      - 'wrangler.toml'
-      - '.github/workflows/deploy-cf.yml'
-  workflow_dispatch:
+  workflow_dispatch:  # manual-only, no automatic trigger
 
 jobs:
   deploy:

@@ -1,11 +1,12 @@
-name: Sync to Hugging Face Space (DISABLED — HF account banned)
+name: Sync to Hugging Face Space
 
-# v4.3: HF account permanently banned (ToS violation). This workflow is
-# disabled — no more push trigger — to avoid wasting Actions minutes on
-# guaranteed-fail pushes. Kept as workflow_dispatch only in case HF
-# access is restored later.
+# v4.4: Fresh HF Space (hamza-02/QuizBot), single-platform only (Render OFF).
+# Previous HF account was banned for running HF Space + Render simultaneously
+# (dual-webhook/dual-instance ToS violation). This time only HF Space is live.
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -24,5 +25,5 @@ jobs:
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
-          git remote add hf https://HamzaHF2:${HF_TOKEN}@huggingface.co/spaces/HamzaHF2/AtlasBoss
-          git push hf main --force
+          git remote add hf https://hamza-02:${HF_TOKEN}@huggingface.co/spaces/hamza-02/QuizBot
+          git push hf main:main --force
