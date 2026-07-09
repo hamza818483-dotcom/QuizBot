@@ -4339,6 +4339,27 @@ async def _process_pdf_pages_inner(
                 mcqs = await _repair_thin_explanations(mcqs, img, topic)
                 mcqs = await _attach_explanation_images_if_missing(mcqs, img)
 
+                # SPEED FIX: pre-crop every explanation image concurrently
+                # (imgbb upload is the slowest part of each iteration) instead
+                # of doing it one-by-one inside the send loop. Quality/output
+                # is identical — same crop_explanation_image call, just run
+                # in parallel ahead of time so the actual sendPoll loop below
+                # only waits on Telegram, not on image uploads.
+                async def _precrop(mcq):
+                    bbox = mcq.get("exp_bbox")
+                    if not bbox:
+                        return
+                    try:
+                        crop_result = await asyncio.to_thread(crop_explanation_image, img, bbox)
+                        crop_url = crop_result.get("url", "")
+                        if crop_url:
+                            tp, bp = crop_result.get("top_pct"), crop_result.get("bottom_pct")
+                            crop_attrs = f' data-crop-top="{tp}" data-crop-bottom="{bp}"' if tp is not None else ""
+                            mcq["explanation"] = f'<img src="{crop_url}"{crop_attrs}> {mcq.get("explanation","")}'
+                    except Exception as _crop_e:
+                        logger.warning(f"[Poll] pre-crop failed: {_crop_e}")
+                await asyncio.gather(*[_precrop(mcq) for mcq in mcqs])
+
                 poll_links = []
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
@@ -4351,21 +4372,6 @@ async def _process_pdf_pages_inner(
                     exp = mcq.get("explanation", "")
                     if exp_footer:
                         exp = f"{exp}\n{exp_footer}"
-                    # exp_bbox থাকলে page image থেকে সেই অংশ crop করে upload করে
-                    # explanation-এ <img> tag embed করা হচ্ছে — send_poll() নিজে থেকেই
-                    # এটা detect করে explanation_media হিসেবে ছবি দেখাবে (আগের fix)।
-                    bbox = mcq.get("exp_bbox")
-                    if bbox:
-                        try:
-                            crop_result = await asyncio.to_thread(crop_explanation_image, img, bbox)
-                            crop_url = crop_result.get("url", "")
-                            if crop_url:
-                                tp, bp = crop_result.get("top_pct"), crop_result.get("bottom_pct")
-                                crop_attrs = f' data-crop-top="{tp}" data-crop-bottom="{bp}"' if tp is not None else ""
-                                exp = f'<img src="{crop_url}"{crop_attrs}> {exp}'
-                                mcq["explanation"] = exp
-                        except Exception as _crop_e:
-                            logger.warning(f"[Poll] crop failed for MCQ {i+1}: {_crop_e}")
                     # Retry logic — poll অবশ্যই যেতে হবে
                     poll_r = {"ok": False}
                     for _attempt in range(3):
@@ -4387,7 +4393,7 @@ async def _process_pdf_pages_inner(
                             first_poll_link = f"https://t.me/{str(channel_id).lstrip('@')}/{msg_id}"
                         poll_links.append(first_poll_link)
                     total_polls += 1
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.35)
                   except Exception as _mcq_e:
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
