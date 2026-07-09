@@ -308,12 +308,10 @@ def _parse_mcq_json(text: str) -> list:
 
 def crop_explanation_image(img: Image.Image, bbox: list) -> dict:
     """
-    Returns {"thumb": url, "full": url}.
-    thumb = tight vertical crop (full page width) with red border on exp_box —
-            shown inline in the poll/explanation.
-    full  = the ENTIRE original page image with the same red border marking
-            exactly where the thumb came from — shown when thumb is clicked,
-            so the user can see the full surrounding context.
+    Single upload (full page, red-border marked at exp_box). Client renders
+    a CSS-cropped thumbnail view (object-position) using bbox percentages,
+    and full image on click — avoids double-upload fragility.
+    Returns {"url": str, "top_pct": float, "bottom_pct": float}.
     """
     if not bbox or len(bbox) != 4:
         return {}
@@ -324,33 +322,21 @@ def crop_explanation_image(img: Image.Image, bbox: list) -> dict:
         x_min, y_min, x_max, y_max = bbox
         box_top = (y_min / 1000) * h
         box_bottom = (y_max / 1000) * h
-        context_margin = max(2, round(h * 0.003))
-        py = max(0, int(box_top - context_margin))
-        bottom = min(h, int(box_bottom + context_margin))
-        ph = bottom - py
-        if ph < 10:
-            return {}
 
-        # Full page with red border marking the source region
         full_img = img.convert("RGB").copy()
-        full_draw = ImageDraw.Draw(full_img)
-        fb_top = max(0, int(box_top))
-        fb_bottom = min(h, int(box_bottom))
-        if fb_bottom > fb_top:
-            full_draw.rectangle([6, fb_top + 6, w - 6, max(fb_top + 7, fb_bottom - 6)], outline=(220, 38, 38), width=6)
-        full_url = upload_to_imgbb(image_to_base64(full_img))
-
-        # Tight thumb crop (same border, cropped to just that region)
-        cropped = img.crop((0, py, w, bottom)).convert("RGB")
-        draw = ImageDraw.Draw(cropped)
-        b_top = max(0, int(box_top - py))
-        b_bottom = min(ph, int(box_bottom - py))
-        b_h = b_bottom - b_top
-        if b_h > 0:
+        draw = ImageDraw.Draw(full_img)
+        b_top = max(0, int(box_top))
+        b_bottom = min(h, int(box_bottom))
+        if b_bottom > b_top:
             draw.rectangle([6, b_top + 6, w - 6, max(b_top + 7, b_bottom - 6)], outline=(220, 38, 38), width=6)
-        thumb_url = upload_to_imgbb(image_to_base64(cropped))
-
-        return {"thumb": thumb_url, "full": full_url}
+        url = upload_to_imgbb(image_to_base64(full_img))
+        if not url:
+            return {}
+        return {
+            "url": url,
+            "top_pct": round((b_top / h) * 100, 2),
+            "bottom_pct": round((b_bottom / h) * 100, 2),
+        }
     except Exception as e:
         logger.warning(f"[ExplanationCrop] Failed: {e}")
         return {}
