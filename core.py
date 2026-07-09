@@ -562,7 +562,14 @@ async def notify_owner(text: str):
 async def download_tg_file(file_id: str, progress_cb=None) -> bytes:
     file_res = await tg_post("getFile", {"file_id": file_id})
     if not file_res.get("ok"):
-        raise Exception(f"getFile failed: {file_res.get('description')}")
+        desc = file_res.get("description")
+        if not desc:
+            raise Exception(
+                "getFile failed: file likely exceeds Telegram Bot API's 20MB download "
+                "limit (large multi-page PDFs often do). Split the file into smaller "
+                "parts and try again."
+            )
+        raise Exception(f"getFile failed: {desc}")
     file_path = file_res["result"]["file_path"]
     total_size = file_res["result"].get("file_size", 0)
 

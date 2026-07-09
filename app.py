@@ -3184,20 +3184,27 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
         try:
             if progress_cb:
                 await progress_cb(15)
-            browser = await _get_pw_browser()
-            try:
-                page = await browser.new_page()
-            except Exception as e:
-                logger.warning(f"[PDF Gen] new_page failed ({e}), forcing browser relaunch and retrying")
-                async with _PW_LOCK:
-                    try:
-                        await _PW_BROWSER["playwright"].stop()
-                    except Exception:
-                        pass
-                    _PW_BROWSER["browser"] = None
-                    _PW_BROWSER["playwright"] = None
-                browser = await _get_pw_browser()
-                page = await browser.new_page()
+            page = None
+            last_err = None
+            for attempt in range(3):
+                try:
+                    browser = await _get_pw_browser()
+                    page = await browser.new_page()
+                    break
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"[PDF Gen] new_page failed (attempt {attempt+1}/3): {e}, forcing browser relaunch")
+                    async with _PW_LOCK:
+                        try:
+                            if _PW_BROWSER["playwright"]:
+                                await _PW_BROWSER["playwright"].stop()
+                        except Exception:
+                            pass
+                        _PW_BROWSER["browser"] = None
+                        _PW_BROWSER["playwright"] = None
+                    await asyncio.sleep(0.5 * (attempt + 1))
+            if page is None:
+                raise last_err or Exception("Failed to open browser page after retries")
             if progress_cb:
                 await progress_cb(30)
 
