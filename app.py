@@ -1000,8 +1000,27 @@ def _ocr_bbox_lookup(img, mcqs: list) -> dict:
                     best_ratio = ratio
                     best_box = lbox
                     best_idx = idx
-            if best_ratio < 0.45 or best_box is None:
-                continue  # not confident enough — leave for fallback
+            # STRICT REQUIREMENT: the explanation image must ALWAYS show the
+            # source line — never skip to an unmarked fallback. Try matching
+            # both the explanation text and the question text, keep whichever
+            # scores higher, and use it regardless of confidence (best-effort
+            # is still far better than no mark at all).
+            q_text_key = q[:80]
+            best_ratio_q = 0.0
+            best_box_q = None
+            best_idx_q = None
+            for idx, (ltext, lbox) in enumerate(line_list):
+                ratio = difflib.SequenceMatcher(None, q_text_key.lower(), ltext.lower()).ratio()
+                if ratio > best_ratio_q:
+                    best_ratio_q = ratio
+                    best_box_q = lbox
+                    best_idx_q = idx
+            if best_ratio_q > best_ratio:
+                best_ratio = best_ratio_q
+                best_box = best_box_q
+                best_idx = best_idx_q
+            if best_box is None:
+                continue  # no OCR lines at all on this page — nothing to mark
 
             # Extend window: include 1 line before/after to capture full context
             x0, y0, x1, y1 = best_box["x0"], best_box["y0"], best_box["x1"], best_box["y1"]
