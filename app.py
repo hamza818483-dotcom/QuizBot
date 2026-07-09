@@ -7241,7 +7241,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
     progress_task = asyncio.create_task(update_progress())
     try:
         new_mcqs = _cap_mcq_options(await asyncio.wait_for(
-            generate_new_mcq(img, topic, page, count=15), timeout=90))
+            generate_new_mcq(img, topic, page, mcq_count=15), timeout=90))
     except Exception as e:
         progress_task.cancel()
         logger.error(f"[PollNew] generation failed: {e}")
@@ -7738,7 +7738,7 @@ async def handle_quiz_new(cache_id: str, user: dict, chat_id: int):
     progress_task = asyncio.create_task(update_progress())
     try:
         new_mcqs = _cap_mcq_options(await asyncio.wait_for(
-            generate_new_mcq(img, cache["topic"], cache["page_number"], count=15), timeout=90))
+            generate_new_mcq(img, cache["topic"], cache["page_number"], mcq_count=15), timeout=90))
     except Exception as e:
         progress_task.cancel()
         logger.error(f"[QuizNew] generation failed: {e}")
@@ -9543,7 +9543,7 @@ async def _run_new_exam_job(job_id: str, cache_id: str, user_id, cache: dict, im
                     job["pct"] = min(90, job["pct"] + 4)
 
         ticker_task = asyncio.create_task(_ticker())
-        new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15))
+        new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], mcq_count=15))
         ticker_task.cancel()
 
         if not new_mcqs:
@@ -9616,7 +9616,7 @@ async def generate_new_exam(request: Request):
         img_bytes = await download_tg_file(image_file_id)
         from PIL import Image as PILImage
         img = PILImage.open(BytesIO(img_bytes))
-        new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15))
+        new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], mcq_count=15))
         if not new_mcqs:
             return JSONResponse({"error": "MCQ generation failed"}, status_code=500)
         new_cache_id = gen_session_id()
