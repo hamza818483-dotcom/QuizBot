@@ -37,7 +37,7 @@ OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://atlasquizbotpro.hamza818483.workers.dev")
 HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://hamza-02-quizbot.hf.space")
-RENDER_URL = os.environ.get("RENDER_URL", "")
+RENDER_URL = os.environ.get("RENDER_URL", "") or os.environ.get("HF_SPACE_URL", "https://hamza-02-quizbot.hf.space")
 D1_TOKEN = os.environ.get("D1_TOKEN", "")
 # v4.3: GitHub Pages exam link — CF down thakleo page load hoy (static host),
 # er bhitorer JS nijei Render->CF->Supabase try kore. Beshi robust than CF-hosted /exam/.
