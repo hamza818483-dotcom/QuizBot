@@ -960,8 +960,50 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     # ছাড়া) — সেটার জন্য একটা targeted repair pass চালানো হয়, পুরো পেইজ আবার
     # generate না করেই। ব্যর্থ হলেও মূল MCQ ডেলিভারি আটকায় না।
     out = await _repair_thin_explanations(out, img, topic)
-    out = await _attach_explanation_images_if_missing(out, img)
+    # explanation crop/full-page image attach removed — user requested faster
+    # /pdf turnaround; explanation text itself is kept, just no image.
+    out = await _verify_and_fix_page(out, img, topic, page_num, mcq_count)
     return out
+
+
+async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=None) -> list:
+    """
+    2ND CALL — verification pass over what CALL 1 produced. Checks:
+      (a) did call 1 miss any highlighted/underlined/marked/boxed content,
+      (b) is the MCQ count reasonably close to target (~15/page avg),
+      (c) did call 1 follow the prompt rules (real info only, no junk).
+    If verification finds gaps, requests ADDITIONAL mcqs only for the missed
+    content (never re-generates the whole page) and appends them. Best-effort:
+    any failure here just returns the original call-1 output untouched.
+    """
+    try:
+        count_target = mcq_count if mcq_count else 15
+        current_n = len(mcqs or [])
+        existing_qs = "\n".join(f"- {m.get('question','')[:100]}" for m in (mcqs or [])[:40])
+        verify_prompt = (
+            f"You are verifying MCQ extraction from this page (Topic: {topic}).\n"
+            f"CALL 1 already extracted {current_n} MCQs (target ~{count_target}/page). "
+            f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
+            f"Re-scan the image carefully and check:\n"
+            f"1. Any highlighted/underlined/marked/boxed/ছক content NOT yet covered above?\n"
+            f"2. Any distinct real-info fact on the page not yet turned into an MCQ?\n"
+            f"3. Is {current_n} clearly below what the page's content could support?\n\n"
+            f"If you find genuinely MISSING content, return ONLY the ADDITIONAL new MCQs "
+            f"(never duplicate the existing ones above) as a STRICT JSON array matching this "
+            f"schema: [{{\"question\":\"...\",\"options\":[\"...\",\"...\",\"...\",\"...\"],"
+            f"\"answer\":\"A\",\"explanation\":\"...\"}}]. "
+            f"If nothing is missing and coverage is already complete, return exactly: []\n"
+            f"Never invent facts not present on the page. No prose, JSON only."
+        )
+        extra_txt = await _gen_groq_raw_text(img, verify_prompt)
+        extra = _parse_mcq_json(extra_txt) if extra_txt else []
+        if extra:
+            extra = _cap_mcq_options(extra, 4)
+            logger.info(f"[Verify] page {page_num}: call-2 added {len(extra)} missed MCQs")
+            mcqs = (mcqs or []) + extra
+    except Exception as e:
+        logger.warning(f"[Verify] page {page_num} verification skipped: {e}")
+    return mcqs
 
 
 
@@ -4340,14 +4382,6 @@ async def _process_pdf_pages_inner(
                     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
                     ans_num = ans_map.get(m.get("answer", "A"), "1")
                     exp = m.get("explanation", "")
-                    bbox = m.get("exp_bbox")
-                    if bbox:
-                        crop_result = await asyncio.to_thread(crop_explanation_image, img, bbox)
-                        crop_url = crop_result.get("url", "")
-                        if crop_url:
-                            tp, bp = crop_result.get("top_pct"), crop_result.get("bottom_pct")
-                            crop_attrs = f' data-crop-top="{tp}" data-crop-bottom="{bp}"' if tp is not None else ""
-                            exp = f'<img src="{crop_url}"{crop_attrs}> {exp}'
                     all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, _strip_img_tag(exp), "1", "1"])
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs)
             else:
@@ -4369,28 +4403,8 @@ async def _process_pdf_pages_inner(
                             await try_pin_message(channel_id, image_msg_id)
 
                 mcqs = await _repair_thin_explanations(mcqs, img, topic)
-                mcqs = await _attach_explanation_images_if_missing(mcqs, img)
-
-                # SPEED FIX: pre-crop every explanation image concurrently
-                # (imgbb upload is the slowest part of each iteration) instead
-                # of doing it one-by-one inside the send loop. Quality/output
-                # is identical — same crop_explanation_image call, just run
-                # in parallel ahead of time so the actual sendPoll loop below
-                # only waits on Telegram, not on image uploads.
-                async def _precrop(mcq):
-                    bbox = mcq.get("exp_bbox")
-                    if not bbox:
-                        return
-                    try:
-                        crop_result = await asyncio.to_thread(crop_explanation_image, img, bbox)
-                        crop_url = crop_result.get("url", "")
-                        if crop_url:
-                            tp, bp = crop_result.get("top_pct"), crop_result.get("bottom_pct")
-                            crop_attrs = f' data-crop-top="{tp}" data-crop-bottom="{bp}"' if tp is not None else ""
-                            mcq["explanation"] = f'<img src="{crop_url}"{crop_attrs}> {mcq.get("explanation","")}'
-                    except Exception as _crop_e:
-                        logger.warning(f"[Poll] pre-crop failed: {_crop_e}")
-                await asyncio.gather(*[_precrop(mcq) for mcq in mcqs])
+                # explanation crop/attach removed — user requested no
+                # explanation image after submit, for faster /pdf turnaround.
 
                 poll_links = []
                 first_poll_link = ""
