@@ -221,7 +221,8 @@ async def _process_mhtml_auto(msg: dict):
                 if total and speed > 0:
                     job["eta_sec"] = round((total - downloaded) / speed)
 
-        raw_bytes = await download_tg_file(doc["file_id"], _dl_progress_cb)
+        raw_bytes = await download_tg_file(doc["file_id"], _dl_progress_cb,
+                                           chat_id=chat_id, message_id=msg["message_id"])
         job = MHTML_JOBS.get(job_id)
         if job:
             job["phase"] = "detecting"
@@ -2906,7 +2907,7 @@ async def handle_wm_command(msg: dict):
             file_id = reply["document"]["file_id"]
         if file_id:
             await send_msg(chat_id, f"⏳ Watermark apply হচ্ছে: <b>{wm_text}</b>", parse_mode="HTML")
-            asyncio.create_task(_apply_watermark_to_pdf(chat_id, file_id, wm_text))
+            asyncio.create_task(_apply_watermark_to_pdf(chat_id, file_id, wm_text, reply["message_id"]))
             return
 
     await send_msg(chat_id,
@@ -2917,10 +2918,10 @@ async def handle_wm_command(msg: dict):
     )
 
 
-async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str):
+async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str, message_id: int = None):
     """Download PDF, apply watermark using existing add_watermark_to_pdf, resend"""
     try:
-        pdf_bytes = await download_tg_file(file_id)
+        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
         wm_bytes = add_watermark_to_pdf(pdf_bytes, wm_text)
         await send_document(chat_id, wm_bytes,
             f"watermarked.pdf",
@@ -4001,7 +4002,7 @@ async def handle_pdf(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[░░░░░░░░░░ 0%]")
 
-        pdf_bytes = await download_tg_file(file_id)
+        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
 
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
@@ -4545,7 +4546,7 @@ async def handle_pdfm(msg: dict):
     status_msg_id = status_r.get("result",{}).get("message_id")
 
     try:
-        pdf_bytes = await download_tg_file(file_id)
+        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
         ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
         if not ok:
             await send_msg(chat_id, pages)
@@ -5574,12 +5575,12 @@ async def _handle_qbm_impl(msg: dict):
 
     try:
         if is_image_reply:
-            img_bytes = await download_tg_file(file_id)
+            img_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
             from PIL import Image as PILImage
             img = PILImage.open(BytesIO(img_bytes))
             pages = [(1, img)]
         else:
-            pdf_bytes = await download_tg_file(file_id)
+            pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
             ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
             if not ok:
                 await send_msg(chat_id, pages)
