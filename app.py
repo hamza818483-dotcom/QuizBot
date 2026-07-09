@@ -3191,7 +3191,6 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
                 "--disable-crash-reporter", "--no-crash-upload",
                 f"--user-data-dir={user_data_dir}",
                 f"--remote-debugging-port={debug_port}",
-                "--remote-debugging-address=127.0.0.1",
                 f"file://{html_path}",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
@@ -3205,15 +3204,18 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
             ws_url = None
             for _ in range(30):
                 await asyncio.sleep(1.0)
-                try:
-                    async with _httpx.AsyncClient(timeout=2) as client:
-                        r = await client.get(f"http://127.0.0.1:{debug_port}/json")
-                        tabs = r.json()
-                        if tabs:
-                            ws_url = tabs[0]["webSocketDebuggerUrl"]
-                            break
-                except Exception:
-                    continue
+                for host in ("127.0.0.1", "localhost"):
+                    try:
+                        async with _httpx.AsyncClient(timeout=2) as client:
+                            r = await client.get(f"http://{host}:{debug_port}/json")
+                            tabs = r.json()
+                            if tabs:
+                                ws_url = tabs[0]["webSocketDebuggerUrl"]
+                                break
+                    except Exception:
+                        continue
+                if ws_url:
+                    break
             if ws_url:
                 break
             try:
