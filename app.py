@@ -3196,6 +3196,16 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
                 pass
 
         for _launch_attempt in range(2):
+            if _launch_attempt == 0:
+                try:
+                    ver_proc = await asyncio.create_subprocess_exec(
+                        chromium_bin, "--version",
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    )
+                    ver_out, ver_err = await asyncio.wait_for(ver_proc.communicate(), timeout=5)
+                    logger.info(f"[PDF Gen] Chromium binary check: path={chromium_bin}, version_out={ver_out.decode(errors='ignore').strip()}, version_err={ver_err.decode(errors='ignore').strip()}")
+                except Exception as _ver_e:
+                    logger.error(f"[PDF Gen] Chromium binary check FAILED: {_ver_e}")
             proc = await asyncio.create_subprocess_exec(
                 chromium_bin, "--headless=new", "--no-sandbox",
                 "--disable-gpu", "--disable-dev-shm-usage",
@@ -3240,7 +3250,12 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
                 break
             noise_markers = ["dbus", "cpufreq", "crashpad", "scaling_cur_freq", "scaling_max_freq"]
             useful_lines = [l for l in stderr_buffer if l.strip() and not any(n in l.lower() for n in noise_markers)]
-            stderr_snapshot = "".join(useful_lines[-20:]) if useful_lines else f"(exit_code={proc.returncode}, only harmless noise, {len(stderr_buffer)} total lines)"
+            if useful_lines:
+                stderr_snapshot = "".join(useful_lines[-20:])
+            else:
+                # Nothing useful after filtering — show raw unfiltered output
+                # instead, since the filter itself may be hiding the real cause.
+                stderr_snapshot = f"(exit_code={proc.returncode}) RAW: " + "".join(stderr_buffer[-30:])
             logger.error(f"[PDF Gen] Chromium launch attempt {_launch_attempt+1} failed. stderr: {stderr_snapshot}")
             drain_task.cancel()
             try:
