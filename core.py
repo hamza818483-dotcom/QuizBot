@@ -597,19 +597,24 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int) -> Optiona
 # ============================================================
 async def download_tg_file(file_id: str, progress_cb=None,
                            chat_id: int = None, message_id: int = None) -> bytes:
+    # Pyrogram is now the DEFAULT download path (not just a >20MB fallback) --
+    # it has no Bot API 20MB ceiling and is a single consistent code path for
+    # every file size. Falls back to Bot API getFile if pyrogram isn't
+    # configured (no TELEGRAM_API_ID/HASH) or the call itself fails.
+    if chat_id is not None and message_id is not None:
+        big = await download_large_file_pyrogram(chat_id, message_id)
+        if big is not None:
+            return big
+        logger.warning("[download_tg_file] pyrogram unavailable/failed, falling back to Bot API getFile")
+
     file_res = await tg_post("getFile", {"file_id": file_id})
     if not file_res.get("ok"):
-        if chat_id is not None and message_id is not None:
-            logger.warning("[download_tg_file] getFile failed, trying pyrogram fallback")
-            big = await download_large_file_pyrogram(chat_id, message_id)
-            if big is not None:
-                return big
         desc = file_res.get("description")
         if not desc:
             raise Exception(
                 "getFile failed: file likely exceeds Telegram Bot API's 20MB download "
-                "limit (large multi-page PDFs often do). Pyrogram fallback also failed — "
-                "check TELEGRAM_API_ID/TELEGRAM_API_HASH env vars."
+                "limit (large multi-page PDFs often do), and pyrogram fallback also "
+                "failed — check TELEGRAM_API_ID/TELEGRAM_API_HASH env vars."
             )
         raise Exception(f"getFile failed: {desc}")
     file_path = file_res["result"]["file_path"]
