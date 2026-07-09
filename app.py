@@ -1038,10 +1038,18 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
         current_n = len(mcqs or [])
         existing_qs = "\n".join(f"- {m.get('question','')[:100]}" for m in (mcqs or [])[:40])
         verify_prompt = (
-            f"You are verifying MCQ extraction from this page (Topic: {topic}).\n"
+            f"You are STRICTLY auditing MCQ coverage for this page (Topic: {topic}).\n"
             f"CALL 1 already extracted {current_n} MCQs (target ~{count_target}/page). "
             f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
-            f"Re-scan the image carefully and check:\n"
+            f"MANDATORY SYSTEMATIC SCAN (do this before answering, not optional):\n"
+            f"- Mentally divide the page into regions (top/middle/bottom, and left/right "
+            f"if multi-column) and check EACH region separately against the list above.\n"
+            f"- Pay special attention to the LAST paragraph/box/row on the page and the "
+            f"BOTTOM of the page — these are the most commonly missed areas.\n"
+            f"- Check every highlighted/underlined/marked/boxed/ছক item individually — "
+            f"if it's not represented above, it was missed.\n"
+            f"- Check every table/ছক cell individually, not just at a glance.\n"
+            f"Only after this region-by-region pass, decide:\n"
             f"1. Any highlighted/underlined/marked/boxed/ছক content NOT yet covered above?\n"
             f"2. Any distinct real-info fact on the page not yet turned into an MCQ?\n"
             f"3. Is {current_n} clearly below what the page's content could support?\n\n"
@@ -5474,14 +5482,16 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
 {q_summary if q_summary else "(none found)"}
 
 TASK (fast audit, connected to Call 1 — do not redo full extraction):
-1) Look at the page again and check if ANY existing MCQ was MISSED by the list above
-   (especially the LAST MCQ on the page — most commonly missed).
-2) If you find missed MCQ(s), extract them in the SAME strict format (options in the exact
+1) MANDATORY: mentally divide the page into regions (top/middle/bottom, left/right if
+   multi-column) and check EACH region against the list above before answering —
+   especially the LAST MCQ on the page and the BOTTOM of the page — most commonly missed.
+2) Check if ANY existing MCQ was MISSED by the list above.
+3) If you find missed MCQ(s), extract them in the SAME strict format (options in the exact
    source position order, A/B/C/D slots by position — never relabeled/sorted).
-3) UDDIPOK CHECK: if a missed MCQ belongs under a passage/উদ্দীপক, prepend that passage's full
+4) UDDIPOK CHECK: if a missed MCQ belongs under a passage/উদ্দীপক, prepend that passage's full
    text to its question (self-contained), same as Call 1's rule.
-4) Do NOT re-list MCQs already shown above. Only output NEW ones that were missed.
-5) If nothing was missed, output exactly: []
+5) Do NOT re-list MCQs already shown above. Only output NEW ones that were missed.
+6) If nothing was missed, output exactly: []
 
 Output ONLY a JSON array of the MISSED MCQs (same schema as before):
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
