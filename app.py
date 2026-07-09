@@ -3150,9 +3150,9 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
   async with _PDF_SEMAPHORE:
     task = asyncio.ensure_future(_html_to_pdf_impl(html, progress_cb))
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=90)
+        return await asyncio.wait_for(asyncio.shield(task), timeout=150)
     except asyncio.TimeoutError:
-        logger.error("[PDF Gen] Timed out after 90s")
+        logger.error("[PDF Gen] Timed out after 150s")
         task.cancel()
         try:
             await task
@@ -3216,7 +3216,22 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
         async with websockets.connect(ws_url, max_size=None) as ws:
             await ws.send(_json.dumps({"id": 1, "method": "Page.enable"}))
             await ws.recv()
-            await asyncio.sleep(0.5)
+
+            # Wait for the actual load event instead of a fixed sleep —
+            # important for style3/large sheets with many embedded images.
+            load_fired = False
+            try:
+                deadline = asyncio.get_event_loop().time() + 20
+                while asyncio.get_event_loop().time() < deadline:
+                    msg = _json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                    if msg.get("method") == "Page.loadEventFired":
+                        load_fired = True
+                        break
+            except asyncio.TimeoutError:
+                pass
+            if not load_fired:
+                await asyncio.sleep(1.5)  # fallback grace period
+
             await ws.send(_json.dumps({
                 "id": 2,
                 "method": "Page.printToPDF",
@@ -3228,7 +3243,7 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
             }))
             result = None
             while True:
-                msg = _json.loads(await ws.recv())
+                msg = _json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
                 if msg.get("id") == 2:
                     result = msg
                     break
