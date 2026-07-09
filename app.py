@@ -3155,6 +3155,15 @@ async def _get_pw_browser():
     """Reuses a single Playwright browser instance across all PDF generations —
     matches AtlasMasterBot's AsyncPDFExporter pattern (proven working system)."""
     async with _PW_LOCK:
+        browser = _PW_BROWSER["browser"]
+        if browser is not None and not browser.is_connected():
+            logger.warning("[PDF Gen] Cached Playwright browser disconnected — relaunching")
+            try:
+                await _PW_BROWSER["playwright"].stop()
+            except Exception:
+                pass
+            _PW_BROWSER["browser"] = None
+            _PW_BROWSER["playwright"] = None
         if _PW_BROWSER["browser"] is None:
             from playwright.async_api import async_playwright
             _PW_BROWSER["playwright"] = await async_playwright().start()
@@ -3176,7 +3185,19 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
             if progress_cb:
                 await progress_cb(15)
             browser = await _get_pw_browser()
-            page = await browser.new_page()
+            try:
+                page = await browser.new_page()
+            except Exception as e:
+                logger.warning(f"[PDF Gen] new_page failed ({e}), forcing browser relaunch and retrying")
+                async with _PW_LOCK:
+                    try:
+                        await _PW_BROWSER["playwright"].stop()
+                    except Exception:
+                        pass
+                    _PW_BROWSER["browser"] = None
+                    _PW_BROWSER["playwright"] = None
+                browser = await _get_pw_browser()
+                page = await browser.new_page()
             if progress_cb:
                 await progress_cb(30)
 
