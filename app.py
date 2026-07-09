@@ -535,7 +535,12 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"the same fact to reach the target count, rephrase it into a genuinely "
         f"different question angle, not a copy-paste.\n"
         f"- NEVER generate MCQs from topic names, chapter titles, headlines, or "
-        f"page numbers — these are structural labels, not content.\n\n"
+        f"page numbers — these are structural labels, not content.\n"
+        f"- Among the MCQs generated, 3-5 of them should mix several distinct "
+        f"facts from the page into a single question — e.g. options that are each "
+        f"a combination of 2-3 facts, where only one option has ALL facts correct. "
+        f"Keep these moderate difficulty (not extreme/confusing) — a student who "
+        f"reads carefully should be able to solve it.\n\n"
 
         f"═══════════════════════════════\n"
         f"🟥 MUST-PRIORITY — NEVER skip lines that are marked in ANY way\n"
