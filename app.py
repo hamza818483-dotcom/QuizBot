@@ -4347,7 +4347,20 @@ async def pdf_generate_all_pages(
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error(f"[PDF Generate] Page {page_num} error: {e}")
+                logger.error(f"[PDF Generate] Page {page_num} error: {e}; retrying once")
+
+            # Strict no-page-miss guarantee: a page landing empty (crash or
+            # every provider returned nothing) gets ONE retry before being
+            # accepted as genuinely empty — protects against a single
+            # transient failure silently dropping a whole page's MCQs.
+            if not mcqs and not is_cancelled(chat_id):
+                try:
+                    await asyncio.sleep(1)
+                    mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[PDF Generate] Page {page_num} retry also failed: {e}")
 
             if is_cancelled(chat_id):
                 return
