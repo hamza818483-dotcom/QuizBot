@@ -3201,6 +3201,7 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
                 "--disable-gpu", "--disable-dev-shm-usage",
                 "--disable-extensions", "--disable-background-networking",
                 "--disable-setuid-sandbox", "--no-zygote",
+                "--disable-namespace-sandbox", "--disable-seccomp-filter-sandbox",
                 "--disable-dbus", "--disable-features=DBus",
                 "--disable-crash-reporter", "--no-crash-upload",
                 f"--user-data-dir={user_data_dir}",
