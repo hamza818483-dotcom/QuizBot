@@ -3185,6 +3185,7 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
                 "--disable-gpu", "--disable-dev-shm-usage",
                 "--disable-extensions", "--disable-background-networking",
                 "--disable-setuid-sandbox", "--no-zygote",
+                "--disable-dbus", "--disable-features=DBus",
                 f"--remote-debugging-port={debug_port}",
                 "--remote-debugging-address=127.0.0.1",
                 f"file://{html_path}",
@@ -3212,8 +3213,11 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
             if ws_url:
                 break
             try:
-                stderr_data = await asyncio.wait_for(proc.stderr.read(4000), timeout=2)
-                stderr_snapshot = stderr_data.decode(errors="ignore")[:1000]
+                stderr_data = await asyncio.wait_for(proc.stderr.read(8000), timeout=2)
+                stderr_snapshot = stderr_data.decode(errors="ignore")
+                # Skip past repetitive harmless dbus noise to find the real error
+                lines = [l for l in stderr_snapshot.split("\n") if "dbus" not in l.lower() and l.strip()]
+                stderr_snapshot = "\n".join(lines[-15:]) if lines else stderr_snapshot[-1000:]
                 logger.error(f"[PDF Gen] Chromium launch attempt {_launch_attempt+1} failed. stderr: {stderr_snapshot}")
             except Exception:
                 pass
