@@ -455,19 +455,25 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
 # GENERATE MCQ FROM IMAGE — Gemini primary + OpenRouter fallback
 # ============================================================
 async def _attach_explanation_images(mcqs: list, img: Image.Image) -> list:
-    """প্রতিটি MCQ-এর exp_bbox থাকলে crop করে upload করে explanation-এ <img> tag জুড়ে দেয়।"""
+    """প্রতিটি MCQ-এর exp_bbox থাকলে crop করে upload করে explanation-এ <img> tag জুড়ে দেয়।
+    crop_explanation_image() now returns {url, top_pct, bottom_pct} (single-upload,
+    CSS-crop design) — must match index.html's renderExpWithImg() which reads
+    data-crop-top / data-crop-bottom, NOT the old data-full contract."""
     for m in mcqs:
         bbox = m.get("exp_bbox")
         if not bbox:
             continue
         try:
             result = await asyncio.to_thread(crop_explanation_image, img, bbox)
-            thumb_url = (result or {}).get("thumb", "")
-            full_url = (result or {}).get("full", "") or thumb_url
-            if thumb_url:
+            url = (result or {}).get("url", "")
+            if url:
                 exp = m.get("explanation", "") or ""
-                data_full = f' data-full="{full_url}"' if full_url else ""
-                m["explanation"] = f'{exp} <img src="{thumb_url}"{data_full}>'.strip()
+                top_pct = (result or {}).get("top_pct", 0)
+                bot_pct = (result or {}).get("bottom_pct", 100)
+                m["explanation"] = (
+                    f'{exp} <img src="{url}" data-crop-top="{top_pct}" '
+                    f'data-crop-bottom="{bot_pct}">'
+                ).strip()
         except Exception as e:
             logger.warning(f"[ExplanationCrop] Attach failed: {e}")
     return mcqs
