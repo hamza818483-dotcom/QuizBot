@@ -3177,6 +3177,8 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
         if progress_cb:
             await progress_cb(15)
 
+        import tempfile as _tf
+        user_data_dir = _tf.mkdtemp(prefix="chromium-profile-")
         proc = None
         stderr_snapshot = ""
         for _launch_attempt in range(2):
@@ -3186,6 +3188,8 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
                 "--disable-extensions", "--disable-background-networking",
                 "--disable-setuid-sandbox", "--no-zygote",
                 "--disable-dbus", "--disable-features=DBus",
+                "--disable-crash-reporter", "--no-crash-upload",
+                f"--user-data-dir={user_data_dir}",
                 f"--remote-debugging-port={debug_port}",
                 "--remote-debugging-address=127.0.0.1",
                 f"file://{html_path}",
@@ -3213,11 +3217,12 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
             if ws_url:
                 break
             try:
-                stderr_data = await asyncio.wait_for(proc.stderr.read(8000), timeout=2)
+                stderr_data = await asyncio.wait_for(proc.stderr.read(16000), timeout=2)
                 stderr_snapshot = stderr_data.decode(errors="ignore")
-                # Skip past repetitive harmless dbus noise to find the real error
-                lines = [l for l in stderr_snapshot.split("\n") if "dbus" not in l.lower() and l.strip()]
-                stderr_snapshot = "\n".join(lines[-15:]) if lines else stderr_snapshot[-1000:]
+                noise_markers = ["dbus", "cpufreq", "crashpad", "scaling_cur_freq", "scaling_max_freq"]
+                lines = [l for l in stderr_snapshot.split("\n")
+                         if l.strip() and not any(n in l.lower() for n in noise_markers)]
+                stderr_snapshot = "\n".join(lines[-15:]) if lines else "(only harmless dbus/crashpad noise, no fatal error found)"
                 logger.error(f"[PDF Gen] Chromium launch attempt {_launch_attempt+1} failed. stderr: {stderr_snapshot}")
             except Exception:
                 pass
@@ -3297,6 +3302,12 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
                 os.remove(html_path)
             except Exception:
                 pass
+        try:
+            import shutil as _sh
+            if 'user_data_dir' in dir() and os.path.isdir(user_data_dir):
+                _sh.rmtree(user_data_dir, ignore_errors=True)
+        except Exception:
+            pass
     return None
 
 # ============================================================
