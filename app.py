@@ -7216,11 +7216,30 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
                     pass
 
     progress_task = asyncio.create_task(update_progress())
-    new_mcqs = _cap_mcq_options(await generate_new_mcq(img, topic, page, count=15))
+    try:
+        new_mcqs = _cap_mcq_options(await asyncio.wait_for(
+            generate_new_mcq(img, topic, page, count=15), timeout=90))
+    except Exception as e:
+        progress_task.cancel()
+        logger.error(f"[PollNew] generation failed: {e}")
+        if loading_id:
+            try:
+                await edit_msg_caption(chat_id, loading_id, "❌ MCQ generate করতে সমস্যা হয়েছে, আবার চেষ্টা করো!")
+            except Exception:
+                pass
+        else:
+            await send_msg(chat_id, "❌ MCQ generate করতে সমস্যা হয়েছে, আবার চেষ্টা করো!")
+        return
     progress_task.cancel()
 
     if not new_mcqs:
-        await send_msg(chat_id, "❌ MCQ generate হয়নি!")
+        if loading_id:
+            try:
+                await edit_msg_caption(chat_id, loading_id, "❌ MCQ generate হয়নি!")
+            except Exception:
+                pass
+        else:
+            await send_msg(chat_id, "❌ MCQ generate হয়নি!")
         return
 
     await db_increment_gen_count(cache_id, uid)
@@ -7694,11 +7713,30 @@ async def handle_quiz_new(cache_id: str, user: dict, chat_id: int):
                     pass
 
     progress_task = asyncio.create_task(update_progress())
-    new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], count=15))
+    try:
+        new_mcqs = _cap_mcq_options(await asyncio.wait_for(
+            generate_new_mcq(img, cache["topic"], cache["page_number"], count=15), timeout=90))
+    except Exception as e:
+        progress_task.cancel()
+        logger.error(f"[QuizNew] generation failed: {e}")
+        if loading_id:
+            try:
+                await edit_msg_caption(chat_id, loading_id, "❌ MCQ generate করতে সমস্যা হয়েছে, আবার চেষ্টা করো!")
+            except Exception:
+                pass
+        else:
+            await send_msg(chat_id, "❌ MCQ generate করতে সমস্যা হয়েছে, আবার চেষ্টা করো!")
+        return
     progress_task.cancel()
 
     if not new_mcqs:
-        await send_msg(chat_id, "❌ MCQ generate হয়নি!")
+        if loading_id:
+            try:
+                await edit_msg_caption(chat_id, loading_id, "❌ MCQ generate হয়নি!")
+            except Exception:
+                pass
+        else:
+            await send_msg(chat_id, "❌ MCQ generate হয়নি!")
         return
     await db_increment_gen_count(cache_id, uid)
     new_cache_id = gen_session_id()
@@ -8617,7 +8655,10 @@ async def handle_callback(query: dict):
 
         elif data.startswith("pollnew_"):
             cache_id = data.replace("pollnew_", "")
-            asyncio.create_task(handle_poll_new(cache_id, user, chat_id, msg_id))
+            if uid in _QUIZ_START_LOCK:
+                return
+            _QUIZ_START_LOCK.add(uid)
+            asyncio.create_task(_run_quiz_start_debounced(handle_poll_new(cache_id, user, chat_id, msg_id), uid))
 
         elif data.startswith("polllb_"):
             cache_id = data.replace("polllb_", "")

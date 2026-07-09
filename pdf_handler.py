@@ -515,7 +515,7 @@ async def generate_mcq_from_image(
                     ]
                 )
 
-            response = await asyncio.to_thread(_call_gemini)
+            response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=25)
             valid = _parse_mcq_json(response.text)
             valid = await _attach_explanation_images(valid, img)
             logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1})")
@@ -596,7 +596,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
                     contents=[types.Part.from_text(text=prompt)]
                 )
 
-            response = await asyncio.to_thread(_call_gemini)
+            response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=25)
             valid = _parse_text_json(response.text)
             if valid:
                 logger.info(f"[Gemini-Text] {len(valid)} MCQs (attempt {attempt+1})")
