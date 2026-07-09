@@ -9365,7 +9365,7 @@ async def _keepalive_task() -> None:
     while True:
         if RENDER_URL:
             try:
-                async with httpx.AsyncClient(timeout=20) as client:
+                async with httpx.AsyncClient(timeout=40) as client:
                     r = await client.get(f"{RENDER_URL.rstrip('/')}/health")
                     if r.status_code == 200:
                         fails = 0
@@ -9392,7 +9392,7 @@ async def _watchdog_task() -> None:
     while True:
         healthy = False
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
+            async with httpx.AsyncClient(timeout=40) as client:
                 if RENDER_URL:
                     r = await client.get(f"{RENDER_URL.rstrip('/')}/health")
                     healthy = r.status_code == 200
@@ -9410,7 +9410,7 @@ async def _watchdog_task() -> None:
         else:
             fails += 1
             logger.warning(f"[Watchdog] health check failed ({fails} in a row)")
-            if fails >= 2:
+            if fails >= 4:
                 if not was_down:
                     try:
                         await notify_owner(f"🚨 QuizBot WATCHDOG: service unreachable ({fails}x) — attempting self-wake.")
@@ -9453,7 +9453,7 @@ async def _watchdog2_task() -> None:
                 was_down2 = False
         else:
             fails += 1
-            if fails >= 2:
+            if fails >= 4:
                 if not was_down2:
                     try:
                         await notify_owner(f"🚨 QuizBot WATCHDOG-2: unreachable ({fails}x) — self-wake attempt.")
@@ -9484,7 +9484,7 @@ async def _cross_bot_watchdog_task() -> None:
     while True:
         healthy = False
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
+            async with httpx.AsyncClient(timeout=40) as client:
                 r = await client.get(f"{atlasbot_url}/health")
                 healthy = r.status_code == 200
         except Exception:
@@ -9493,7 +9493,7 @@ async def _cross_bot_watchdog_task() -> None:
             fails = 0
         else:
             fails += 1
-            if fails >= 2:
+            if fails >= 4:
                 try:
                     await notify_owner(f"🚨 AtlasBot unreachable via cross-bot check ({fails}x) — checked from QuizBot.")
                 except Exception:
