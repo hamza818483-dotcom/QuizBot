@@ -357,7 +357,7 @@ def _cap_page_cache(cache: dict) -> None:
 # download entirely. Small cap + oldest-eviction, same safety pattern as
 # _cap_page_cache. In-memory only — resets on deploy/restart, which is fine
 # since it's purely a speed optimization, never a correctness dependency.
-_PDF_BYTES_CACHE_MAX = 8
+_PDF_BYTES_CACHE_MAX = 40  # HF has 16GB RAM (not Render free tier) — safe to hold more raw PDFs
 _pdf_bytes_cache = {}  # file_id -> bytes
 
 def _cap_pdf_bytes_cache() -> None:
@@ -373,6 +373,30 @@ async def _download_pdf_cached(file_id: str, chat_id: int = None, message_id: in
     _pdf_bytes_cache[file_id] = data
     _cap_pdf_bytes_cache()
     return data
+
+# SPEED: cache RENDERED page images by (file_id, page_range) so a re-run of
+# /pdf on the same file+range skips pdf2image rasterization too (the
+# heaviest CPU step). Safe now that we're on HF's 16GB RAM instance instead
+# of Render's memory-constrained free tier.
+_PDF_RENDER_CACHE_MAX = 15
+_pdf_render_cache = {}  # (file_id, page_range) -> pages list
+
+def _cap_pdf_render_cache() -> None:
+    while len(_pdf_render_cache) > _PDF_RENDER_CACHE_MAX:
+        _pdf_render_cache.pop(next(iter(_pdf_render_cache)), None)
+
+def _render_pdf_cached(file_id: str, pdf_bytes: bytes, page_range: str = None):
+    """Wraps pdf_to_images_safe with a render cache keyed by (file_id, page_range)."""
+    key = (file_id, page_range or "ALL")
+    cached = _pdf_render_cache.get(key)
+    if cached is not None:
+        logger.info(f"[Render Cache] hit for {key[0][:16]}...:{key[1]} — skipping rasterization")
+        return True, cached
+    ok, pages = pdf_to_images_safe(pdf_bytes, page_range)
+    if ok and pages:
+        _pdf_render_cache[key] = pages
+        _cap_pdf_render_cache()
+    return ok, pages
 
 PIN_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB)
 PDF_AUTO_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB) — /pdf on|off
@@ -4146,7 +4170,7 @@ async def handle_pdf(msg: dict):
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id,
                         f"⏳ Batch {batch_start}-{batch_end}/{req_last} processing...")
-                ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, batch_range)
+                ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, batch_range)
                 if not ok:
                     await send_msg(chat_id, pages)
                     continue
@@ -4157,8 +4181,9 @@ async def handle_pdf(msg: dict):
             return
 
         if channel_id:
-            ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
-            pdf_bytes = None  # RAM fix: raw PDF no longer needed once page images are extracted
+            ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+            # HF has 16GB RAM (not Render's constrained free tier) — safe to
+            # keep pdf_bytes alive; also needed now for the render cache key.
             if not ok:
                 await send_msg(chat_id, pages)
                 return
@@ -4190,7 +4215,7 @@ async def handle_pdf(msg: dict):
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id,
                         f"⏳ Batch {batch_start}-{batch_end}/{req_last} generating MCQ...")
-                ok, batch_pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, batch_range)
+                ok, batch_pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, batch_range)
                 if not ok:
                     await send_msg(chat_id, batch_pages)
                     continue
@@ -4648,7 +4673,7 @@ async def handle_pdfm(msg: dict):
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id, message_id=reply["message_id"])
-        ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
             await send_msg(chat_id, pages)
             return
@@ -5745,7 +5770,7 @@ async def _handle_qbm_impl(msg: dict):
             pages = [(1, img)]
         else:
             pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id, message_id=reply["message_id"])
-            ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
+            ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
             if not ok:
                 await send_msg(chat_id, pages)
                 return
@@ -8677,8 +8702,8 @@ async def handle_callback(query: dict):
                     return
                 await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
                 try:
-                    pdf_bytes = await download_tg_file(saved_file_id)
-                    ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
+                    pdf_bytes = await _download_pdf_cached(saved_file_id)
+                    ok, pages = await asyncio.to_thread(_render_pdf_cached, saved_file_id, pdf_bytes, pending.get("page_range"))
                 except Exception as e:
                     await send_msg(chat_id, f"❌ PDF re-download failed: {e}")
                     return
@@ -8736,8 +8761,8 @@ async def handle_callback(query: dict):
                 return
             await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
             try:
-                pdf_bytes = await download_tg_file(saved_file_id)
-                ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
+                pdf_bytes = await _download_pdf_cached(saved_file_id)
+                ok, pages = await asyncio.to_thread(_render_pdf_cached, saved_file_id, pdf_bytes, pending.get("page_range"))
                 if not ok:
                     await send_msg(chat_id, pages)
                     return
@@ -9023,8 +9048,8 @@ async def handle_callback(query: dict):
                     return
                 await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
                 try:
-                    pdf_bytes = await download_tg_file(saved_file_id)
-                    ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
+                    pdf_bytes = await _download_pdf_cached(saved_file_id)
+                    ok, pages = await asyncio.to_thread(_render_pdf_cached, saved_file_id, pdf_bytes, pending.get("page_range"))
                     if not ok:
                         await send_msg(chat_id, pages)
                         return
@@ -9079,8 +9104,8 @@ async def handle_callback(query: dict):
                     return
                 await send_msg(chat_id, "⏳ PDF re-download হচ্ছে...")
                 try:
-                    pdf_bytes = await download_tg_file(saved_file_id)
-                    raw_ok, raw_pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, pending.get("page_range"))
+                    pdf_bytes = await _download_pdf_cached(saved_file_id)
+                    raw_ok, raw_pages = await asyncio.to_thread(_render_pdf_cached, saved_file_id, pdf_bytes, pending.get("page_range"))
                     if not raw_ok:
                         await send_msg(chat_id, raw_pages)
                         return
