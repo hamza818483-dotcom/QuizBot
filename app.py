@@ -3181,6 +3181,20 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
         user_data_dir = _tf.mkdtemp(prefix="chromium-profile-")
         proc = None
         stderr_snapshot = ""
+        stderr_buffer = []
+
+        async def _drain_stderr(p):
+            try:
+                while True:
+                    line = await p.stderr.readline()
+                    if not line:
+                        break
+                    stderr_buffer.append(line.decode(errors="ignore"))
+                    if len(stderr_buffer) > 200:
+                        stderr_buffer.pop(0)
+            except Exception:
+                pass
+
         for _launch_attempt in range(2):
             proc = await asyncio.create_subprocess_exec(
                 chromium_bin, "--headless=new", "--no-sandbox",
@@ -3192,9 +3206,10 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
                 f"--user-data-dir={user_data_dir}",
                 f"--remote-debugging-port={debug_port}",
                 f"file://{html_path}",
-                stdout=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE
             )
+            drain_task = asyncio.ensure_future(_drain_stderr(proc))
             if progress_cb:
                 await progress_cb(30)
 
@@ -3216,23 +3231,24 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
                         continue
                 if ws_url:
                     break
+                if proc.returncode is not None:
+                    logger.error(f"[PDF Gen] Chromium process exited early with code {proc.returncode}")
+                    break
             if ws_url:
+                drain_task.cancel()
                 break
-            try:
-                stderr_data = await asyncio.wait_for(proc.stderr.read(16000), timeout=2)
-                stderr_snapshot = stderr_data.decode(errors="ignore")
-                noise_markers = ["dbus", "cpufreq", "crashpad", "scaling_cur_freq", "scaling_max_freq"]
-                lines = [l for l in stderr_snapshot.split("\n")
-                         if l.strip() and not any(n in l.lower() for n in noise_markers)]
-                stderr_snapshot = "\n".join(lines[-15:]) if lines else "(only harmless dbus/crashpad noise, no fatal error found)"
-                logger.error(f"[PDF Gen] Chromium launch attempt {_launch_attempt+1} failed. stderr: {stderr_snapshot}")
-            except Exception:
-                pass
+            noise_markers = ["dbus", "cpufreq", "crashpad", "scaling_cur_freq", "scaling_max_freq"]
+            useful_lines = [l for l in stderr_buffer if l.strip() and not any(n in l.lower() for n in noise_markers)]
+            stderr_snapshot = "".join(useful_lines[-20:]) if useful_lines else f"(exit_code={proc.returncode}, only harmless noise, {len(stderr_buffer)} total lines)"
+            logger.error(f"[PDF Gen] Chromium launch attempt {_launch_attempt+1} failed. stderr: {stderr_snapshot}")
+            drain_task.cancel()
             try:
                 proc.kill()
             except Exception:
                 pass
             debug_port = random.randint(9300, 9999)
+            stderr_buffer.clear()
+
 
         if not ws_url:
             raise RuntimeError(f"Chromium debug port not ready after 2 attempts (may be crashed/OOM). stderr: {stderr_snapshot}")
