@@ -744,6 +744,8 @@ function doSubmit(){
     <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (${_mistakeCnt})</button>
     <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>`;
   if(!isNewGen)
+    html+=`<button class="result-btn" id="newExamBtnResult" onclick="startNewExamV2()">🆕 New Exam</button>`;
+  if(!isNewGen)
     html+=`<button class="result-btn warning" onclick="openLb()">🏆 Leaderboard</button>`;
   html+=`
     <button class="result-btn"          onclick="window.open('https://Atlascourses.com','_blank')">🌐 ATLAS Courses</button>
