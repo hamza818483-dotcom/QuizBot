@@ -9,6 +9,7 @@ pytesseract
 reportlab
 httpx
 websockets
+playwright
 python-dotenv
 fastapi
 uvicorn
