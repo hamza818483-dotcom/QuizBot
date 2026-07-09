@@ -3144,15 +3144,15 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
 # ============================================================
 # HTML → PDF (Chromium)
 # ============================================================
-_PDF_SEMAPHORE = asyncio.Semaphore(3)
+_PDF_SEMAPHORE = asyncio.Semaphore(8)
 
 async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
   async with _PDF_SEMAPHORE:
     task = asyncio.ensure_future(_html_to_pdf_impl(html, progress_cb))
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=150)
+        return await asyncio.wait_for(asyncio.shield(task), timeout=300)
     except asyncio.TimeoutError:
-        logger.error("[PDF Gen] Timed out after 150s")
+        logger.error("[PDF Gen] Timed out after 300s")
         task.cancel()
         try:
             await task
@@ -3221,7 +3221,7 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
             # important for style3/large sheets with many embedded images.
             load_fired = False
             try:
-                deadline = asyncio.get_event_loop().time() + 20
+                deadline = asyncio.get_event_loop().time() + 40
                 while asyncio.get_event_loop().time() < deadline:
                     msg = _json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
                     if msg.get("method") == "Page.loadEventFired":
@@ -3243,7 +3243,7 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
             }))
             result = None
             while True:
-                msg = _json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
+                msg = _json.loads(await asyncio.wait_for(ws.recv(), timeout=120))
                 if msg.get("id") == 2:
                     result = msg
                     break
@@ -3531,7 +3531,7 @@ def _build_print_style2(data, heading):
     body += '</tbody></table></div>'
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_PRINT_CSS}</head><body>{body}</body></html>'
 
-def _build_print_style3(data, heading, per_page=10):
+def _build_print_style3(data, heading, per_page=25):
     """Style 3: Compact Exam - paginated, each page's answer key directly below that page's questions"""
     pages_html = ""
     for start in range(0, len(data), per_page):
