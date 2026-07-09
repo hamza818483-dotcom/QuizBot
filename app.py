@@ -4492,7 +4492,10 @@ async def _process_pdf_pages_inner(
         summary_data = {"chat_id": channel_id, "text": summary, "disable_web_page_preview": True}
         if first_image_msg_id:
             summary_data["reply_to_message_id"] = first_image_msg_id
-        await tg_post("sendMessage", summary_data)
+        sum_r = await tg_post("sendMessage", summary_data)
+        # Auto-pin the summary message (same as /csvS master summary behavior)
+        if sum_r.get("ok"):
+            await try_pin_message(channel_id, sum_r["result"]["message_id"])
 
     sb.table("pdf_sessions").update({"status": "done"}).eq("id", session_id).execute()
     elapsed = int(time.time() - start_time)
