@@ -36,7 +36,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://atlasquizbotpro.hamza818483.workers.dev")
-HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://quizbot-s482.onrender.com")  # v4.2: HF permanently banned, Render is primary
+HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://hamza-02-quizbot.hf.space")
 RENDER_URL = os.environ.get("RENDER_URL", "")
 D1_TOKEN = os.environ.get("D1_TOKEN", "")
 # v4.3: GitHub Pages exam link — CF down thakleo page load hoy (static host),
@@ -44,7 +44,7 @@ D1_TOKEN = os.environ.get("D1_TOKEN", "")
 GH_PAGES_EXAM_URL = os.environ.get("GH_PAGES_EXAM_URL", "https://hamza818483-dotcom.github.io/QuizBot/exam.html")
 
 # Render এ চললে directly TG API, HF এ চললে CF proxy (HF তে TG blocked)
-_running_on = os.environ.get("RUNNING_ON", "")
+_running_on = os.environ.get("RUNNING_ON", "") or "HuggingFace Space"
 if _running_on == "Render" or (RENDER_URL and "onrender.com" in RENDER_URL):
     TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
     _tg_mode = "direct"
@@ -189,9 +189,13 @@ async def d1_select(sql: str, params: list = None) -> list:
         logger.warning(f"[D1] Supabase fallback failed: {e}")
     return []
 
-async def d1_run(sql: str, params: list = None) -> bool:
+async def d1_run(sql: str, params: list = None, return_id: bool = False):
     r = await d1_query(sql, params, False)
     ok = r.get("ok")
+    last_id = None
+    if ok:
+        meta = r.get("meta") or {}
+        last_id = meta.get("last_row_id")
 
     # ── Always mirror quiz INSERT/REPLACE to BOTH Supabase accounts, ──
     # ── regardless of D1 success, so web quiz has a backup even when D1 is fine. ──
@@ -222,6 +226,8 @@ async def d1_run(sql: str, params: list = None) -> bool:
     except Exception as e:
         logger.warning(f"[D1] Supabase mirror step failed: {e}")
 
+    if return_id:
+        return (bool(ok), last_id)
     return bool(ok)
 
 # ============================================================
@@ -236,7 +242,7 @@ from datetime import datetime as _datetime
 import pytz as _pytz
 
 BD_TZ = _pytz.timezone("Asia/Dhaka")
-LOG_DIR = os.environ.get("LOG_DIR", "logs")
+LOG_DIR = os.environ.get("LOG_DIR", "") or "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
@@ -298,7 +304,30 @@ async def clear_error_logs():
 # ============================================================
 # TELEGRAM HELPERS
 # ============================================================
+import re as _re_opt
+
+def _strip_option_prefix(text: str) -> str:
+    """Strip a leading 'A.'/'A)'/'A:'/'ক.'/'(A)' style label from a poll option,
+    so options never show A,B,C,D (or ক,খ,গ,ঘ) prefixes to the user (item 2).
+    Requires the separator to be followed by whitespace so legitimate content
+    like 'ক-অক্ষর দিয়ে...' (a word that happens to start with ক-) is never
+    mistaken for an option label and mangled."""
+    if not isinstance(text, str):
+        return text
+    stripped = _re_opt.sub(
+        r"^\s*[\(\[]?\s*[A-Da-dকখগঘ]\s*[\.\)\:।]\s+",
+        "", text, count=1
+    ).strip()
+    return stripped if stripped else text
+
+def _sanitize_poll_options(data: dict) -> dict:
+    if isinstance(data.get("options"), list):
+        data["options"] = [_strip_option_prefix(o) for o in data["options"]]
+    return data
+
 async def tg_post(method: str, data: dict) -> dict:
+    if method == "sendPoll":
+        data = _sanitize_poll_options(data)
     # ── Primary: CF Worker TG proxy ──
     try:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -312,7 +341,7 @@ async def tg_post(method: str, data: dict) -> dict:
                 await asyncio.sleep(min(retry_after, 30) + 0.5)
             logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
     except Exception as e:
-        logger.warning(f"[TG] {method} proxy error: {e}")
+        logger.warning(f"[TG] {method} proxy error: {type(e).__name__}: {e}")
     # ── Fallback: Direct Telegram API (CF down হলেও কাজ করবে) ──
     try:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -326,7 +355,7 @@ async def tg_post(method: str, data: dict) -> dict:
                 logger.warning(f"[TG] {method} direct failed: {result.get('description')}")
             return result
     except Exception as e:
-        logger.error(f"[TG] {method} direct error: {e}")
+        logger.error(f"[TG] {method} direct error: {type(e).__name__}: {e}")
         return {"ok": False, "error": str(e)}
 
 # ============================================================
@@ -364,6 +393,14 @@ async def edit_msg(chat_id, message_id: int, text: str, parse_mode: str = "HTML"
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
+        "parse_mode": parse_mode
+    })
+
+async def edit_msg_caption(chat_id, message_id: int, caption: str, parse_mode: str = "HTML") -> dict:
+    return await tg_post("editMessageCaption", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "caption": caption,
         "parse_mode": parse_mode
     })
 
@@ -458,7 +495,8 @@ def extract_image_url(text: str):
 
 async def send_poll(chat_id, question: str, options: list, correct_idx: int,
                     explanation: str = "", reply_to_message_id: int = None,
-                    message_thread_id: int = None) -> dict:
+                    message_thread_id: int = None, is_anonymous: bool = True,
+                    open_period: int = None, poll_type: str = "quiz") -> dict:
     # প্রতিটা অংশ (question/option/explanation) থেকে <img> ট্যাগ থাকলে আলাদা করা হচ্ছে —
     # Bot API 10.0 (May 2026)-এ InputPollMedia/InputPollOptionMedia/explanation_media
     # যোগ হয়েছে, যেটা দিয়ে poll question/option/explanation-এ ছবি embed করা যায়।
@@ -480,10 +518,12 @@ async def send_poll(chat_id, question: str, options: list, correct_idx: int,
 
     base_data = {
         "chat_id": chat_id,
-        "type": "quiz",
+        "type": poll_type,
         "correct_option_id": correct_idx,
-        "is_anonymous": True,
+        "is_anonymous": is_anonymous,
     }
+    if open_period:
+        base_data["open_period"] = open_period
     if reply_to_message_id:
         base_data["reply_to_message_id"] = reply_to_message_id
     if message_thread_id:

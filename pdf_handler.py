@@ -83,10 +83,12 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
   • বইয়ের মূল লাইনের সাথে হাতে/কলমে এক্সট্রা কোনো কালার, দাগ, মার্ক, আন্ডারলাইন দেখা গেলেই MUST তা থেকে MCQ বানাতে হবে, মিস করা যাবে না
 -কোয়ালিটিফুল প্রশ্ন বানাতে হবে
 -ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
+-🟥 বক্স/ছক STYLE তথ্য থাকলে (bordered box, info-card, ছক/সারণির প্রতিটি সেল): প্রতিটি বক্স/ছক থেকে MUST কমপক্ষে ১টি MCQ বানাতে হবে, সর্বোচ্চ ২-৩টি একেবারে তুচ্ছ/খালি বক্স বাদ দেওয়া যাবে — এর বেশি বাদ দেওয়া যাবে না। কোনো বক্সে তথ্য বেশি/ঘন থাকলে সেই একটি বক্স থেকেই একাধিক MCQ (সর্বোচ্চ ১৫টি পর্যন্ত) বানাতে হবে।
 -টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট এসব থেকে MCQ বানাবে না — না প্রশ্নে, না অপশনে। এগুলো শুধু structural/navigation elements, প্রকৃত জ্ঞান/তথ্য না।
 -প্রতিটি অপশন অবশ্যই actual factual content হতে হবে (definition, cause, treatment, value, name of a real concept ইত্যাদি) — কখনোই কোনো section heading, card/page label, বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না
 -MUST বানাতে হবে exactly {count} টি MCQ, কম বেশি নয়
 -Highest quality MCQ বানাবে
+-মাঝে মাঝে একই তথ্যকে উল্টিয়েও প্রশ্ন করবে (যেমন "বাংলাদেশের রাজধানী কোথায়?" এর পাশাপাশি অন্য কোথাও "ঢাকা কোন দেশের রাজধানী?" ধরনের reverse angle প্রশ্নও রাখবে, যেখানে যুক্তিসঙ্গত)
 
 🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
 -Source image-এর মূল ভাষা যা থাকবে (Bengali বা English), Question + Options + Explanation সবকিছু সেই একই ভাষায় লিখতে হবে
@@ -120,11 +122,13 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 -কোয়ালিটিফুল প্রশ্ন বানাতে হবে
 -এমনভাবে সকল প্রশ্ন বানাবে যাতে সকল লাইন থেকে MCQ কিভাবে আসতে পারে আইডিয়া হয়ে যাবে
 -ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
+-🟥 বক্স/ছক STYLE তথ্য থাকলে (bordered box, info-card, ছক/সারণির প্রতিটি সেল): প্রতিটি বক্স/ছক থেকে MUST কমপক্ষে ১টি MCQ বানাতে হবে, সর্বোচ্চ ২-৩টি একেবারে তুচ্ছ/খালি বক্স বাদ দেওয়া যাবে — এর বেশি বাদ দেওয়া যাবে না। কোনো বক্সে তথ্য বেশি/ঘন থাকলে সেই একটি বক্স থেকেই একাধিক MCQ (সর্বোচ্চ ১৫টি পর্যন্ত) বানাতে হবে।
 -টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট এসব থেকে MCQ বানাবে না — না প্রশ্নে, না অপশনে। এগুলো শুধু structural/navigation elements, প্রকৃত জ্ঞান/তথ্য না।
 -প্রতিটি অপশন অবশ্যই actual factual content হতে হবে (definition, cause, treatment, value, name of a real concept ইত্যাদি) — কখনোই কোনো section heading, card/page label, বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না
 -হাবিজাবি MCQ বানানো যাবে না,বেশি প্রশ্ন বানানোর প্রয়োজনে একটি MCQ কেই ঘুরিয়ে ফিরিয়ে দেওয়া যেতে পারে
 -MAXIMUM possible MCQ বানাবে — প্রতিটি লাইন, বক্স, তথ্য, সোর্স use করে
 -তথ্য কম থাকলে minimum 10 টি
+-মাঝে মাঝে একই তথ্যকে উল্টিয়েও প্রশ্ন করবে (যেমন "বাংলাদেশের রাজধানী কোথায়?" এর পাশাপাশি অন্য কোথাও "ঢাকা কোন দেশের রাজধানী?" ধরনের reverse angle প্রশ্নও রাখবে, যেখানে যুক্তিসঙ্গত)
 
 🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
 -Source image-এর মূল ভাষা যা থাকবে (Bengali বা English), Question + Options + Explanation সবকিছু সেই একই ভাষায় লিখতে হবে
@@ -151,16 +155,14 @@ MUST Return ONLY valid JSON array, no markdown:
 # ============================================================
 # PDF TO IMAGES
 # ============================================================
-# v-RAM-fix: pdf2image (poppler) rendering is the single biggest RAM spike
-# risk on a 512MB Render instance -- a large PDF at dpi=150 can use 100-300MB
-# during conversion. If two users' /qbm or /pdf uploads convert at the same
-# time, RAM can spike well past the limit and get OOM-killed. This semaphore
-# limits concurrent conversions -- now that page count per call is hard-capped
-# at 60 (below), 2 simultaneous conversions is still safe headroom-wise while
-# cutting queue wait roughly in half under 100-concurrent-user load.
+# v-RAM-fix: pdf2image (poppler) rendering was the biggest RAM spike risk on
+# the old 512MB Render instance -- a large PDF at dpi=150 could use 100-300MB
+# during conversion, so concurrency was capped hard at 1 and pages/call at 10.
+# Now on 16GB HF Space there's ample headroom, so both are raised substantially
+# while still keeping some ceiling as a sanity guard against runaway usage.
 import threading as _threading
-_PDF_CONVERT_LOCK = _threading.Semaphore(2)
-_PDF_MAX_PAGES_PER_CALL = 40
+_PDF_CONVERT_LOCK = _threading.Semaphore(6)
+_PDF_MAX_PAGES_PER_CALL = 60
 
 
 def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
@@ -181,7 +183,7 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                 )
             result = []
             for p in range(first, last + 1):
-                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
                 if imgs:
                     result.append((p, imgs[0]))
             logger.info(f"[PDF] Converted {len(result)} pages")
@@ -190,13 +192,13 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
             result = []
             p = 1
             while p <= _PDF_MAX_PAGES_PER_CALL:
-                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
                 if not imgs:
                     break
                 result.append((p, imgs[0]))
                 p += 1
             if p > _PDF_MAX_PAGES_PER_CALL:
-                extra = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=1)
+                extra = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
                 if extra:
                     raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
             logger.info(f"[PDF] Converted {len(result)} pages")
@@ -322,14 +324,49 @@ def crop_explanation_image(img: Image.Image, bbox: list) -> dict:
         x_min, y_min, x_max, y_max = bbox
         box_top = (y_min / 1000) * h
         box_bottom = (y_max / 1000) * h
+        box_top = (y_min / 1000) * h
+        box_bottom = (y_max / 1000) * h
 
-        full_img = img.convert("RGB").copy()
-        draw = ImageDraw.Draw(full_img)
+        # Snap top/bottom to nearest blank row so text isn't cut mid-line
+        gray = img.convert("L")
+        import numpy as np
+        arr = np.asarray(gray, dtype=np.uint8)
+        row_min = arr.min(axis=1)
+        max_extend = int(h * 0.12)
+
+        def _snap_top(y0):
+            y = int(y0)
+            limit = max(0, y - max_extend)
+            i = y
+            while i > limit and row_min[i] < 245:
+                i -= 1
+            return max(0, i)
+
+        def _snap_bottom(y0):
+            y = int(y0)
+            limit = min(h - 1, y + max_extend)
+            i = y
+            while i < limit and row_min[i] < 245:
+                i += 1
+            return min(h, i + 1)
+
         b_top = max(0, int(box_top))
         b_bottom = min(h, int(box_bottom))
+
+        # Single upload (full page, orange highlight + red box) — avoids the
+        # double-upload fragility that was causing MCQs to get skipped on
+        # imgbb timeouts/failures.
+        full_img = img.convert("RGB").copy()
         if b_bottom > b_top:
-            draw.rectangle([6, b_top + 6, w - 6, max(b_top + 7, b_bottom - 6)], outline=(220, 38, 38), width=6)
+            overlay = full_img.copy()
+            ov_draw = ImageDraw.Draw(overlay)
+            ov_draw.rectangle([0, b_top, w, b_bottom], fill=(255, 165, 0))
+            full_img = Image.blend(full_img, overlay, 0.35)
+            draw = ImageDraw.Draw(full_img)
+            draw.rectangle([6, b_top + 6, w - 6, max(b_top + 7, b_bottom - 6)], outline=(220, 38, 38), width=8)
         url = upload_to_imgbb(image_to_base64(full_img))
+        if not url:
+            url = upload_to_imgbb(image_to_base64(full_img))  # one retry
         if not url:
             return {}
         return {
@@ -424,10 +461,13 @@ async def _attach_explanation_images(mcqs: list, img: Image.Image) -> list:
         if not bbox:
             continue
         try:
-            url = await asyncio.to_thread(crop_explanation_image, img, bbox)
-            if url:
+            result = await asyncio.to_thread(crop_explanation_image, img, bbox)
+            thumb_url = (result or {}).get("thumb", "")
+            full_url = (result or {}).get("full", "") or thumb_url
+            if thumb_url:
                 exp = m.get("explanation", "") or ""
-                m["explanation"] = f'{exp} <img src="{url}">'.strip()
+                data_full = f' data-full="{full_url}"' if full_url else ""
+                m["explanation"] = f'{exp} <img src="{thumb_url}"{data_full}>'.strip()
         except Exception as e:
             logger.warning(f"[ExplanationCrop] Attach failed: {e}")
     return mcqs
@@ -497,18 +537,23 @@ MANDATORY RULES (কোনোটাই skip করা যাবে না):
 0. STRICT SOURCE-ONLY RULE: শুধুমাত্র নিচের TEXT-এ যা লেখা আছে সেখান থেকেই MCQ বানাতে হবে। Text-এ নেই এমন কোনো তথ্য, fact, নাম, সংখ্যা নিজে থেকে বানানো/অনুমান করা সম্পূর্ণ নিষেধ। প্রশ্ন ও option ঘুরিয়ে-পেঁচিয়ে (rephrase করে) লেখা যাবে, কিন্তু অর্থ/তথ্য অবশ্যই মূল text থেকেই আসতে হবে — বাইরের কোনো knowledge ব্যবহার করা যাবে না।
 1. MANDATORY: Text-এর প্রতিটি লাইন/তথ্যপূর্ণ vakko থেকে অবশ্যই কমপক্ষে একটি MCQ বানাতে হবে — কোনো লাইন বাদ দেওয়া যাবে না (শুধু pure heading/tag/navigation line ছাড়া, যেগুলোতে কোনো factual তথ্যই নেই)। কোনো লাইন সংক্ষিপ্ত/সাধারণ মনে হলেও সেটা থেকে rephrase/context ব্যবহার করে MCQ বানানোর সর্বোচ্চ চেষ্টা করবে।
 2. এরপর কয়েকটা লাইনের তথ্য মিক্স/combine করে additional MCQ বানাবে — যেখানে প্রশ্ন বা option একাধিক লাইনের তথ্য একসাথে ব্যবহার করে (যেমন দুইটা ভিন্ন লাইনের ফ্যাক্ট মিলিয়ে comparison/relation ভিত্তিক প্রশ্ন)।
+2a. এর মধ্যে অন্তত ৩-৫টি MCQ এমন হবে যেখানে একটা single প্রশ্নের মধ্যেই বেশ কয়েকটা আলাদা তথ্য (multiple facts) একসাথে verify করা যায় — যেমন option-গুলো নিজেরাই ২-৩টা তথ্যের combination হবে, আর সঠিক option-টাই একমাত্র যেটা সবগুলো তথ্য মিলিয়ে সঠিক। এগুলো extreme-level কঠিন হবে না — মাঝারি (moderate) কঠিন রাখবে, যাতে মনোযোগ দিয়ে পড়লে বোঝা যায়, কিন্তু অতিরিক্ত ঘুরিয়ে-প্যাঁচিয়ে confusing না হয়।
 3. এছাড়াও পুরো text থেকে overall বুঝে কিছু brainstorming MCQ বানাবে — একাধিক তথ্য যুক্তি দিয়ে সংযুক্ত করে গভীর প্রশ্ন (এখনও strictly text-এর তথ্যের ভিত্তিতেই, বাইরের knowledge না)।
-3a. এদের মধ্যে কিছু MCQ ইচ্ছাকৃতভাবে "কঠিন/verification-type" হতে হবে — যেগুলো শুধু sample/superficial পড়লে উত্তর দেওয়া যাবে না, বরং পুরো text মনোযোগ দিয়ে ভালোভাবে পড়লেই সঠিক উত্তর দেওয়া সম্ভব হবে (যেমন: দুইটা কাছাকাছি/similar তথ্যের মধ্যে সূক্ষ্ম পার্থক্য ধরিয়ে দেওয়া, ব্যতিক্রম/exception ধরনের তথ্য, একাধিক শর্ত একসাথে মেলানো, বা easily-confused নাম/সংখ্যার মধ্যে সঠিকটা বাছাই)। এগুলো দিয়ে বোঝা যাবে ইউজার সত্যিই মনোযোগ দিয়ে পুরো text পড়েছে কি না।
-4. Explanation-এ সঠিক answer confirm করার পাশাপাশি সংশ্লিষ্ট তথ্যের ঠিক আশেপাশের (আগের/পরের লাইনের) অতিরিক্ত related info যোগ করতে হবে — শুধু answer repeat করা চলবে না।
+3a. এদের মধ্যে কিছু MCQ ইচ্ছাকৃতভাবে "কঠিন/verification-type" হতে হবে — যেগুলো শুধু sample/superficial পড়লে উত্তর দেওয়া যাবে না, বরং পুরো text মনোযোগ দিয়ে ভালোভাবে পড়লেই সঠিক উত্তর দেওয়া সম্ভব হবে (যেমন: দুইটা কাছাকাছি/similar তথ্যের মধ্যে সূক্ষ্ম পার্থক্য ধরিয়ে দেওয়া, ব্যতিক্রম/exception ধরনের তথ্য, একাধিক শর্ত একসাথে মেলানো, বা easily-confused নাম/সংখ্যার মধ্যে সঠিকটা বাছাই)। এগুলো extreme-level কঠিন হবে না, শুধু moderate — এগুলো দিয়ে বোঝা যাবে ইউজার সত্যিই মনোযোগ দিয়ে পুরো text পড়েছে কি না।
+4. Explanation-এ সঠিক answer confirm করার পাশাপাশি সংশ্লিষ্ট তথ্যের ঠিক আশেপাশের (আগের/পরের লাইনের) অতিরিক্ত related info যোগ করতে হবে — শুধু answer repeat করা চলবে না। এছাড়া explanation-এ বাকি ৩টা ভুল option কেন ভুল/কী সেটার ছোট ব্যাখ্যাও থাকবে, যাতে ইউজার প্রতিটা option সম্পর্কেই বুঝতে পারে (নিচের rule 4b তে explanation-এর length constraint বিস্তারিত আছে)।
 4a. STRICTLY NISHIDDHO (explanation-এ): "টেক্সট অনুসারে", "টপিক অনুসারে", "টেক্সটে লিখা আছে", "উপরের তথ্য অনুযায়ী", "প্রদত্ত অংশে বলা হয়েছে", "উক্ত অনুচ্ছেদে উল্লেখ আছে" বা এই জাতীয় কোনো source/reference-উল্লেখকারী কথা explanation-এ কখনোই লেখা যাবে না। Explanation সরাসরি fact-টুকু বলবে, কোনো source-এর দিকে ইঙ্গিত করবে না।
+4b. EXPLANATION LENGTH RULE (Telegram poll explanation box limit মাথায় রেখে): ভুল ৩টা option-এর সংক্ষিপ্ত ব্যাখ্যা অবশ্যই এই box-এর character limit-এর মধ্যে রাখতে হবে (মোট explanation ~200 characters-এর মধ্যে গুছিয়ে রাখার চেষ্টা করবে) — সংক্ষেপে, এক লাইনে বলবে কেন ভুল। সঠিক answer নিয়ে extra info তথ্যবহুল হলে সামান্য limit-এর বাইরে যেতে পারে, কিন্তু চেষ্টা করবে সবটাই যতটা সম্ভব সংক্ষিপ্ত ও গোছানো রাখতে।
 5. সঠিক answer (A/B/C/D) প্রতিটি প্রশ্নে ভিন্ন ভিন্ন option-এ থাকতে হবে — কখনোই sequential pattern বা একই option বারবার না।
-6. যত ধরনের সম্ভব MCQ variety বানাও — direct fact, definition, cause-effect, comparison, fill-in-the-blank style, "কোনটি সঠিক নয়" ধরনের প্রশ্ন — সব ধরনের প্রশ্ন mix করে বানাও, শুধু এক প্যাটার্নে আটকে থেকো না।
+6. যত ধরনের সম্ভব MCQ variety বানাও — direct fact, definition, cause-effect, comparison, fill-in-the-blank style, "কোনটি সঠিক নয়" ধরনের প্রশ্ন — সব ধরনের প্রশ্ন mix করে বানাও, শুধু এক প্যাটার্নে আটকে থেকো না। প্রশ্ন বানানোর সময় বারবার টপিকের নাম ধরে ধরে প্রশ্ন শুরু করা যাবে না (যেমন "X সম্পর্কে কোনটি সঠিক", "X এর গঠন কী" — একই প্যাটার্নে বারবার) — বৈচিত্র্যপূর্ণ প্রশ্ন-গঠন ব্যবহার করবে, না হলে পড়তে boring লাগে।
 7. প্রশ্ন text এর ভাষায় (বাংলা হলে বাংলা, ইংরেজি হলে ইংরেজি)
-8. ৪টি option, একটি সঠিক (text থেকে সরাসরি), বাকি ৩টি distractor অবশ্যই text-এর অন্য অংশের প্রকৃত তথ্য/নাম/সংখ্যা থেকে নেওয়া (অন্য লাইনের সত্যিকার তথ্য এখানে ভুল option হিসেবে ব্যবহার করো) — সম্পূর্ণ কল্পনাপ্রসূত/বানানো distractor চলবে না
-9. Explanation max 200 chars
-10. কোনো section heading, "Card 1"/"Card 2", page/chapter label বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না — প্রতিটি option অবশ্যই actual factual content হতে হবে
+8. ৪টি option, একটি সঠিক (text থেকে সরাসরি), বাকি ৩টি distractor অবশ্যই text-এর অন্য অংশের প্রকৃত তথ্য/নাম/সংখ্যা থেকে নেওয়া (অন্য লাইনের সত্যিকার তথ্য এখানে ভুল option হিসেবে ব্যবহার করো) — সম্পূর্ণ কল্পনাপ্রসূত/বানানো distractor চলবে না।
+8a. OPTION RELEVANCE RULE (must): ৪টি option একই category/type-এর হতে হবে যেমন প্রশ্নের answer-type — যদি প্রশ্নের উত্তর কোনো ব্যক্তি/বিজ্ঞানীর নাম হয়, ৪টি option-ই নাম হবে (এলোমেলো ভিন্ন-টাইপ জিনিস মেশানো যাবে না); যদি উত্তর percentage হয়, ৪টি option-ই percentage হবে; যদি উত্তর সংখ্যা/measurement হয়, ৪টি option-ই একই ধরনের সংখ্যা/measurement হবে। এভাবে option-গুলো দেখলেই বোঝা যাবে প্রশ্নটা আসলে কী নিয়ে, guessing কমে যাবে। বিশেষ ক্ষেত্রে text-এ সেই নির্দিষ্ট category-র পর্যাপ্ত রিলেটেড তথ্য না পাওয়া গেলে, topic-related কাছাকাছি extra info দিয়ে option বানানো যাবে (কিন্তু কখনো সম্পূর্ণ ভিন্ন ধরনের/অপ্রাসঙ্গিক option দেওয়া যাবে না)।
+9. Explanation-এর মূল answer-confirm অংশ max 200 chars এর মধ্যে রাখার চেষ্টা করবে (rule 4b অনুযায়ী)।
+10. কোনো section heading, "Card 1"/"Card 2", page/chapter label বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না — প্রতিটি option অবশ্যই actual factual content হতে হবে।
 11. STRICTLY NISHIDDHO: প্রশ্নে বা option-এ কখনোই এই ধরনের কথা লেখা যাবে না — "টপিকের নাম কি", "এখানে কি বলা হয়েছে", "প্রদত্ত বর্ণনায় আছে যে", "পাঠ্যবস্তুটির টপিক", "উক্ত অনুচ্ছেদে/টেক্সটে উল্লেখিত", "...কী হিসেবে উল্লেখ করা হয়েছে", "...হিসেবে উল্লেখ করা হয়েছে", বা এই জাতীয় কোনো meta/source-reference কথা। প্রশ্ন সরাসরি বিষয়বস্তু নিয়ে হবে, যেন টেক্সট পড়ে না জানলেও প্রশ্নটা independent একটা knowledge question মনে হয়।
 12. Text-এ থাকা যেকোনো #tag, @mention, © copyright line, channel/page/credit name, promotional line — এসব থেকে কোনো MCQ বানানো যাবে না এবং এসব কখনোই question বা option এর content হিসেবে ব্যবহার করা যাবে না।
+13. QUESTION/OPTION LENGTH RULE: প্রশ্ন ছোট ও সরাসরি রাখবে (অতিরিক্ত বড় বাক্যের প্রশ্ন এড়িয়ে চলবে)। Option সাধারণত ছোট রাখবে, একটা MCQ-তে সর্বোচ্চ ১-২টা option তুলনামূলক বড় হতে পারে (যদি source fact নিজেই বড় হয়), কিন্তু পুরো ৪টা option বড় বা অতিরিক্ত জটিল বাক্য হওয়া যাবে না। অতিরিক্ত কঠিন/ঘোরানো-প্যাঁচানো বড় প্রশ্ন এড়িয়ে চলবে (rule 3a এর moderate-difficulty MCQ ছাড়া)।
+14. MCQ সংখ্যা সাধারণত ১০-২৫টার মধ্যে রাখবে (text-এ তথ্য বেশি থাকলে সর্বোচ্চ ৩৫ পর্যন্ত যেতে পারে) — কিন্তু quantity-র চেয়ে quality সবসময় অগ্রাধিকার পাবে; কম fact থাকা text থেকে জোর করে বেশি MCQ বানানো যাবে না।
 
 TEXT:
 {text[:4000]}

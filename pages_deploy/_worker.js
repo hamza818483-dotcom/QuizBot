@@ -617,7 +617,7 @@ async function handleWebQuiz(request, url, env) {
   const name = url.searchParams.get('name') || 'Student';
 
   // index.html fetch করো — raw.githubusercontent rate-limit (429) হলে GH Pages fallback + retry
-  const WORKER_ORIGIN = `https://atlasquizbotpro.hamza818483.workers.dev`;
+  const WORKER_ORIGIN = `https://quizbot.pages.dev`;
   const HTML_SOURCES = [
     'https://raw.githubusercontent.com/hamza818483-dotcom/QuizBot/main/index.html',
     'https://hamza818483-dotcom.github.io/QuizBot/index.html',

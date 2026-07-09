@@ -1,0 +1,67 @@
+name: Watchdog CF-Pages (7min)
+
+# Independently checks the Cloudflare Pages proxy layer (quizbot.pages.dev),
+# separate from the HF/Render backend checks in watchdog-1/2/3. This exists
+# because the other watchdogs ping the backend (HF Space) directly — if HF
+# is healthy but CF Pages itself is misconfigured/broken (e.g. build output
+# directory setting reset, bad deploy), those watchdogs would still report
+# "UP" while the bot is actually unreachable from Telegram's side, since
+# Telegram only ever talks to the CF Pages URL, never directly to HF.
+#
+# This does NOT auto-fix anything (CF Pages config issues need a manual
+# dashboard check — see docs/DEPLOYMENT_SETUP.md troubleshooting section).
+# It only alerts so the issue isn't silently invisible.
+
+on:
+  schedule:
+    - cron: '*/7 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check_cf_pages:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CF Pages root route
+        id: cf_check
+        env:
+          CF_PAGES_URL: ${{ secrets.CF_PAGES_URL }}
+        run: |
+          if [ -z "$CF_PAGES_URL" ]; then
+            echo "::warning::CF_PAGES_URL secret not set, skipping check"
+            exit 0
+          fi
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 --retry 1 "${CF_PAGES_URL}/health" || echo "000")
+          echo "CF Pages /health: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "cf_status=DOWN" >> $GITHUB_OUTPUT
+          else
+            echo "cf_status=UP" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check CF Pages tg-proxy route (the one that broke before)
+        id: proxy_check
+        env:
+          CF_PAGES_URL: ${{ secrets.CF_PAGES_URL }}
+        run: |
+          if [ -z "$CF_PAGES_URL" ]; then exit 0; fi
+          # getWebhookInfo needs no body but proxy expects POST; a 405 here
+          # means Pages routing is broken (this exact symptom happened once
+          # when Build output directory dashboard setting was blank).
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST --max-time 20 --retry 1 "${CF_PAGES_URL}/tg-proxy/getMe" || echo "000")
+          echo "CF Pages /tg-proxy/getMe: $STATUS"
+          if [ "$STATUS" = "405" ] || [ "$STATUS" = "404" ]; then
+            echo "proxy_status=ROUTING_BROKEN" >> $GITHUB_OUTPUT
+          else
+            echo "proxy_status=OK" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Alert owner if either check failed
+        if: ${{ steps.cf_check.outputs.cf_status == 'DOWN' || steps.proxy_check.outputs.proxy_status == 'ROUTING_BROKEN' }}
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+        run: |
+          if [ -z "$OWNER_ID" ] || [ -z "$BOT_TOKEN" ]; then exit 0; fi
+          MSG="🚨 CF Pages Watchdog: quizbot.pages.dev issue detected!%0A%0AHealth: ${{ steps.cf_check.outputs.cf_status }}%0AProxy routing: ${{ steps.proxy_check.outputs.proxy_status }}%0A%0AThis is the layer between Telegram and HF — check Cloudflare dashboard: Pages project → Settings → Builds %26 deployments → Build output directory should be 'pages_deploy'."
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${OWNER_ID}" -d "text=${MSG}" || true
