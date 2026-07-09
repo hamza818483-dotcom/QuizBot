@@ -5458,12 +5458,17 @@ async def _qbm_extract_from_image(img) -> list:
     await _qbm_ram_aware_acquire()
     try:
         call1 = await _qbm_call1_extract(img)
-        if not call1:
-            return []  # Confirmed: page genuinely has no existing MCQ
 
+        # Even if Call 1 found nothing, Call 2 still re-checks the page for a
+        # missed MCQ before we declare it genuinely empty -- a single failed/
+        # empty Call 1 (e.g. transient parse issue) should never silently zero
+        # out a page that Call 2 could still catch.
         before_call2 = len(call1)
         call2 = await _qbm_call2_miss_check(img, call1)
         page_confirmed_complete = (len(call2) == before_call2)  # no misses added, no dupes removed
+
+        if not call2:
+            return []  # Confirmed by both Call 1 and Call 2: page genuinely has no MCQ
 
         call3 = await _qbm_call3_verify(img, call2, page_confirmed_complete)
         return _cap_mcq_options(call3)
