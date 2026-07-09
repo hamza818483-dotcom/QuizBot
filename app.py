@@ -3534,6 +3534,233 @@ PRINT_STYLE_NAMES = {
     "style3": "🖨️ Style 3: Compact Exam",
 }
 
+# ============================================================
+# ATLASMASTERBOT /sheet SYSTEM — 100% PORTED (5 Reading formats)
+# ============================================================
+_AM_COLORS = {
+    "header_bg": "#1B4F72", "header_text": "#FFFFFF",
+    "question_bg": "#FFFBF0", "question_border": "#FBBF24",
+    "qnum_bg": "#FEF3C7", "qnum_text": "#92400E",
+    "option_bg": "#FFFFFF", "option_border": "#D1D5DB", "option_text": "#1F2937",
+    "correct_bg": "#DCFCE7", "correct_border": "#4ADE80", "correct_text": "#14532D",
+    "explanation_bg": "#EFF6FF", "explanation_border": "#4299E1", "explanation_text": "#1E40AF",
+    "footer_text": "#6B7280",
+}
+
+_AM_FORMAT_NAMES = {
+    'format_01': '📖 Practice Sheet (প্রশ্ন + উত্তর + ব্যাখ্যা)',
+    'format_02': '📖 Solve Sheet (প্রশ্নপত্র + উত্তরপত্র)',
+    'format_03': '📖 Exam Style (Answer টেবিল)',
+    'format_04': '📖 Mixed Style (ইনলাইন উত্তর)',
+    'format_05': '📖 Summary (Answer Key)',
+}
+
+def _am_fix_bn(text):
+    if not text: return ""
+    fixes = [('\u09C7\u09D7','\u09CC'),('\u09C7\u09BE','\u09CB'),('\u09BE\u09C7','\u09CB'),('\u09AF\u09BC','\u09DF'),('\u09A1\u09BC','\u09DC'),('\u09A2\u09BC','\u09DD')]
+    for b,g in fixes: text=text.replace(b,g)
+    return text
+
+def _am_fix_chemical(text):
+    if not text: return ""
+    sub_map={'₀':'<sub>0</sub>','₁':'<sub>1</sub>','₂':'<sub>2</sub>','₃':'<sub>3</sub>','₄':'<sub>4</sub>','₅':'<sub>5</sub>','₆':'<sub>6</sub>','₇':'<sub>7</sub>','₈':'<sub>8</sub>','₉':'<sub>9</sub>'}
+    sup_map={'⁰':'<sup>0</sup>','¹':'<sup>1</sup>','²':'<sup>2</sup>','³':'<sup>3</sup>','⁴':'<sup>4</sup>','⁵':'<sup>5</sup>','⁶':'<sup>6</sup>','⁷':'<sup>7</sup>','⁸':'<sup>8</sup>','⁹':'<sup>9</sup>','⁺':'<sup>+</sup>','⁻':'<sup>-</sup>'}
+    for u,h in sub_map.items(): text=text.replace(u,h)
+    for u,h in sup_map.items(): text=text.replace(u,h)
+    return text
+
+def _am_extract_images(text):
+    return re.findall(r'src=["\'](https?://[^\s>"\']+)["\']', text)
+
+def _am_download_image(url):
+    try:
+        import requests as _rq
+        resp = _rq.get(url, timeout=10)
+        if resp.status_code == 200:
+            from PIL import Image as _PILImage
+            from io import BytesIO as _BytesIO
+            img = _PILImage.open(_BytesIO(resp.content))
+            buf = _BytesIO(); img.save(buf, format='PNG')
+            b64 = base64.b64encode(buf.getvalue()).decode()
+            return f'<img src="data:image/png;base64,{b64}" style="max-width:100px;height:auto;display:block;margin:3px 0;">'
+    except Exception:
+        pass
+    return ""
+
+def _am_get_clean(text):
+    if not text: return "", []
+    text = str(text); imgs = _am_extract_images(text)
+    text = re.sub(r'<img[^>]+>', '', text); text = re.sub(r'<[^>]+>', '', text)
+    for s, d in [('&amp;', '&'), ('&lt;', '<'), ('&gt;', '>'), ('&nbsp;', ' ')]:
+        text = text.replace(s, d)
+    text = _am_fix_chemical(text); text = _am_fix_bn(text.strip())
+    return text, imgs
+
+def _am_get_css(watermark=""):
+    wm = ""
+    if watermark:
+        wm = f'body::before{{content:"{watermark}";position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-30deg);font-size:60pt;color:rgba(0,0,0,0.03);white-space:nowrap;z-index:999;pointer-events:none;font-weight:bold;letter-spacing:5px;}}'
+    return f'''<style>
+@page{{size:A4;margin:8mm;@bottom-right{{content:counter(page);font-size:7pt;color:{_AM_COLORS["footer_text"]}}}}}
+body{{font-family:sans-serif;font-size:6.8pt;line-height:1.25;}}
+.topic-bar-first{{text-align:center;background:linear-gradient(135deg,rgba(27,79,114,0.97),rgba(27,79,114,0.88));color:#fff;padding:10px 8px;font-size:16pt;font-weight:bold;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 6px 20px rgba(0,0,0,0.25);margin-bottom:8px;border-radius:0 0 8px 8px;letter-spacing:1.5px;text-shadow:0 2px 4px rgba(0,0,0,0.3);}}
+.footer-pg{{position:fixed;bottom:0;left:0;right:0;text-align:center;font-size:5.5pt;color:{_AM_COLORS["footer_text"]};padding:2px;z-index:100;background:#fff;border-top:1px solid #ddd;}}
+.columns{{column-count:2;column-gap:6px;}}
+.mcq{{break-inside:avoid;border:1px solid {_AM_COLORS["question_border"]};border-radius:5px;padding:3px;margin-bottom:2px;background:{_AM_COLORS["question_bg"]}}}
+.qnum{{font-weight:bold;color:{_AM_COLORS["qnum_text"]};background:{_AM_COLORS["qnum_bg"]};padding:1px 3px;border-radius:3px;display:inline-block;margin-bottom:1px;font-size:6pt}}
+.question{{font-weight:bold;margin-bottom:1px;font-size:7pt}}
+.opt{{padding:1px 2px;margin:1px;border-radius:8px;background:{_AM_COLORS["option_bg"]};border:1px solid {_AM_COLORS["option_border"]};font-size:6.5pt;display:inline-block;color:{_AM_COLORS["option_text"]}}}
+.opt-c{{background:{_AM_COLORS["correct_bg"]};border-color:{_AM_COLORS["correct_border"]};color:{_AM_COLORS["correct_text"]};font-weight:bold}}
+.exp{{margin-top:1px;padding:2px;background:{_AM_COLORS["explanation_bg"]};border-left:2px solid {_AM_COLORS["explanation_border"]};font-size:6pt;color:{_AM_COLORS["explanation_text"]}}}
+.ans-inline{{font-weight:bold;color:{_AM_COLORS["correct_text"]};font-size:7pt}}
+table.at{{width:100%;border-collapse:collapse;margin-top:4px;font-size:6.5pt}}
+table.at th,table.at td{{border:1px solid #555;padding:1px 2px;text-align:center}}
+table.at th{{background:#f0f0f0}}
+.answer-sidebar{{position:fixed;right:2mm;top:14mm;width:28mm;border:1px solid #333;padding:2px;font-size:5pt;background:#fff;z-index:10;max-height:80%;overflow-y:auto;box-shadow:0 2px 8px rgba(0,0,0,0.15);}}
+.exp-table{{width:100%;border-collapse:collapse;margin-top:8px;font-size:6.5pt;page-break-before:always;}}
+.exp-table th,.exp-table td{{border:1px solid #555;padding:2px;text-align:center;}}
+.exp-table th{{background:#EFF6FF;}}
+sub,sup{{font-size:0.65em}}
+img{{max-width:80px;height:auto;display:block;margin:1px 0}}
+{wm}
+</style>'''
+
+def _am_build_mcq_data(mcqs):
+    """Convert MCQs (QuizBot's list-based options schema) to AtlasMasterBot's Sheet format."""
+    data = []
+    BN = ['A', 'B', 'C', 'D', 'E']
+    for qi, mcq in enumerate(mcqs):
+        q, qi_ = _am_get_clean(mcq.get('question', ''))
+        e, ei_ = _am_get_clean(mcq.get('explanation', ''))
+        opts_list = mcq.get('options', [])
+        opts, oimgs = [], []
+        for i in range(4):
+            v = opts_list[i] if i < len(opts_list) else ''
+            if v and str(v).strip():
+                ct, ci = _am_get_clean(str(v))
+                opts.append(ct)
+                oimgs.append(''.join([_am_download_image(u) for u in ci]))
+            else:
+                opts.append('')
+                oimgs.append('')
+        ans_raw = str(mcq.get('answer', 'A')).strip().upper()
+        ans_letter_map = {"A": 0, "B": 1, "C": 2, "D": 3, "1": 0, "2": 1, "3": 2, "4": 3}
+        ai = ans_letter_map.get(ans_raw, 0)
+        data.append({
+            'n': qi + 1, 'q': q, 'qi': ''.join([_am_download_image(u) for u in qi_]),
+            'opts': opts[:4], 'oimgs': oimgs[:4],
+            'exp': e, 'ei': ''.join([_am_download_image(u) for u in ei_]),
+            'ai': ai, 'al': BN[ai] if ai >= 0 else '?'
+        })
+    return data
+
+def _am_build_html(data, heading, fmt, hdr_txt="", ftr_txt=""):
+    """Build HTML — 100% AtlasMasterBot Sheet Bot logic (5 formats)."""
+    css = _am_get_css()
+    BN = ['A', 'B', 'C', 'D']
+    body = ""
+    tbl = ""
+
+    if fmt == 1:
+        body = f'<div class="topic-bar-first">{hdr_txt or heading}</div><div class="columns">'
+        for d in data:
+            body += f'<div class="mcq"><span class="qnum">Q.{d["n"]}</span><div class="question">{d["q"]}{d["qi"]}</div>'
+            for oi in range(4):
+                if d['opts'][oi]:
+                    c = ['①', '②', '③', '④'][oi]
+                    cl = 'opt opt-c' if oi == d['ai'] else 'opt'
+                    body += f'<span class="{cl}">{c} {d["opts"][oi]}{d["oimgs"][oi]}</span> '
+            if d['ai'] >= 0:
+                body += f' <span class="ans-inline">✓ {BN[d["ai"]]}</span>'
+            if d['exp']:
+                body += f'<div class="exp">{d["exp"]}{d["ei"]}</div>'
+            body += '</div>'
+        body += '</div>'
+
+    elif fmt == 2:
+        per_page = 15
+        pages = [data[i:i + per_page] for i in range(0, len(data), per_page)]
+        body = ''
+        for pg_idx, page_data in enumerate(pages):
+            sidetbl = '<div class="answer-sidebar"><b>Ans</b><table style="font-size:5pt;width:100%;">'
+            cols = min(len(page_data), 15)
+            for i in range(0, cols, 2):
+                sidetbl += '<tr>'
+                sidetbl += f'<td>Q{page_data[i]["n"]}:{page_data[i]["al"]}</td>'
+                if i + 1 < cols:
+                    sidetbl += f'<td>Q{page_data[i+1]["n"]}:{page_data[i+1]["al"]}</td>'
+                sidetbl += '</tr>'
+            sidetbl += '</table></div>'
+            body += sidetbl + f'<div style="margin-right:30mm;">'
+            for d in page_data:
+                body += f'<div class="mcq"><span class="qnum">Q.{d["n"]}</span><div class="question">{d["q"]}{d["qi"]}</div>'
+                for oi in range(4):
+                    if d['opts'][oi]:
+                        body += f'<span class="opt">({BN[oi]}) {d["opts"][oi]}{d["oimgs"][oi]}</span> '
+                body += '</div>'
+            body += '</div>'
+            if pg_idx < len(pages) - 1:
+                body += '<div style="page-break-after:always;"></div>'
+        tbl = '<div class="exp-table"><h3>📋 ব্যাখ্যা</h3><table><tr><th>Q.No</th><th>ব্যাখ্যা</th></tr>'
+        for d in data:
+            if d['exp']:
+                tbl += f'<tr><td>Q{d["n"]}</td><td>{d["exp"]}{d["ei"]}</td></tr>'
+        tbl += '</table></div>'
+
+    elif fmt == 3:
+        per_page = 15
+        pages = [data[i:i + per_page] for i in range(0, len(data), per_page)]
+        body = ''
+        for pg_idx, page_data in enumerate(pages):
+            body += '<div class="columns">'
+            for d in page_data:
+                body += f'<div class="mcq"><span class="qnum">Q.{d["n"]}</span><div class="question">{d["q"]}{d["qi"]}</div>'
+                for oi in range(4):
+                    if d['opts'][oi]:
+                        body += f'<span class="opt">({BN[oi]}) {d["opts"][oi]}{d["oimgs"][oi]}</span> '
+                body += '</div>'
+            body += '</div>'
+            body += '<div style="margin-top:2px"><b>Ans:</b><table class="at"><tr>'
+            for d in page_data:
+                body += f'<td>Q{d["n"]}</td>'
+            body += '</tr><tr>'
+            for d in page_data:
+                body += f'<td><b>{d["al"]}</b></td>'
+            body += '</tr></table></div>'
+            if pg_idx < len(pages) - 1:
+                body += '<div style="page-break-after:always;"></div>'
+
+    elif fmt == 4:
+        body = '<div class="columns">'
+        for d in data:
+            body += f'<div class="mcq"><span class="qnum">Q.{d["n"]}</span><div class="question">{d["q"]}{d["qi"]}</div>'
+            for oi in range(4):
+                if d['opts'][oi]:
+                    body += f'<span class="opt">({BN[oi]}) {d["opts"][oi]}{d["oimgs"][oi]}</span> '
+            body += f'<span class="ans-inline"> Ans: {d["al"]}</span>'
+            if d['exp']:
+                body += f'<div class="exp">{d["exp"]}{d["ei"]}</div>'
+            body += '</div>'
+        body += '</div>'
+
+    elif fmt == 5:
+        body = '<div class="columns">'
+        for d in data:
+            body += f'<div class="mcq"><span class="qnum">Q.{d["n"]}</span><div class="question">{d["q"]}{d["qi"]}</div>'
+            for oi in range(4):
+                if d['opts'][oi]:
+                    body += f'<span class="opt">({BN[oi]}) {d["opts"][oi]}{d["oimgs"][oi]}</span> '
+            body += '</div>'
+        body += '</div>'
+        tbl = '<div style="border:2px solid #1B4F72;padding:8px;margin-top:10px"><h3>📋 Answer Key</h3>'
+        tbl += '<table class="at"><tr><th>Q.No</th><th>Ans</th><th>ব্যাখ্যা</th></tr>'
+        for d in data:
+            tbl += f'<tr><td>{d["n"]}</td><td><b>{d["al"]}</b></td><td>{d["exp"]}{d["ei"]}</td></tr>'
+        tbl += '</table></div>'
+
+    f = f'<div class="footer-pg">{ftr_txt or "Practice makes perfect"}</div>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}{tbl}{f}</body></html>'
+
 _sheet_cache = {}
 
 async def handle_sheet_command(msg: dict):
@@ -3573,6 +3800,8 @@ async def handle_sheet_command(msg: dict):
         _sheet_cache[cache_key] = {"mcqs": mcqs, "title": title}
 
         buttons = [[{"text": name, "callback_data": f"sheetstyle:{key}:{cache_key}"}]
+                   for key, name in _AM_FORMAT_NAMES.items()]
+        buttons += [[{"text": name, "callback_data": f"sheetstyle:{key}:{cache_key}"}]
                    for key, name in PRINT_STYLE_NAMES.items()]
         buttons.append([{"text": "📄 Default Style", "callback_data": f"sheetstyle:default:{cache_key}"}])
 
@@ -3605,7 +3834,7 @@ async def handle_sheet_style_callback(callback_query: dict):
     mcqs, title = cached["mcqs"], cached["title"]
     await tg_post("answerCallbackQuery", {"callback_query_id": callback_query["id"]})
 
-    style_label = PRINT_STYLE_NAMES.get(style_key, "Default")
+    style_label = _AM_FORMAT_NAMES.get(style_key) or PRINT_STYLE_NAMES.get(style_key, "Default")
     status_msg = await send_msg(chat_id, f"🎨 {style_label}\n⏳ 0% — শুরু হচ্ছে...")
     status_id = status_msg.get("result", {}).get("message_id")
     start_t = time.time()
@@ -3622,7 +3851,11 @@ async def handle_sheet_style_callback(callback_query: dict):
     try:
         async with _sheet_lock:
             await _progress(10)
-            if style_key == "default":
+            if style_key.startswith("format_"):
+                am_data = _am_build_mcq_data(mcqs)
+                fmt_num = int(style_key.split("_")[-1])
+                html_out = _am_build_html(am_data, title, fmt_num, title)
+            elif style_key == "default":
                 html_out = _build_solve_sheet_html(title, 1, mcqs)
             else:
                 data_adapted = _adapt_mcqs_for_print(mcqs)
