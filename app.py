@@ -3178,7 +3178,9 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
             chromium_bin, "--headless=new", "--no-sandbox",
             "--disable-gpu", "--disable-dev-shm-usage",
             "--disable-extensions", "--disable-background-networking",
-            "--js-flags=--max-old-space-size=128",
+            "--disable-software-rasterizer", "--disable-setuid-sandbox",
+            "--single-process", "--no-zygote",
+            "--js-flags=--max-old-space-size=96",
             f"--remote-debugging-port={debug_port}",
             "--remote-debugging-address=127.0.0.1",
             f"file://{html_path}",
@@ -3204,7 +3206,12 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
             except Exception:
                 continue
         if not ws_url:
-            raise RuntimeError("Chromium debug port not ready")
+            try:
+                stderr_data = await asyncio.wait_for(proc.stderr.read(4000), timeout=2)
+                logger.error(f"[PDF Gen] Chromium never opened debug port. stderr: {stderr_data.decode(errors='ignore')[:1000]}")
+            except Exception:
+                pass
+            raise RuntimeError("Chromium debug port not ready (process may have crashed/OOM)")
 
         if progress_cb:
             await progress_cb(55)
