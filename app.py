@@ -1007,14 +1007,20 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
     out = _cap_mcq_options(out, 4)
-    # কোনো MCQ-র explanation যদি শুধু উত্তর বলেই থেমে যায় (আশেপাশের সোর্স-তথ্য
-    # ছাড়া) — সেটার জন্য একটা targeted repair pass চালানো হয়, পুরো পেইজ আবার
-    # generate না করেই। ব্যর্থ হলেও মূল MCQ ডেলিভারি আটকায় না।
-    out = await _repair_thin_explanations(out, img, topic)
-    # explanation crop/full-page image attach removed — user requested faster
-    # /pdf turnaround; explanation text itself is kept, just no image.
-    out = await _verify_and_fix_page(out, img, topic, page_num, mcq_count)
-    return out
+    # Repair (fixes thin explanations on existing MCQs) and Verify (finds
+    # MCQs call-1 missed) touch disjoint data — run concurrently instead of
+    # sequentially to cut per-page latency roughly in half. Verify appends
+    # new items to `out`, so run it first into a temp var and merge after.
+    repair_task = asyncio.create_task(_repair_thin_explanations(list(out), img, topic))
+    verify_task = asyncio.create_task(_verify_and_fix_page(list(out), img, topic, page_num, mcq_count))
+    repaired, verified = await asyncio.gather(repair_task, verify_task)
+    # verified = original out + any newly-found MCQs (appended at the end).
+    # Rebuild: take repaired explanations for the original items, then append
+    # whatever new items verify found.
+    n_orig = len(out)
+    merged = repaired[:n_orig] if len(repaired) >= n_orig else repaired
+    merged = merged + verified[n_orig:]
+    return merged
 
 
 async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=None) -> list:
@@ -4310,23 +4316,30 @@ async def pdf_generate_all_pages(
     """
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
     start_time = time.time()
-    total_mcq = 0
-    results = []
+    results_by_idx = [None] * len(pages)
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
-    set_active_job(chat_id, f"PDF MCQ generation ({file_name}, page-by-page)")
+    set_active_job(chat_id, f"PDF MCQ generation ({file_name}, parallel)")
 
-    try:
-        if status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
+    # Concurrency cap: several pages generated at once instead of strictly
+    # sequential — cuts wall-clock time roughly by this factor while staying
+    # safe against provider rate limits (each page already does its own
+    # internal key rotation across providers).
+    _PDF_PARALLEL_PAGES = 4
+    sem = asyncio.Semaphore(_PDF_PARALLEL_PAGES)
+    lock = asyncio.Lock()
+    total_mcq_box = {"n": 0}
 
-        for idx, (page_num, img) in enumerate(pages):
+    async def _run_one(idx, page_num, img):
+        if is_cancelled(chat_id):
+            return
+        async with sem:
             if is_cancelled(chat_id):
-                break
-            page_status[idx]["current"] = True
-            if status_msg_id:
-                await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+                return
+            async with lock:
+                page_status[idx]["current"] = True
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id,
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0))
 
             mcqs = []
             try:
@@ -4334,18 +4347,29 @@ async def pdf_generate_all_pages(
             except Exception as e:
                 logger.error(f"[PDF Generate] Page {page_num} error: {e}")
 
-            results.append((page_num, img, mcqs))
-            total_mcq += len(mcqs)
-            page_status[idx]["current"] = False
-            page_status[idx]["done"] = True
-            page_status[idx]["mcq"] = len(mcqs)
-            if status_msg_id:
-                await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+            async with lock:
+                results_by_idx[idx] = (page_num, img, mcqs)
+                total_mcq_box["n"] += len(mcqs)
+                page_status[idx]["current"] = False
+                page_status[idx]["done"] = True
+                page_status[idx]["mcq"] = len(mcqs)
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id,
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0))
+
+    try:
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
+
+        await asyncio.gather(*[
+            _run_one(idx, page_num, img) for idx, (page_num, img) in enumerate(pages)
+        ])
     finally:
         _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
         clear_active_job(chat_id)
 
+    results = [r for r in results_by_idx if r is not None]
     return results
 
 
