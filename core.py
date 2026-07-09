@@ -700,6 +700,18 @@ async def db_save_mcq_cache(cache_id: str, session_id: str, page: int,
         }).execute()
     except Exception as e:
         logger.error(f"[DB] save_mcq_cache error: {e}")
+    # DURABILITY: mirror into D1 `quizzes` table too (same table/schema the
+    # qz_ web-quiz path already uses) so the Website Exam link survives even
+    # if Supabase (primary store above) is ever unreachable/deleted — get_exam_data
+    # already knows how to read this table as a fallback source.
+    try:
+        import json as _json
+        await d1_run(
+            "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            [cache_id, topic or "ATLAS MCQ", "", 30, 0, _json.dumps(mcqs), "", "", 0]
+        )
+    except Exception as e:
+        logger.warning(f"[DB] D1 mirror for pdf_mcq_cache failed (non-fatal): {e}")
 
 async def db_update_cache(cache_id: str, fields: dict):
     try:
@@ -714,6 +726,22 @@ async def db_get_mcq_cache(cache_id: str) -> dict:
             return r.data[0]
     except Exception as e:
         logger.error(f"[DB] get_mcq_cache error: {e}")
+    # DURABILITY FALLBACK: Supabase (primary) failed/empty — try the D1 mirror
+    # (written by db_save_mcq_cache above) so the exam link still works.
+    try:
+        rows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [cache_id])
+        if rows:
+            row = rows[0]
+            import json as _json
+            mcqs = _json.loads(row.get("csv_data", "[]"))
+            return {
+                "id": cache_id, "session_id": cache_id, "page_number": 1,
+                "topic": row.get("name", "ATLAS MCQ"), "mcq_data": mcqs,
+                "poll_links": [], "image_file_id": None, "image_msg_id": None,
+                "channel_id": "", "is_new_gen": False, "end_msg_id": None,
+            }
+    except Exception as e:
+        logger.warning(f"[DB] D1 fallback for get_mcq_cache failed: {e}")
     return None
 
 async def db_get_new_gen_count(cache_id: str, user_id: int) -> int:
