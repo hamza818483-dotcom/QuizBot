@@ -613,7 +613,10 @@ function doSubmit(){
   html+=`
     <button class="result-btn"          onclick="window.open('https://Atlascourses.com','_blank')">🌐 ATLAS Courses</button>
     <button class="result-btn"          onclick="window.open('https://wa.me/8801999681290','_blank')">💬 WhatsApp</button>
-    <button class="result-btn"          onclick="window.open('https://t.me/MediAtlas/4221','_blank')">📢 Groups+Channels</button>
+    <button class="result-btn"          onclick="window.open('https://t.me/MediAtlas/4221','_blank')">📢 Groups+Channels</button>`;
+  if(backUrl)
+    html+=`<button class="result-btn" onclick="window.open('${backUrl}','_blank')">↩️ Back to Source</button>`;
+  html+=`
   </div>
   <div class="divider"></div>
   <div class="section-title">📋 Solve Sheet</div>
