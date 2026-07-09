@@ -4344,9 +4344,13 @@ async def pdf_generate_all_pages(
             mcqs = []
             try:
                 mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"[PDF Generate] Page {page_num} error: {e}")
 
+            if is_cancelled(chat_id):
+                return
             async with lock:
                 results_by_idx[idx] = (page_num, img, mcqs)
                 total_mcq_box["n"] += len(mcqs)
@@ -4357,14 +4361,34 @@ async def pdf_generate_all_pages(
                     await edit_msg(chat_id, status_msg_id,
                         _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0))
 
+    async def _watch_cancel(tasks):
+        # Polls the cancel flag while pages are in flight; the moment /cancel
+        # is issued, actively cancels every still-running page task instead
+        # of letting gather() wait for all of them to finish naturally.
+        while not all(t.done() for t in tasks):
+            if is_cancelled(chat_id):
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                return
+            await asyncio.sleep(0.3)
+
     try:
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
 
-        await asyncio.gather(*[
-            _run_one(idx, page_num, img) for idx, (page_num, img) in enumerate(pages)
-        ])
+        tasks = [
+            asyncio.create_task(_run_one(idx, page_num, img))
+            for idx, (page_num, img) in enumerate(pages)
+        ]
+        watcher = asyncio.create_task(_watch_cancel(tasks))
+        await asyncio.gather(*tasks, return_exceptions=True)
+        watcher.cancel()
+        try:
+            await watcher
+        except asyncio.CancelledError:
+            pass
     finally:
         _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
         clear_active_job(chat_id)
