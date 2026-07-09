@@ -3210,7 +3210,7 @@ async def _html_to_pdf_impl(html: str, progress_cb=None) -> bytes:
                 chromium_bin, "--headless=new", "--no-sandbox",
                 "--disable-gpu", "--disable-dev-shm-usage",
                 "--disable-extensions", "--disable-background-networking",
-                "--disable-setuid-sandbox", "--no-zygote",
+                "--disable-setuid-sandbox", "--no-zygote", "--single-process",
                 "--disable-namespace-sandbox", "--disable-seccomp-filter-sandbox",
                 "--disable-dbus", "--disable-features=DBus",
                 "--disable-crash-reporter", "--no-crash-upload",
