@@ -3150,9 +3150,9 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
   async with _PDF_SEMAPHORE:
     task = asyncio.ensure_future(_html_to_pdf_impl(html, progress_cb))
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=60)
+        return await asyncio.wait_for(asyncio.shield(task), timeout=90)
     except asyncio.TimeoutError:
-        logger.error("[PDF Gen] Timed out after 60s")
+        logger.error("[PDF Gen] Timed out after 90s")
         task.cancel()
         try:
             await task
@@ -3647,6 +3647,10 @@ async def handle_sheet_style_callback(callback_query: dict):
 
         if not pdf_bytes:
             await edit_msg(chat_id, status_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
+            try:
+                await notify_owner(f"⚠️ /sheet PDF gen failed (empty result), style={style_key}, title={title}, mcqs={len(mcqs)}")
+            except Exception:
+                pass
             return
 
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Sheet"
@@ -3657,6 +3661,10 @@ async def handle_sheet_style_callback(callback_query: dict):
         logger.error(f"[SHEET STYLE] Error: {e}")
         if status_id:
             await edit_msg(chat_id, status_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
+        try:
+            await notify_owner(f"⚠️ /sheet PDF gen exception: {str(e)[:300]}")
+        except Exception:
+            pass
 
 # ============================================================
 # SOLVE SHEET PDF — Practice Sheet same style (2-col, boxed)
