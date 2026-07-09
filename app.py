@@ -5303,6 +5303,46 @@ Output ONLY a JSON array of the MISSED MCQs (same schema as before):
         return call1_mcqs
 
 
+async def _qbm_final_empty_page_scan(img) -> list:
+    """
+    CALL 3 (empty-page variant) — used ONLY when Call 1 AND Call 2 BOTH
+    returned zero MCQs. Two independent empty results is a strong signal but
+    not proof (both calls could share the same blind spot, e.g. faint text,
+    an MCQ tucked in a corner/footnote, or an OCR gap). This does one final,
+    independent, fresh-eyes scan of the raw page image before the pipeline is
+    allowed to confirm "this page truly has 0 MCQ".
+    Strong combination rule: only when ALL THREE calls (1, 2, and this final
+    scan) agree on zero is the page marked confirmed-empty.
+    """
+    try:
+        prompt = """Two prior independent passes over this exact page image both concluded
+there is NO existing MCQ (multiple-choice question) on this page.
+
+TASK: Do one final, completely fresh scan of the page, ignoring the prior
+passes' conclusion. Look carefully at every part of the page including
+footnotes, page corners/margins, faint or small text, and any question that
+might be split across a passage/উদ্দীপক.
+
+If you find even ONE existing MCQ that was missed, extract it in the strict
+format below (options in exact source position order, A/B/C/D by position —
+never relabeled/sorted). If it depends on a passage/উদ্দীপক, prepend that
+passage's full text to the question (self-contained).
+
+If the page genuinely has no MCQ at all, output exactly: []
+
+Output ONLY a JSON array:
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]"""
+        txt = await _qbm_groq_call(img, prompt)
+        found = _qbm_parse_json(txt) if txt else []
+        if not found:
+            gem_txt = await _qbm_gemini_raw(img, prompt)
+            found = _qbm_parse_json(gem_txt) if gem_txt else []
+        return _qbm_dedup_list(found) if found else []
+    except Exception as e:
+        logger.warning(f"[QBM Call3-empty] failed: {e}")
+        return []
+
+
 async def _qbm_call3_verify(img, mcqs: list, page_confirmed_complete: bool) -> list:
     """
     CALL 3 — per-MCQ verification, connected to Call 1+2:
@@ -5468,7 +5508,15 @@ async def _qbm_extract_from_image(img) -> list:
         page_confirmed_complete = (len(call2) == before_call2)  # no misses added, no dupes removed
 
         if not call2:
-            return []  # Confirmed by both Call 1 and Call 2: page genuinely has no MCQ
+            # STRONG COMBINATION CHECK: Call 1 and Call 2 both say zero. Don't
+            # trust two-in-agreement alone -- run one final independent scan
+            # (Call 3's empty-page variant). Only if all THREE calls agree on
+            # zero is the page confirmed truly empty.
+            final_check = await _qbm_final_empty_page_scan(img)
+            if not final_check:
+                return []  # Confirmed by all 3 calls: page genuinely has no MCQ
+            # Call 3 found something the first two missed -- verify it properly.
+            return _cap_mcq_options(await _qbm_call3_verify(img, final_check, False))
 
         call3 = await _qbm_call3_verify(img, call2, page_confirmed_complete)
         return _cap_mcq_options(call3)
