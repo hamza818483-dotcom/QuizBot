@@ -300,7 +300,7 @@ try {
 let examData = null, questions = [], origQs = [];
 let userAnswers = {}, bookmarks = {};
 let submitted = false;
-let tag = '', expFooter = '', channelId = '', imageMsgId = null, endMsgId = null;
+let tag = '', expFooter = '', channelId = '', imageMsgId = null, endMsgId = null, imageFileId = null;
 let isNewGen = false;
 let totalSec = 0, totalLeft = 0, totalTimer = null;
 
@@ -319,6 +319,7 @@ async function init() {
     channelId  = d.channel_id || '';
     imageMsgId = d.image_msg_id || null;
     endMsgId   = d.end_msg_id   || null;
+    imageFileId = d.image_file_id || null;
     isNewGen   = d.is_new_gen   || false;
 
     document.getElementById('headerSub').textContent = d.topic || 'Special Exam';
@@ -572,7 +573,14 @@ function doSubmit(){
 
   const backUrl = buildBackUrl(channelId, endMsgId || imageMsgId);
 
-  let html=`
+  const previewSrc = imageFileId ? `${HF_URL}/api/tg-image/${imageFileId}` : '';
+  let html = previewSrc ? `
+  <div class="result-preview-wrap" style="text-align:center;margin-bottom:14px;">
+    <img src="${previewSrc}" onclick="openImgModal('${previewSrc}')"
+         style="max-width:220px;width:60%;border-radius:10px;cursor:zoom-in;box-shadow:0 2px 10px rgba(0,0,0,.25);"
+         onerror="this.parentElement.style.display='none'">
+  </div>` : '';
+  html+=`
   <div class="result-score-card">
     <div class="result-name">📝 ${examData.topic||'ATLAS Exam'}</div>
     <div><span class="result-big">${fin}</span><span class="result-denom">/${questions.length}</span></div>
