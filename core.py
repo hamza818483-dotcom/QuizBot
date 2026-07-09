@@ -557,17 +557,59 @@ async def notify_owner(text: str):
         await send_msg(OWNER_ID, f"🔔 <b>ATLAS BOT Alert</b>\n\n{text}")
 
 # ============================================================
+# PYROGRAM CLIENT (large file download, >20MB, Bot API getFile bypass)
+# ============================================================
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+_pyro_client = None
+
+async def _get_pyro_client():
+    global _pyro_client
+    if _pyro_client is None and TELEGRAM_API_ID and TELEGRAM_API_HASH:
+        from pyrogram import Client
+        _pyro_client = Client(
+            "atlas_pyrogram", api_id=int(TELEGRAM_API_ID),
+            api_hash=TELEGRAM_API_HASH, bot_token=BOT_TOKEN, no_updates=True,
+            in_memory=True,
+        )
+        await _pyro_client.start()
+    return _pyro_client
+
+async def download_large_file_pyrogram(chat_id: int, message_id: int) -> Optional[bytes]:
+    try:
+        client = await _get_pyro_client()
+        if not client:
+            logger.error("[pyrogram] TELEGRAM_API_ID/HASH not set, cannot download large file")
+            return None
+        msg = await client.get_messages(chat_id, message_id)
+        if not msg or not (msg.document or msg.video or msg.audio):
+            return None
+        file_bytes = await client.download_media(msg, in_memory=True)
+        if file_bytes is None:
+            return None
+        return file_bytes.getvalue() if hasattr(file_bytes, "getvalue") else file_bytes
+    except Exception as e:
+        logger.error(f"[pyrogram] download error: {e}")
+        return None
+
+# ============================================================
 # DOWNLOAD FILE VIA CF PROXY
 # ============================================================
-async def download_tg_file(file_id: str, progress_cb=None) -> bytes:
+async def download_tg_file(file_id: str, progress_cb=None,
+                           chat_id: int = None, message_id: int = None) -> bytes:
     file_res = await tg_post("getFile", {"file_id": file_id})
     if not file_res.get("ok"):
+        if chat_id is not None and message_id is not None:
+            logger.warning("[download_tg_file] getFile failed, trying pyrogram fallback")
+            big = await download_large_file_pyrogram(chat_id, message_id)
+            if big is not None:
+                return big
         desc = file_res.get("description")
         if not desc:
             raise Exception(
                 "getFile failed: file likely exceeds Telegram Bot API's 20MB download "
-                "limit (large multi-page PDFs often do). Split the file into smaller "
-                "parts and try again."
+                "limit (large multi-page PDFs often do). Pyrogram fallback also failed — "
+                "check TELEGRAM_API_ID/TELEGRAM_API_HASH env vars."
             )
         raise Exception(f"getFile failed: {desc}")
     file_path = file_res["result"]["file_path"]
