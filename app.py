@@ -9356,28 +9356,18 @@ async def _ram_guard_task() -> None:
 
 
 async def _keepalive_task() -> None:
-    """Self-ping own Render URL /health every 5 min for 24/7 uptime
-    (prevents Render free-tier sleep). Tracks consecutive failures and
-    alerts owner if the service looks down."""
+    """Self-ping own service URL /health every 5 min for 24/7 uptime
+    (prevents platform sleep). Alerting disabled — AtlasBot handles
+    monitoring/alerts now."""
     await asyncio.sleep(60)
     logger.info("[App] Keep-alive task started")
-    fails = 0
     while True:
         if RENDER_URL:
             try:
                 async with httpx.AsyncClient(timeout=40) as client:
-                    r = await client.get(f"{RENDER_URL.rstrip('/')}/health")
-                    if r.status_code == 200:
-                        fails = 0
-                    else:
-                        fails += 1
+                    await client.get(f"{RENDER_URL.rstrip('/')}/health")
             except Exception:
-                fails += 1
-            if fails == 3:
-                try:
-                    await notify_owner(f"🚨 QuizBot keep-alive: {fails} consecutive /health failures — bot may be down.")
-                except Exception:
-                    pass
+                pass
         await asyncio.sleep(300)
 
 
@@ -9539,15 +9529,15 @@ async def startup():
                         pass
                 await asyncio.sleep(wait)
 
-    # Self-ping keep-alive: prevents Render free-tier from sleeping.
+    # Self-ping keep-alive: prevents platform sleep. Watchdog alert tasks
+    # disabled per request — AtlasBot now handles all external monitoring.
     asyncio.create_task(_supervised(_keepalive_task, "_keepalive_task"))
     asyncio.create_task(_supervised(_memory_cleanup_task, "_memory_cleanup_task"))
     asyncio.create_task(_supervised(_ram_guard_task, "_ram_guard_task"))
     asyncio.create_task(_supervised(_scheduled_restart_task, "_scheduled_restart_task"))
-    # Independent watchdog: separate timing, detects if keep-alive itself dies.
-    asyncio.create_task(_supervised(_watchdog_task, "_watchdog_task"))
-    asyncio.create_task(_supervised(_watchdog2_task, "_watchdog2_task"))
-    asyncio.create_task(_supervised(_cross_bot_watchdog_task, "_cross_bot_watchdog_task"))
+    # asyncio.create_task(_supervised(_watchdog_task, "_watchdog_task"))  # DISABLED — AtlasBot monitors instead
+    # asyncio.create_task(_supervised(_watchdog2_task, "_watchdog2_task"))  # DISABLED — AtlasBot monitors instead
+    # asyncio.create_task(_supervised(_cross_bot_watchdog_task, "_cross_bot_watchdog_task"))  # DISABLED
 
     if not BOT_TOKEN:
         logger.error("[App] BOT_TOKEN missing!")
