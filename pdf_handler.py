@@ -270,6 +270,19 @@ def image_to_bytes(img: Image.Image) -> bytes:
 # ============================================================
 # JSON PARSE HELPER (shared)
 # ============================================================
+def _strip_q_numbering(q: str) -> str:
+    """প্রশ্নের শুরুতে numbering prefix (1) 14) 1. Q1. ইত্যাদি) সরায়।"""
+    if not q:
+        return q
+    pattern = r'^\s*(?:[Qq]\.?\s*)?[\d১২৩৪৫৬৭৮৯০]{1,3}\s*[).।:.\-]\s*'
+    cur = q
+    for _ in range(2):
+        new = re.sub(pattern, '', cur)
+        if new == cur:
+            break
+        cur = new
+    return cur.strip()
+
 def _parse_mcq_json(text: str) -> list:
     text = text.strip()
     if "```json" in text:
@@ -284,6 +297,7 @@ def _parse_mcq_json(text: str) -> list:
     for m in mcqs:
         if all(k in m for k in ["question", "options", "answer", "explanation"]):
             if len(m["options"]) == 4 and m["answer"] in ["A", "B", "C", "D"]:
+                m["question"] = _strip_q_numbering(str(m.get("question", "")))
                 # Defense-in-depth: navigation-label-like options (e.g. "Card 1",
                 # "Section 2") indicate the AI leaked page-structure text into the
                 # options instead of real content — reject this MCQ entirely.

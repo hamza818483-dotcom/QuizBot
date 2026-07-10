@@ -710,6 +710,27 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"exp_bbox\":[100,200,900,350]}}]"
     )
 
+def _strip_q_numbering(q: str) -> str:
+    """
+    Question টেক্সটের শুরুতে যেকোনো ধরনের numbering prefix (1) 14) 1. Q1. Q.1
+    ক) ১) ইত্যাদি) সরিয়ে দেয়, প্রশ্নের বাকি অংশ অক্ষত রেখে। AI prompt-এ নিষেধ
+    থাকা সত্ত্বেও মাঝেমধ্যে numbering দিয়ে ফেলে — এই safety-net সব MCQ সোর্সে
+    (/pdf, /img, /txt, /poll) parse-time এ প্রয়োগ হয় যাতে কখনো miss না যায়।
+    """
+    if not q:
+        return q
+    # ইংরেজি/বাংলা সংখ্যা + ঐচ্ছিক ) . । স্পেস — শুরুতে একবার বা দুইবার (Q1. এর মতো)
+    pattern = r'^\s*(?:[Qq]\.?\s*)?[\d১২৩৪৫৬৭৮৯০]{1,3}\s*[).।:.\-]\s*'
+    prev = None
+    cur = q
+    # চেইনড prefix (যেমন "Q1) 2." ভুলে দুইবার) ধরার জন্য সর্বোচ্চ ২ বার strip
+    for _ in range(2):
+        new = re.sub(pattern, '', cur)
+        if new == cur:
+            break
+        cur = new
+    return cur.strip()
+
 def _parse_mcq_json(text: str) -> list:
     if not text:
         return []
@@ -732,6 +753,7 @@ def _parse_mcq_json(text: str) -> list:
             if not isinstance(it, dict):
                 continue
             q = (it.get("question") or it.get("q") or "").strip()
+            q = _strip_q_numbering(q)
             opts = it.get("options") or it.get("opts") or []
             if not q or not isinstance(opts, list) or len(opts) < 2:
                 continue
@@ -2809,7 +2831,7 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
             ans_map = {"1": "A", "2": "B", "3": "C", "4": "D", "A": "A", "B": "B", "C": "C", "D": "D"}
             ans = ans_map.get(ans_raw, "A")
             mcqs.append({
-                "question": q.strip(), "options": opts, "answer": ans,
+                "question": _strip_q_numbering(q.strip()), "options": opts, "answer": ans,
                 "explanation": row.get("explanation", "").strip()
             })
         return mcqs
@@ -5561,10 +5583,9 @@ def _qbm_parse_json(text: str) -> list:
             opts = mc.get("options", {})
             if not q or not opts:
                 continue
-            # Clean numbering prefix
+            # Clean numbering prefix + trailing bracket artifacts
             q = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q)
-            q = re.sub(r'^\s*[\d০-৯]+\s*[.)\-:\s]+\s*', '', q)
-            q = re.sub(r'^\s*[Qq]\.?\s*[\d]+\s*[.)\-:\s]*\s*', '', q)
+            q = _strip_q_numbering(q)
             opts_list = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
             expl = mc.get("explanation", "")
             if _has_mixed_digit_script(q) or any(_has_mixed_digit_script(o) for o in opts_list) or _has_mixed_digit_script(expl):
