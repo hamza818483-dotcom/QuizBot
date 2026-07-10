@@ -535,7 +535,7 @@ async def generate_mcq_from_image(
                     ]
                 )
 
-            response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=25)
+            response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=45)
             valid = _parse_mcq_json(response.text)
             valid = await _attach_explanation_images(valid, img)
             logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1})")
@@ -616,7 +616,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
                     contents=[types.Part.from_text(text=prompt)]
                 )
 
-            response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=25)
+            response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=45)
             valid = _parse_text_json(response.text)
             if valid:
                 logger.info(f"[Gemini-Text] {len(valid)} MCQs (attempt {attempt+1})")
@@ -716,29 +716,27 @@ def parse_pdf_command(text: str) -> dict:
             m_match = re.search(r'-m\s+(\S+)', text)
             if m_match:
                 result["topic"] = m_match.group(1)
-        # [.N.] বা [N] বা [N-M] ব্র্যাকেট: প্রতি পেইজে কতগুলো MCQ বানাতে হবে সেটা স্পষ্টভাবে
-        # বোঝায় (কমান্ডের শেষে থাকা bare সংখ্যার অস্পষ্ট অনুমানের চেয়ে অগ্রাধিকার পাবে)।
-        # Range দেওয়া হলে (mcq_count_min, mcq_count_max) হিসেবে স্টোর হয়, single number
-        # দেওয়া হলে mcq_count একটাই exact number থাকে (আগের মতোই)।
+        # [N-M] রেঞ্জ ব্র্যাকেট: প্রতি পেইজে MCQ সংখ্যা এই রেঞ্জের মধ্যে strictly
+        # রাখতে হবে (min-max দুটোই মানতে হবে, কমও না বেশিও না)
         range_match = re.search(r'\[\.?(\d+)\s*-\s*(\d+)\.?\]', text)
-        bracket_match = None if range_match else re.search(r'\[\.?(\d+)\.?\]', text)
         if range_match:
             lo, hi = int(range_match.group(1)), int(range_match.group(2))
-            if lo > hi:
-                lo, hi = hi, lo
-            result["mcq_count_min"] = lo
-            result["mcq_count_max"] = hi
-            result["mcq_count"] = hi  # backward-compat: callers using mcq_count alone get the upper bound
-        elif bracket_match:
-            result["mcq_count"] = int(bracket_match.group(1))
+            result["mcq_count_min"] = min(lo, hi)
+            result["mcq_count_max"] = max(lo, hi)
         else:
-            cmd_part = text.split('/pdf')[1] if '/pdf' in text else text
-            nums = re.findall(r'(?<!\d)(\d+)(?!\d)', cmd_part)
-            if nums:
-                last_num = int(nums[-1])
-                page_nums = result["page_range"].replace("-", " ").split() if result["page_range"] else []
-                if str(last_num) not in page_nums and last_num < 200:
-                    result["mcq_count"] = last_num
+            # [.N.] বা [N] ব্র্যাকেট: প্রতি পেইজে কতগুলো MCQ বানাতে হবে সেটা স্পষ্টভাবে
+            # বোঝায় (কমান্ডের শেষে থাকা bare সংখ্যার অস্পষ্ট অনুমানের চেয়ে অগ্রাধিকার পাবে)
+            bracket_match = re.search(r'\[\.?(\d+)\.?\]', text)
+            if bracket_match:
+                result["mcq_count"] = int(bracket_match.group(1))
+            else:
+                cmd_part = text.split('/pdf')[1] if '/pdf' in text else text
+                nums = re.findall(r'(?<!\d)(\d+)(?!\d)', cmd_part)
+                if nums:
+                    last_num = int(nums[-1])
+                    page_nums = result["page_range"].replace("-", " ").split() if result["page_range"] else []
+                    if str(last_num) not in page_nums and last_num < 200:
+                        result["mcq_count"] = last_num
     except Exception as e:
         logger.error(f"[Parse] PDF command error: {e}")
     return result
