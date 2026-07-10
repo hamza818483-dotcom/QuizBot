@@ -501,7 +501,22 @@ async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
 
 
 def _build_mcq_prompt(topic: str, count) -> str:
-    if count:
+    count_min = count_max = None
+    if isinstance(count, (tuple, list)) and len(count) == 2:
+        count_min, count_max = count[0], count[1]
+        count = None
+    if count_min and count_max:
+        count_rule = (
+            f"STRICT RANGE REQUIRED: Extract BETWEEN {count_min} AND {count_max} MCQs "
+            f"from this page — never fewer than {count_min}, never more than {count_max}. "
+            f"If the page doesn't have enough distinct information for {count_min}, "
+            f"get as close as possible by rephrasing/re-angling the same facts from "
+            f"different angles (different question style, different correct option "
+            f"position) — never stop early just because it feels repetitive. If the "
+            f"page has more content than {count_max} MCQs worth, pick the {count_max} "
+            f"most important/highest-priority facts (highlighted/marked content first)."
+        )
+    elif count:
         count_rule = (
             f"EXACT COUNT REQUIRED: Extract exactly {count} MCQs from this page. "
             f"If the page genuinely doesn't have enough distinct information for "
@@ -755,7 +770,7 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
             ]
         }],
         "temperature": 0.3,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
     }
     try:
         async with httpx.AsyncClient(timeout=120) as c:
@@ -889,7 +904,7 @@ async def _gen_hf(img, topic, count):
                 {"type": "image_url", "image_url": {"url": data_url}}
             ]
         }],
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "temperature": 0.3,
     }
     try:
@@ -1060,6 +1075,9 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
     out = _cap_mcq_options(out, 4)
+    _rng_max = mcq_count[1] if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2 else None
+    if _rng_max and len(out) > _rng_max:
+        out = out[:_rng_max]
     # Repair (fixes thin explanations on existing MCQs) and Verify (finds
     # MCQs call-1 missed) touch disjoint data — run concurrently instead of
     # sequentially to cut per-page latency roughly in half. Verify appends
@@ -1073,6 +1091,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     n_orig = len(out)
     merged = repaired[:n_orig] if len(repaired) >= n_orig else repaired
     merged = merged + verified[n_orig:]
+    if _rng_max and len(merged) > _rng_max:
+        merged = merged[:_rng_max]
     return merged
 
 
@@ -1087,8 +1107,17 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
     any failure here just returns the original call-1 output untouched.
     """
     try:
-        count_target = mcq_count if mcq_count else 15
+        count_min = count_max = None
+        if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
+            count_min, count_max = mcq_count[0], mcq_count[1]
+            count_target = count_max
+        else:
+            count_target = mcq_count if mcq_count else 15
         current_n = len(mcqs or [])
+        # If a strict range was given and we're already at/above max, don't
+        # ask verify to add more — would violate the user's upper bound.
+        if count_max and current_n >= count_max:
+            return mcqs
         existing_qs = "\n".join(f"- {m.get('question','')[:100]}" for m in (mcqs or [])[:40])
         verify_prompt = (
             f"You are STRICTLY auditing MCQ coverage for this page (Topic: {topic}).\n"
@@ -1138,6 +1167,8 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
             combined_extra = _cap_mcq_options(combined_extra, 4)
             logger.info(f"[Verify] page {page_num}: call-2 added {len(combined_extra)} missed MCQs (groq={len(extra)}, gemini_extra={len(combined_extra)-len(extra)})")
             mcqs = (mcqs or []) + combined_extra
+            if count_max and len(mcqs) > count_max:
+                mcqs = mcqs[:count_max]
     except Exception as e:
         logger.warning(f"[Verify] page {page_num} verification skipped: {e}")
     return mcqs
@@ -4216,6 +4247,8 @@ async def handle_pdf(msg: dict):
     page_range = params["page_range"]
     channel_id = params["channel_id"]
     mcq_count = params["mcq_count"]
+    if params.get("mcq_count_min") and params.get("mcq_count_max"):
+        mcq_count = (params["mcq_count_min"], params["mcq_count_max"])
     thread_id = params.get("thread_id")
     file_name = reply["document"].get("file_name", "document.pdf")
     file_id = reply["document"]["file_id"]
@@ -4803,6 +4836,8 @@ async def handle_pdfm(msg: dict):
     page_range = params["page_range"]
     channel_id = params["channel_id"]
     mcq_count = params["mcq_count"]
+    if params.get("mcq_count_min") and params.get("mcq_count_max"):
+        mcq_count = (params["mcq_count_min"], params["mcq_count_max"])
     thread_id = params["thread_id"]
 
     file_id = reply["document"]["file_id"]
@@ -4884,7 +4919,9 @@ def _parse_pdfm_params(text: str) -> dict:
         "channel_id": None,
         "topic": None,
         "thread_id": None,
-        "mcq_count": None
+        "mcq_count": None,
+        "mcq_count_min": None,
+        "mcq_count_max": None
     }
 
     m = re.search(r'-p\s+([\d,\-]+)', text)
@@ -4903,14 +4940,20 @@ def _parse_pdfm_params(text: str) -> dict:
     if m:
         result["thread_id"] = int(m.group(1))
 
-    m_bracket = re.search(r'\[(\d+)\]', text)
-    if m_bracket:
-        result["mcq_count"] = int(m_bracket.group(1))
+    m_range = re.search(r'\[(\d+)\s*-\s*(\d+)\]', text)
+    if m_range:
+        lo, hi = int(m_range.group(1)), int(m_range.group(2))
+        result["mcq_count_min"] = min(lo, hi)
+        result["mcq_count_max"] = max(lo, hi)
     else:
-        cleaned = re.sub(r'-[pcmt]\s+\S+', '', text)
-        m2 = re.search(r'(\d+)\s*$', cleaned)
-        if m2:
-            result["mcq_count"] = int(m2.group(1))
+        m_bracket = re.search(r'\[(\d+)\]', text)
+        if m_bracket:
+            result["mcq_count"] = int(m_bracket.group(1))
+        else:
+            cleaned = re.sub(r'-[pcmt]\s+\S+', '', text)
+            m2 = re.search(r'(\d+)\s*$', cleaned)
+            if m2:
+                result["mcq_count"] = int(m2.group(1))
 
     return result
 
