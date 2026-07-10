@@ -814,10 +814,15 @@ async def _gen_groq(img, topic, count):
     if not data_url:
         return []
     prompt = _build_mcq_prompt(topic, count)
+    # meta-llama/llama-4-scout-17b-16e-instruct was deprecated by Groq on
+    # 2026-06-17 (see console.groq.com/docs/deprecations) — every call to it
+    # now fails, which silently fell through to Gemini. qwen/qwen3.6-27b is
+    # Groq's current vision-capable replacement (openai/gpt-oss-120b, their
+    # other suggested replacement, is text-only and can't process images).
     for i, key in enumerate(keys):
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
-            key, "meta-llama/llama-4-scout-17b-16e-instruct",
+            key, "qwen/qwen3.6-27b",
             data_url, prompt
         )
         if txt:
@@ -825,7 +830,10 @@ async def _gen_groq(img, topic, count):
         if status == 429:
             logger.warning(f"[Groq] key #{i+1}/{len(keys)} quota exhausted (429), trying next key")
             continue
-        break
+        # Any other error (400/404/5xx/network) — log and still try the next
+        # key instead of giving up immediately, since a single bad key/model
+        # response shouldn't block the whole provider when others might work.
+        logger.warning(f"[Groq] key #{i+1}/{len(keys)} failed (status={status}), trying next key")
     return []
 
 async def _gen_nvidia(img, topic, count):
@@ -1058,13 +1066,13 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
     for key in keys:
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
-            key, "meta-llama/llama-4-scout-17b-16e-instruct",
+            key, "qwen/qwen3.6-27b",
             data_url, prompt
         )
         if txt:
             return txt
         if status != 429:
-            break
+            logger.warning(f"[GroqVerify] key failed (status={status}), trying next key")
     return ""
 
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
@@ -5583,13 +5591,13 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     for key in keys:
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
-            key, "meta-llama/llama-4-scout-17b-16e-instruct",
+            key, "qwen/qwen3.6-27b",
             data_url, prompt
         )
         if txt:
             return txt
         if status != 429:
-            break
+            logger.warning(f"[Groq-QBM] key failed (status={status}), trying next key")
     return ""
 
 
@@ -6125,13 +6133,14 @@ Return ONLY the JSON array, nothing else."""
                 for key in keys:
                     txt, status = await _post_openai_compat(
                         "https://api.groq.com/openai/v1/chat/completions",
-                        key, "meta-llama/llama-4-scout-17b-16e-instruct",
+                        key, "qwen/qwen3.6-27b",
                         data_url, prompt
                     )
                     if txt:
                         result_json = _qbm_parse_json(txt)
                         break
                     if status != 429:
+                        logger.warning(f"[Groq-QBM2] key failed (status={status}), falling through to Gemini")
                         break
 
         if not result_json:
