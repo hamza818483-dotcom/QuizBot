@@ -538,11 +538,25 @@ async def finish_d1_quiz(session: dict):
         )
         attempt = (cnt[0]["cnt"] if cnt else 0) + 1
 
-        _ok, result_id = await d1_run(
-            "INSERT INTO quiz_results (user_id, user_name, quiz_id, right_count, wrong_count, skip_count, total, score, attempt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            [uid, uname, quiz_id, right, wrong, skip, tot, score, attempt],
-            return_id=True
-        )
+        # RELIABILITY: this INSERT is the one thing that makes "Practice
+        # (Wrong only/Wrong+Skip)" work later — a single transient network
+        # hiccup here used to permanently break mistake-practice for this
+        # attempt with zero visibility. Retry a couple of times before
+        # giving up, since the summary message gets sent either way.
+        _ok = False
+        result_id = None
+        for _attempt_n in range(3):
+            _ok, result_id = await d1_run(
+                "INSERT INTO quiz_results (user_id, user_name, quiz_id, right_count, wrong_count, skip_count, total, score, attempt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                [uid, uname, quiz_id, right, wrong, skip, tot, score, attempt],
+                return_id=True
+            )
+            if _ok:
+                break
+            logger.warning(f"[Quiz] quiz_results insert attempt {_attempt_n+1}/3 failed, retrying...")
+            await asyncio.sleep(0.6 * (_attempt_n + 1))
+        if not _ok:
+            logger.error(f"[Quiz] quiz_results insert FAILED after 3 attempts for user={uid} quiz={quiz_id} — mistake-practice will show 'No previous attempt found' for this run")
 
         # Fallback: if meta.last_row_id unavailable, look it up via a fresh SELECT
         if not result_id:
@@ -605,13 +619,16 @@ async def finish_d1_quiz(session: dict):
     if session.get("is_mistake"):
         kb = {"inline_keyboard": [[{"text": "📌 আবার প্রাক্টিস করো", "url": link}]]}
     else:
-        kb = {"inline_keyboard": [
+        kb_rows = [
             [{"text": "📌 আবার প্রাক্টিস করো", "url": link}],
             [{"text": "👥 Leaderboard", "callback_data": f"qzlb_{quiz_id}"},
              {"text": "📈 History", "callback_data": f"qzhist_{quiz_id}"}],
-            [{"text": "🔴 Practice (Wrong only)", "callback_data": f"qzmp1_{quiz_id}"}],
-            [{"text": "🟡 Practice (Wrong+Skip)", "callback_data": f"qzmp2_{quiz_id}"}]
-        ]}
+        ]
+        if wrong > 0:
+            kb_rows.append([{"text": f"🔴 Practice (Wrong only) ({wrong})", "callback_data": f"qzmp1_{quiz_id}"}])
+        if (wrong + skip) > 0:
+            kb_rows.append([{"text": f"🟡 Practice (Wrong+Skip) ({wrong + skip})", "callback_data": f"qzmp2_{quiz_id}"}])
+        kb = {"inline_keyboard": kb_rows}
 
     await send_msg(chat_id, txt, reply_markup=kb)
 
