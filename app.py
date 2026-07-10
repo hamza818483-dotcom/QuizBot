@@ -4854,7 +4854,7 @@ async def _process_pdf_pages_inner(
         total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
         summary = f"🟥ATLAS Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq_sum}\n\n"
         for p in summary_pages:
-            summary += f"🌟Page-{fmt_page(p['page'])}:\n{p['first_poll']}\n"
+            summary += f"🌟Page-{fmt_page(p['page'])} ({p['mcq_count']} MCQ):\n{p['first_poll']}\n"
         summary += (
             f"\n💥শুভকামনা প্রিয় শিক্ষার্থী {uname}...\n"
             '"যেকোনো প্রশ্ন থাকলে মেসেজ দাও "Ask Your Mentor" গ্রুপে।\n'
