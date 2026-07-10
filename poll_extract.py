@@ -425,10 +425,6 @@ async def handle_poll_extract(msg: dict):
     bot_info     = await tg_post("getMe", {})
     bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
 
-    QUIZ_WORKER_URL = "https://atlasquizbotpro.hamza818483.workers.dev"
-    GH_PAGES_URL    = "https://hamza818483-dotcom.github.io/QuizBot/quiz.html"
-    HF_SPACE_URL    = "https://quizbot-s482.onrender.com"  # v4.2: HF permanently banned, Render primary
-
     # একটাই smart link — ভেতরে HF→CF→Supabase auto fallback
     web_link = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={quiz_id}" if quiz_id else None
     bot_link = f"https://t.me/{bot_username}?start={quiz_id}" if quiz_id else None
