@@ -526,14 +526,14 @@ def _build_mcq_prompt(topic: str, count) -> str:
         )
     else:
         count_rule = (
-            "MAXIMUM COUNT REQUIRED (no fixed number given): Extract the HIGHEST "
-            "POSSIBLE number of quality MCQs from every piece of information on "
-            "this page — do not stop at a small number just because the obvious "
-            "MCQs ran out. Re-angle the same facts into different question styles "
-            "(direct fact, true/false-style, definition, comparison, cause-effect) "
-            "so nothing usable on the page is left unused. Minimum 15-35 MCQs if "
-            "the page has enough content; only go below that if the page has "
-            "genuinely very little text (then at least 10)."
+            "TARGET ~15 MCQs REQUIRED (no fixed number given by user, default target): "
+            "Extract AT LEAST 15 quality MCQs from every piece of information on this "
+            "page, more if the page is content-rich (up to 35). Re-angle the same facts "
+            "into different question styles (direct fact, true/false-style, definition, "
+            "comparison, cause-effect, fill-in-the-blank) so nothing usable on the page "
+            "is left unused — do NOT stop at 6-10 just because the 'obvious' MCQs ran "
+            "out; that is under-extracting. Only go below 15 if the page has genuinely "
+            "very little text (then at least 10, minimum 5 if truly sparse)."
         )
     return (
         f"You are an expert MCQ-extraction engine for Bengali/English academic "
@@ -814,10 +814,15 @@ async def _gen_groq(img, topic, count):
     if not data_url:
         return []
     prompt = _build_mcq_prompt(topic, count)
+    # meta-llama/llama-4-scout-17b-16e-instruct was deprecated by Groq on
+    # 2026-06-17 (see console.groq.com/docs/deprecations) — every call to it
+    # now fails, which silently fell through to Gemini. qwen/qwen3.6-27b is
+    # Groq's current vision-capable replacement (openai/gpt-oss-120b, their
+    # other suggested replacement, is text-only and can't process images).
     for i, key in enumerate(keys):
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
-            key, "meta-llama/llama-4-scout-17b-16e-instruct",
+            key, "qwen/qwen3.6-27b",
             data_url, prompt
         )
         if txt:
@@ -825,7 +830,10 @@ async def _gen_groq(img, topic, count):
         if status == 429:
             logger.warning(f"[Groq] key #{i+1}/{len(keys)} quota exhausted (429), trying next key")
             continue
-        break
+        # Any other error (400/404/5xx/network) — log and still try the next
+        # key instead of giving up immediately, since a single bad key/model
+        # response shouldn't block the whole provider when others might work.
+        logger.warning(f"[Groq] key #{i+1}/{len(keys)} failed (status={status}), trying next key")
     return []
 
 async def _gen_nvidia(img, topic, count):
@@ -1058,13 +1066,13 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
     for key in keys:
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
-            key, "meta-llama/llama-4-scout-17b-16e-instruct",
+            key, "qwen/qwen3.6-27b",
             data_url, prompt
         )
         if txt:
             return txt
         if status != 429:
-            break
+            logger.warning(f"[GroqVerify] key failed (status={status}), trying next key")
     return ""
 
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
@@ -1119,9 +1127,14 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
         if count_max and current_n >= count_max:
             return mcqs
         existing_qs = "\n".join(f"- {m.get('question','')[:100]}" for m in (mcqs or [])[:40])
+        max_extra_note = (
+            f"\nHARD CAP: do not return more than {count_max - current_n} additional "
+            f"MCQ(s) — the page's total must not exceed {count_max}."
+            if count_max is not None else ""
+        )
         verify_prompt = (
             f"You are STRICTLY auditing MCQ coverage for this page (Topic: {topic}).\n"
-            f"CALL 1 already extracted {current_n} MCQs (target ~{count_target}/page). "
+            f"CALL 1 already extracted {current_n} MCQs (target ~{count_target}/page).{max_extra_note} "
             f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
             f"MANDATORY SYSTEMATIC SCAN (do this before answering, not optional):\n"
             f"- Mentally divide the page into regions (top/middle/bottom, and left/right "
@@ -1167,6 +1180,9 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
             combined_extra = _cap_mcq_options(combined_extra, 4)
             logger.info(f"[Verify] page {page_num}: call-2 added {len(combined_extra)} missed MCQs (groq={len(extra)}, gemini_extra={len(combined_extra)-len(extra)})")
             mcqs = (mcqs or []) + combined_extra
+            # Code-level hard cap: AI can still overshoot the prompt's max
+            # instruction, so trim here to guarantee the strict range is
+            # never violated regardless of model compliance.
             if count_max and len(mcqs) > count_max:
                 mcqs = mcqs[:count_max]
     except Exception as e:
@@ -5575,13 +5591,13 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     for key in keys:
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
-            key, "meta-llama/llama-4-scout-17b-16e-instruct",
+            key, "qwen/qwen3.6-27b",
             data_url, prompt
         )
         if txt:
             return txt
         if status != 429:
-            break
+            logger.warning(f"[Groq-QBM] key failed (status={status}), trying next key")
     return ""
 
 
@@ -6117,13 +6133,14 @@ Return ONLY the JSON array, nothing else."""
                 for key in keys:
                     txt, status = await _post_openai_compat(
                         "https://api.groq.com/openai/v1/chat/completions",
-                        key, "meta-llama/llama-4-scout-17b-16e-instruct",
+                        key, "qwen/qwen3.6-27b",
                         data_url, prompt
                     )
                     if txt:
                         result_json = _qbm_parse_json(txt)
                         break
                     if status != 429:
+                        logger.warning(f"[Groq-QBM2] key failed (status={status}), falling through to Gemini")
                         break
 
         if not result_json:
