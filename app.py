@@ -3203,7 +3203,7 @@ async def handle_wm_command(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     text = msg.get("text", "").strip()
-    wm_text = re.sub(r"^/wm\s*", "", text, flags=re.IGNORECASE).strip()
+    wm_text = re.sub(r"^/(?:watermark|wm)\s*", "", text, flags=re.IGNORECASE).strip()
     reply = msg.get("reply_to_message")
 
     if not wm_text:
@@ -8794,6 +8794,7 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         asyncio.create_task(handle_wm_command(msg))
+    elif text.startswith("/live") and not text.startswith("/livetime"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
@@ -8848,8 +8849,17 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, "❌ Owner only!")
     elif text.startswith("/merge"):
         await handle_merge_command(msg)
-    elif text == "/watermark":
-        await handle_watermark_command(msg)
+    elif text.startswith("/watermark"):
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        wm_arg = re.sub(r"^/watermark\s*", "", text, flags=re.IGNORECASE).strip()
+        reply = msg.get("reply_to_message")
+        if wm_arg and reply and reply.get("document"):
+            # New: /watermark reply-to-PDF + name -> apply immediately, no step-by-step wait
+            asyncio.create_task(handle_wm_command(msg))
+        else:
+            await handle_watermark_command(msg)
     elif text == "/convert":
         await handle_convert_command(msg)
     elif text.startswith("/error") or text.startswith("/errors"):
