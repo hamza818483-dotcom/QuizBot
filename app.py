@@ -4736,13 +4736,13 @@ async def _process_pdf_pages_inner(
                     else:
                         await notify_owner(f"⚠️ End message failed for page {fmt_page(page_num)}, topic: {topic}\nReason: {err_desc}")
 
-                # /pdf on hole ending message er por auto Style1+Style2 Sheet PDF channel e jabe
+                # /pdf on hole ending message er por auto Style1+Style3 Sheet PDF channel e jabe
                 if await should_autosend_pdf(channel_id):
                     try:
                         data_adapted = _adapt_mcqs_for_print(mcqs)
                         reply_target = first_image_msg_id or image_msg_id
                         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
-                        for style_key in ("style1", "style2"):
+                        for style_key in ("style1", "style3"):
                             html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
                             pdf_bytes = await _html_to_pdf(html_s)
                             if pdf_bytes:
@@ -4750,7 +4750,7 @@ async def _process_pdf_pages_inner(
                                 doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
                                     caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
                                     message_thread_id=thread_id, reply_to_message_id=reply_target)
-                                # Item 3: both auto-sent PDFs (style1 + style2) get pinned
+                                # Item 3: both auto-sent PDFs (style1 + style3) get pinned
                                 if doc_r and doc_r.get("ok"):
                                     doc_msg_id = doc_r.get("result", {}).get("message_id")
                                     if doc_msg_id:
@@ -5176,13 +5176,13 @@ async def _process_pdfm_pages_impl(
                     end_msg_id = end_r["result"]["message_id"]
                     await db_update_cache(cache_id, {"end_msg_id": end_msg_id})
 
-                # /pdf on hole ending message er por auto Style1+Style2 Sheet PDF channel e jabe
+                # /pdf on hole ending message er por auto Style1+Style3 Sheet PDF channel e jabe
                 if await should_autosend_pdf(channel_id):
                     try:
                         data_adapted = _adapt_mcqs_for_print(mcqs)
                         reply_target = first_image_msg_id or image_msg_id
                         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
-                        for style_key in ("style1", "style2"):
+                        for style_key in ("style1", "style3"):
                             html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
                             pdf_bytes = await _html_to_pdf(html_s)
                             if pdf_bytes:
@@ -5190,7 +5190,7 @@ async def _process_pdfm_pages_impl(
                                 doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
                                     caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
                                     message_thread_id=thread_id, reply_to_message_id=reply_target)
-                                # Item 3: both auto-sent PDFs (style1 + style2) get pinned
+                                # Item 3: both auto-sent PDFs (style1 + style3) get pinned
                                 if doc_r and doc_r.get("ok"):
                                     doc_msg_id = doc_r.get("result", {}).get("message_id")
                                     if doc_msg_id:
