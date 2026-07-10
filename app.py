@@ -501,7 +501,20 @@ async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
 
 
 def _build_mcq_prompt(topic: str, count) -> str:
-    if count:
+    count_min = count_max = None
+    if isinstance(count, (tuple, list)) and len(count) == 2:
+        count_min, count_max = count
+    if count_min is not None:
+        count_rule = (
+            f"STRICT RANGE REQUIRED: Extract BETWEEN {count_min} AND {count_max} MCQs "
+            f"from this page — no fewer than {count_min}, no more than {count_max}. "
+            f"This range is a hard rule, not a suggestion. If the page's content is "
+            f"thin, still reach at least {count_min} by rephrasing/re-angling the same "
+            f"facts from different angles (different question style, different correct "
+            f"option position) — never stop below {count_min}. If the page is rich, "
+            f"stop at {count_max} even if more MCQs are possible — do not exceed it."
+        )
+    elif count:
         count_rule = (
             f"EXACT COUNT REQUIRED: Extract exactly {count} MCQs from this page. "
             f"If the page genuinely doesn't have enough distinct information for "
@@ -511,14 +524,14 @@ def _build_mcq_prompt(topic: str, count) -> str:
         )
     else:
         count_rule = (
-            "MAXIMUM COUNT REQUIRED (no fixed number given): Extract the HIGHEST "
-            "POSSIBLE number of quality MCQs from every piece of information on "
-            "this page — do not stop at a small number just because the obvious "
-            "MCQs ran out. Re-angle the same facts into different question styles "
-            "(direct fact, true/false-style, definition, comparison, cause-effect) "
-            "so nothing usable on the page is left unused. Minimum 15-35 MCQs if "
-            "the page has enough content; only go below that if the page has "
-            "genuinely very little text (then at least 10)."
+            "TARGET ~15 MCQs REQUIRED (no fixed number given by user, default target): "
+            "Extract AT LEAST 15 quality MCQs from every piece of information on this "
+            "page, more if the page is content-rich (up to 35). Re-angle the same facts "
+            "into different question styles (direct fact, true/false-style, definition, "
+            "comparison, cause-effect, fill-in-the-blank) so nothing usable on the page "
+            "is left unused — do NOT stop at 6-10 just because the 'obvious' MCQs ran "
+            "out; that is under-extracting. Only go below 15 if the page has genuinely "
+            "very little text (then at least 10, minimum 5 if truly sparse)."
         )
     return (
         f"You are an expert MCQ-extraction engine for Bengali/English academic "
@@ -1087,12 +1100,26 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
     any failure here just returns the original call-1 output untouched.
     """
     try:
-        count_target = mcq_count if mcq_count else 15
+        count_min = count_max = None
+        if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
+            count_min, count_max = mcq_count
+            count_target = f"{count_min}-{count_max} (range)"
+        else:
+            count_target = mcq_count if mcq_count else 15
         current_n = len(mcqs or [])
+        # If a strict max is set and we've already hit/exceeded it, skip verify
+        # entirely — adding more would violate the user's upper bound.
+        if count_max is not None and current_n >= count_max:
+            return mcqs
         existing_qs = "\n".join(f"- {m.get('question','')[:100]}" for m in (mcqs or [])[:40])
+        max_extra_note = (
+            f"\nHARD CAP: do not return more than {count_max - current_n} additional "
+            f"MCQ(s) — the page's total must not exceed {count_max}."
+            if count_max is not None else ""
+        )
         verify_prompt = (
             f"You are STRICTLY auditing MCQ coverage for this page (Topic: {topic}).\n"
-            f"CALL 1 already extracted {current_n} MCQs (target ~{count_target}/page). "
+            f"CALL 1 already extracted {current_n} MCQs (target ~{count_target}/page).{max_extra_note} "
             f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
             f"MANDATORY SYSTEMATIC SCAN (do this before answering, not optional):\n"
             f"- Mentally divide the page into regions (top/middle/bottom, and left/right "
@@ -1138,6 +1165,11 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
             combined_extra = _cap_mcq_options(combined_extra, 4)
             logger.info(f"[Verify] page {page_num}: call-2 added {len(combined_extra)} missed MCQs (groq={len(extra)}, gemini_extra={len(combined_extra)-len(extra)})")
             mcqs = (mcqs or []) + combined_extra
+            # Code-level hard cap: AI can still overshoot the prompt's max
+            # instruction, so trim here to guarantee the strict range is
+            # never violated regardless of model compliance.
+            if count_max is not None and len(mcqs) > count_max:
+                mcqs = mcqs[:count_max]
     except Exception as e:
         logger.warning(f"[Verify] page {page_num} verification skipped: {e}")
     return mcqs
@@ -4216,6 +4248,8 @@ async def handle_pdf(msg: dict):
     page_range = params["page_range"]
     channel_id = params["channel_id"]
     mcq_count = params["mcq_count"]
+    if params.get("mcq_count_min") is not None:
+        mcq_count = (params["mcq_count_min"], params["mcq_count_max"])
     thread_id = params.get("thread_id")
     file_name = reply["document"].get("file_name", "document.pdf")
     file_id = reply["document"]["file_id"]

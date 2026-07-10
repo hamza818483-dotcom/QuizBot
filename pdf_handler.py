@@ -131,8 +131,8 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 -টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট এসব থেকে MCQ বানাবে না — না প্রশ্নে, না অপশনে। এগুলো শুধু structural/navigation elements, প্রকৃত জ্ঞান/তথ্য না।
 -প্রতিটি অপশন অবশ্যই actual factual content হতে হবে (definition, cause, treatment, value, name of a real concept ইত্যাদি) — কখনোই কোনো section heading, card/page label, বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না
 -হাবিজাবি MCQ বানানো যাবে না,বেশি প্রশ্ন বানানোর প্রয়োজনে একটি MCQ কেই ঘুরিয়ে ফিরিয়ে দেওয়া যেতে পারে
--MAXIMUM possible MCQ বানাবে — প্রতিটি লাইন, বক্স, তথ্য, সোর্স use করে
--তথ্য কম থাকলে minimum 10 টি
+-TARGET কমপক্ষে ১৫টি MCQ বানাবে (default target, user কোনো নির্দিষ্ট সংখ্যা না দিলে) — প্রতিটি লাইন, বক্স, তথ্য, সোর্স ব্যবহার করে; পেইজে তথ্য বেশি থাকলে ৩৫ পর্যন্ত যেতে পারো। "obvious" MCQ শেষ হয়ে গেছে ভেবে ৬-১০টায় থেমে যাওয়া UNDER-EXTRACTING, এটা করা যাবে না।
+-তথ্য সত্যিই কম থাকলে minimum 10 টি, একদম sparse হলে minimum 5 টি
 -মাঝে মাঝে একই তথ্যকে উল্টিয়েও প্রশ্ন করবে (যেমন "বাংলাদেশের রাজধানী কোথায়?" এর পাশাপাশি অন্য কোথাও "ঢাকা কোন দেশের রাজধানী?" ধরনের reverse angle প্রশ্নও রাখবে, যেখানে যুক্তিসঙ্গত)
 -বারবার একই প্যাটার্নে টপিকের নাম ধরে প্রশ্ন শুরু করবে না (যেমন "X সম্পর্কে কোনটি সঠিক", "X এর গঠন কী" — বারবার একই স্টাইল) — বৈচিত্র্যপূর্ণ প্রশ্ন-গঠন ব্যবহার করবে (direct fact, definition, cause-effect, comparison, fill-in-the-blank, "কোনটি সঠিক নয়" ইত্যাদি মিক্স করে)
 -জেনারেট করা MCQ-এর মধ্যে ৩-৫টি এমন হবে যেখানে একটি প্রশ্নেই একাধিক ভিন্ন তথ্য মিক্স করা থাকবে (যেমন option-গুলো ২-৩টা তথ্যের কম্বিনেশন, শুধু একটা option-ই সব তথ্য মিলিয়ে সঠিক) — মাঝারি কঠিন রাখবে, extreme hard না
@@ -495,7 +495,17 @@ async def generate_mcq_from_image(
     page: int,
     mcq_count: int = None,
 ) -> list:
-    if mcq_count:
+    if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
+        c_min, c_max = mcq_count
+        range_rule = (
+            f"STRICT RANGE REQUIRED: Extract BETWEEN {c_min} AND {c_max} MCQs from "
+            f"this page — no fewer than {c_min}, no more than {c_max}. Hard rule, "
+            f"not a suggestion."
+        )
+        prompt = MCQ_PROMPT_WITH_COUNT.format(
+            count=f"{c_min}-{c_max} ({range_rule})", topic=topic, page=str(page).zfill(2)
+        )
+    elif mcq_count:
         prompt = MCQ_PROMPT_WITH_COUNT.format(
             count=mcq_count, topic=topic, page=str(page).zfill(2)
         )
@@ -684,6 +694,8 @@ def parse_pdf_command(text: str) -> dict:
         "channel_id": None,
         "topic": None,
         "mcq_count": None,
+        "mcq_count_min": None,
+        "mcq_count_max": None,
         "thread_id": None
     }
     try:
@@ -704,10 +716,20 @@ def parse_pdf_command(text: str) -> dict:
             m_match = re.search(r'-m\s+(\S+)', text)
             if m_match:
                 result["topic"] = m_match.group(1)
-        # [.N.] বা [N] ব্র্যাকেট: প্রতি পেইজে কতগুলো MCQ বানাতে হবে সেটা স্পষ্টভাবে
-        # বোঝায় (কমান্ডের শেষে থাকা bare সংখ্যার অস্পষ্ট অনুমানের চেয়ে অগ্রাধিকার পাবে)
-        bracket_match = re.search(r'\[\.?(\d+)\.?\]', text)
-        if bracket_match:
+        # [.N.] বা [N] বা [N-M] ব্র্যাকেট: প্রতি পেইজে কতগুলো MCQ বানাতে হবে সেটা স্পষ্টভাবে
+        # বোঝায় (কমান্ডের শেষে থাকা bare সংখ্যার অস্পষ্ট অনুমানের চেয়ে অগ্রাধিকার পাবে)।
+        # Range দেওয়া হলে (mcq_count_min, mcq_count_max) হিসেবে স্টোর হয়, single number
+        # দেওয়া হলে mcq_count একটাই exact number থাকে (আগের মতোই)।
+        range_match = re.search(r'\[\.?(\d+)\s*-\s*(\d+)\.?\]', text)
+        bracket_match = None if range_match else re.search(r'\[\.?(\d+)\.?\]', text)
+        if range_match:
+            lo, hi = int(range_match.group(1)), int(range_match.group(2))
+            if lo > hi:
+                lo, hi = hi, lo
+            result["mcq_count_min"] = lo
+            result["mcq_count_max"] = hi
+            result["mcq_count"] = hi  # backward-compat: callers using mcq_count alone get the upper bound
+        elif bracket_match:
             result["mcq_count"] = int(bracket_match.group(1))
         else:
             cmd_part = text.split('/pdf')[1] if '/pdf' in text else text
