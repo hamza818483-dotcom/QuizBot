@@ -78,7 +78,7 @@ export default {
         headers: request.headers,
         body: bodyText,
       });
-      ctx.waitUntil(forwardToHF(forwardReq, env));
+      ctx.waitUntil(forwardToHFWithFallback(forwardReq, bodyText, env));
       return new Response('OK');
     }
 
@@ -712,6 +712,110 @@ async function forwardToHF(request, env) {
     }
     return new Response('All Render instances unavailable', { status: 502 });
   }
+}
+
+// ============================================================
+// D1 QUIZ — PERMANENT FALLBACK (works even if Render is fully off)
+// ============================================================
+// When BOTH Render instances are unreachable, the bot itself can't respond
+// to any Telegram update. But a /start <quiz_id> deep-link (D1 quiz share
+// link) doesn't need the bot's full logic — it just needs the quiz's
+// questions sent as Telegram native quiz-type polls. Telegram's own poll
+// UI shows correct/wrong + explanation instantly, with ZERO backend
+// tracking needed after sending. So this Worker (always-on, independent of
+// Render) can serve that specific case directly from D1, keeping D1 quizzes
+// permanently usable (without score/leaderboard tracking) even if the
+// Python bot is fully down.
+async function forwardToHFWithFallback(request, bodyText, env) {
+  const r = await forwardToHF(request, env);
+  if (r.status !== 502) return r; // Render handled it fine, nothing more to do
+
+  // Render is fully down — check if this update is a /start <quiz_id> deep-link.
+  try {
+    const update = JSON.parse(bodyText);
+    const msg = update.message;
+    const text = (msg && msg.text) || '';
+    const m = text.match(/^\/start\s+([A-Za-z0-9_]+)/);
+    if (!m) return r; // not a quiz deep-link — nothing this Worker can do
+    let quizId = m[1];
+    // Deep-links can carry pdf_/poll_/premium_ prefixes for other features —
+    // only D1-quiz plain IDs are handled here; strip a bare "d1_" prefix if present.
+    if (quizId.startsWith('d1_')) quizId = quizId.slice(3);
+
+    const chatId = msg.chat.id;
+    globalThis.DB = env.DB;
+    globalThis.ATLAS_BOT_TOKEN = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN;
+    await sendD1QuizFallbackPoll(quizId, chatId, env);
+  } catch (e) {
+    console.warn('[fallback] quiz-poll fallback failed:', e.message);
+  }
+  return r;
+}
+
+async function sendD1QuizFallbackPoll(quizId, chatId, env) {
+  const BOT_TOKEN = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
+  const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+  const row = await DB.prepare("SELECT * FROM quizzes WHERE id = ?1").bind(quizId).first();
+  if (!row) return; // quiz not found in D1 — silently skip, nothing to notify with (bot is down)
+
+  let questions;
+  try {
+    questions = JSON.parse(row.csv_data);
+  } catch (e) {
+    return;
+  }
+  if (!Array.isArray(questions) || questions.length === 0) return;
+
+  // Let the person know upfront this is limited-mode (no scoring), since the
+  // bot itself is unreachable to explain further.
+  await fetch(`${TG_API}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: `📚 ${row.name || 'Quiz'}\n\n⚠️ Bot এখন সাময়িক বন্ধ — score/leaderboard track হবে না, কিন্তু প্রশ্নগুলো normal quiz poll হিসেবে solve করতে পারবে।`,
+    }),
+  });
+
+  const MAX_POLL_QUESTION = 300; // Telegram limit
+  const MAX_POLL_OPTION = 100;   // Telegram limit
+
+  for (const q of questions) {
+    const options = (q.options || []).map(o => String(o).slice(0, MAX_POLL_OPTION));
+    if (options.length < 2) continue;
+    const correctIdx = typeof q.answer_index === 'number' ? q.answer_index : 0;
+    const explanation = (q.explanation || '').slice(0, 200); // Telegram poll explanation limit
+
+    try {
+      await fetch(`${TG_API}/sendPoll`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          question: String(q.question || '').slice(0, MAX_POLL_QUESTION),
+          options: JSON.stringify(options),
+          type: 'quiz',
+          correct_option_id: correctIdx,
+          explanation: explanation || undefined,
+          is_anonymous: false,
+        }),
+      });
+    } catch (e) {
+      console.warn('[fallback] sendPoll failed:', e.message);
+    }
+    // Small delay to avoid Telegram flood limits when a quiz has many questions.
+    await new Promise(res => setTimeout(res, 350));
+  }
+
+  await fetch(`${TG_API}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: `✅ শেষ! Bot চালু হলে আবার এই লিংকেই score-tracked mode এ practice করতে পারবে।`,
+    }),
+  });
 }
 
 

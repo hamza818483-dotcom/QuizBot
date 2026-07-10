@@ -535,7 +535,12 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"the same fact to reach the target count, rephrase it into a genuinely "
         f"different question angle, not a copy-paste.\n"
         f"- NEVER generate MCQs from topic names, chapter titles, headlines, or "
-        f"page numbers — these are structural labels, not content.\n\n"
+        f"page numbers — these are structural labels, not content.\n"
+        f"- Among the MCQs generated, 3-5 of them should mix several distinct "
+        f"facts from the page into a single question — e.g. options that are each "
+        f"a combination of 2-3 facts, where only one option has ALL facts correct. "
+        f"Keep these moderate difficulty (not extreme/confusing) — a student who "
+        f"reads carefully should be able to solve it.\n\n"
 
         f"═══════════════════════════════\n"
         f"🟥 MUST-PRIORITY — NEVER skip lines that are marked in ANY way\n"
@@ -571,6 +576,11 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"═══════════════════════════════\n"
         f"🟦 QUESTION-ANGLE VARIATION\n"
         f"═══════════════════════════════\n"
+        f"Never repeatedly start questions by naming the topic itself in the same "
+        f"pattern (e.g. always \"X সম্পর্কে কোনটি সঠিক?\", \"X এর গঠন কী?\", \"X এর ক্ষেত্রে...\" "
+        f"back to back) — this reads as boring/repetitive. Use varied question "
+        f"structures: direct fact, definition, cause-effect, comparison, fill-in-"
+        f"the-blank, \"কোনটি সঠিক নয়\" style, etc. Mix them naturally across the set.\n"
         f"Occasionally reverse the direction of a fact-based question instead of "
         f"always asking it the same way — e.g. if one MCQ asks 'বাংলাদেশের রাজধানী "
         f"কোথায়?' (answer: ঢাকা), elsewhere in the set also ask the reverse angle "
@@ -657,6 +667,20 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"write the question, ALL options, and the explanation in that exact same "
         f"language. Never translate — if the source is English, output English; "
         f"if the source is Bengali, output Bengali.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🚫 FORBIDDEN SOURCE-REFERENCE PHRASES (question AND explanation, always)\n"
+        f"═══════════════════════════════\n"
+        f"NEVER use phrases that refer back to the source material itself instead of "
+        f"stating the fact directly — in the question OR the explanation:\n"
+        f"❌ \"টপিকে বলা হয়েছে\" / \"দেখা যাচ্ছে\" / \"লিখা আছে\" / \"বর্ণিত আছে\" / \"উল্লেখ আছে\" / "
+        f"\"চিত্রে দেখা যাচ্ছে\" / \"বক্সে\" / \"ছকে\" / \"সারণিতে\" / \"পৃষ্ঠায়\" / \"প্রদত্ত অংশে\" / "
+        f"\"উপরে দেখানো\" / \"টেক্সট অনুসারে\" / \"টেক্সটে লিখা আছে\"\n"
+        f"❌ English equivalents: \"as shown in the figure/box/table\", \"mentioned in the "
+        f"text/page\", \"as given above\", \"according to the source\"\n"
+        f"Instead: ALWAYS state the actual fact directly and plainly, as if it were "
+        f"general knowledge — never mention or imply it came from \"the shown image/box/"
+        f"table/page\". Applies to every single MCQ's question and explanation, no exceptions.\n\n"
 
         f"For EACH MCQ, also give 'exp_bbox': a TIGHT bounding box centered exactly "
         f"on the specific line/paragraph/table this MCQ's answer came from — include "
@@ -980,6 +1004,35 @@ def _parse_explanation_only_json(text: str) -> list:
         return []
     return [str(it.get("explanation", "")).strip()[:500] if isinstance(it, dict) else "" for it in data]
 
+async def _gemini_verify_raw_text(img, prompt: str) -> str:
+    """Same job as _gen_groq_raw_text but via Gemini — used to get a second,
+    provider-diverse opinion on missed-content verification. Best-effort:
+    empty string on any failure, never raises (caller treats empty as
+    'nothing extra found')."""
+    try:
+        if not key_rotator.keys:
+            return ""
+        from google import genai as gai
+        from google.genai import types
+        from pdf_handler import image_to_base64
+        key = key_rotator.get_key()
+        client = gai.Client(api_key=key)
+        img_b64 = image_to_base64(img)
+
+        def _call():
+            return client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_text(text=prompt),
+                    types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                ]
+            )
+        response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=20)
+        return response.text or ""
+    except Exception as e:
+        logger.warning(f"[GeminiVerify] failed: {e}")
+        return ""
+
 async def _gen_groq_raw_text(img, prompt: str) -> str:
     keys = groq_key_rotator.all_keys()
     if not keys:
@@ -1007,14 +1060,20 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
     out = _cap_mcq_options(out, 4)
-    # কোনো MCQ-র explanation যদি শুধু উত্তর বলেই থেমে যায় (আশেপাশের সোর্স-তথ্য
-    # ছাড়া) — সেটার জন্য একটা targeted repair pass চালানো হয়, পুরো পেইজ আবার
-    # generate না করেই। ব্যর্থ হলেও মূল MCQ ডেলিভারি আটকায় না।
-    out = await _repair_thin_explanations(out, img, topic)
-    # explanation crop/full-page image attach removed — user requested faster
-    # /pdf turnaround; explanation text itself is kept, just no image.
-    out = await _verify_and_fix_page(out, img, topic, page_num, mcq_count)
-    return out
+    # Repair (fixes thin explanations on existing MCQs) and Verify (finds
+    # MCQs call-1 missed) touch disjoint data — run concurrently instead of
+    # sequentially to cut per-page latency roughly in half. Verify appends
+    # new items to `out`, so run it first into a temp var and merge after.
+    repair_task = asyncio.create_task(_repair_thin_explanations(list(out), img, topic))
+    verify_task = asyncio.create_task(_verify_and_fix_page(list(out), img, topic, page_num, mcq_count))
+    repaired, verified = await asyncio.gather(repair_task, verify_task)
+    # verified = original out + any newly-found MCQs (appended at the end).
+    # Rebuild: take repaired explanations for the original items, then append
+    # whatever new items verify found.
+    n_orig = len(out)
+    merged = repaired[:n_orig] if len(repaired) >= n_orig else repaired
+    merged = merged + verified[n_orig:]
+    return merged
 
 
 async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=None) -> list:
@@ -1032,10 +1091,18 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
         current_n = len(mcqs or [])
         existing_qs = "\n".join(f"- {m.get('question','')[:100]}" for m in (mcqs or [])[:40])
         verify_prompt = (
-            f"You are verifying MCQ extraction from this page (Topic: {topic}).\n"
+            f"You are STRICTLY auditing MCQ coverage for this page (Topic: {topic}).\n"
             f"CALL 1 already extracted {current_n} MCQs (target ~{count_target}/page). "
             f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
-            f"Re-scan the image carefully and check:\n"
+            f"MANDATORY SYSTEMATIC SCAN (do this before answering, not optional):\n"
+            f"- Mentally divide the page into regions (top/middle/bottom, and left/right "
+            f"if multi-column) and check EACH region separately against the list above.\n"
+            f"- Pay special attention to the LAST paragraph/box/row on the page and the "
+            f"BOTTOM of the page — these are the most commonly missed areas.\n"
+            f"- Check every highlighted/underlined/marked/boxed/ছক item individually — "
+            f"if it's not represented above, it was missed.\n"
+            f"- Check every table/ছক cell individually, not just at a glance.\n"
+            f"Only after this region-by-region pass, decide:\n"
             f"1. Any highlighted/underlined/marked/boxed/ছক content NOT yet covered above?\n"
             f"2. Any distinct real-info fact on the page not yet turned into an MCQ?\n"
             f"3. Is {current_n} clearly below what the page's content could support?\n\n"
@@ -1046,12 +1113,31 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
             f"If nothing is missing and coverage is already complete, return exactly: []\n"
             f"Never invent facts not present on the page. No prose, JSON only."
         )
-        extra_txt = await _gen_groq_raw_text(img, verify_prompt)
+        # Two independent verify passes from DIFFERENT providers (Groq +
+        # Gemini) run concurrently — genuine second-opinion diversity catches
+        # misses a single model's blind spots would let through, at the cost
+        # of one extra parallel call (not sequential, so latency impact is
+        # small since both run at once).
+        groq_task = asyncio.create_task(_gen_groq_raw_text(img, verify_prompt))
+        gemini_task = asyncio.create_task(_gemini_verify_raw_text(img, verify_prompt))
+        extra_txt, extra_txt_gemini = await asyncio.gather(groq_task, gemini_task)
+
         extra = _parse_mcq_json(extra_txt) if extra_txt else []
-        if extra:
-            extra = _cap_mcq_options(extra, 4)
-            logger.info(f"[Verify] page {page_num}: call-2 added {len(extra)} missed MCQs")
-            mcqs = (mcqs or []) + extra
+        extra_g = _parse_mcq_json(extra_txt_gemini) if extra_txt_gemini else []
+
+        combined_extra = list(extra)
+        if extra_g:
+            existing_q_texts = {(m.get("question") or "").strip().lower()[:60] for m in combined_extra}
+            for m in extra_g:
+                qk = (m.get("question") or "").strip().lower()[:60]
+                if qk and qk not in existing_q_texts:
+                    combined_extra.append(m)
+                    existing_q_texts.add(qk)
+
+        if combined_extra:
+            combined_extra = _cap_mcq_options(combined_extra, 4)
+            logger.info(f"[Verify] page {page_num}: call-2 added {len(combined_extra)} missed MCQs (groq={len(extra)}, gemini_extra={len(combined_extra)-len(extra)})")
+            mcqs = (mcqs or []) + combined_extra
     except Exception as e:
         logger.warning(f"[Verify] page {page_num} verification skipped: {e}")
     return mcqs
@@ -4310,42 +4396,97 @@ async def pdf_generate_all_pages(
     """
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
     start_time = time.time()
-    total_mcq = 0
-    results = []
+    results_by_idx = [None] * len(pages)
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
-    set_active_job(chat_id, f"PDF MCQ generation ({file_name}, page-by-page)")
+    set_active_job(chat_id, f"PDF MCQ generation ({file_name}, parallel)")
+
+    # Concurrency cap: several pages generated at once instead of strictly
+    # sequential — cuts wall-clock time roughly by this factor while staying
+    # safe against provider rate limits (each page already does its own
+    # internal key rotation across providers).
+    _PDF_PARALLEL_PAGES = 4
+    sem = asyncio.Semaphore(_PDF_PARALLEL_PAGES)
+    lock = asyncio.Lock()
+    total_mcq_box = {"n": 0}
+
+    async def _run_one(idx, page_num, img):
+        if is_cancelled(chat_id):
+            return
+        async with sem:
+            if is_cancelled(chat_id):
+                return
+            async with lock:
+                page_status[idx]["current"] = True
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id,
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0))
+
+            mcqs = []
+            try:
+                mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[PDF Generate] Page {page_num} error: {e}; retrying once")
+
+            # Strict no-page-miss guarantee: a page landing empty (crash or
+            # every provider returned nothing) gets ONE retry before being
+            # accepted as genuinely empty — protects against a single
+            # transient failure silently dropping a whole page's MCQs.
+            if not mcqs and not is_cancelled(chat_id):
+                try:
+                    await asyncio.sleep(1)
+                    mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[PDF Generate] Page {page_num} retry also failed: {e}")
+
+            if is_cancelled(chat_id):
+                return
+            async with lock:
+                results_by_idx[idx] = (page_num, img, mcqs)
+                total_mcq_box["n"] += len(mcqs)
+                page_status[idx]["current"] = False
+                page_status[idx]["done"] = True
+                page_status[idx]["mcq"] = len(mcqs)
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id,
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0))
+
+    async def _watch_cancel(tasks):
+        # Polls the cancel flag while pages are in flight; the moment /cancel
+        # is issued, actively cancels every still-running page task instead
+        # of letting gather() wait for all of them to finish naturally.
+        while not all(t.done() for t in tasks):
+            if is_cancelled(chat_id):
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                return
+            await asyncio.sleep(0.3)
 
     try:
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
 
-        for idx, (page_num, img) in enumerate(pages):
-            if is_cancelled(chat_id):
-                break
-            page_status[idx]["current"] = True
-            if status_msg_id:
-                await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
-
-            mcqs = []
-            try:
-                mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
-            except Exception as e:
-                logger.error(f"[PDF Generate] Page {page_num} error: {e}")
-
-            results.append((page_num, img, mcqs))
-            total_mcq += len(mcqs)
-            page_status[idx]["current"] = False
-            page_status[idx]["done"] = True
-            page_status[idx]["mcq"] = len(mcqs)
-            if status_msg_id:
-                await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+        tasks = [
+            asyncio.create_task(_run_one(idx, page_num, img))
+            for idx, (page_num, img) in enumerate(pages)
+        ]
+        watcher = asyncio.create_task(_watch_cancel(tasks))
+        await asyncio.gather(*tasks, return_exceptions=True)
+        watcher.cancel()
+        try:
+            await watcher
+        except asyncio.CancelledError:
+            pass
     finally:
         _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
         clear_active_job(chat_id)
 
+    results = [r for r in results_by_idx if r is not None]
     return results
 
 
@@ -5413,14 +5554,16 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
 {q_summary if q_summary else "(none found)"}
 
 TASK (fast audit, connected to Call 1 — do not redo full extraction):
-1) Look at the page again and check if ANY existing MCQ was MISSED by the list above
-   (especially the LAST MCQ on the page — most commonly missed).
-2) If you find missed MCQ(s), extract them in the SAME strict format (options in the exact
+1) MANDATORY: mentally divide the page into regions (top/middle/bottom, left/right if
+   multi-column) and check EACH region against the list above before answering —
+   especially the LAST MCQ on the page and the BOTTOM of the page — most commonly missed.
+2) Check if ANY existing MCQ was MISSED by the list above.
+3) If you find missed MCQ(s), extract them in the SAME strict format (options in the exact
    source position order, A/B/C/D slots by position — never relabeled/sorted).
-3) UDDIPOK CHECK: if a missed MCQ belongs under a passage/উদ্দীপক, prepend that passage's full
+4) UDDIPOK CHECK: if a missed MCQ belongs under a passage/উদ্দীপক, prepend that passage's full
    text to its question (self-contained), same as Call 1's rule.
-4) Do NOT re-list MCQs already shown above. Only output NEW ones that were missed.
-5) If nothing was missed, output exactly: []
+5) Do NOT re-list MCQs already shown above. Only output NEW ones that were missed.
+6) If nothing was missed, output exactly: []
 
 Output ONLY a JSON array of the MISSED MCQs (same schema as before):
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
