@@ -1458,7 +1458,14 @@ async def db_get_pin_setting(chat_id) -> bool:
             return r.data[0]["value"] == "on"
     except:
         pass
-    return False
+    # BUG FIX: previously defaulted to False. Since /pin on|off is typed in the
+    # admin's DM with the bot (setting pin_{dm_chat_id}) while try_pin_message
+    # is checked against pin_{channel_id} — a completely different key — the
+    # setting could never actually be turned on for the channel that matters.
+    # Default to True (auto-pin, the originally intended always-on behavior)
+    # so first-image/summary/PDF pinning works out of the box; explicit
+    # /pin off (once wired to the right chat_id) still overrides this.
+    return True
 
 async def db_set_pin_setting(chat_id, enabled: bool):
     try:
@@ -1783,18 +1790,23 @@ async def handle_pin(msg: dict):
     if not await db_is_owner_or_admin(uid):
         await send_msg(chat_id, "❌ Admin only!")
         return
-    arg = text.replace("/pin", "").strip().lower()
+    # /pin on|off applies to the CHANNEL (via -c), not the DM chat where this
+    # is typed — try_pin_message() checks pin_{channel_id}, so the setting
+    # must be stored under that same key or it silently never applies.
+    c_match = re.search(r'-c\s+(\S+)', text)
+    target_id = c_match.group(1) if c_match else chat_id
+    arg = re.sub(r'-c\s+\S+', '', text).replace("/pin", "").strip().lower()
     if arg == "on":
-        await db_set_pin_setting(chat_id, True)
-        PIN_ENABLED[chat_id] = True
-        await send_msg(chat_id, "📌 Auto-pin চালু! Summary message আর /pdfm message pin হবে।")
+        await db_set_pin_setting(target_id, True)
+        PIN_ENABLED[target_id] = True
+        await send_msg(chat_id, f"📌 Auto-pin চালু ({target_id})! First image, summary, ও PDF pin হবে।")
     elif arg == "off":
-        await db_set_pin_setting(chat_id, False)
-        PIN_ENABLED[chat_id] = False
-        await send_msg(chat_id, "📌 Auto-pin বন্ধ!")
+        await db_set_pin_setting(target_id, False)
+        PIN_ENABLED[target_id] = False
+        await send_msg(chat_id, f"📌 Auto-pin বন্ধ ({target_id})!")
     else:
-        current = await db_get_pin_setting(chat_id)
-        await send_msg(chat_id, f"📌 Pin status: {'✅ ON' if current else '❌ OFF'}\n\nChange: /pin on | /pin off")
+        current = await db_get_pin_setting(target_id)
+        await send_msg(chat_id, f"📌 Pin status ({target_id}): {'✅ ON' if current else '❌ OFF'}\n\nChange: /pin on -c @channel | /pin off -c @channel")
 
 async def try_pin_message(chat_id, message_id: int):
     """Channel-এ message pin করার চেষ্টা করে"""
@@ -1818,14 +1830,17 @@ async def handle_pdf_autosend_toggle(msg: dict, arg: str):
     if not await db_is_owner_or_admin(uid):
         await send_msg(chat_id, "❌ Admin only!")
         return
+    text = msg.get("text", "")
+    c_match = re.search(r'-c\s+(\S+)', text)
+    target_id = c_match.group(1) if c_match else chat_id
     if arg == "on":
-        await db_set_pdf_autosend_setting(chat_id, True)
-        PDF_AUTO_ENABLED[chat_id] = True
-        await send_msg(chat_id, "📄 /pdf auto-PDF চালু! এখন থেকে প্রতিটা page/ending message এর পরে Sheet PDF অটো channel এ যাবে।")
+        await db_set_pdf_autosend_setting(target_id, True)
+        PDF_AUTO_ENABLED[target_id] = True
+        await send_msg(chat_id, f"📄 /pdf auto-PDF চালু ({target_id})! এখন থেকে প্রতিটা page/ending message এর পরে Sheet PDF অটো channel এ যাবে।")
     else:
-        await db_set_pdf_autosend_setting(chat_id, False)
-        PDF_AUTO_ENABLED[chat_id] = False
-        await send_msg(chat_id, "📄 /pdf auto-PDF বন্ধ!")
+        await db_set_pdf_autosend_setting(target_id, False)
+        PDF_AUTO_ENABLED[target_id] = False
+        await send_msg(chat_id, f"📄 /pdf auto-PDF বন্ধ ({target_id})!")
 
 async def should_autosend_pdf(chat_id) -> bool:
     enabled = PDF_AUTO_ENABLED.get(chat_id)
@@ -4679,6 +4694,15 @@ async def _process_pdf_pages_inner(
                     continue
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
+
+                # FIX: summary_pages was declared but never populated — this is
+                # what feeds the end-of-job summary message + its auto-pin
+                # further down. Without this, the summary never sent.
+                summary_pages.append({
+                    "page": page_num,
+                    "mcq_count": len(mcqs),
+                    "first_poll": first_poll_link or "(লিংক পাওয়া যায়নি)"
+                })
 
                 exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
                 bot_un = await get_bot_username()
