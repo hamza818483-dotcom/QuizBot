@@ -546,17 +546,15 @@ async function handleQuizData(request, url, env) {
       console.warn('[quiz] Supabase pdf_mcq_cache direct failed:', e.message);
     }
 
-    // ── Layer 2: D1 (qz_ prefix quizzes only) ──
-    if (id.startsWith('qz_')) {
-      try {
-        const row = await DB.prepare("SELECT * FROM quizzes WHERE id=?1").bind(id).first();
-        if (row) {
-          const questions = JSON.parse(row.csv_data || '[]');
-          return makeResp(id, row.name, toMcqs(questions), row.timer || 30, 'd1');
-        }
-      } catch(e) {
-        console.error('[quiz] D1 failed:', e.message);
+    // ── Layer 2: D1 (any cache_id — /pdf caches are now mirrored here too) ──
+    try {
+      const row = await DB.prepare("SELECT * FROM quizzes WHERE id=?1").bind(id).first();
+      if (row) {
+        const questions = JSON.parse(row.csv_data || '[]');
+        return makeResp(id, row.name, toMcqs(questions), row.timer || 30, 'd1');
       }
+    } catch(e) {
+      console.error('[quiz] D1 failed:', e.message);
     }
 
     // ── Layer 3: Supabase primary account quiz_backups ──
