@@ -91,23 +91,11 @@ function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').rep
 
 function imgLoadFail(el){ el.outerHTML = '<div class="exp-img-broken" style="font-size:12px;color:#888;margin:4px 0;">🖼️ ছবি লোড হয়নি</div>'; }
 function renderExpWithImg(exp){
-  const srcMatch = exp.match(/<img[^>]*\ssrc="([^"]+)"/i);
-  const topMatch = exp.match(/data-crop-top="([\d.]+)"/i);
-  const botMatch = exp.match(/data-crop-bottom="([\d.]+)"/i);
+  // Explanation images totally disabled — strip any <img> tag, text only.
   const imgTagMatch = exp.match(/<img\b[^>]*>/i);
-  if(!srcMatch || !imgTagMatch) return esc(exp);
-  const rest = esc(exp.replace(imgTagMatch[0], '').trim());
-  const src = srcMatch[1];
-  if(topMatch && botMatch){
-    const top = parseFloat(topMatch[1]), bot = parseFloat(botMatch[1]);
-    const spanPct = Math.max(bot - top, 3);
-    const zoom = 100 / spanPct;
-    const posY = (top / (100 - spanPct)) * 100;
-    return `<div class="exp-crop-img" onclick="openImgModal('${src}')" style="width:100%;aspect-ratio:16/${Math.max(spanPct*0.16,2)};overflow:hidden;border-radius:6px;margin:6px 0;cursor:zoom-in;position:relative;background:#111;">`+
-      `<img src="${src}" onerror="imgLoadFail(this.parentElement)" style="width:100%;height:${zoom*100}%;object-fit:cover;object-position:center ${posY}%;display:block;">`+
-      `</div>` + rest;
-  }
-  return `<img src="${src}" class="exp-crop-img" onclick="openImgModal('${src}')" onerror="imgLoadFail(this)" style="max-width:100%;border-radius:6px;margin:6px 0;cursor:zoom-in;display:block;">` + rest;
+  let rest = exp;
+  if(imgTagMatch) rest = exp.replace(imgTagMatch[0], '').trim();
+  return esc(rest);
 }
 
 function openImgModal(src){
