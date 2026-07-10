@@ -611,7 +611,15 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"- Cover every plausible angle the source content could be tested on, but "
         f"never invent facts not present in the source image.\n"
         f"- Should not be unnecessarily hard/tricky — quality and clarity matter more "
-        f"than difficulty.\n\n"
+        f"than difficulty.\n"
+        f"- 🚨 EXACT TERM FIDELITY (CRITICAL): Copy every proper noun, name, place, "
+        f"country, term, or spelling EXACTLY as printed on the page — character "
+        f"for character. NEVER substitute a similar-looking or similar-sounding "
+        f"word (e.g. if the page says 'তুরস্ক', never write 'তুর্ক'; if it says "
+        f"'উসমানীয়', never write 'অটোমান' unless the page itself uses that word). "
+        f"Before finalizing each question/option/explanation, re-check every proper "
+        f"noun against the source image's actual spelling — do not rely on memory "
+        f"or general knowledge for how a name is 'usually' spelled.\n\n"
 
         f"═══════════════════════════════\n"
         f"💥 অপশন (OPTIONS) — exactly 4\n"
@@ -4738,13 +4746,17 @@ async def _process_pdf_pages_inner(
                 bot_un = await get_bot_username()
                 quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
                 poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+                new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{cache_id}"
+                new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
                 end_data = {
                     "chat_id": channel_id,
                     "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
                     "reply_markup": {"inline_keyboard": [
-                        [{"text": "📝 Quiz Solve", "url": quiz_url}],
-                        [{"text": "🔄 Poll Again", "url": poll_url}],
+                        [{"text": "📝 Quiz Solve", "url": quiz_url},
+                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
+                        [{"text": "🔄 Poll Again", "url": poll_url},
+                         {"text": "🆕 New Poll", "url": new_poll_url}],
                         [{"text": "🌐 Website Exam", "url": exam_url}]
                     ]},
                     "reply_to_message_id": image_msg_id
@@ -8655,6 +8667,18 @@ async def handle_message(msg: dict):
     if text.startswith("/start poll_"):
         cache_id = text.replace("/start poll_", "").strip()
         asyncio.create_task(handle_poll_again(cache_id, msg["from"], chat_id))
+        return
+    if text.startswith("/start pdfnew_"):
+        cache_id = text.replace("/start pdfnew_", "").strip()
+        if uid not in _QUIZ_START_LOCK:
+            _QUIZ_START_LOCK.add(uid)
+            asyncio.create_task(_run_quiz_start_debounced(handle_quiz_new(cache_id, msg["from"], chat_id), uid))
+        return
+    if text.startswith("/start pollnew_"):
+        cache_id = text.replace("/start pollnew_", "").strip()
+        if uid not in _QUIZ_START_LOCK:
+            _QUIZ_START_LOCK.add(uid)
+            asyncio.create_task(_run_quiz_start_debounced(handle_poll_new(cache_id, msg["from"], chat_id, None), uid))
         return
     if text.startswith("/start qz_"):
         quiz_id = text.split()[1] if len(text.split()) > 1 else text.replace("/start ", "")
