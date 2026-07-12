@@ -4222,6 +4222,7 @@ async def handle_sheet_style_callback(callback_query: dict):
 
             pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress)
             pdf_bytes = await _apply_saved_watermark(pdf_bytes)
+            pdf_bytes = await _apply_saved_watermark(pdf_bytes)
 
         if not pdf_bytes:
             await edit_msg(chat_id, status_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
@@ -6852,6 +6853,7 @@ async def _run_rapid_job(job_id: str):
         try:
             html_out = _build_rapid_pdf_html(topic, mcqs)
             pdf_bytes = await _html_to_pdf(html_out)
+            pdf_bytes = await _apply_saved_watermark(pdf_bytes)
             if pdf_bytes:
                 safe_topic = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:40] or "Rapid"
                 pdf_fname = f"{safe_topic}_Rapid_QA.pdf"
@@ -9738,6 +9740,7 @@ async def solve_pdf(request: Request):
             return JSONResponse({"error": "Cache not found"}, status_code=404)
         html = _build_solve_sheet_html(cache["topic"], cache["page_number"], cache["mcq_data"], answers)
         pdf_bytes = await _html_to_pdf(html)
+        pdf_bytes = await _apply_saved_watermark(pdf_bytes)
         if not pdf_bytes:
             return JSONResponse({"error": "PDF generation failed"}, status_code=500)
         return JSONResponse({"ok": True, "pdf_b64": base64.b64encode(pdf_bytes).decode()})
