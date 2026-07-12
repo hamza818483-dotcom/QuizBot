@@ -418,7 +418,7 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
         return []
 
     img_b64 = image_to_base64(img)
-    max_retries = len(openrouter_rotator.keys) * len(OPENROUTER_MODELS)
+    max_retries = min(len(openrouter_rotator.keys) * len(OPENROUTER_MODELS), 4)
 
     for attempt in range(max(max_retries, 3)):
         model = OPENROUTER_MODELS[attempt % len(OPENROUTER_MODELS)]
@@ -426,7 +426,7 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
             key = openrouter_rotator.get_key()
             logger.info(f"[OpenRouter] Attempt {attempt+1}, model: {model}")
 
-            async with httpx.AsyncClient(timeout=90) as client:
+            async with httpx.AsyncClient(timeout=30) as client:
                 r = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
@@ -527,7 +527,11 @@ async def generate_mcq_from_image(
         prompt = MCQ_PROMPT_MAX.format(topic=topic, page=str(page).zfill(2))
 
     # ── PRIMARY: Gemini ──────────────────────────────────────
-    max_retries = len(key_rotator.keys) if key_rotator.keys else 3
+    # v4.5: previously tried EVERY configured key at a full 45s timeout each —
+    # with 5-6 keys that's 4-5 minutes of stalling per image before ever
+    # reaching the OpenRouter fallback. Cap attempts at 3 keys max, and use a
+    # shorter timeout on the 2nd/3rd attempt so a bad/slow key fails fast.
+    max_retries = min(len(key_rotator.keys), 3) if key_rotator.keys else 3
 
     for attempt in range(max_retries):
         try:
@@ -549,7 +553,8 @@ async def generate_mcq_from_image(
                     ]
                 )
 
-            response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=45)
+            _attempt_timeout = 45 if attempt == 0 else 20
+            response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
             valid = _parse_mcq_json(response.text)
             valid = await _attach_explanation_images(valid, img)
             logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1})")
