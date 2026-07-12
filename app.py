@@ -1853,11 +1853,22 @@ async def try_pin_message(chat_id, message_id: int):
         enabled = await db_get_pin_setting(chat_id)
         PIN_ENABLED[chat_id] = enabled
     if enabled:
-        await tg_post("pinChatMessage", {
+        r = await tg_post("pinChatMessage", {
             "chat_id": chat_id,
             "message_id": message_id,
             "disable_notification": True
         })
+        if not r or not r.get("ok"):
+            err_desc = (r or {}).get("description", "no response")
+            logger.warning(f"[Pin] FAILED chat={chat_id} msg={message_id}: {err_desc}")
+            try:
+                await notify_owner(
+                    f"⚠️ Auto-pin failed (chat={chat_id}, msg_id={message_id})\n"
+                    f"Reason: {err_desc}\n"
+                    f"সম্ভবত bot-কে channel-এ 'Pin Messages' admin permission দেওয়া নেই।"
+                )
+            except Exception:
+                pass
 
 # ============================================================
 # FEATURE: /pdf on | /pdf off — ending message er por auto Sheet PDF channel e jabe kina
@@ -3183,6 +3194,7 @@ async def handle_premium_pdf_start(msg: dict, cache_id: str):
         mcqs = cache["mcq_data"]
         html = _build_rapid_pdf_html(topic, mcqs)
         pdf_bytes = await _html_to_pdf(html)
+        pdf_bytes = await _apply_saved_watermark(pdf_bytes)
         if not pdf_bytes:
             await send_msg(chat_id, "❌ PDF generate হয়নি!")
             return
@@ -3297,6 +3309,7 @@ async def handle_bm(msg: dict):
         await send_msg(chat_id, f"🔖 {len(bookmarks)} টি bookmark পাওয়া গেছে!\n📄 PDF তৈরি হচ্ছে...")
         html = _build_bm_html(bookmarks)
         pdf_bytes = await _html_to_pdf(html)
+        pdf_bytes = await _apply_saved_watermark(pdf_bytes)
         if pdf_bytes:
             await send_document(
                 chat_id, pdf_bytes, "ATLAS_Bookmarks.pdf",
@@ -3494,6 +3507,21 @@ async def _get_pw_browser():
             )
         return _PW_BROWSER["browser"]
 
+async def _apply_saved_watermark(pdf_bytes: bytes) -> bytes:
+    """If a default watermark is saved (via /wm or /watermark, no reply),
+    stamp it onto any generated PDF before sending. Best-effort — returns
+    original bytes untouched on any failure or if no watermark is set."""
+    if not pdf_bytes:
+        return pdf_bytes
+    try:
+        settings = await db_get_settings()
+        wm_text = settings.get("watermark", "")
+        if wm_text:
+            return add_watermark_to_pdf(pdf_bytes, wm_text)
+    except Exception as e:
+        logger.warning(f"[AutoWatermark] apply failed: {e}")
+    return pdf_bytes
+
 async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
     """Playwright-based HTML->PDF, ported 1:1 from AtlasMasterBot's
     AsyncPDFExporter.html_to_pdf (proven working in production there)."""
@@ -3613,6 +3641,7 @@ async def handle_qpdf_command(msg: dict):
 
         html_out = await build_chorcha_pdf_html(data)
         pdf_bytes = await _html_to_pdf(html_out)
+        pdf_bytes = await _apply_saved_watermark(pdf_bytes)
 
         if not pdf_bytes:
             if loading_id:
@@ -4190,6 +4219,7 @@ async def handle_sheet_style_callback(callback_query: dict):
                 html_out = PRINT_STYLE_BUILDERS[style_key](data_adapted, title)
 
             pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress)
+            pdf_bytes = await _apply_saved_watermark(pdf_bytes)
 
         if not pdf_bytes:
             await edit_msg(chat_id, status_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
@@ -4792,9 +4822,15 @@ async def _process_pdf_pages_inner(
                         data_adapted = _adapt_mcqs_for_print(mcqs)
                         reply_target = first_image_msg_id or image_msg_id
                         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                        _wm_saved = (await db_get_settings()).get("watermark", "")
                         for style_key in ("style1", "style3"):
                             html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
                             pdf_bytes = await _html_to_pdf(html_s)
+                            if pdf_bytes and _wm_saved:
+                                try:
+                                    pdf_bytes = add_watermark_to_pdf(pdf_bytes, _wm_saved)
+                                except Exception as _wm_e:
+                                    logger.warning(f"[PDF-AUTOSEND] watermark apply failed: {_wm_e}")
                             if pdf_bytes:
                                 style_name = PRINT_STYLE_NAMES[style_key]
                                 doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
@@ -5232,9 +5268,15 @@ async def _process_pdfm_pages_impl(
                         data_adapted = _adapt_mcqs_for_print(mcqs)
                         reply_target = first_image_msg_id or image_msg_id
                         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                        _wm_saved = (await db_get_settings()).get("watermark", "")
                         for style_key in ("style1", "style3"):
                             html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
                             pdf_bytes = await _html_to_pdf(html_s)
+                            if pdf_bytes and _wm_saved:
+                                try:
+                                    pdf_bytes = add_watermark_to_pdf(pdf_bytes, _wm_saved)
+                                except Exception as _wm_e:
+                                    logger.warning(f"[PDF-AUTOSEND] watermark apply failed: {_wm_e}")
                             if pdf_bytes:
                                 style_name = PRINT_STYLE_NAMES[style_key]
                                 doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
