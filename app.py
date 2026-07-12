@@ -1869,6 +1869,8 @@ async def try_pin_message(chat_id, message_id: int):
                 )
             except Exception:
                 pass
+    else:
+        logger.info(f"[Pin] Skipped (disabled for chat={chat_id})")
 
 # ============================================================
 # FEATURE: /pdf on | /pdf off — ending message er por auto Sheet PDF channel e jabe kina
@@ -4826,23 +4828,30 @@ async def _process_pdf_pages_inner(
                         for style_key in ("style1", "style3"):
                             html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
                             pdf_bytes = await _html_to_pdf(html_s)
-                            if pdf_bytes and _wm_saved:
+                            if not pdf_bytes:
+                                logger.error(f"[PDF-AUTOSEND] {style_key} generation returned empty for page {page_num}")
+                                await notify_owner(f"⚠️ Auto-PDF ({style_key}) generate হয়নি — page {fmt_page(page_num)}, topic: {topic}")
+                                continue
+                            if _wm_saved:
                                 try:
                                     pdf_bytes = add_watermark_to_pdf(pdf_bytes, _wm_saved)
                                 except Exception as _wm_e:
                                     logger.warning(f"[PDF-AUTOSEND] watermark apply failed: {_wm_e}")
-                            if pdf_bytes:
-                                style_name = PRINT_STYLE_NAMES[style_key]
-                                doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
-                                    caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
-                                    message_thread_id=thread_id, reply_to_message_id=reply_target)
-                                # Item 3: both auto-sent PDFs (style1 + style3) get pinned
-                                if doc_r and doc_r.get("ok"):
-                                    doc_msg_id = doc_r.get("result", {}).get("message_id")
-                                    if doc_msg_id:
-                                        await try_pin_message(channel_id, doc_msg_id)
+                            style_name = PRINT_STYLE_NAMES[style_key]
+                            doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
+                                caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
+                                message_thread_id=thread_id, reply_to_message_id=reply_target)
+                            if doc_r and doc_r.get("ok"):
+                                doc_msg_id = doc_r.get("result", {}).get("message_id")
+                                if doc_msg_id:
+                                    await try_pin_message(channel_id, doc_msg_id)
+                            else:
+                                err_desc = (doc_r or {}).get("description", "no response")
+                                logger.error(f"[PDF-AUTOSEND] send_document failed ({style_key}): {err_desc}")
+                                await notify_owner(f"⚠️ Auto-PDF ({style_key}) পাঠাতে ব্যর্থ — page {fmt_page(page_num)}\nReason: {err_desc}")
                     except Exception as e:
                         logger.error(f"[PDF-AUTOSEND] Error: {e}")
+                        await notify_owner(f"⚠️ Auto-PDF সিস্টেমে error — page {fmt_page(page_num)}, topic: {topic}\nReason: {e}")
 
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
@@ -5272,23 +5281,30 @@ async def _process_pdfm_pages_impl(
                         for style_key in ("style1", "style3"):
                             html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
                             pdf_bytes = await _html_to_pdf(html_s)
-                            if pdf_bytes and _wm_saved:
+                            if not pdf_bytes:
+                                logger.error(f"[PDF-AUTOSEND] {style_key} generation returned empty for page {page_num}")
+                                await notify_owner(f"⚠️ Auto-PDF ({style_key}) generate হয়নি — page {fmt_page(page_num)}, topic: {topic}")
+                                continue
+                            if _wm_saved:
                                 try:
                                     pdf_bytes = add_watermark_to_pdf(pdf_bytes, _wm_saved)
                                 except Exception as _wm_e:
                                     logger.warning(f"[PDF-AUTOSEND] watermark apply failed: {_wm_e}")
-                            if pdf_bytes:
-                                style_name = PRINT_STYLE_NAMES[style_key]
-                                doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
-                                    caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
-                                    message_thread_id=thread_id, reply_to_message_id=reply_target)
-                                # Item 3: both auto-sent PDFs (style1 + style3) get pinned
-                                if doc_r and doc_r.get("ok"):
-                                    doc_msg_id = doc_r.get("result", {}).get("message_id")
-                                    if doc_msg_id:
-                                        await try_pin_message(channel_id, doc_msg_id)
+                            style_name = PRINT_STYLE_NAMES[style_key]
+                            doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
+                                caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
+                                message_thread_id=thread_id, reply_to_message_id=reply_target)
+                            if doc_r and doc_r.get("ok"):
+                                doc_msg_id = doc_r.get("result", {}).get("message_id")
+                                if doc_msg_id:
+                                    await try_pin_message(channel_id, doc_msg_id)
+                            else:
+                                err_desc = (doc_r or {}).get("description", "no response")
+                                logger.error(f"[PDF-AUTOSEND] send_document failed ({style_key}): {err_desc}")
+                                await notify_owner(f"⚠️ Auto-PDF ({style_key}) পাঠাতে ব্যর্থ — page {fmt_page(page_num)}\nReason: {err_desc}")
                     except Exception as e:
                         logger.error(f"[PDF-AUTOSEND] Error: {e}")
+                        await notify_owner(f"⚠️ Auto-PDF সিস্টেমে error — page {fmt_page(page_num)}, topic: {topic}\nReason: {e}")
 
                 summary_pages.append({
                     "page": page_num,
