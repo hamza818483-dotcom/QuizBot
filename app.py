@@ -803,7 +803,7 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
         "max_tokens": 8192,
     }
     try:
-        async with httpx.AsyncClient(timeout=120) as c:
+        async with httpx.AsyncClient(timeout=30) as c:
             r = await c.post(url, headers=headers, json=payload)
             if r.status_code >= 400:
                 logger.warning(f"[AI-ROT] {model} HTTP {r.status_code}: {r.text[:200]}")
@@ -946,7 +946,7 @@ async def _gen_hf(img, topic, count):
         "temperature": 0.3,
     }
     try:
-        async with httpx.AsyncClient(timeout=120) as c:
+        async with httpx.AsyncClient(timeout=30) as c:
             r = await c.post(
                 "https://router.huggingface.co/v1/chat/completions",
                 headers=headers, json=payload
