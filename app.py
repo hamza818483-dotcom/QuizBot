@@ -3183,10 +3183,21 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 f"✅ {sent}/{total} polls channel-এ পাঠানো হয়েছে!")
 
 async def handle_premium_pdf_start(msg: dict, cache_id: str):
-    """Premium PDF button clicked — generate PDF from cache"""
+    """Premium PDF button clicked — generate Style1 PDF from cache with live progress"""
     chat_id = msg["chat"]["id"]
-    r = await send_msg(chat_id, "⏳ Premium PDF তৈরি হচ্ছে...")
+    r = await send_msg(chat_id, "🎨 Premium PDF (Style1)\n⏳ 0% — শুরু হচ্ছে...")
     status_id = r.get("result", {}).get("message_id")
+    start_t = time.time()
+
+    async def _progress(pct):
+        if not status_id:
+            return
+        elapsed = time.time() - start_t
+        try:
+            await edit_msg(chat_id, status_id, f"🎨 Premium PDF (Style1)\n⏳ {pct}% — {elapsed:.1f}s")
+        except Exception:
+            pass
+
     try:
         cache = await db_get_mcq_cache(cache_id)
         if not cache:
@@ -3194,8 +3205,10 @@ async def handle_premium_pdf_start(msg: dict, cache_id: str):
             return
         topic = cache.get("topic", "MCQ")
         mcqs = cache["mcq_data"]
-        html = _build_rapid_pdf_html(topic, mcqs)
-        pdf_bytes = await _html_to_pdf(html)
+        await _progress(10)
+        data_adapted = _adapt_mcqs_for_print(mcqs)
+        html = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
+        pdf_bytes = await _html_to_pdf(html, progress_cb=_progress)
         pdf_bytes = await _apply_saved_watermark(pdf_bytes)
         if not pdf_bytes:
             await send_msg(chat_id, "❌ PDF generate হয়নি!")
@@ -4221,7 +4234,6 @@ async def handle_sheet_style_callback(callback_query: dict):
                 html_out = PRINT_STYLE_BUILDERS[style_key](data_adapted, title)
 
             pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress)
-            pdf_bytes = await _apply_saved_watermark(pdf_bytes)
             pdf_bytes = await _apply_saved_watermark(pdf_bytes)
 
         if not pdf_bytes:
