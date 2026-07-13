@@ -3098,8 +3098,8 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             premium_url = f"https://t.me/{bot_un}?start=premium_{batch_cache_id}"
             end_kb = {"inline_keyboard": [
                 [{"text": "📝 Quiz Solve", "url": quiz_url},
-                 {"text": "🔄 Poll Solve", "url": poll_url}],
-                [{"text": "🌐 Web Exam", "url": exam_url},
+                 {"text": "🔄 Poll Again", "url": poll_url}],
+                [{"text": "🌐 Website Exam", "url": exam_url},
                  {"text": "💎 Premium PDF", "url": premium_url}],
             ]}
             end_r = await tg_post("sendMessage", {
@@ -3159,8 +3159,8 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
         premium_url = f"https://t.me/{bot_un}?start=premium_{cache_id}"
         end_kb = {"inline_keyboard": [
             [{"text": "📝 Quiz Solve", "url": quiz_url},
-             {"text": "🔄 Poll Solve", "url": poll_url}],
-            [{"text": "🌐 Web Exam", "url": exam_url},
+             {"text": "🔄 Poll Again", "url": poll_url}],
+            [{"text": "🌐 Website Exam", "url": exam_url},
              {"text": "💎 Premium PDF", "url": premium_url}],
         ]}
         end_send_data = {
