@@ -4684,6 +4684,23 @@ async def _process_pdf_pages_inner(
     summary_pages = []
     all_mcqs_csv = []
     first_image_msg_id = None
+    _prefetch_task = None
+    _prefetch_idx = None
+
+    async def _gen_with_retry(img_, page_num_):
+        """Page-level retry: try twice before giving up on a page entirely,
+        so a single transient failure doesn't silently drop the whole page."""
+        for _pg_attempt in range(2):
+            try:
+                _mcqs = await _generate_mcq_from_image_raw(img_, topic, page_num_, mcq_count)
+                _mcqs = _cap_mcq_options(_mcqs, 4)
+                if _mcqs:
+                    return _mcqs
+            except Exception as _pg_e:
+                logger.warning(f"[PDF] Page {page_num_} gen attempt {_pg_attempt+1} failed: {_pg_e}")
+            if _pg_attempt == 0:
+                await asyncio.sleep(1)
+        return []
 
     for idx, page_tuple in enumerate(pages):
         if skip_generate:
@@ -4696,8 +4713,14 @@ async def _process_pdf_pages_inner(
 
         try:
             if not skip_generate:
-                mcqs = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
-                mcqs = _cap_mcq_options(mcqs, 4)
+                # Speed fix: if the next page's generation was already
+                # prefetched (started while this page's polls were being
+                # sent), use that result instead of generating again.
+                if _prefetch_task is not None and _prefetch_idx == idx:
+                    mcqs = await _prefetch_task
+                else:
+                    mcqs = await _gen_with_retry(img, page_num)
+                _prefetch_task = None
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
@@ -4737,6 +4760,15 @@ async def _process_pdf_pages_inner(
                 mcqs = await _repair_thin_explanations(mcqs, img, topic)
                 # explanation crop/attach removed — user requested no
                 # explanation image after submit, for faster /pdf turnaround.
+
+                # Speed fix: start generating the NEXT page's MCQs now, in the
+                # background, while THIS page's polls are being sent below
+                # (poll-sending is rate-limited/slow — generation can overlap
+                # with it instead of waiting its turn after).
+                if not skip_generate and idx + 1 < len(pages):
+                    _next_page_num, _next_img = pages[idx + 1]
+                    _prefetch_task = asyncio.create_task(_gen_with_retry(_next_img, _next_page_num))
+                    _prefetch_idx = idx + 1
 
                 poll_links = []
                 first_poll_link = ""
