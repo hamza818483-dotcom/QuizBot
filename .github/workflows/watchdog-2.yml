@@ -9,21 +9,14 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Render Primary
+      - name: Ping HF Space
         env:
-          RENDER_URL: ${{ secrets.RENDER_URL }}
+          HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
         run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 "${RENDER_URL}/health" || echo "000")
-          echo "Primary: $STATUS"
+          URL="${HF_SPACE_URL:-https://hamza-02-quizbot.hf.space}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 "${URL}/health" || echo "000")
+          echo "HF Space: $STATUS"
           if [ "$STATUS" != "200" ]; then
-            echo "::error::watchdog-2 primary ping failed ($STATUS)"
+            echo "::error::watchdog-2 HF Space ping failed ($STATUS)"
             exit 1
           fi
-
-      - name: Ping Render Secondary
-        env:
-          RENDER_URL_2: ${{ secrets.RENDER_URL_2 }}
-        run: |
-          if [ -z "$RENDER_URL_2" ]; then exit 0; fi
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 "${RENDER_URL_2}/health" || echo "000")
-          echo "Secondary: $STATUS"

@@ -1,4 +1,4 @@
-name: Watchdog 1 (5min) + Confirmed Primary→Secondary Failover
+name: Watchdog 1 (5min) + Confirmed Down Alert
 
 on:
   schedule:
@@ -6,21 +6,21 @@ on:
   workflow_dispatch:
 
 jobs:
-  ping_and_failover:
+  ping_and_alert:
     runs-on: ubuntu-latest
     steps:
-      # ── Step 1: Confirmed Primary check — 3 attempts, 10s apart.
-      # Single ping failure ≠ down (could be cold-start/network blip).
-      # Only "down" if ALL 3 attempts fail.
-      - name: Confirmed Primary check (3x retry)
-        id: primary_check
+      # Confirmed check — 3 attempts, 10s apart. Single ping failure ≠ down
+      # (could be cold-start/network blip). Only "down" if ALL 3 attempts fail.
+      - name: Confirmed HF Space check (3x retry)
+        id: check
         env:
-          RENDER_URL: ${{ secrets.RENDER_URL }}
+          HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
         run: |
+          URL="${HF_SPACE_URL:-https://hamza-02-quizbot.hf.space}"
           FAIL_COUNT=0
           for i in 1 2 3; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 --retry 1 "${RENDER_URL}/health" || echo "000")
-            echo "Primary attempt $i: $STATUS"
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 --retry 1 "${URL}/health" || echo "000")
+            echo "Attempt $i: $STATUS"
             if [ "$STATUS" != "200" ]; then
               FAIL_COUNT=$((FAIL_COUNT+1))
             else
@@ -29,147 +29,21 @@ jobs:
             [ "$i" -lt 3 ] && sleep 10
           done
           if [ "$FAIL_COUNT" -ge 3 ]; then
-            echo "primary_status=DOWN" >> $GITHUB_OUTPUT
-            echo "::warning::Primary confirmed DOWN after 3 attempts"
+            echo "status=DOWN" >> $GITHUB_OUTPUT
+            echo "::error::HF Space confirmed DOWN after 3 attempts"
           else
-            echo "primary_status=UP" >> $GITHUB_OUTPUT
+            echo "status=UP" >> $GITHUB_OUTPUT
           fi
 
-      - name: Ping Render Secondary
+      - name: Alert owner if confirmed DOWN
+        if: ${{ steps.check.outputs.status == 'DOWN' }}
         env:
-          RENDER_URL_2: ${{ secrets.RENDER_URL_2 }}
-        run: |
-          if [ -z "$RENDER_URL_2" ]; then exit 0; fi
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 "${RENDER_URL_2}/health" || echo "000")
-          echo "Secondary: $STATUS"
-
-      # ── Step 2: Failover — only after confirmed DOWN, and only if
-      # Secondary is verified healthy first (no point switching to a dead target).
-      - name: Failover to Secondary (confirmed-down + secondary-healthy)
-        if: ${{ steps.primary_check.outputs.primary_status == 'DOWN' }}
-        id: failover
-        env:
-          RENDER_URL: ${{ secrets.RENDER_URL }}
-          RENDER_URL_2: ${{ secrets.RENDER_URL_2 }}
+          HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OWNER_ID: ${{ secrets.OWNER_ID }}
         run: |
-          if [ -z "$RENDER_URL_2" ]; then
-            echo "RENDER_URL_2 not set, skipping failover"
-            exit 0
-          fi
-
-          # Verify Secondary is actually healthy before switching to it
-          SEC_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "${RENDER_URL_2}/health" || echo "000")
-          if [ "$SEC_STATUS" != "200" ]; then
-            echo "::error::Secondary also unhealthy ($SEC_STATUS) — cannot fail over, both down"
-            exit 0
-          fi
-
-          CURRENT=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',{}).get('url',''))" 2>/dev/null || echo "")
-          echo "Current webhook: $CURRENT"
-          PRIMARY_HOST=$(echo "${RENDER_URL}" | sed -E 's#https?://##')
-
-          if [[ "$CURRENT" == *"$PRIMARY_HOST"* ]]; then
-            SECONDARY_WEBHOOK="${RENDER_URL_2}/webhook"
-            echo "::warning::Primary confirmed DOWN, Secondary healthy — switching webhook"
-
-            SWITCHED="false"
-            for i in 1 2 3; do
-              RESULT=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
-                -d "url=$SECONDARY_WEBHOOK" \
-                -d "drop_pending_updates=false")
-              OK=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok', False))" 2>/dev/null || echo "False")
-              echo "setWebhook attempt $i: $RESULT"
-              if [ "$OK" = "True" ]; then
-                SWITCHED="true"
-                break
-              fi
-              sleep 5
-            done
-
-            # Post-switch confirm: re-fetch webhook info, verify it actually points to Secondary
-            sleep 3
-            CONFIRM=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo" \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',{}).get('url',''))" 2>/dev/null || echo "")
-            SECONDARY_HOST=$(echo "${RENDER_URL_2}" | sed -E 's#https?://##')
-
-            if [[ "$CONFIRM" == *"$SECONDARY_HOST"* ]]; then
-              echo "failover_confirmed=true" >> $GITHUB_OUTPUT
-              if [ -n "$OWNER_ID" ]; then
-                MSG="🔄 AUTO-FAILOVER HOLO (CONFIRMED)!%0A%0APrimary Render 3x check e DOWN paowa gechhe.%0ABot ekhon Secondary Render e switch hoyeche — webhook verify kora hoyeche.%0A%0APrimary: ${RENDER_URL}%0ASecondary: ${RENDER_URL_2}%0A%0ABot active ache, Primary check koro druto."
-                curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-                  -d "chat_id=${OWNER_ID}" -d "text=${MSG}" || true
-              fi
-            else
-              echo "failover_confirmed=false" >> $GITHUB_OUTPUT
-              echo "::error::Webhook switch NOT confirmed — still shows: $CONFIRM"
-              if [ -n "$OWNER_ID" ]; then
-                MSG="🚨 FAILOVER FAILED!%0A%0APrimary DOWN, kintu webhook Secondary te switch confirm hoyni.%0ACurrent webhook: ${CONFIRM}%0A%0AManual check dorkar EKHONI."
-                curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-                  -d "chat_id=${OWNER_ID}" -d "text=${MSG}" || true
-              fi
-            fi
-          else
-            echo "Webhook already not on Primary — no action needed"
-          fi
-
-      # ── Step 3: Switch back — only after Primary confirmed UP again
-      - name: Switch back to Primary if confirmed recovered
-        if: ${{ steps.primary_check.outputs.primary_status == 'UP' }}
-        env:
-          RENDER_URL: ${{ secrets.RENDER_URL }}
-          RENDER_URL_2: ${{ secrets.RENDER_URL_2 }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          OWNER_ID: ${{ secrets.OWNER_ID }}
-        run: |
-          CURRENT=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',{}).get('url',''))" 2>/dev/null || echo "")
-          SECONDARY_HOST=$(echo "${RENDER_URL_2}" | sed -E 's#https?://##')
-          if [[ -n "$SECONDARY_HOST" && "$CURRENT" == *"$SECONDARY_HOST"* ]]; then
-            PRIMARY_WEBHOOK="${RENDER_URL}/webhook"
-            echo "✅ Primary confirmed recovered — switching webhook back"
-
-            SWITCHED="false"
-            for i in 1 2 3; do
-              RESULT=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
-                -d "url=$PRIMARY_WEBHOOK" \
-                -d "drop_pending_updates=false")
-              OK=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok', False))" 2>/dev/null || echo "False")
-              if [ "$OK" = "True" ]; then SWITCHED="true"; break; fi
-              sleep 5
-            done
-
-            sleep 3
-            CONFIRM=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo" \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',{}).get('url',''))" 2>/dev/null || echo "")
-            PRIMARY_HOST=$(echo "${RENDER_URL}" | sed -E 's#https?://##')
-
-            if [[ "$CONFIRM" == *"$PRIMARY_HOST"* ]]; then
-              if [ -n "$OWNER_ID" ]; then
-                MSG="✅ PRIMARY RENDER ABAR THIK (CONFIRMED)!%0A%0AWebhook Secondary theke Primary te switch back hoyeche — verify kora hoyeche.%0A%0APrimary: ${RENDER_URL}"
-                curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-                  -d "chat_id=${OWNER_ID}" -d "text=${MSG}" || true
-              fi
-            else
-              echo "::error::Switch-back NOT confirmed — still shows: $CONFIRM"
-            fi
-          fi
-
-      # ── Step 4: Both-down critical alert (confirmed Primary down + Secondary also down)
-      - name: Alert if BOTH confirmed down
-        if: ${{ steps.primary_check.outputs.primary_status == 'DOWN' }}
-        env:
-          RENDER_URL: ${{ secrets.RENDER_URL }}
-          RENDER_URL_2: ${{ secrets.RENDER_URL_2 }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          OWNER_ID: ${{ secrets.OWNER_ID }}
-        run: |
-          if [ -z "$RENDER_URL_2" ] || [ -z "$OWNER_ID" ]; then exit 0; fi
-          SEC_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "${RENDER_URL_2}/health" || echo "000")
-          if [ "$SEC_STATUS" != "200" ]; then
-            MSG="🚨 CRITICAL: BOTH Render accounts DOWN (confirmed)!%0A%0APrimary: ${RENDER_URL}%0ASecondary: ${RENDER_URL_2}%0A%0ABot COMPLETELY OFFLINE — manual check needed NOW."
-            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-              -d "chat_id=${OWNER_ID}" -d "text=${MSG}" || true
-          fi
+          if [ -z "$OWNER_ID" ] || [ -z "$BOT_TOKEN" ]; then exit 0; fi
+          URL="${HF_SPACE_URL:-https://hamza-02-quizbot.hf.space}"
+          MSG="🚨 CRITICAL: HF Space DOWN (confirmed 3x)!%0A%0AURL: ${URL}%0A%0ABot possibly OFFLINE — HF Space may be sleeping/crashed. Manual check needed."
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${OWNER_ID}" -d "text=${MSG}" || true
