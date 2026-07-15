@@ -5479,18 +5479,30 @@ of likelihood, before concluding no answer exists:
 
 Source A — Answer marked directly on an option: circle, tick (✓), cross(✗)-elimination,
   underline, bold, highlight, star (★), or any other visual mark on one option
+  🔴 ABSOLUTE PRIORITY: if ANY option on the page has ANY visual mark on it — no matter
+  which type (tick/circle/cross/underline/bold/highlight/star/anything else) — that marked
+  option IS the answer, 100%, strictly, with zero exception. Do NOT second-guess it, do NOT
+  cross-check it against an answer key elsewhere, and do NOT let a separate answer-key table
+  (Source C/D/E) override or contradict a mark that is physically on the option itself. A
+  mark directly on an option is ground truth and wins over every other source, always.
 Source B — Answer given immediately with/after the MCQ itself (right after the question
   block, before the next question starts)
 Source C — Answer table/box at the BOTTOM of the SAME page: a small table, boxed list,
   or line like "Answer: 1-A, 2-C, 3-B..." — match question number → correct option
+  (only use this when NO mark exists directly on any option for that question)
 Source D — Combined/consolidated answer key appearing SEVERAL PAGES LATER (not
   necessarily the very next page — scan forward through ALL available pages, since many
   question banks group all answers together after 2-3 pages of questions, or at the very
   end of the document): match question number exactly → correct option
+  (only use this when NO mark exists directly on any option for that question)
 Source E — Answer key on the page(s) immediately BEFORE or AFTER this one, in any of
   the above formats (marked option, inline, or boxed table)
+  (only use this when NO mark exists directly on any option for that question)
 
 Rules while scanning:
+→ 🔴 PRIORITY ORDER IS ABSOLUTE: Source A (mark on option) > Source B > Source C > Source D
+  > Source E. If a mark exists directly on an option, stop right there — that is the answer,
+  do not continue scanning other sources for that question.
 → Check every source type above before deciding an answer is missing — the answer for a
   question on this page may live on a completely different page from the ones you've
   processed so far, so scan broadly, not just this single page.
