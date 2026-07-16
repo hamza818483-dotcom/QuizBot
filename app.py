@@ -9959,14 +9959,31 @@ async def save_exam_result(request: Request):
 
 @app.get("/api/leaderboard/{cache_id}")
 async def get_leaderboard(cache_id: str):
+    cache = None
     try:
         cache = await db_get_mcq_cache(cache_id)
         if cache and cache.get("is_new_gen"):
             return JSONResponse({"ok": True, "disabled": True, "data": []})
         r = sb.table("web_exam_leaderboard").select("*")\
             .eq("cache_id", cache_id).order("final_score", desc=True).limit(50).execute()
-        return JSONResponse({"ok": True, "data": r.data or []})
+        if r.data:
+            return JSONResponse({"ok": True, "data": r.data})
     except Exception as e:
+        logger.warning(f"[Leaderboard] Supabase read warn: {e}")
+    # ── Supabase empty/down → D1 fallback ──
+    try:
+        from core import d1_select as _d1s
+        if cache is None:
+            cache = await db_get_mcq_cache(cache_id)
+            if cache and cache.get("is_new_gen"):
+                return JSONResponse({"ok": True, "disabled": True, "data": []})
+        rows = await _d1s(
+            "SELECT * FROM web_exam_leaderboard WHERE cache_id=?1 ORDER BY final_score DESC LIMIT 50",
+            [cache_id]
+        )
+        return JSONResponse({"ok": True, "data": rows or []})
+    except Exception as e:
+        logger.error(f"[Leaderboard] D1 fallback failed: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/bookmark")
