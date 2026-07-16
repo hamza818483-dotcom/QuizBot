@@ -527,6 +527,10 @@ def _build_chok_prompt(topic: str) -> str:
         f"- Count the total number of boxes/cells/marked areas on the page first "
         f"(mentally). Your total MCQ output must be AT LEAST equal to that box count, "
         f"and ideally MORE (aim 15-25+ MCQs per page, more if content-rich).\n"
+        f"- HARD FLOOR: regardless of box count, NEVER return fewer than 15 total MCQs "
+        f"for this ছক page. If the box count is below 15, generate multiple MCQs per box "
+        f"(different angles/facts) until you reach at least 15 — this floor is non-"
+        f"negotiable.\n"
         f"- Never merge multiple boxes into one MCQ unless it's for the dedicated "
         f"'combined/multi-box' MCQ type described below.\n"
         f"- Never skip a box for being 'too small' — even a 2-3 word box/cell must "
@@ -1217,29 +1221,45 @@ def _classify_chok_mcq_type(m: dict) -> str:
 
 def _chok_ratio_gap_note(mcqs: list) -> str:
     """Returns a short instruction string describing which type-buckets are
-    under target ratio, to append to the chok verify prompt. Empty string
-    means ratios are acceptable — no extra instruction needed."""
+    under target ratio AND whether the hard 15-MCQ-per-page floor is unmet,
+    to append to the chok verify prompt. Empty string means everything is
+    already satisfied — no extra instruction needed.
+    Ratio math always uses a baseline of at least 15 (the user's hard minimum
+    per ছক) so small pages still get told to add T/F, multi-box, short-Q
+    MCQs — percentages are never skipped just because current count is low.
+    """
     n = len(mcqs or [])
-    if n < 8:
-        return ""  # too few MCQs yet for ratio math to be meaningful
+    baseline = max(n, 15)
     counts = {"standard": 0, "tf": 0, "multi_box": 0, "short_q_long_opt": 0}
     for m in mcqs:
         counts[_classify_chok_mcq_type(m)] += 1
     targets = {"tf": 0.05, "multi_box": 0.10, "short_q_long_opt": 0.05}
     gaps = []
     for key, pct in targets.items():
-        need = max(0, round(n * pct) - counts[key])
+        need = max(0, round(baseline * pct) - counts[key])
         if need > 0:
             label = {"tf": "সত্য/মিথ্যা style", "multi_box": "multi-box combined",
                       "short_q_long_opt": "short-question-long-option"}[key]
             gaps.append(f"{need} more {label} MCQ(s)")
-    if not gaps:
+    floor_gap = 15 - n
+    notes = []
+    if floor_gap > 0:
+        notes.append(
+            f"HARD FLOOR NOT MET: this ছক page has only {n} MCQs — the user's "
+            f"absolute minimum is 15 MCQs per ছক page, no exceptions. You MUST "
+            f"add at least {floor_gap} more MCQ(s) to reach 15, on top of any "
+            f"type-mix gaps below, by covering more boxes/cells or adding more "
+            f"angles per box — never stop below 15."
+        )
+    if gaps:
+        notes.append(
+            f"TYPE-MIX GAP: current set is short on required variety — "
+            f"{'; '.join(gaps)}. Prioritize these types among the additional "
+            f"MCQs you return (still following per-box source-fidelity rules)."
+        )
+    if not notes:
         return ""
-    return (
-        f"\nTYPE-MIX GAP DETECTED: current set is short on required variety — "
-        f"{'; '.join(gaps)}. Prioritize these types among the additional MCQs you return "
-        f"(still following per-box source-fidelity rules)."
-    )
+    return "\n" + "\n".join(notes)
 
 
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
