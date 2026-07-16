@@ -501,7 +501,93 @@ async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
     await send_msg(chat_id, "❌ কিছু একটা সমস্যা হয়েছে। একটু পর আবার চেষ্টা করুন।")
 
 
+import contextvars
+_CHOK_MODE = contextvars.ContextVar("chok_mode", default=False)
+
+def _build_chok_prompt(topic: str) -> str:
+    """
+    /chok command prompt — ছক (box/table/diagram) pages মাস্ট প্রতিটা বক্স থেকে MCQ।
+    Mix: 80% standard (per-box, /pdf-style rules), 5% সত্য-মিথ্যা (True/False),
+    10% multi-box combined MCQ (covers full ছক), 5% short-question-long-option.
+    Minimum coverage: at least 1 MCQ per box, target 15-25+ total per page.
+    """
+    return (
+        f"You are an expert MCQ-extraction engine specialized in ছক/টেবিল (box/table/diagram) "
+        f"pages for Bengali/English academic textbooks (medical/HSC/admission-standard).\n"
+        f"Topic: {topic}\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 ABSOLUTE MUST — EVERY BOX/AREA/MARKED PART MUST PRODUCE AN MCQ\n"
+        f"═══════════════════════════════\n"
+        f"- This page contains a ছক/box/table/diagram-style layout. Walk through EVERY "
+        f"single box, cell, marked area, column, and row ONE BY ONE.\n"
+        f"- EVERY box/cell/marked area on the page MUST generate at least 1 MCQ — "
+        f"zero exceptions, zero skipped boxes. If a box has rich info, generate MORE "
+        f"than 1 MCQ from it.\n"
+        f"- Count the total number of boxes/cells/marked areas on the page first "
+        f"(mentally). Your total MCQ output must be AT LEAST equal to that box count, "
+        f"and ideally MORE (aim 15-25+ MCQs per page, more if content-rich).\n"
+        f"- Never merge multiple boxes into one MCQ unless it's for the dedicated "
+        f"'combined/multi-box' MCQ type described below.\n"
+        f"- Never skip a box for being 'too small' — even a 2-3 word box/cell must "
+        f"produce a real MCQ using surrounding context.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟦 MCQ TYPE DISTRIBUTION (STRICT MIX — apply across the full set)\n"
+        f"═══════════════════════════════\n"
+        f"1) ~80% — STANDARD MCQ (one or more per box, individually, using that box's "
+        f"exact info): direct fact, definition, comparison, cause-effect, fill-in-blank, "
+        f"'কোনটি সঠিক নয়' style — vary the angle, never repeat the same question pattern "
+        f"back-to-back. 4 options, all info-rich (never bare হ্যাঁ/না/সত্য/মিথ্যা "
+        f"as a whole option). One correct answer only. Bengali/English explanation covering "
+        f"why each of the 4 options is right/wrong, compact and clear, within Telegram "
+        f"explanation character limit (max ~200 characters) — never a 1-line generic "
+        f"explanation.\n\n"
+        f"2) ~5% — সত্য/মিথ্যা (TRUE/FALSE) STYLE: Randomly mix these 4 exact patterns "
+        f"(logic must be followed exactly, never mismatch):\n"
+        f"   - 'নিচের কোনটিকে সত্য বললে ভুল হবে না?' → answer = the option that is actually "
+        f"TRUE/correct\n"
+        f"   - 'নিচের কোনটিকে সত্য বললে ভুল হবে?' → answer = the option that is actually "
+        f"FALSE/incorrect\n"
+        f"   - 'নিচের কোনটিকে মিথ্যা বললে ভুল হবে?' → answer = the option that is actually "
+        f"TRUE/correct\n"
+        f"   - 'নিচের কোনটিকে মিথ্যা বললে ভুল হবে না?' → answer = the option that is actually "
+        f"FALSE/incorrect\n"
+        f"   Self-check this logic after writing each one before finalizing. All 4 options "
+        f"info-rich (never a bare 'হ্যাঁ/না/সত্য/মিথ্যা' word as an option). Source-based only.\n\n"
+        f"3) ~10% — MULTI-BOX COMBINED MCQ: combine info from SEVERAL different boxes into "
+        f"a single question (e.g. options that each mix facts from 2-3+ boxes, only one "
+        f"option has ALL facts correct). Across this ~10% slice specifically, make sure "
+        f"the full ছক's information — including all box contents, options, and "
+        f"explanations — ends up covered collectively. Moderate difficulty, not confusing.\n\n"
+        f"4) ~5% — SHORT QUESTION, LONG OPTIONS: question is one short line, all 4 options "
+        f"are longer sentences/phrases. Same explanation-quality rules apply.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 SOURCE FIDELITY (STRICT)\n"
+        f"═══════════════════════════════\n"
+        f"- 100% of question text, options, and explanations must come from the source "
+        f"ছক/page — never invent or assume outside facts.\n"
+        f"- Explanation must justify each of the 4 options individually (correct one why "
+        f"right, other 3 why wrong) — pulled directly from source data — compact enough "
+        f"to fit Telegram's explanation character limit, but never a lazy 1-liner.\n"
+        f"- Never generate MCQs from topic names, chapter titles, headers, or page numbers.\n"
+        f"- Highlighted/marked/boxed/underlined content = highest priority, must be covered.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟩 OUTPUT\n"
+        f"═══════════════════════════════\n"
+        f"JSON array only, no markdown fences, no preamble. Format:\n"
+        f'[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],'
+        f'"answer":0,"explanation":"..."}}]\n'
+        f"answer is integer 0-3 (A=0,B=1,C=2,D=3). Answers must be spread across different "
+        f"option positions, not always the same letter."
+    )
+
+
 def _build_mcq_prompt(topic: str, count) -> str:
+    if _CHOK_MODE.get():
+        return _build_chok_prompt(topic)
     count_min = count_max = None
     if isinstance(count, (tuple, list)) and len(count) == 2:
         count_min, count_max = count[0], count[1]
@@ -1654,6 +1740,7 @@ async def handle_start(msg: dict):
             "━━━━━━━━━━━━━━━━━━━━\n"
             "📄 <b>PDF Commands:</b>\n"
             "• <code>/pdf</code> — PDF reply করে MCQ generate + channel poll\n"
+            "• <code>/chok</code> — ছক/বক্স PDF থেকে প্রতি বক্সে MCQ (mixed style)\n"
             "• <code>/pdfm</code> — PDF pagewise MCQ with image\n"
             "  Format: <code>/pdfm -p 1-5 -c @channel -m \"Topic\" 10</code>\n\n"
             "📸 <b>Image Commands:</b>\n"
@@ -8896,6 +8983,18 @@ async def handle_message(msg: dict):
             return
         clear_cancel(chat_id)
         await handle_pdf(msg)
+        return
+    if text.startswith("/chok"):
+        if not is_auth:
+            if is_private:
+                await send_msg(chat_id, UNAUTH_MSG)
+            return
+        clear_cancel(chat_id)
+        token = _CHOK_MODE.set(True)
+        try:
+            await handle_pdf(msg)
+        finally:
+            _CHOK_MODE.reset(token)
         return
     if text == "/bm":
         await handle_bm(msg)
