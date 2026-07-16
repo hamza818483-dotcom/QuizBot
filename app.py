@@ -525,12 +525,16 @@ def _build_chok_prompt(topic: str) -> str:
         f"zero exceptions, zero skipped boxes. If a box has rich info, generate MORE "
         f"than 1 MCQ from it.\n"
         f"- Count the total number of boxes/cells/marked areas on the page first "
-        f"(mentally). Your total MCQ output must be AT LEAST equal to that box count, "
-        f"and ideally MORE (aim 15-25+ MCQs per page, more if content-rich).\n"
-        f"- HARD FLOOR: regardless of box count, NEVER return fewer than 15 total MCQs "
-        f"for this ছক page. If the box count is below 15, generate multiple MCQs per box "
-        f"(different angles/facts) until you reach at least 15 — this floor is non-"
-        f"negotiable.\n"
+        f"(mentally). This box count IS your real floor — not a fixed number. "
+        f"Your total MCQ output must be AT LEAST equal to that box count, always, "
+        f"no matter how many boxes there are (e.g. 22 boxes → at least 22 MCQs, "
+        f"35 boxes → at least 35 MCQs) — every single box MUST be individually "
+        f"represented in the output.\n"
+        f"- SEPARATELY, as a general target (not a cap): aim for 15-25+ MCQs per page "
+        f"on average when box count is low, going higher whenever box count or page "
+        f"richness demands it. The box-count floor above ALWAYS takes priority over "
+        f"this 15-25 guideline — if boxes exceed 25, you MUST still exceed the box "
+        f"count; the 15-25 range is never an upper limit.\n"
         f"- Never merge multiple boxes into one MCQ unless it's for the dedicated "
         f"'combined/multi-box' MCQ type described below.\n"
         f"- Never skip a box for being 'too small' — even a 2-3 word box/cell must "
@@ -1221,12 +1225,16 @@ def _classify_chok_mcq_type(m: dict) -> str:
 
 def _chok_ratio_gap_note(mcqs: list) -> str:
     """Returns a short instruction string describing which type-buckets are
-    under target ratio AND whether the hard 15-MCQ-per-page floor is unmet,
-    to append to the chok verify prompt. Empty string means everything is
-    already satisfied — no extra instruction needed.
-    Ratio math always uses a baseline of at least 15 (the user's hard minimum
-    per ছক) so small pages still get told to add T/F, multi-box, short-Q
-    MCQs — percentages are never skipped just because current count is low.
+    under target ratio AND whether the code-verifiable safety-net floor is
+    unmet, to append to the chok verify prompt. Empty string means everything
+    checkable from code is satisfied — no extra instruction needed.
+
+    IMPORTANT: code cannot see the page image, so it cannot count actual boxes.
+    15 here is only a SAFETY-NET minimum (never go below this), not the real
+    target — the real, binding floor is "one MCQ per box, however many boxes
+    there are" as instructed in the Call-1 prompt (_build_chok_prompt), which
+    can be 22, 35, or more. This function only catches the case where the
+    count fell below even the conservative 15 safety net.
     """
     n = len(mcqs or [])
     baseline = max(n, 15)
@@ -1245,11 +1253,13 @@ def _chok_ratio_gap_note(mcqs: list) -> str:
     notes = []
     if floor_gap > 0:
         notes.append(
-            f"HARD FLOOR NOT MET: this ছক page has only {n} MCQs — the user's "
-            f"absolute minimum is 15 MCQs per ছক page, no exceptions. You MUST "
-            f"add at least {floor_gap} more MCQ(s) to reach 15, on top of any "
-            f"type-mix gaps below, by covering more boxes/cells or adding more "
-            f"angles per box — never stop below 15."
+            f"SAFETY-NET FLOOR NOT MET: this ছক page has only {n} MCQs, below "
+            f"even the conservative 15 minimum. Add at least {floor_gap} more "
+            f"MCQ(s) now. REMINDER: 15 is only a safety-net minimum — the real, "
+            f"binding requirement is ONE MCQ PER BOX on this page (if this page "
+            f"has 22 boxes, you need 22+; if 35 boxes, 35+). Re-check whether "
+            f"every box/cell is individually represented, not just whether the "
+            f"count reaches 15."
         )
     if gaps:
         notes.append(
