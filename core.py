@@ -793,28 +793,83 @@ async def db_save_leaderboard(cache_id: str, user_id: int, user_name: str,
     except Exception as e:
         logger.error(f"[DB] save_leaderboard error: {e}")
 
+_D1_CHANNELS_TABLE_ENSURED = False
+
+async def _ensure_d1_channels_table():
+    global _D1_CHANNELS_TABLE_ENSURED
+    if _D1_CHANNELS_TABLE_ENSURED:
+        return
+    try:
+        await d1_run(
+            "CREATE TABLE IF NOT EXISTS channels ("
+            "channel_id TEXT PRIMARY KEY, channel_name TEXT)"
+        )
+        _D1_CHANNELS_TABLE_ENSURED = True
+    except Exception as e:
+        logger.warning(f"[D1] ensure channels table warn: {e}")
+
+async def db_save_channel(channel_id: str, channel_name: str) -> bool:
+    """Save/update a channel in BOTH Supabase (primary) and D1 (mirror/durability)."""
+    ok = True
+    try:
+        sb.table("channels").upsert({"channel_id": channel_id, "channel_name": channel_name}).execute()
+    except Exception as e:
+        logger.error(f"[DB] save_channel Supabase error: {e}")
+        ok = False
+    try:
+        await _ensure_d1_channels_table()
+        await d1_run(
+            "INSERT INTO channels (channel_id, channel_name) VALUES (?, ?) "
+            "ON CONFLICT(channel_id) DO UPDATE SET channel_name=excluded.channel_name",
+            [channel_id, channel_name]
+        )
+    except Exception as e:
+        logger.warning(f"[D1] save_channel mirror warn: {e}")
+    return ok
+
 async def db_get_channels() -> list:
     try:
         r = sb.table("channels").select("*").execute()
-        return r.data or []
-    except:
+        if r.data:
+            return r.data
+    except Exception as e:
+        logger.warning(f"[DB] get_channels Supabase warn: {e}")
+    # ── Supabase empty/down → D1 fallback ──
+    try:
+        await _ensure_d1_channels_table()
+        rows = await d1_select("SELECT channel_id, channel_name FROM channels")
+        return rows or []
+    except Exception as e:
+        logger.warning(f"[D1] get_channels fallback warn: {e}")
         return []
 
 async def db_delete_channel(channel_id: str) -> bool:
+    ok = True
     try:
         sb.table("channels").delete().eq("channel_id", channel_id).execute()
-        return True
     except Exception as e:
-        logger.error(f"[DB] delete_channel error: {e}")
-        return False
+        logger.error(f"[DB] delete_channel Supabase error: {e}")
+        ok = False
+    try:
+        await _ensure_d1_channels_table()
+        await d1_run("DELETE FROM channels WHERE channel_id = ?", [channel_id])
+    except Exception as e:
+        logger.warning(f"[D1] delete_channel mirror warn: {e}")
+    return ok
 
 async def db_rename_channel(channel_id: str, new_name: str) -> bool:
+    ok = True
     try:
         sb.table("channels").update({"channel_name": new_name}).eq("channel_id", channel_id).execute()
-        return True
     except Exception as e:
-        logger.error(f"[DB] rename_channel error: {e}")
-        return False
+        logger.error(f"[DB] rename_channel Supabase error: {e}")
+        ok = False
+    try:
+        await _ensure_d1_channels_table()
+        await d1_run("UPDATE channels SET channel_name = ? WHERE channel_id = ?", [new_name, channel_id])
+    except Exception as e:
+        logger.warning(f"[D1] rename_channel mirror warn: {e}")
+    return ok
 
 # ============================================================
 # QUIZ STATE (last-quiz resume, shared by image/pdf quiz solve)
