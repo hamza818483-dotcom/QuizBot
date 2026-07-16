@@ -3321,15 +3321,14 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 thread_id=thread_id, loading_id=loading_id
             )
 
-            # Button-msg (channel only): pre-msg টেক্সট + 4 button, pre-msg কে reply
-            if ask_score:
-                btn_kb = await _csv_pre_buttons(batch_cache_id)
-                btn_send_data = {"chat_id": channel_id, "text": pre_text, "reply_markup": btn_kb}
-                if pre_msg_id:
-                    btn_send_data["reply_to_message_id"] = pre_msg_id
-                if thread_id:
-                    btn_send_data["message_thread_id"] = thread_id
-                await tg_post("sendMessage", btn_send_data)
+            # Button-msg (channel + group উভয়ে): pre-msg টেক্সট + 4 button, pre-msg কে reply
+            btn_kb = await _csv_pre_buttons(batch_cache_id)
+            btn_send_data = {"chat_id": channel_id, "text": pre_text, "reply_markup": btn_kb}
+            if pre_msg_id:
+                btn_send_data["reply_to_message_id"] = pre_msg_id
+            if thread_id:
+                btn_send_data["message_thread_id"] = thread_id
+            await tg_post("sendMessage", btn_send_data)
 
             # Score-ask End-msg (channel only, no button, pre-msg কে reply) |
             # Group: plain thank-you end-msg, score-ask/button নাই
@@ -3392,15 +3391,14 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             thread_id=thread_id, loading_id=loading_id
         )
 
-        # Button-msg (channel only): pre-msg টেক্সট + 4 button, pre-msg কে reply
-        if ask_score:
-            btn_kb = await _csv_pre_buttons(cache_id)
-            btn_send_data = {"chat_id": channel_id, "text": pre_text, "reply_markup": btn_kb}
-            if pre_msg_id:
-                btn_send_data["reply_to_message_id"] = pre_msg_id
-            if thread_id:
-                btn_send_data["message_thread_id"] = thread_id
-            await tg_post("sendMessage", btn_send_data)
+        # Button-msg (channel + group উভয়ে): pre-msg টেক্সট + 4 button, pre-msg কে reply
+        btn_kb = await _csv_pre_buttons(cache_id)
+        btn_send_data = {"chat_id": channel_id, "text": pre_text, "reply_markup": btn_kb}
+        if pre_msg_id:
+            btn_send_data["reply_to_message_id"] = pre_msg_id
+        if thread_id:
+            btn_send_data["message_thread_id"] = thread_id
+        await tg_post("sendMessage", btn_send_data)
 
         # Score-ask End-msg (channel only, no button, pre-msg কে reply) |
         # Group: plain thank-you end-msg, score-ask/button নাই
