@@ -2592,34 +2592,37 @@ async def _process_txt_to_poll_inner(channel_id: str, chat_id: int, uid: int, un
 # HELPER FUNCTIONS — CSV pre/end/summary messages
 # ============================================================
 def csv_get_pre_message(topic: str, count: int) -> str:
-    topic_text = f'"{topic}"' if topic else ""
+    topic_text = topic or "Special MCQ By ATLAS"
     return (
-        f"🌟Important Poll Solve By ATLAS\n"
-        f"🔥Topic Name: {topic_text}\n\n"
-        f"✅প্রশ্ন সংখ্যা: {count}"
+        f"🌟Topic:{topic_text}\n"
+        f"⚡MCQ:{count}\n\n"
+        f"✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো"
     )
 
 def csv_get_comment_prompt_message(topic: str, count: int) -> str:
-    topic_text = f'"{topic}"' if topic else ""
+    topic_text = topic or "Special MCQ By ATLAS"
     return (
-        f"🌟Important Poll Solve By ATLAS\n"
-        f"🔥Topic Name: {topic_text}\n\n"
-        f"✅প্রশ্ন সংখ্যা: {count}\n\n"
+        f"🌟Topic:{topic_text}\n"
+        f"⚡MCQ:{count}\n\n"
+        f"✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো\n\n"
         f"⁉️তোমার স্কোর কত? 🤔\n"
         f"( ? / {count} )\n\n"
         f"নিচে কমেন্টে লিখো! 👇"
     )
 
-def csv_get_ending_message(topic: str, count: int, first_link: str = "") -> str:
-    topic_text = f'"{topic}"' if topic else ""
+def csv_get_ending_message(topic: str, count: int, first_link: str = "", ask_score: bool = True) -> str:
+    topic_text = topic or "Special MCQ By ATLAS"
     base = (
         f"🎉 ধন্যবাদ প্রিয় শিক্ষার্থী!\n"
-        f"👉এটলাস আয়োজিত {topic_text} পোল সলভে অংশগ্রহণ করার জন্য। 😊\n\n"
-        f"📊 মোট পোল: {count}\n\n"
-        f"⁉️তোমার স্কোর কত? 🤔\n"
-        f"( ? / {count} )\n\n"
-        f"নিচে লিখো! 👇"
+        f"👉এটলাস আয়োজিত \"{topic_text}\" পোল সলভে অংশগ্রহণ করার জন্য। 😊\n\n"
+        f"📊 মোট পোল: {count}"
     )
+    if ask_score:
+        base += (
+            f"\n\n⁉️তোমার স্কোর কত? 🤔\n"
+            f"( ? / {count} )\n\n"
+            f"নিচে লিখো! 👇"
+        )
     if first_link:
         base += f"\n\n✅পোল যেখান থেকে শুরু হয়েছে:\n{first_link}"
     return base
@@ -2642,6 +2645,75 @@ def csv_get_master_summary(topic: str, total: int,
         "🌟 *Website:* Atlascourses.com"
     )
     return text
+
+async def _get_chat_type(channel_id) -> str:
+    """'channel' / 'group' / 'supergroup' / 'private' / '' (unknown on failure)"""
+    r = await tg_post("getChat", {"chat_id": channel_id})
+    if r.get("ok"):
+        return r["result"].get("type", "")
+    return ""
+
+async def _check_bot_admin(channel_id) -> tuple:
+    """
+    Bot ওই channel/group-এ admin কিনা check করে।
+    Returns: (is_admin: bool, error_msg: str)
+    error_msg blank হলে সব ঠিক আছে।
+    """
+    bot_un = await get_bot_username()
+    me = await tg_post("getMe", {})
+    bot_id = me.get("result", {}).get("id")
+    if not bot_id:
+        return False, "❌ বট আইডি যাচাই করা যায়নি। আবার চেষ্টা করো।"
+
+    r = await tg_post("getChatMember", {"chat_id": channel_id, "user_id": bot_id})
+    if not r.get("ok"):
+        desc = r.get("description", "")
+        if "chat not found" in desc.lower():
+            return False, (
+                f"❌ Channel/Group খুঁজে পাওয়া যায়নি!\n\n"
+                f"📌 সমাধান: বট (@{bot_un}) কে ওই channel/group-এ member হিসেবে add করো।"
+            )
+        if "bot is not a member" in desc.lower() or "user not found" in desc.lower():
+            return False, (
+                f"❌ বট (@{bot_un}) ওই channel/group-এ নেই!\n\n"
+                f"📌 সমাধান: প্রথমে বটকে channel/group-এ add করো, তারপর Admin বানাও।"
+            )
+        return False, f"❌ যাচাই ব্যর্থ: {desc}\n\n📌 বটকে admin করে আবার চেষ্টা করো।"
+
+    status = r["result"].get("status", "")
+    if status not in ("administrator", "creator"):
+        return False, (
+            f"❌ বট (@{bot_un}) ওই channel/group-এ Admin না!\n\n"
+            f"📌 সমাধান:\n"
+            f"1️⃣ Channel/Group Settings → Administrators এ যাও\n"
+            f"2️⃣ @{bot_un} কে Admin বানাও\n"
+            f"3️⃣ Post Messages + Pin Messages permission দাও\n"
+            f"4️⃣ আবার /csv বা /csvS command দাও"
+        )
+
+    if status == "administrator":
+        can_post = r["result"].get("can_post_messages", True)
+        if can_post is False:
+            return False, (
+                f"❌ বট (@{bot_un}) Admin আছে, কিন্তু 'Post Messages' permission নেই!\n\n"
+                f"📌 সমাধান: Admin permissions থেকে 'Post Messages' চালু করো।"
+            )
+
+    return True, ""
+
+async def _csv_pre_buttons(cache_id: str) -> dict:
+    """Pre-message এর সাথে যুক্ত 4 inline button (deep-link URL, cache_id লাগবেই)"""
+    bot_un = await get_bot_username()
+    quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+    poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+    exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+    premium_url = f"https://t.me/{bot_un}?start=premium_{cache_id}"
+    return {"inline_keyboard": [
+        [{"text": "📝 Quiz Solve", "url": quiz_url},
+         {"text": "🔄 Poll Again", "url": poll_url}],
+        [{"text": "🌐 Website Exam", "url": exam_url},
+         {"text": "💎 Premium PDF", "url": premium_url}],
+    ]}
 
 def _get_first_poll_link(channel_id: str, msg_id: int) -> str:
     """Poll message link বানাও"""
@@ -2671,37 +2743,35 @@ async def handle_csv_command(msg: dict):
     # Full text after /csv
     raw_args = text[len("/csv"):].strip()
 
-    # Parse inline args: (Topic Name) (channel_id) (topic_id optional)
-    # Format: /csv জাতীয় বাজেট -100123456789 12
+    # Parse flag-based args: -m (topic name) -c (channel/group id) -t (thread/topic id)
+    import re as _re
     inline_channel = None
     inline_topic_id = None
-    inline_topic_name = raw_args
+    topic = ""
 
-    # Check if args contain a channel_id (-100... or @...) pattern
-    import re as _re
-    chan_match = _re.search(r'(-100\d+|@\S+)', raw_args)
-    if chan_match:
-        inline_channel = chan_match.group(1)
-        before_chan = raw_args[:chan_match.start()].strip()
-        after_chan = raw_args[chan_match.end():].strip()
-        inline_topic_name = before_chan
+    m_match = _re.search(r'-m\s+(.+?)(?=\s+-c\b|\s+-t\b|$)', raw_args)
+    if m_match:
+        topic = m_match.group(1).strip()
 
-        # topic_id is digits after channel_id
-        tid_match = _re.match(r'(\d+)', after_chan)
-        if tid_match:
-            inline_topic_id = int(tid_match.group(1))
+    c_match = _re.search(r'-c\s+(\S+)', raw_args)
+    if c_match:
+        inline_channel = c_match.group(1)
 
-    topic = inline_topic_name or ""
+    t_match = _re.search(r'-t\s+(\d+)', raw_args)
+    if t_match:
+        inline_topic_id = int(t_match.group(1))
+
+    if not topic:
+        topic = "Special MCQ By ATLAS"
 
     if not reply or not reply.get("document"):
         await send_msg(chat_id,
             "❌ CSV ফাইলে reply করে /csv দাও!\n\n"
-            "<b>Usage 1 (reply mode):</b>\n"
-            "<code>/csv জাতীয় বাজেট-২০২৬</code>\n\n"
-            "<b>Usage 2 (inline mode):</b>\n"
-            "<code>/csv Topic Name -100123456 [topic_id]</code>\n"
-            "<code>/csv Topic Name @channel</code>\n\n"
-            "📌 Topic optional — না দিলে blank থাকবে"
+            "<b>Usage:</b>\n"
+            "<code>/csv -m (topic name) -c (channel id/username/group id) -t (group topic id)</code>\n\n"
+            "📌 -m না দিলে default: \"Special MCQ By ATLAS\"\n"
+            "📌 -c না দিলে channel list থেকে বেছে নিতে পারবে\n"
+            "📌 -t শুধু group topic/thread হলে দরকার"
         )
         return
 
@@ -3099,9 +3169,25 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
         return
 
     session = json.loads(row.data[0]["data"])
-    topic = session.get("topic", "")
+    topic = session.get("topic", "") or "Special MCQ By ATLAS"
     mode = session.get("mode", "csv")
     thread_id = session.get("inline_topic_id") or None  # group topic/thread ID
+
+    # Bot admin check — সব কিছুর আগে
+    is_admin, admin_err = await _check_bot_admin(channel_id)
+    if not is_admin:
+        await send_msg(chat_id, admin_err)
+        return
+
+    # Chat type check — channel হলে score ask করবে, group হলে করবে না
+    chat_type = await _get_chat_type(channel_id)
+    ask_score = chat_type == "channel"
+
+    # thread_id ভুল/না-দেওয়া হলে group এর general এ পাঠাবে (default None already)
+    if chat_type in ("group", "supergroup") and thread_id:
+        # thread valid কিনা যাচাই করার সহজ উপায় নেই আগে থেকে; ভুল হলে TG নিজেই error দেবে,
+        # সেক্ষেত্রে general এ fallback করা হবে _send_csv_polls_to_channel এর retry তে না, তাই এখানে just pass through
+        pass
 
     cache = await db_get_mcq_cache(cache_id)
     if not cache:
@@ -3124,11 +3210,22 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
         for b_idx, batch in enumerate(batches, 1):
             batch_topic = f"{topic} (Part-{b_idx:02d})"
 
-            # Pre-message
+            # প্রতিটা batch-এর জন্য আগেই cache — pre-message বাটনের জন্য দরকার
+            batch_cache_id = gen_session_id()
+            await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
+
+            # Pre-message with 4 inline buttons
             pre_text = csv_get_pre_message(batch_topic, len(batch))
-            pre_r = await tg_post("sendMessage", {
-                "chat_id": channel_id, "text": pre_text
-            })
+            pre_kb = await _csv_pre_buttons(batch_cache_id)
+            pre_send_data = {"chat_id": channel_id, "text": pre_text, "reply_markup": pre_kb}
+            if thread_id:
+                pre_send_data["message_thread_id"] = thread_id
+            pre_r = await tg_post("sendMessage", pre_send_data)
+            if not pre_r.get("ok") and thread_id:
+                # thread ভুল হলে group general এ fallback
+                pre_send_data.pop("message_thread_id", None)
+                pre_r = await tg_post("sendMessage", pre_send_data)
+                thread_id = None
             pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
 
             # Polls পাঠাও
@@ -3137,28 +3234,12 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 thread_id=thread_id, loading_id=loading_id
             )
 
-            # প্রতিটা batch-এর জন্য আলাদা cache — Quiz Solve/Poll Solve/Web Exam বাটনের জন্য
-            batch_cache_id = gen_session_id()
-            await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
-
-            # Ending message for this batch
-            ending = csv_get_ending_message(batch_topic, sent, first_link)
-            exam_url = f"{GH_PAGES_EXAM_URL}?id={batch_cache_id}"
-            bot_un = await get_bot_username()
-            quiz_url = f"https://t.me/{bot_un}?start=pdf_{batch_cache_id}"
-            poll_url = f"https://t.me/{bot_un}?start=poll_{batch_cache_id}"
-            premium_url = f"https://t.me/{bot_un}?start=premium_{batch_cache_id}"
-            end_kb = {"inline_keyboard": [
-                [{"text": "📝 Quiz Solve", "url": quiz_url},
-                 {"text": "🔄 Poll Again", "url": poll_url}],
-                [{"text": "🌐 Website Exam", "url": exam_url},
-                 {"text": "💎 Premium PDF", "url": premium_url}],
-            ]}
+            # Ending message for this batch (score ask শুধু channel এ)
+            ending = csv_get_ending_message(batch_topic, sent, first_link, ask_score=ask_score)
             end_send_data2 = {
                 "chat_id": channel_id,
                 "text": ending,
-                "disable_web_page_preview": True,
-                "reply_markup": end_kb
+                "disable_web_page_preview": True
             }
             if pre_msg_id:
                 end_send_data2["reply_to_message_id"] = pre_msg_id
@@ -3171,12 +3252,13 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                     "end_msg_id": end_r["result"]["message_id"]
                 })
 
-            # Follow-up message (no button, no reply) — comment button enable হওয়ার জন্য
-            comment_prompt = csv_get_comment_prompt_message(batch_topic, sent)
-            comment_send_data = {"chat_id": channel_id, "text": comment_prompt}
-            if thread_id:
-                comment_send_data["message_thread_id"] = thread_id
-            await tg_post("sendMessage", comment_send_data)
+            # Follow-up message — channel এ score-ask থাকলেই শুধু পাঠাও (no button, no reply)
+            if ask_score:
+                comment_prompt = csv_get_comment_prompt_message(batch_topic, sent)
+                comment_send_data = {"chat_id": channel_id, "text": comment_prompt}
+                if thread_id:
+                    comment_send_data["message_thread_id"] = thread_id
+                await tg_post("sendMessage", comment_send_data)
 
             batch_links.append((b_idx, first_link, len(batch)))
 
@@ -3205,10 +3287,15 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
     else:
         # Normal /csv mode — single batch
         pre_text = csv_get_pre_message(topic, total)
-        pre_send_data = {"chat_id": channel_id, "text": pre_text}
+        pre_kb = await _csv_pre_buttons(cache_id)
+        pre_send_data = {"chat_id": channel_id, "text": pre_text, "reply_markup": pre_kb}
         if thread_id:
             pre_send_data["message_thread_id"] = thread_id
         pre_r = await tg_post("sendMessage", pre_send_data)
+        if not pre_r.get("ok") and thread_id:
+            pre_send_data.pop("message_thread_id", None)
+            pre_r = await tg_post("sendMessage", pre_send_data)
+            thread_id = None
         pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
 
         sent, first_link = await _send_csv_polls_to_channel(
@@ -3216,23 +3303,11 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             thread_id=thread_id, loading_id=loading_id
         )
 
-        ending = csv_get_ending_message(topic, sent, first_link)
-        exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
-        bot_un = await get_bot_username()
-        quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
-        poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
-        premium_url = f"https://t.me/{bot_un}?start=premium_{cache_id}"
-        end_kb = {"inline_keyboard": [
-            [{"text": "📝 Quiz Solve", "url": quiz_url},
-             {"text": "🔄 Poll Again", "url": poll_url}],
-            [{"text": "🌐 Website Exam", "url": exam_url},
-             {"text": "💎 Premium PDF", "url": premium_url}],
-        ]}
+        ending = csv_get_ending_message(topic, sent, first_link, ask_score=ask_score)
         end_send_data = {
             "chat_id": channel_id,
             "text": ending,
-            "disable_web_page_preview": True,
-            "reply_markup": end_kb
+            "disable_web_page_preview": True
         }
         if pre_msg_id:
             end_send_data["reply_to_message_id"] = pre_msg_id
@@ -3245,12 +3320,13 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 "end_msg_id": end_r["result"]["message_id"]
             })
 
-        # Follow-up message (no button, no reply) — comment button enable হওয়ার জন্য
-        comment_prompt = csv_get_comment_prompt_message(topic, sent)
-        comment_send_data = {"chat_id": channel_id, "text": comment_prompt}
-        if thread_id:
-            comment_send_data["message_thread_id"] = thread_id
-        await tg_post("sendMessage", comment_send_data)
+        # Follow-up message — channel এ score-ask থাকলেই শুধু পাঠাও
+        if ask_score:
+            comment_prompt = csv_get_comment_prompt_message(topic, sent)
+            comment_send_data = {"chat_id": channel_id, "text": comment_prompt}
+            if thread_id:
+                comment_send_data["message_thread_id"] = thread_id
+            await tg_post("sendMessage", comment_send_data)
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
