@@ -3316,6 +3316,8 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
         batches = [mcqs[i:i+batch_size] for i in range(0, total, batch_size)]
         total_batches = len(batches)
         batch_links = []
+        first_pre_msg_id = None
+        all_batch_mcqs = []
 
         for b_idx, batch in enumerate(batches, 1):
             batch_topic = f"{topic} (Part-{b_idx:02d})"
@@ -3336,6 +3338,9 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 pre_r = await tg_post("sendMessage", pre_send_data)
                 thread_id = None
             pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
+            if first_pre_msg_id is None:
+                first_pre_msg_id = pre_msg_id
+            all_batch_mcqs.extend(batch)
 
             # Polls পাঠাও (pre-msg কে reply করে)
             sent, first_link = await _send_csv_polls_to_channel(
@@ -3379,14 +3384,42 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
 
             await asyncio.sleep(2.5)
 
-        # Master Summary (শুধু multiple batch হলে)
+        # Style1 PDF (সব poll মিলিয়ে) — summary এর আগে, first pre-msg কে reply, auto-pin
+        if all_batch_mcqs:
+            try:
+                data_adapted = _adapt_mcqs_for_print(all_batch_mcqs)
+                html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
+                pdf_bytes = await _html_to_pdf(html_s)
+                if pdf_bytes:
+                    safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                    doc_r = await send_document(
+                        channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
+                        caption=f"📖 Practice Sheet (Style 1)\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 ATLAS APP",
+                        message_thread_id=thread_id,
+                        reply_to_message_id=first_pre_msg_id
+                    )
+                    if doc_r and doc_r.get("ok"):
+                        doc_msg_id = doc_r.get("result", {}).get("message_id")
+                        if doc_msg_id:
+                            await try_pin_message(channel_id, doc_msg_id)
+                else:
+                    logger.error(f"[CSV-PDF] Style1 generation empty for topic: {topic}")
+            except Exception as e:
+                logger.error(f"[CSV-PDF] Error generating Style1 PDF: {e}")
+
+        # Master Summary (শুধু multiple batch হলে) — first pre-msg কে reply
         if total_batches > 1:
             summary = csv_get_master_summary(topic, total, total_batches, batch_links)
-            sum_r = await tg_post("sendMessage", {
+            sum_send_data = {
                 "chat_id": channel_id,
                 "text": summary,
                 "disable_web_page_preview": True
-            })
+            }
+            if first_pre_msg_id:
+                sum_send_data["reply_to_message_id"] = first_pre_msg_id
+            if thread_id:
+                sum_send_data["message_thread_id"] = thread_id
+            sum_r = await tg_post("sendMessage", sum_send_data)
             # Auto-pin summary
             if sum_r.get("ok"):
                 await try_pin_message(channel_id, sum_r["result"]["message_id"])
@@ -3440,6 +3473,28 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 "channel_id": channel_id,
                 "end_msg_id": end_r["result"]["message_id"]
             })
+
+        # Style1 PDF (সব poll মিলিয়ে) — pre-msg কে reply, auto-pin
+        try:
+            data_adapted = _adapt_mcqs_for_print(mcqs)
+            html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
+            pdf_bytes = await _html_to_pdf(html_s)
+            if pdf_bytes:
+                safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                doc_r = await send_document(
+                    channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
+                    caption=f"📖 Practice Sheet (Style 1)\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 ATLAS APP",
+                    message_thread_id=thread_id,
+                    reply_to_message_id=pre_msg_id
+                )
+                if doc_r and doc_r.get("ok"):
+                    doc_msg_id = doc_r.get("result", {}).get("message_id")
+                    if doc_msg_id:
+                        await try_pin_message(channel_id, doc_msg_id)
+            else:
+                logger.error(f"[CSV-PDF] Style1 generation empty for topic: {topic}")
+        except Exception as e:
+            logger.error(f"[CSV-PDF] Error generating Style1 PDF: {e}")
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
