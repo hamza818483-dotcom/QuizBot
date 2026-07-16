@@ -568,6 +568,14 @@ TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 _pyro_client = None
 
+_shared_http_client = None
+
+async def _get_shared_http_client():
+    global _shared_http_client
+    if _shared_http_client is None:
+        _shared_http_client = httpx.AsyncClient(timeout=300)
+    return _shared_http_client
+
 async def _get_pyro_client():
     global _pyro_client
     if _pyro_client is None and TELEGRAM_API_ID and TELEGRAM_API_HASH:
@@ -629,18 +637,18 @@ async def download_tg_file(file_id: str, progress_cb=None,
         downloaded = 0
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp_path = tmp.name
-            async with httpx.AsyncClient(timeout=300) as client:
-                async with client.stream("GET", url) as r:
-                    if r.status_code != 200:
-                        raise Exception(f"HTTP {r.status_code}")
-                    async for chunk in r.aiter_bytes(chunk_size=262144):
-                        tmp.write(chunk)
-                        downloaded += len(chunk)
-                        if progress_cb:
-                            try:
-                                progress_cb(downloaded, total_size)
-                            except Exception:
-                                pass
+            client = await _get_shared_http_client()
+            async with client.stream("GET", url) as r:
+                if r.status_code != 200:
+                    raise Exception(f"HTTP {r.status_code}")
+                async for chunk in r.aiter_bytes(chunk_size=262144):
+                    tmp.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_cb:
+                        try:
+                            progress_cb(downloaded, total_size)
+                        except Exception:
+                            pass
         try:
             with open(tmp_path, "rb") as f:
                 return f.read()
