@@ -6,6 +6,7 @@
 # ============================================================
 
 import os
+import io
 import tempfile
 import re
 import json
@@ -634,26 +635,23 @@ async def download_tg_file(file_id: str, progress_cb=None,
     total_size = file_res["result"].get("file_size", 0)
 
     async def _stream_download(url: str) -> bytes:
+        # In-memory buffer — ছোট/মাঝারি ফাইলে (bot download সাধারণত <50MB)
+        # disk write/read এর extra I/O latency বাদ দিলে ভালো speed পাওয়া যায়।
         downloaded = 0
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp_path = tmp.name
-            client = await _get_shared_http_client()
-            async with client.stream("GET", url) as r:
-                if r.status_code != 200:
-                    raise Exception(f"HTTP {r.status_code}")
-                async for chunk in r.aiter_bytes(chunk_size=262144):
-                    tmp.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_cb:
-                        try:
-                            progress_cb(downloaded, total_size)
-                        except Exception:
-                            pass
-        try:
-            with open(tmp_path, "rb") as f:
-                return f.read()
-        finally:
-            os.remove(tmp_path)
+        buf = io.BytesIO()
+        client = await _get_shared_http_client()
+        async with client.stream("GET", url) as r:
+            if r.status_code != 200:
+                raise Exception(f"HTTP {r.status_code}")
+            async for chunk in r.aiter_bytes(chunk_size=1048576):  # 1MB chunks
+                buf.write(chunk)
+                downloaded += len(chunk)
+                if progress_cb:
+                    try:
+                        progress_cb(downloaded, total_size)
+                    except Exception:
+                        pass
+        return buf.getvalue()
 
     # CF proxy আগে try না করে সরাসরি direct Telegram file API — ছোট/মাঝারি
     # ফাইলে (mhtml/csv/pdf) extra proxy hop-এর কোনো লাভ নেই, শুধু latency বাড়ায়।
