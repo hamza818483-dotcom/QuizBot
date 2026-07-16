@@ -4908,14 +4908,24 @@ async def handle_pdf(msg: dict):
     text = msg.get("text", "")
     reply = msg.get("reply_to_message")
     if not reply or not reply.get("document"):
-        await send_msg(chat_id,
-            "❌ PDF ফাইলে reply করে <code>/pdf</code> দাও!\n\n"
-            "<b>Example:</b>\n"
-            "<code>/pdf -p 1-5 -c @channel -m \"Topic\" [10]</code>\n"
-            "<code>/pdf -p 2 -c -100xxx -t 447 -m \"Group Topic\" [10]</code>\n\n"
-            "<code>[N]</code> = প্রতি পেইজে কতগুলো MCQ বানাতে হবে (ঐচ্ছিক)\n"
-            "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
-        )
+        if _CHOK_MODE.get():
+            await send_msg(chat_id,
+                "❌ PDF ফাইলে reply করে <code>/chok</code> দাও!\n\n"
+                "<b>Example:</b>\n"
+                "<code>/chok -p 1-5 -c @channel -m \"Topic\"</code>\n"
+                "<code>/chok -p 2 -c -100xxx -t 447 -m \"Group Topic\"</code>\n\n"
+                "ছক/বক্স/টেবিল PDF-এর জন্য বিশেষায়িত — প্রতিটা বক্স থেকে MCQ (mixed style)।\n"
+                "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
+            )
+        else:
+            await send_msg(chat_id,
+                "❌ PDF ফাইলে reply করে <code>/pdf</code> দাও!\n\n"
+                "<b>Example:</b>\n"
+                "<code>/pdf -p 1-5 -c @channel -m \"Topic\" [10]</code>\n"
+                "<code>/pdf -p 2 -c -100xxx -t 447 -m \"Group Topic\" [10]</code>\n\n"
+                "<code>[N]</code> = প্রতি পেইজে কতগুলো MCQ বানাতে হবে (ঐচ্ছিক)\n"
+                "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
+            )
         return
     params = parse_pdf_command(text)
     topic = params["topic"]
