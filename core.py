@@ -658,6 +658,17 @@ async def download_tg_file(file_id: str, progress_cb=None,
 # ============================================================
 # SUPABASE HELPERS (shared)
 # ============================================================
+_D1_TABLES_ENSURED = set()
+
+async def _ensure_d1_table(name: str, create_sql: str):
+    if name in _D1_TABLES_ENSURED:
+        return
+    try:
+        await d1_run(create_sql)
+        _D1_TABLES_ENSURED.add(name)
+    except Exception as e:
+        logger.warning(f"[D1] ensure {name} table warn: {e}")
+
 async def db_get_settings() -> dict:
     try:
         r = sb.table("quiz_settings").select("tag,exp_footer").eq("id", 1).execute()
@@ -665,7 +676,27 @@ async def db_get_settings() -> dict:
             return r.data[0]
     except Exception as e:
         logger.error(f"[DB] get_settings error: {e}")
+    try:
+        await _ensure_d1_table("quiz_settings",
+            "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT)")
+        rows = await d1_select("SELECT tag, exp_footer FROM quiz_settings WHERE id=1")
+        if rows:
+            return rows[0]
+    except Exception as e:
+        logger.warning(f"[D1] get_settings fallback warn: {e}")
     return {"tag": "", "exp_footer": ""}
+
+async def db_save_settings_field(field: str, value: str):
+    try:
+        await _ensure_d1_table("quiz_settings",
+            "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT)")
+        await d1_run(
+            f"INSERT INTO quiz_settings (id, {field}) VALUES (1, ?1) "
+            f"ON CONFLICT(id) DO UPDATE SET {field}=excluded.{field}",
+            [value]
+        )
+    except Exception as e:
+        logger.warning(f"[D1] save_settings mirror warn: {e}")
 
 async def db_is_owner_or_admin(uid: int) -> bool:
     if uid == OWNER_ID:
@@ -683,6 +714,16 @@ async def db_track_user(uid: int, uname: str):
         }).execute()
     except Exception as e:
         logger.error(f"[DB] track_user error: {e}")
+    try:
+        await _ensure_d1_table("pdf_users",
+            "CREATE TABLE IF NOT EXISTS pdf_users (user_id INTEGER PRIMARY KEY, user_name TEXT, last_seen INTEGER)")
+        await d1_run(
+            "INSERT INTO pdf_users (user_id,user_name,last_seen) VALUES (?1,?2,?3) "
+            "ON CONFLICT(user_id) DO UPDATE SET user_name=excluded.user_name, last_seen=excluded.last_seen",
+            [uid, uname, int(time.time())]
+        )
+    except Exception as e:
+        logger.warning(f"[D1] track_user mirror warn: {e}")
 
 async def db_save_session(session_id: str, data: dict):
     try:
@@ -792,6 +833,21 @@ async def db_save_leaderboard(cache_id: str, user_id: int, user_name: str,
             }).execute()
     except Exception as e:
         logger.error(f"[DB] save_leaderboard error: {e}")
+    try:
+        await _ensure_d1_table("web_exam_leaderboard",
+            "CREATE TABLE IF NOT EXISTS web_exam_leaderboard (cache_id TEXT, user_id INTEGER, user_name TEXT, "
+            "topic TEXT, page_number INTEGER, correct INTEGER, total INTEGER, final_score REAL, updated_at INTEGER, "
+            "PRIMARY KEY (cache_id, user_id))")
+        await d1_run(
+            "INSERT INTO web_exam_leaderboard (cache_id,user_id,user_name,topic,page_number,correct,total,final_score,updated_at) "
+            "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) "
+            "ON CONFLICT(cache_id,user_id) DO UPDATE SET user_name=excluded.user_name, correct=excluded.correct, "
+            "total=excluded.total, final_score=excluded.final_score, updated_at=excluded.updated_at "
+            "WHERE excluded.final_score > web_exam_leaderboard.final_score",
+            [cache_id, user_id, user_name, topic, page, correct, total, final_score, int(time.time())]
+        )
+    except Exception as e:
+        logger.warning(f"[D1] save_leaderboard mirror warn: {e}")
 
 _D1_CHANNELS_TABLE_ENSURED = False
 
