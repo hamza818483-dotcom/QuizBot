@@ -5320,7 +5320,9 @@ async def _process_pdf_pages_inner(
         if first_image_msg_id:
             summary_data["reply_to_message_id"] = first_image_msg_id
         sum_r = await tg_post("sendMessage", summary_data)
-        if not sum_r.get("ok"):
+        if sum_r.get("ok"):
+            await try_pin_message(channel_id, sum_r["result"]["message_id"])
+        else:
             logger.warning(f"[Summary] send failed: {sum_r.get('description')}")
 
     # সব poll শেষে combined Style1+Style3 PDF (সব page/poll মিলিয়ে) —
