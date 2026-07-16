@@ -1202,6 +1202,177 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
 
 _TF_PATTERNS_BN = ("বললে ভুল হবে", "সত্য বললে", "মিথ্যা বললে")
 
+
+def _detect_chok_boxes(img) -> list:
+    """
+    CV-based box/cell detection for /chok pages using OpenCV contour detection.
+    Finds rectangular bordered regions (ছক/box/table cells) on the page and
+    returns their bounding boxes in normalized 0-1000 coordinates, ranked
+    largest-area-first (roughly reading order isn't guaranteed, but size
+    filtering removes noise). Zero AI cost — pure local CV, runs in a thread.
+
+    This gives a REAL, deterministic box count independent of what the AI
+    vision model claims to see, so we can code-verify "MCQ count >= box
+    count" instead of trusting the AI's self-report alone.
+
+    Best-effort: on any failure (bad image, no opencv, no boxes found),
+    returns [] and callers must treat that as "unknown box count" — NOT as
+    "zero boxes required".
+    """
+    try:
+        import cv2
+        import numpy as np
+        arr = np.array(img.convert("L"))  # grayscale
+        h, w = arr.shape[:2]
+        # Adaptive threshold handles uneven scan lighting better than a fixed one
+        thresh = cv2.adaptiveThreshold(
+            arr, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 25, 10
+        )
+        # Morphological close to connect broken box borders (dashed/faint lines)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours, _ = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+        page_area = w * h
+        boxes = []
+        for c in contours:
+            x, y, cw, ch = cv2.boundingRect(c)
+            area = cw * ch
+            # Filter: must be a meaningfully sized rectangular region — not a
+            # single character/line (too small) and not the whole page/a huge
+            # background block (too large). These thresholds are deliberately
+            # loose since textbook ছক boxes vary a lot in size.
+            if area < page_area * 0.003 or area > page_area * 0.5:
+                continue
+            aspect = cw / max(ch, 1)
+            if aspect > 25 or aspect < 0.03:
+                continue  # skip degenerate slivers (stray table gridlines etc.)
+            boxes.append((x, y, x + cw, y + ch, area))
+
+        if not boxes:
+            return []
+
+        # De-duplicate near-identical/nested boxes (common with nested
+        # borders/double-lines in scanned textbooks) by suppressing boxes
+        # that are >90% contained inside a larger already-kept box.
+        boxes.sort(key=lambda b: -b[4])
+        kept = []
+        for bx in boxes:
+            x0, y0, x1, y1, _ = bx
+            nested = False
+            for kx0, ky0, kx1, ky1, _ in kept:
+                ix0, iy0 = max(x0, kx0), max(y0, ky0)
+                ix1, iy1 = min(x1, kx1), min(y1, ky1)
+                if ix1 > ix0 and iy1 > iy0:
+                    inter = (ix1 - ix0) * (iy1 - iy0)
+                    this_area = (x1 - x0) * (y1 - y0)
+                    if inter / max(this_area, 1) > 0.9:
+                        nested = True
+                        break
+            if not nested:
+                kept.append(bx)
+
+        # Normalize to 0-1000 scale (matches _ocr_bbox_lookup convention)
+        norm = []
+        for x0, y0, x1, y1, _ in kept:
+            norm.append([
+                round(x0 / w * 1000), round(y0 / h * 1000),
+                round(x1 / w * 1000), round(y1 / h * 1000),
+            ])
+        return norm
+    except Exception as e:
+        logger.warning(f"[ChokBoxDetect] detection failed, treating as unknown: {e}")
+        return []
+
+
+def _chok_box_coverage_note(img, mcqs: list) -> str:
+    """
+    Cross-checks CV-detected box count against a heuristic estimate of how
+    many boxes the current MCQ set actually represents (proxy: total MCQ
+    count, since ~80% are meant to be 1-per-box). If detected box count
+    clearly exceeds current MCQ count, injects an explicit numeric
+    instruction into the verify prompt so the AI isn't just trusting its own
+    mental box-count — it gets a code-derived number to react to.
+    Returns "" if detection found nothing (fails open — never blocks/reduces
+    output) or coverage already looks sufficient.
+    """
+    try:
+        boxes = _detect_chok_boxes(img)
+    except Exception:
+        boxes = []
+    if not boxes:
+        return ""
+    box_count = len(boxes)
+    n = len(mcqs or [])
+    if n >= box_count:
+        return ""
+    gap = box_count - n
+    return (
+        f"\nCV BOX-DETECTION RESULT (independent of your own visual count): "
+        f"automated detection found approximately {box_count} distinct "
+        f"bordered box/cell regions on this page, but only {n} MCQs exist so "
+        f"far — that means AT LEAST {gap} box(es) are almost certainly still "
+        f"unrepresented. Go through the page again region by region and add "
+        f"MCQs for whichever boxes are missing until total MCQs >= {box_count}. "
+        f"This automated count can occasionally include a false positive "
+        f"(e.g. a decorative border), so use judgment, but treat a large gap "
+        f"like this as a strong signal of real missed boxes, not noise."
+    )
+
+
+async def _chok_final_cv_enforcement(mcqs: list, img, topic: str, page_num) -> list:
+    """
+    Final code-level safety net for /chok, run AFTER the normal verify pass.
+    Re-checks CV-detected box count vs current MCQ count. If a gap still
+    remains (verify pass either wasn't triggered by this specific number, or
+    the model under-delivered on its addition), fires ONE bounded, targeted
+    extra call asking specifically for the shortfall count, then appends
+    whatever comes back. Runs once only (no loop) to bound latency — this is
+    a best-effort second safety net on top of the verify pass, not a
+    guarantee generator, since CV detection itself can misfire (over/under
+    count on decorative borders, faint scan lines, etc).
+    """
+    try:
+        boxes = await asyncio.to_thread(_detect_chok_boxes, img)
+        if not boxes:
+            return mcqs
+        box_count = len(boxes)
+        n = len(mcqs or [])
+        if n >= box_count:
+            return mcqs
+        gap = box_count - n
+        existing_qs = "\n".join(f"- {m.get('question','')[:100]}" for m in (mcqs or [])[:60])
+        fix_prompt = (
+            f"CV box-detection found {box_count} distinct box/cell regions on this ছক "
+            f"page (Topic: {topic}), but only {n} MCQs exist — a gap of at least {gap}. "
+            f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
+            f"Scan the page box-by-box one final time and return ONLY the ADDITIONAL "
+            f"new MCQs for boxes/cells not yet represented above (never duplicate "
+            f"existing questions) — aim to close this gap of {gap}. All info must come "
+            f"from the source page. STRICT JSON array only: "
+            f'[{{"question":"...","options":["...","...","...","..."],'
+            f'"answer":"A","explanation":"..."}}]. If truly nothing more to add, '
+            f"return exactly: []"
+        )
+        txt = await _gen_groq_raw_text(img, fix_prompt)
+        extra = _parse_mcq_json(txt) if txt else []
+        if extra:
+            extra = _cap_mcq_options(extra, 4)
+            existing_q_texts = {(m.get("question") or "").strip().lower()[:60] for m in (mcqs or [])}
+            new_items = []
+            for m in extra:
+                qk = (m.get("question") or "").strip().lower()[:60]
+                if qk and qk not in existing_q_texts:
+                    new_items.append(m)
+                    existing_q_texts.add(qk)
+            if new_items:
+                logger.info(f"[ChokCVEnforce] page {page_num}: added {len(new_items)} more MCQs to close CV box-gap")
+                mcqs = list(mcqs or []) + new_items
+    except Exception as e:
+        logger.warning(f"[ChokCVEnforce] page {page_num} skipped: {e}")
+    return mcqs
+
+
 def _classify_chok_mcq_type(m: dict) -> str:
     """Zero-cost regex classification of an MCQ into chok's 4 buckets.
     Used only for ratio-auditing in chok mode — never blocks/filters output."""
@@ -1298,6 +1469,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     merged = merged + verified[n_orig:]
     if _rng_max and len(merged) > _rng_max:
         merged = merged[:_rng_max]
+    if _CHOK_MODE.get():
+        merged = await _chok_final_cv_enforcement(merged, img, topic, page_num)
     return merged
 
 
@@ -1331,6 +1504,7 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
         )
         if _CHOK_MODE.get():
             ratio_gap_note = _chok_ratio_gap_note(mcqs)
+            cv_box_note = await asyncio.to_thread(_chok_box_coverage_note, img, mcqs)
             verify_prompt = (
                 f"You are STRICTLY auditing ছক/box MCQ coverage for this page (Topic: {topic}).\n"
                 f"CALL 1 already extracted {current_n} MCQs.{max_extra_note} "
@@ -1344,7 +1518,7 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
                 f"commonly missed.\n"
                 f"- Also check: are there enough MULTI-BOX combined MCQs (mixing 2-3+ boxes) "
                 f"to cover the full ছক collectively, and at least one সত্য/মিথ্যা style MCQ?"
-                f"{ratio_gap_note}\n\n"
+                f"{ratio_gap_note}{cv_box_note}\n\n"
                 f"If ANY box was missed, or the mix is incomplete, return ONLY the ADDITIONAL "
                 f"new MCQs needed (one per missed box minimum, never duplicate existing "
                 f"questions above) as STRICT JSON array: [{{\"question\":\"...\",\"options\":"
