@@ -3022,7 +3022,8 @@ async def _handle_split_command_inner(msg: dict):
 async def _send_csv_polls_to_channel(
     channel_id: str, mcqs: list, topic: str,
     chat_id: int, pre_msg_id: int = None,
-    thread_id: int = None
+    thread_id: int = None,
+    loading_id: int = None
 ) -> tuple:
     """
     একটা batch-এর polls পাঠাও।
@@ -3033,6 +3034,7 @@ async def _send_csv_polls_to_channel(
     exp_footer = settings.get("exp_footer", "")
 
     sent = 0
+    total = len(mcqs)
     first_poll_link = ""
 
     for i, mcq in enumerate(mcqs):
@@ -3064,9 +3066,13 @@ async def _send_csv_polls_to_channel(
                 break
             else:
                 logger.warning(f"[CSV] Poll {i+1} attempt {attempt+1} failed, retrying...")
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
 
-        await asyncio.sleep(2.5)  # Rate limit (same as reference code)
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"📤 poll পাঠানো হচ্ছে... {sent}/{total}")
+
+        await asyncio.sleep(1.5)  # Rate limit
 
     return sent, first_poll_link
 
@@ -3117,7 +3123,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             # Polls পাঠাও
             sent, first_link = await _send_csv_polls_to_channel(
                 channel_id, batch, batch_topic, chat_id, pre_msg_id,
-                thread_id=thread_id
+                thread_id=thread_id, loading_id=loading_id
             )
 
             # প্রতিটা batch-এর জন্য আলাদা cache — Quiz Solve/Poll Solve/Web Exam বাটনের জন্য
@@ -3186,7 +3192,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
 
         sent, first_link = await _send_csv_polls_to_channel(
             channel_id, mcqs, topic, chat_id, pre_msg_id,
-            thread_id=thread_id
+            thread_id=thread_id, loading_id=loading_id
         )
 
         ending = csv_get_ending_message(topic, sent, first_link)
