@@ -1249,7 +1249,29 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
             f"MCQ(s) — the page's total must not exceed {count_max}."
             if count_max is not None else ""
         )
-        verify_prompt = (
+        if _CHOK_MODE.get():
+            verify_prompt = (
+                f"You are STRICTLY auditing ছক/box MCQ coverage for this page (Topic: {topic}).\n"
+                f"CALL 1 already extracted {current_n} MCQs.{max_extra_note} "
+                f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
+                f"MANDATORY BOX-BY-BOX AUDIT (not optional):\n"
+                f"- List EVERY box/cell/marked area/row/column on this page mentally, one by one.\n"
+                f"- For EACH box, check: is there at least one MCQ above that clearly covers "
+                f"THIS specific box's content? If not, that box was MISSED — this is a hard "
+                f"failure that must be fixed.\n"
+                f"- Pay special attention to the LAST row/box and BOTTOM of the page — most "
+                f"commonly missed.\n"
+                f"- Also check: are there enough MULTI-BOX combined MCQs (mixing 2-3+ boxes) "
+                f"to cover the full ছক collectively, and at least one সত্য/মিথ্যা style MCQ?\n\n"
+                f"If ANY box was missed, or the mix is incomplete, return ONLY the ADDITIONAL "
+                f"new MCQs needed (one per missed box minimum, never duplicate existing "
+                f"questions above) as STRICT JSON array: [{{\"question\":\"...\",\"options\":"
+                f"[\"...\",\"...\",\"...\",\"...\"],\"answer\":\"A\",\"explanation\":\"...\"}}]. "
+                f"If every box is genuinely already covered, return exactly: []\n"
+                f"Never invent facts not present on the page. No prose, JSON only."
+            )
+        else:
+            verify_prompt = (
             f"You are STRICTLY auditing MCQ coverage for this page (Topic: {topic}).\n"
             f"CALL 1 already extracted {current_n} MCQs (target ~{count_target}/page).{max_extra_note} "
             f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
