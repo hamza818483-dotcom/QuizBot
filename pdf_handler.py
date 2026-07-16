@@ -689,9 +689,6 @@ Return ONLY valid JSON array, no markdown, no extra text:
 
     return []
 
-
-    return await generate_mcq_from_image(img, topic, page, mcq_count=count)
-
 # ============================================================
 # PARSE HELPERS
 # ============================================================

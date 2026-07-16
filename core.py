@@ -7,6 +7,7 @@
 
 import os
 import io
+import asyncio
 import tempfile
 import re
 import json
@@ -677,25 +678,25 @@ async def _ensure_d1_table(name: str, create_sql: str):
 
 async def db_get_settings() -> dict:
     try:
-        r = sb.table("quiz_settings").select("tag,exp_footer").eq("id", 1).execute()
+        r = sb.table("quiz_settings").select("tag,exp_footer,watermark").eq("id", 1).execute()
         if r.data:
             return r.data[0]
     except Exception as e:
         logger.error(f"[DB] get_settings error: {e}")
     try:
         await _ensure_d1_table("quiz_settings",
-            "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT)")
-        rows = await d1_select("SELECT tag, exp_footer FROM quiz_settings WHERE id=1")
+            "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT, watermark TEXT)")
+        rows = await d1_select("SELECT tag, exp_footer, watermark FROM quiz_settings WHERE id=1")
         if rows:
             return rows[0]
     except Exception as e:
         logger.warning(f"[D1] get_settings fallback warn: {e}")
-    return {"tag": "", "exp_footer": ""}
+    return {"tag": "", "exp_footer": "", "watermark": ""}
 
 async def db_save_settings_field(field: str, value: str):
     try:
         await _ensure_d1_table("quiz_settings",
-            "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT)")
+            "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT, watermark TEXT)")
         await d1_run(
             f"INSERT INTO quiz_settings (id, {field}) VALUES (1, ?1) "
             f"ON CONFLICT(id) DO UPDATE SET {field}=excluded.{field}",
@@ -703,6 +704,16 @@ async def db_save_settings_field(field: str, value: str):
         )
     except Exception as e:
         logger.warning(f"[D1] save_settings mirror warn: {e}")
+
+async def db_save_settings(settings: dict):
+    """dict-e thaka shob field Supabase (primary) + D1 (mirror) e save kore.
+    /wm command er moto jekhane pura settings dict update hoy shekhane use hoy."""
+    try:
+        sb.table("quiz_settings").upsert({"id": 1, **settings}).execute()
+    except Exception as e:
+        logger.error(f"[DB] save_settings error: {e}")
+    for field, value in settings.items():
+        await db_save_settings_field(field, value)
 
 async def db_is_owner_or_admin(uid: int) -> bool:
     if uid == OWNER_ID:
