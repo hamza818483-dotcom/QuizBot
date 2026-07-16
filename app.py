@@ -10508,6 +10508,19 @@ async def startup():
     BOT_START_TIME = time.time()
     logger.info("[App] ATLAS BOT v4.1 starting...")
 
+    # SPEED: Pyrogram client cold-start (connect+auth handshake) prothom
+    # download request-ei hoile user wait kore. Startup-e pre-warm kore rakhle
+    # first real download-e ei latency lage na.
+    try:
+        from core import _get_pyro_client
+        pc = await _get_pyro_client()
+        if pc:
+            logger.info("[App] Pyrogram client pre-warmed at startup")
+        else:
+            logger.info("[App] Pyrogram not configured (TELEGRAM_API_ID/HASH missing), skip pre-warm")
+    except Exception as e:
+        logger.warning(f"[App] Pyrogram pre-warm failed (will lazy-init later): {e}")
+
     # Start mhtml/html auto-queue worker (serial processing, one file at a time)
     global _mhtml_worker_started
     if not _mhtml_worker_started:
