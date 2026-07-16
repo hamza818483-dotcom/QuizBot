@@ -49,7 +49,7 @@ from core import (
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
     send_document, send_poll, notify_owner, download_tg_file,
-    db_get_settings, db_is_owner_or_admin, db_track_user, db_save_session,
+    db_get_settings, db_save_settings_field, db_is_owner_or_admin, db_track_user, db_save_session,
     db_save_mcq_cache, db_update_cache, db_get_mcq_cache,
     db_get_new_gen_count, db_increment_gen_count, db_save_leaderboard,
     db_get_channels, db_save_channel, db_delete_channel, db_rename_channel, db_save_last_quiz, db_get_last_quiz,
@@ -1612,6 +1612,22 @@ async def db_save_live_result(session_id: str, user_id: int, user_name: str,
         }).execute()
     except Exception as e:
         logger.error(f"[DB] save_live_result error: {e}")
+    try:
+        from core import _ensure_d1_table, d1_run as _d1r
+        await _ensure_d1_table("live_quiz_results",
+            "CREATE TABLE IF NOT EXISTS live_quiz_results (session_id TEXT, user_id INTEGER, user_name TEXT, "
+            "correct INTEGER, wrong INTEGER, skipped INTEGER, total INTEGER, avg_response_time REAL, score INTEGER, "
+            "updated_at INTEGER, PRIMARY KEY (session_id, user_id))")
+        await _d1r(
+            "INSERT INTO live_quiz_results (session_id,user_id,user_name,correct,wrong,skipped,total,avg_response_time,score,updated_at) "
+            "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) "
+            "ON CONFLICT(session_id,user_id) DO UPDATE SET user_name=excluded.user_name, correct=excluded.correct, "
+            "wrong=excluded.wrong, skipped=excluded.skipped, total=excluded.total, "
+            "avg_response_time=excluded.avg_response_time, score=excluded.score, updated_at=excluded.updated_at",
+            [session_id, user_id, user_name, correct, wrong, skipped, total, avg_time, correct, int(time.time())]
+        )
+    except Exception as e:
+        logger.warning(f"[D1] save_live_result mirror warn: {e}")
 
 async def db_get_live_results(session_id: str) -> list:
     try:
@@ -1753,6 +1769,7 @@ async def handle_tagQ(msg: dict):
     text = re.sub(r'(?i)^/tagq', '', msg.get("text", "")).strip()
     if text:
         sb.table("quiz_settings").upsert({"id": 1, "tag": text}).execute()
+        await db_save_settings_field("tag", text)
         await send_msg(chat_id, f"✅ Tag set:\n{text}")
     else:
         s = await db_get_settings()
@@ -1763,6 +1780,7 @@ async def handle_expQ(msg: dict):
     text = re.sub(r'(?i)^/expq', '', msg.get("text", "")).strip()
     if text:
         sb.table("quiz_settings").upsert({"id": 1, "exp_footer": text}).execute()
+        await db_save_settings_field("exp_footer", text)
         await send_msg(chat_id, f"✅ Footer set:\n{text}")
     else:
         s = await db_get_settings()
@@ -9877,6 +9895,19 @@ async def save_exam_result(request: Request):
             "correct": correct, "wrong": wrong, "skipped": skipped,
             "negative_marks": negative, "final_score": final_score, "time_taken": time_taken
         }).execute()
+        try:
+            from core import _ensure_d1_table, d1_run as _d1r
+            await _ensure_d1_table("web_exam_results",
+                "CREATE TABLE IF NOT EXISTS web_exam_results (id INTEGER PRIMARY KEY AUTOINCREMENT, cache_id TEXT, "
+                "user_id INTEGER, user_name TEXT, topic TEXT, page_number INTEGER, total INTEGER, correct INTEGER, "
+                "wrong INTEGER, skipped INTEGER, negative_marks REAL, final_score REAL, time_taken INTEGER)")
+            await _d1r(
+                "INSERT INTO web_exam_results (cache_id,user_id,user_name,topic,page_number,total,correct,wrong,skipped,negative_marks,final_score,time_taken) "
+                "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                [cache_id, user_id, user_name, topic, page, total, correct, wrong, skipped, negative, final_score, time_taken]
+            )
+        except Exception as e:
+            logger.warning(f"[D1] save_exam_result mirror warn: {e}")
         cache = await db_get_mcq_cache(cache_id)
         if not (cache and cache.get("is_new_gen")):
             await db_save_leaderboard(cache_id, user_id, user_name, topic, page, correct, total, final_score)
@@ -9910,6 +9941,22 @@ async def save_bookmark(request: Request):
             "question_data": data.get("question_data"),
             "topic": data.get("topic"), "page_number": data.get("page")
         }, on_conflict="user_id,cache_id,question_index").execute()
+        try:
+            from core import _ensure_d1_table, d1_run as _d1r
+            import json as _json
+            await _ensure_d1_table("bookmarks",
+                "CREATE TABLE IF NOT EXISTS bookmarks (user_id INTEGER, cache_id TEXT, question_index INTEGER, "
+                "question_data TEXT, topic TEXT, page_number INTEGER, PRIMARY KEY (user_id, cache_id, question_index))")
+            await _d1r(
+                "INSERT INTO bookmarks (user_id,cache_id,question_index,question_data,topic,page_number) "
+                "VALUES (?1,?2,?3,?4,?5,?6) "
+                "ON CONFLICT(user_id,cache_id,question_index) DO UPDATE SET question_data=excluded.question_data, "
+                "topic=excluded.topic, page_number=excluded.page_number",
+                [data["user_id"], data.get("cache_id"), data.get("question_index"),
+                 _json.dumps(data.get("question_data")), data.get("topic"), data.get("page")]
+            )
+        except Exception as e:
+            logger.warning(f"[D1] save_bookmark mirror warn: {e}")
         return JSONResponse({"ok": True})
     except Exception as e:
         logger.error(f"[Bookmark] save error: {e}")
@@ -9923,6 +9970,14 @@ async def delete_bookmark(request: Request):
             .eq("user_id", data["user_id"])\
             .eq("cache_id", data["cache_id"])\
             .eq("question_index", data["question_index"]).execute()
+        try:
+            from core import d1_run as _d1r
+            await _d1r(
+                "DELETE FROM bookmarks WHERE user_id=?1 AND cache_id=?2 AND question_index=?3",
+                [data["user_id"], data["cache_id"], data["question_index"]]
+            )
+        except Exception as e:
+            logger.warning(f"[D1] delete_bookmark mirror warn: {e}")
         return JSONResponse({"ok": True})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
