@@ -3137,12 +3137,17 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 [{"text": "🌐 Website Exam", "url": exam_url},
                  {"text": "💎 Premium PDF", "url": premium_url}],
             ]}
-            end_r = await tg_post("sendMessage", {
+            end_send_data2 = {
                 "chat_id": channel_id,
                 "text": ending,
                 "disable_web_page_preview": True,
                 "reply_markup": end_kb
-            })
+            }
+            if pre_msg_id:
+                end_send_data2["reply_to_message_id"] = pre_msg_id
+            if thread_id:
+                end_send_data2["message_thread_id"] = thread_id
+            end_r = await tg_post("sendMessage", end_send_data2)
             if end_r.get("ok"):
                 await db_update_cache(batch_cache_id, {
                     "channel_id": channel_id,
@@ -3204,6 +3209,8 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             "disable_web_page_preview": True,
             "reply_markup": end_kb
         }
+        if pre_msg_id:
+            end_send_data["reply_to_message_id"] = pre_msg_id
         if thread_id:
             end_send_data["message_thread_id"] = thread_id
         end_r = await tg_post("sendMessage", end_send_data)
