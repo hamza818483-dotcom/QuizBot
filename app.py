@@ -8170,15 +8170,14 @@ async def _finish_quiz(uid: int):
     special_count = len(set(st["wrong_idx"] + st["skip_idx"]))
 
     kb = {"inline_keyboard": []}
+    has_image = bool(st.get("image_file_id"))
     # Item 4: fixed 3-row layout
     kb["inline_keyboard"].append([
         {"text": "🔄 Same Quiz", "callback_data": f"qsame_{cache_id}"},
-        {"text": "🆕 New Quiz", "callback_data": f"qnew_{cache_id}"}
-    ])
+    ] + ([{"text": "🆕 New Quiz", "callback_data": f"qnew_{cache_id}"}] if has_image else []))
     kb["inline_keyboard"].append([
         {"text": "🔄 Same Poll", "callback_data": f"pollagain_{cache_id}"},
-        {"text": "🆕 New Poll", "callback_data": f"pollnew_{cache_id}"}
-    ])
+    ] + ([{"text": "🆕 New Poll", "callback_data": f"pollnew_{cache_id}"}] if has_image else []))
     kb["inline_keyboard"].append([{"text": "🌐 Website Exam", "url": exam_url}])
     if wrong_count > 0:
         kb["inline_keyboard"].append([{"text": f"❌ Mistake Practice ({wrong_count} টি ভুল)", "callback_data": "qmis"}])
