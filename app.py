@@ -3149,6 +3149,8 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 "disable_web_page_preview": True,
                 "reply_markup": end_kb
             }
+            if pre_msg_id:
+                end_send_data2["reply_to_message_id"] = pre_msg_id
             if thread_id:
                 end_send_data2["message_thread_id"] = thread_id
             end_r = await tg_post("sendMessage", end_send_data2)
@@ -3213,6 +3215,8 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             "disable_web_page_preview": True,
             "reply_markup": end_kb
         }
+        if pre_msg_id:
+            end_send_data["reply_to_message_id"] = pre_msg_id
         if thread_id:
             end_send_data["message_thread_id"] = thread_id
         end_r = await tg_post("sendMessage", end_send_data)
