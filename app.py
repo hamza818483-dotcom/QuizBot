@@ -2599,6 +2599,17 @@ def csv_get_pre_message(topic: str, count: int) -> str:
         f"✅প্রশ্ন সংখ্যা: {count}"
     )
 
+def csv_get_comment_prompt_message(topic: str, count: int) -> str:
+    topic_text = f'"{topic}"' if topic else ""
+    return (
+        f"🌟Important Poll Solve By ATLAS\n"
+        f"🔥Topic Name: {topic_text}\n\n"
+        f"✅প্রশ্ন সংখ্যা: {count}\n\n"
+        f"⁉️তোমার স্কোর কত? 🤔\n"
+        f"( ? / {count} )\n\n"
+        f"নিচে কমেন্টে লিখো! 👇"
+    )
+
 def csv_get_ending_message(topic: str, count: int, first_link: str = "") -> str:
     topic_text = f'"{topic}"' if topic else ""
     base = (
@@ -3159,6 +3170,14 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                     "channel_id": channel_id,
                     "end_msg_id": end_r["result"]["message_id"]
                 })
+
+            # Follow-up message (no button, no reply) — comment button enable হওয়ার জন্য
+            comment_prompt = csv_get_comment_prompt_message(batch_topic, sent)
+            comment_send_data = {"chat_id": channel_id, "text": comment_prompt}
+            if thread_id:
+                comment_send_data["message_thread_id"] = thread_id
+            await tg_post("sendMessage", comment_send_data)
+
             batch_links.append((b_idx, first_link, len(batch)))
 
             if loading_id:
@@ -3225,6 +3244,13 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 "channel_id": channel_id,
                 "end_msg_id": end_r["result"]["message_id"]
             })
+
+        # Follow-up message (no button, no reply) — comment button enable হওয়ার জন্য
+        comment_prompt = csv_get_comment_prompt_message(topic, sent)
+        comment_send_data = {"chat_id": channel_id, "text": comment_prompt}
+        if thread_id:
+            comment_send_data["message_thread_id"] = thread_id
+        await tg_post("sendMessage", comment_send_data)
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
