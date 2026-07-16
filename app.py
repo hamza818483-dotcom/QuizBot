@@ -52,7 +52,7 @@ from core import (
     db_get_settings, db_is_owner_or_admin, db_track_user, db_save_session,
     db_save_mcq_cache, db_update_cache, db_get_mcq_cache,
     db_get_new_gen_count, db_increment_gen_count, db_save_leaderboard,
-    db_get_channels, db_delete_channel, db_rename_channel, db_save_last_quiz, db_get_last_quiz,
+    db_get_channels, db_save_channel, db_delete_channel, db_rename_channel, db_save_last_quiz, db_get_last_quiz,
     build_back_url, source_msg_id,
     get_recent_errors, clear_error_logs,
     add_watermark_to_pdf,
@@ -1786,10 +1786,7 @@ async def handle_channel(msg: dict):
         channel_id = "@" + channel_id.split("/")[-1]
     if channel_id.startswith("@") or channel_id.startswith("-100"):
         display = custom_name or channel_id
-        sb.table("channels").upsert({
-            "channel_id": channel_id,
-            "channel_name": display
-        }).execute()
+        await db_save_channel(channel_id, display)
         await send_msg(chat_id, f"✅ Channel added: {channel_id}\n📛 Name: {display}")
     else:
         await send_msg(chat_id,
