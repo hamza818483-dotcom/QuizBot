@@ -4745,6 +4745,12 @@ async def handle_pdf(msg: dict):
     mcq_count = params["mcq_count"]
     if params.get("mcq_count_min") and params.get("mcq_count_max"):
         mcq_count = (params["mcq_count_min"], params["mcq_count_max"])
+    if _CHOK_MODE.get():
+        # /chok count is NEVER user-settable — always content/box-driven per
+        # the user's explicit instruction. Any number typed after /chok is
+        # ignored entirely so it can never cap or override the mandatory
+        # 15+ per-box MCQ generation.
+        mcq_count = None
     thread_id = params.get("thread_id")
     file_name = reply["document"].get("file_name", "document.pdf")
     file_id = reply["document"]["file_id"]
