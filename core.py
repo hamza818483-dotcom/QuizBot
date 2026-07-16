@@ -800,6 +800,22 @@ async def db_get_channels() -> list:
     except:
         return []
 
+async def db_delete_channel(channel_id: str) -> bool:
+    try:
+        sb.table("channels").delete().eq("channel_id", channel_id).execute()
+        return True
+    except Exception as e:
+        logger.error(f"[DB] delete_channel error: {e}")
+        return False
+
+async def db_rename_channel(channel_id: str, new_name: str) -> bool:
+    try:
+        sb.table("channels").update({"channel_name": new_name}).eq("channel_id", channel_id).execute()
+        return True
+    except Exception as e:
+        logger.error(f"[DB] rename_channel error: {e}")
+        return False
+
 # ============================================================
 # QUIZ STATE (last-quiz resume, shared by image/pdf quiz solve)
 # ============================================================

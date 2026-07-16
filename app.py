@@ -52,7 +52,7 @@ from core import (
     db_get_settings, db_is_owner_or_admin, db_track_user, db_save_session,
     db_save_mcq_cache, db_update_cache, db_get_mcq_cache,
     db_get_new_gen_count, db_increment_gen_count, db_save_leaderboard,
-    db_get_channels, db_save_last_quiz, db_get_last_quiz,
+    db_get_channels, db_delete_channel, db_rename_channel, db_save_last_quiz, db_get_last_quiz,
     build_back_url, source_msg_id,
     get_recent_errors, clear_error_logs,
     add_watermark_to_pdf,
@@ -440,6 +440,7 @@ IMG_COLLECTION = {}   # uid -> {"imgs": [], "collecting": bool}
 
 # v1.2: /watermark feature — uid -> pdf_bytes (waiting for watermark text)
 WATERMARK_PENDING = {}
+CHANNEL_RENAME_PENDING = {}  # uid -> channel_id awaiting new name text
 
 
 # v1.3: /rapid — scheduled comment-based question drop in a channel
@@ -1799,24 +1800,45 @@ async def handle_channel(msg: dict):
             "<code>/channelist</code> — list all"
         )
 
-async def _show_channel_list(chat_id):
+async def _show_channel_list(chat_id, edit_message_id=None):
     channels = await db_get_channels()
     if not channels:
-        await send_msg(chat_id,
-            "📢 No channels saved!\n\n"
-            "Add: <code>/channel @name</code>\n"
-            "Add: <code>/channel -100xxx Custom Name</code>"
-        )
+        txt = ("📢 No channels saved!\n\n"
+               "Add: <code>/channel @name</code>\n"
+               "Add: <code>/channel -100xxx Custom Name</code>")
+        if edit_message_id:
+            await tg_post("editMessageText", {"chat_id": chat_id, "message_id": edit_message_id, "text": txt, "parse_mode": "HTML"})
+        else:
+            await send_msg(chat_id, txt)
         return
-    txt = "📢 <b>Saved Channels</b>\n\n"
-    for i, ch in enumerate(channels, 1):
+    txt = "📢 <b>Saved Channels</b>\n\nচ্যানেল সিলেক্ট করলে Edit/Delete অপশন পাবে:"
+    buttons = []
+    for ch in channels:
         ch_id = ch.get("channel_id", "")
         ch_name = ch.get("channel_name", ch_id)
-        txt += f"{i}. 📢 <b>{ch_name}</b>\n   🔗 <code>{ch_id}</code>\n\n"
-    txt += "<b>Commands:</b>\n"
-    txt += "<code>/channel @id Name</code> — add/update\n"
-    txt += "<code>/channelist</code> — view list"
-    await send_msg(chat_id, txt)
+        buttons.append([{"text": f"📢 {ch_name}", "callback_data": f"chsel_{ch_id}"}])
+    reply_markup = {"inline_keyboard": buttons}
+    if edit_message_id:
+        await tg_post("editMessageText", {"chat_id": chat_id, "message_id": edit_message_id, "text": txt,
+                                            "parse_mode": "HTML", "reply_markup": reply_markup})
+    else:
+        await send_msg(chat_id, txt, reply_markup=reply_markup)
+
+async def _show_channel_actions(chat_id, message_id, channel_id):
+    channels = await db_get_channels()
+    ch = next((c for c in channels if c.get("channel_id") == channel_id), None)
+    if not ch:
+        await tg_post("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": "❌ Channel পাওয়া যায়নি, হয়তো delete হয়ে গেছে।"})
+        return
+    ch_name = ch.get("channel_name", channel_id)
+    txt = f"📢 <b>{ch_name}</b>\n🔗 <code>{channel_id}</code>\n\nকী করতে চাও?"
+    buttons = [
+        [{"text": "✏️ Name Update", "callback_data": f"chren_{channel_id}"}],
+        [{"text": "🗑️ Delete", "callback_data": f"chdel_{channel_id}"}],
+        [{"text": "⬅️ Back", "callback_data": "chback"}]
+    ]
+    await tg_post("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": txt,
+                                        "parse_mode": "HTML", "reply_markup": {"inline_keyboard": buttons}})
 
 # ============================================================
 # FEATURE: /pin on | /pin off
@@ -8754,6 +8776,18 @@ async def handle_message(msg: dict):
         if consumed:
             return
 
+    # Channel rename flow check (awaiting new name text after ✏️ Name Update tap)
+    if uid in CHANNEL_RENAME_PENDING and msg.get("text") and not text.startswith("/"):
+        channel_id = CHANNEL_RENAME_PENDING.pop(uid)
+        new_name = text.strip()
+        ok = await db_rename_channel(channel_id, new_name)
+        if ok:
+            await send_msg(chat_id, f"✅ <code>{channel_id}</code> এর নাম আপডেট হয়েছে: <b>{new_name}</b>")
+            await _show_channel_list(chat_id)
+        else:
+            await send_msg(chat_id, "❌ Rename failed!")
+        return
+
     # DB cleanup (every ~100 requests, random)
     if random.random() < 0.01:
         asyncio.create_task(db_auto_cleanup_if_needed())
@@ -9069,6 +9103,29 @@ async def handle_callback(query: dict):
     uname = user.get("username") or user.get("first_name", "User")
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
+        if data.startswith("chsel_"):
+            channel_id = data[len("chsel_"):]
+            await _show_channel_actions(chat_id, msg_id, channel_id)
+            return
+        if data == "chback":
+            await _show_channel_list(chat_id, edit_message_id=msg_id)
+            return
+        if data.startswith("chdel_"):
+            channel_id = data[len("chdel_"):]
+            ok = await db_delete_channel(channel_id)
+            if ok:
+                await tg_post("editMessageText", {"chat_id": chat_id, "message_id": msg_id,
+                    "text": f"✅ Channel <code>{channel_id}</code> delete করা হয়েছে।", "parse_mode": "HTML"})
+                await _show_channel_list(chat_id)
+            else:
+                await tg_post("editMessageText", {"chat_id": chat_id, "message_id": msg_id, "text": "❌ Delete failed!"})
+            return
+        if data.startswith("chren_"):
+            channel_id = data[len("chren_"):]
+            CHANNEL_RENAME_PENDING[uid] = channel_id
+            await tg_post("editMessageText", {"chat_id": chat_id, "message_id": msg_id,
+                "text": f"✏️ <code>{channel_id}</code> এর নতুন নাম লিখে পাঠাও:", "parse_mode": "HTML"})
+            return
         if data.startswith("sheetstyle:"):
             await handle_sheet_style_callback(query)
             return
