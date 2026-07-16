@@ -3214,7 +3214,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             batch_cache_id = gen_session_id()
             await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
 
-            # Pre-message (plain, no button)
+            # Pre-message (plain, no button, no reply)
             pre_text = csv_get_pre_message(batch_topic, len(batch))
             pre_send_data = {"chat_id": channel_id, "text": pre_text}
             if thread_id:
@@ -3233,22 +3233,16 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 thread_id=thread_id, loading_id=loading_id
             )
 
-            # 4-button message (pre-msg কে reply করে)
-            btn_kb = await _csv_pre_buttons(batch_cache_id)
-            btn_send_data = {"chat_id": channel_id, "text": pre_text, "reply_markup": btn_kb}
-            if pre_msg_id:
-                btn_send_data["reply_to_message_id"] = pre_msg_id
-            if thread_id:
-                btn_send_data["message_thread_id"] = thread_id
-            await tg_post("sendMessage", btn_send_data)
-
-            # Ending message for this batch (score ask শুধু channel এ, button নাই)
+            # Ending message for this batch (pre-msg কে reply)
+            # Channel: 4 button + score-ask | Group: plain, button/score-ask নাই
             ending = csv_get_ending_message(batch_topic, sent, first_link, ask_score=ask_score)
             end_send_data2 = {
                 "chat_id": channel_id,
                 "text": ending,
                 "disable_web_page_preview": True
             }
+            if ask_score:
+                end_send_data2["reply_markup"] = await _csv_pre_buttons(batch_cache_id)
             if pre_msg_id:
                 end_send_data2["reply_to_message_id"] = pre_msg_id
             if thread_id:
@@ -3302,21 +3296,16 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             thread_id=thread_id, loading_id=loading_id
         )
 
-        # 4-button message (pre-msg কে reply করে)
-        btn_kb = await _csv_pre_buttons(cache_id)
-        btn_send_data = {"chat_id": channel_id, "text": pre_text, "reply_markup": btn_kb}
-        if pre_msg_id:
-            btn_send_data["reply_to_message_id"] = pre_msg_id
-        if thread_id:
-            btn_send_data["message_thread_id"] = thread_id
-        await tg_post("sendMessage", btn_send_data)
-
+        # Ending message (pre-msg কে reply)
+        # Channel: 4 button + score-ask | Group: plain, button/score-ask নাই
         ending = csv_get_ending_message(topic, sent, first_link, ask_score=ask_score)
         end_send_data = {
             "chat_id": channel_id,
             "text": ending,
             "disable_web_page_preview": True
         }
+        if ask_score:
+            end_send_data["reply_markup"] = await _csv_pre_buttons(cache_id)
         if pre_msg_id:
             end_send_data["reply_to_message_id"] = pre_msg_id
         if thread_id:
