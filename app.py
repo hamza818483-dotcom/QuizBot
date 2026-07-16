@@ -1192,6 +1192,56 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
             logger.warning(f"[GroqVerify] key failed (status={status}), trying next key")
     return ""
 
+_TF_PATTERNS_BN = ("বললে ভুল হবে", "সত্য বললে", "মিথ্যা বললে")
+
+def _classify_chok_mcq_type(m: dict) -> str:
+    """Zero-cost regex classification of an MCQ into chok's 4 buckets.
+    Used only for ratio-auditing in chok mode — never blocks/filters output."""
+    q = (m.get("question") or "")
+    opts = m.get("options") or []
+    if any(p in q for p in _TF_PATTERNS_BN):
+        return "tf"
+    opt_lens = [len(str(o)) for o in opts] if opts else []
+    avg_opt_len = (sum(opt_lens) / len(opt_lens)) if opt_lens else 0
+    if len(q) <= 40 and avg_opt_len >= 25:
+        return "short_q_long_opt"
+    # heuristic for multi-box combined: question mentions multiple distinct
+    # nouns/topics joined by connectors, or options are unusually long/dense
+    # combining several facts (rough proxy: avg option length very high AND
+    # question itself references comparison/combination).
+    combine_markers = ("এবং", "ও ", "উভয়", "সবগুলো", "কোনটি সঠিক", "মিলিয়ে")
+    if avg_opt_len >= 35 and any(cm in q for cm in combine_markers):
+        return "multi_box"
+    return "standard"
+
+
+def _chok_ratio_gap_note(mcqs: list) -> str:
+    """Returns a short instruction string describing which type-buckets are
+    under target ratio, to append to the chok verify prompt. Empty string
+    means ratios are acceptable — no extra instruction needed."""
+    n = len(mcqs or [])
+    if n < 8:
+        return ""  # too few MCQs yet for ratio math to be meaningful
+    counts = {"standard": 0, "tf": 0, "multi_box": 0, "short_q_long_opt": 0}
+    for m in mcqs:
+        counts[_classify_chok_mcq_type(m)] += 1
+    targets = {"tf": 0.05, "multi_box": 0.10, "short_q_long_opt": 0.05}
+    gaps = []
+    for key, pct in targets.items():
+        need = max(0, round(n * pct) - counts[key])
+        if need > 0:
+            label = {"tf": "সত্য/মিথ্যা style", "multi_box": "multi-box combined",
+                      "short_q_long_opt": "short-question-long-option"}[key]
+            gaps.append(f"{need} more {label} MCQ(s)")
+    if not gaps:
+        return ""
+    return (
+        f"\nTYPE-MIX GAP DETECTED: current set is short on required variety — "
+        f"{'; '.join(gaps)}. Prioritize these types among the additional MCQs you return "
+        f"(still following per-box source-fidelity rules)."
+    )
+
+
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     Smart wrapper: Groq first (primary), then Gemini (internal key rotation via pdf_handler).
@@ -1250,6 +1300,7 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
             if count_max is not None else ""
         )
         if _CHOK_MODE.get():
+            ratio_gap_note = _chok_ratio_gap_note(mcqs)
             verify_prompt = (
                 f"You are STRICTLY auditing ছক/box MCQ coverage for this page (Topic: {topic}).\n"
                 f"CALL 1 already extracted {current_n} MCQs.{max_extra_note} "
@@ -1262,7 +1313,8 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
                 f"- Pay special attention to the LAST row/box and BOTTOM of the page — most "
                 f"commonly missed.\n"
                 f"- Also check: are there enough MULTI-BOX combined MCQs (mixing 2-3+ boxes) "
-                f"to cover the full ছক collectively, and at least one সত্য/মিথ্যা style MCQ?\n\n"
+                f"to cover the full ছক collectively, and at least one সত্য/মিথ্যা style MCQ?"
+                f"{ratio_gap_note}\n\n"
                 f"If ANY box was missed, or the mix is incomplete, return ONLY the ADDITIONAL "
                 f"new MCQs needed (one per missed box minimum, never duplicate existing "
                 f"questions above) as STRICT JSON array: [{{\"question\":\"...\",\"options\":"
