@@ -6556,7 +6556,7 @@ def qbm_get_active_prompt() -> str:
     if _qbm_prompt_cache["prompt"]:
         return _qbm_prompt_cache["prompt"]
     try:
-        r = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", "qbm_active_prompt").execute())
+        r = sb.table("quiz_sessions").select("data").eq("key", "qbm_active_prompt").execute()
         if r.data:
             p = json.loads(r.data[0]["data"]).get("prompt")
             if p:
@@ -6572,11 +6572,11 @@ def qbm_set_active_prompt(new_prompt: str):
     (নতুন update না আসা অবধি) এই prompt-ই সবসময় ব্যবহার হবে।"""
     _qbm_prompt_cache["prompt"] = new_prompt
     try:
-        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
+        sb.table("quiz_sessions").upsert({
             "key": "qbm_active_prompt",
             "data": json.dumps({"prompt": new_prompt}),
             "updated_at": int(time.time())
-        }).execute())
+        }).execute()
     except Exception as e:
         logger.warning(f"[QBM] prompt memory save failed: {e}")
 
