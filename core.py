@@ -348,7 +348,7 @@ async def tg_post(method: str, data: dict) -> dict:
     # ── Fallback: Direct Telegram API (CF down হলেও কাজ করবে) ──
     for attempt in range(2):
         try:
-            client = await _get_tg_direct_client()
+            client = await _get_shared_http_client()
             r = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=data)
             result = r.json()
             if not result.get("ok"):
