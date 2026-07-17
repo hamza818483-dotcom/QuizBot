@@ -9771,27 +9771,6 @@ async def handle_convert_command(msg: dict):
 # ============================================================
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
-# Per-user command queue — if the SAME user fires a command again while their
-# previous one is still running, the 2nd call now waits its turn instead of
-# running concurrently and colliding (shared session rows, etc). Different
-# users are never blocked by each other; only same-user overlap is serialized.
-_USER_LOCKS = {}
-_USER_LOCKS_ORDER = deque(maxlen=5000)
-
-def _get_user_lock(uid: int) -> asyncio.Lock:
-    lock = _USER_LOCKS.get(uid)
-    if lock is None:
-        lock = asyncio.Lock()
-        _USER_LOCKS[uid] = lock
-        _USER_LOCKS_ORDER.append(uid)
-        if len(_USER_LOCKS_ORDER) == _USER_LOCKS_ORDER.maxlen:
-            while len(_USER_LOCKS) > _USER_LOCKS_ORDER.maxlen:
-                old_uid = _USER_LOCKS_ORDER.popleft()
-                old_lock = _USER_LOCKS.get(old_uid)
-                if old_lock is not None and not old_lock.locked():
-                    _USER_LOCKS.pop(old_uid, None)
-    return lock
-
 @app.post("/webhook")
 async def webhook(request: Request):
     if WEBHOOK_SECRET:
@@ -9808,12 +9787,7 @@ async def webhook(request: Request):
 async def process_update(update: dict):
     try:
         if "message" in update:
-            uid = update["message"].get("from", {}).get("id")
-            if uid is not None:
-                async with _get_user_lock(uid):
-                    await handle_message(update["message"])
-            else:
-                await handle_message(update["message"])
+            await handle_message(update["message"])
         elif "callback_query" in update:
             await handle_callback(update["callback_query"])
         elif "poll_answer" in update:
