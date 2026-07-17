@@ -5616,11 +5616,13 @@ async def _process_pdf_pages_inner(
 
     async def _gen_with_retry(img_, page_num_):
         """Page-level retry: try twice before giving up on a page entirely,
-        so a single transient failure doesn't silently drop the whole page."""
+        so a single transient failure doesn't silently drop the whole page.
+        Uses generate_mcq_from_image() (full pipeline: raw-gen + option-cap +
+        repair thin explanations + cross-verify missed MCQs) — same as /img,
+        so /pdf and /bangla get identical quality, not a stripped-down path."""
         for _pg_attempt in range(2):
             try:
-                _mcqs = await _generate_mcq_from_image_raw(img_, topic, page_num_, mcq_count)
-                _mcqs = _cap_mcq_options(_mcqs, 4)
+                _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count)
                 if _mcqs:
                     return _mcqs
             except Exception as _pg_e:
