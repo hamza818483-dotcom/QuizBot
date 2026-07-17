@@ -3142,9 +3142,9 @@ async def handle_csv_command(msg: dict):
         return
 
     doc = reply["document"]
-    if not doc.get("file_name", "").lower().endswith(".csv"):
-        await send_msg(chat_id, "❌ শুধু .csv file support করে!")
-        return
+    # v: strict ".csv" filename check hotay silent-fail hocchilo (bot-generated
+    # document er filename shobshomoy ".csv"-te shesh hoy na). Ekhon shorashori
+    # try kore, parse fail hoile tobei error dekhabe.
 
     loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
     loading_id = loading.get("result", {}).get("message_id")
