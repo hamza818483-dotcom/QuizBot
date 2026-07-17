@@ -2905,6 +2905,13 @@ async def handle_img_command(msg: dict):
 
     # STEP 0 (NEW): source select — New MCQ (AI-generated, present system)
     # vs Existing MCQ (extract already-existing MCQ from the image, qbm-style).
+    # If a count was given (e.g. /img Physics 5), skip this prompt entirely —
+    # a count only makes sense for AI-generated ("new") MCQ, so default straight
+    # into "new" mode instead of asking new-vs-existing every time.
+    if mcq_count is not None:
+        await handle_img_source("new", uid, chat_id, msg["from"])
+        return
+
     kb = {"inline_keyboard": [
         [{"text": "🆕 New MCQ (AI generate করবে)", "callback_data": f"imgsrc_new_{uid}"}],
         [{"text": "📋 Existing MCQ (ছবিতে যা আছে তাই বের করবে)", "callback_data": f"imgsrc_existing_{uid}"}]
