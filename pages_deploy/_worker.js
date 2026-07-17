@@ -931,12 +931,22 @@ async function forwardToHF(request, env) {
     }
     // No second instance (or it also failed) — retry the SAME target once
     // more before giving up. Common single-instance case: HF Space was
-    // asleep/cold on the first hit (timeout/connection refused mid-restart);
-    // by the time we retry a couple seconds later it has usually finished
-    // waking up, so the update isn't silently dropped.
+    // asleep/cold on the first hit (timeout/connection refused mid-restart).
+    // A cold HF Space container can take 20-60s+ to fully boot, so retrying
+    // instantly often still lands mid-boot and fails again — wait a few
+    // seconds first, and give this retry more time to complete.
     try {
-      console.warn(`[webhook] retrying ${picked} once more (possible cold start)...`);
-      const r3 = await tryTarget(picked);
+      console.warn(`[webhook] waiting 5s then retrying ${picked} once more (possible cold start)...`);
+      await new Promise(r => setTimeout(r, 5000));
+      const r3 = await fetch(picked, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': request.headers.get('X-Telegram-Bot-Api-Secret-Token') || '',
+        },
+        body,
+        signal: AbortSignal.timeout(60000),
+      });
       if (r3.ok) return new Response('OK');
     } catch (e3) {
       console.warn(`[webhook] retry of ${picked} also failed:`, e3.message);
