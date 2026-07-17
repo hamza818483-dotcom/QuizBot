@@ -9839,7 +9839,20 @@ async def process_update(update: dict):
         if "message" in update:
             uid = update["message"].get("from", {}).get("id")
             if uid is not None:
-                async with _get_user_lock(uid):
+                lock = _get_user_lock(uid)
+                if lock.locked():
+                    # A previous command (possibly long-running: /pdf, /qbm,
+                    # /csv, etc.) is still processing for this user. Silently
+                    # queuing behind it (old behavior) gave zero feedback —
+                    # the new command looked like it did nothing, so people
+                    # resent it, which then landed only after the first one
+                    # finally finished ("works on the 2nd try"). Tell them
+                    # explicitly instead of making them guess/retry blind.
+                    chat_id = update["message"].get("chat", {}).get("id")
+                    if chat_id is not None:
+                        await send_msg(chat_id, "⏳ আগের command এখনো process হচ্ছে — শেষ হলে এটা reply দিবে। একটু wait করো।")
+                    return
+                async with lock:
                     _active_command_task.pop(uid, None)
                     await handle_message(update["message"])
                     # handle_message dispatches the real command work via
