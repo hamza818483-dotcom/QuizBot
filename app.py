@@ -593,9 +593,74 @@ def _build_chok_prompt(topic: str) -> str:
     )
 
 
+_BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
+
+def _build_bangla_prompt(topic: str) -> str:
+    """
+    /bangla command prompt — same pipeline as /pdf (page range, channel, thread,
+    topic, watermark, count-range override all inherited via handle_pdf reuse),
+    only the generation prompt differs.
+
+    Core rule: every line/portion/paragraph/point on the page must produce an
+    MCQ — no maximum cap, generate as many as the content genuinely supports.
+    """
+    return (
+        f"You are an expert MCQ-extraction engine for Bengali/English academic "
+        f"textbook pages (medical/HSC/admission-standard).\n"
+        f"Topic: {topic}\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 ABSOLUTE MUST — EVERY LINE/PORTION MUST PRODUCE AN MCQ\n"
+        f"═══════════════════════════════\n"
+        f"- Go through this page LINE BY LINE, PARAGRAPH BY PARAGRAPH, POINT BY "
+        f"POINT. Every distinct line, sentence, fact, definition, or portion of "
+        f"text on the page MUST generate at least one MCQ — zero exceptions, "
+        f"zero skipped lines/portions.\n"
+        f"- If a line or portion has rich information, generate MORE than one "
+        f"MCQ from it, covering different angles (definition, cause-effect, "
+        f"fill-in-blank, comparison, 'কোনটি সঠিক নয়' etc.).\n"
+        f"- NO MAXIMUM MCQ COUNT — there is no upper limit or cap. Generate as "
+        f"many MCQs as the page's content genuinely supports. More lines/"
+        f"portions covered = more MCQs expected; never artificially stop early "
+        f"to hit some target number.\n"
+        f"- Never skip a line for being 'too short' or 'minor' — even a short "
+        f"one-sentence fact must produce a real MCQ.\n"
+        f"- Pay special attention to the LAST lines / bottom of the page and "
+        f"footnotes — these are the most commonly missed.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟦 MCQ QUALITY RULES\n"
+        f"═══════════════════════════════\n"
+        f"- 4 options, all info-rich and plausible (never a bare/trivial option "
+        f"like a lone 'হ্যাঁ'/'না').\n"
+        f"- One correct answer only, vary the correct answer's position across "
+        f"the set — never always the same letter.\n"
+        f"- Bengali/English explanation covering why each of the 4 options is "
+        f"right/wrong, compact and clear, within Telegram's explanation "
+        f"character limit (max ~200 characters) — never a lazy 1-line generic "
+        f"explanation.\n"
+        f"- 100% of question text, options, and explanations must come from "
+        f"this source page — never invent or assume outside facts.\n"
+        f"- Never generate MCQs from chapter titles, headers, or page numbers "
+        f"alone — only from actual content lines/portions.\n"
+        f"- Highlighted/marked/underlined content = highest priority, must be "
+        f"covered.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟩 OUTPUT\n"
+        f"═══════════════════════════════\n"
+        f"JSON array only, no markdown fences, no preamble. Format:\n"
+        f'[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],'
+        f'"answer":0,"explanation":"..."}}]\n'
+        f"answer is integer 0-3 (A=0,B=1,C=2,D=3)."
+    )
+
+
 def _build_mcq_prompt(topic: str, count) -> str:
     if _CHOK_MODE.get():
         return _build_chok_prompt(topic)
+    if _BANGLA_MODE.get():
+        return _build_bangla_prompt(topic)
     count_min = count_max = None
     if isinstance(count, (tuple, list)) and len(count) == 2:
         count_min, count_max = count[0], count[1]
@@ -2019,6 +2084,7 @@ async def handle_start(msg: dict):
             "📄 <b>PDF Commands:</b>\n"
             "• <code>/pdf</code> — PDF reply করে MCQ generate + channel poll\n"
             "• <code>/chok</code> — ছক/বক্স PDF থেকে প্রতি বক্সে MCQ (mixed style)\n"
+            "• <code>/bangla</code> — প্রতিটা লাইন/অংশ থেকে MCQ, no max limit\n"
             "• <code>/pdfm</code> — PDF pagewise MCQ with image\n"
             "  Format: <code>/pdfm -p 1-5 -c @channel -m \"Topic\" 10</code>\n\n"
             "📸 <b>Image Commands:</b>\n"
@@ -4915,6 +4981,16 @@ async def handle_pdf(msg: dict):
                 "<code>/chok -p 1-5 -c @channel -m \"Topic\"</code>\n"
                 "<code>/chok -p 2 -c -100xxx -t 447 -m \"Group Topic\"</code>\n\n"
                 "ছক/বক্স/টেবিল PDF-এর জন্য বিশেষায়িত — প্রতিটা বক্স থেকে MCQ (mixed style)।\n"
+                "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
+            )
+        elif _BANGLA_MODE.get():
+            await send_msg(chat_id,
+                "❌ PDF ফাইলে reply করে <code>/bangla</code> দাও!\n\n"
+                "<b>Example:</b>\n"
+                "<code>/bangla -p 1-5 -c @channel -m \"Topic\" [10]</code>\n"
+                "<code>/bangla -p 2 -c -100xxx -t 447 -m \"Group Topic\" [10]</code>\n\n"
+                "প্রতিটা লাইন/অংশ থেকে MCQ বানাবে, কোনো maximum limit নেই।\n"
+                "<code>[N]</code> = প্রতি পেইজে কতগুলো MCQ বানাতে হবে (ঐচ্ছিক)\n"
                 "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
             )
         else:
@@ -9430,6 +9506,18 @@ async def handle_message(msg: dict):
             await handle_pdf(msg)
         finally:
             _CHOK_MODE.reset(token)
+        return
+    if text.startswith("/bangla"):
+        if not is_auth:
+            if is_private:
+                await send_msg(chat_id, UNAUTH_MSG)
+            return
+        clear_cancel(chat_id)
+        token = _BANGLA_MODE.set(True)
+        try:
+            await handle_pdf(msg)
+        finally:
+            _BANGLA_MODE.reset(token)
         return
     if text == "/bm":
         await handle_bm(msg)
