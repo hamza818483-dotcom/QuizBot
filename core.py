@@ -367,7 +367,7 @@ async def tg_post(method: str, data: dict) -> dict:
     #    হলে যেন প্রতিটা command 60s আটকে না থেকে দ্রুত direct API-তে fallback করে) ──
     try:
         client = await _get_shared_http_client()
-        r = await client.post(f"{TG_API}/{method}", json=data, timeout=12)
+        r = await client.post(f"{TG_API}/{method}", json=data, timeout=60)
         result = r.json()
         if result.get("ok"):
             return result
@@ -455,7 +455,7 @@ async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
         if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
         if message_thread_id: data["message_thread_id"] = message_thread_id
         client = await _get_shared_http_client()
-        r = await client.post(f"{CF_WORKER_URL}/tg-sendphoto", json=data, timeout=25)
+        r = await client.post(f"{CF_WORKER_URL}/tg-sendphoto", json=data, timeout=60)
         result = r.json()
         if result.get("ok"): return result
     except Exception as e:
@@ -501,7 +501,7 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
         if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
         if message_thread_id: data["message_thread_id"] = message_thread_id
         c = await _get_shared_http_client()
-        r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=25)
+        r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=60)
         result = r.json()
         if result.get("ok"): return result
     except Exception as e:
