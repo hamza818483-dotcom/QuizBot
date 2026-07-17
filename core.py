@@ -113,14 +113,14 @@ _mem_kv: dict = {}
 
 async def d1_set(key: str, value: dict, ttl: int = 86400):
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(f"{CF_WORKER_URL}/d1/set",
-                json={"key": key, "value": value, "ttl": ttl})
-            if r.text.strip():
-                ok = r.json().get("ok", False)
-                if ok:
-                    _mem_kv[key] = value  # mirror to memory
-                    return True
+        c = await _get_shared_http_client()
+        r = await c.post(f"{CF_WORKER_URL}/d1/set",
+            json={"key": key, "value": value, "ttl": ttl})
+        if r.text.strip():
+            ok = r.json().get("ok", False)
+            if ok:
+                _mem_kv[key] = value  # mirror to memory
+                return True
         return True
     except Exception as e:
         logger.warning(f"[D1] set warn (using memory): {e}")
@@ -129,14 +129,14 @@ async def d1_set(key: str, value: dict, ttl: int = 86400):
 
 async def d1_get(key: str) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(f"{CF_WORKER_URL}/d1/get", params={"key": key})
-            if r.text.strip():
-                data = r.json()
-                val = data.get("value")
-                if val is not None:
-                    _mem_kv[key] = val  # mirror
-                    return val
+        c = await _get_shared_http_client()
+        r = await c.get(f"{CF_WORKER_URL}/d1/get", params={"key": key})
+        if r.text.strip():
+            data = r.json()
+            val = data.get("value")
+            if val is not None:
+                _mem_kv[key] = val  # mirror
+                return val
         return _mem_kv.get(key)  # fallback: RAM
     except Exception as e:
         logger.warning(f"[D1] get warn (using memory): {e}")
@@ -144,8 +144,8 @@ async def d1_get(key: str) -> dict:
 
 async def d1_del(key: str):
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            await c.post(f"{CF_WORKER_URL}/d1/del", json={"key": key})
+        c = await _get_shared_http_client()
+        await c.post(f"{CF_WORKER_URL}/d1/del", json={"key": key})
     except Exception as e:
         logger.warning(f"[D1] del warn: {e}")
     _mem_kv.pop(key, None)  # always clean memory too
@@ -154,13 +154,13 @@ async def d1_del(key: str):
 async def d1_query(sql: str, params: list = None, is_select: bool = True) -> dict:
     try:
         body = {"sql": sql, "params": params or [], "token": D1_TOKEN}
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body)
-            data = r.json()
-            if not data.get("ok"):
-                logger.warning(f"[D1] query error: {data.get('error')}")
-                return {"ok": False, "error": data.get("error")}
-            return data
+        c = await _get_shared_http_client()
+        r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body)
+        data = r.json()
+        if not data.get("ok"):
+            logger.warning(f"[D1] query error: {data.get('error')}")
+            return {"ok": False, "error": data.get("error")}
+        return data
     except Exception as e:
         logger.warning(f"[D1] query error: {e}")
         return {"ok": False, "error": str(e)}
@@ -330,18 +330,19 @@ def _sanitize_poll_options(data: dict) -> dict:
 async def tg_post(method: str, data: dict) -> dict:
     if method == "sendPoll":
         data = _sanitize_poll_options(data)
-    # ── Primary: CF Worker TG proxy ──
+    # ── Primary: CF Worker TG proxy (shared client — connection reuse,
+    #    prottekbar TCP/TLS handshake bade dilo, response fast hoy) ──
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(f"{TG_API}/{method}", json=data)
-            result = r.json()
-            if result.get("ok"):
-                return result
-            if result.get("error_code") == 429:
-                retry_after = result.get("parameters", {}).get("retry_after", 5)
-                logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
-                await asyncio.sleep(min(retry_after, 30) + 0.5)
-            logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
+        client = await _get_shared_http_client()
+        r = await client.post(f"{TG_API}/{method}", json=data, timeout=60)
+        result = r.json()
+        if result.get("ok"):
+            return result
+        if result.get("error_code") == 429:
+            retry_after = result.get("parameters", {}).get("retry_after", 5)
+            logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
+            await asyncio.sleep(min(retry_after, 30) + 0.5)
+        logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
     except Exception as e:
         logger.warning(f"[TG] {method} proxy error: {type(e).__name__}: {e}")
     # ── Fallback: Direct Telegram API (CF down হলেও কাজ করবে) ──
