@@ -67,8 +67,8 @@ export default {
     // Web Quiz — CF serves index.html, API data via Render→Supabase→D1 chain
     if (url.pathname.startsWith('/quiz/')) return await handleWebQuiz(request, url, env);
     if (url.pathname.startsWith('/exam/')) return await handleWebQuiz(request, url, env);
-    if (url.pathname.startsWith('/api/exam/')) return await handleQuizData(request, url, env);
-    if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url, env);
+    if (url.pathname.startsWith('/api/exam/')) return await handleQuizData(request, url, env, ctx);
+    if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url, env, ctx);
 
     // Webhook → ack Telegram INSTANTLY, forward to Render in background.
     // v4.4: previously this awaited Render synchronously, so a cold Render
@@ -493,7 +493,7 @@ async function handleTgSendDoc(request) {
 // ============================================================
 // WEB QUIZ — Same index.html style, runs entirely on CF
 // ============================================================
-async function handleQuizData(request, url, env) {
+async function handleQuizData(request, url, env, ctx) {
   try {
     let id = url.searchParams.get('id');
     if (!id) id = url.pathname.replace('/api/exam/', '').split('?')[0].trim();
@@ -540,6 +540,11 @@ async function handleQuizData(request, url, env) {
           if (r.ok) {
             const d = await r.json();
             if (d && d.mcqs && d.mcqs.length > 0) {
+              ctx.waitUntil(backupToR2(env, id, d.topic, d.mcqs, d.timer, {
+                tag: d.tag, exp_footer: d.exp_footer, channel_id: d.channel_id,
+                image_msg_id: d.image_msg_id, end_msg_id: d.end_msg_id,
+                image_file_id: d.image_file_id, is_new_gen: d.is_new_gen, page: d.page,
+              }));
               return jsonResp(d);
             }
             break; // this host answered but no mcqs — real 404 on this host, try next host
@@ -560,13 +565,19 @@ async function handleQuizData(request, url, env) {
       const data = await r.json();
       if (data && data[0]) {
         const c = data[0];
-        return jsonResp({
+        const resp = {
           cache_id: id, topic: c.topic || 'Quiz', page: c.page_number || 1,
           mcqs: c.mcq_data || [], tag: '', exp_footer: '',
           channel_id: c.channel_id || '', image_msg_id: c.image_msg_id || null,
           end_msg_id: c.end_msg_id || null, image_file_id: c.image_file_id || null,
           is_new_gen: !!c.is_new_gen, timer: 30, _source: 'supabase_direct',
-        });
+        };
+        ctx.waitUntil(backupToR2(env, id, resp.topic, resp.mcqs, resp.timer, {
+          tag: resp.tag, exp_footer: resp.exp_footer, channel_id: resp.channel_id,
+          image_msg_id: resp.image_msg_id, end_msg_id: resp.end_msg_id,
+          image_file_id: resp.image_file_id, is_new_gen: resp.is_new_gen, page: resp.page,
+        }));
+        return jsonResp(resp);
       }
     } catch(e) {
       console.warn('[quiz] Supabase pdf_mcq_cache direct failed:', e.message);
@@ -577,7 +588,9 @@ async function handleQuizData(request, url, env) {
       const row = await DB.prepare("SELECT * FROM quizzes WHERE id=?1").bind(id).first();
       if (row) {
         const questions = JSON.parse(row.csv_data || '[]');
-        return makeResp(id, row.name, toMcqs(questions), row.timer || 30, 'd1');
+        const mcqs = toMcqs(questions);
+        ctx.waitUntil(backupToR2(env, id, row.name, mcqs, row.timer || 30, {}));
+        return makeResp(id, row.name, mcqs, row.timer || 30, 'd1');
       }
     } catch(e) {
       console.error('[quiz] D1 failed:', e.message);
@@ -599,6 +612,7 @@ async function handleQuizData(request, url, env) {
             ).bind(id, b.name, '', 30, 0, JSON.stringify(b.questions), '', '', 0).run();
           } catch(_) {}
         }
+        ctx.waitUntil(backupToR2(env, id, b.name, toMcqs(b.questions), 30, {}));
         return makeResp(id, b.name, toMcqs(b.questions), 30, 'supabase');
       }
     } catch(e) {
@@ -621,15 +635,45 @@ async function handleQuizData(request, url, env) {
             ).bind(id, b.name, '', 30, 0, JSON.stringify(b.questions), '', '', 0).run();
           } catch(_) {}
         }
+        ctx.waitUntil(backupToR2(env, id, b.name, toMcqs(b.questions), 30, {}));
         return makeResp(id, b.name, toMcqs(b.questions), 30, 'supabase2');
       }
     } catch(e) {
       console.error('[quiz] Supabase secondary failed:', e.message);
     }
 
+    // ── Layer 5: R2 (atlas-pdfs bucket) — final fallback if Render, both
+    //    Supabase accounts, AND D1 are all unreachable/empty. Every quiz
+    //    successfully resolved by ANY layer above is also written here
+    //    (see backupToR2 calls below) so this layer stays populated. ──
+    if (env.PDF_BUCKET) {
+      try {
+        const obj = await env.PDF_BUCKET.get(`quiz-backups/${id}.json`);
+        if (obj) {
+          const b = JSON.parse(await obj.text());
+          return makeResp(id, b.name, b.mcqs, b.timer || 30, 'r2_backup', b.extra || {});
+        }
+      } catch(e) {
+        console.error('[quiz] R2 backup read failed:', e.message);
+      }
+    }
+
     return jsonResp({ error: 'Quiz পাওয়া যায়নি' }, 404);
   } catch(e) {
     return jsonResp({ error: e.message }, 500);
+  }
+}
+
+// Fire-and-forget write-through backup to R2 so Layer 5 above stays populated.
+// Never blocks or fails the actual response — best-effort only.
+async function backupToR2(env, id, name, mcqs, timer, extra) {
+  if (!env.PDF_BUCKET) return;
+  try {
+    await env.PDF_BUCKET.put(`quiz-backups/${id}.json`, JSON.stringify({ name, mcqs, timer, extra }), {
+      httpMetadata: { contentType: 'application/json' },
+    });
+  } catch(e) {
+    console.warn('[quiz] R2 backup write failed:', e.message);
   }
 }
 
