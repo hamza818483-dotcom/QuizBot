@@ -884,24 +884,22 @@ async function handleWebQuiz(request, url, env) {
   }
 }
 async function forwardToHF(request, env) {
-  // v-loadsplit: real per-request load splitting across primary + secondary
-  // Render (not just failover-on-crash) -- alternates requests between the
-  // two so under high concurrent traffic (e.g. 100 users at once) neither
-  // single 512MB instance carries the full load alone. Falls back instantly
-  // to the other instance if the picked one fails, so no request is lost.
+  // v-single-active: per DEPLOYMENT.md, only ONE backend may serve live
+  // Telegram traffic at a time (dual-webhook/dual-instance previously caused
+  // an account ban). PRIMARY is always used; SECONDARY (the old/standby
+  // fallback space) is ONLY tried if PRIMARY genuinely fails -- it must never
+  // receive live traffic on its own turn. The previous round-robin split sent
+  // every-other update to the stale fallback space (broken webhook, 15s+
+  // latency), which silently ate the first attempt of every command until
+  // the user resent it and it happened to land on PRIMARY.
   const BOT_TOKEN    = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
   const PRIMARY      = (env.RENDER_URL   || 'https://quizbot-s482.onrender.com') + '/webhook';
   const SECONDARY    = env.RENDER_URL_2 ? (env.RENDER_URL_2 + '/webhook') : '';
   const TG_API       = `https://api.telegram.org/bot${BOT_TOKEN}`;
   const body = await request.text();
 
-  const targets = SECONDARY ? [PRIMARY, SECONDARY] : [PRIMARY];
-  // Simple alternating pick using a Worker-global counter (best-effort even
-  // split across isolates -- doesn't need to be perfectly exact, just spread
-  // load roughly evenly instead of hammering one instance).
-  globalThis.__rrCounter = ((globalThis.__rrCounter || 0) + 1) % targets.length;
-  const picked = targets[globalThis.__rrCounter];
-  const other = targets.find(t => t !== picked);
+  const picked = PRIMARY;
+  const other = SECONDARY || null;
 
   async function tryTarget(target) {
     return await fetch(target, {
