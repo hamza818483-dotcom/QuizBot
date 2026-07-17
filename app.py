@@ -3709,12 +3709,13 @@ async def handle_csv_command(msg: dict):
             await send_msg(chat_id, "❌ CSV-এ কোনো valid MCQ পাওয়া যায়নি!")
             return
 
-        # Session save (topic + mcqs)
+        # Session save (topic + mcqs) — cache_id দিয়ে key করা, uid দিয়ে না;
+        # তাই একই user দ্রুত ২টা /csv দিলে একে-অপরকে overwrite করবে না
         cache_id = gen_session_id()
         await db_save_mcq_cache(cache_id, cache_id, 0, topic or "CSV MCQ", mcqs)
 
         await sb_exec(lambda: sb.table("quiz_sessions").upsert({
-            "key": f"csv_cmd_{uid}",
+            "key": f"csv_cmd_{cache_id}",
             "data": json.dumps({
                 "cache_id": cache_id,
                 "topic": topic,
@@ -3834,8 +3835,9 @@ async def handle_csvs_command(msg: dict):
         cache_id = gen_session_id()
         await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs)
 
+        # cache_id দিয়ে key — uid দিয়ে না, একই user দ্রুত ২টা /csvS দিলে overwrite এড়াতে
         await sb_exec(lambda: sb.table("quiz_sessions").upsert({
-            "key": f"csv_cmd_{uid}",
+            "key": f"csv_cmd_{cache_id}",
             "data": json.dumps({
                 "cache_id": cache_id,
                 "topic": topic,
@@ -4100,7 +4102,9 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
     /csv — single batch, সব polls একসাথে পাঠাও
     /csvS — serial batch mode
     """
-    row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{uid}").execute())
+    # cache_id দিয়ে session read — uid দিয়ে না, কারণ একই user দ্রুত ২টা /csv
+    # চালালে uid-based key overwrite হয়ে যেতে পারতো
+    row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{cache_id}").execute())
     if not row.data:
         await send_msg(chat_id, "❌ Session expired!")
         return
@@ -10569,13 +10573,15 @@ async def handle_callback(query: dict):
             orig_uid = int(rest_parts[1]) if len(rest_parts) > 1 else uid
             if uid != orig_uid:
                 return
-            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{uid}").execute())
-            if not row.data:
+            # cache_id_cb (callback_data থেকে) সরাসরি ব্যবহার — csv_cmd_{uid} row
+            # re-fetch করা হচ্ছে না, কারণ একই user দ্রুত ২টা /csv দিলে সেই shared
+            # row overwrite হয়ে যেতে পারে; button-এর cache_id সবসময় সঠিক থাকে।
+            c_id = cache_id_cb
+            mcqs_row_topic = await db_get_mcq_cache(c_id)
+            if not mcqs_row_topic:
                 await send_msg(chat_id, "❌ Session expired! আবার CSV reply করে /csv দাও।")
                 return
-            csv_data = json.loads(row.data[0]["data"])
-            c_id = csv_data["cache_id"]
-            topic_cb = csv_data.get("topic", "MCQ")
+            topic_cb = mcqs_row_topic.get("topic", "MCQ")
 
             if action == "quiz":
                 # D1 quiz হিসেবে save করে bot link দাও
@@ -10643,24 +10649,22 @@ async def handle_callback(query: dict):
                 for ch in channels:
                     kb2["inline_keyboard"].append([{
                         "text": f"📢 {ch.get('channel_name', ch.get('channel_id'))}",
-                        "callback_data": f"csvchannel_{ch['channel_id']}_{uid}"
+                        "callback_data": f"csvchannel_{ch['channel_id']}_{c_id}_{uid}"
                     }])
                 kb2["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}])
                 await send_msg(chat_id, "📢 Channel select করো:", reply_markup=kb2)
 
         elif data.startswith("csvchannel_"):
-            parts = data.split("_", 2)
-            channel = parts[1]
-            orig_uid = int(parts[2])
+            # csvchannel_{channel_id}_{cache_id}_{uid}
+            parts = data.split("_")
+            # uid is last, cache_id is second-last, channel is everything else joined back
+            orig_uid = int(parts[-1])
+            cache_id_ch = parts[-2]
+            channel = "_".join(parts[1:-2])
             if uid != orig_uid:
                 return
-            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{uid}").execute())
-            if not row.data:
-                await send_msg(chat_id, "❌ Session expired!")
-                return
-            csv_data = json.loads(row.data[0]["data"])
             asyncio.create_task(process_csv_to_channel(
-                csv_data["cache_id"], channel, chat_id, uid
+                cache_id_ch, channel, chat_id, uid
             ))
 
         elif data.startswith("rapidch_"):
