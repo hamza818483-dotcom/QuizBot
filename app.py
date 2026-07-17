@@ -11736,6 +11736,26 @@ async def startup():
     except Exception as e:
         logger.warning(f"[App] Pyrogram pre-warm failed (will lazy-init later): {e}")
 
+    # SPEED: pre-warm the shared httpx client's connection to the CF Worker
+    # (used by every send_msg/tg_post call) and the Supabase client, so the
+    # very first real command doesn't pay a cold TLS-handshake/DNS cost that
+    # could otherwise eat into tg_post's timeout and make the first reply
+    # silently miss its window.
+    try:
+        from core import _get_shared_http_client, CF_WORKER_URL
+        _warm_client = await _get_shared_http_client()
+        await _warm_client.get(f"{CF_WORKER_URL}/", timeout=10)
+        logger.info("[App] CF Worker connection pre-warmed at startup")
+    except Exception as e:
+        logger.warning(f"[App] CF Worker pre-warm failed (non-fatal): {e}")
+
+    try:
+        if sb is not None:
+            await sb_exec(lambda: sb.table("pdf_users").select("user_id").limit(1).execute(), timeout=10)
+            logger.info("[App] Supabase connection pre-warmed at startup")
+    except Exception as e:
+        logger.warning(f"[App] Supabase pre-warm failed (non-fatal): {e}")
+
     # Start mhtml/html auto-queue worker (serial processing, one file at a time)
     global _mhtml_worker_started
     if not _mhtml_worker_started:
