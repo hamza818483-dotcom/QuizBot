@@ -10110,6 +10110,34 @@ async def webhook(request: Request):
 
 _LOCK_ACQUIRED_AT = {}  # uid -> timestamp the currently-held lock was acquired
 _STALE_LOCK_SECONDS = 600  # 10 min — generous even for the slowest /pdf jobs
+_USER_PENDING_QUEUE = {}  # uid -> list of queued update dicts waiting their turn
+
+async def _run_user_message_chain(uid: int, update: dict):
+    """Run this update under the user's lock, then keep draining any updates
+    that got queued up while we were busy — so a 2nd command sent while the
+    1st was still processing auto-runs afterward instead of being lost."""
+    lock = _get_user_lock(uid)
+    _LOCK_ACQUIRED_AT[uid] = time.time()
+    try:
+        async with lock:
+            _active_command_task.pop(uid, None)
+            await handle_message(update["message"])
+            # handle_message dispatches the real command work via
+            # _spawn_command_task and returns right away — wait for
+            # that specific task to actually finish before releasing
+            # this user's lock, otherwise the "queue" is a no-op.
+            task = _active_command_task.pop(uid, None)
+            if task is not None and not task.done():
+                await asyncio.gather(task, return_exceptions=True)
+    finally:
+        _LOCK_ACQUIRED_AT.pop(uid, None)
+
+    queued = _USER_PENDING_QUEUE.get(uid)
+    if queued:
+        next_update = queued.pop(0)
+        if not queued:
+            _USER_PENDING_QUEUE.pop(uid, None)
+        await _run_user_message_chain(uid, next_update)
 
 async def process_update(update: dict):
     try:
@@ -10131,30 +10159,22 @@ async def process_update(update: dict):
                         _USER_LOCKS[uid] = lock
                     else:
                         # A previous command (possibly long-running: /pdf, /qbm,
-                        # /csv, etc.) is genuinely still processing. Silently
-                        # queuing behind it (old behavior) gave zero feedback —
-                        # the new command looked like it did nothing, so people
-                        # resent it, which then landed only after the first one
-                        # finally finished ("works on the 2nd try"). Tell them
-                        # explicitly instead of making them guess/retry blind.
+                        # /csv, etc.) is genuinely still processing. Instead of
+                        # dropping this update (old behavior forced the user to
+                        # manually resend after seeing the "wait" notice, and if
+                        # they didn't, the command was silently lost forever),
+                        # queue it — it will auto-run right after the current
+                        # command releases the lock, no resend needed.
                         chat_id = update["message"].get("chat", {}).get("id")
-                        if chat_id is not None:
-                            await send_msg(chat_id, "⏳ আগের command এখনো process হচ্ছে — শেষ হলে এটা reply দিবে। একটু wait করো।")
+                        qlen = len(_USER_PENDING_QUEUE.get(uid, []))
+                        if qlen == 0 and chat_id is not None:
+                            await send_msg(chat_id, "⏳ আগের command এখনো process হচ্ছে — শেষ হলে এটা automatic চলে যাবে।")
+                        _USER_PENDING_QUEUE.setdefault(uid, []).append(update)
+                        if qlen >= 20:
+                            # Safety cap — drop oldest queued item rather than growing unbounded
+                            _USER_PENDING_QUEUE[uid].pop(0)
                         return
-                _LOCK_ACQUIRED_AT[uid] = time.time()
-                try:
-                    async with lock:
-                        _active_command_task.pop(uid, None)
-                        await handle_message(update["message"])
-                        # handle_message dispatches the real command work via
-                        # _spawn_command_task and returns right away — wait for
-                        # that specific task to actually finish before releasing
-                        # this user's lock, otherwise the "queue" is a no-op.
-                        task = _active_command_task.pop(uid, None)
-                        if task is not None and not task.done():
-                            await asyncio.gather(task, return_exceptions=True)
-                finally:
-                    _LOCK_ACQUIRED_AT.pop(uid, None)
+                await _run_user_message_chain(uid, update)
             else:
                 await handle_message(update["message"])
         elif "callback_query" in update:
