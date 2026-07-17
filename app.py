@@ -6552,7 +6552,7 @@ If NO MCQ exists on this page → return exactly: []
 # পড়তে হয় না — RAM cache-এ read, update হলেই DB-তে ও RAM-এ একসাথে save হয়।
 _qbm_prompt_cache = {"prompt": None}
 
-def qbm_get_active_prompt() -> str:
+async def qbm_get_active_prompt() -> str:
     if _qbm_prompt_cache["prompt"]:
         return _qbm_prompt_cache["prompt"]
     try:
@@ -6567,7 +6567,7 @@ def qbm_get_active_prompt() -> str:
     _qbm_prompt_cache["prompt"] = QBM_EXTRACT_PROMPT_DEFAULT
     return QBM_EXTRACT_PROMPT_DEFAULT
 
-def qbm_set_active_prompt(new_prompt: str):
+async def qbm_set_active_prompt(new_prompt: str):
     """New prompt update এলে সেটাকে permanent করে save করে — পরের বার থেকে
     (নতুন update না আসা অবধি) এই prompt-ই সবসময় ব্যবহার হবে।"""
     _qbm_prompt_cache["prompt"] = new_prompt
@@ -6664,7 +6664,7 @@ async def _qbm_call1_extract(img) -> list:
     /ghost MCQ enters the list. Groq primary -> Gemini fallback.
     """
     try:
-        prompt = qbm_get_active_prompt()
+        prompt = await qbm_get_active_prompt()
         txt = await _qbm_groq_call(img, prompt)
         result = _qbm_parse_json(txt) if txt else []
         if result:
@@ -6971,7 +6971,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
 
 async def _qbm_gemini_extract(img, prompt: str = None) -> list:
     """Direct Gemini call with the strict extraction prompt (fallback path)."""
-    txt = await _qbm_gemini_raw(img, prompt or qbm_get_active_prompt())
+    txt = await _qbm_gemini_raw(img, prompt or await qbm_get_active_prompt())
     return _qbm_parse_json(txt) if txt else []
 
 
@@ -9799,12 +9799,13 @@ async def handle_message(msg: dict):
         # /qbmprompt (no args) -> shows the currently active prompt.
         new_prompt = text[len("/qbmprompt"):].strip()
         if not new_prompt:
-            await send_msg(chat_id, f"📋 Active QBM Prompt:\n\n<code>{qbm_get_active_prompt()[:3500]}</code>")
+            active_prompt = await qbm_get_active_prompt()
+            await send_msg(chat_id, f"📋 Active QBM Prompt:\n\n<code>{active_prompt[:3500]}</code>")
         elif new_prompt.lower() == "reset":
-            qbm_set_active_prompt(QBM_EXTRACT_PROMPT_DEFAULT)
+            await qbm_set_active_prompt(QBM_EXTRACT_PROMPT_DEFAULT)
             await send_msg(chat_id, "✅ QBM prompt default-এ reset হয়ে গেছে।")
         else:
-            qbm_set_active_prompt(new_prompt)
+            await qbm_set_active_prompt(new_prompt)
             await send_msg(chat_id, "✅ QBM prompt permanently update হয়ে গেছে। এখন থেকে সব page-এ এই prompt-ই ব্যবহার হবে।")
     elif text.startswith("/qbm"):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
