@@ -665,7 +665,12 @@ _shared_http_client = None
 async def _get_shared_http_client():
     global _shared_http_client
     if _shared_http_client is None:
-        _shared_http_client = httpx.AsyncClient(timeout=300)
+        # keepalive_expiry বাড়িয়ে দিলাম (httpx default মাত্র 5s) — কম গ্যাপে
+        # commands এলে পুরনো connection বেশি সময় বেঁচে থাকবে, তাই "প্রথমবার
+        # stale connection-এ fail করে retry লাগে, দ্বিতীয়বার fast" — এই
+        # pattern-টাই কম ঘটবে (retry logic এখনও fallback হিসেবে থাকছে)।
+        limits = httpx.Limits(max_keepalive_connections=20, keepalive_expiry=60.0)
+        _shared_http_client = httpx.AsyncClient(timeout=300, limits=limits)
     return _shared_http_client
 
 async def _get_pyro_client():
