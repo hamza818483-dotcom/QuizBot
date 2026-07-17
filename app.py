@@ -9771,6 +9771,20 @@ async def handle_convert_command(msg: dict):
 # ============================================================
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
+# Fire-and-forget asyncio.create_task() calls can be silently garbage-collected
+# mid-execution if nothing holds a reference to the Task object — this is a
+# well-known asyncio pitfall and matches "first command silent, retry works"
+# (the very first task in a fresh loop has nothing else referencing it yet).
+# Keep a strong-reference set for every background task spawned from the
+# webhook so none of them can be GC'd before completion.
+_BACKGROUND_TASKS = set()
+
+def _spawn_task(coro):
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
 # Per-user command queue — same user firing a command again while a previous
 # one is still running now waits its turn instead of running concurrently
 # and colliding (shared session rows, etc). Different users never block
@@ -9799,7 +9813,7 @@ async def webhook(request: Request):
             return Response(status_code=403)
     try:
         update = await request.json()
-        asyncio.create_task(process_update(update))
+        _spawn_task(process_update(update))
         return Response("OK")
     except Exception as e:
         logger.error(f"[Webhook] Parse error: {e}")
