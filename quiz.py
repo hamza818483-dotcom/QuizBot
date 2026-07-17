@@ -382,6 +382,18 @@ async def send_quiz_question(chat_id: int, session: dict):
         await finish_d1_quiz(session)
         return
 
+    # ── Race guard: prevent duplicate sendPoll if answer-path and
+    # timeout-path both try to advance to the same question at once ──
+    uid = session["uid"]
+    guard_key = (uid, session["cur"])
+    live = QUIZ_SESSIONS.get(uid)
+    if live is not None and live.get("_sending_for") == guard_key:
+        return
+    if live is not None:
+        live["_sending_for"] = guard_key
+        QUIZ_SESSIONS[uid] = live
+    session["_sending_for"] = guard_key
+
     q = session["questions"][session["cur"]]
     session["q_results"].append({"index": session["cur"], "type": None})
 
@@ -461,6 +473,7 @@ async def handle_quiz_poll_answer(pa: dict):
     session = QUIZ_SESSIONS[uid]
     poll_id = pa.get("poll_id", "")
     if session.get("pid") != poll_id:
+        logger.warning(f"[Quiz] pid mismatch uid={uid} got={poll_id} expected={session.get('pid')} cur={session.get('cur')}")
         return
 
     option_ids = pa.get("option_ids", [])
