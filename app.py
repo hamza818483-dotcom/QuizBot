@@ -9407,12 +9407,13 @@ async def handle_message(msg: dict):
         quiz_id = text.split()[1] if len(text.split()) > 1 else text.replace("/start ", "")
         asyncio.create_task(start_d1_quiz(chat_id, quiz_id, msg["from"]))
         return
-    if text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm"):
+    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm")) or text.startswith("/bangla"):
         if not is_auth:
             if is_private:
                 await send_msg(chat_id, UNAUTH_MSG)
             return
-        arg = text.replace("/pdf", "").strip().lower()
+        _cmd_prefix = "/bangla" if text.startswith("/bangla") else "/pdf"
+        arg = text.replace(_cmd_prefix, "").strip().lower()
         if arg in ("on", "off"):
             await handle_pdf_autosend_toggle(msg, arg)
             return
