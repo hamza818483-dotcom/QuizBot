@@ -639,12 +639,22 @@ async def _get_pyro_client():
     global _pyro_client
     if _pyro_client is None and TELEGRAM_API_ID and TELEGRAM_API_HASH:
         from pyrogram import Client
-        _pyro_client = Client(
+        client = Client(
             "atlas_pyrogram", api_id=int(TELEGRAM_API_ID),
             api_hash=TELEGRAM_API_HASH, bot_token=BOT_TOKEN, no_updates=True,
             in_memory=True,
         )
-        await _pyro_client.start()
+        try:
+            await client.start()
+        except Exception as e:
+            # Don't cache a client whose start() failed (e.g. FLOOD_WAIT on
+            # auth.ImportBotAuthorization) — leaving _pyro_client set to a
+            # never-started client here permanently breaks every future
+            # private-invite-link resolve/large-file download until restart.
+            # Keep it None so the NEXT call retries start() fresh.
+            logger.warning(f"[pyrogram] start() failed, will retry next call: {e}")
+            return None
+        _pyro_client = client
     return _pyro_client
 
 async def download_large_file_pyrogram(chat_id: int, message_id: int) -> Optional[bytes]:
@@ -672,7 +682,7 @@ async def resolve_private_invite_link(invite_link: str) -> dict:
     """
     client = await _get_pyro_client()
     if not client:
-        return {"ok": False, "error": "TELEGRAM_API_ID/TELEGRAM_API_HASH সেট করা নাই — private invite link resolve করতে এগুলো লাগবে।"}
+        return {"ok": False, "error": "TELEGRAM_API_ID/TELEGRAM_API_HASH সেট করা নাই, অথবা Telegram সাময়িকভাবে rate-limit করেছে (কিছুক্ষণ পর আবার চেষ্টা করো)।"}
     try:
         chat = await client.join_chat(invite_link)
         return {
