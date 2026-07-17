@@ -2433,6 +2433,8 @@ async def handle_permit(msg: dict):
         return
     target = int(args[1])
     await sb_exec(lambda: sb.table("admins").upsert({"user_id": target}).execute())
+    from core import _admin_check_cache
+    _admin_check_cache.pop(target, None)
     await send_msg(chat_id, f"✅ Admin added: {target}")
 
 async def handle_remove(msg: dict):
@@ -2448,6 +2450,8 @@ async def handle_remove(msg: dict):
         return
     target = int(args[1])
     await sb_exec(lambda: sb.table("admins").delete().eq("user_id", target).execute())
+    from core import _admin_check_cache
+    _admin_check_cache.pop(target, None)
     await send_msg(chat_id, f"✅ Admin removed: {target}")
 
 # ============================================================
@@ -9826,7 +9830,11 @@ async def handle_message(msg: dict):
     # These two are independent DB lookups that ran one-after-another before
     # every single command — running them concurrently halves this fixed
     # per-message latency for every command in the bot.
-    _, is_auth = await asyncio.gather(db_track_user(uid, uname), db_is_owner_or_admin(uid))
+    # db_track_user শুধু analytics/tracking — command response-এর জন্য দরকার নাই,
+    # তাই await না করে background-এ ছেড়ে দিলে প্রতিটা command-এর latency থেকে
+    # এই ২টা network round-trip বাদ পড়ে (fire-and-forget)
+    asyncio.create_task(db_track_user(uid, uname))
+    is_auth = await db_is_owner_or_admin(uid)
 
     # Image collection mode check
     if msg.get("photo") or msg.get("document"):
