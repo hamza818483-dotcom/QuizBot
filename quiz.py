@@ -20,7 +20,7 @@ from core import (
     logger, sb, sb_exec, OWNER_ID,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, edit_msg, send_photo_by_id, send_poll,
-    download_tg_file, db_get_settings,
+    download_tg_file, db_get_settings, notify_owner,
 )
 
 # ============================================================
@@ -474,6 +474,14 @@ async def handle_quiz_poll_answer(pa: dict):
     poll_id = pa.get("poll_id", "")
     if session.get("pid") != poll_id:
         logger.warning(f"[Quiz] pid mismatch uid={uid} got={poll_id} expected={session.get('pid')} cur={session.get('cur')}")
+        try:
+            await notify_owner(
+                f"⚠️ Quiz auto-next FAILED\nuid: {uid}\ncur: {session.get('cur')}/{session.get('tot')}\n"
+                f"expected pid: {session.get('pid')}\ngot pid: {poll_id}\n\n"
+                f"User answered but poll_id didn't match — next question not sent."
+            )
+        except Exception:
+            pass
         return
 
     option_ids = pa.get("option_ids", [])
