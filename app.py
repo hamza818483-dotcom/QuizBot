@@ -9789,8 +9789,18 @@ def _spawn_task(coro):
 # one is still running now waits its turn instead of running concurrently
 # and colliding (shared session rows, etc). Different users never block
 # each other; only same-user overlap is serialized.
+#
+# Most command handlers dispatch their real work via a top-level
+# _spawn_task(handle_X(msg)) call inside handle_message(), which then
+# returns right away — a lock held only around "await handle_message(...)"
+# releases instantly and never covers the actual work. _spawn_command_task()
+# is used ONLY at those top-level dispatch sites (not for nested/long-lived
+# background jobs like quiz timers, which must NOT hold up the next command)
+# and registers the task so process_update can wait for it before releasing
+# this user's lock.
 _USER_LOCKS = {}
 _USER_LOCKS_ORDER = deque(maxlen=5000)
+_active_command_task = {}  # uid -> the currently-dispatched top-level command Task
 
 def _get_user_lock(uid: int) -> asyncio.Lock:
     lock = _USER_LOCKS.get(uid)
@@ -9805,6 +9815,11 @@ def _get_user_lock(uid: int) -> asyncio.Lock:
                 if old_lock is not None and not old_lock.locked():
                     _USER_LOCKS.pop(old_uid, None)
     return lock
+
+def _spawn_command_task(uid, coro):
+    task = _spawn_task(coro)
+    _active_command_task[uid] = task
+    return task
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -9825,7 +9840,15 @@ async def process_update(update: dict):
             uid = update["message"].get("from", {}).get("id")
             if uid is not None:
                 async with _get_user_lock(uid):
+                    _active_command_task.pop(uid, None)
                     await handle_message(update["message"])
+                    # handle_message dispatches the real command work via
+                    # _spawn_command_task and returns right away — wait for
+                    # that specific task to actually finish before releasing
+                    # this user's lock, otherwise the "queue" is a no-op.
+                    task = _active_command_task.pop(uid, None)
+                    if task is not None and not task.done():
+                        await asyncio.gather(task, return_exceptions=True)
             else:
                 await handle_message(update["message"])
         elif "callback_query" in update:
@@ -10033,31 +10056,31 @@ async def handle_message(msg: dict):
         return
     if text.startswith("/start premium_"):
         cache_id = text.replace("/start premium_", "").strip()
-        _spawn_task(handle_premium_pdf_start(msg, cache_id))
+        _spawn_command_task(uid, handle_premium_pdf_start(msg, cache_id))
         return
     if text.startswith("/start pdf_"):
         cache_id = text.replace("/start pdf_", "").strip()
-        _spawn_task(handle_quiz_solve(msg, cache_id))
+        _spawn_command_task(uid, handle_quiz_solve(msg, cache_id))
         return
     if text.startswith("/start poll_"):
         cache_id = text.replace("/start poll_", "").strip()
-        _spawn_task(handle_poll_again(cache_id, msg["from"], chat_id))
+        _spawn_command_task(uid, handle_poll_again(cache_id, msg["from"], chat_id))
         return
     if text.startswith("/start pdfnew_"):
         cache_id = text.replace("/start pdfnew_", "").strip()
         if uid not in _QUIZ_START_LOCK:
             _QUIZ_START_LOCK.add(uid)
-            _spawn_task(_run_quiz_start_debounced(handle_quiz_new(cache_id, msg["from"], chat_id), uid))
+            _spawn_command_task(uid, _run_quiz_start_debounced(handle_quiz_new(cache_id, msg["from"], chat_id), uid))
         return
     if text.startswith("/start pollnew_"):
         cache_id = text.replace("/start pollnew_", "").strip()
         if uid not in _QUIZ_START_LOCK:
             _QUIZ_START_LOCK.add(uid)
-            _spawn_task(_run_quiz_start_debounced(handle_poll_new(cache_id, msg["from"], chat_id, None), uid))
+            _spawn_command_task(uid, _run_quiz_start_debounced(handle_poll_new(cache_id, msg["from"], chat_id, None), uid))
         return
     if text.startswith("/start qz_"):
         quiz_id = text.split()[1] if len(text.split()) > 1 else text.replace("/start ", "")
-        _spawn_task(start_d1_quiz(chat_id, quiz_id, msg["from"]))
+        _spawn_command_task(uid, start_d1_quiz(chat_id, quiz_id, msg["from"]))
         return
     if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm")) or text.startswith("/bangla"):
         if not is_auth:
@@ -10100,7 +10123,7 @@ async def handle_message(msg: dict):
         await handle_bm(msg)
         return
     if text == "/bmexam":
-        _spawn_task(handle_bmexam(msg))
+        _spawn_command_task(uid, handle_bmexam(msg))
         return
     if text in ("/collect", "/cstatus", "/cdone", "/ccancel"):
         await handle_collect_command(msg)
@@ -10143,7 +10166,7 @@ async def handle_message(msg: dict):
     elif text.startswith("/qbm"):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
         # 100% ported from AtlasMasterBot's qbm_handler
-        _spawn_task(handle_qbm(msg))
+        _spawn_command_task(uid, handle_qbm(msg))
     elif text.startswith("/pdfm"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
@@ -10161,59 +10184,59 @@ async def handle_message(msg: dict):
             return
         await handle_txt_command(msg)
     elif text.startswith("/cancel"):
-        _spawn_task(handle_cancel_command(msg))
+        _spawn_command_task(uid, handle_cancel_command(msg))
     elif text.startswith("/sheet"):
-        _spawn_task(handle_sheet_command(msg))
+        _spawn_command_task(uid, handle_sheet_command(msg))
     elif text.startswith("/qcsv"):
-        _spawn_task(handle_qcsv_command(msg))
+        _spawn_command_task(uid, handle_qcsv_command(msg))
     elif text.startswith("/qpdf"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        _spawn_task(handle_qpdf_command(msg))
+        _spawn_command_task(uid, handle_qpdf_command(msg))
     elif text.startswith("/split"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        _spawn_task(handle_split_command(msg))
+        _spawn_command_task(uid, handle_split_command(msg))
     elif text.startswith("/csvS"):
         # /csvS অবশ্যই /csv এর আগে check করতে হবে
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        _spawn_task(handle_csvs_command(msg))
+        _spawn_command_task(uid, handle_csvs_command(msg))
     elif text.startswith("/csv"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        _spawn_task(handle_csv_command(msg))
+        _spawn_command_task(uid, handle_csv_command(msg))
     elif text.startswith("/rapid ") or text == "/rapid":
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        _spawn_task(handle_rapid_command(msg))
+        _spawn_command_task(uid, handle_rapid_command(msg))
     elif text.startswith("/wm"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        _spawn_task(handle_wm_command(msg))
+        _spawn_command_task(uid, handle_wm_command(msg))
     elif text.startswith("/live") and not text.startswith("/livetime"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        _spawn_task(handle_live_command(msg))
+        _spawn_command_task(uid, handle_live_command(msg))
 
     elif text.startswith("/pollcsv") or text.startswith("/pcsv"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        _spawn_task(handle_poll_extract(msg))
+        _spawn_command_task(uid, handle_poll_extract(msg))
 
     elif text.startswith("/poll") and "\n" in text and "t.me/" in text:
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        _spawn_task(handle_poll_extract(msg))
+        _spawn_command_task(uid, handle_poll_extract(msg))
 
     elif text == "/setcommand":
         if uid != OWNER_ID:
