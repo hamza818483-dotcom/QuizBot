@@ -330,8 +330,7 @@ def _sanitize_poll_options(data: dict) -> dict:
 async def tg_post(method: str, data: dict) -> dict:
     if method == "sendPoll":
         data = _sanitize_poll_options(data)
-    # ── Primary: CF Worker TG proxy (shared client — connection reuse,
-    #    prottekbar TCP/TLS handshake bade dilo, response fast hoy) ──
+    # ── Primary: CF Worker TG proxy (shared client — connection reused, no per-call handshake) ──
     try:
         client = await _get_shared_http_client()
         r = await client.post(f"{TG_API}/{method}", json=data, timeout=60)
@@ -345,11 +344,11 @@ async def tg_post(method: str, data: dict) -> dict:
         logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
     except Exception as e:
         logger.warning(f"[TG] {method} proxy error: {type(e).__name__}: {e}")
-    # ── Fallback: Direct Telegram API (CF down হলেও কাজ করবে) ──
+    # ── Fallback: Direct Telegram API (CF down হলেও কাজ করবে, shared client) ──
     for attempt in range(2):
         try:
             client = await _get_shared_http_client()
-            r = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=data)
+            r = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=data, timeout=60)
             result = r.json()
             if not result.get("ok"):
                 if result.get("error_code") == 429:
@@ -414,20 +413,20 @@ async def edit_msg_caption(chat_id, message_id: int, caption: str, parse_mode: s
 async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
                      reply_markup=None, reply_to_message_id: int = None,
                      message_thread_id: int = None) -> dict:
-    # ── Primary: CF Worker (b64 proxy) ──
+    # ── Primary: CF Worker (b64 proxy, shared client) ──
     try:
         b64 = base64.b64encode(photo_bytes).decode()
         data = {"chat_id": str(chat_id), "caption": caption, "photo_b64": b64}
         if reply_markup: data["reply_markup"] = reply_markup
         if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
         if message_thread_id: data["message_thread_id"] = message_thread_id
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(f"{CF_WORKER_URL}/tg-sendphoto", json=data)
-            result = r.json()
-            if result.get("ok"): return result
+        client = await _get_shared_http_client()
+        r = await client.post(f"{CF_WORKER_URL}/tg-sendphoto", json=data, timeout=60)
+        result = r.json()
+        if result.get("ok"): return result
     except Exception as e:
         logger.warning(f"[TG] sendPhoto CF failed: {e}")
-    # ── Fallback: Direct TG API multipart (CF down হলে) ──
+    # ── Fallback: Direct TG API multipart (CF down হলে, shared client) ──
     try:
         fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"}
         if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
@@ -436,11 +435,11 @@ async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
             import json as _j
             fields["reply_markup"] = _j.dumps(reply_markup)
         files = {"photo": ("photo.jpg", photo_bytes, "image/jpeg")}
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-                data=fields, files=files)
-            return r.json()
+        client = await _get_shared_http_client()
+        r = await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            data=fields, files=files, timeout=120)
+        return r.json()
     except Exception as e:
         logger.error(f"[TG] sendPhoto direct failed: {e}")
         return {"ok": False, "error": str(e)}
@@ -458,7 +457,7 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",
                         message_thread_id: int = None) -> dict:
-    # ── Primary: CF Worker (b64 proxy) ──
+    # ── Primary: CF Worker (b64 proxy, shared client) ──
     try:
         data = {
             "chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode,
@@ -467,23 +466,23 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
         }
         if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
         if message_thread_id: data["message_thread_id"] = message_thread_id
-        async with httpx.AsyncClient(timeout=60) as c:
-            r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data)
-            result = r.json()
-            if result.get("ok"): return result
+        c = await _get_shared_http_client()
+        r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=60)
+        result = r.json()
+        if result.get("ok"): return result
     except Exception as e:
         logger.warning(f"[sendDoc] CF failed: {e}")
-    # ── Fallback: Direct TG API multipart ──
+    # ── Fallback: Direct TG API multipart (shared client) ──
     try:
         fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode}
         if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
         if message_thread_id: fields["message_thread_id"] = str(message_thread_id)
         files = {"document": (filename, file_bytes, mime_type)}
-        async with httpx.AsyncClient(timeout=120) as c:
-            r = await c.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                data=fields, files=files)
-            return r.json()
+        c = await _get_shared_http_client()
+        r = await c.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+            data=fields, files=files, timeout=120)
+        return r.json()
     except Exception as e:
         logger.error(f"[sendDoc] direct failed: {e}")
         return {"ok": False, "error": str(e)}
