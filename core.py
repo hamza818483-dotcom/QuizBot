@@ -38,6 +38,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://atlasquizbotpro.hamza818483.workers.dev")
+CF_WORKER_URL_2 = os.environ.get("CF_WORKER_URL_2", "https://quizbot.pages.dev")
 HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://hamza-02-quizbot.hf.space")
 RENDER_URL = os.environ.get("RENDER_URL", "") or os.environ.get("HF_SPACE_URL", "https://hamza-02-quizbot.hf.space")
 D1_TOKEN = os.environ.get("D1_TOKEN", "")
@@ -371,6 +372,35 @@ def _sanitize_poll_options(data: dict) -> dict:
 async def tg_post(method: str, data: dict) -> dict:
     if method == "sendPoll":
         data = _sanitize_poll_options(data)
+    # ── setWebhook special-case: target URL host must resolve on Telegram's
+    #    side. pages.dev/workers.dev subdomains occasionally fail DNS resolve
+    #    from Telegram's servers ("Failed to resolve host"). If the primary
+    #    domain is used as webhook target and Telegram rejects it with a
+    #    resolve error, retry once using the secondary domain instead. ──
+    if method == "setWebhook" and _tg_mode == "cf-proxy":
+        try:
+            client = await _get_shared_http_client()
+            r = await client.post(f"{TG_API}/setWebhook", json=data, timeout=60)
+            result = r.json()
+            if result.get("ok"):
+                return result
+            desc = (result.get("description") or "")
+            if "resolve host" in desc.lower() and CF_WORKER_URL_2 and CF_WORKER_URL in str(data.get("url", "")):
+                alt_url = data["url"].replace(CF_WORKER_URL, CF_WORKER_URL_2)
+                logger.warning(f"[TG] setWebhook resolve failed on {CF_WORKER_URL}, retrying with {CF_WORKER_URL_2}")
+                alt_data = dict(data, url=alt_url)
+                r2 = await client.post(f"{TG_API}/setWebhook", json=alt_data, timeout=60)
+                result2 = r2.json()
+                if result2.get("ok"):
+                    logger.info(f"[TG] setWebhook succeeded on fallback domain → {alt_url}")
+                    return result2
+                logger.warning(f"[TG] setWebhook fallback also failed: {result2.get('description')}")
+                return result2
+            logger.warning(f"[TG] setWebhook proxy failed: {desc}")
+            return result
+        except Exception as e:
+            logger.warning(f"[TG] setWebhook proxy error: {type(e).__name__}: {e}")
+            return {"ok": False, "error": str(e)}
     # ── Primary: CF Worker TG proxy (shared client, short timeout — CF hang/slow
     #    হলে যেন প্রতিটা command 60s আটকে না থেকে দ্রুত direct API-তে fallback করে) ──
     #    The shared client's keep-alive connection can go stale after any idle

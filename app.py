@@ -46,7 +46,7 @@ from pdf_handler import (
 from core import (
     logger, app, sb, sb_exec,
     BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
-    CF_WORKER_URL, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL,
+    CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, _tg_mode,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
     send_document, send_poll, notify_owner, download_tg_file,
@@ -11655,6 +11655,33 @@ async def _keepalive_task() -> None:
         await asyncio.sleep(300)
 
 
+async def _webhook_healer_task() -> None:
+    """Every 10 min, checks Telegram webhook is set and non-empty. If it's
+    empty (e.g. setWebhook failed at startup due to a transient DNS resolve
+    error on the CF domain), retries setting it — using tg_post's built-in
+    primary/secondary domain fallback."""
+    await asyncio.sleep(120)
+    logger.info("[App] Webhook healer task started")
+    while True:
+        try:
+            if _tg_mode == "cf-proxy":
+                info = await tg_post("getWebhookInfo", {})
+                current_url = info.get("result", {}).get("url", "") if info.get("ok") else ""
+                if not current_url:
+                    worker_webhook = CF_WORKER_URL.rstrip("/") + "/webhook"
+                    payload = {"url": worker_webhook, "drop_pending_updates": False, "max_connections": 40}
+                    if WEBHOOK_SECRET:
+                        payload["secret_token"] = WEBHOOK_SECRET
+                    result = await tg_post("setWebhook", payload)
+                    if result.get("ok"):
+                        logger.info(f"[App] Webhook healer: re-set webhook → {result}")
+                    else:
+                        logger.warning(f"[App] Webhook healer: re-set attempt failed: {result}")
+        except Exception as e:
+            logger.warning(f"[App] Webhook healer error: {e}")
+        await asyncio.sleep(600)
+
+
 async def _watchdog_task() -> None:
     """Independent watchdog — separate ping loop (offset timing) that
     double-checks the bot is alive. If keep-alive silently dies (task
@@ -11849,6 +11876,7 @@ async def startup():
     # Self-ping keep-alive: prevents platform sleep. Watchdog alert tasks
     # disabled per request — AtlasBot now handles all external monitoring.
     _spawn_task(_supervised(_keepalive_task, "_keepalive_task"))
+    _spawn_task(_supervised(_webhook_healer_task, "_webhook_healer_task"))
     _spawn_task(_supervised(_memory_cleanup_task, "_memory_cleanup_task"))
     _spawn_task(_supervised(_ram_guard_task, "_ram_guard_task"))
     _spawn_task(_supervised(_scheduled_restart_task, "_scheduled_restart_task"))
