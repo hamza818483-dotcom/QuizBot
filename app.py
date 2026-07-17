@@ -3705,9 +3705,11 @@ async def handle_csv_command(msg: dict):
             pass
 
     try:
+        # CSV ফাইল সবসময় ছোট (কখনো 20MB Bot-API ceiling ছাড়ায় না), তাই chat_id/
+        # message_id পাস করা হচ্ছে না — pyrogram path (client connect overhead)
+        # স্কিপ হয়ে সরাসরি দ্রুত Bot API getFile ব্যবহার হবে।
         csv_bytes = await download_tg_file(
-            doc["file_id"], progress_cb=_dl_progress,
-            chat_id=chat_id, message_id=reply["message_id"]
+            doc["file_id"], progress_cb=_dl_progress
         )
         if loading_id:
             await edit_msg(chat_id, loading_id, "✅ Download complete!\n⏳ CSV parse হচ্ছে...")
@@ -3827,9 +3829,9 @@ async def handle_csvs_command(msg: dict):
             pass
 
     try:
+        # CSV ফাইল ছোট, pyrogram path স্কিপ করে সরাসরি দ্রুত Bot API getFile
         csv_bytes = await download_tg_file(
-            reply["document"]["file_id"], progress_cb=_dl_progress_s,
-            chat_id=chat_id, message_id=reply["message_id"]
+            reply["document"]["file_id"], progress_cb=_dl_progress_s
         )
         if loading_id:
             await edit_msg(chat_id, loading_id, "✅ Download complete!\n⏳ CSV parse হচ্ছে...")
