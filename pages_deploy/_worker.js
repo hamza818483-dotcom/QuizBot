@@ -85,11 +85,32 @@ export default {
     // Health check
     if (url.pathname === '/health') return jsonResp({ ok: true, status: 'alive' });
 
+    // ── /cron-check: Pages Functions e built-in Cron Trigger nai (Workers-only
+    // feature), tai GitHub Actions scheduled workflow theke ei endpoint HTTP
+    // diye hit kore, jeta ekhoni scheduled() function er shathe hubohu same
+    // failover+keepalive logic run kore. Simple shared-secret diye protect. ──
+    if (url.pathname === '/cron-check') {
+      const provided = url.searchParams.get('key') || request.headers.get('X-Cron-Key') || '';
+      const expected = env.CRON_SECRET || '';
+      if (expected && provided !== expected) {
+        return jsonResp({ ok: false, error: 'Unauthorized' }, 401);
+      }
+      ctx.waitUntil(runCronCheck(env));
+      return jsonResp({ ok: true, message: 'Cron check triggered' });
+    }
+
     return jsonResp({ ok: true, service: 'ATLAS Bot Proxy', version: '2.0' });
   },
 
   // ── Cron: Render keep-alive + Primary→Secondary failover + daily Supabase→D1 sync ──
+  // (Pages e ei handler kokhono auto-fire hoy na — /cron-check HTTP route-i
+  // actual trigger. Worker-e move korle eta nijei kaj korbe.)
   async scheduled(event, env) {
+    await runCronCheck(env);
+  }
+};
+
+async function runCronCheck(env) {
     const RENDER_URL   = env.RENDER_URL   || 'https://quizbot-s482.onrender.com';
     const RENDER_URL_2 = env.RENDER_URL_2 || '';
     const BOT_TOKEN     = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
@@ -219,8 +240,7 @@ export default {
         console.error(`[cron] Daily sync failed: ${e.message}`);
       }
     }
-  }
-};
+}
 
 function jsonResp(data, status = 200) {
   return new Response(JSON.stringify(data), {
