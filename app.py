@@ -9678,6 +9678,14 @@ async def handle_message(msg: dict):
     if random.random() < 0.01:
         asyncio.create_task(db_auto_cleanup_if_needed())
 
+    # Plain t.me link পাঠালেই (কোনো command ছাড়া) auto-resolve করে ID দিয়ে দেওয়া
+    if (is_private and is_auth and text and not text.startswith("/")
+            and re.fullmatch(r'(https?://)?t\.me/\S+', text)):
+        fake_msg = dict(msg)
+        fake_msg["text"] = "/getid " + text
+        await handle_getid(fake_msg)
+        return
+
     # Poll auto-collect (forwarded polls)
     if msg.get("poll") and msg.get("forward_date"):
         collected = await handle_poll_auto_collect(msg)
