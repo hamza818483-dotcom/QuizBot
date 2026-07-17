@@ -417,7 +417,7 @@ async def send_quiz_question(chat_id: int, session: dict):
     try:
         poll_r = await send_poll(
             chat_id, q_text, [o[:100] for o in opts], ans_idx,
-            explanation=exp, is_anonymous=False
+            explanation=exp, is_anonymous=False, open_period=session["timer"] + 5
         )
     except Exception as e:
         # sendPoll ke exception dhoreche (network blip etc) - guard clear kore
