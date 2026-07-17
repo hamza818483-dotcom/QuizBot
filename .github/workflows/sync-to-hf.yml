@@ -33,6 +33,7 @@ jobs:
           git push hf-primary main:main --force
 
       - name: Sync Secrets to Primary HF Space
+        if: false  # PAUSED: was causing collision with existing HF Space Variables (same key names). Re-enable after Variables section is cleared, or after confirming HF's actual collision cause.
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SPACE_SECRETS_JSON: ${{ secrets.SPACE_SECRETS_JSON }}
