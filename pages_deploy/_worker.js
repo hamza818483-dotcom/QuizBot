@@ -929,6 +929,18 @@ async function forwardToHF(request, env) {
         console.warn(`[webhook] fallback ${other} also failed:`, e2.message);
       }
     }
+    // No second instance (or it also failed) — retry the SAME target once
+    // more before giving up. Common single-instance case: HF Space was
+    // asleep/cold on the first hit (timeout/connection refused mid-restart);
+    // by the time we retry a couple seconds later it has usually finished
+    // waking up, so the update isn't silently dropped.
+    try {
+      console.warn(`[webhook] retrying ${picked} once more (possible cold start)...`);
+      const r3 = await tryTarget(picked);
+      if (r3.ok) return new Response('OK');
+    } catch (e3) {
+      console.warn(`[webhook] retry of ${picked} also failed:`, e3.message);
+    }
     return new Response('All Render instances unavailable', { status: 502 });
   }
 }
