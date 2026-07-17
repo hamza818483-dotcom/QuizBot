@@ -682,7 +682,19 @@ async def db_get_settings() -> dict:
         if r.data:
             return r.data[0]
     except Exception as e:
-        logger.error(f"[DB] get_settings error: {e}")
+        # watermark column ekhono Supabase e add kora hoy nai (migration pending) —
+        # purono columns diye retry kore crash bachai, watermark khali thakbe
+        if "watermark" in str(e):
+            try:
+                r = sb.table("quiz_settings").select("tag,exp_footer").eq("id", 1).execute()
+                if r.data:
+                    row = r.data[0]
+                    row["watermark"] = ""
+                    return row
+            except Exception as e2:
+                logger.error(f"[DB] get_settings retry error: {e2}")
+        else:
+            logger.error(f"[DB] get_settings error: {e}")
     try:
         await _ensure_d1_table("quiz_settings",
             "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT, watermark TEXT)")
