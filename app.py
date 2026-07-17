@@ -9432,7 +9432,7 @@ async def _send_quiz_question_inner(uid: int):
 
     poll_r = await send_poll(
         st["chat_id"], q_text[:300], [o[:100] for o in opts], ans_idx,
-        explanation=exp[:200], is_anonymous=False, open_period=QUIZ_Q_SEC
+        explanation=exp[:200], is_anonymous=False, open_period=QUIZ_Q_SEC + 5
     )
 
     if not poll_r.get("ok"):
