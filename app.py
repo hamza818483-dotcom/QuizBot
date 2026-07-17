@@ -2287,8 +2287,99 @@ async def _show_channel_actions(chat_id, message_id, channel_id):
                                         "parse_mode": "HTML", "reply_markup": {"inline_keyboard": buttons}})
 
 # ============================================================
-# FEATURE: /pin on | /pin off
+# FEATURE: /getid — public/private channel/group link থেকে auto ID বের করা
 # ============================================================
+async def handle_getid(msg: dict):
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+    reply = msg.get("reply_to_message")
+
+    target = text.replace("/getid", "", 1).strip()
+
+    # Forwarded message থেকে ID (reply-mode)
+    if not target and reply:
+        fwd_chat = reply.get("forward_from_chat")
+        if fwd_chat:
+            cid = fwd_chat.get("id")
+            ctype = fwd_chat.get("type", "")
+            cname = fwd_chat.get("title") or fwd_chat.get("username") or ""
+            await send_msg(chat_id,
+                f"✅ <b>ID পাওয়া গেছে!</b>\n\n"
+                f"📛 নাম: {cname}\n"
+                f"🆔 ID: <code>{cid}</code>\n"
+                f"📂 Type: {ctype}"
+            )
+            return
+        await send_msg(chat_id, "❌ এই মেসেজে forward info নাই। Public/private channel link পাঠাও অথবা forwarded message-এ reply করো।")
+        return
+
+    if not target:
+        await send_msg(chat_id,
+            "❌ Link/username দাও!\n\n"
+            "<b>Usage:</b>\n"
+            "<code>/getid https://t.me/channelname</code>\n"
+            "<code>/getid @channelname</code>\n"
+            "<code>/getid https://t.me/+AbCdEfGhIjK</code> (private invite link)\n"
+            "<code>/getid -1001234567890</code>\n\n"
+            "📌 Private channel/group হলে বটকে আগে member/admin করে নিতে হবে।"
+        )
+        return
+
+    # Private invite link (t.me/+xxx বা t.me/joinchat/xxx) — সরাসরি resolve করা যায় না,
+    # বট আগে থেকে member/admin হলেই getChat কাজ করবে; না হলে instruct করবো।
+    is_private_invite = bool(re.search(r't\.me/(\+|joinchat/)', target))
+
+    # চেষ্টা ১: username/link কে @username বা numeric ID তে normalize করা
+    resolved = target
+    m = re.search(r't\.me/([A-Za-z0-9_]+)$', target)
+    if m and not is_private_invite:
+        resolved = "@" + m.group(1)
+    elif target.startswith("t.me/") or target.startswith("https://t.me/") or target.startswith("http://t.me/"):
+        # username pattern না মিললে (private link) as-is রাখা
+        pass
+    elif not target.startswith("@") and not target.startswith("-100") and not target.lstrip("-").isdigit():
+        resolved = "@" + target.lstrip("@")
+
+    if is_private_invite:
+        await send_msg(chat_id,
+            "⚠️ এটা একটা <b>private invite link</b>।\n\n"
+            "Telegram Bot API invite link থেকে সরাসরি ID বের করতে দেয় না — "
+            "বটকে আগে ওই channel/group-এ manually add/invite করতে হবে। "
+            "তারপর ওই channel/group থেকে যেকোনো একটা মেসেজ এই চ্যাটে forward করে "
+            "সেই forwarded মেসেজে <code>/getid</code> reply করলে ID পেয়ে যাবে।"
+        )
+        return
+
+    r = await tg_post("getChat", {"chat_id": resolved})
+    if not r.get("ok"):
+        desc = r.get("description", "")
+        await send_msg(chat_id,
+            f"❌ ID বের করা যায়নি!\n\n"
+            f"Reason: {desc}\n\n"
+            f"📌 সম্ভাব্য কারণ:\n"
+            f"• বট ওই channel/group-এ নেই\n"
+            f"• Channel/username ভুল\n"
+            f"• Private হলে বটকে আগে add করতে হবে"
+        )
+        return
+
+    result = r["result"]
+    cid = result.get("id")
+    ctype = result.get("type", "")
+    cname = result.get("title") or result.get("username") or ""
+    uname = result.get("username", "")
+
+    txt = (
+        f"✅ <b>ID পাওয়া গেছে!</b>\n\n"
+        f"📛 নাম: {cname}\n"
+        f"🆔 ID: <code>{cid}</code>\n"
+        f"📂 Type: {ctype}"
+    )
+    if uname:
+        txt += f"\n🔗 Username: @{uname}"
+    await send_msg(chat_id, txt)
+
+
 async def handle_pin(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
@@ -9583,6 +9674,8 @@ async def handle_message(msg: dict):
         await handle_expQ(msg)
     elif text.startswith("/channel") or text == "/channelist":
         await handle_channel(msg)
+    elif text.startswith("/getid"):
+        await handle_getid(msg)
     elif text == "/info2":
         await handle_info2(msg)
     elif text.startswith("/qbmprompt"):
