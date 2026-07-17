@@ -373,19 +373,30 @@ async def tg_post(method: str, data: dict) -> dict:
         data = _sanitize_poll_options(data)
     # ── Primary: CF Worker TG proxy (shared client, short timeout — CF hang/slow
     #    হলে যেন প্রতিটা command 60s আটকে না থেকে দ্রুত direct API-তে fallback করে) ──
-    try:
-        client = await _get_shared_http_client()
-        r = await client.post(f"{TG_API}/{method}", json=data, timeout=60)
-        result = r.json()
-        if result.get("ok"):
-            return result
-        if result.get("error_code") == 429:
-            retry_after = result.get("parameters", {}).get("retry_after", 5)
-            logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
-            await asyncio.sleep(min(retry_after, 30) + 0.5)
-        logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
-    except Exception as e:
-        logger.warning(f"[TG] {method} proxy error: {type(e).__name__}: {e}")
+    #    The shared client's keep-alive connection can go stale after any idle
+    #    period (Space asleep, CF edge recycling idle sockets) — the first
+    #    request on a dead connection raises a transport error even though
+    #    the service itself is fine. Retry once on transient errors before
+    #    falling through to "give up" (which, on HF where direct API is
+    #    blocked, previously meant total silent failure on that one stale
+    #    connection — exactly "1st command does nothing, 2nd works").
+    for _proxy_attempt in range(2):
+        try:
+            client = await _get_shared_http_client()
+            r = await client.post(f"{TG_API}/{method}", json=data, timeout=60)
+            result = r.json()
+            if result.get("ok"):
+                return result
+            if result.get("error_code") == 429:
+                retry_after = result.get("parameters", {}).get("retry_after", 5)
+                logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
+                await asyncio.sleep(min(retry_after, 30) + 0.5)
+            logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
+            break  # got a real response (not a transport error) — don't retry, fall through
+        except Exception as e:
+            logger.warning(f"[TG] {method} proxy error (attempt {_proxy_attempt+1}/2): {type(e).__name__}: {e}")
+            if _proxy_attempt == 0:
+                continue  # retry once — likely a stale reused connection
     # ── Fallback: Direct Telegram API (skipped when running where TG is
     #    network-blocked, e.g. HF Space — trying it there just wastes time
     #    on a guaranteed failure before eventually giving up) ──
