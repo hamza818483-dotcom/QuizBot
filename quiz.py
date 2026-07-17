@@ -416,7 +416,7 @@ async def send_quiz_question(chat_id: int, session: dict):
 
     poll_r = await send_poll(
         chat_id, q_text, [o[:100] for o in opts], ans_idx,
-        explanation=exp, is_anonymous=False, open_period=session["timer"]
+        explanation=exp, is_anonymous=False
     )
 
     if poll_r.get("ok"):
