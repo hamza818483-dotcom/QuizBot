@@ -10255,7 +10255,7 @@ async def handle_message(msg: dict):
             async def _get_webhook_status():
                 nonlocal _wh_short
                 try:
-                    async with _hx.AsyncClient(timeout=5) as _c:
+                    async with _hx.AsyncClient(timeout=15) as _c:
                         _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
                         _wh_data = _wr.json()
                         _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
