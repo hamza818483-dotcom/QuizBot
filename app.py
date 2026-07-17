@@ -11669,7 +11669,8 @@ async def _webhook_healer_task() -> None:
                 current_url = info.get("result", {}).get("url", "") if info.get("ok") else ""
                 if not current_url:
                     worker_webhook = CF_WORKER_URL.rstrip("/") + "/webhook"
-                    payload = {"url": worker_webhook, "drop_pending_updates": False, "max_connections": 40}
+                    payload = {"url": worker_webhook, "drop_pending_updates": False, "max_connections": 40,
+                               "allowed_updates": ["message", "callback_query", "poll_answer", "poll"]}
                     if WEBHOOK_SECRET:
                         payload["secret_token"] = WEBHOOK_SECRET
                     result = await tg_post("setWebhook", payload)
@@ -11906,7 +11907,8 @@ async def startup():
 
                 if "onrender.com" in current_url:
                     # ইতিমধ্যেই Render-এ ছিল — restart এর পর re-confirm করছি
-                    _r_payload = {"url": webhook_url, "drop_pending_updates": True, "max_connections": 40}
+                    _r_payload = {"url": webhook_url, "drop_pending_updates": True, "max_connections": 40,
+                                  "allowed_updates": ["message", "callback_query", "poll_answer", "poll"]}
                     if WEBHOOK_SECRET:
                         _r_payload["secret_token"] = WEBHOOK_SECRET
                     r = await _c.post(
@@ -11928,7 +11930,8 @@ async def startup():
             current_url = info_r.get("result", {}).get("url", "")
 
             if current_url != worker_webhook or WEBHOOK_SECRET:
-                _wh_payload = {"url": worker_webhook, "drop_pending_updates": True, "max_connections": 40}
+                _wh_payload = {"url": worker_webhook, "drop_pending_updates": True, "max_connections": 40,
+                               "allowed_updates": ["message", "callback_query", "poll_answer", "poll"]}
                 if WEBHOOK_SECRET:
                     _wh_payload["secret_token"] = WEBHOOK_SECRET
                 result = await tg_post("setWebhook", _wh_payload)
