@@ -11839,7 +11839,7 @@ async def startup():
 
                 if "onrender.com" in current_url:
                     # ইতিমধ্যেই Render-এ ছিল — restart এর পর re-confirm করছি
-                    _r_payload = {"url": webhook_url, "drop_pending_updates": False, "max_connections": 40}
+                    _r_payload = {"url": webhook_url, "drop_pending_updates": True, "max_connections": 40}
                     if WEBHOOK_SECRET:
                         _r_payload["secret_token"] = WEBHOOK_SECRET
                     r = await _c.post(
@@ -11861,7 +11861,7 @@ async def startup():
             current_url = info_r.get("result", {}).get("url", "")
 
             if current_url != worker_webhook or WEBHOOK_SECRET:
-                _wh_payload = {"url": worker_webhook, "drop_pending_updates": False, "max_connections": 40}
+                _wh_payload = {"url": worker_webhook, "drop_pending_updates": True, "max_connections": 40}
                 if WEBHOOK_SECRET:
                     _wh_payload["secret_token"] = WEBHOOK_SECRET
                 result = await tg_post("setWebhook", _wh_payload)
