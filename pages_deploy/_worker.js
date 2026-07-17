@@ -471,6 +471,8 @@ async function handleTgSendDoc(request) {
     formData.append('caption', body.caption || '');
     if (body.parse_mode) formData.append('parse_mode', body.parse_mode);
     formData.append('document', new Blob([bytes], { type: body.mime_type || 'application/octet-stream' }), body.filename || 'file');
+    if (body.reply_to_message_id) formData.append('reply_to_message_id', String(body.reply_to_message_id));
+    if (body.message_thread_id) formData.append('message_thread_id', String(body.message_thread_id));
 
     const resp = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
       method: 'POST', body: formData
