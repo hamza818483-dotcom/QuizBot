@@ -12235,8 +12235,16 @@ async def startup():
         logger.error(f"[App] Webhook setup error: {e}")
 
     try:
-        ok, admin_ok, admin_total = await set_bot_commands()
+        ok = False
+        for attempt in range(3):
+            ok, admin_ok, admin_total = await set_bot_commands()
+            if ok:
+                break
+            logger.warning(f"[App] Command menu setup attempt {attempt+1}/3 failed, retrying...")
+            await asyncio.sleep(2 * (attempt + 1))
         logger.info(f"[App] Command menu set on startup: default={ok}, admins={admin_ok}/{admin_total}")
+        if not ok:
+            await notify_owner("⚠️ Command menu (/) setup failed after 3 retries on startup — bot commands list may be stale/missing. Run /setcommand manually to fix.")
     except Exception as e:
         logger.error(f"[App] Failed to set command menu on startup: {e}")
     try:
