@@ -991,6 +991,79 @@ def _strip_q_numbering(q: str) -> str:
         cur = new
     return cur.strip()
 
+def _is_mcq_text_sane(text: str) -> bool:
+    """
+    Cheap heuristic sanity check to catch broken/garbled/ulta-palta text
+    before it reaches the user — no AI cost, pure regex/string checks.
+    Rejects:
+    - empty or whitespace-only text
+    - excessive repeated-character runs (e.g. 'aaaaaaa', 'কককককক') which
+      indicate OCR/generation corruption, not real content
+    - suspiciously short "words" that are just 1 char repeated as the whole
+      option (e.g. a lone garbled glyph)
+    - text that's mostly non-printable/control characters
+    This is intentionally conservative — it only catches clear corruption,
+    never rejects normal short Bengali/English words or numbers.
+    """
+    if not text or not text.strip():
+        return False
+    t = text.strip()
+    if len(t) > 400:
+        return False  # runaway generation, not a real option/question
+    # 6+ identical consecutive characters is never valid real content
+    if re.search(r'(.)\1{5,}', t):
+        return False
+    # mostly non-printable / control characters
+    printable = sum(1 for c in t if c.isprintable())
+    if printable / max(len(t), 1) < 0.8:
+        return False
+    return True
+
+
+def _validate_mcq_structure(mcqs: list) -> list:
+    """
+    Structural + sanity validation applied to any freshly-generated MCQ batch
+    (both the main Call 1 output and any later 'fix'/enforcement-call output
+    for /chok and /bangla) before it's merged into the final list. Drops
+    individual malformed items rather than failing the whole batch, so one
+    broken MCQ never blocks the rest.
+
+    Checks:
+    - question present and passes sanity check
+    - exactly 4 options after padding/trimming, each present and sane
+    - answer is a valid A/B/C/D letter
+    - no duplicate options (a sign of a broken/repeated generation)
+    """
+    if not mcqs:
+        return mcqs
+    clean = []
+    for m in mcqs:
+        try:
+            q = (m.get("question") or "").strip()
+            opts = m.get("options") or []
+            ans = str(m.get("answer", "A")).strip().upper()
+            if not _is_mcq_text_sane(q):
+                continue
+            if not isinstance(opts, list) or len(opts) < 4:
+                continue
+            opts4 = [str(o).strip() for o in opts[:4]]
+            if any(not _is_mcq_text_sane(o) for o in opts4):
+                continue
+            # duplicate-option check (case-insensitive) — a real sign of
+            # broken/repeated generation, not a legitimate MCQ
+            if len({o.lower() for o in opts4}) < 4:
+                continue
+            if ans not in ("A", "B", "C", "D"):
+                continue
+            exp = (m.get("explanation") or "").strip()
+            if exp and not _is_mcq_text_sane(exp):
+                continue
+            clean.append(m)
+        except Exception:
+            continue
+    return clean
+
+
 def _parse_mcq_json(text: str) -> list:
     if not text:
         return []
@@ -1515,6 +1588,7 @@ async def _chok_final_cv_enforcement(mcqs: list, img, topic: str, page_num) -> l
         extra = _parse_mcq_json(txt) if txt else []
         if extra:
             extra = _cap_mcq_options(extra, 4)
+            extra = _validate_mcq_structure(extra)
             existing_q_texts = {(m.get("question") or "").strip().lower()[:60] for m in (mcqs or [])}
             new_items = []
             for m in extra:
@@ -1654,6 +1728,7 @@ async def _bangla_verify_and_enforce(mcqs: list, img, topic: str, page_num) -> l
         extra = _parse_mcq_json(txt) if txt else []
         if extra:
             extra = _cap_mcq_options(extra, 4)
+            extra = _validate_mcq_structure(extra)
             existing_q_texts = {(m.get("question") or "").strip().lower()[:60] for m in (mcqs or [])}
             new_items = []
             for m in extra:
@@ -1747,6 +1822,7 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
     out = _cap_mcq_options(out, 4)
+    out = _validate_mcq_structure(out)
     _rng_max = mcq_count[1] if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2 else None
     if _rng_max and len(out) > _rng_max:
         out = out[:_rng_max]
@@ -1769,6 +1845,7 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
         merged = await _chok_final_cv_enforcement(merged, img, topic, page_num)
     if _BANGLA_MODE.get():
         merged = await _bangla_verify_and_enforce(merged, img, topic, page_num)
+    merged = _validate_mcq_structure(merged)
     return merged
 
 
