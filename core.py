@@ -148,7 +148,7 @@ async def d1_set(key: str, value: dict, ttl: int = 86400):
     try:
         c = await _get_shared_http_client()
         r = await c.post(f"{CF_WORKER_URL}/d1/set",
-            json={"key": key, "value": value, "ttl": ttl})
+            json={"key": key, "value": value, "ttl": ttl}, timeout=15)
         if r.text.strip():
             ok = r.json().get("ok", False)
             if ok:
@@ -163,7 +163,7 @@ async def d1_set(key: str, value: dict, ttl: int = 86400):
 async def d1_get(key: str) -> dict:
     try:
         c = await _get_shared_http_client()
-        r = await c.get(f"{CF_WORKER_URL}/d1/get", params={"key": key})
+        r = await c.get(f"{CF_WORKER_URL}/d1/get", params={"key": key}, timeout=15)
         if r.text.strip():
             data = r.json()
             val = data.get("value")
@@ -178,7 +178,7 @@ async def d1_get(key: str) -> dict:
 async def d1_del(key: str):
     try:
         c = await _get_shared_http_client()
-        await c.post(f"{CF_WORKER_URL}/d1/del", json={"key": key})
+        await c.post(f"{CF_WORKER_URL}/d1/del", json={"key": key}, timeout=15)
     except Exception as e:
         logger.warning(f"[D1] del warn: {e}")
     _mem_kv.pop(key, None)  # always clean memory too
@@ -188,7 +188,7 @@ async def d1_query(sql: str, params: list = None, is_select: bool = True) -> dic
     try:
         body = {"sql": sql, "params": params or [], "token": D1_TOKEN}
         c = await _get_shared_http_client()
-        r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body)
+        r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body, timeout=15)
         data = r.json()
         if not data.get("ok"):
             logger.warning(f"[D1] query error: {data.get('error')}")
@@ -363,10 +363,11 @@ def _sanitize_poll_options(data: dict) -> dict:
 async def tg_post(method: str, data: dict) -> dict:
     if method == "sendPoll":
         data = _sanitize_poll_options(data)
-    # ── Primary: CF Worker TG proxy (shared client — connection reused, no per-call handshake) ──
+    # ── Primary: CF Worker TG proxy (shared client, short timeout — CF hang/slow
+    #    হলে যেন প্রতিটা command 60s আটকে না থেকে দ্রুত direct API-তে fallback করে) ──
     try:
         client = await _get_shared_http_client()
-        r = await client.post(f"{TG_API}/{method}", json=data, timeout=60)
+        r = await client.post(f"{TG_API}/{method}", json=data, timeout=12)
         result = r.json()
         if result.get("ok"):
             return result
@@ -454,7 +455,7 @@ async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
         if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
         if message_thread_id: data["message_thread_id"] = message_thread_id
         client = await _get_shared_http_client()
-        r = await client.post(f"{CF_WORKER_URL}/tg-sendphoto", json=data, timeout=60)
+        r = await client.post(f"{CF_WORKER_URL}/tg-sendphoto", json=data, timeout=25)
         result = r.json()
         if result.get("ok"): return result
     except Exception as e:
@@ -500,7 +501,7 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
         if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
         if message_thread_id: data["message_thread_id"] = message_thread_id
         c = await _get_shared_http_client()
-        r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=60)
+        r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=25)
         result = r.json()
         if result.get("ok"): return result
     except Exception as e:
@@ -794,32 +795,48 @@ async def db_save_settings(settings: dict):
     for field, value in settings.items():
         await db_save_settings_field(field, value)
 
+_admin_check_cache = {}  # uid -> (is_admin: bool, checked_at: float)
+_ADMIN_CACHE_TTL = 300  # 5 min
+
 async def db_is_owner_or_admin(uid: int) -> bool:
     if uid == OWNER_ID:
         return True
+    now = time.time()
+    cached = _admin_check_cache.get(uid)
+    if cached and (now - cached[1]) < _ADMIN_CACHE_TTL:
+        return cached[0]
     try:
         r = await sb_exec(lambda: sb.table("admins").select("user_id").eq("user_id", uid).execute())
-        return len(r.data) > 0
+        result = len(r.data) > 0
+        _admin_check_cache[uid] = (result, now)
+        return result
     except:
         return False
 
 async def db_track_user(uid: int, uname: str):
-    try:
-        await sb_exec(lambda: sb.table("pdf_users").upsert({
-            "user_id": uid, "user_name": uname, "last_seen": int(time.time())
-        }).execute())
-    except Exception as e:
-        logger.error(f"[DB] track_user error: {e}")
-    try:
-        await _ensure_d1_table("pdf_users",
-            "CREATE TABLE IF NOT EXISTS pdf_users (user_id INTEGER PRIMARY KEY, user_name TEXT, last_seen INTEGER)")
-        await d1_run(
-            "INSERT INTO pdf_users (user_id,user_name,last_seen) VALUES (?1,?2,?3) "
-            "ON CONFLICT(user_id) DO UPDATE SET user_name=excluded.user_name, last_seen=excluded.last_seen",
-            [uid, uname, int(time.time())]
-        )
-    except Exception as e:
-        logger.warning(f"[D1] track_user mirror warn: {e}")
+    async def _sb_write():
+        try:
+            await sb_exec(lambda: sb.table("pdf_users").upsert({
+                "user_id": uid, "user_name": uname, "last_seen": int(time.time())
+            }).execute())
+        except Exception as e:
+            logger.error(f"[DB] track_user error: {e}")
+
+    async def _d1_write():
+        try:
+            await _ensure_d1_table("pdf_users",
+                "CREATE TABLE IF NOT EXISTS pdf_users (user_id INTEGER PRIMARY KEY, user_name TEXT, last_seen INTEGER)")
+            await d1_run(
+                "INSERT INTO pdf_users (user_id,user_name,last_seen) VALUES (?1,?2,?3) "
+                "ON CONFLICT(user_id) DO UPDATE SET user_name=excluded.user_name, last_seen=excluded.last_seen",
+                [uid, uname, int(time.time())]
+            )
+        except Exception as e:
+            logger.warning(f"[D1] track_user mirror warn: {e}")
+
+    # Supabase + D1 write একসাথে (sequential হলে প্রতি মেসেজে ২টা network round-trip
+    # যোগ হতো — parallel করায় সময় প্রায় অর্ধেক)
+    await asyncio.gather(_sb_write(), _d1_write())
 
 async def db_save_session(session_id: str, data: dict):
     try:
