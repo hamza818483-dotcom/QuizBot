@@ -9834,6 +9834,9 @@ async def webhook(request: Request):
         logger.error(f"[Webhook] Parse error: {e}")
         return Response("OK")
 
+_LOCK_ACQUIRED_AT = {}  # uid -> timestamp the currently-held lock was acquired
+_STALE_LOCK_SECONDS = 600  # 10 min — generous even for the slowest /pdf jobs
+
 async def process_update(update: dict):
     try:
         if "message" in update:
@@ -9841,27 +9844,43 @@ async def process_update(update: dict):
             if uid is not None:
                 lock = _get_user_lock(uid)
                 if lock.locked():
-                    # A previous command (possibly long-running: /pdf, /qbm,
-                    # /csv, etc.) is still processing for this user. Silently
-                    # queuing behind it (old behavior) gave zero feedback —
-                    # the new command looked like it did nothing, so people
-                    # resent it, which then landed only after the first one
-                    # finally finished ("works on the 2nd try"). Tell them
-                    # explicitly instead of making them guess/retry blind.
-                    chat_id = update["message"].get("chat", {}).get("id")
-                    if chat_id is not None:
-                        await send_msg(chat_id, "⏳ আগের command এখনো process হচ্ছে — শেষ হলে এটা reply দিবে। একটু wait করো।")
-                    return
-                async with lock:
-                    _active_command_task.pop(uid, None)
-                    await handle_message(update["message"])
-                    # handle_message dispatches the real command work via
-                    # _spawn_command_task and returns right away — wait for
-                    # that specific task to actually finish before releasing
-                    # this user's lock, otherwise the "queue" is a no-op.
-                    task = _active_command_task.pop(uid, None)
-                    if task is not None and not task.done():
-                        await asyncio.gather(task, return_exceptions=True)
+                    acquired_at = _LOCK_ACQUIRED_AT.get(uid)
+                    if acquired_at and (time.time() - acquired_at) > _STALE_LOCK_SECONDS:
+                        # Previous task hung/crashed without releasing the lock
+                        # (e.g. process was killed mid-task by a restart) —
+                        # without this, EVERY future command from this user
+                        # would be stuck forever behind a lock that will
+                        # never free, until the whole process restarts.
+                        logger.warning(f"[Queue] Stale lock for uid={uid} "
+                                        f"({time.time()-acquired_at:.0f}s old) — force-resetting")
+                        lock = asyncio.Lock()
+                        _USER_LOCKS[uid] = lock
+                    else:
+                        # A previous command (possibly long-running: /pdf, /qbm,
+                        # /csv, etc.) is genuinely still processing. Silently
+                        # queuing behind it (old behavior) gave zero feedback —
+                        # the new command looked like it did nothing, so people
+                        # resent it, which then landed only after the first one
+                        # finally finished ("works on the 2nd try"). Tell them
+                        # explicitly instead of making them guess/retry blind.
+                        chat_id = update["message"].get("chat", {}).get("id")
+                        if chat_id is not None:
+                            await send_msg(chat_id, "⏳ আগের command এখনো process হচ্ছে — শেষ হলে এটা reply দিবে। একটু wait করো।")
+                        return
+                _LOCK_ACQUIRED_AT[uid] = time.time()
+                try:
+                    async with lock:
+                        _active_command_task.pop(uid, None)
+                        await handle_message(update["message"])
+                        # handle_message dispatches the real command work via
+                        # _spawn_command_task and returns right away — wait for
+                        # that specific task to actually finish before releasing
+                        # this user's lock, otherwise the "queue" is a no-op.
+                        task = _active_command_task.pop(uid, None)
+                        if task is not None and not task.done():
+                            await asyncio.gather(task, return_exceptions=True)
+                finally:
+                    _LOCK_ACQUIRED_AT.pop(uid, None)
             else:
                 await handle_message(update["message"])
         elif "callback_query" in update:
