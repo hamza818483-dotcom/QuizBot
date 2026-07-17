@@ -365,12 +365,12 @@ def _cap_pdf_bytes_cache() -> None:
     while len(_pdf_bytes_cache) > _PDF_BYTES_CACHE_MAX:
         _pdf_bytes_cache.pop(next(iter(_pdf_bytes_cache)), None)
 
-async def _download_pdf_cached(file_id: str, chat_id: int = None, message_id: int = None) -> bytes:
+async def _download_pdf_cached(file_id: str, progress_cb=None, chat_id: int = None, message_id: int = None) -> bytes:
     cached = _pdf_bytes_cache.get(file_id)
     if cached is not None:
         logger.info(f"[PDF Cache] hit for file_id={file_id[:16]}... skipping download")
         return cached
-    data = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
+    data = await download_tg_file(file_id, progress_cb=progress_cb, chat_id=chat_id, message_id=message_id)
     _pdf_bytes_cache[file_id] = data
     _cap_pdf_bytes_cache()
     return data
@@ -5817,7 +5817,23 @@ async def handle_pdf(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[░░░░░░░░░░ 0%]")
 
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id, message_id=reply["message_id"])
+        _last_pct5820 = {"v": -1}
+        async def _dl_progress5820(done, total):
+            if not status_msg_id or not total:
+                return
+            pct = int(done * 100 / total)
+            if pct - _last_pct5820["v"] < 10 and pct != 100:
+                return
+            _last_pct5820["v"] = pct
+            bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+            size_mb = round(file_size / 1024 / 1024, 1) if file_size else "?"
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                    f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[{bar} {pct}%]")
+            except Exception:
+                pass
+
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress5820, chat_id=chat_id, message_id=reply["message_id"])
 
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
@@ -6464,11 +6480,25 @@ async def handle_pdfm(msg: dict):
     file_name = reply["document"].get("file_name","document.pdf")
     file_size = reply["document"].get("file_size",0)
 
-    status_r = await send_msg(chat_id, "⏳ PDF download হচ্ছে...")
+    status_r = await send_msg(chat_id, "⏳ PDF download হচ্ছে...\n[░░░░░░░░░░ 0%]")
     status_msg_id = status_r.get("result",{}).get("message_id")
 
+    _last_pct6471 = {"v": -1}
+    async def _dl_progress6471(done, total):
+        if not status_msg_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct6471["v"] < 10 and pct != 100:
+            return
+        _last_pct6471["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        try:
+            await edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n[{bar} {pct}%]")
+        except Exception:
+            pass
+
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id, message_id=reply["message_id"])
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress6471, chat_id=chat_id, message_id=reply["message_id"])
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
             await send_msg(chat_id, pages)
@@ -7589,17 +7619,32 @@ async def _handle_qbm_impl(msg: dict):
         file_id = reply["document"]["file_id"]
         file_name = reply["document"].get("file_name", "document.pdf")
 
-    status_r = await send_msg(chat_id, "⏳ " + ("Image" if is_image_reply else "PDF") + " download হচ্ছে...")
+    status_r = await send_msg(chat_id, "⏳ " + ("Image" if is_image_reply else "PDF") + " download হচ্ছে...\n[░░░░░░░░░░ 0%]")
     status_msg_id = status_r.get("result", {}).get("message_id")
+
+    _last_pct = {"v": -1}
+    async def _dl_progress_pdf(done, total):
+        if not status_msg_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct["v"] < 10 and pct != 100:
+            return
+        _last_pct["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        label = "Image" if is_image_reply else "PDF"
+        try:
+            await edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n[{bar} {pct}%]")
+        except Exception:
+            pass
 
     try:
         if is_image_reply:
-            img_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
+            img_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id, message_id=reply["message_id"])
             from PIL import Image as PILImage
             img = PILImage.open(BytesIO(img_bytes))
             pages = [(1, img)]
         else:
-            pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id, message_id=reply["message_id"])
+            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id, message_id=reply["message_id"])
             ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
             if not ok:
                 await send_msg(chat_id, pages)
