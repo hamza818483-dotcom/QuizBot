@@ -9655,8 +9655,10 @@ async def handle_message(msg: dict):
     uname = msg["from"].get("first_name", "User")
     chat_type = msg["chat"].get("type", "private")
     is_private = chat_type == "private"
-    await db_track_user(uid, uname)
-    is_auth = await db_is_owner_or_admin(uid)
+    # These two are independent DB lookups that ran one-after-another before
+    # every single command — running them concurrently halves this fixed
+    # per-message latency for every command in the bot.
+    _, is_auth = await asyncio.gather(db_track_user(uid, uname), db_is_owner_or_admin(uid))
 
     # Image collection mode check
     if msg.get("photo") or msg.get("document"):
@@ -9987,43 +9989,50 @@ async def handle_message(msg: dict):
 
             total_users = 0
             daily_active = 0
-            try:
-                total_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact").execute())
-                total_users = total_r.count or 0
-                active_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact") \
-                    .gte("last_seen", today_start_ts).execute())
-                daily_active = active_r.count or 0
-            except Exception as e:
-                logger.error(f"[Ping] user count error: {e}")
-
             key_count = len(key_rotator.keys)
-
             import os as _os, httpx as _hx
             _platform = _os.environ.get("RUNNING_ON", "") or "HuggingFace Space"
+            _wh_short = "❓ Check failed"
 
-            # Current webhook check
-            _wh_url = "Unknown"
-            try:
-                async with _hx.AsyncClient(timeout=5) as _c:
-                    _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
-                    _wh_data = _wr.json()
-                    _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
-                    _render_primary = (os.environ.get("RENDER_URL", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
-                    _render_secondary = (os.environ.get("RENDER_URL_2", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
-                    if _render_secondary and _render_secondary in _wh_url:
-                        _wh_short = "🟠 Render SECONDARY (failover active!)"
-                    elif _render_primary and _render_primary in _wh_url:
-                        _wh_short = "🟡 Render PRIMARY"
-                    elif "onrender.com" in _wh_url:
-                        _wh_short = "🟡 Render (unknown account)"
-                    elif "workers.dev" in _wh_url or "pages.dev" in _wh_url:
-                        _wh_short = "🟢 CF Worker (normal)"
-                    elif "hf.space" in _wh_url:
-                        _wh_short = "🔵 HF Space (direct)"
-                    else:
-                        _wh_short = f"⚪ {_wh_url[:40]}"
-            except Exception:
-                _wh_short = "❓ Check failed"
+            async def _get_user_counts():
+                nonlocal total_users, daily_active
+                try:
+                    total_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact").execute())
+                    total_users = total_r.count or 0
+                    active_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact")
+                        .gte("last_seen", today_start_ts).execute())
+                    daily_active = active_r.count or 0
+                except Exception as e:
+                    logger.error(f"[Ping] user count error: {e}")
+
+            async def _get_webhook_status():
+                nonlocal _wh_short
+                try:
+                    async with _hx.AsyncClient(timeout=5) as _c:
+                        _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
+                        _wh_data = _wr.json()
+                        _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
+                        _render_primary = (os.environ.get("RENDER_URL", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
+                        _render_secondary = (os.environ.get("RENDER_URL_2", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
+                        if _render_secondary and _render_secondary in _wh_url:
+                            _wh_short = "🟠 Render SECONDARY (failover active!)"
+                        elif _render_primary and _render_primary in _wh_url:
+                            _wh_short = "🟡 Render PRIMARY"
+                        elif "onrender.com" in _wh_url:
+                            _wh_short = "🟡 Render (unknown account)"
+                        elif "workers.dev" in _wh_url or "pages.dev" in _wh_url:
+                            _wh_short = "🟢 CF Worker (normal)"
+                        elif "hf.space" in _wh_url:
+                            _wh_short = "🔵 HF Space (direct)"
+                        else:
+                            _wh_short = f"⚪ {_wh_url[:40]}"
+                except Exception:
+                    _wh_short = "❓ Check failed"
+
+            # These three lookups don't depend on each other — run them
+            # concurrently instead of one-by-one so /ping's real latency is
+            # max(all three) instead of the sum of all three.
+            await asyncio.gather(_get_user_counts(), _get_webhook_status())
 
             _latency_ms = int((time.time() - _t0) * 1000)
             final_text = (
