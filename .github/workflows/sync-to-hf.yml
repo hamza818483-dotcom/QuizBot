@@ -26,13 +26,13 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: Push to Primary HF Space (HF04/quizbot-backup)
+      - name: Push to Primary HF Space (test02-HF05/QuizBot)
         env:
           HF_TOKEN_PRIMARY: ${{ secrets.HF_TOKEN_PRIMARY }}
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
-          git remote add hf-primary https://HF04:${HF_TOKEN_PRIMARY}@huggingface.co/spaces/HF04/quizbot-backup
+          git remote add hf-primary https://test02-HF05:${HF_TOKEN_PRIMARY}@huggingface.co/spaces/test02-HF05/QuizBot
           git push hf-primary main:main --force
 
       - name: Sync Secrets to Primary HF Space
@@ -45,7 +45,7 @@ jobs:
           import os, json
           from huggingface_hub import HfApi
           api = HfApi(token=os.environ["HF_TOKEN_PRIMARY"])
-          space_id = "HF04/quizbot-backup"
+          space_id = "test02-HF05/QuizBot"
           secrets_map = json.loads(os.environ["SPACE_SECRETS_JSON"])
           for key, value in secrets_map.items():
               api.add_space_secret(repo_id=space_id, key=key, value=value)
