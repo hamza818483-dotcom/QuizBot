@@ -414,15 +414,29 @@ async def send_quiz_question(chat_id: int, session: dict):
         else:
             opts = opts[:4]
 
-    poll_r = await send_poll(
-        chat_id, q_text, [o[:100] for o in opts], ans_idx,
-        explanation=exp, is_anonymous=False, open_period=session["timer"]
-    )
+    try:
+        poll_r = await send_poll(
+            chat_id, q_text, [o[:100] for o in opts], ans_idx,
+            explanation=exp, is_anonymous=False, open_period=session["timer"] + 5,
+            reply_to_message_id=session.get("last_msg_id")
+        )
+    except Exception as e:
+        # sendPoll ke exception dhoreche (network blip etc) - guard clear kore
+        # dite hobe, nahole retry-o eki guard e atke thakbe (permanent stall)
+        logger.error(f"[Quiz] send_poll raised q{session['cur']+1}/{session['tot']}: {e}")
+        live = QUIZ_SESSIONS.get(uid)
+        if live is not None:
+            live["_sending_for"] = None
+            QUIZ_SESSIONS[uid] = live
+        session["_sending_for"] = None
+        poll_r = {"ok": False, "description": str(e)}
 
     if poll_r.get("ok"):
         poll_id = poll_r["result"].get("poll", {}).get("id", "")
         session["pid"] = poll_id
         session["cor"] = ans_idx
+        session["_sending_for"] = None
+        session["last_msg_id"] = poll_r["result"].get("message_id")
         QUIZ_SESSIONS[session["uid"]] = session
 
         # Timer: auto-skip after timer expires
@@ -456,6 +470,7 @@ async def send_quiz_question(chat_id: int, session: dict):
                 break
         session["skip"] += 1
         session["cur"] += 1
+        session["_sending_for"] = None
         QUIZ_SESSIONS[session["uid"]] = session
         if session["cur"] >= session["tot"]:
             await finish_d1_quiz(session)
@@ -467,6 +482,7 @@ async def send_quiz_question(chat_id: int, session: dict):
 async def handle_quiz_poll_answer(pa: dict):
     """Handle poll answer for D1 quiz system"""
     uid = pa.get("user", {}).get("id")
+    logger.info(f"[Quiz] poll_answer received uid={uid} poll_id={pa.get('poll_id')} in_sessions={uid in QUIZ_SESSIONS if uid else False}")
     if not uid or uid not in QUIZ_SESSIONS:
         return
 
@@ -507,6 +523,9 @@ async def handle_quiz_poll_answer(pa: dict):
         session["wrong"] += 1
 
     session["cur"] += 1
+    # user answer ashle leftover kono guard thakle clear kore dao,
+    # nahole eibar-er advance stale guard e atke jete pare
+    session["_sending_for"] = None
 
     if uid in QUIZ_TIMERS:
         QUIZ_TIMERS[uid].cancel()
@@ -706,7 +725,7 @@ async def finish_d1_quiz(session: dict):
             kb_rows.append([{"text": f"🟡 Practice (Wrong+Skip) ({wrong + skip})", "callback_data": f"qzmp2_{quiz_id}"}])
         kb = {"inline_keyboard": kb_rows}
 
-    await send_msg(chat_id, txt, reply_markup=kb)
+    await send_msg(chat_id, txt, reply_markup=kb, reply_to_message_id=session.get("last_msg_id"))
 
 
 async def handle_d1_leaderboard(chat_id: int, quiz_id: str, uid: int):

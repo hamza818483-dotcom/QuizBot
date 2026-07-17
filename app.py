@@ -4957,21 +4957,21 @@ def _adapt_mcqs_for_print(mcqs: list) -> list:
     return data
 
 _PRINT_CSS = """<style>
-@page{size:A4 portrait;margin:10mm 10mm}
-body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:13pt;line-height:1.2;color:#000;margin:0;padding:10px;width:210mm;max-width:210mm}
+@page{size:A4 portrait;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}}
+body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:12pt;line-height:1.2;color:#000;margin:0;padding:10px;width:210mm;max-width:210mm}
 .exam-header{text-align:center;border:2px solid #4169E1;background-color:#F0F8FF;border-radius:6px;padding:10px;margin-bottom:15px}
 .exam-header h1{color:#191970;margin:0;font-size:15pt;font-weight:bold}
 .content-columns{column-count:2;column-gap:15px;column-fill:balance;column-rule:1px solid #ddd}
 .question{margin-bottom:7px;break-inside:avoid;page-break-inside:avoid}
 .question-header{margin-bottom:4px;display:flex;align-items:flex-start}
-.question-num{font-weight:bold;color:#1E64B7;font-size:14pt;margin-right:5px;white-space:nowrap;flex-shrink:0}
-.question-text{flex:1;line-height:1.6;font-size:15pt;color:#000;word-wrap:break-word}
-.options-table-short{width:100%;border-collapse:collapse;margin:6px 0 6px 8px;table-layout:fixed}
-.options-table-short td{border:none;padding:3px 8px 3px 0;vertical-align:top;font-size:15pt;color:#000;width:40%}
-.options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;font-weight:600;font-size:14pt;color:#000;padding-left:10px}
-.answer-circle{font-weight:300;font-size:14pt;line-height:1}
-.options-list{margin:6px 0 6px 8px;padding:0;list-style:none}
-.options-list li{margin:2px 0;font-size:15pt;color:#000;word-wrap:break-word}
+.question-num{font-family:'Times New Roman',serif;font-weight:bold;color:#1E64B7;font-size:12pt;margin-right:5px;white-space:nowrap;flex-shrink:0}
+.question-text{flex:1;line-height:1.4;font-size:13pt;color:#000;word-wrap:break-word}
+.options-table-short{width:100%;border-collapse:collapse;margin:4px 0 4px 8px;table-layout:fixed}
+.options-table-short td{border:none;padding:2px 8px 2px 0;vertical-align:top;font-size:13pt;color:#000;width:40%}
+.options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;vertical-align:middle;font-family:'Poppins',sans-serif;font-weight:600;font-size:12pt;color:#000;padding-left:10px}
+.answer-circle{font-weight:300;font-family:'Poppins',sans-serif;font-size:12pt;line-height:1}
+.options-list{margin:4px 0 4px 8px;padding:0;list-style:none}
+.options-list li{margin:1px 0;font-size:13pt;color:#000;word-wrap:break-word}
 .option-with-answer{display:flex;justify-content:space-between;align-items:flex-start}
 .explanation{margin:4px 0 2px 8px;padding:4px;color:#000;background-color:rgba(66,153,225,0.1);border-left:3px solid #4299e1;font-size:12pt;font-style:italic;break-inside:avoid}
 .explanation-label{font-weight:bold;color:#2c5282}
@@ -4981,90 +4981,351 @@ body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:1
 .answer-table th,.answer-table td{border:1px solid #333;padding:6px;text-align:left;vertical-align:top;word-wrap:break-word}
 .answer-table th{background-color:#f5f5f5;font-weight:bold;text-align:center;font-size:13pt}
 .qno-col{width:8%;text-align:center}.ans-col{width:8%;text-align:center;font-weight:bold;font-size:14pt}.exp-col{width:84%;font-size:12pt}
-.print-page{display:flex;flex-direction:column;min-height:277mm}
-.answer-key-section{margin-top:auto;page-break-inside:avoid}
+.answer-key-section{margin-top:20px;page-break-inside:avoid}
 .answer-key-header{text-align:center;font-weight:bold;font-size:13pt;margin-bottom:10px;color:#000}
 .answer-key-table{width:100%;border-collapse:collapse;border:1px solid #333;margin:0 auto}
 .answer-key-table th,.answer-key-table td{border:1px solid #333;padding:6px;text-align:center;font-size:11pt}
 .answer-key-table th{background-color:#f5f5f5;font-weight:bold}
 img{max-width:35%!important;height:auto!important;vertical-align:middle}
+@media print{@page{size:A4 portrait;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:210mm;max-width:210mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
 </style>"""
 
 def _check_short_option(opts):
     for v in opts:
-        if v and len(str(v).strip()) > 16:
-            return False
+        if v:
+            clean = re.sub(r'<[^>]+>', '', str(v)).strip()
+            if len(clean) > 16:
+                return False
     return True
 
 def _build_print_style1(data, heading):
-    """Style 1: Study Material - Q + Options + inline Answer + Explanation"""
+    """Format P1: Study Material — Questions + Answers + Explanations inline (100% ported)"""
+    css = _PRINT_CSS
     body = f'<div class="exam-header"><h1>{heading} - Practice Sheet</h1></div><div class="content-columns">'
     for d in data:
-        short = _check_short_option(d["opts"])
-        body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}</div></div>'
-        ans_circle = f'[{d["al"]}]'
-        if short:
-            body += f'<table class="options-table-short"><tr><td>(A) {d["opts"][0]}</td><td>(B) {d["opts"][1]}</td><td rowspan="2" class="answer-col"><span class="answer-circle">{ans_circle}</span></td></tr><tr><td>(C) {d["opts"][2]}</td><td>(D) {d["opts"][3]}</td></tr></table>'
+        is_short = _check_short_option(d["opts"])
+        body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
+        ans_circle = f'[{[chr(97+d["ai"])] if d["ai"]>=0 else "?"}]'
+        if is_short:
+            body += f'<table class="options-table-short"><tr><td class="option-col">(A) {d["opts"][0]}{d["oimgs"][0]}</td><td class="option-col">(B) {d["opts"][1]}{d["oimgs"][1]}</td><td rowspan="2" class="answer-col"><span class="answer-circle">{ans_circle}</span></td></tr><tr><td class="option-col">(C) {d["opts"][2]}{d["oimgs"][2]}</td><td class="option-col">(D) {d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
         else:
-            body += f'<ul class="options-list"><li>(A) {d["opts"][0]}</li><li>(B) {d["opts"][1]}</li><li>(C) {d["opts"][2]}</li><li class="option-with-answer"><span>(D) {d["opts"][3]}</span><span class="answer-circle">{ans_circle}</span></li></ul>'
+            body += f'<ul class="options-list"><li>(A) {d["opts"][0]}{d["oimgs"][0]}</li><li>(B) {d["opts"][1]}{d["oimgs"][1]}</li><li>(C) {d["opts"][2]}{d["oimgs"][2]}</li><li class="option-with-answer"><span>(D) {d["opts"][3]}{d["oimgs"][3]}</span><span class="answer-circle">{ans_circle}</span></li></ul>'
         if d['exp']:
-            body += f'<div class="explanation"><span class="explanation-label">ব্যাখ্যা:</span> {d["exp"]}</div>'
+            body += f'<div class="explanation"><span class="explanation-label">ব্যাখ্যা:</span> {d["exp"]}{d["ei"]}</div>'
         body += '</div>'
     body += '</div>'
-    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_PRINT_CSS}</head><body>{body}</body></html>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
 def _build_print_style2(data, heading):
-    """Style 2: Exam Style - Questions page then separate Answer Table"""
+    """Format P2: Exam Style — Questions page then separate Answer Table (100% ported)"""
+    css = _PRINT_CSS
     body = f'<div class="exam-header"><h1>{heading} - Questions</h1></div><div class="content-columns">'
     for d in data:
-        short = _check_short_option(d["opts"])
-        body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}</div></div>'
-        if short:
-            body += f'<table class="options-table-short"><tr><td>(A) {d["opts"][0]}</td><td>(B) {d["opts"][1]}</td></tr><tr><td>(C) {d["opts"][2]}</td><td>(D) {d["opts"][3]}</td></tr></table>'
+        is_short = _check_short_option(d["opts"])
+        body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
+        if is_short:
+            body += f'<table class="options-table-short"><tr><td>(A) {d["opts"][0]}{d["oimgs"][0]}</td><td>(B) {d["opts"][1]}{d["oimgs"][1]}</td></tr><tr><td>(C) {d["opts"][2]}{d["oimgs"][2]}</td><td>(D) {d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
         else:
-            body += f'<ul class="options-list"><li>(A) {d["opts"][0]}</li><li>(B) {d["opts"][1]}</li><li>(C) {d["opts"][2]}</li><li>(D) {d["opts"][3]}</li></ul>'
+            body += f'<ul class="options-list"><li>(A) {d["opts"][0]}{d["oimgs"][0]}</li><li>(B) {d["opts"][1]}{d["oimgs"][1]}</li><li>(C) {d["opts"][2]}{d["oimgs"][2]}</li><li>(D) {d["opts"][3]}{d["oimgs"][3]}</li></ul>'
         body += '</div>'
     body += '</div><div class="page-break"></div><div class="answers-section"><table class="answer-table"><thead><tr><th class="qno-col">Q.No.</th><th class="ans-col">Ans</th><th class="exp-col">Explanation</th></tr></thead><tbody>'
     for d in data:
         body += f'<tr><td class="qno-col">{d["n"]}</td><td class="ans-col">{d["al"]}</td><td class="exp-col">{d["exp"] if d["exp"] else "-"}</td></tr>'
     body += '</tbody></table></div>'
-    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_PRINT_CSS}</head><body>{body}</body></html>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
-def _build_print_style3(data, heading, per_page=25):
-    """Style 3: Compact Exam - paginated, each page's answer key directly below that page's questions"""
-    pages_html = ""
-    for start in range(0, len(data), per_page):
-        chunk = data[start:start + per_page]
-        body = f'<div class="print-page"><div class="exam-header"><h1>{heading}</h1></div><div class="content-columns" style="column-count:2;break-inside:avoid;">'
-        for d in chunk:
-            short = _check_short_option(d["opts"])
-            body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]}.</span><div class="question-text">{d["q"]}</div></div>'
-            if short:
-                body += f'<table class="options-table-short"><tr><td>(a) {d["opts"][0]}</td><td>(b) {d["opts"][1]}</td></tr><tr><td>(c) {d["opts"][2]}</td><td>(d) {d["opts"][3]}</td></tr></table>'
-            else:
-                body += f'<ul class="options-list"><li>(a) {d["opts"][0]}</li><li>(b) {d["opts"][1]}</li><li>(c) {d["opts"][2]}</li><li>(d) {d["opts"][3]}</li></ul>'
-            body += '</div>'
-        body += '</div><div class="answer-key-section"><div class="answer-key-header">সঠিক উত্তর যাচাই কর :)</div><table class="answer-key-table"><thead><tr><th>প্রশ্ন</th>'
-        for d in chunk:
-            body += f'<th>{d["n"]}</th>'
-        body += '</tr></thead><tbody><tr><th>উত্তর</th>'
-        for d in chunk:
-            body += f'<td>{d["al"]}</td>'
-        body += '</tr></tbody></table></div></div>'
-        if start + per_page < len(data):
-            body += '<div class="page-break"></div>'
-        pages_html += body
-    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_PRINT_CSS}</head><body>{pages_html}</body></html>'
+def _build_print_style3(data, heading):
+    """Format P3: Compact Exam — Questions 2-col + Horizontal Answer Key at bottom (100% ported)"""
+    css = _PRINT_CSS
+    body = f'<div class="exam-header"><h1>{heading}</h1></div><div class="content-columns">'
+    for d in data:
+        is_short = _check_short_option(d["opts"])
+        body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
+        if is_short:
+            body += f'<table class="options-table-short"><tr><td>(a) {d["opts"][0]}{d["oimgs"][0]}</td><td>(b) {d["opts"][1]}{d["oimgs"][1]}</td></tr><tr><td>(c) {d["opts"][2]}{d["oimgs"][2]}</td><td>(d) {d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
+        else:
+            body += f'<ul class="options-list"><li>(a) {d["opts"][0]}{d["oimgs"][0]}</li><li>(b) {d["opts"][1]}{d["oimgs"][1]}</li><li>(c) {d["opts"][2]}{d["oimgs"][2]}</li><li>(d) {d["opts"][3]}{d["oimgs"][3]}</li></ul>'
+        body += '</div>'
+    body += '</div><div class="answer-key-section"><div class="answer-key-header">সঠিক উত্তর যাচাই কর :)</div><table class="answer-key-table"><thead><tr><th class="qno-cell">প্রশ্ন</th>'
+    for d in data:
+        body += f'<th class="qno-cell">{d["n"]}</th>'
+    body += '</tr></thead><tbody><tr><th class="ans-cell">উত্তর</th>'
+    for d in data:
+        body += f'<td class="ans-cell">{d["al"]}</td>'
+    body += '</tr></tbody></table></div>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
+
+# ---- Print Style-02 (3 more formats, 100% ported from print_style_handler02.py) ----
+_P2_HEADER_CSS = """
+.exam-header{width:100%;border-radius:8px;background:#1B4332;padding:12px 16px;margin-bottom:14px;text-align:center}
+.exam-header h1{color:#fff;font-size:26pt;font-weight:bold;margin:0}
+.exam-header p{color:#fff;font-size:11pt;margin:4px 0 0 0}
+"""
+_P3_HEADER_CSS = """
+.exam-header-p3{width:100%;border-radius:8px;background:linear-gradient(135deg, #F4E6E5 0%, #F0D8D6 50%, #E8CCCA 100%);border:2px solid #FBBAB8;padding:12px 16px;margin-bottom:14px;text-align:center}
+.exam-header-p3 h1{color:#6E0607;font-size:26pt;font-weight:bold;margin:0}
+.exam-header-p3 p{color:#6E0607;font-size:11pt;margin:4px 0 0 0}
+"""
+_P2_COMMON_CSS = """<style>
+@page{size:A4 portrait;margin:10mm 10mm}
+body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:12pt;line-height:1.4;color:#000;margin:0;padding:0}
+""" + _P2_HEADER_CSS + """
+.footer-pg{text-align:center;font-size:9pt;color:#999;margin-top:10px;padding:5px}
+.content-columns{column-count:2;column-gap:14px;column-rule:1px solid #e5e7eb;column-fill:balance}
+.question{break-inside:avoid;page-break-inside:avoid;margin-bottom:10px}
+.question-num{font-family:'Times New Roman',serif;font-weight:bold;font-size:12pt;color:#000}
+.question-text{font-size:12pt;line-height:1.4}
+.options-table-short{width:100%;table-layout:fixed;border-collapse:collapse;margin:4px 0}
+.options-table-short td{border:none;padding:2px 4px;font-size:12pt;vertical-align:top}
+.opt-col{width:43%}
+.answer-col{width:14%;text-align:center;vertical-align:middle!important;font-size:13pt;font-weight:600}
+.options-list{list-style:none;padding:0;margin:4px 0 4px 8px}
+.options-list li{font-size:12pt;margin:2px 0}
+.option-flex{display:flex;justify-content:space-between;align-items:flex-start}
+.explanation-box{background:#D1FAE5;border-radius:6px;padding:6px 10px;margin-top:4px;break-inside:avoid}
+.explanation-label{font-weight:bold;color:#065F46;font-size:12pt}
+.explanation-text{font-size:11pt;color:#000}
+.answer-table{width:100%;border-collapse:collapse;border:1px solid #333;margin-top:10px}
+.answer-table th{background:#1B4332;color:#fff;font-weight:bold;font-size:13pt;padding:6px;border:1px solid #333}
+.answer-table td{border:1px solid #333;padding:6px;font-size:12pt}
+.qno-col{width:8%;text-align:center}
+.ans-col{width:8%;text-align:center;font-weight:bold;font-size:14pt}
+.exp-col{width:84%}
+.page-break{page-break-before:always}
+.bengali-hint{font-style:italic;font-size:10pt;color:#555;margin-top:2px}
+img{max-width:100%!important;height:auto!important;display:inline-block;vertical-align:middle}
+.q-img{max-height:80px;max-width:60%!important;margin:0 2px}
+.opt-img{max-height:60px;max-width:80%!important}
+.exp-img{max-height:60px;max-width:80%!important}
+@media print{body{-webkit-print-color-adjust:exact;color-adjust:exact}.question{break-inside:avoid}.answer-table thead{display:table-header-group}}
+</style>"""
+_P2_P3_CSS = """<style>
+@page{size:A4 portrait;margin:10mm 10mm}
+body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:12pt;line-height:1.4;color:#1A1A1A;margin:0;padding:0}
+""" + _P3_HEADER_CSS + """
+.footer-pg{text-align:center;font-size:9pt;color:#999;margin-top:10px;padding:5px}
+.content-columns{column-count:2;column-gap:14px;column-rule:1px solid #e5e7eb;column-fill:balance}
+.question{break-inside:avoid;page-break-inside:avoid;margin-bottom:10px}
+.question-num{font-family:'Times New Roman',serif;font-weight:bold;font-size:12pt;color:#6E0607}
+.question-text{font-size:12pt;line-height:1.4;color:#1A1A1A}
+.options-table-short{width:100%;table-layout:fixed;border-collapse:collapse;margin:4px 0}
+.options-table-short td{border:none;padding:2px 4px;font-size:12pt;vertical-align:top;color:#1A1A1A}
+.opt-col{width:43%}
+.answer-col{width:14%;text-align:center;vertical-align:middle!important;font-size:13pt;font-weight:600;color:#555555}
+.options-list{list-style:none;padding:0;margin:4px 0 4px 8px}
+.options-list li{font-size:12pt;margin:2px 0;color:#1A1A1A}
+.option-flex{display:flex;justify-content:space-between;align-items:flex-start}
+.explanation-box-p3{background:#F0E0E0;border-radius:6px;padding:6px 10px;margin-top:4px;break-inside:avoid}
+.explanation-label-p3{font-weight:bold;color:#6E090F;font-size:12pt}
+.explanation-text-p3{font-size:11pt;color:#1A1A1A}
+.bengali-hint{font-style:italic;font-size:10pt;color:#555;margin-top:2px}
+img{max-width:100%!important;height:auto!important;display:inline-block;vertical-align:middle}
+.q-img{max-height:80px;max-width:60%!important;margin:0 2px}
+.opt-img{max-height:60px;max-width:80%!important}
+.exp-img{max-height:60px;max-width:80%!important}
+@media print{body{-webkit-print-color-adjust:exact;color-adjust:exact}.question{break-inside:avoid}}
+</style>"""
+_P2_FOOTER_TEXT = 'সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস'
+
+def _p2_wrap_img(tag):
+    if not tag:
+        return ''
+    return re.sub(r'<img\s', '<img class="opt-img" ', str(tag))
+
+def _p2_wrap_q_img(tag):
+    if not tag:
+        return ''
+    return re.sub(r'<img\s', '<img class="q-img" ', str(tag))
+
+def _p2_wrap_exp_img(tag):
+    if not tag:
+        return ''
+    return re.sub(r'<img\s', '<img class="exp-img" ', str(tag))
+
+def _build_print2_style1(data, heading):
+    """print2_p1: Practice Style — Answer Table at end (100% ported)"""
+    body = (
+        f'<div class="exam-header"><h1>{heading}</h1>'
+        f'<p>প্রশ্নপত্র – উত্তর ও ব্যাখ্যা শেষ পৃষ্ঠায়</p></div>'
+        f'<div class="content-columns">'
+    )
+    for d in data:
+        is_short = _check_short_option(d['opts'])
+        qi = _p2_wrap_q_img(d.get('qi', ''))
+        oi = [_p2_wrap_img(x) for x in d.get('oimgs', ['', '', '', ''])]
+        body += (
+            f'<div class="question">'
+            f'<span class="question-num">{d["n"]}.</span> '
+            f'<span class="question-text">{d["q"]}{qi}</span>'
+        )
+        if is_short:
+            body += (
+                f'<table class="options-table-short">'
+                f'<tr>'
+                f'<td class="opt-col">ⓐ {d["opts"][0]}{oi[0]}</td>'
+                f'<td class="opt-col">ⓑ {d["opts"][1]}{oi[1]}</td>'
+                f'</tr><tr>'
+                f'<td class="opt-col">ⓒ {d["opts"][2]}{oi[2]}</td>'
+                f'<td class="opt-col">ⓓ {d["opts"][3]}{oi[3]}</td>'
+                f'</tr></table>'
+            )
+        else:
+            body += (
+                f'<ul class="options-list">'
+                f'<li>ⓐ {d["opts"][0]}{oi[0]}</li>'
+                f'<li>ⓑ {d["opts"][1]}{oi[1]}</li>'
+                f'<li>ⓒ {d["opts"][2]}{oi[2]}</li>'
+                f'<li>ⓓ {d["opts"][3]}{oi[3]}</li>'
+                f'</ul>'
+            )
+        body += '</div>'
+    body += '</div><div class="page-break"></div>'
+    body += (
+        f'<div class="exam-header"><h1>{heading} - উত্তর ও ব্যাখ্যা</h1></div>'
+        f'<table class="answer-table">'
+        f'<thead><tr>'
+        f'<th class="qno-col">প্রশ্ন নং</th>'
+        f'<th class="ans-col">উত্তর</th>'
+        f'<th class="exp-col">ব্যাখ্যা</th>'
+        f'</tr></thead><tbody>'
+    )
+    for d in data:
+        ei = _p2_wrap_exp_img(d.get('ei', ''))
+        exp = f'{d["exp"]}{ei}' if d.get('exp') else 'no explanation can be made'
+        body += (
+            f'<tr>'
+            f'<td class="qno-col">{d["n"]}</td>'
+            f'<td class="ans-col">{d["al"]}</td>'
+            f'<td class="exp-col">{exp}</td>'
+            f'</tr>'
+        )
+    body += f'</tbody></table><div class="footer-pg">{_P2_FOOTER_TEXT}</div>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_P2_COMMON_CSS}</head><body>{body}</body></html>'
+
+def _build_print2_style2(data, heading):
+    """print2_p2: Preparation Style — Answer + Explanation inline (100% ported)"""
+    body = (
+        f'<div class="exam-header"><h1>{heading}</h1>'
+        f'<p>সকল প্রশ্নের সাথে উত্তর ও ব্যাখ্যা সম্বলিত সলভ শিট</p></div>'
+        f'<div class="content-columns">'
+    )
+    circles = ['ⓐ', 'ⓑ', 'ⓒ', 'ⓓ']
+    for d in data:
+        is_short = _check_short_option(d['opts'])
+        ans_circle = circles[d['ai']] if 0 <= d.get('ai', -1) <= 3 else '?'
+        qi = _p2_wrap_q_img(d.get('qi', ''))
+        oi = [_p2_wrap_img(x) for x in d.get('oimgs', ['', '', '', ''])]
+        ei = _p2_wrap_exp_img(d.get('ei', ''))
+        body += (
+            f'<div class="question">'
+            f'<span class="question-num">{d["n"]}.</span> '
+            f'<span class="question-text">{d["q"]}{qi}</span>'
+        )
+        if is_short:
+            body += (
+                f'<table class="options-table-short">'
+                f'<tr>'
+                f'<td class="opt-col">(A) {d["opts"][0]}{oi[0]}</td>'
+                f'<td class="opt-col">(B) {d["opts"][1]}{oi[1]}</td>'
+                f'<td rowspan="2" class="answer-col">{ans_circle}</td>'
+                f'</tr><tr>'
+                f'<td class="opt-col">(C) {d["opts"][2]}{oi[2]}</td>'
+                f'<td class="opt-col">(D) {d["opts"][3]}{oi[3]}</td>'
+                f'</tr></table>'
+            )
+        else:
+            body += (
+                f'<ul class="options-list">'
+                f'<li>(A) {d["opts"][0]}{oi[0]}</li>'
+                f'<li>(B) {d["opts"][1]}{oi[1]}</li>'
+                f'<li>(C) {d["opts"][2]}{oi[2]}</li>'
+                f'<li class="option-flex">'
+                f'<span>(D) {d["opts"][3]}{oi[3]}</span>'
+                f'<span class="answer-col">{ans_circle}</span>'
+                f'</li></ul>'
+            )
+        if d.get('exp'):
+            body += (
+                f'<div class="explanation-box">'
+                f'<span class="explanation-label">ব্যাখ্যা:</span> '
+                f'<span class="explanation-text">{d["exp"]}{ei}</span>'
+                f'</div>'
+            )
+        body += '</div>'
+    body += f'</div><div class="footer-pg">{_P2_FOOTER_TEXT}</div>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_P2_COMMON_CSS}</head><body>{body}</body></html>'
+
+def _build_print2_style3(data, heading):
+    """print2_p3: Preparation Style-02 (English + Bengali, pink/maroon theme) (100% ported)"""
+    body = (
+        f'<div class="exam-header-p3"><h1>{heading}</h1>'
+        f'<p>Practice Sheet By ATLAS</p></div>'
+        f'<div class="content-columns">'
+    )
+    circles = ['ⓐ', 'ⓑ', 'ⓒ', 'ⓓ']
+    for d in data:
+        is_short = _check_short_option(d['opts'])
+        ans_circle = circles[d['ai']] if 0 <= d.get('ai', -1) <= 3 else '?'
+        qi = _p2_wrap_q_img(d.get('qi', ''))
+        oi = [_p2_wrap_img(x) for x in d.get('oimgs', ['', '', '', ''])]
+        ei = _p2_wrap_exp_img(d.get('ei', ''))
+        hint = d.get('hint', '')
+        body += (
+            f'<div class="question">'
+            f'<span class="question-num">{d["n"]:02d}.</span> '
+            f'<span class="question-text">{d["q"]}{qi}</span>'
+        )
+        if hint:
+            body += f'<div class="bengali-hint">{hint}</div>'
+        if is_short:
+            body += (
+                f'<table class="options-table-short">'
+                f'<tr>'
+                f'<td class="opt-col">(A) {d["opts"][0]}{oi[0]}</td>'
+                f'<td class="opt-col">(B) {d["opts"][1]}{oi[1]}</td>'
+                f'<td rowspan="2" class="answer-col">{ans_circle}</td>'
+                f'</tr><tr>'
+                f'<td class="opt-col">(C) {d["opts"][2]}{oi[2]}</td>'
+                f'<td class="opt-col">(D) {d["opts"][3]}{oi[3]}</td>'
+                f'</tr></table>'
+            )
+        else:
+            body += (
+                f'<ul class="options-list">'
+                f'<li>(A) {d["opts"][0]}{oi[0]}</li>'
+                f'<li>(B) {d["opts"][1]}{oi[1]}</li>'
+                f'<li>(C) {d["opts"][2]}{oi[2]}</li>'
+                f'<li class="option-flex">'
+                f'<span>(D) {d["opts"][3]}{oi[3]}</span>'
+                f'<span class="answer-col">{ans_circle}</span>'
+                f'</li></ul>'
+            )
+        if d.get('exp'):
+            body += (
+                f'<div class="explanation-box-p3">'
+                f'<span class="explanation-label-p3">ব্যাখ্যা:</span> '
+                f'<span class="explanation-text-p3">{d["exp"]}{ei}</span>'
+                f'</div>'
+            )
+        body += '</div>'
+    body += f'</div><div class="footer-pg">{_P2_FOOTER_TEXT}</div>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{_P2_P3_CSS}</head><body>{body}</body></html>'
 
 PRINT_STYLE_BUILDERS = {
     "style1": _build_print_style1,
     "style2": _build_print_style2,
     "style3": _build_print_style3,
+    "style4": _build_print2_style1,
+    "style5": _build_print2_style2,
+    "style6": _build_print2_style3,
 }
 PRINT_STYLE_NAMES = {
-    "style1": "🖨️ Style 1: Study Material",
-    "style2": "🖨️ Style 2: Exam Style",
-    "style3": "🖨️ Style 3: Compact Exam",
+    "style1": "🖨️ Study Material (প্রশ্ন + উত্তর + ব্যাখ্যা)",
+    "style2": "🖨️ Exam Style (প্রশ্ন + Answer Table)",
+    "style3": "🖨️ Compact Exam (Horizontal Answer Key)",
+    "style4": "🖨️ Practice Style (প্রশ্ন + Answer Table)",
+    "style5": "🖨️ Preparation Style (উত্তর + ব্যাখ্যা inline)",
+    "style6": "🖨️ Preparation Style-02 (English + Bengali)",
 }
 
 # ============================================================
@@ -9173,7 +9434,8 @@ async def _send_quiz_question_inner(uid: int):
 
     poll_r = await send_poll(
         st["chat_id"], q_text[:300], [o[:100] for o in opts], ans_idx,
-        explanation=exp[:200], is_anonymous=False, open_period=QUIZ_Q_SEC
+        explanation=exp[:200], is_anonymous=False, open_period=QUIZ_Q_SEC + 5,
+        reply_to_message_id=st.get("last_msg_id")
     )
 
     if not poll_r.get("ok"):
@@ -9186,6 +9448,7 @@ async def _send_quiz_question_inner(uid: int):
         return
 
     st["poll_id"] = poll_r["result"]["poll"]["id"]
+    st["last_msg_id"] = poll_r["result"]["message_id"]
     st["answered"] = False
     st["timer_task"] = None
     await qs_set(uid, st)
@@ -9349,14 +9612,16 @@ async def _finish_quiz(uid: int):
         kb["inline_keyboard"].append([{"text": "↩️ Back to Source", "url": back_url}])
 
     img_id = st.get("image_file_id")
+    last_id = st.get("last_msg_id")
 
     if img_id:
         caption_trimmed = result_caption[:1024]
-        await send_photo_by_id(chat_id, img_id, caption_trimmed, parse_mode="HTML")
-        await send_msg(chat_id, motivation_text, reply_markup=kb)
+        photo_r = await send_photo_by_id(chat_id, img_id, caption_trimmed, parse_mode="HTML", reply_to_message_id=last_id)
+        reply_for_final = photo_r.get("result", {}).get("message_id") or last_id
+        await send_msg(chat_id, motivation_text, reply_markup=kb, reply_to_message_id=reply_for_final)
     else:
         full_result = result_caption + "\n" + motivation_text
-        await send_msg(chat_id, full_result, reply_markup=kb)
+        await send_msg(chat_id, full_result, reply_markup=kb, reply_to_message_id=last_id)
 
 async def handle_quiz_solve(msg: dict, cache_id: str):
     chat_id = msg["chat"]["id"]
