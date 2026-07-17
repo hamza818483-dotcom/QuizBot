@@ -74,7 +74,12 @@ def _patch_supabase_execute_with_retry():
     The underlying connection can be closed server-side after being idle
     (load balancer / idle timeout); recreating the global Supabase client
     opens a fresh connection. This requires zero changes at any of the
-    existing sb.table(...) call sites across the codebase."""
+    existing sb.table(...) call sites across the codebase.
+
+    v1.2: also retries on Cloudflare edge errors (522/523/524/502/503) which
+    surface as a postgrest APIError ("JSON could not be generated") rather
+    than an httpx transport error, since Cloudflare returns an HTML error
+    page instead of JSON when Supabase's origin is unreachable."""
     try:
         from postgrest._sync.request_builder import SyncQueryRequestBuilder
     except ImportError:
@@ -83,21 +88,49 @@ def _patch_supabase_execute_with_retry():
 
     original_execute = SyncQueryRequestBuilder.execute
 
+    def _is_transient(e) -> bool:
+        if isinstance(e, (_httpx.RemoteProtocolError, _httpx.ConnectError, _httpx.ReadError, _httpx.TimeoutException)):
+            return True
+        msg = str(e)
+        if "JSON could not be generated" in msg or any(c in msg for c in ("522", "523", "524", "502", "503", "Connection timed out")):
+            return True
+        return False
+
     def patched_execute(self):
-        try:
-            return original_execute(self)
-        except (_httpx.RemoteProtocolError, _httpx.ConnectError, _httpx.ReadError) as e:
-            global sb
-            logger.warning(f"[DB] Supabase connection error ({type(e).__name__}) — recreating client and retrying once")
+        last_exc = None
+        for attempt in range(3):  # initial try + 2 retries
             try:
-                sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-            except Exception as ce:
-                logger.error(f"[DB] Supabase client recreation failed: {ce}")
-            return original_execute(self)
+                return original_execute(self)
+            except Exception as e:
+                if not _is_transient(e):
+                    raise
+                last_exc = e
+                global sb
+                logger.warning(f"[DB] Supabase transient error ({type(e).__name__}) — recreating client, attempt {attempt+1}/3")
+                try:
+                    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+                except Exception as ce:
+                    logger.error(f"[DB] Supabase client recreation failed: {ce}")
+                if attempt < 2:
+                    time.sleep(1.0 * (attempt + 1))
+        raise last_exc
 
     SyncQueryRequestBuilder.execute = patched_execute
 
 _patch_supabase_execute_with_retry()
+
+# ------------------------------------------------------------
+# v1.3: run any blocking Supabase call off the event loop.
+# Every `sb.table(...).execute()` call site in this codebase sits inside
+# an `async def` handler but is a plain synchronous call — it blocks the
+# whole FastAPI event loop (every user, every chat) for the duration of
+# each DB round-trip. Wrap calls with `await sb_exec(lambda: sb.table(...)...)`
+# to offload them to a worker thread and keep the bot responsive.
+# ------------------------------------------------------------
+async def sb_exec(fn):
+    """Run a synchronous Supabase call (e.g. lambda: sb.table('x').select('*').execute())
+    on a worker thread so it doesn't block the event loop."""
+    return await asyncio.to_thread(fn)
 
 # ============================================================
 # FASTAPI APP (single shared instance)
@@ -606,6 +639,41 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int) -> Optiona
         logger.error(f"[pyrogram] download error: {e}")
         return None
 
+async def resolve_private_invite_link(invite_link: str) -> dict:
+    """
+    Private invite link (t.me/+xxx বা t.me/joinchat/xxx) থেকে chat ID resolve করে।
+    TELEGRAM_API_ID/HASH configured থাকলে Pyrogram দিয়ে join try করে, না থাকলে error।
+    Returns: {"ok": True, "id":..., "title":..., "type":...} অথবা {"ok": False, "error": "..."}
+    """
+    client = await _get_pyro_client()
+    if not client:
+        return {"ok": False, "error": "TELEGRAM_API_ID/TELEGRAM_API_HASH সেট করা নাই — private invite link resolve করতে এগুলো লাগবে।"}
+    try:
+        chat = await client.join_chat(invite_link)
+        return {
+            "ok": True,
+            "id": chat.id,
+            "title": getattr(chat, "title", "") or getattr(chat, "first_name", ""),
+            "type": str(getattr(chat, "type", "")).split(".")[-1].lower(),
+            "username": getattr(chat, "username", None),
+        }
+    except Exception as e:
+        err = str(e)
+        # ইতিমধ্যে join করা থাকলে join_chat error দেয়, কিন্তু chat resolve করা যায়
+        if "USER_ALREADY_PARTICIPANT" in err or "already" in err.lower():
+            try:
+                chat = await client.get_chat(invite_link)
+                return {
+                    "ok": True,
+                    "id": chat.id,
+                    "title": getattr(chat, "title", "") or getattr(chat, "first_name", ""),
+                    "type": str(getattr(chat, "type", "")).split(".")[-1].lower(),
+                    "username": getattr(chat, "username", None),
+                }
+            except Exception as e2:
+                return {"ok": False, "error": str(e2)}
+        return {"ok": False, "error": err}
+
 # ============================================================
 # DOWNLOAD FILE VIA CF PROXY
 # ============================================================
@@ -677,7 +745,7 @@ async def _ensure_d1_table(name: str, create_sql: str):
 
 async def db_get_settings() -> dict:
     try:
-        r = sb.table("quiz_settings").select("tag,exp_footer,watermark").eq("id", 1).execute()
+        r = await sb_exec(lambda: sb.table("quiz_settings").select("tag,exp_footer,watermark").eq("id", 1).execute())
         if r.data:
             return r.data[0]
     except Exception as e:
@@ -720,7 +788,7 @@ async def db_save_settings(settings: dict):
     """dict-e thaka shob field Supabase (primary) + D1 (mirror) e save kore.
     /wm command er moto jekhane pura settings dict update hoy shekhane use hoy."""
     try:
-        sb.table("quiz_settings").upsert({"id": 1, **settings}).execute()
+        await sb_exec(lambda: sb.table("quiz_settings").upsert({"id": 1, **settings}).execute())
     except Exception as e:
         logger.error(f"[DB] save_settings error: {e}")
     for field, value in settings.items():
@@ -730,16 +798,16 @@ async def db_is_owner_or_admin(uid: int) -> bool:
     if uid == OWNER_ID:
         return True
     try:
-        r = sb.table("admins").select("user_id").eq("user_id", uid).execute()
+        r = await sb_exec(lambda: sb.table("admins").select("user_id").eq("user_id", uid).execute())
         return len(r.data) > 0
     except:
         return False
 
 async def db_track_user(uid: int, uname: str):
     try:
-        sb.table("pdf_users").upsert({
+        await sb_exec(lambda: sb.table("pdf_users").upsert({
             "user_id": uid, "user_name": uname, "last_seen": int(time.time())
-        }).execute()
+        }).execute())
     except Exception as e:
         logger.error(f"[DB] track_user error: {e}")
     try:
@@ -755,7 +823,7 @@ async def db_track_user(uid: int, uname: str):
 
 async def db_save_session(session_id: str, data: dict):
     try:
-        sb.table("pdf_sessions").upsert({"id": session_id, **data}).execute()
+        await sb_exec(lambda: sb.table("pdf_sessions").upsert({"id": session_id, **data}).execute())
     except Exception as e:
         logger.error(f"[DB] save_session error: {e}")
 
@@ -765,13 +833,13 @@ async def db_save_mcq_cache(cache_id: str, session_id: str, page: int,
                              channel_id: str = None, is_new_gen: bool = False,
                              end_msg_id: int = None):
     try:
-        sb.table("pdf_mcq_cache").upsert({
+        await sb_exec(lambda: sb.table("pdf_mcq_cache").upsert({
             "id": cache_id, "session_id": session_id, "page_number": page,
             "topic": topic, "mcq_data": mcqs, "poll_links": poll_links or [],
             "image_file_id": image_file_id, "image_msg_id": image_msg_id,
             "channel_id": channel_id or "", "is_new_gen": is_new_gen,
             "end_msg_id": end_msg_id, "new_gen_count": 0
-        }).execute()
+        }).execute())
     except Exception as e:
         logger.error(f"[DB] save_mcq_cache error: {e}")
     # DURABILITY: mirror into D1 `quizzes` table too (same table/schema the
@@ -789,13 +857,13 @@ async def db_save_mcq_cache(cache_id: str, session_id: str, page: int,
 
 async def db_update_cache(cache_id: str, fields: dict):
     try:
-        sb.table("pdf_mcq_cache").update(fields).eq("id", cache_id).execute()
+        await sb_exec(lambda: sb.table("pdf_mcq_cache").update(fields).eq("id", cache_id).execute())
     except Exception as e:
         logger.error(f"[DB] update_cache error: {e}")
 
 async def db_get_mcq_cache(cache_id: str) -> dict:
     try:
-        r = sb.table("pdf_mcq_cache").select("*").eq("id", cache_id).execute()
+        r = await sb_exec(lambda: sb.table("pdf_mcq_cache").select("*").eq("id", cache_id).execute())
         if r.data:
             return r.data[0]
     except Exception as e:
@@ -820,8 +888,8 @@ async def db_get_mcq_cache(cache_id: str) -> dict:
 
 async def db_get_new_gen_count(cache_id: str, user_id: int) -> int:
     try:
-        r = sb.table("new_gen_count").select("count")\
-            .eq("cache_id", cache_id).eq("user_id", user_id).execute()
+        r = await sb_exec(lambda: sb.table("new_gen_count").select("count")
+            .eq("cache_id", cache_id).eq("user_id", user_id).execute())
         if r.data:
             return r.data[0]["count"]
     except:
@@ -831,10 +899,10 @@ async def db_get_new_gen_count(cache_id: str, user_id: int) -> int:
 async def db_increment_gen_count(cache_id: str, user_id: int) -> int:
     try:
         count = await db_get_new_gen_count(cache_id, user_id) + 1
-        sb.table("new_gen_count").upsert({
+        await sb_exec(lambda: sb.table("new_gen_count").upsert({
             "cache_id": cache_id, "user_id": user_id,
             "count": count, "updated_at": int(time.time())
-        }).execute()
+        }).execute())
         return count
     except Exception as e:
         logger.error(f"[DB] increment_gen_count error: {e}")
@@ -844,21 +912,21 @@ async def db_save_leaderboard(cache_id: str, user_id: int, user_name: str,
                                topic: str, page: int, correct: int,
                                total: int, final_score: float):
     try:
-        r = sb.table("web_exam_leaderboard").select("final_score")\
-            .eq("cache_id", cache_id).eq("user_id", user_id).execute()
+        r = await sb_exec(lambda: sb.table("web_exam_leaderboard").select("final_score")
+            .eq("cache_id", cache_id).eq("user_id", user_id).execute())
         if r.data:
             if final_score > r.data[0]["final_score"]:
-                sb.table("web_exam_leaderboard").update({
+                await sb_exec(lambda: sb.table("web_exam_leaderboard").update({
                     "user_name": user_name, "correct": correct,
                     "total": total, "final_score": final_score,
                     "updated_at": int(time.time())
-                }).eq("cache_id", cache_id).eq("user_id", user_id).execute()
+                }).eq("cache_id", cache_id).eq("user_id", user_id).execute())
         else:
-            sb.table("web_exam_leaderboard").insert({
+            await sb_exec(lambda: sb.table("web_exam_leaderboard").insert({
                 "cache_id": cache_id, "user_id": user_id, "user_name": user_name,
                 "topic": topic, "page_number": page, "correct": correct,
                 "total": total, "final_score": final_score
-            }).execute()
+            }).execute())
     except Exception as e:
         logger.error(f"[DB] save_leaderboard error: {e}")
     try:
@@ -896,7 +964,7 @@ async def db_save_channel(channel_id: str, channel_name: str) -> bool:
     """Save/update a channel in BOTH Supabase (primary) and D1 (mirror/durability)."""
     ok = True
     try:
-        sb.table("channels").upsert({"channel_id": channel_id, "channel_name": channel_name}).execute()
+        await sb_exec(lambda: sb.table("channels").upsert({"channel_id": channel_id, "channel_name": channel_name}).execute())
     except Exception as e:
         logger.error(f"[DB] save_channel Supabase error: {e}")
         ok = False
@@ -913,7 +981,7 @@ async def db_save_channel(channel_id: str, channel_name: str) -> bool:
 
 async def db_get_channels() -> list:
     try:
-        r = sb.table("channels").select("*").execute()
+        r = await sb_exec(lambda: sb.table("channels").select("*").execute())
         if r.data:
             return r.data
     except Exception as e:
@@ -930,7 +998,7 @@ async def db_get_channels() -> list:
 async def db_delete_channel(channel_id: str) -> bool:
     ok = True
     try:
-        sb.table("channels").delete().eq("channel_id", channel_id).execute()
+        await sb_exec(lambda: sb.table("channels").delete().eq("channel_id", channel_id).execute())
     except Exception as e:
         logger.error(f"[DB] delete_channel Supabase error: {e}")
         ok = False
@@ -944,7 +1012,7 @@ async def db_delete_channel(channel_id: str) -> bool:
 async def db_rename_channel(channel_id: str, new_name: str) -> bool:
     ok = True
     try:
-        sb.table("channels").update({"channel_name": new_name}).eq("channel_id", channel_id).execute()
+        await sb_exec(lambda: sb.table("channels").update({"channel_name": new_name}).eq("channel_id", channel_id).execute())
     except Exception as e:
         logger.error(f"[DB] rename_channel Supabase error: {e}")
         ok = False
@@ -960,7 +1028,7 @@ async def db_rename_channel(channel_id: str, new_name: str) -> bool:
 # ============================================================
 async def db_save_last_quiz(uid: int, st: dict):
     try:
-        sb.table("quiz_last_state").upsert({
+        await sb_exec(lambda: sb.table("quiz_last_state").upsert({
             "user_id": uid, "cache_id": st["cache_id"],
             "topic": st.get("topic", ""), "page_number": st.get("page", 1),
             "mcqs": st.get("mcqs", []), "wrong_idx": st.get("wrong_idx", []),
@@ -969,13 +1037,13 @@ async def db_save_last_quiz(uid: int, st: dict):
             "is_new_gen": bool(st.get("is_new_gen")), "right_count": st.get("right", 0),
             "wrong_count": st.get("wrong", 0), "skip_count": st.get("skip", 0),
             "uname": st.get("uname", ""), "updated_at": int(time.time())
-        }).execute()
+        }).execute())
     except Exception as e:
         logger.error(f"[DB] save_last_quiz error: {e}")
 
 async def db_get_last_quiz(uid: int) -> dict:
     try:
-        r = sb.table("quiz_last_state").select("*").eq("user_id", uid).execute()
+        r = await sb_exec(lambda: sb.table("quiz_last_state").select("*").eq("user_id", uid).execute())
         if r.data:
             row = r.data[0]
             return {

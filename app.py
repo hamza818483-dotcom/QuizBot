@@ -43,7 +43,7 @@ from pdf_handler import (
 )
 
 from core import (
-    logger, app, sb,
+    logger, app, sb, sb_exec,
     BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
     CF_WORKER_URL, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
@@ -2179,7 +2179,7 @@ QUIZ_Q_SEC = 35
 # ============================================================
 async def db_get_pin_setting(chat_id) -> bool:
     try:
-        r = sb.table("bot_settings").select("value").eq("key", f"pin_{chat_id}").execute()
+        r = await sb_exec(lambda: sb.table("bot_settings").select("value").eq("key", f"pin_{chat_id}").execute())
         if r.data:
             return r.data[0]["value"] == "on"
     except:
@@ -2195,16 +2195,16 @@ async def db_get_pin_setting(chat_id) -> bool:
 
 async def db_set_pin_setting(chat_id, enabled: bool):
     try:
-        sb.table("bot_settings").upsert({
+        await sb_exec(lambda: sb.table("bot_settings").upsert({
             "key": f"pin_{chat_id}",
             "value": "on" if enabled else "off"
-        }).execute()
+        }).execute())
     except Exception as e:
         logger.error(f"[DB] set_pin error: {e}")
 
 async def db_get_pdf_autosend_setting(chat_id) -> bool:
     try:
-        r = sb.table("bot_settings").select("value").eq("key", f"pdfauto_{chat_id}").execute()
+        r = await sb_exec(lambda: sb.table("bot_settings").select("value").eq("key", f"pdfauto_{chat_id}").execute())
         if r.data:
             return r.data[0]["value"] == "on"
     except:
@@ -2213,16 +2213,16 @@ async def db_get_pdf_autosend_setting(chat_id) -> bool:
 
 async def db_set_pdf_autosend_setting(chat_id, enabled: bool):
     try:
-        sb.table("bot_settings").upsert({
+        await sb_exec(lambda: sb.table("bot_settings").upsert({
             "key": f"pdfauto_{chat_id}",
             "value": "on" if enabled else "off"
-        }).execute()
+        }).execute())
     except Exception as e:
         logger.error(f"[DB] set_pdf_autosend error: {e}")
 
 async def db_get_live_time(chat_id) -> int:
     try:
-        r = sb.table("bot_settings").select("value").eq("key", f"livetime_{chat_id}").execute()
+        r = await sb_exec(lambda: sb.table("bot_settings").select("value").eq("key", f"livetime_{chat_id}").execute())
         if r.data:
             return int(r.data[0]["value"])
     except:
@@ -2231,10 +2231,10 @@ async def db_get_live_time(chat_id) -> int:
 
 async def db_set_live_time(chat_id, seconds: int):
     try:
-        sb.table("bot_settings").upsert({
+        await sb_exec(lambda: sb.table("bot_settings").upsert({
             "key": f"livetime_{chat_id}",
             "value": str(seconds)
-        }).execute()
+        }).execute())
     except Exception as e:
         logger.error(f"[DB] set_livetime error: {e}")
 
@@ -2248,33 +2248,33 @@ async def db_auto_cleanup_if_needed():
     """
     try:
         # pdf_mcq_cache — 10000 rows limit রাখো
-        r = sb.table("pdf_mcq_cache").select("id", count="exact").execute()
+        r = await sb_exec(lambda: sb.table("pdf_mcq_cache").select("id", count="exact").execute())
         if (r.count or 0) > 10000:
-            old = sb.table("pdf_mcq_cache").select("id")\
-                .order("created_at").limit(500).execute()
+            old = await sb_exec(lambda: sb.table("pdf_mcq_cache").select("id")\
+                .order("created_at").limit(500).execute())
             ids = [row["id"] for row in (old.data or [])]
             if ids:
-                sb.table("pdf_mcq_cache").delete().in_("id", ids).execute()
+                await sb_exec(lambda: sb.table("pdf_mcq_cache").delete().in_("id", ids).execute())
                 logger.info(f"[Cleanup] Deleted {len(ids)} old cache rows")
 
         # web_exam_results — 50000 rows limit
-        r2 = sb.table("web_exam_results").select("id", count="exact").execute()
+        r2 = await sb_exec(lambda: sb.table("web_exam_results").select("id", count="exact").execute())
         if (r2.count or 0) > 50000:
-            old2 = sb.table("web_exam_results").select("id")\
-                .order("created_at").limit(1000).execute()
+            old2 = await sb_exec(lambda: sb.table("web_exam_results").select("id")\
+                .order("created_at").limit(1000).execute())
             ids2 = [row["id"] for row in (old2.data or [])]
             if ids2:
-                sb.table("web_exam_results").delete().in_("id", ids2).execute()
+                await sb_exec(lambda: sb.table("web_exam_results").delete().in_("id", ids2).execute())
                 logger.info(f"[Cleanup] Deleted {len(ids2)} old exam results")
 
         # pdf_sessions — 5000 rows limit
-        r3 = sb.table("pdf_sessions").select("id", count="exact").execute()
+        r3 = await sb_exec(lambda: sb.table("pdf_sessions").select("id", count="exact").execute())
         if (r3.count or 0) > 5000:
-            old3 = sb.table("pdf_sessions").select("id")\
-                .order("created_at").limit(200).execute()
+            old3 = await sb_exec(lambda: sb.table("pdf_sessions").select("id")\
+                .order("created_at").limit(200).execute())
             ids3 = [row["id"] for row in (old3.data or [])]
             if ids3:
-                sb.table("pdf_sessions").delete().in_("id", ids3).execute()
+                await sb_exec(lambda: sb.table("pdf_sessions").delete().in_("id", ids3).execute())
     except Exception as e:
         logger.error(f"[Cleanup] Error: {e}")
 
@@ -2285,7 +2285,7 @@ async def db_save_live_result(session_id: str, user_id: int, user_name: str,
                                correct: int, wrong: int, skipped: int,
                                total: int, avg_time: float):
     try:
-        sb.table("live_quiz_results").upsert({
+        await sb_exec(lambda: sb.table("live_quiz_results").upsert({
             "session_id": session_id,
             "user_id": user_id,
             "user_name": user_name,
@@ -2296,7 +2296,7 @@ async def db_save_live_result(session_id: str, user_id: int, user_name: str,
             "avg_response_time": avg_time,
             "score": correct,
             "updated_at": int(time.time())
-        }).execute()
+        }).execute())
     except Exception as e:
         logger.error(f"[DB] save_live_result error: {e}")
     try:
@@ -2318,9 +2318,9 @@ async def db_save_live_result(session_id: str, user_id: int, user_name: str,
 
 async def db_get_live_results(session_id: str) -> list:
     try:
-        r = sb.table("live_quiz_results").select("*")\
+        r = await sb_exec(lambda: sb.table("live_quiz_results").select("*")\
             .eq("session_id", session_id)\
-            .order("score", desc=True).execute()
+            .order("score", desc=True).execute())
         return r.data or []
     except:
         return []
@@ -2424,7 +2424,7 @@ async def handle_permit(msg: dict):
         return
     args = text.split()
     if len(args) < 2:
-        r = sb.table("admins").select("user_id").execute()
+        r = await sb_exec(lambda: sb.table("admins").select("user_id").execute())
         admins = r.data or []
         txt = f"👑 Admins:\n• {OWNER_ID} (Owner)\n"
         for a in admins:
@@ -2432,7 +2432,7 @@ async def handle_permit(msg: dict):
         await send_msg(chat_id, txt)
         return
     target = int(args[1])
-    sb.table("admins").upsert({"user_id": target}).execute()
+    await sb_exec(lambda: sb.table("admins").upsert({"user_id": target}).execute())
     await send_msg(chat_id, f"✅ Admin added: {target}")
 
 async def handle_remove(msg: dict):
@@ -2447,7 +2447,7 @@ async def handle_remove(msg: dict):
         await send_msg(chat_id, "❌ /remove [user_id]")
         return
     target = int(args[1])
-    sb.table("admins").delete().eq("user_id", target).execute()
+    await sb_exec(lambda: sb.table("admins").delete().eq("user_id", target).execute())
     await send_msg(chat_id, f"✅ Admin removed: {target}")
 
 # ============================================================
@@ -2457,7 +2457,7 @@ async def handle_tagQ(msg: dict):
     chat_id = msg["chat"]["id"]
     text = re.sub(r'(?i)^/tagq', '', msg.get("text", "")).strip()
     if text:
-        sb.table("quiz_settings").upsert({"id": 1, "tag": text}).execute()
+        await sb_exec(lambda: sb.table("quiz_settings").upsert({"id": 1, "tag": text}).execute())
         await db_save_settings_field("tag", text)
         await send_msg(chat_id, f"✅ Tag set:\n{text}")
     else:
@@ -2468,7 +2468,7 @@ async def handle_expQ(msg: dict):
     chat_id = msg["chat"]["id"]
     text = re.sub(r'(?i)^/expq', '', msg.get("text", "")).strip()
     if text:
-        sb.table("quiz_settings").upsert({"id": 1, "exp_footer": text}).execute()
+        await sb_exec(lambda: sb.table("quiz_settings").upsert({"id": 1, "exp_footer": text}).execute())
         await db_save_settings_field("exp_footer", text)
         await send_msg(chat_id, f"✅ Footer set:\n{text}")
     else:
@@ -2554,9 +2554,11 @@ async def handle_getid(msg: dict):
 
     target = text.replace("/getid", "", 1).strip()
 
-    # Forwarded message থেকে ID (reply-mode)
+    # Forwarded message থেকে ID (reply-mode) — channel/group অথবা user, দুটোই handle
     if not target and reply:
         fwd_chat = reply.get("forward_from_chat")
+        fwd_user = reply.get("forward_from")
+
         if fwd_chat:
             cid = fwd_chat.get("id")
             ctype = fwd_chat.get("type", "")
@@ -2568,7 +2570,30 @@ async def handle_getid(msg: dict):
                 f"📂 Type: {ctype}"
             )
             return
-        await send_msg(chat_id, "❌ এই মেসেজে forward info নাই। Public/private channel link পাঠাও অথবা forwarded message-এ reply করো।")
+
+        if fwd_user:
+            uid_f = fwd_user.get("id")
+            fname = fwd_user.get("first_name", "")
+            lname = fwd_user.get("last_name", "")
+            uname_f = fwd_user.get("username", "")
+            full_name = f"{fname} {lname}".strip()
+            txt = (
+                f"✅ <b>User ID পাওয়া গেছে!</b>\n\n"
+                f"📛 নাম: {full_name}\n"
+                f"🆔 ID: <code>{uid_f}</code>"
+            )
+            if uname_f:
+                txt += f"\n🔗 Username: @{uname_f}"
+            await send_msg(chat_id, txt)
+            return
+
+        await send_msg(chat_id,
+            "❌ এই মেসেজে forward info নাই।\n\n"
+            "📌 সম্ভাব্য কারণ: যাকে forward করেছো, সে তার Privacy Settings-এ "
+            "\"Forwarded Messages\" এ নিজের নাম/অ্যাকাউন্ট লুকিয়ে রেখেছে — "
+            "সেক্ষেত্রে Telegram নিজেই এই তথ্য কাউকে দেয় না।\n\n"
+            "Public/private channel link পাঠাও অথবা অন্য কোনো forwarded message-এ reply করো।"
+        )
         return
 
     if not target:
@@ -2577,7 +2602,7 @@ async def handle_getid(msg: dict):
             "<b>Usage:</b>\n"
             "<code>/getid https://t.me/channelname</code>\n"
             "<code>/getid @channelname</code>\n"
-            "<code>/getid https://t.me/+AbCdEfGhIjK</code> (private invite link)\n"
+            "<code>/getid https://t.me/+AbCdEfGhIjK</code> (private invite link — API ID/HASH লাগবে)\n"
             "<code>/getid -1001234567890</code>\n\n"
             "📌 Private channel/group হলে বটকে আগে member/admin করে নিতে হবে।"
         )
@@ -2599,13 +2624,25 @@ async def handle_getid(msg: dict):
         resolved = "@" + target.lstrip("@")
 
     if is_private_invite:
-        await send_msg(chat_id,
-            "⚠️ এটা একটা <b>private invite link</b>।\n\n"
-            "Telegram Bot API invite link থেকে সরাসরি ID বের করতে দেয় না — "
-            "বটকে আগে ওই channel/group-এ manually add/invite করতে হবে। "
-            "তারপর ওই channel/group থেকে যেকোনো একটা মেসেজ এই চ্যাটে forward করে "
-            "সেই forwarded মেসেজে <code>/getid</code> reply করলে ID পেয়ে যাবে।"
-        )
+        from core import resolve_private_invite_link
+        result = await resolve_private_invite_link(target)
+        if result.get("ok"):
+            txt = (
+                f"✅ <b>ID পাওয়া গেছে!</b> (private invite link থেকে)\n\n"
+                f"📛 নাম: {result.get('title', '')}\n"
+                f"🆔 ID: <code>{result.get('id')}</code>\n"
+                f"📂 Type: {result.get('type', '')}"
+            )
+            if result.get("username"):
+                txt += f"\n🔗 Username: @{result['username']}"
+            await send_msg(chat_id, txt)
+        else:
+            await send_msg(chat_id,
+                f"❌ Private invite link resolve করা যায়নি!\n\n"
+                f"Reason: {result.get('error', 'unknown')}\n\n"
+                f"📌 বিকল্প: ওই channel/group থেকে যেকোনো একটা মেসেজ এই চ্যাটে forward করে "
+                f"সেই forwarded মেসেজে <code>/getid</code> reply করো।"
+            )
         return
 
     r = await tg_post("getChat", {"chat_id": resolved})
@@ -2778,11 +2815,11 @@ async def handle_img_command(msg: dict):
         file_id = reply["document"]["file_id"]
 
     session_key = f"img_cmd_{uid}"
-    sb.table("quiz_sessions").upsert({
+    await sb_exec(lambda: sb.table("quiz_sessions").upsert({
         "key": session_key,
         "data": json.dumps({"file_id": file_id, "msg_id": reply["message_id"], "topic": topic, "mcq_count": mcq_count}),
         "updated_at": int(time.time())
-    }).execute()
+    }).execute())
 
     # STEP 0 (NEW): source select — New MCQ (AI-generated, present system)
     # vs Existing MCQ (extract already-existing MCQ from the image, qbm-style).
@@ -2802,18 +2839,18 @@ async def handle_img_source(source: str, uid: int, chat_id: int, user: dict):
     Mode selection no longer happens here; it happens after the channel is picked
     (see imgchannel_ callback), right before the poll is actually sent."""
     session_key = f"img_cmd_{uid}"
-    row = sb.table("quiz_sessions").select("data").eq("key", session_key).execute()
+    row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", session_key).execute())
     if not row.data:
         await send_msg(chat_id, "❌ Session expired!")
         return
 
     img_data = json.loads(row.data[0]["data"])
     img_data["source"] = source
-    sb.table("quiz_sessions").upsert({
+    await sb_exec(lambda: sb.table("quiz_sessions").upsert({
         "key": session_key,
         "data": json.dumps(img_data),
         "updated_at": int(time.time())
-    }).execute()
+    }).execute())
 
     # Straight into processing — no mode prompt here anymore.
     await handle_img_process(uid, chat_id, user)
@@ -2822,7 +2859,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     """Runs MCQ generation/extraction, auto-sends CSV, then shows channel list.
     Mode (Image/Topic) is asked AFTER channel is chosen, not here."""
     session_key = f"img_cmd_{uid}"
-    row = sb.table("quiz_sessions").select("data").eq("key", session_key).execute()
+    row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", session_key).execute())
     if not row.data:
         await send_msg(chat_id, "❌ Session expired!")
         return
@@ -2958,11 +2995,11 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     app.state.img_cache = getattr(app.state, "img_cache", {})
     app.state.img_cache[f"img_mcq_{uid}"] = {"mcqs": mcqs, "img_bytes": img_bytes}
 
-    sb.table("quiz_sessions").upsert({
+    await sb_exec(lambda: sb.table("quiz_sessions").upsert({
         "key": f"img_mode_{uid}",
         "data": json.dumps({"file_id": file_id, "topic": topic, "source": source, "mcq_count": mcq_count, "mcqs": mcqs}),
         "updated_at": int(time.time())
-    }).execute()
+    }).execute())
 
     await edit_msg(chat_id, loading_id, f"✅ Processing Complete! {len(mcqs)} MCQ পাওয়া গেছে")
 
@@ -3014,7 +3051,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         # image bytes need a cheap re-download from Telegram (no AI cost).
         db_mcqs = None
         try:
-            row = sb.table("quiz_sessions").select("data").eq("key", f"img_mode_{uid}").execute()
+            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"img_mode_{uid}").execute())
             if row.data:
                 saved = json.loads(row.data[0]["data"])
                 db_mcqs = saved.get("mcqs")
@@ -3285,11 +3322,11 @@ async def handle_txt_command(msg: dict):
             "ATLAS_mcq.csv", caption=caption, mime_type="text/csv")
 
         # MCQ result cache করে রাখা হচ্ছে channel select করার সময় ব্যবহারের জন্য
-        sb.table("quiz_sessions").upsert({
+        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
             "key": f"txt_cmd_{uid}",
             "data": json.dumps({"mcqs": mcqs}),
             "updated_at": int(time.time())
-        }).execute()
+        }).execute())
 
         channels = await db_get_channels()
         if not channels:
@@ -3322,7 +3359,7 @@ async def process_txt_to_poll(channel_id: str, chat_id: int, uid: int, uname: st
 
 async def _process_txt_to_poll_inner(channel_id: str, chat_id: int, uid: int, uname: str):
     """Cache করা MCQ থেকে সরাসরি poll পাঠাও (আবার generate করবে না)"""
-    row = sb.table("quiz_sessions").select("data").eq("key", f"txt_cmd_{uid}").execute()
+    row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"txt_cmd_{uid}").execute())
     if not row.data:
         await send_msg(chat_id, "❌ Session expired!")
         return
@@ -3595,7 +3632,7 @@ async def handle_csv_command(msg: dict):
         cache_id = gen_session_id()
         await db_save_mcq_cache(cache_id, cache_id, 0, topic or "CSV MCQ", mcqs)
 
-        sb.table("quiz_sessions").upsert({
+        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
             "key": f"csv_cmd_{uid}",
             "data": json.dumps({
                 "cache_id": cache_id,
@@ -3606,7 +3643,7 @@ async def handle_csv_command(msg: dict):
                 "inline_topic_id": inline_topic_id
             }),
             "updated_at": int(time.time())
-        }).execute()
+        }).execute())
 
         # Inline mode: directly send to specified channel
         if inline_channel:
@@ -3716,7 +3753,7 @@ async def handle_csvs_command(msg: dict):
         cache_id = gen_session_id()
         await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs)
 
-        sb.table("quiz_sessions").upsert({
+        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
             "key": f"csv_cmd_{uid}",
             "data": json.dumps({
                 "cache_id": cache_id,
@@ -3726,7 +3763,7 @@ async def handle_csvs_command(msg: dict):
                 "mode": "csvs"  # serial/batch mode
             }),
             "updated_at": int(time.time())
-        }).execute()
+        }).execute())
 
         batches = [mcqs[i:i+batch_size] for i in range(0, len(mcqs), batch_size)]
 
@@ -3982,7 +4019,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
     /csv — single batch, সব polls একসাথে পাঠাও
     /csvS — serial batch mode
     """
-    row = sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{uid}").execute()
+    row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{uid}").execute())
     if not row.data:
         await send_msg(chat_id, "❌ Session expired!")
         return
@@ -4313,10 +4350,10 @@ async def handle_info2(msg: dict):
         await send_msg(chat_id, "❌ Owner only!")
         return
     try:
-        users = sb.table("pdf_users").select("user_id", count="exact").execute()
-        sessions = sb.table("pdf_sessions").select("id", count="exact").execute()
-        web_exams = sb.table("web_exam_results").select("id", count="exact").execute()
-        top_r = sb.table("web_exam_results").select("user_name, user_id").execute()
+        users = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact").execute())
+        sessions = await sb_exec(lambda: sb.table("pdf_sessions").select("id", count="exact").execute())
+        web_exams = await sb_exec(lambda: sb.table("web_exam_results").select("id", count="exact").execute())
+        top_r = await sb_exec(lambda: sb.table("web_exam_results").select("user_name, user_id").execute())
         top_counts = {}
         for row in (top_r.data or []):
             uid_r = row["user_id"]
@@ -4345,7 +4382,7 @@ async def handle_bm(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     try:
-        r = sb.table("bookmarks").select("*").eq("user_id", uid).order("created_at").execute()
+        r = await sb_exec(lambda: sb.table("bookmarks").select("*").eq("user_id", uid).order("created_at").execute())
         bookmarks = r.data or []
         if not bookmarks:
             await send_msg(chat_id, "🔖 কোনো bookmark নেই!\n\nWeb Exam এ 🔖 বাটন চেপে bookmark করো।")
@@ -4441,7 +4478,7 @@ async def handle_bmexam(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     try:
-        r = sb.table("bookmarks").select("*").eq("user_id", uid).order("created_at").execute()
+        r = await sb_exec(lambda: sb.table("bookmarks").select("*").eq("user_id", uid).order("created_at").execute())
         bookmarks = r.data or []
         if not bookmarks:
             await send_msg(chat_id, "🔖 কোনো bookmark নেই!\n\nWeb Exam এ 🔖 বাটন চেপে bookmark করো।")
@@ -4471,7 +4508,7 @@ async def handle_bmexam(msg: dict):
 async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: str):
     """User count select করার পর — cache বানিয়ে Quiz Solve/Poll Solve/Web Exam বাটন দাও"""
     try:
-        r = sb.table("bookmarks").select("*").eq("user_id", uid).order("created_at").execute()
+        r = await sb_exec(lambda: sb.table("bookmarks").select("*").eq("user_id", uid).order("created_at").execute())
         bookmarks = r.data or []
         if not bookmarks:
             await send_msg(chat_id, "🔖 কোনো bookmark নেই!")
@@ -5515,11 +5552,11 @@ async def handle_pdf(msg: dict):
             app.state.pdf_cache = getattr(app.state, "pdf_cache", {})
             app.state.pdf_cache[f"pdf_img_{uid}"] = generated_pages
             _cap_page_cache(app.state.pdf_cache)
-            sb.table("quiz_sessions").upsert({
+            await sb_exec(lambda: sb.table("quiz_sessions").upsert({
                 "key": f"pdf_pending_{uid}",
                 "data": json.dumps({"topic": topic, "mcq_count": mcq_count, "file_name": file_name, "status_msg_id": status_msg_id, "thread_id": thread_id, "file_id": file_id, "page_range": page_range}),
                 "updated_at": int(time.time())
-            }).execute()
+            }).execute())
 
             total_mcq_found = sum(len(mcqs) for _, _, mcqs in generated_pages)
             page_breakdown = "\n".join(
@@ -5936,7 +5973,7 @@ async def _process_pdf_pages_inner(
             page_status[idx]["mcq"] = len(mcqs)
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
-            sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute()
+            await sb_exec(lambda: sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute())
 
         except Exception as e:
             logger.error(f"[PDF] Page {page_num} error: {e}", exc_info=True)
@@ -6019,7 +6056,7 @@ async def _process_pdf_pages_inner(
             logger.error(f"[PDF-AUTOSEND] Error: {e}")
             await notify_owner(f"⚠️ Auto-PDF সিস্টেমে error — topic: {topic}\nReason: {e}")
 
-    sb.table("pdf_sessions").update({"status": "done"}).eq("id", session_id).execute()
+    await sb_exec(lambda: sb.table("pdf_sessions").update({"status": "done"}).eq("id", session_id).execute())
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
     await edit_msg(chat_id, status_msg_id,
@@ -6097,7 +6134,7 @@ async def handle_pdfm(msg: dict):
             app.state.pdf_cache = getattr(app.state, "pdf_cache", {})
             app.state.pdf_cache[f"pdfm_img_{uid}"] = pages
             _cap_page_cache(app.state.pdf_cache)
-            sb.table("quiz_sessions").upsert({
+            await sb_exec(lambda: sb.table("quiz_sessions").upsert({
                 "key": f"pdfm_pending_{uid}",
                 "data": json.dumps({
                     "topic": topic, "mcq_count": mcq_count,
@@ -6107,7 +6144,7 @@ async def handle_pdfm(msg: dict):
                     "page_range": page_range
                 }),
                 "updated_at": int(time.time())
-            }).execute()
+            }).execute())
 
             kb = {"inline_keyboard": []}
             for ch in channels:
@@ -6706,7 +6743,7 @@ If NO MCQ exists on this page → return exactly: []
 # পড়তে হয় না — RAM cache-এ read, update হলেই DB-তে ও RAM-এ একসাথে save হয়।
 _qbm_prompt_cache = {"prompt": None}
 
-def qbm_get_active_prompt() -> str:
+async def qbm_get_active_prompt() -> str:
     if _qbm_prompt_cache["prompt"]:
         return _qbm_prompt_cache["prompt"]
     try:
@@ -6721,7 +6758,7 @@ def qbm_get_active_prompt() -> str:
     _qbm_prompt_cache["prompt"] = QBM_EXTRACT_PROMPT_DEFAULT
     return QBM_EXTRACT_PROMPT_DEFAULT
 
-def qbm_set_active_prompt(new_prompt: str):
+async def qbm_set_active_prompt(new_prompt: str):
     """New prompt update এলে সেটাকে permanent করে save করে — পরের বার থেকে
     (নতুন update না আসা অবধি) এই prompt-ই সবসময় ব্যবহার হবে।"""
     _qbm_prompt_cache["prompt"] = new_prompt
@@ -6818,7 +6855,7 @@ async def _qbm_call1_extract(img) -> list:
     /ghost MCQ enters the list. Groq primary -> Gemini fallback.
     """
     try:
-        prompt = qbm_get_active_prompt()
+        prompt = await qbm_get_active_prompt()
         txt = await _qbm_groq_call(img, prompt)
         result = _qbm_parse_json(txt) if txt else []
         if result:
@@ -7125,7 +7162,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
 
 async def _qbm_gemini_extract(img, prompt: str = None) -> list:
     """Direct Gemini call with the strict extraction prompt (fallback path)."""
-    txt = await _qbm_gemini_raw(img, prompt or qbm_get_active_prompt())
+    txt = await _qbm_gemini_raw(img, prompt or await qbm_get_active_prompt())
     return _qbm_parse_json(txt) if txt else []
 
 
@@ -7261,7 +7298,7 @@ async def _handle_qbm_impl(msg: dict):
             app.state.qbm_cache = getattr(app.state, "qbm_cache", {})
             app.state.qbm_cache[f"qbm_img_{uid}"] = extracted_pages
             _cap_page_cache(app.state.qbm_cache)
-            sb.table("quiz_sessions").upsert({
+            await sb_exec(lambda: sb.table("quiz_sessions").upsert({
                 "key": f"qbm_pending_{uid}",
                 "data": json.dumps({
                     "topic": topic, "file_name": file_name,
@@ -7269,7 +7306,7 @@ async def _handle_qbm_impl(msg: dict):
                     "file_id": file_id, "page_range": page_range
                 }),
                 "updated_at": int(time.time())
-            }).execute()
+            }).execute())
 
             total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
             page_breakdown = "\n".join(
@@ -7853,7 +7890,7 @@ async def handle_rapid_time_text(msg: dict) -> bool:
     state["run_at_ts"] = run_at.timestamp()
 
     # persist (so a restart before fire-time doesn't silently lose it — see _recover_rapid_jobs)
-    sb.table("quiz_sessions").upsert({
+    await sb_exec(lambda: sb.table("quiz_sessions").upsert({
         "key": f"rapid_job_{job_id}",
         "data": json.dumps({
             "topic": state["topic"],
@@ -7864,7 +7901,7 @@ async def handle_rapid_time_text(msg: dict) -> bool:
             "status": "pending",
         }),
         "updated_at": int(time.time())
-    }).execute()
+    }).execute())
 
     delay = (run_at - now).total_seconds()
     task = asyncio.create_task(_rapid_wait_and_run(job_id, delay))
@@ -7894,7 +7931,7 @@ async def _rapid_wait_and_run(job_id: str, delay_seconds: float):
 
 
 async def _run_rapid_job(job_id: str):
-    row = sb.table("quiz_sessions").select("data").eq("key", f"rapid_job_{job_id}").execute()
+    row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"rapid_job_{job_id}").execute())
     if not row.data:
         return
     job = json.loads(row.data[0]["data"])
@@ -7988,8 +8025,8 @@ async def _run_rapid_job(job_id: str):
         except Exception as e:
             logger.error(f"[RAPID] PDF error: {e}")
 
-        sb.table("quiz_sessions").update({"data": json.dumps({**job, "status": "done"})}) \
-            .eq("key", f"rapid_job_{job_id}").execute()
+        await sb_exec(lambda: sb.table("quiz_sessions").update({"data": json.dumps({**job, "status": "done"})}) \
+            .eq("key", f"rapid_job_{job_id}").execute())
 
     except Exception as e:
         logger.error(f"[RAPID] job {job_id} run error: {e}")
@@ -8045,8 +8082,8 @@ async def _recover_rapid_jobs():
     """App restart হলে যেসব /rapid job এখনো fire হয়নি (run_at_ts ভবিষ্যতে), সেগুলো
     আবার schedule করে। Past হয়ে গেলে (process অনেকক্ষণ বন্ধ ছিল) মিস হিসেবে গণ্য করে skip করে।"""
     try:
-        rows = sb.table("quiz_sessions").select("key,data") \
-            .like("key", "rapid_job_%").execute()
+        rows = await sb_exec(lambda: sb.table("quiz_sessions").select("key,data") \
+            .like("key", "rapid_job_%").execute())
         now_ts = time.time()
         for row in (rows.data or []):
             try:
@@ -8059,8 +8096,8 @@ async def _recover_rapid_jobs():
             job_id = row["key"].replace("rapid_job_", "")
             if run_at_ts <= now_ts:
                 logger.warning(f"[RAPID] job {job_id} missed its scheduled time during downtime — skipping")
-                sb.table("quiz_sessions").update({"data": json.dumps({**job, "status": "missed"})}) \
-                    .eq("key", row["key"]).execute()
+                await sb_exec(lambda: sb.table("quiz_sessions").update({"data": json.dumps({**job, "status": "missed"})}) \
+                    .eq("key", row["key"]).execute())
                 continue
             delay = run_at_ts - now_ts
             task = asyncio.create_task(_rapid_wait_and_run(job_id, delay))
@@ -8111,7 +8148,7 @@ async def handle_live_command(msg: dict):
 
         session_id = gen_session_id()
 
-        sb.table("quiz_sessions").upsert({
+        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
             "key":        f"live_pending_{uid}",
             "data":       json.dumps({
                 "session_id": session_id,
@@ -8120,7 +8157,7 @@ async def handle_live_command(msg: dict):
                 "admin_chat": chat_id
             }),
             "updated_at": int(time.time())
-        }).execute()
+        }).execute())
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
@@ -9442,7 +9479,7 @@ async def handle_merge_command(msg: dict):
     args = text.replace("/merge", "").strip()
 
     if args == "done":
-        row = sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute()
+        row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute())
         if not row.data:
             await send_msg(chat_id, "❌ No files to merge!")
             return
@@ -9464,17 +9501,17 @@ async def handle_merge_command(msg: dict):
             f"merged_{len(all_rows)-1}.csv",
             caption=f"✅ Merged: {len(all_rows)-1} rows from {len(files)} files",
             mime_type="text/csv")
-        sb.table("quiz_sessions").delete().eq("key", f"merge_{uid}").execute()
+        await sb_exec(lambda: sb.table("quiz_sessions").delete().eq("key", f"merge_{uid}").execute())
         return
 
     if args == "status":
-        row = sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute()
+        row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute())
         count = len(json.loads(row.data[0]["data"]).get("files", [])) if row.data else 0
         await send_msg(chat_id, f"📊 Total files: {count}")
         return
 
     if args == "cancel":
-        sb.table("quiz_sessions").delete().eq("key", f"merge_{uid}").execute()
+        await sb_exec(lambda: sb.table("quiz_sessions").delete().eq("key", f"merge_{uid}").execute())
         await send_msg(chat_id, "❌ Merge cancelled!")
         return
 
@@ -9482,14 +9519,14 @@ async def handle_merge_command(msg: dict):
         try:
             csv_bytes = await download_tg_file(reply["document"]["file_id"])
             content = csv_bytes.decode("utf-8-sig")
-            row = sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute()
+            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute())
             files = json.loads(row.data[0]["data"]).get("files", []) if row.data else []
             files.append(content)
-            sb.table("quiz_sessions").upsert({
+            await sb_exec(lambda: sb.table("quiz_sessions").upsert({
                 "key": f"merge_{uid}",
                 "data": json.dumps({"files": files}),
                 "updated_at": int(time.time())
-            }).execute()
+            }).execute())
             await send_msg(chat_id, f"📎 File {len(files)} received! Total: {len(files)}\n/merge done when ready")
         except Exception as e:
             await _safe_error_reply(chat_id, e)
@@ -9746,7 +9783,7 @@ async def set_bot_commands(notify_chat_id: int = None):
 
     admin_ids = {OWNER_ID}
     try:
-        admin_rows = sb.table("admins").select("user_id").execute()
+        admin_rows = await sb_exec(lambda: sb.table("admins").select("user_id").execute())
         for row in (admin_rows.data or []):
             try:
                 admin_ids.add(int(row["user_id"]))
@@ -9784,8 +9821,10 @@ async def handle_message(msg: dict):
     uname = msg["from"].get("first_name", "User")
     chat_type = msg["chat"].get("type", "private")
     is_private = chat_type == "private"
-    await db_track_user(uid, uname)
-    is_auth = await db_is_owner_or_admin(uid)
+    # These two are independent DB lookups that ran one-after-another before
+    # every single command — running them concurrently halves this fixed
+    # per-message latency for every command in the bot.
+    _, is_auth = await asyncio.gather(db_track_user(uid, uname), db_is_owner_or_admin(uid))
 
     # Image collection mode check
     if msg.get("photo") or msg.get("document"):
@@ -9831,6 +9870,22 @@ async def handle_message(msg: dict):
     # DB cleanup (every ~100 requests, random)
     if random.random() < 0.01:
         asyncio.create_task(db_auto_cleanup_if_needed())
+
+    # Plain t.me link পাঠালেই (কোনো command ছাড়া) auto-resolve করে ID দিয়ে দেওয়া
+    if (is_private and text and not text.startswith("/")
+            and re.fullmatch(r'(https?://)?t\.me/\S+', text)):
+        fake_msg = dict(msg)
+        fake_msg["text"] = "/getid " + text
+        await handle_getid(fake_msg)
+        return
+
+    # Forwarded message পাঠালেই (কোনো command ছাড়া) auto ID বের করে দেওয়া
+    if is_private and (msg.get("forward_from_chat") or msg.get("forward_from")) and not text:
+        fake_msg = dict(msg)
+        fake_msg["text"] = "/getid"
+        fake_msg["reply_to_message"] = msg
+        await handle_getid(fake_msg)
+        return
 
     # Poll auto-collect (forwarded polls)
     if msg.get("poll") and msg.get("forward_date"):
@@ -9945,12 +10000,13 @@ async def handle_message(msg: dict):
         # /qbmprompt (no args) -> shows the currently active prompt.
         new_prompt = text[len("/qbmprompt"):].strip()
         if not new_prompt:
-            await send_msg(chat_id, f"📋 Active QBM Prompt:\n\n<code>{qbm_get_active_prompt()[:3500]}</code>")
+            active_prompt = await qbm_get_active_prompt()
+            await send_msg(chat_id, f"📋 Active QBM Prompt:\n\n<code>{active_prompt[:3500]}</code>")
         elif new_prompt.lower() == "reset":
-            qbm_set_active_prompt(QBM_EXTRACT_PROMPT_DEFAULT)
+            await qbm_set_active_prompt(QBM_EXTRACT_PROMPT_DEFAULT)
             await send_msg(chat_id, "✅ QBM prompt default-এ reset হয়ে গেছে।")
         else:
-            qbm_set_active_prompt(new_prompt)
+            await qbm_set_active_prompt(new_prompt)
             await send_msg(chat_id, "✅ QBM prompt permanently update হয়ে গেছে। এখন থেকে সব page-এ এই prompt-ই ব্যবহার হবে।")
     elif text.startswith("/qbm"):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
@@ -10099,43 +10155,50 @@ async def handle_message(msg: dict):
 
             total_users = 0
             daily_active = 0
-            try:
-                total_r = sb.table("pdf_users").select("user_id", count="exact").execute()
-                total_users = total_r.count or 0
-                active_r = sb.table("pdf_users").select("user_id", count="exact") \
-                    .gte("last_seen", today_start_ts).execute()
-                daily_active = active_r.count or 0
-            except Exception as e:
-                logger.error(f"[Ping] user count error: {e}")
-
             key_count = len(key_rotator.keys)
-
             import os as _os, httpx as _hx
             _platform = _os.environ.get("RUNNING_ON", "") or "HuggingFace Space"
+            _wh_short = "❓ Check failed"
 
-            # Current webhook check
-            _wh_url = "Unknown"
-            try:
-                async with _hx.AsyncClient(timeout=5) as _c:
-                    _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
-                    _wh_data = _wr.json()
-                    _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
-                    _render_primary = (os.environ.get("RENDER_URL", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
-                    _render_secondary = (os.environ.get("RENDER_URL_2", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
-                    if _render_secondary and _render_secondary in _wh_url:
-                        _wh_short = "🟠 Render SECONDARY (failover active!)"
-                    elif _render_primary and _render_primary in _wh_url:
-                        _wh_short = "🟡 Render PRIMARY"
-                    elif "onrender.com" in _wh_url:
-                        _wh_short = "🟡 Render (unknown account)"
-                    elif "workers.dev" in _wh_url or "pages.dev" in _wh_url:
-                        _wh_short = "🟢 CF Worker (normal)"
-                    elif "hf.space" in _wh_url:
-                        _wh_short = "🔵 HF Space (direct)"
-                    else:
-                        _wh_short = f"⚪ {_wh_url[:40]}"
-            except Exception:
-                _wh_short = "❓ Check failed"
+            async def _get_user_counts():
+                nonlocal total_users, daily_active
+                try:
+                    total_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact").execute())
+                    total_users = total_r.count or 0
+                    active_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact")
+                        .gte("last_seen", today_start_ts).execute())
+                    daily_active = active_r.count or 0
+                except Exception as e:
+                    logger.error(f"[Ping] user count error: {e}")
+
+            async def _get_webhook_status():
+                nonlocal _wh_short
+                try:
+                    async with _hx.AsyncClient(timeout=5) as _c:
+                        _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
+                        _wh_data = _wr.json()
+                        _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
+                        _render_primary = (os.environ.get("RENDER_URL", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
+                        _render_secondary = (os.environ.get("RENDER_URL_2", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
+                        if _render_secondary and _render_secondary in _wh_url:
+                            _wh_short = "🟠 Render SECONDARY (failover active!)"
+                        elif _render_primary and _render_primary in _wh_url:
+                            _wh_short = "🟡 Render PRIMARY"
+                        elif "onrender.com" in _wh_url:
+                            _wh_short = "🟡 Render (unknown account)"
+                        elif "workers.dev" in _wh_url or "pages.dev" in _wh_url:
+                            _wh_short = "🟢 CF Worker (normal)"
+                        elif "hf.space" in _wh_url:
+                            _wh_short = "🔵 HF Space (direct)"
+                        else:
+                            _wh_short = f"⚪ {_wh_url[:40]}"
+                except Exception:
+                    _wh_short = "❓ Check failed"
+
+            # These three lookups don't depend on each other — run them
+            # concurrently instead of one-by-one so /ping's real latency is
+            # max(all three) instead of the sum of all three.
+            await asyncio.gather(_get_user_counts(), _get_webhook_status())
 
             _latency_ms = int((time.time() - _t0) * 1000)
             final_text = (
@@ -10202,7 +10265,7 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            row = sb.table("quiz_sessions").select("data").eq("key", f"pdf_pending_{uid}").execute()
+            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"pdf_pending_{uid}").execute())
             if not row.data:
                 await send_msg(chat_id, "❌ Session expired!")
                 return
@@ -10245,11 +10308,11 @@ async def handle_callback(query: dict):
             # (Without Image = photo skipped, only MCQ polls go to channel,
             # same pattern as /img's Topic Mode) ──
             pending["channel_id"] = channel
-            sb.table("quiz_sessions").upsert({
+            await sb_exec(lambda: sb.table("quiz_sessions").upsert({
                 "key": f"pdf_pending_{uid}",
                 "data": json.dumps(pending),
                 "updated_at": int(time.time())
-            }).execute()
+            }).execute())
             kb = {"inline_keyboard": [
                 [{"text": "🖼️ With Image (present system)", "callback_data": f"pdfimg_with_{uid}"}],
                 [{"text": "📝 Without Image (শুধু MCQ Poll)", "callback_data": f"pdfimg_without_{uid}"}]
@@ -10262,7 +10325,7 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            row = sb.table("quiz_sessions").select("data").eq("key", f"pdf_pending_{uid}").execute()
+            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"pdf_pending_{uid}").execute())
             if not row.data:
                 await send_msg(chat_id, "❌ Session expired!")
                 return
@@ -10359,17 +10422,17 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            row = sb.table("quiz_sessions").select("data").eq("key", f"img_mode_{uid}").execute()
+            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"img_mode_{uid}").execute())
             if not row.data:
                 await send_msg(chat_id, "❌ Session expired!")
                 return
             img_data = json.loads(row.data[0]["data"])
             img_data["channel"] = channel
-            sb.table("quiz_sessions").upsert({
+            await sb_exec(lambda: sb.table("quiz_sessions").upsert({
                 "key": f"img_mode_{uid}",
                 "data": json.dumps(img_data),
                 "updated_at": int(time.time())
-            }).execute()
+            }).execute())
             kb = {"inline_keyboard": [
                 [{"text": "🖼️ Image Mode (image সহ channel-এ যাবে)", "callback_data": f"imgfinal_image_{uid}"}],
                 [{"text": "📝 Topic Mode (শুধু MCQ Poll)", "callback_data": f"imgfinal_topic_{uid}"}]
@@ -10385,7 +10448,7 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            row = sb.table("quiz_sessions").select("data").eq("key", f"img_mode_{uid}").execute()
+            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"img_mode_{uid}").execute())
             if not row.data:
                 await send_msg(chat_id, "❌ Session expired!")
                 return
@@ -10419,7 +10482,7 @@ async def handle_callback(query: dict):
             orig_uid = int(rest_parts[1]) if len(rest_parts) > 1 else uid
             if uid != orig_uid:
                 return
-            row = sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{uid}").execute()
+            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{uid}").execute())
             if not row.data:
                 await send_msg(chat_id, "❌ Session expired! আবার CSV reply করে /csv দাও।")
                 return
@@ -10504,7 +10567,7 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            row = sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{uid}").execute()
+            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{uid}").execute())
             if not row.data:
                 await send_msg(chat_id, "❌ Session expired!")
                 return
@@ -10557,7 +10620,7 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            row = sb.table("quiz_sessions").select("data").eq("key", f"pdfm_pending_{uid}").execute()
+            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"pdfm_pending_{uid}").execute())
             if not row.data:
                 await send_msg(chat_id, "❌ Session expired!")
                 return
@@ -10598,7 +10661,7 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            row = sb.table("quiz_sessions").select("data").eq("key", f"qbm_pending_{uid}").execute()
+            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"qbm_pending_{uid}").execute())
             if not row.data:
                 await send_msg(chat_id, "❌ Session expired!")
                 return
@@ -10661,8 +10724,8 @@ async def handle_callback(query: dict):
             if uid != orig_uid:
                 return
 
-            row = sb.table("quiz_sessions").select("data")\
-                .eq("key", f"live_pending_{uid}").execute()
+            row = await sb_exec(lambda: sb.table("quiz_sessions").select("data")\
+                .eq("key", f"live_pending_{uid}").execute())
             if not row.data:
                 await send_msg(chat_id, "❌ Session expired!")
                 return
@@ -10748,8 +10811,8 @@ async def handle_poll_leaderboard(cache_id: str, uid: int, chat_id: int):
         if cache and cache.get("is_new_gen"):
             await send_msg(chat_id, "❌ New Quiz/Exam এ leaderboard নেই!")
             return
-        r = sb.table("web_exam_leaderboard").select("*")\
-            .eq("cache_id", cache_id).order("final_score", desc=True).limit(50).execute()
+        r = await sb_exec(lambda: sb.table("web_exam_leaderboard").select("*")\
+            .eq("cache_id", cache_id).order("final_score", desc=True).limit(50).execute())
         lb = r.data or []
         if not lb:
             await send_msg(chat_id, "🏆 এখনো কেউ exam দেয়নি!")
@@ -10941,12 +11004,12 @@ async def save_exam_result(request: Request):
         time_taken = data.get("time_taken", 0)
         negative = round(wrong * 0.25, 2)
         final_score = round(correct - negative, 2)
-        sb.table("web_exam_results").insert({
+        await sb_exec(lambda: sb.table("web_exam_results").insert({
             "cache_id": cache_id, "user_id": user_id, "user_name": user_name,
             "topic": topic, "page_number": page, "total": total,
             "correct": correct, "wrong": wrong, "skipped": skipped,
             "negative_marks": negative, "final_score": final_score, "time_taken": time_taken
-        }).execute()
+        }).execute())
         try:
             from core import _ensure_d1_table, d1_run as _d1r
             await _ensure_d1_table("web_exam_results",
@@ -10978,8 +11041,8 @@ async def get_leaderboard(cache_id: str):
         cache = await db_get_mcq_cache(cache_id)
         if cache and cache.get("is_new_gen"):
             return JSONResponse({"ok": True, "disabled": True, "data": []})
-        r = sb.table("web_exam_leaderboard").select("*")\
-            .eq("cache_id", cache_id).order("final_score", desc=True).limit(50).execute()
+        r = await sb_exec(lambda: sb.table("web_exam_leaderboard").select("*")\
+            .eq("cache_id", cache_id).order("final_score", desc=True).limit(50).execute())
         if r.data:
             return JSONResponse({"ok": True, "data": r.data})
     except Exception as e:
@@ -11004,12 +11067,12 @@ async def get_leaderboard(cache_id: str):
 async def save_bookmark(request: Request):
     try:
         data = await request.json()
-        sb.table("bookmarks").upsert({
+        await sb_exec(lambda: sb.table("bookmarks").upsert({
             "user_id": data["user_id"], "cache_id": data.get("cache_id"),
             "question_index": data.get("question_index"),
             "question_data": data.get("question_data"),
             "topic": data.get("topic"), "page_number": data.get("page")
-        }, on_conflict="user_id,cache_id,question_index").execute()
+        }, on_conflict="user_id,cache_id,question_index").execute())
         try:
             from core import _ensure_d1_table, d1_run as _d1r
             import json as _json
@@ -11035,10 +11098,10 @@ async def save_bookmark(request: Request):
 async def delete_bookmark(request: Request):
     try:
         data = await request.json()
-        sb.table("bookmarks").delete()\
+        await sb_exec(lambda: sb.table("bookmarks").delete()\
             .eq("user_id", data["user_id"])\
             .eq("cache_id", data["cache_id"])\
-            .eq("question_index", data["question_index"]).execute()
+            .eq("question_index", data["question_index"]).execute())
         try:
             from core import d1_run as _d1r
             await _d1r(
