@@ -9381,7 +9381,13 @@ async def start_sequential_quiz(chat_id: int, uid: int, uname: str,
     await asyncio.sleep(0.5)
     await send_msg(chat_id, "2️⃣")
     await asyncio.sleep(0.5)
-    await send_msg(chat_id, "1️⃣ 🚀")
+    r_go = await send_msg(chat_id, "1️⃣ 🚀")
+    go_msg_id = r_go.get("result", {}).get("message_id") if r_go.get("ok") else None
+    if go_msg_id:
+        st_now = await qs_get(uid)
+        if st_now:
+            st_now["last_msg_id"] = go_msg_id
+            await qs_set(uid, st_now)
     await asyncio.sleep(0.5)
     await _send_quiz_question(uid)
 
