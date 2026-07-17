@@ -423,6 +423,7 @@ async def send_quiz_question(chat_id: int, session: dict):
         poll_id = poll_r["result"].get("poll", {}).get("id", "")
         session["pid"] = poll_id
         session["cor"] = ans_idx
+        session["_sending_for"] = None
         QUIZ_SESSIONS[session["uid"]] = session
 
         # Timer: auto-skip after timer expires
@@ -456,6 +457,7 @@ async def send_quiz_question(chat_id: int, session: dict):
                 break
         session["skip"] += 1
         session["cur"] += 1
+        session["_sending_for"] = None
         QUIZ_SESSIONS[session["uid"]] = session
         if session["cur"] >= session["tot"]:
             await finish_d1_quiz(session)
