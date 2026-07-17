@@ -2388,9 +2388,11 @@ async def handle_getid(msg: dict):
 
     target = text.replace("/getid", "", 1).strip()
 
-    # Forwarded message থেকে ID (reply-mode)
+    # Forwarded message থেকে ID (reply-mode) — channel/group অথবা user, দুটোই handle
     if not target and reply:
         fwd_chat = reply.get("forward_from_chat")
+        fwd_user = reply.get("forward_from")
+
         if fwd_chat:
             cid = fwd_chat.get("id")
             ctype = fwd_chat.get("type", "")
@@ -2402,7 +2404,30 @@ async def handle_getid(msg: dict):
                 f"📂 Type: {ctype}"
             )
             return
-        await send_msg(chat_id, "❌ এই মেসেজে forward info নাই। Public/private channel link পাঠাও অথবা forwarded message-এ reply করো।")
+
+        if fwd_user:
+            uid_f = fwd_user.get("id")
+            fname = fwd_user.get("first_name", "")
+            lname = fwd_user.get("last_name", "")
+            uname_f = fwd_user.get("username", "")
+            full_name = f"{fname} {lname}".strip()
+            txt = (
+                f"✅ <b>User ID পাওয়া গেছে!</b>\n\n"
+                f"📛 নাম: {full_name}\n"
+                f"🆔 ID: <code>{uid_f}</code>"
+            )
+            if uname_f:
+                txt += f"\n🔗 Username: @{uname_f}"
+            await send_msg(chat_id, txt)
+            return
+
+        await send_msg(chat_id,
+            "❌ এই মেসেজে forward info নাই।\n\n"
+            "📌 সম্ভাব্য কারণ: যাকে forward করেছো, সে তার Privacy Settings-এ "
+            "\"Forwarded Messages\" এ নিজের নাম/অ্যাকাউন্ট লুকিয়ে রেখেছে — "
+            "সেক্ষেত্রে Telegram নিজেই এই তথ্য কাউকে দেয় না।\n\n"
+            "Public/private channel link পাঠাও অথবা অন্য কোনো forwarded message-এ reply করো।"
+        )
         return
 
     if not target:
@@ -9687,7 +9712,7 @@ async def handle_message(msg: dict):
         return
 
     # Forwarded message পাঠালেই (কোনো command ছাড়া) auto ID বের করে দেওয়া
-    if is_private and msg.get("forward_from_chat") and not text:
+    if is_private and (msg.get("forward_from_chat") or msg.get("forward_from")) and not text:
         fake_msg = dict(msg)
         fake_msg["text"] = "/getid"
         fake_msg["reply_to_message"] = msg
