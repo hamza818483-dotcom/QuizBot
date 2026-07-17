@@ -9770,8 +9770,6 @@ async def handle_convert_command(msg: dict):
 # WEBHOOK HANDLER
 # ============================================================
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
-_SEEN_UPDATE_IDS = set()
-_SEEN_UPDATE_IDS_ORDER = deque(maxlen=2000)
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -9780,15 +9778,6 @@ async def webhook(request: Request):
             return Response(status_code=403)
     try:
         update = await request.json()
-        update_id = update.get("update_id")
-        if update_id is not None:
-            if update_id in _SEEN_UPDATE_IDS:
-                return Response("OK")
-            _SEEN_UPDATE_IDS.add(update_id)
-            _SEEN_UPDATE_IDS_ORDER.append(update_id)
-            if len(_SEEN_UPDATE_IDS_ORDER) == _SEEN_UPDATE_IDS_ORDER.maxlen:
-                while len(_SEEN_UPDATE_IDS) > _SEEN_UPDATE_IDS_ORDER.maxlen:
-                    _SEEN_UPDATE_IDS.discard(_SEEN_UPDATE_IDS_ORDER.popleft())
         asyncio.create_task(process_update(update))
         return Response("OK")
     except Exception as e:
