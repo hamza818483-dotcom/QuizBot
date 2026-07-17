@@ -413,7 +413,7 @@ async def tg_post(method: str, data: dict) -> dict:
     for _proxy_attempt in range(2):
         try:
             client = await _get_shared_http_client()
-            r = await client.post(f"{TG_API}/{method}", json=data, timeout=60)
+            r = await client.post(f"{TG_API}/{method}", json=data, timeout=12)
             result = r.json()
             if result.get("ok"):
                 return result
