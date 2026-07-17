@@ -1,13 +1,20 @@
 name: Sync to Hugging Face Space
 
-# v4.6: HF04/quizbot-backup is PRIMARY. hamza-02/QuizBot kept as FALLBACK
-# (old Space still running/serving traffic — its build-queue bug only
-# affects new deploys, not the already-running instance).
+# v4.7: Primary-only auto-sync. Fallback (hamza-02/QuizBot) push REMOVED from
+# automatic push trigger — every commit was force-rebuilding it too, which
+# knocked the already-stable fallback into HF's "Build Queued" stuck bug.
+# Fallback now only updates when manually run via workflow_dispatch with
+# sync_fallback=true, so it stays untouched (and running) otherwise.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      sync_fallback:
+        description: 'Also push to fallback hamza-02/QuizBot?'
+        type: boolean
+        default: false
 
 jobs:
   sync-to-hf:
@@ -45,7 +52,8 @@ jobs:
               print(f"Added: {key}")
           PYEOF
 
-      - name: Push to Fallback HF Space (hamza-02/QuizBot)
+      - name: Push to Fallback HF Space (hamza-02/QuizBot) — manual only
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.sync_fallback == true }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
