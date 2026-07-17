@@ -28,6 +28,23 @@ jobs:
           git remote add hf-primary https://HF04:${HF_TOKEN_PRIMARY}@huggingface.co/spaces/HF04/quizbot-backup
           git push hf-primary main:main --force
 
+      - name: Sync Secrets to Primary HF Space
+        env:
+          HF_TOKEN_PRIMARY: ${{ secrets.HF_TOKEN_PRIMARY }}
+          SPACE_SECRETS_JSON: ${{ secrets.SPACE_SECRETS_JSON }}
+        run: |
+          pip install --quiet huggingface_hub
+          python3 - <<'PYEOF'
+          import os, json
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN_PRIMARY"])
+          space_id = "HF04/quizbot-backup"
+          secrets_map = json.loads(os.environ["SPACE_SECRETS_JSON"])
+          for key, value in secrets_map.items():
+              api.add_space_secret(repo_id=space_id, key=key, value=value)
+              print(f"Added: {key}")
+          PYEOF
+
       - name: Push to Fallback HF Space (hamza-02/QuizBot)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
