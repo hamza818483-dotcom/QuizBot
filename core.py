@@ -148,7 +148,7 @@ async def d1_set(key: str, value: dict, ttl: int = 86400):
     try:
         c = await _get_shared_http_client()
         r = await c.post(f"{CF_WORKER_URL}/d1/set",
-            json={"key": key, "value": value, "ttl": ttl})
+            json={"key": key, "value": value, "ttl": ttl}, timeout=15)
         if r.text.strip():
             ok = r.json().get("ok", False)
             if ok:
@@ -163,7 +163,7 @@ async def d1_set(key: str, value: dict, ttl: int = 86400):
 async def d1_get(key: str) -> dict:
     try:
         c = await _get_shared_http_client()
-        r = await c.get(f"{CF_WORKER_URL}/d1/get", params={"key": key})
+        r = await c.get(f"{CF_WORKER_URL}/d1/get", params={"key": key}, timeout=15)
         if r.text.strip():
             data = r.json()
             val = data.get("value")
@@ -178,7 +178,7 @@ async def d1_get(key: str) -> dict:
 async def d1_del(key: str):
     try:
         c = await _get_shared_http_client()
-        await c.post(f"{CF_WORKER_URL}/d1/del", json={"key": key})
+        await c.post(f"{CF_WORKER_URL}/d1/del", json={"key": key}, timeout=15)
     except Exception as e:
         logger.warning(f"[D1] del warn: {e}")
     _mem_kv.pop(key, None)  # always clean memory too
@@ -188,7 +188,7 @@ async def d1_query(sql: str, params: list = None, is_select: bool = True) -> dic
     try:
         body = {"sql": sql, "params": params or [], "token": D1_TOKEN}
         c = await _get_shared_http_client()
-        r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body)
+        r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body, timeout=15)
         data = r.json()
         if not data.get("ok"):
             logger.warning(f"[D1] query error: {data.get('error')}")
