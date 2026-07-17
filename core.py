@@ -113,14 +113,14 @@ _mem_kv: dict = {}
 
 async def d1_set(key: str, value: dict, ttl: int = 86400):
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(f"{CF_WORKER_URL}/d1/set",
-                json={"key": key, "value": value, "ttl": ttl})
-            if r.text.strip():
-                ok = r.json().get("ok", False)
-                if ok:
-                    _mem_kv[key] = value  # mirror to memory
-                    return True
+        c = await _get_shared_http_client()
+        r = await c.post(f"{CF_WORKER_URL}/d1/set",
+            json={"key": key, "value": value, "ttl": ttl})
+        if r.text.strip():
+            ok = r.json().get("ok", False)
+            if ok:
+                _mem_kv[key] = value  # mirror to memory
+                return True
         return True
     except Exception as e:
         logger.warning(f"[D1] set warn (using memory): {e}")
@@ -129,14 +129,14 @@ async def d1_set(key: str, value: dict, ttl: int = 86400):
 
 async def d1_get(key: str) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(f"{CF_WORKER_URL}/d1/get", params={"key": key})
-            if r.text.strip():
-                data = r.json()
-                val = data.get("value")
-                if val is not None:
-                    _mem_kv[key] = val  # mirror
-                    return val
+        c = await _get_shared_http_client()
+        r = await c.get(f"{CF_WORKER_URL}/d1/get", params={"key": key})
+        if r.text.strip():
+            data = r.json()
+            val = data.get("value")
+            if val is not None:
+                _mem_kv[key] = val  # mirror
+                return val
         return _mem_kv.get(key)  # fallback: RAM
     except Exception as e:
         logger.warning(f"[D1] get warn (using memory): {e}")
@@ -144,8 +144,8 @@ async def d1_get(key: str) -> dict:
 
 async def d1_del(key: str):
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            await c.post(f"{CF_WORKER_URL}/d1/del", json={"key": key})
+        c = await _get_shared_http_client()
+        await c.post(f"{CF_WORKER_URL}/d1/del", json={"key": key})
     except Exception as e:
         logger.warning(f"[D1] del warn: {e}")
     _mem_kv.pop(key, None)  # always clean memory too
@@ -154,13 +154,13 @@ async def d1_del(key: str):
 async def d1_query(sql: str, params: list = None, is_select: bool = True) -> dict:
     try:
         body = {"sql": sql, "params": params or [], "token": D1_TOKEN}
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body)
-            data = r.json()
-            if not data.get("ok"):
-                logger.warning(f"[D1] query error: {data.get('error')}")
-                return {"ok": False, "error": data.get("error")}
-            return data
+        c = await _get_shared_http_client()
+        r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body)
+        data = r.json()
+        if not data.get("ok"):
+            logger.warning(f"[D1] query error: {data.get('error')}")
+            return {"ok": False, "error": data.get("error")}
+        return data
     except Exception as e:
         logger.warning(f"[D1] query error: {e}")
         return {"ok": False, "error": str(e)}
@@ -330,34 +330,33 @@ def _sanitize_poll_options(data: dict) -> dict:
 async def tg_post(method: str, data: dict) -> dict:
     if method == "sendPoll":
         data = _sanitize_poll_options(data)
-    # ── Primary: CF Worker TG proxy ──
+    # ── Primary: CF Worker TG proxy (shared client — connection reused, no per-call handshake) ──
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(f"{TG_API}/{method}", json=data)
-            result = r.json()
-            if result.get("ok"):
-                return result
-            if result.get("error_code") == 429:
-                retry_after = result.get("parameters", {}).get("retry_after", 5)
-                logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
-                await asyncio.sleep(min(retry_after, 30) + 0.5)
-            logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
+        client = await _get_shared_http_client()
+        r = await client.post(f"{TG_API}/{method}", json=data, timeout=60)
+        result = r.json()
+        if result.get("ok"):
+            return result
+        if result.get("error_code") == 429:
+            retry_after = result.get("parameters", {}).get("retry_after", 5)
+            logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
+            await asyncio.sleep(min(retry_after, 30) + 0.5)
+        logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
     except Exception as e:
         logger.warning(f"[TG] {method} proxy error: {type(e).__name__}: {e}")
-    # ── Fallback: Direct Telegram API (CF down হলেও কাজ করবে) ──
-    timeout_cfg = httpx.Timeout(connect=10, read=60, write=20, pool=10)
+    # ── Fallback: Direct Telegram API (CF down হলেও কাজ করবে, shared client) ──
     for attempt in range(2):
         try:
-            async with httpx.AsyncClient(timeout=timeout_cfg) as client:
-                r = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=data)
-                result = r.json()
-                if not result.get("ok"):
-                    if result.get("error_code") == 429:
-                        retry_after = result.get("parameters", {}).get("retry_after", 5)
-                        logger.warning(f"[TG] {method} direct 429, waiting {retry_after}s")
-                        await asyncio.sleep(min(retry_after, 30) + 0.5)
-                    logger.warning(f"[TG] {method} direct failed: {result.get('description')}")
-                return result
+            client = await _get_shared_http_client()
+            r = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=data, timeout=60)
+            result = r.json()
+            if not result.get("ok"):
+                if result.get("error_code") == 429:
+                    retry_after = result.get("parameters", {}).get("retry_after", 5)
+                    logger.warning(f"[TG] {method} direct 429, waiting {retry_after}s")
+                    await asyncio.sleep(min(retry_after, 30) + 0.5)
+                logger.warning(f"[TG] {method} direct failed: {result.get('description')}")
+            return result
         except Exception as e:
             logger.error(f"[TG] {method} direct error (attempt {attempt+1}/2): {type(e).__name__}: {e}")
             if attempt == 0:
@@ -414,20 +413,20 @@ async def edit_msg_caption(chat_id, message_id: int, caption: str, parse_mode: s
 async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
                      reply_markup=None, reply_to_message_id: int = None,
                      message_thread_id: int = None) -> dict:
-    # ── Primary: CF Worker (b64 proxy) ──
+    # ── Primary: CF Worker (b64 proxy, shared client) ──
     try:
         b64 = base64.b64encode(photo_bytes).decode()
         data = {"chat_id": str(chat_id), "caption": caption, "photo_b64": b64}
         if reply_markup: data["reply_markup"] = reply_markup
         if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
         if message_thread_id: data["message_thread_id"] = message_thread_id
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(f"{CF_WORKER_URL}/tg-sendphoto", json=data)
-            result = r.json()
-            if result.get("ok"): return result
+        client = await _get_shared_http_client()
+        r = await client.post(f"{CF_WORKER_URL}/tg-sendphoto", json=data, timeout=60)
+        result = r.json()
+        if result.get("ok"): return result
     except Exception as e:
         logger.warning(f"[TG] sendPhoto CF failed: {e}")
-    # ── Fallback: Direct TG API multipart (CF down হলে) ──
+    # ── Fallback: Direct TG API multipart (CF down হলে, shared client) ──
     try:
         fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"}
         if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
@@ -436,11 +435,11 @@ async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
             import json as _j
             fields["reply_markup"] = _j.dumps(reply_markup)
         files = {"photo": ("photo.jpg", photo_bytes, "image/jpeg")}
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-                data=fields, files=files)
-            return r.json()
+        client = await _get_shared_http_client()
+        r = await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            data=fields, files=files, timeout=120)
+        return r.json()
     except Exception as e:
         logger.error(f"[TG] sendPhoto direct failed: {e}")
         return {"ok": False, "error": str(e)}
@@ -458,7 +457,7 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",
                         message_thread_id: int = None) -> dict:
-    # ── Primary: CF Worker (b64 proxy) ──
+    # ── Primary: CF Worker (b64 proxy, shared client) ──
     try:
         data = {
             "chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode,
@@ -467,23 +466,23 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
         }
         if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
         if message_thread_id: data["message_thread_id"] = message_thread_id
-        async with httpx.AsyncClient(timeout=60) as c:
-            r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data)
-            result = r.json()
-            if result.get("ok"): return result
+        c = await _get_shared_http_client()
+        r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=60)
+        result = r.json()
+        if result.get("ok"): return result
     except Exception as e:
         logger.warning(f"[sendDoc] CF failed: {e}")
-    # ── Fallback: Direct TG API multipart ──
+    # ── Fallback: Direct TG API multipart (shared client) ──
     try:
         fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode}
         if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
         if message_thread_id: fields["message_thread_id"] = str(message_thread_id)
         files = {"document": (filename, file_bytes, mime_type)}
-        async with httpx.AsyncClient(timeout=120) as c:
-            r = await c.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                data=fields, files=files)
-            return r.json()
+        c = await _get_shared_http_client()
+        r = await c.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+            data=fields, files=files, timeout=120)
+        return r.json()
     except Exception as e:
         logger.error(f"[sendDoc] direct failed: {e}")
         return {"ok": False, "error": str(e)}
@@ -682,7 +681,19 @@ async def db_get_settings() -> dict:
         if r.data:
             return r.data[0]
     except Exception as e:
-        logger.error(f"[DB] get_settings error: {e}")
+        # watermark column ekhono Supabase e add kora hoy nai (migration pending) —
+        # purono columns diye retry kore crash bachai, watermark khali thakbe
+        if "watermark" in str(e):
+            try:
+                r = sb.table("quiz_settings").select("tag,exp_footer").eq("id", 1).execute()
+                if r.data:
+                    row = r.data[0]
+                    row["watermark"] = ""
+                    return row
+            except Exception as e2:
+                logger.error(f"[DB] get_settings retry error: {e2}")
+        else:
+            logger.error(f"[DB] get_settings error: {e}")
     try:
         await _ensure_d1_table("quiz_settings",
             "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT, watermark TEXT)")
