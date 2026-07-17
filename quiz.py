@@ -369,9 +369,15 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
         else:
             await send_msg(chat_id, info_text)
 
+    last_cd_id = None
     for cd in ["3...", "2...", "1..."]:
         await asyncio.sleep(0.7)
-        await send_msg(chat_id, cd)
+        r_cd = await send_msg(chat_id, cd)
+        if r_cd.get("ok"):
+            last_cd_id = r_cd.get("result", {}).get("message_id")
+    if last_cd_id:
+        session["last_msg_id"] = last_cd_id
+        QUIZ_SESSIONS[uid] = session
     await asyncio.sleep(1)
     await send_quiz_question(chat_id, session)
 
