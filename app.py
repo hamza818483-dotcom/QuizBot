@@ -22,6 +22,7 @@ import re
 import difflib
 import base64
 from io import BytesIO
+from collections import deque
 from typing import Optional
 from datetime import datetime
 from datetime import timedelta
@@ -9769,6 +9770,8 @@ async def handle_convert_command(msg: dict):
 # WEBHOOK HANDLER
 # ============================================================
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+_SEEN_UPDATE_IDS = set()
+_SEEN_UPDATE_IDS_ORDER = deque(maxlen=2000)
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -9777,6 +9780,15 @@ async def webhook(request: Request):
             return Response(status_code=403)
     try:
         update = await request.json()
+        update_id = update.get("update_id")
+        if update_id is not None:
+            if update_id in _SEEN_UPDATE_IDS:
+                return Response("OK")
+            _SEEN_UPDATE_IDS.add(update_id)
+            _SEEN_UPDATE_IDS_ORDER.append(update_id)
+            if len(_SEEN_UPDATE_IDS_ORDER) == _SEEN_UPDATE_IDS_ORDER.maxlen:
+                while len(_SEEN_UPDATE_IDS) > _SEEN_UPDATE_IDS_ORDER.maxlen:
+                    _SEEN_UPDATE_IDS.discard(_SEEN_UPDATE_IDS_ORDER.popleft())
         asyncio.create_task(process_update(update))
         return Response("OK")
     except Exception as e:
@@ -10211,17 +10223,6 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, "❌ Owner only!")
     elif text.startswith("/merge"):
         await handle_merge_command(msg)
-    elif text.startswith("/watermark"):
-        if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
-            return
-        wm_arg = re.sub(r"^/watermark\s*", "", text, flags=re.IGNORECASE).strip()
-        reply = msg.get("reply_to_message")
-        if wm_arg and reply and reply.get("document"):
-            # New: /watermark reply-to-PDF + name -> apply immediately, no step-by-step wait
-            asyncio.create_task(handle_wm_command(msg))
-        else:
-            await handle_watermark_command(msg)
     elif text == "/convert":
         await handle_convert_command(msg)
     elif text.startswith("/error") or text.startswith("/errors"):
