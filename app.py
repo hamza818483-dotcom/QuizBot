@@ -9679,10 +9679,18 @@ async def handle_message(msg: dict):
         asyncio.create_task(db_auto_cleanup_if_needed())
 
     # Plain t.me link পাঠালেই (কোনো command ছাড়া) auto-resolve করে ID দিয়ে দেওয়া
-    if (is_private and is_auth and text and not text.startswith("/")
+    if (is_private and text and not text.startswith("/")
             and re.fullmatch(r'(https?://)?t\.me/\S+', text)):
         fake_msg = dict(msg)
         fake_msg["text"] = "/getid " + text
+        await handle_getid(fake_msg)
+        return
+
+    # Forwarded message পাঠালেই (কোনো command ছাড়া) auto ID বের করে দেওয়া
+    if is_private and msg.get("forward_from_chat") and not text:
+        fake_msg = dict(msg)
+        fake_msg["text"] = "/getid"
+        fake_msg["reply_to_message"] = msg
         await handle_getid(fake_msg)
         return
 
