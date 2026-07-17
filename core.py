@@ -127,10 +127,18 @@ _patch_supabase_execute_with_retry()
 # each DB round-trip. Wrap calls with `await sb_exec(lambda: sb.table(...)...)`
 # to offload them to a worker thread and keep the bot responsive.
 # ------------------------------------------------------------
-async def sb_exec(fn):
+async def sb_exec(fn, timeout: float = 20.0):
     """Run a synchronous Supabase call (e.g. lambda: sb.table('x').select('*').execute())
-    on a worker thread so it doesn't block the event loop."""
-    return await asyncio.to_thread(fn)
+    on a worker thread so it doesn't block the event loop. Hard-capped at
+    `timeout` seconds — supabase-py's underlying httpx client has no default
+    timeout of its own, so a cold/slow connection could otherwise hang the
+    calling command indefinitely with zero error logged (looks exactly like
+    'first command does nothing, works on 2nd try')."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(fn), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.error(f"[DB] sb_exec timed out after {timeout}s")
+        raise
 
 # ============================================================
 # FASTAPI APP (single shared instance)
@@ -378,7 +386,12 @@ async def tg_post(method: str, data: dict) -> dict:
         logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
     except Exception as e:
         logger.warning(f"[TG] {method} proxy error: {type(e).__name__}: {e}")
-    # ── Fallback: Direct Telegram API (CF down হলেও কাজ করবে, shared client) ──
+    # ── Fallback: Direct Telegram API (skipped when running where TG is
+    #    network-blocked, e.g. HF Space — trying it there just wastes time
+    #    on a guaranteed failure before eventually giving up) ──
+    if _tg_mode == "cf-proxy":
+        logger.error(f"[TG] {method} CF proxy failed and direct API is blocked on this platform — giving up")
+        return {"ok": False, "error": "cf_proxy_failed_direct_blocked"}
     for attempt in range(2):
         try:
             client = await _get_shared_http_client()
