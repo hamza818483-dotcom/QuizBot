@@ -3965,13 +3965,32 @@ async def _handle_split_command_inner(msg: dict):
         await send_msg(chat_id, "❌ সংখ্যা ১ বা তার বেশি হতে হবে!")
         return
 
-    status_r = await send_msg(chat_id, "⏳ ফাইল ডাউনলোড হচ্ছে...")
-    status_msg_id = status_r.get("result", {}).get("message_id")
-
     file_id = reply["document"]["file_id"]
     file_name = reply["document"].get("file_name", "file.csv")
+    file_size = reply["document"].get("file_size", 0)
+    size_kb = round(file_size / 1024, 1) if file_size else "?"
+
+    status_r = await send_msg(chat_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[░░░░░░░░░░ 0%]")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    _last_pct_split = {"v": -1}
+    async def _dl_progress_split(done, total):
+        if not status_msg_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct_split["v"] < 15 and pct != 100:
+            return
+        _last_pct_split["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        try:
+            await edit_msg(chat_id, status_msg_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]")
+        except Exception:
+            pass
+
     try:
-        csv_bytes = await download_tg_file(file_id)
+        csv_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_split)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
     except Exception as e:
         logger.error(f"[Split] error: {e}", exc_info=True)
@@ -3982,6 +4001,9 @@ async def _handle_split_command_inner(msg: dict):
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, "❌ ফাইলে কোনো MCQ পাওয়া যায়নি!")
         return
+
+    if status_msg_id:
+        await edit_msg(chat_id, status_msg_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!")
 
     total = len(mcqs)
     total_parts = (total + chunk_size - 1) // chunk_size
@@ -3998,6 +4020,14 @@ async def _handle_split_command_inner(msg: dict):
                 caption=f"📄 Part-{i+1:02d} | 📊 {len(chunk)}টি MCQ")
             if not r.get("ok"):
                 logger.error(f"[Split] send_document failed: {r}")
+            if status_msg_id:
+                pct = int((i + 1) * 100 / total_parts)
+                bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                try:
+                    await edit_msg(chat_id, status_msg_id,
+                        f"⏳ Part পাঠানো হচ্ছে... ({i+1}/{total_parts})\n[{bar} {pct}%]")
+                except Exception:
+                    pass
             await asyncio.sleep(0.5)
     except Exception as e:
         logger.error(f"[Split] send loop error: {e}", exc_info=True)
@@ -5574,11 +5604,29 @@ async def handle_sheet_command(msg: dict):
         await send_msg(chat_id, "❌ শুধু .csv file support করে!")
         return
 
-    loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
+    file_size = doc.get("file_size", 0)
+    size_kb = round(file_size / 1024, 1) if file_size else "?"
+    loading = await send_msg(chat_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[░░░░░░░░░░ 0%]")
     loading_id = loading.get("result", {}).get("message_id")
 
+    _last_pct_sheet = {"v": -1}
+    async def _dl_progress_sheet(done, total):
+        if not loading_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct_sheet["v"] < 15 and pct != 100:
+            return
+        _last_pct_sheet["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        try:
+            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]")
+        except Exception:
+            pass
+
     try:
-        csv_bytes = await download_tg_file(doc["file_id"])
+        csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress_sheet)
+        if loading_id:
+            await edit_msg(chat_id, loading_id, f"✅ Download সম্পূর্ণ!\n📄 {file_name}\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
 
         if not mcqs:
@@ -8187,16 +8235,37 @@ async def handle_rapid_command(msg: dict):
         await send_msg(chat_id, "❌ শুধু .csv file support করে!")
         return
 
-    loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
+    file_name = doc.get("file_name", "")
+    file_size = doc.get("file_size", 0)
+    size_kb = round(file_size / 1024, 1) if file_size else "?"
+    loading = await send_msg(chat_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[░░░░░░░░░░ 0%]")
     loading_id = loading.get("result", {}).get("message_id")
 
+    _last_pct_rapid = {"v": -1}
+    async def _dl_progress_rapid(done, total):
+        if not loading_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct_rapid["v"] < 15 and pct != 100:
+            return
+        _last_pct_rapid["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        try:
+            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]")
+        except Exception:
+            pass
+
     try:
-        csv_bytes = await download_tg_file(doc["file_id"])
+        csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress_rapid)
+        if loading_id:
+            await edit_msg(chat_id, loading_id, f"✅ Download সম্পূর্ণ!\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
         if not mcqs:
             if loading_id:
                 await edit_msg(chat_id, loading_id, "❌ CSV-এ কোনো valid প্রশ্ন পাওয়া যায়নি!")
             return
+        if loading_id:
+            await edit_msg(chat_id, loading_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!")
 
         RAPID_PENDING[uid] = {
             "step": "awaiting_channel",
@@ -8538,16 +8607,38 @@ async def handle_live_command(msg: dict):
         await send_msg(chat_id, "❌ শুধু .csv file support করে!")
         return
 
-    loading    = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
+    file_name = doc.get("file_name", "")
+    file_size = doc.get("file_size", 0)
+    size_kb = round(file_size / 1024, 1) if file_size else "?"
+    loading    = await send_msg(chat_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[░░░░░░░░░░ 0%]")
     loading_id = loading.get("result", {}).get("message_id")
 
+    _last_pct_live = {"v": -1}
+    async def _dl_progress_live(done, total):
+        if not loading_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct_live["v"] < 15 and pct != 100:
+            return
+        _last_pct_live["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        try:
+            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]")
+        except Exception:
+            pass
+
     try:
-        csv_bytes  = await download_tg_file(doc["file_id"])
+        csv_bytes  = await download_tg_file(doc["file_id"], progress_cb=_dl_progress_live)
+        if loading_id:
+            await edit_msg(chat_id, loading_id, "✅ Download সম্পূর্ণ!\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
         mcqs       = _parse_csv_bytes(csv_bytes)
 
         if not mcqs:
             await send_msg(chat_id, "❌ CSV-এ কোনো MCQ পাওয়া যায়নি!")
             return
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!")
 
         session_id = gen_session_id()
 
