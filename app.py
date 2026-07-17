@@ -3684,6 +3684,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 data_adapted = _adapt_mcqs_for_print(all_batch_mcqs)
                 html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
                 pdf_bytes = await _html_to_pdf(html_s)
+                pdf_bytes = await _apply_saved_watermark(pdf_bytes)
                 if pdf_bytes:
                     safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
                     doc_r = await send_document(
@@ -3773,6 +3774,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             data_adapted = _adapt_mcqs_for_print(mcqs)
             html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
             pdf_bytes = await _html_to_pdf(html_s)
+            pdf_bytes = await _apply_saved_watermark(pdf_bytes)
             if pdf_bytes:
                 safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
                 doc_r = await send_document(
@@ -4135,16 +4137,16 @@ async def _get_pw_browser():
         return _PW_BROWSER["browser"]
 
 async def _apply_saved_watermark(pdf_bytes: bytes) -> bytes:
-    """If a default watermark is saved (via /wm or /watermark, no reply),
-    stamp it onto any generated PDF before sending. Best-effort — returns
-    original bytes untouched on any failure or if no watermark is set."""
+    """Stamps the /wm-saved watermark onto any generated PDF before sending.
+    Falls back to "ATLAS" if no custom watermark was ever set — every
+    generated sheet PDF always carries some watermark by default now.
+    Best-effort — returns original bytes untouched on failure."""
     if not pdf_bytes:
         return pdf_bytes
     try:
         settings = await db_get_settings()
-        wm_text = settings.get("watermark", "")
-        if wm_text:
-            return add_watermark_to_pdf(pdf_bytes, wm_text)
+        wm_text = settings.get("watermark", "") or "ATLAS"
+        return add_watermark_to_pdf(pdf_bytes, wm_text)
     except Exception as e:
         logger.warning(f"[AutoWatermark] apply failed: {e}")
     return pdf_bytes
