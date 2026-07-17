@@ -2319,7 +2319,7 @@ async def handle_getid(msg: dict):
             "<b>Usage:</b>\n"
             "<code>/getid https://t.me/channelname</code>\n"
             "<code>/getid @channelname</code>\n"
-            "<code>/getid https://t.me/+AbCdEfGhIjK</code> (private invite link)\n"
+            "<code>/getid https://t.me/+AbCdEfGhIjK</code> (private invite link — API ID/HASH লাগবে)\n"
             "<code>/getid -1001234567890</code>\n\n"
             "📌 Private channel/group হলে বটকে আগে member/admin করে নিতে হবে।"
         )
@@ -2341,13 +2341,25 @@ async def handle_getid(msg: dict):
         resolved = "@" + target.lstrip("@")
 
     if is_private_invite:
-        await send_msg(chat_id,
-            "⚠️ এটা একটা <b>private invite link</b>।\n\n"
-            "Telegram Bot API invite link থেকে সরাসরি ID বের করতে দেয় না — "
-            "বটকে আগে ওই channel/group-এ manually add/invite করতে হবে। "
-            "তারপর ওই channel/group থেকে যেকোনো একটা মেসেজ এই চ্যাটে forward করে "
-            "সেই forwarded মেসেজে <code>/getid</code> reply করলে ID পেয়ে যাবে।"
-        )
+        from core import resolve_private_invite_link
+        result = await resolve_private_invite_link(target)
+        if result.get("ok"):
+            txt = (
+                f"✅ <b>ID পাওয়া গেছে!</b> (private invite link থেকে)\n\n"
+                f"📛 নাম: {result.get('title', '')}\n"
+                f"🆔 ID: <code>{result.get('id')}</code>\n"
+                f"📂 Type: {result.get('type', '')}"
+            )
+            if result.get("username"):
+                txt += f"\n🔗 Username: @{result['username']}"
+            await send_msg(chat_id, txt)
+        else:
+            await send_msg(chat_id,
+                f"❌ Private invite link resolve করা যায়নি!\n\n"
+                f"Reason: {result.get('error', 'unknown')}\n\n"
+                f"📌 বিকল্প: ওই channel/group থেকে যেকোনো একটা মেসেজ এই চ্যাটে forward করে "
+                f"সেই forwarded মেসেজে <code>/getid</code> reply করো।"
+            )
         return
 
     r = await tg_post("getChat", {"chat_id": resolved})

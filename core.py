@@ -606,6 +606,41 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int) -> Optiona
         logger.error(f"[pyrogram] download error: {e}")
         return None
 
+async def resolve_private_invite_link(invite_link: str) -> dict:
+    """
+    Private invite link (t.me/+xxx বা t.me/joinchat/xxx) থেকে chat ID resolve করে।
+    TELEGRAM_API_ID/HASH configured থাকলে Pyrogram দিয়ে join try করে, না থাকলে error।
+    Returns: {"ok": True, "id":..., "title":..., "type":...} অথবা {"ok": False, "error": "..."}
+    """
+    client = await _get_pyro_client()
+    if not client:
+        return {"ok": False, "error": "TELEGRAM_API_ID/TELEGRAM_API_HASH সেট করা নাই — private invite link resolve করতে এগুলো লাগবে।"}
+    try:
+        chat = await client.join_chat(invite_link)
+        return {
+            "ok": True,
+            "id": chat.id,
+            "title": getattr(chat, "title", "") or getattr(chat, "first_name", ""),
+            "type": str(getattr(chat, "type", "")).split(".")[-1].lower(),
+            "username": getattr(chat, "username", None),
+        }
+    except Exception as e:
+        err = str(e)
+        # ইতিমধ্যে join করা থাকলে join_chat error দেয়, কিন্তু chat resolve করা যায়
+        if "USER_ALREADY_PARTICIPANT" in err or "already" in err.lower():
+            try:
+                chat = await client.get_chat(invite_link)
+                return {
+                    "ok": True,
+                    "id": chat.id,
+                    "title": getattr(chat, "title", "") or getattr(chat, "first_name", ""),
+                    "type": str(getattr(chat, "type", "")).split(".")[-1].lower(),
+                    "username": getattr(chat, "username", None),
+                }
+            except Exception as e2:
+                return {"ok": False, "error": str(e2)}
+        return {"ok": False, "error": err}
+
 # ============================================================
 # DOWNLOAD FILE VIA CF PROXY
 # ============================================================
