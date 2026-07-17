@@ -1,13 +1,17 @@
 name: Sync to Hugging Face Space
 
-# v4.4: Fresh HF Space (hamza-02/QuizBot), single-platform only (Render OFF).
-# Previous HF account was banned for running HF Space + Render simultaneously
-# (dual-webhook/dual-instance ToS violation). This time only HF Space is live.
+# v4.9: hamza-02/QuizBot is now PRIMARY (auto-synced on every push).
+# test02-HF05/QuizBot demoted to manual-only fallback.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      sync_fallback:
+        description: 'Also push to fallback test02-HF05/QuizBot?'
+        type: boolean
+        default: false
 
 jobs:
   sync-to-hf:
@@ -19,11 +23,37 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: Push to Hugging Face Space
+      - name: Push to Primary HF Space (hamza-02/QuizBot)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
-          git remote add hf https://hamza-02:${HF_TOKEN}@huggingface.co/spaces/hamza-02/QuizBot
-          git push hf main:main --force
+          git remote add hf-primary https://hamza-02:${HF_TOKEN}@huggingface.co/spaces/hamza-02/QuizBot
+          git push hf-primary main:main --force
+
+      - name: Sync Secrets to Primary HF Space
+        if: false  # PAUSED: was causing collision with existing HF Space Variables (same key names). Re-enable after Variables section is cleared, or after confirming HF's actual collision cause.
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE_SECRETS_JSON: ${{ secrets.SPACE_SECRETS_JSON }}
+        run: |
+          pip install --quiet huggingface_hub
+          python3 - <<'PYEOF'
+          import os, json
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          space_id = "hamza-02/QuizBot"
+          secrets_map = json.loads(os.environ["SPACE_SECRETS_JSON"])
+          for key, value in secrets_map.items():
+              api.add_space_secret(repo_id=space_id, key=key, value=value)
+              print(f"Added: {key}")
+          PYEOF
+
+      - name: Push to Fallback HF Space (test02-HF05/QuizBot) — manual only
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.sync_fallback == true }}
+        env:
+          HF_TOKEN_PRIMARY: ${{ secrets.HF_TOKEN_PRIMARY }}
+        run: |
+          git remote add hf-fallback https://test02-HF05:${HF_TOKEN_PRIMARY}@huggingface.co/spaces/test02-HF05/QuizBot
+          git push hf-fallback main:main --force || echo "Fallback push failed (non-blocking)"

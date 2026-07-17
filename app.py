@@ -3208,15 +3208,34 @@ async def handle_csv_command(msg: dict):
         return
 
     doc = reply["document"]
-    if not doc.get("file_name", "").lower().endswith(".csv"):
-        await send_msg(chat_id, "❌ শুধু .csv file support করে!")
-        return
+    # v: strict ".csv" filename check hotay silent-fail hocchilo (bot-generated
+    # document er filename shobshomoy ".csv"-te shesh hoy na). Ekhon shorashori
+    # try kore, parse fail hoile tobei error dekhabe.
 
-    loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
+    loading = await send_msg(chat_id, "⏳ CSV download হচ্ছে...\n[░░░░░░░░░░ 0%]")
     loading_id = loading.get("result", {}).get("message_id")
 
+    _last_pct = {"v": -1}
+    async def _dl_progress(done, total):
+        if not loading_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct["v"] < 10 and pct != 100:
+            return
+        _last_pct["v"] = pct
+        bar = "\u2588" * (pct // 10) + "\u2591" * (10 - pct // 10)
+        try:
+            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n[{bar} {pct}%]")
+        except Exception:
+            pass
+
     try:
-        csv_bytes = await download_tg_file(doc["file_id"])
+        csv_bytes = await download_tg_file(
+            doc["file_id"], progress_cb=_dl_progress,
+            chat_id=chat_id, message_id=reply["message_id"]
+        )
+        if loading_id:
+            await edit_msg(chat_id, loading_id, "✅ Download complete!\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
 
         if not mcqs:
@@ -3314,11 +3333,30 @@ async def handle_csvs_command(msg: dict):
         await send_msg(chat_id, "❌ CSV ফাইলে reply করে /csvS দাও!")
         return
 
-    loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
+    loading = await send_msg(chat_id, "⏳ CSV download হচ্ছে...\n[░░░░░░░░░░ 0%]")
     loading_id = loading.get("result", {}).get("message_id")
 
+    _last_pct_s = {"v": -1}
+    async def _dl_progress_s(done, total):
+        if not loading_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct_s["v"] < 10 and pct != 100:
+            return
+        _last_pct_s["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        try:
+            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n[{bar} {pct}%]")
+        except Exception:
+            pass
+
     try:
-        csv_bytes = await download_tg_file(reply["document"]["file_id"])
+        csv_bytes = await download_tg_file(
+            reply["document"]["file_id"], progress_cb=_dl_progress_s,
+            chat_id=chat_id, message_id=reply["message_id"]
+        )
+        if loading_id:
+            await edit_msg(chat_id, loading_id, "✅ Download complete!\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
 
         if not mcqs:
@@ -3712,6 +3750,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 data_adapted = _adapt_mcqs_for_print(all_batch_mcqs)
                 html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
                 pdf_bytes = await _html_to_pdf(html_s)
+                pdf_bytes = await _apply_saved_watermark(pdf_bytes)
                 if pdf_bytes:
                     safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
                     doc_r = await send_document(
@@ -3801,6 +3840,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             data_adapted = _adapt_mcqs_for_print(mcqs)
             html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
             pdf_bytes = await _html_to_pdf(html_s)
+            pdf_bytes = await _apply_saved_watermark(pdf_bytes)
             if pdf_bytes:
                 safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
                 doc_r = await send_document(
@@ -4163,16 +4203,16 @@ async def _get_pw_browser():
         return _PW_BROWSER["browser"]
 
 async def _apply_saved_watermark(pdf_bytes: bytes) -> bytes:
-    """If a default watermark is saved (via /wm or /watermark, no reply),
-    stamp it onto any generated PDF before sending. Best-effort — returns
-    original bytes untouched on any failure or if no watermark is set."""
+    """Stamps the /wm-saved watermark onto any generated PDF before sending.
+    Falls back to "ATLAS" if no custom watermark was ever set — every
+    generated sheet PDF always carries some watermark by default now.
+    Best-effort — returns original bytes untouched on failure."""
     if not pdf_bytes:
         return pdf_bytes
     try:
         settings = await db_get_settings()
-        wm_text = settings.get("watermark", "")
-        if wm_text:
-            return add_watermark_to_pdf(pdf_bytes, wm_text)
+        wm_text = settings.get("watermark", "") or "ATLAS"
+        return add_watermark_to_pdf(pdf_bytes, wm_text)
     except Exception as e:
         logger.warning(f"[AutoWatermark] apply failed: {e}")
     return pdf_bytes
@@ -9483,12 +9523,13 @@ async def handle_message(msg: dict):
         quiz_id = text.split()[1] if len(text.split()) > 1 else text.replace("/start ", "")
         asyncio.create_task(start_d1_quiz(chat_id, quiz_id, msg["from"]))
         return
-    if text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm"):
+    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm")) or text.startswith("/bangla"):
         if not is_auth:
             if is_private:
                 await send_msg(chat_id, UNAUTH_MSG)
             return
-        arg = text.replace("/pdf", "").strip().lower()
+        _cmd_prefix = "/bangla" if text.startswith("/bangla") else "/pdf"
+        arg = text.replace(_cmd_prefix, "").strip().lower()
         if arg in ("on", "off"):
             await handle_pdf_autosend_toggle(msg, arg)
             return

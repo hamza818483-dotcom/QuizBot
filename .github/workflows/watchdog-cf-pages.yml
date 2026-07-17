@@ -1,4 +1,4 @@
-name: Watchdog CF-Pages (7min)
+name: Watchdog CF-Pages (7min) + Cron-Check Trigger
 
 # Independently checks the Cloudflare Pages proxy layer (quizbot.pages.dev),
 # separate from the HF/Render backend checks in watchdog-1/2/3. This exists
@@ -54,6 +54,14 @@ jobs:
           else
             echo "proxy_status=OK" >> $GITHUB_OUTPUT
           fi
+
+      - name: Trigger failover/keepalive logic (/cron-check)
+        env:
+          CF_PAGES_URL: ${{ secrets.CF_PAGES_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CF_PAGES_URL" ]; then exit 0; fi
+          curl -s --max-time 15 "${CF_PAGES_URL}/cron-check?key=${CRON_SECRET}" || true
 
       - name: Alert owner if either check failed
         if: ${{ steps.cf_check.outputs.cf_status == 'DOWN' || steps.proxy_check.outputs.proxy_status == 'ROUTING_BROKEN' }}
