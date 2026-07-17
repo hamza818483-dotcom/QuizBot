@@ -690,7 +690,7 @@ async def _get_pyro_client():
         _pyro_client = client
     return _pyro_client
 
-async def download_large_file_pyrogram(chat_id: int, message_id: int) -> Optional[bytes]:
+async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_cb=None) -> Optional[bytes]:
     try:
         client = await _get_pyro_client()
         if not client:
@@ -699,7 +699,16 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int) -> Optiona
         msg = await client.get_messages(chat_id, message_id)
         if not msg or not (msg.document or msg.video or msg.audio):
             return None
-        file_bytes = await client.download_media(msg, in_memory=True)
+
+        _progress_fn = None
+        if progress_cb:
+            async def _progress_fn(current, total):
+                try:
+                    await progress_cb(current, total)
+                except Exception:
+                    pass
+
+        file_bytes = await client.download_media(msg, in_memory=True, progress=_progress_fn)
         if file_bytes is None:
             return None
         return file_bytes.getvalue() if hasattr(file_bytes, "getvalue") else file_bytes
@@ -752,7 +761,7 @@ async def download_tg_file(file_id: str, progress_cb=None,
     # every file size. Falls back to Bot API getFile if pyrogram isn't
     # configured (no TELEGRAM_API_ID/HASH) or the call itself fails.
     if chat_id is not None and message_id is not None:
-        big = await download_large_file_pyrogram(chat_id, message_id)
+        big = await download_large_file_pyrogram(chat_id, message_id, progress_cb=progress_cb)
         if big is not None:
             return big
         logger.warning("[download_tg_file] pyrogram unavailable/failed, falling back to Bot API getFile")
