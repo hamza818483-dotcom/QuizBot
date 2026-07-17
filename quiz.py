@@ -17,7 +17,7 @@ from datetime import datetime
 import pytz
 
 from core import (
-    logger, sb, OWNER_ID,
+    logger, sb, sb_exec, OWNER_ID,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, edit_msg, send_photo_by_id, send_poll,
     download_tg_file, db_get_settings,
@@ -205,11 +205,11 @@ async def handle_d1_send(msg: dict):
         [{"text": f"👥+📢 Both ({total_users + total_chs})", "callback_data": f"d1send_both_{uid}"}]
     ]}
 
-    sb.table("quiz_sessions").upsert({
+    await sb_exec(lambda: sb.table("quiz_sessions").upsert({
         "key": f"d1_send_{uid}",
         "data": json.dumps({"msg_id": reply_msg_id, "chat_id": chat_id}),
         "updated_at": int(time.time())
-    }).execute()
+    }).execute())
 
     await send_msg(chat_id,
         f"📤 Send This Message To:\n\n"
@@ -230,7 +230,7 @@ async def handle_d1_send_cb(query: dict):
     if uid != orig_uid:
         return
 
-    row = sb.table("quiz_sessions").select("data").eq("key", f"d1_send_{uid}").execute()
+    row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"d1_send_{uid}").execute())
     if not row.data:
         return
     info = json.loads(row.data[0]["data"])
@@ -261,7 +261,7 @@ async def handle_d1_send_cb(query: dict):
             except:
                 pass
 
-    sb.table("quiz_sessions").delete().eq("key", f"d1_send_{uid}").execute()
+    await sb_exec(lambda: sb.table("quiz_sessions").delete().eq("key", f"d1_send_{uid}").execute())
     await send_msg(chat_id, f"✅ Sent to {sent} recipients!")
 
 
@@ -273,7 +273,7 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
     if mistake_qs:
         questions = mistake_qs
         quiz = {"timer": 15, "tag": "", "exp_footer": "", "name": "Practice", "description": ""}
-        row = sb.table("quiz_sessions").select("data").eq("key", f"d1_otag_{uid}").execute()
+        row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"d1_otag_{uid}").execute())
         if row.data:
             orig = json.loads(row.data[0]["data"])
             quiz["timer"] = orig.get("timer", 15)
@@ -317,14 +317,14 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
                 random.shuffle(q["options"])
                 q["answer_index"] = q["options"].index(correct_opt)
 
-        sb.table("quiz_sessions").upsert({
+        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
             "key": f"d1_otag_{uid}",
             "data": json.dumps({
                 "timer": quiz.get("timer", 15), "tag": quiz.get("tag", ""),
                 "exp": quiz.get("exp_footer", ""), "name": quiz.get("name", "")
             }),
             "updated_at": int(time.time())
-        }).execute()
+        }).execute())
 
     session = {
         "quiz_id": (quiz_id + "mp") if mistake_qs else quiz_id,
