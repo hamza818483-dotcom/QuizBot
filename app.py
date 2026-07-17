@@ -501,7 +501,101 @@ async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
     await send_msg(chat_id, "❌ কিছু একটা সমস্যা হয়েছে। একটু পর আবার চেষ্টা করুন।")
 
 
+import contextvars
+_CHOK_MODE = contextvars.ContextVar("chok_mode", default=False)
+
+def _build_chok_prompt(topic: str) -> str:
+    """
+    /chok command prompt — ছক (box/table/diagram) pages মাস্ট প্রতিটা বক্স থেকে MCQ।
+    Mix: 80% standard (per-box, /pdf-style rules), 5% সত্য-মিথ্যা (True/False),
+    10% multi-box combined MCQ (covers full ছক), 5% short-question-long-option.
+    Minimum coverage: at least 1 MCQ per box, target 15-25+ total per page.
+    """
+    return (
+        f"You are an expert MCQ-extraction engine specialized in ছক/টেবিল (box/table/diagram) "
+        f"pages for Bengali/English academic textbooks (medical/HSC/admission-standard).\n"
+        f"Topic: {topic}\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 ABSOLUTE MUST — EVERY BOX/AREA/MARKED PART MUST PRODUCE AN MCQ\n"
+        f"═══════════════════════════════\n"
+        f"- This page contains a ছক/box/table/diagram-style layout. Walk through EVERY "
+        f"single box, cell, marked area, column, and row ONE BY ONE.\n"
+        f"- EVERY box/cell/marked area on the page MUST generate at least 1 MCQ — "
+        f"zero exceptions, zero skipped boxes. If a box has rich info, generate MORE "
+        f"than 1 MCQ from it.\n"
+        f"- Count the total number of boxes/cells/marked areas on the page first "
+        f"(mentally). This box count IS your real floor — not a fixed number. "
+        f"Your total MCQ output must be AT LEAST equal to that box count, always, "
+        f"no matter how many boxes there are (e.g. 22 boxes → at least 22 MCQs, "
+        f"35 boxes → at least 35 MCQs) — every single box MUST be individually "
+        f"represented in the output.\n"
+        f"- SEPARATELY, as a general target (not a cap): aim for 15-25+ MCQs per page "
+        f"on average when box count is low, going higher whenever box count or page "
+        f"richness demands it. The box-count floor above ALWAYS takes priority over "
+        f"this 15-25 guideline — if boxes exceed 25, you MUST still exceed the box "
+        f"count; the 15-25 range is never an upper limit.\n"
+        f"- Never merge multiple boxes into one MCQ unless it's for the dedicated "
+        f"'combined/multi-box' MCQ type described below.\n"
+        f"- Never skip a box for being 'too small' — even a 2-3 word box/cell must "
+        f"produce a real MCQ using surrounding context.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟦 MCQ TYPE DISTRIBUTION (STRICT MIX — apply across the full set)\n"
+        f"═══════════════════════════════\n"
+        f"1) ~80% — STANDARD MCQ (one or more per box, individually, using that box's "
+        f"exact info): direct fact, definition, comparison, cause-effect, fill-in-blank, "
+        f"'কোনটি সঠিক নয়' style — vary the angle, never repeat the same question pattern "
+        f"back-to-back. 4 options, all info-rich (never bare হ্যাঁ/না/সত্য/মিথ্যা "
+        f"as a whole option). One correct answer only. Bengali/English explanation covering "
+        f"why each of the 4 options is right/wrong, compact and clear, within Telegram "
+        f"explanation character limit (max ~200 characters) — never a 1-line generic "
+        f"explanation.\n\n"
+        f"2) ~5% — সত্য/মিথ্যা (TRUE/FALSE) STYLE: Randomly mix these 4 exact patterns "
+        f"(logic must be followed exactly, never mismatch):\n"
+        f"   - 'নিচের কোনটিকে সত্য বললে ভুল হবে না?' → answer = the option that is actually "
+        f"TRUE/correct\n"
+        f"   - 'নিচের কোনটিকে সত্য বললে ভুল হবে?' → answer = the option that is actually "
+        f"FALSE/incorrect\n"
+        f"   - 'নিচের কোনটিকে মিথ্যা বললে ভুল হবে?' → answer = the option that is actually "
+        f"TRUE/correct\n"
+        f"   - 'নিচের কোনটিকে মিথ্যা বললে ভুল হবে না?' → answer = the option that is actually "
+        f"FALSE/incorrect\n"
+        f"   Self-check this logic after writing each one before finalizing. All 4 options "
+        f"info-rich (never a bare 'হ্যাঁ/না/সত্য/মিথ্যা' word as an option). Source-based only.\n\n"
+        f"3) ~10% — MULTI-BOX COMBINED MCQ: combine info from SEVERAL different boxes into "
+        f"a single question (e.g. options that each mix facts from 2-3+ boxes, only one "
+        f"option has ALL facts correct). Across this ~10% slice specifically, make sure "
+        f"the full ছক's information — including all box contents, options, and "
+        f"explanations — ends up covered collectively. Moderate difficulty, not confusing.\n\n"
+        f"4) ~5% — SHORT QUESTION, LONG OPTIONS: question is one short line, all 4 options "
+        f"are longer sentences/phrases. Same explanation-quality rules apply.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 SOURCE FIDELITY (STRICT)\n"
+        f"═══════════════════════════════\n"
+        f"- 100% of question text, options, and explanations must come from the source "
+        f"ছক/page — never invent or assume outside facts.\n"
+        f"- Explanation must justify each of the 4 options individually (correct one why "
+        f"right, other 3 why wrong) — pulled directly from source data — compact enough "
+        f"to fit Telegram's explanation character limit, but never a lazy 1-liner.\n"
+        f"- Never generate MCQs from topic names, chapter titles, headers, or page numbers.\n"
+        f"- Highlighted/marked/boxed/underlined content = highest priority, must be covered.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟩 OUTPUT\n"
+        f"═══════════════════════════════\n"
+        f"JSON array only, no markdown fences, no preamble. Format:\n"
+        f'[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],'
+        f'"answer":0,"explanation":"..."}}]\n'
+        f"answer is integer 0-3 (A=0,B=1,C=2,D=3). Answers must be spread across different "
+        f"option positions, not always the same letter."
+    )
+
+
 def _build_mcq_prompt(topic: str, count) -> str:
+    if _CHOK_MODE.get():
+        return _build_chok_prompt(topic)
     count_min = count_max = None
     if isinstance(count, (tuple, list)) and len(count) == 2:
         count_min, count_max = count[0], count[1]
@@ -1106,6 +1200,249 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
             logger.warning(f"[GroqVerify] key failed (status={status}), trying next key")
     return ""
 
+_TF_PATTERNS_BN = ("বললে ভুল হবে", "সত্য বললে", "মিথ্যা বললে")
+
+
+def _detect_chok_boxes(img) -> list:
+    """
+    CV-based box/cell detection for /chok pages using OpenCV contour detection.
+    Finds rectangular bordered regions (ছক/box/table cells) on the page and
+    returns their bounding boxes in normalized 0-1000 coordinates, ranked
+    largest-area-first (roughly reading order isn't guaranteed, but size
+    filtering removes noise). Zero AI cost — pure local CV, runs in a thread.
+
+    This gives a REAL, deterministic box count independent of what the AI
+    vision model claims to see, so we can code-verify "MCQ count >= box
+    count" instead of trusting the AI's self-report alone.
+
+    Best-effort: on any failure (bad image, no opencv, no boxes found),
+    returns [] and callers must treat that as "unknown box count" — NOT as
+    "zero boxes required".
+    """
+    try:
+        import cv2
+        import numpy as np
+        arr = np.array(img.convert("L"))  # grayscale
+        h, w = arr.shape[:2]
+        # Adaptive threshold handles uneven scan lighting better than a fixed one
+        thresh = cv2.adaptiveThreshold(
+            arr, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 25, 10
+        )
+        # Morphological close to connect broken box borders (dashed/faint lines)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours, _ = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+        page_area = w * h
+        boxes = []
+        for c in contours:
+            x, y, cw, ch = cv2.boundingRect(c)
+            area = cw * ch
+            # Filter: must be a meaningfully sized rectangular region — not a
+            # single character/line (too small) and not the whole page/a huge
+            # background block (too large). These thresholds are deliberately
+            # loose since textbook ছক boxes vary a lot in size.
+            if area < page_area * 0.003 or area > page_area * 0.5:
+                continue
+            aspect = cw / max(ch, 1)
+            if aspect > 25 or aspect < 0.03:
+                continue  # skip degenerate slivers (stray table gridlines etc.)
+            boxes.append((x, y, x + cw, y + ch, area))
+
+        if not boxes:
+            return []
+
+        # De-duplicate near-identical/nested boxes (common with nested
+        # borders/double-lines in scanned textbooks) by suppressing boxes
+        # that are >90% contained inside a larger already-kept box.
+        boxes.sort(key=lambda b: -b[4])
+        kept = []
+        for bx in boxes:
+            x0, y0, x1, y1, _ = bx
+            nested = False
+            for kx0, ky0, kx1, ky1, _ in kept:
+                ix0, iy0 = max(x0, kx0), max(y0, ky0)
+                ix1, iy1 = min(x1, kx1), min(y1, ky1)
+                if ix1 > ix0 and iy1 > iy0:
+                    inter = (ix1 - ix0) * (iy1 - iy0)
+                    this_area = (x1 - x0) * (y1 - y0)
+                    if inter / max(this_area, 1) > 0.9:
+                        nested = True
+                        break
+            if not nested:
+                kept.append(bx)
+
+        # Normalize to 0-1000 scale (matches _ocr_bbox_lookup convention)
+        norm = []
+        for x0, y0, x1, y1, _ in kept:
+            norm.append([
+                round(x0 / w * 1000), round(y0 / h * 1000),
+                round(x1 / w * 1000), round(y1 / h * 1000),
+            ])
+        return norm
+    except Exception as e:
+        logger.warning(f"[ChokBoxDetect] detection failed, treating as unknown: {e}")
+        return []
+
+
+def _chok_box_coverage_note(img, mcqs: list) -> str:
+    """
+    Cross-checks CV-detected box count against a heuristic estimate of how
+    many boxes the current MCQ set actually represents (proxy: total MCQ
+    count, since ~80% are meant to be 1-per-box). If detected box count
+    clearly exceeds current MCQ count, injects an explicit numeric
+    instruction into the verify prompt so the AI isn't just trusting its own
+    mental box-count — it gets a code-derived number to react to.
+    Returns "" if detection found nothing (fails open — never blocks/reduces
+    output) or coverage already looks sufficient.
+    """
+    try:
+        boxes = _detect_chok_boxes(img)
+    except Exception:
+        boxes = []
+    if not boxes:
+        return ""
+    box_count = len(boxes)
+    n = len(mcqs or [])
+    if n >= box_count:
+        return ""
+    gap = box_count - n
+    return (
+        f"\nCV BOX-DETECTION RESULT (independent of your own visual count): "
+        f"automated detection found approximately {box_count} distinct "
+        f"bordered box/cell regions on this page, but only {n} MCQs exist so "
+        f"far — that means AT LEAST {gap} box(es) are almost certainly still "
+        f"unrepresented. Go through the page again region by region and add "
+        f"MCQs for whichever boxes are missing until total MCQs >= {box_count}. "
+        f"This automated count can occasionally include a false positive "
+        f"(e.g. a decorative border), so use judgment, but treat a large gap "
+        f"like this as a strong signal of real missed boxes, not noise."
+    )
+
+
+async def _chok_final_cv_enforcement(mcqs: list, img, topic: str, page_num) -> list:
+    """
+    Final code-level safety net for /chok, run AFTER the normal verify pass.
+    Re-checks CV-detected box count vs current MCQ count. If a gap still
+    remains (verify pass either wasn't triggered by this specific number, or
+    the model under-delivered on its addition), fires ONE bounded, targeted
+    extra call asking specifically for the shortfall count, then appends
+    whatever comes back. Runs once only (no loop) to bound latency — this is
+    a best-effort second safety net on top of the verify pass, not a
+    guarantee generator, since CV detection itself can misfire (over/under
+    count on decorative borders, faint scan lines, etc).
+    """
+    try:
+        boxes = await asyncio.to_thread(_detect_chok_boxes, img)
+        if not boxes:
+            return mcqs
+        box_count = len(boxes)
+        n = len(mcqs or [])
+        if n >= box_count:
+            return mcqs
+        gap = box_count - n
+        existing_qs = "\n".join(f"- {m.get('question','')[:100]}" for m in (mcqs or [])[:60])
+        fix_prompt = (
+            f"CV box-detection found {box_count} distinct box/cell regions on this ছক "
+            f"page (Topic: {topic}), but only {n} MCQs exist — a gap of at least {gap}. "
+            f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
+            f"Scan the page box-by-box one final time and return ONLY the ADDITIONAL "
+            f"new MCQs for boxes/cells not yet represented above (never duplicate "
+            f"existing questions) — aim to close this gap of {gap}. All info must come "
+            f"from the source page. STRICT JSON array only: "
+            f'[{{"question":"...","options":["...","...","...","..."],'
+            f'"answer":"A","explanation":"..."}}]. If truly nothing more to add, '
+            f"return exactly: []"
+        )
+        txt = await _gen_groq_raw_text(img, fix_prompt)
+        extra = _parse_mcq_json(txt) if txt else []
+        if extra:
+            extra = _cap_mcq_options(extra, 4)
+            existing_q_texts = {(m.get("question") or "").strip().lower()[:60] for m in (mcqs or [])}
+            new_items = []
+            for m in extra:
+                qk = (m.get("question") or "").strip().lower()[:60]
+                if qk and qk not in existing_q_texts:
+                    new_items.append(m)
+                    existing_q_texts.add(qk)
+            if new_items:
+                logger.info(f"[ChokCVEnforce] page {page_num}: added {len(new_items)} more MCQs to close CV box-gap")
+                mcqs = list(mcqs or []) + new_items
+    except Exception as e:
+        logger.warning(f"[ChokCVEnforce] page {page_num} skipped: {e}")
+    return mcqs
+
+
+def _classify_chok_mcq_type(m: dict) -> str:
+    """Zero-cost regex classification of an MCQ into chok's 4 buckets.
+    Used only for ratio-auditing in chok mode — never blocks/filters output."""
+    q = (m.get("question") or "")
+    opts = m.get("options") or []
+    if any(p in q for p in _TF_PATTERNS_BN):
+        return "tf"
+    opt_lens = [len(str(o)) for o in opts] if opts else []
+    avg_opt_len = (sum(opt_lens) / len(opt_lens)) if opt_lens else 0
+    if len(q) <= 40 and avg_opt_len >= 25:
+        return "short_q_long_opt"
+    # heuristic for multi-box combined: question mentions multiple distinct
+    # nouns/topics joined by connectors, or options are unusually long/dense
+    # combining several facts (rough proxy: avg option length very high AND
+    # question itself references comparison/combination).
+    combine_markers = ("এবং", "ও ", "উভয়", "সবগুলো", "কোনটি সঠিক", "মিলিয়ে")
+    if avg_opt_len >= 35 and any(cm in q for cm in combine_markers):
+        return "multi_box"
+    return "standard"
+
+
+def _chok_ratio_gap_note(mcqs: list) -> str:
+    """Returns a short instruction string describing which type-buckets are
+    under target ratio AND whether the code-verifiable safety-net floor is
+    unmet, to append to the chok verify prompt. Empty string means everything
+    checkable from code is satisfied — no extra instruction needed.
+
+    IMPORTANT: code cannot see the page image, so it cannot count actual boxes.
+    15 here is only a SAFETY-NET minimum (never go below this), not the real
+    target — the real, binding floor is "one MCQ per box, however many boxes
+    there are" as instructed in the Call-1 prompt (_build_chok_prompt), which
+    can be 22, 35, or more. This function only catches the case where the
+    count fell below even the conservative 15 safety net.
+    """
+    n = len(mcqs or [])
+    baseline = max(n, 15)
+    counts = {"standard": 0, "tf": 0, "multi_box": 0, "short_q_long_opt": 0}
+    for m in mcqs:
+        counts[_classify_chok_mcq_type(m)] += 1
+    targets = {"tf": 0.05, "multi_box": 0.10, "short_q_long_opt": 0.05}
+    gaps = []
+    for key, pct in targets.items():
+        need = max(0, round(baseline * pct) - counts[key])
+        if need > 0:
+            label = {"tf": "সত্য/মিথ্যা style", "multi_box": "multi-box combined",
+                      "short_q_long_opt": "short-question-long-option"}[key]
+            gaps.append(f"{need} more {label} MCQ(s)")
+    floor_gap = 15 - n
+    notes = []
+    if floor_gap > 0:
+        notes.append(
+            f"SAFETY-NET FLOOR NOT MET: this ছক page has only {n} MCQs, below "
+            f"even the conservative 15 minimum. Add at least {floor_gap} more "
+            f"MCQ(s) now. REMINDER: 15 is only a safety-net minimum — the real, "
+            f"binding requirement is ONE MCQ PER BOX on this page (if this page "
+            f"has 22 boxes, you need 22+; if 35 boxes, 35+). Re-check whether "
+            f"every box/cell is individually represented, not just whether the "
+            f"count reaches 15."
+        )
+    if gaps:
+        notes.append(
+            f"TYPE-MIX GAP: current set is short on required variety — "
+            f"{'; '.join(gaps)}. Prioritize these types among the additional "
+            f"MCQs you return (still following per-box source-fidelity rules)."
+        )
+    if not notes:
+        return ""
+    return "\n" + "\n".join(notes)
+
+
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     Smart wrapper: Groq first (primary), then Gemini (internal key rotation via pdf_handler).
@@ -1132,6 +1469,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     merged = merged + verified[n_orig:]
     if _rng_max and len(merged) > _rng_max:
         merged = merged[:_rng_max]
+    if _CHOK_MODE.get():
+        merged = await _chok_final_cv_enforcement(merged, img, topic, page_num)
     return merged
 
 
@@ -1163,7 +1502,32 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
             f"MCQ(s) — the page's total must not exceed {count_max}."
             if count_max is not None else ""
         )
-        verify_prompt = (
+        if _CHOK_MODE.get():
+            ratio_gap_note = _chok_ratio_gap_note(mcqs)
+            cv_box_note = await asyncio.to_thread(_chok_box_coverage_note, img, mcqs)
+            verify_prompt = (
+                f"You are STRICTLY auditing ছক/box MCQ coverage for this page (Topic: {topic}).\n"
+                f"CALL 1 already extracted {current_n} MCQs.{max_extra_note} "
+                f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
+                f"MANDATORY BOX-BY-BOX AUDIT (not optional):\n"
+                f"- List EVERY box/cell/marked area/row/column on this page mentally, one by one.\n"
+                f"- For EACH box, check: is there at least one MCQ above that clearly covers "
+                f"THIS specific box's content? If not, that box was MISSED — this is a hard "
+                f"failure that must be fixed.\n"
+                f"- Pay special attention to the LAST row/box and BOTTOM of the page — most "
+                f"commonly missed.\n"
+                f"- Also check: are there enough MULTI-BOX combined MCQs (mixing 2-3+ boxes) "
+                f"to cover the full ছক collectively, and at least one সত্য/মিথ্যা style MCQ?"
+                f"{ratio_gap_note}{cv_box_note}\n\n"
+                f"If ANY box was missed, or the mix is incomplete, return ONLY the ADDITIONAL "
+                f"new MCQs needed (one per missed box minimum, never duplicate existing "
+                f"questions above) as STRICT JSON array: [{{\"question\":\"...\",\"options\":"
+                f"[\"...\",\"...\",\"...\",\"...\"],\"answer\":\"A\",\"explanation\":\"...\"}}]. "
+                f"If every box is genuinely already covered, return exactly: []\n"
+                f"Never invent facts not present on the page. No prose, JSON only."
+            )
+        else:
+            verify_prompt = (
             f"You are STRICTLY auditing MCQ coverage for this page (Topic: {topic}).\n"
             f"CALL 1 already extracted {current_n} MCQs (target ~{count_target}/page).{max_extra_note} "
             f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
@@ -1654,6 +2018,7 @@ async def handle_start(msg: dict):
             "━━━━━━━━━━━━━━━━━━━━\n"
             "📄 <b>PDF Commands:</b>\n"
             "• <code>/pdf</code> — PDF reply করে MCQ generate + channel poll\n"
+            "• <code>/chok</code> — ছক/বক্স PDF থেকে প্রতি বক্সে MCQ (mixed style)\n"
             "• <code>/pdfm</code> — PDF pagewise MCQ with image\n"
             "  Format: <code>/pdfm -p 1-5 -c @channel -m \"Topic\" 10</code>\n\n"
             "📸 <b>Image Commands:</b>\n"
@@ -2592,34 +2957,38 @@ async def _process_txt_to_poll_inner(channel_id: str, chat_id: int, uid: int, un
 # HELPER FUNCTIONS — CSV pre/end/summary messages
 # ============================================================
 def csv_get_pre_message(topic: str, count: int) -> str:
-    topic_text = f'"{topic}"' if topic else ""
+    topic_text = topic or "Special MCQ By ATLAS"
     return (
-        f"🌟Important Poll Solve By ATLAS\n"
-        f"🔥Topic Name: {topic_text}\n\n"
-        f"✅প্রশ্ন সংখ্যা: {count}"
+        f"🌟Topic:{topic_text}\n"
+        f"⚡MCQ:{count}\n\n"
+        f"✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো"
     )
 
 def csv_get_comment_prompt_message(topic: str, count: int) -> str:
-    topic_text = f'"{topic}"' if topic else ""
+    topic_text = topic or "Special MCQ By ATLAS"
     return (
-        f"🌟Important Poll Solve By ATLAS\n"
-        f"🔥Topic Name: {topic_text}\n\n"
-        f"✅প্রশ্ন সংখ্যা: {count}\n\n"
+        f"🌟Topic:{topic_text}\n"
+        f"⚡MCQ:{count}\n\n"
+        f"✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো\n\n"
         f"⁉️তোমার স্কোর কত? 🤔\n"
         f"( ? / {count} )\n\n"
         f"নিচে কমেন্টে লিখো! 👇"
     )
 
-def csv_get_ending_message(topic: str, count: int, first_link: str = "") -> str:
-    topic_text = f'"{topic}"' if topic else ""
+def csv_get_ending_message(topic: str, count: int, first_link: str = "", ask_score: bool = True) -> str:
+    """Channel: score-ask সহ. Group: শুধু thank-you + count, score-ask নাই."""
+    topic_text = topic or "Special MCQ By ATLAS"
     base = (
         f"🎉 ধন্যবাদ প্রিয় শিক্ষার্থী!\n"
-        f"👉এটলাস আয়োজিত {topic_text} পোল সলভে অংশগ্রহণ করার জন্য। 😊\n\n"
-        f"📊 মোট পোল: {count}\n\n"
-        f"⁉️তোমার স্কোর কত? 🤔\n"
-        f"( ? / {count} )\n\n"
-        f"নিচে লিখো! 👇"
+        f"👉এটলাস আয়োজিত \"{topic_text}\" পোল সলভে অংশগ্রহণ করার জন্য। 😊\n\n"
+        f"📊 মোট পোল: {count}"
     )
+    if ask_score:
+        base += (
+            f"\n\n⁉️তোমার স্কোর কত? 🤔\n"
+            f"( ? / {count} )\n\n"
+            f"নিচে লিখো! 👇"
+        )
     if first_link:
         base += f"\n\n✅পোল যেখান থেকে শুরু হয়েছে:\n{first_link}"
     return base
@@ -2642,6 +3011,75 @@ def csv_get_master_summary(topic: str, total: int,
         "🌟 *Website:* Atlascourses.com"
     )
     return text
+
+async def _get_chat_type(channel_id) -> str:
+    """'channel' / 'group' / 'supergroup' / 'private' / '' (unknown on failure)"""
+    r = await tg_post("getChat", {"chat_id": channel_id})
+    if r.get("ok"):
+        return r["result"].get("type", "")
+    return ""
+
+async def _check_bot_admin(channel_id) -> tuple:
+    """
+    Bot ওই channel/group-এ admin কিনা check করে।
+    Returns: (is_admin: bool, error_msg: str)
+    error_msg blank হলে সব ঠিক আছে।
+    """
+    bot_un = await get_bot_username()
+    me = await tg_post("getMe", {})
+    bot_id = me.get("result", {}).get("id")
+    if not bot_id:
+        return False, "❌ বট আইডি যাচাই করা যায়নি। আবার চেষ্টা করো।"
+
+    r = await tg_post("getChatMember", {"chat_id": channel_id, "user_id": bot_id})
+    if not r.get("ok"):
+        desc = r.get("description", "")
+        if "chat not found" in desc.lower():
+            return False, (
+                f"❌ Channel/Group খুঁজে পাওয়া যায়নি!\n\n"
+                f"📌 সমাধান: বট (@{bot_un}) কে ওই channel/group-এ member হিসেবে add করো।"
+            )
+        if "bot is not a member" in desc.lower() or "user not found" in desc.lower():
+            return False, (
+                f"❌ বট (@{bot_un}) ওই channel/group-এ নেই!\n\n"
+                f"📌 সমাধান: প্রথমে বটকে channel/group-এ add করো, তারপর Admin বানাও।"
+            )
+        return False, f"❌ যাচাই ব্যর্থ: {desc}\n\n📌 বটকে admin করে আবার চেষ্টা করো।"
+
+    status = r["result"].get("status", "")
+    if status not in ("administrator", "creator"):
+        return False, (
+            f"❌ বট (@{bot_un}) ওই channel/group-এ Admin না!\n\n"
+            f"📌 সমাধান:\n"
+            f"1️⃣ Channel/Group Settings → Administrators এ যাও\n"
+            f"2️⃣ @{bot_un} কে Admin বানাও\n"
+            f"3️⃣ Post Messages + Pin Messages permission দাও\n"
+            f"4️⃣ আবার /csv বা /csvS command দাও"
+        )
+
+    if status == "administrator":
+        can_post = r["result"].get("can_post_messages", True)
+        if can_post is False:
+            return False, (
+                f"❌ বট (@{bot_un}) Admin আছে, কিন্তু 'Post Messages' permission নেই!\n\n"
+                f"📌 সমাধান: Admin permissions থেকে 'Post Messages' চালু করো।"
+            )
+
+    return True, ""
+
+async def _csv_pre_buttons(cache_id: str) -> dict:
+    """Pre-message এর সাথে যুক্ত 4 inline button (deep-link URL, cache_id লাগবেই)"""
+    bot_un = await get_bot_username()
+    quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+    poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+    exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+    premium_url = f"https://t.me/{bot_un}?start=premium_{cache_id}"
+    return {"inline_keyboard": [
+        [{"text": "📝 Quiz Solve", "url": quiz_url},
+         {"text": "🔄 Poll Again", "url": poll_url}],
+        [{"text": "🌐 Website Exam", "url": exam_url},
+         {"text": "💎 Premium PDF", "url": premium_url}],
+    ]}
 
 def _get_first_poll_link(channel_id: str, msg_id: int) -> str:
     """Poll message link বানাও"""
@@ -2671,37 +3109,35 @@ async def handle_csv_command(msg: dict):
     # Full text after /csv
     raw_args = text[len("/csv"):].strip()
 
-    # Parse inline args: (Topic Name) (channel_id) (topic_id optional)
-    # Format: /csv জাতীয় বাজেট -100123456789 12
+    # Parse flag-based args: -m (topic name) -c (channel/group id) -t (thread/topic id)
+    import re as _re
     inline_channel = None
     inline_topic_id = None
-    inline_topic_name = raw_args
+    topic = ""
 
-    # Check if args contain a channel_id (-100... or @...) pattern
-    import re as _re
-    chan_match = _re.search(r'(-100\d+|@\S+)', raw_args)
-    if chan_match:
-        inline_channel = chan_match.group(1)
-        before_chan = raw_args[:chan_match.start()].strip()
-        after_chan = raw_args[chan_match.end():].strip()
-        inline_topic_name = before_chan
+    m_match = _re.search(r'-m\s+(.+?)(?=\s+-c\b|\s+-t\b|$)', raw_args)
+    if m_match:
+        topic = m_match.group(1).strip()
 
-        # topic_id is digits after channel_id
-        tid_match = _re.match(r'(\d+)', after_chan)
-        if tid_match:
-            inline_topic_id = int(tid_match.group(1))
+    c_match = _re.search(r'-c\s+(\S+)', raw_args)
+    if c_match:
+        inline_channel = c_match.group(1)
 
-    topic = inline_topic_name or ""
+    t_match = _re.search(r'-t\s+(\d+)', raw_args)
+    if t_match:
+        inline_topic_id = int(t_match.group(1))
+
+    if not topic:
+        topic = "Special MCQ By ATLAS"
 
     if not reply or not reply.get("document"):
         await send_msg(chat_id,
             "❌ CSV ফাইলে reply করে /csv দাও!\n\n"
-            "<b>Usage 1 (reply mode):</b>\n"
-            "<code>/csv জাতীয় বাজেট-২০২৬</code>\n\n"
-            "<b>Usage 2 (inline mode):</b>\n"
-            "<code>/csv Topic Name -100123456 [topic_id]</code>\n"
-            "<code>/csv Topic Name @channel</code>\n\n"
-            "📌 Topic optional — না দিলে blank থাকবে"
+            "<b>Usage:</b>\n"
+            "<code>/csv -m (topic name) -c (channel id/username/group id) -t (group topic id)</code>\n\n"
+            "📌 -m না দিলে default: \"Special MCQ By ATLAS\"\n"
+            "📌 -c না দিলে channel list থেকে বেছে নিতে পারবে\n"
+            "📌 -t শুধু group topic/thread হলে দরকার"
         )
         return
 
@@ -3099,9 +3535,25 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
         return
 
     session = json.loads(row.data[0]["data"])
-    topic = session.get("topic", "")
+    topic = session.get("topic", "") or "Special MCQ By ATLAS"
     mode = session.get("mode", "csv")
     thread_id = session.get("inline_topic_id") or None  # group topic/thread ID
+
+    # Bot admin check — সব কিছুর আগে
+    is_admin, admin_err = await _check_bot_admin(channel_id)
+    if not is_admin:
+        await send_msg(chat_id, admin_err)
+        return
+
+    # Chat type check — channel হলে score ask করবে, group হলে করবে না
+    chat_type = await _get_chat_type(channel_id)
+    ask_score = chat_type == "channel"
+
+    # thread_id ভুল/না-দেওয়া হলে group এর general এ পাঠাবে (default None already)
+    if chat_type in ("group", "supergroup") and thread_id:
+        # thread valid কিনা যাচাই করার সহজ উপায় নেই আগে থেকে; ভুল হলে TG নিজেই error দেবে,
+        # সেক্ষেত্রে general এ fallback করা হবে _send_csv_polls_to_channel এর retry তে না, তাই এখানে just pass through
+        pass
 
     cache = await db_get_mcq_cache(cache_id)
     if not cache:
@@ -3120,45 +3572,54 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
         batches = [mcqs[i:i+batch_size] for i in range(0, total, batch_size)]
         total_batches = len(batches)
         batch_links = []
+        first_pre_msg_id = None
+        all_batch_mcqs = []
 
         for b_idx, batch in enumerate(batches, 1):
             batch_topic = f"{topic} (Part-{b_idx:02d})"
 
-            # Pre-message
-            pre_text = csv_get_pre_message(batch_topic, len(batch))
-            pre_r = await tg_post("sendMessage", {
-                "chat_id": channel_id, "text": pre_text
-            })
-            pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
+            # প্রতিটা batch-এর জন্য আগেই cache — বাটন লিংকের জন্য দরকার
+            batch_cache_id = gen_session_id()
+            await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
 
-            # Polls পাঠাও
+            # Pre-message (plain, no button, no reply)
+            pre_text = csv_get_pre_message(batch_topic, len(batch))
+            pre_send_data = {"chat_id": channel_id, "text": pre_text}
+            if thread_id:
+                pre_send_data["message_thread_id"] = thread_id
+            pre_r = await tg_post("sendMessage", pre_send_data)
+            if not pre_r.get("ok") and thread_id:
+                # thread ভুল হলে group general এ fallback
+                pre_send_data.pop("message_thread_id", None)
+                pre_r = await tg_post("sendMessage", pre_send_data)
+                thread_id = None
+            pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
+            if first_pre_msg_id is None:
+                first_pre_msg_id = pre_msg_id
+            all_batch_mcqs.extend(batch)
+
+            # Polls পাঠাও (pre-msg কে reply করে)
             sent, first_link = await _send_csv_polls_to_channel(
                 channel_id, batch, batch_topic, chat_id, pre_msg_id,
                 thread_id=thread_id, loading_id=loading_id
             )
 
-            # প্রতিটা batch-এর জন্য আলাদা cache — Quiz Solve/Poll Solve/Web Exam বাটনের জন্য
-            batch_cache_id = gen_session_id()
-            await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
+            # Button-msg (channel + group উভয়ে): pre-msg টেক্সট + 4 button, pre-msg কে reply
+            btn_kb = await _csv_pre_buttons(batch_cache_id)
+            btn_send_data = {"chat_id": channel_id, "text": pre_text, "reply_markup": btn_kb}
+            if pre_msg_id:
+                btn_send_data["reply_to_message_id"] = pre_msg_id
+            if thread_id:
+                btn_send_data["message_thread_id"] = thread_id
+            await tg_post("sendMessage", btn_send_data)
 
-            # Ending message for this batch
-            ending = csv_get_ending_message(batch_topic, sent, first_link)
-            exam_url = f"{GH_PAGES_EXAM_URL}?id={batch_cache_id}"
-            bot_un = await get_bot_username()
-            quiz_url = f"https://t.me/{bot_un}?start=pdf_{batch_cache_id}"
-            poll_url = f"https://t.me/{bot_un}?start=poll_{batch_cache_id}"
-            premium_url = f"https://t.me/{bot_un}?start=premium_{batch_cache_id}"
-            end_kb = {"inline_keyboard": [
-                [{"text": "📝 Quiz Solve", "url": quiz_url},
-                 {"text": "🔄 Poll Again", "url": poll_url}],
-                [{"text": "🌐 Website Exam", "url": exam_url},
-                 {"text": "💎 Premium PDF", "url": premium_url}],
-            ]}
+            # Score-ask End-msg (channel only, no button, pre-msg কে reply) |
+            # Group: plain thank-you end-msg, score-ask/button নাই
+            ending = csv_get_ending_message(batch_topic, sent, first_link, ask_score=ask_score)
             end_send_data2 = {
                 "chat_id": channel_id,
                 "text": ending,
-                "disable_web_page_preview": True,
-                "reply_markup": end_kb
+                "disable_web_page_preview": True
             }
             if pre_msg_id:
                 end_send_data2["reply_to_message_id"] = pre_msg_id
@@ -3171,13 +3632,6 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                     "end_msg_id": end_r["result"]["message_id"]
                 })
 
-            # Follow-up message (no button, no reply) — comment button enable হওয়ার জন্য
-            comment_prompt = csv_get_comment_prompt_message(batch_topic, sent)
-            comment_send_data = {"chat_id": channel_id, "text": comment_prompt}
-            if thread_id:
-                comment_send_data["message_thread_id"] = thread_id
-            await tg_post("sendMessage", comment_send_data)
-
             batch_links.append((b_idx, first_link, len(batch)))
 
             if loading_id:
@@ -3186,14 +3640,42 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
 
             await asyncio.sleep(2.5)
 
-        # Master Summary (শুধু multiple batch হলে)
+        # Style1 PDF (সব poll মিলিয়ে) — summary এর আগে, first pre-msg কে reply, auto-pin
+        if all_batch_mcqs:
+            try:
+                data_adapted = _adapt_mcqs_for_print(all_batch_mcqs)
+                html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
+                pdf_bytes = await _html_to_pdf(html_s)
+                if pdf_bytes:
+                    safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                    doc_r = await send_document(
+                        channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
+                        caption=f"📖 Practice Sheet (Style 1)\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 ATLAS APP",
+                        message_thread_id=thread_id,
+                        reply_to_message_id=first_pre_msg_id
+                    )
+                    if doc_r and doc_r.get("ok"):
+                        doc_msg_id = doc_r.get("result", {}).get("message_id")
+                        if doc_msg_id:
+                            await try_pin_message(channel_id, doc_msg_id)
+                else:
+                    logger.error(f"[CSV-PDF] Style1 generation empty for topic: {topic}")
+            except Exception as e:
+                logger.error(f"[CSV-PDF] Error generating Style1 PDF: {e}")
+
+        # Master Summary (শুধু multiple batch হলে) — first pre-msg কে reply
         if total_batches > 1:
             summary = csv_get_master_summary(topic, total, total_batches, batch_links)
-            sum_r = await tg_post("sendMessage", {
+            sum_send_data = {
                 "chat_id": channel_id,
                 "text": summary,
                 "disable_web_page_preview": True
-            })
+            }
+            if first_pre_msg_id:
+                sum_send_data["reply_to_message_id"] = first_pre_msg_id
+            if thread_id:
+                sum_send_data["message_thread_id"] = thread_id
+            sum_r = await tg_post("sendMessage", sum_send_data)
             # Auto-pin summary
             if sum_r.get("ok"):
                 await try_pin_message(channel_id, sum_r["result"]["message_id"])
@@ -3209,6 +3691,10 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
         if thread_id:
             pre_send_data["message_thread_id"] = thread_id
         pre_r = await tg_post("sendMessage", pre_send_data)
+        if not pre_r.get("ok") and thread_id:
+            pre_send_data.pop("message_thread_id", None)
+            pre_r = await tg_post("sendMessage", pre_send_data)
+            thread_id = None
         pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
 
         sent, first_link = await _send_csv_polls_to_channel(
@@ -3216,23 +3702,22 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             thread_id=thread_id, loading_id=loading_id
         )
 
-        ending = csv_get_ending_message(topic, sent, first_link)
-        exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
-        bot_un = await get_bot_username()
-        quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
-        poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
-        premium_url = f"https://t.me/{bot_un}?start=premium_{cache_id}"
-        end_kb = {"inline_keyboard": [
-            [{"text": "📝 Quiz Solve", "url": quiz_url},
-             {"text": "🔄 Poll Again", "url": poll_url}],
-            [{"text": "🌐 Website Exam", "url": exam_url},
-             {"text": "💎 Premium PDF", "url": premium_url}],
-        ]}
+        # Button-msg (channel + group উভয়ে): pre-msg টেক্সট + 4 button, pre-msg কে reply
+        btn_kb = await _csv_pre_buttons(cache_id)
+        btn_send_data = {"chat_id": channel_id, "text": pre_text, "reply_markup": btn_kb}
+        if pre_msg_id:
+            btn_send_data["reply_to_message_id"] = pre_msg_id
+        if thread_id:
+            btn_send_data["message_thread_id"] = thread_id
+        await tg_post("sendMessage", btn_send_data)
+
+        # Score-ask End-msg (channel only, no button, pre-msg কে reply) |
+        # Group: plain thank-you end-msg, score-ask/button নাই
+        ending = csv_get_ending_message(topic, sent, first_link, ask_score=ask_score)
         end_send_data = {
             "chat_id": channel_id,
             "text": ending,
-            "disable_web_page_preview": True,
-            "reply_markup": end_kb
+            "disable_web_page_preview": True
         }
         if pre_msg_id:
             end_send_data["reply_to_message_id"] = pre_msg_id
@@ -3245,12 +3730,27 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 "end_msg_id": end_r["result"]["message_id"]
             })
 
-        # Follow-up message (no button, no reply) — comment button enable হওয়ার জন্য
-        comment_prompt = csv_get_comment_prompt_message(topic, sent)
-        comment_send_data = {"chat_id": channel_id, "text": comment_prompt}
-        if thread_id:
-            comment_send_data["message_thread_id"] = thread_id
-        await tg_post("sendMessage", comment_send_data)
+        # Style1 PDF (সব poll মিলিয়ে) — pre-msg কে reply, auto-pin
+        try:
+            data_adapted = _adapt_mcqs_for_print(mcqs)
+            html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
+            pdf_bytes = await _html_to_pdf(html_s)
+            if pdf_bytes:
+                safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                doc_r = await send_document(
+                    channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
+                    caption=f"📖 Practice Sheet (Style 1)\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 ATLAS APP",
+                    message_thread_id=thread_id,
+                    reply_to_message_id=pre_msg_id
+                )
+                if doc_r and doc_r.get("ok"):
+                    doc_msg_id = doc_r.get("result", {}).get("message_id")
+                    if doc_msg_id:
+                        await try_pin_message(channel_id, doc_msg_id)
+            else:
+                logger.error(f"[CSV-PDF] Style1 generation empty for topic: {topic}")
+        except Exception as e:
+            logger.error(f"[CSV-PDF] Error generating Style1 PDF: {e}")
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
@@ -4408,14 +4908,24 @@ async def handle_pdf(msg: dict):
     text = msg.get("text", "")
     reply = msg.get("reply_to_message")
     if not reply or not reply.get("document"):
-        await send_msg(chat_id,
-            "❌ PDF ফাইলে reply করে <code>/pdf</code> দাও!\n\n"
-            "<b>Example:</b>\n"
-            "<code>/pdf -p 1-5 -c @channel -m \"Topic\" [10]</code>\n"
-            "<code>/pdf -p 2 -c -100xxx -t 447 -m \"Group Topic\" [10]</code>\n\n"
-            "<code>[N]</code> = প্রতি পেইজে কতগুলো MCQ বানাতে হবে (ঐচ্ছিক)\n"
-            "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
-        )
+        if _CHOK_MODE.get():
+            await send_msg(chat_id,
+                "❌ PDF ফাইলে reply করে <code>/chok</code> দাও!\n\n"
+                "<b>Example:</b>\n"
+                "<code>/chok -p 1-5 -c @channel -m \"Topic\"</code>\n"
+                "<code>/chok -p 2 -c -100xxx -t 447 -m \"Group Topic\"</code>\n\n"
+                "ছক/বক্স/টেবিল PDF-এর জন্য বিশেষায়িত — প্রতিটা বক্স থেকে MCQ (mixed style)।\n"
+                "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
+            )
+        else:
+            await send_msg(chat_id,
+                "❌ PDF ফাইলে reply করে <code>/pdf</code> দাও!\n\n"
+                "<b>Example:</b>\n"
+                "<code>/pdf -p 1-5 -c @channel -m \"Topic\" [10]</code>\n"
+                "<code>/pdf -p 2 -c -100xxx -t 447 -m \"Group Topic\" [10]</code>\n\n"
+                "<code>[N]</code> = প্রতি পেইজে কতগুলো MCQ বানাতে হবে (ঐচ্ছিক)\n"
+                "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
+            )
         return
     params = parse_pdf_command(text)
     topic = params["topic"]
@@ -4429,6 +4939,12 @@ async def handle_pdf(msg: dict):
     mcq_count = params["mcq_count"]
     if params.get("mcq_count_min") and params.get("mcq_count_max"):
         mcq_count = (params["mcq_count_min"], params["mcq_count_max"])
+    if _CHOK_MODE.get():
+        # /chok count is NEVER user-settable — always content/box-driven per
+        # the user's explicit instruction. Any number typed after /chok is
+        # ignored entirely so it can never cap or override the mandatory
+        # 15+ per-box MCQ generation.
+        mcq_count = None
     thread_id = params.get("thread_id")
     file_name = reply["document"].get("file_name", "document.pdf")
     file_id = reply["document"]["file_id"]
@@ -4757,6 +5273,7 @@ async def _process_pdf_pages_inner(
 
     summary_pages = []
     all_mcqs_csv = []
+    all_mcqs_raw = []
     first_image_msg_id = None
     _prefetch_task = None
     _prefetch_idx = None
@@ -4883,6 +5400,7 @@ async def _process_pdf_pages_inner(
                     continue
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
+                all_mcqs_raw.extend(mcqs)
 
                 # FIX: summary_pages was declared but never populated — this is
                 # what feeds the end-of-job summary message + its auto-pin
@@ -4937,40 +5455,8 @@ async def _process_pdf_pages_inner(
                     else:
                         await notify_owner(f"⚠️ End message failed for page {fmt_page(page_num)}, topic: {topic}\nReason: {err_desc}")
 
-                # /pdf on hole ending message er por auto Style1+Style3 Sheet PDF channel e jabe
-                if await should_autosend_pdf(channel_id):
-                    try:
-                        data_adapted = _adapt_mcqs_for_print(mcqs)
-                        reply_target = first_image_msg_id or image_msg_id
-                        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
-                        _wm_saved = (await db_get_settings()).get("watermark", "")
-                        for style_key in ("style1", "style3"):
-                            html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
-                            pdf_bytes = await _html_to_pdf(html_s)
-                            if not pdf_bytes:
-                                logger.error(f"[PDF-AUTOSEND] {style_key} generation returned empty for page {page_num}")
-                                await notify_owner(f"⚠️ Auto-PDF ({style_key}) generate হয়নি — page {fmt_page(page_num)}, topic: {topic}")
-                                continue
-                            if _wm_saved:
-                                try:
-                                    pdf_bytes = add_watermark_to_pdf(pdf_bytes, _wm_saved)
-                                except Exception as _wm_e:
-                                    logger.warning(f"[PDF-AUTOSEND] watermark apply failed: {_wm_e}")
-                            style_name = PRINT_STYLE_NAMES[style_key]
-                            doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_p{page_num}_{style_key}.pdf",
-                                caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n🌟 Page: {fmt_page(page_num)}\n📝 মোট MCQ: {len(mcqs)}\n🚀 ATLAS APP",
-                                message_thread_id=thread_id, reply_to_message_id=reply_target)
-                            if doc_r and doc_r.get("ok"):
-                                doc_msg_id = doc_r.get("result", {}).get("message_id")
-                                if doc_msg_id:
-                                    await try_pin_message(channel_id, doc_msg_id)
-                            else:
-                                err_desc = (doc_r or {}).get("description", "no response")
-                                logger.error(f"[PDF-AUTOSEND] send_document failed ({style_key}): {err_desc}")
-                                await notify_owner(f"⚠️ Auto-PDF ({style_key}) পাঠাতে ব্যর্থ — page {fmt_page(page_num)}\nReason: {err_desc}")
-                    except Exception as e:
-                        logger.error(f"[PDF-AUTOSEND] Error: {e}")
-                        await notify_owner(f"⚠️ Auto-PDF সিস্টেমে error — page {fmt_page(page_num)}, topic: {topic}\nReason: {e}")
+                # Auto Style1+Style3 PDF এখন সব page শেষে একবারই পাঠানো হবে (নিচে)
+                all_mcqs_raw.extend(mcqs)
 
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
@@ -5028,9 +5514,45 @@ async def _process_pdf_pages_inner(
         if first_image_msg_id:
             summary_data["reply_to_message_id"] = first_image_msg_id
         sum_r = await tg_post("sendMessage", summary_data)
-        # Auto-pin the summary message (same as /csvS master summary behavior)
         if sum_r.get("ok"):
             await try_pin_message(channel_id, sum_r["result"]["message_id"])
+        else:
+            logger.warning(f"[Summary] send failed: {sum_r.get('description')}")
+
+    # সব poll শেষে combined Style1+Style3 PDF (সব page/poll মিলিয়ে) —
+    # first pre-msg (first_image_msg_id) কে reply করে, auto-pin
+    if not csv_only and channel_id and all_mcqs_raw and await should_autosend_pdf(channel_id):
+        try:
+            data_adapted = _adapt_mcqs_for_print(all_mcqs_raw)
+            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+            _wm_saved = (await db_get_settings()).get("watermark", "")
+            for style_key in ("style1", "style3"):
+                html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
+                pdf_bytes = await _html_to_pdf(html_s)
+                if not pdf_bytes:
+                    logger.error(f"[PDF-AUTOSEND] {style_key} generation returned empty, topic: {topic}")
+                    await notify_owner(f"⚠️ Auto-PDF ({style_key}) generate হয়নি — topic: {topic}")
+                    continue
+                if _wm_saved:
+                    try:
+                        pdf_bytes = add_watermark_to_pdf(pdf_bytes, _wm_saved)
+                    except Exception as _wm_e:
+                        logger.warning(f"[PDF-AUTOSEND] watermark apply failed: {_wm_e}")
+                style_name = PRINT_STYLE_NAMES[style_key]
+                doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_{style_key}.pdf",
+                    caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n📝 মোট MCQ: {len(all_mcqs_raw)}\n🚀 ATLAS APP",
+                    message_thread_id=thread_id, reply_to_message_id=first_image_msg_id)
+                if doc_r and doc_r.get("ok"):
+                    doc_msg_id = doc_r.get("result", {}).get("message_id")
+                    if doc_msg_id:
+                        await try_pin_message(channel_id, doc_msg_id)
+                else:
+                    err_desc = (doc_r or {}).get("description", "no response")
+                    logger.error(f"[PDF-AUTOSEND] send_document failed ({style_key}): {err_desc}")
+                    await notify_owner(f"⚠️ Auto-PDF ({style_key}) পাঠাতে ব্যর্থ — topic: {topic}\nReason: {err_desc}")
+        except Exception as e:
+            logger.error(f"[PDF-AUTOSEND] Error: {e}")
+            await notify_owner(f"⚠️ Auto-PDF সিস্টেমে error — topic: {topic}\nReason: {e}")
 
     sb.table("pdf_sessions").update({"status": "done"}).eq("id", session_id).execute()
     elapsed = int(time.time() - start_time)
@@ -8896,6 +9418,18 @@ async def handle_message(msg: dict):
             return
         clear_cancel(chat_id)
         await handle_pdf(msg)
+        return
+    if text.startswith("/chok"):
+        if not is_auth:
+            if is_private:
+                await send_msg(chat_id, UNAUTH_MSG)
+            return
+        clear_cancel(chat_id)
+        token = _CHOK_MODE.set(True)
+        try:
+            await handle_pdf(msg)
+        finally:
+            _CHOK_MODE.reset(token)
         return
     if text == "/bm":
         await handle_bm(msg)

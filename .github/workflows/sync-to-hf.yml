@@ -1,13 +1,20 @@
 name: Sync to Hugging Face Space
 
-# v4.4: Fresh HF Space (hamza-02/QuizBot), single-platform only (Render OFF).
-# Previous HF account was banned for running HF Space + Render simultaneously
-# (dual-webhook/dual-instance ToS violation). This time only HF Space is live.
+# v4.7: Primary-only auto-sync. Fallback (hamza-02/QuizBot) push REMOVED from
+# automatic push trigger — every commit was force-rebuilding it too, which
+# knocked the already-stable fallback into HF's "Build Queued" stuck bug.
+# Fallback now only updates when manually run via workflow_dispatch with
+# sync_fallback=true, so it stays untouched (and running) otherwise.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      sync_fallback:
+        description: 'Also push to fallback hamza-02/QuizBot?'
+        type: boolean
+        default: false
 
 jobs:
   sync-to-hf:
@@ -19,11 +26,36 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: Push to Hugging Face Space
+      - name: Push to Primary HF Space (HF04/quizbot-backup)
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN_PRIMARY: ${{ secrets.HF_TOKEN_PRIMARY }}
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
-          git remote add hf https://hamza-02:${HF_TOKEN}@huggingface.co/spaces/hamza-02/QuizBot
-          git push hf main:main --force
+          git remote add hf-primary https://HF04:${HF_TOKEN_PRIMARY}@huggingface.co/spaces/HF04/quizbot-backup
+          git push hf-primary main:main --force
+
+      - name: Sync Secrets to Primary HF Space
+        env:
+          HF_TOKEN_PRIMARY: ${{ secrets.HF_TOKEN_PRIMARY }}
+          SPACE_SECRETS_JSON: ${{ secrets.SPACE_SECRETS_JSON }}
+        run: |
+          pip install --quiet huggingface_hub
+          python3 - <<'PYEOF'
+          import os, json
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN_PRIMARY"])
+          space_id = "HF04/quizbot-backup"
+          secrets_map = json.loads(os.environ["SPACE_SECRETS_JSON"])
+          for key, value in secrets_map.items():
+              api.add_space_secret(repo_id=space_id, key=key, value=value)
+              print(f"Added: {key}")
+          PYEOF
+
+      - name: Push to Fallback HF Space (hamza-02/QuizBot) — manual only
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.sync_fallback == true }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git remote add hf-fallback https://hamza-02:${HF_TOKEN}@huggingface.co/spaces/hamza-02/QuizBot
+          git push hf-fallback main:main --force || echo "Fallback push failed (non-blocking)"

@@ -346,19 +346,18 @@ async def tg_post(method: str, data: dict) -> dict:
     except Exception as e:
         logger.warning(f"[TG] {method} proxy error: {type(e).__name__}: {e}")
     # ── Fallback: Direct Telegram API (CF down হলেও কাজ করবে) ──
-    timeout_cfg = httpx.Timeout(connect=10, read=60, write=20, pool=10)
     for attempt in range(2):
         try:
-            async with httpx.AsyncClient(timeout=timeout_cfg) as client:
-                r = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=data)
-                result = r.json()
-                if not result.get("ok"):
-                    if result.get("error_code") == 429:
-                        retry_after = result.get("parameters", {}).get("retry_after", 5)
-                        logger.warning(f"[TG] {method} direct 429, waiting {retry_after}s")
-                        await asyncio.sleep(min(retry_after, 30) + 0.5)
-                    logger.warning(f"[TG] {method} direct failed: {result.get('description')}")
-                return result
+            client = await _get_tg_direct_client()
+            r = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=data)
+            result = r.json()
+            if not result.get("ok"):
+                if result.get("error_code") == 429:
+                    retry_after = result.get("parameters", {}).get("retry_after", 5)
+                    logger.warning(f"[TG] {method} direct 429, waiting {retry_after}s")
+                    await asyncio.sleep(min(retry_after, 30) + 0.5)
+                logger.warning(f"[TG] {method} direct failed: {result.get('description')}")
+            return result
         except Exception as e:
             logger.error(f"[TG] {method} direct error (attempt {attempt+1}/2): {type(e).__name__}: {e}")
             if attempt == 0:
