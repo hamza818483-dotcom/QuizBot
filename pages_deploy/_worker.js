@@ -49,7 +49,10 @@ export default {
     if (url.pathname.startsWith('/api/exam/')) return await handleQuizData(request, url, env);
     if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url, env);
 
-    // v4.2: HF account permanently banned — these routes now go to Render.
+    // Backend host for exam-related write/read APIs. If this host is down,
+    // we no longer just 502 — result/leaderboard/bookmark now fall back to
+    // writing/reading D1 + both Supabase accounts directly from the Worker,
+    // so the exam still "works" end-to-end even with the backend fully off.
     const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
                      '/api/leaderboard', '/api/solve-pdf', '/api/tg-image', '/api/new-exam/status'];
     if (HF_ONLY.some(p => url.pathname.startsWith(p))) {
@@ -60,10 +63,17 @@ export default {
         body: request.method !== 'GET' ? request.body : undefined,
       });
       try {
-        return await fetch(renderReq, { signal: AbortSignal.timeout(20000) });
+        const r = await fetch(renderReq, { signal: AbortSignal.timeout(20000) });
+        if (r.ok) return r;
+        // Backend responded but with an error (5xx) — still worth trying the
+        // direct fallback path below rather than returning its error as-is.
       } catch(e) {
-        return jsonResp({ ok: false, error: 'Render unavailable: ' + e.message }, 502);
+        console.warn('[HF_ONLY] backend unreachable, trying direct fallback:', e.message);
       }
+      // ── Backend down/erroring: try direct D1 + Supabase(x2) fallback ──
+      const fb = await handleExamBackendFallback(request, url, env);
+      if (fb) return fb;
+      return jsonResp({ ok: false, error: 'Backend unavailable, no fallback path for this route' }, 502);
     }
 
     // Webhook → ack Telegram INSTANTLY, forward to Render in background.
@@ -484,6 +494,138 @@ async function handleTgSendDoc(request) {
   } catch (e) {
     return jsonResp({ ok: false, error: e.message }, 500);
   }
+}
+
+// ============================================================
+// EXAM BACKEND FALLBACK — direct D1 + Supabase(x2) writes/reads,
+// used only when the primary HF backend is unreachable/erroring.
+// Covers /api/exam/result (submit), /api/leaderboard (read),
+// /api/bookmark (save/delete). /api/new-exam, /api/solve-pdf,
+// /api/tg-image are NOT covered here (they need real PDF/AI
+// generation work that only the Python backend can do) — those
+// still fail with a clear error if the backend is down.
+// ============================================================
+async function handleExamBackendFallback(request, url, env) {
+  const SB_URL  = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+  const SB_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+  const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
+  const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
+
+  async function sbInsert(base, key, table, row, onConflict) {
+    const q = onConflict ? `?on_conflict=${onConflict}` : '';
+    return await fetch(`${base}/rest/v1/${table}${q}`, {
+      method: 'POST',
+      headers: {
+        apikey: key, Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        Prefer: onConflict ? 'resolution=merge-duplicates' : 'return=minimal',
+      },
+      body: JSON.stringify(row),
+      signal: AbortSignal.timeout(10000),
+    });
+  }
+
+  try {
+    if (url.pathname.startsWith('/api/exam/result') && request.method === 'POST') {
+      const data = await request.json();
+      const wrong = data.wrong || 0, correct = data.correct || 0, total = data.total || 0;
+      const negative = Math.round(wrong * 0.25 * 100) / 100;
+      const final_score = Math.round((correct - negative) * 100) / 100;
+      const row = {
+        cache_id: data.cache_id, user_id: data.user_id, user_name: data.user_name || 'User',
+        topic: data.topic || '', page_number: data.page || 0, total, correct, wrong,
+        skipped: data.skipped || 0, negative_marks: negative, final_score,
+        time_taken: data.time_taken || 0,
+      };
+      // D1 first (fastest, most reliable from inside the Worker itself)
+      try {
+        await env.DB.prepare(
+          "CREATE TABLE IF NOT EXISTS web_exam_results (id INTEGER PRIMARY KEY AUTOINCREMENT, cache_id TEXT, user_id INTEGER, user_name TEXT, topic TEXT, page_number INTEGER, total INTEGER, correct INTEGER, wrong INTEGER, skipped INTEGER, negative_marks REAL, final_score REAL, time_taken INTEGER)"
+        ).run();
+        await env.DB.prepare(
+          "INSERT INTO web_exam_results (cache_id,user_id,user_name,topic,page_number,total,correct,wrong,skipped,negative_marks,final_score,time_taken) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"
+        ).bind(row.cache_id, row.user_id, row.user_name, row.topic, row.page_number, row.total,
+               row.correct, row.wrong, row.skipped, row.negative_marks, row.final_score, row.time_taken).run();
+        // Leaderboard upsert too, so scores show up even in fallback mode
+        await env.DB.prepare(
+          "CREATE TABLE IF NOT EXISTS web_exam_leaderboard (cache_id TEXT, user_id INTEGER, user_name TEXT, final_score REAL, correct INTEGER, total INTEGER, updated_at INTEGER, PRIMARY KEY (cache_id, user_id))"
+        ).run();
+        await env.DB.prepare(
+          "INSERT INTO web_exam_leaderboard (cache_id,user_id,user_name,final_score,correct,total,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(cache_id,user_id) DO UPDATE SET final_score=excluded.final_score, correct=excluded.correct, total=excluded.total, user_name=excluded.user_name, updated_at=excluded.updated_at"
+        ).bind(row.cache_id, row.user_id, row.user_name, row.final_score, row.correct, row.total, Date.now()).run();
+      } catch (e) {
+        console.warn('[Fallback] D1 result write failed:', e.message);
+      }
+      // Best-effort mirror to both Supabase accounts too (non-blocking on each other)
+      sbInsert(SB_URL, SB_KEY, 'web_exam_results', row).catch(e => console.warn('[Fallback] SB1 result write failed:', e.message));
+      sbInsert(SB2_URL, SB2_KEY, 'web_exam_results', row).catch(e => console.warn('[Fallback] SB2 result write failed:', e.message));
+      const pct = total ? Math.round((correct / total) * 100) : 0;
+      return jsonResp({ ok: true, final_score, negative, pct, _source: 'fallback_direct' });
+    }
+
+    if (url.pathname.startsWith('/api/leaderboard/') && request.method === 'GET') {
+      const cacheId = url.pathname.replace('/api/leaderboard/', '').split('?')[0].trim();
+      // Try D1 first
+      try {
+        const { results } = await env.DB.prepare(
+          "SELECT * FROM web_exam_leaderboard WHERE cache_id=?1 ORDER BY final_score DESC LIMIT 50"
+        ).bind(cacheId).all();
+        if (results && results.length > 0) {
+          return jsonResp({ ok: true, data: results, _source: 'fallback_d1' });
+        }
+      } catch (e) {
+        console.warn('[Fallback] D1 leaderboard read failed:', e.message);
+      }
+      // Then both Supabase accounts
+      for (const [base, key] of [[SB_URL, SB_KEY], [SB2_URL, SB2_KEY]]) {
+        try {
+          const r = await fetch(
+            `${base}/rest/v1/web_exam_leaderboard?cache_id=eq.${cacheId}&select=*&order=final_score.desc&limit=50`,
+            { headers: { apikey: key, Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10000) }
+          );
+          const data = await r.json();
+          if (Array.isArray(data) && data.length > 0) {
+            return jsonResp({ ok: true, data, _source: 'fallback_supabase' });
+          }
+        } catch (e) {
+          console.warn('[Fallback] Supabase leaderboard read failed:', e.message);
+        }
+      }
+      return jsonResp({ ok: true, data: [], _source: 'fallback_empty' });
+    }
+
+    if (url.pathname.startsWith('/api/bookmark')) {
+      const data = await request.json().catch(() => ({}));
+      if (request.method === 'POST') {
+        try {
+          await env.DB.prepare(
+            "CREATE TABLE IF NOT EXISTS bookmarks (user_id INTEGER, cache_id TEXT, question_index INTEGER, question_data TEXT, topic TEXT, page_number INTEGER, PRIMARY KEY (user_id, cache_id, question_index))"
+          ).run();
+          await env.DB.prepare(
+            "INSERT INTO bookmarks (user_id,cache_id,question_index,question_data,topic,page_number) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(user_id,cache_id,question_index) DO UPDATE SET question_data=excluded.question_data, topic=excluded.topic, page_number=excluded.page_number"
+          ).bind(data.user_id, data.cache_id, data.question_index,
+                 JSON.stringify(data.question_data || {}), data.topic, data.page).run();
+          return jsonResp({ ok: true, _source: 'fallback_d1' });
+        } catch (e) {
+          return jsonResp({ ok: false, error: e.message }, 500);
+        }
+      }
+      if (request.method === 'DELETE') {
+        try {
+          await env.DB.prepare(
+            "DELETE FROM bookmarks WHERE user_id=?1 AND cache_id=?2 AND question_index=?3"
+          ).bind(data.user_id, data.cache_id, data.question_index).run();
+          return jsonResp({ ok: true, _source: 'fallback_d1' });
+        } catch (e) {
+          return jsonResp({ ok: false, error: e.message }, 500);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[Fallback] handleExamBackendFallback error:', e.message);
+    return jsonResp({ ok: false, error: e.message }, 500);
+  }
+  return null; // no fallback path matched (e.g. /api/new-exam, /api/solve-pdf, /api/tg-image)
 }
 
 // ============================================================
