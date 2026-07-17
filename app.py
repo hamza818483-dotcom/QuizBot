@@ -1530,6 +1530,145 @@ async def _chok_final_cv_enforcement(mcqs: list, img, topic: str, page_num) -> l
     return mcqs
 
 
+def _detect_page_text_lines(img) -> list:
+    """
+    OCR-based (pytesseract, zero AI cost, local CPU) detection of distinct
+    text lines on a page for /bangla mode. Reuses the same block/par/line
+    grouping approach as _ocr_bbox_lookup, but here the goal is simply a
+    real, deterministic LINE COUNT — independent of what the AI vision model
+    claims to see — so code can verify "MCQ count >= real line count" rather
+    than trusting the AI's own line-by-line self-report alone.
+
+    Filters out very short/noise "lines" (e.g. stray single characters,
+    page numbers) so the count roughly tracks genuine content lines.
+
+    Best-effort: on any failure (OCR unavailable, blank page, etc) returns
+    [] and callers must treat that as "unknown line count" — NOT as "zero
+    lines required".
+    """
+    try:
+        import pytesseract
+        try:
+            data = pytesseract.image_to_data(img, lang="ben+eng", output_type=pytesseract.Output.DICT)
+        except pytesseract.TesseractError:
+            data = pytesseract.image_to_data(img, lang="eng", output_type=pytesseract.Output.DICT)
+
+        lines = {}
+        n = len(data.get("text", []))
+        for i in range(n):
+            word = (data["text"][i] or "").strip()
+            if not word:
+                continue
+            key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+            if key not in lines:
+                lines[key] = []
+            lines[key].append(word)
+
+        # Keep only lines with meaningful content (>=2 chars total, not just
+        # a lone page-number digit or punctuation mark)
+        real_lines = []
+        for words in lines.values():
+            joined = " ".join(words)
+            if len(joined.strip()) >= 3:
+                real_lines.append(joined)
+        return real_lines
+    except Exception as e:
+        logger.warning(f"[BanglaLineDetect] detection failed, treating as unknown: {e}")
+        return []
+
+
+def _bangla_line_coverage_note(img, mcqs: list) -> str:
+    """
+    Cross-checks OCR-detected real text-line count against current MCQ count
+    for /bangla mode. If detected line count clearly exceeds current MCQ
+    count, returns an explicit numeric instruction to append to a verify
+    prompt so the model reacts to a code-derived number instead of only its
+    own self-reported line-by-line pass.
+    Returns "" if detection found nothing (fails open) or coverage already
+    looks sufficient — never blocks/reduces output.
+    """
+    try:
+        lines = _detect_page_text_lines(img)
+    except Exception:
+        lines = []
+    if not lines:
+        return ""
+    line_count = len(lines)
+    n = len(mcqs or [])
+    # A single MCQ can legitimately cover more than one OCR "line" (e.g. a
+    # multi-line sentence), so use a conservative ratio rather than a strict
+    # 1:1 — flag a gap only when MCQ count is well below the line count.
+    expected_min = max(1, round(line_count * 0.5))
+    if n >= expected_min:
+        return ""
+    gap = expected_min - n
+    return (
+        f"\nOCR LINE-DETECTION RESULT (independent of your own visual count): "
+        f"automated OCR found approximately {line_count} distinct text lines "
+        f"on this page, but only {n} MCQs exist so far — well below the "
+        f"expected minimum of ~{expected_min}. That means at least {gap} more "
+        f"lines/portions are almost certainly still unused. Go through the "
+        f"page again line by line and add MCQs for whichever lines/portions "
+        f"are missing. This automated count can occasionally include noise "
+        f"(headers, page numbers, OCR misreads), so use judgment, but treat "
+        f"a large gap like this as a strong signal of real unused content, "
+        f"not noise."
+    )
+
+
+async def _bangla_verify_and_enforce(mcqs: list, img, topic: str, page_num) -> list:
+    """
+    Code-level enforcement pass for /bangla, mirroring /chok's dual-layer
+    approach (AI self-audit + CV/OCR cross-check + one bounded extra call).
+    Runs AFTER the normal generation call. Checks OCR line-coverage; if a
+    real gap is detected, fires ONE targeted extra call asking the model to
+    scan again and cover the missing lines, then appends new MCQs found.
+    Runs once only (no loop) to bound latency.
+    """
+    try:
+        lines = await asyncio.to_thread(_detect_page_text_lines, img)
+        if not lines:
+            return mcqs
+        line_count = len(lines)
+        n = len(mcqs or [])
+        expected_min = max(1, round(line_count * 0.5))
+        if n >= expected_min:
+            return mcqs
+        gap = expected_min - n
+        existing_qs = "\n".join(f"- {m.get('question','')[:100]}" for m in (mcqs or [])[:60])
+        fix_prompt = (
+            f"OCR line-detection found approximately {line_count} distinct text "
+            f"lines on this page (Topic: {topic}), but only {n} MCQs exist — "
+            f"well short of the expected minimum coverage. Existing questions "
+            f"already covered:\n{existing_qs or '(none)'}\n\n"
+            f"Scan the page LINE BY LINE one final time and return ONLY the "
+            f"ADDITIONAL new MCQs for lines/portions not yet represented above "
+            f"(never duplicate existing questions) — there is NO maximum cap, "
+            f"cover as many remaining lines as genuinely have distinct content. "
+            f"All info must come from the source page. STRICT JSON array only: "
+            f'[{{"question":"...","options":["...","...","...","..."],'
+            f'"answer":"A","explanation":"..."}}]. If truly nothing more to add, '
+            f"return exactly: []"
+        )
+        txt = await _gen_groq_raw_text(img, fix_prompt)
+        extra = _parse_mcq_json(txt) if txt else []
+        if extra:
+            extra = _cap_mcq_options(extra, 4)
+            existing_q_texts = {(m.get("question") or "").strip().lower()[:60] for m in (mcqs or [])}
+            new_items = []
+            for m in extra:
+                qk = (m.get("question") or "").strip().lower()[:60]
+                if qk and qk not in existing_q_texts:
+                    new_items.append(m)
+                    existing_q_texts.add(qk)
+            if new_items:
+                logger.info(f"[BanglaEnforce] page {page_num}: added {len(new_items)} more MCQs to close OCR line-gap")
+                mcqs = list(mcqs or []) + new_items
+    except Exception as e:
+        logger.warning(f"[BanglaEnforce] page {page_num} skipped: {e}")
+    return mcqs
+
+
 def _classify_chok_mcq_type(m: dict) -> str:
     """Zero-cost regex classification of an MCQ into chok's 4 buckets.
     Used only for ratio-auditing in chok mode — never blocks/filters output."""
@@ -1628,6 +1767,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
         merged = merged[:_rng_max]
     if _CHOK_MODE.get():
         merged = await _chok_final_cv_enforcement(merged, img, topic, page_num)
+    if _BANGLA_MODE.get():
+        merged = await _bangla_verify_and_enforce(merged, img, topic, page_num)
     return merged
 
 
@@ -1681,6 +1822,31 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
                 f"questions above) as STRICT JSON array: [{{\"question\":\"...\",\"options\":"
                 f"[\"...\",\"...\",\"...\",\"...\"],\"answer\":\"A\",\"explanation\":\"...\"}}]. "
                 f"If every box is genuinely already covered, return exactly: []\n"
+                f"Never invent facts not present on the page. No prose, JSON only."
+            )
+        elif _BANGLA_MODE.get():
+            line_gap_note = await asyncio.to_thread(_bangla_line_coverage_note, img, mcqs)
+            verify_prompt = (
+                f"You are STRICTLY auditing MAXIMUM-SOURCE-UTILIZATION MCQ coverage for "
+                f"this page (Topic: {topic}). There is NO maximum MCQ cap on this page.\n"
+                f"CALL 1 already extracted {current_n} MCQs.{max_extra_note} "
+                f"Existing questions already covered:\n{existing_qs or '(none)'}\n\n"
+                f"MANDATORY LINE-BY-LINE AUDIT (not optional):\n"
+                f"- Go through this page LINE BY LINE, PARAGRAPH BY PARAGRAPH, POINT BY "
+                f"POINT, CELL BY CELL — for EACH one, check: is there at least one MCQ "
+                f"above that clearly covers this specific line/portion's content? If "
+                f"not, it was MISSED — this is a hard failure that must be fixed.\n"
+                f"- Pay special attention to the LAST lines/bottom of the page and "
+                f"footnotes — most commonly missed.\n"
+                f"- Check every highlighted/underlined/marked/boxed/ছক item and every "
+                f"table/ছক cell individually.\n"
+                f"{line_gap_note}\n\n"
+                f"If ANY line/portion was missed, return ONLY the ADDITIONAL new MCQs "
+                f"needed (one per missed line/portion minimum, never duplicate existing "
+                f"questions above, NO upper limit on how many you add) as STRICT JSON "
+                f"array: [{{\"question\":\"...\",\"options\":[\"...\",\"...\",\"...\",\"...\"],"
+                f"\"answer\":\"A\",\"explanation\":\"...\"}}]. "
+                f"If every line is genuinely already covered, return exactly: []\n"
                 f"Never invent facts not present on the page. No prose, JSON only."
             )
         else:
@@ -9657,8 +9823,10 @@ async def handle_message(msg: dict):
     uname = msg["from"].get("first_name", "User")
     chat_type = msg["chat"].get("type", "private")
     is_private = chat_type == "private"
-    await db_track_user(uid, uname)
-    is_auth = await db_is_owner_or_admin(uid)
+    # These two are independent DB lookups that ran one-after-another before
+    # every single command — running them concurrently halves this fixed
+    # per-message latency for every command in the bot.
+    _, is_auth = await asyncio.gather(db_track_user(uid, uname), db_is_owner_or_admin(uid))
 
     # Image collection mode check
     if msg.get("photo") or msg.get("document"):
@@ -9989,43 +10157,50 @@ async def handle_message(msg: dict):
 
             total_users = 0
             daily_active = 0
-            try:
-                total_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact").execute())
-                total_users = total_r.count or 0
-                active_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact") \
-                    .gte("last_seen", today_start_ts).execute())
-                daily_active = active_r.count or 0
-            except Exception as e:
-                logger.error(f"[Ping] user count error: {e}")
-
             key_count = len(key_rotator.keys)
-
             import os as _os, httpx as _hx
             _platform = _os.environ.get("RUNNING_ON", "") or "HuggingFace Space"
+            _wh_short = "❓ Check failed"
 
-            # Current webhook check
-            _wh_url = "Unknown"
-            try:
-                async with _hx.AsyncClient(timeout=5) as _c:
-                    _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
-                    _wh_data = _wr.json()
-                    _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
-                    _render_primary = (os.environ.get("RENDER_URL", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
-                    _render_secondary = (os.environ.get("RENDER_URL_2", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
-                    if _render_secondary and _render_secondary in _wh_url:
-                        _wh_short = "🟠 Render SECONDARY (failover active!)"
-                    elif _render_primary and _render_primary in _wh_url:
-                        _wh_short = "🟡 Render PRIMARY"
-                    elif "onrender.com" in _wh_url:
-                        _wh_short = "🟡 Render (unknown account)"
-                    elif "workers.dev" in _wh_url or "pages.dev" in _wh_url:
-                        _wh_short = "🟢 CF Worker (normal)"
-                    elif "hf.space" in _wh_url:
-                        _wh_short = "🔵 HF Space (direct)"
-                    else:
-                        _wh_short = f"⚪ {_wh_url[:40]}"
-            except Exception:
-                _wh_short = "❓ Check failed"
+            async def _get_user_counts():
+                nonlocal total_users, daily_active
+                try:
+                    total_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact").execute())
+                    total_users = total_r.count or 0
+                    active_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact")
+                        .gte("last_seen", today_start_ts).execute())
+                    daily_active = active_r.count or 0
+                except Exception as e:
+                    logger.error(f"[Ping] user count error: {e}")
+
+            async def _get_webhook_status():
+                nonlocal _wh_short
+                try:
+                    async with _hx.AsyncClient(timeout=5) as _c:
+                        _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
+                        _wh_data = _wr.json()
+                        _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
+                        _render_primary = (os.environ.get("RENDER_URL", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
+                        _render_secondary = (os.environ.get("RENDER_URL_2", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
+                        if _render_secondary and _render_secondary in _wh_url:
+                            _wh_short = "🟠 Render SECONDARY (failover active!)"
+                        elif _render_primary and _render_primary in _wh_url:
+                            _wh_short = "🟡 Render PRIMARY"
+                        elif "onrender.com" in _wh_url:
+                            _wh_short = "🟡 Render (unknown account)"
+                        elif "workers.dev" in _wh_url or "pages.dev" in _wh_url:
+                            _wh_short = "🟢 CF Worker (normal)"
+                        elif "hf.space" in _wh_url:
+                            _wh_short = "🔵 HF Space (direct)"
+                        else:
+                            _wh_short = f"⚪ {_wh_url[:40]}"
+                except Exception:
+                    _wh_short = "❓ Check failed"
+
+            # These three lookups don't depend on each other — run them
+            # concurrently instead of one-by-one so /ping's real latency is
+            # max(all three) instead of the sum of all three.
+            await asyncio.gather(_get_user_counts(), _get_webhook_status())
 
             _latency_ms = int((time.time() - _t0) * 1000)
             final_text = (
