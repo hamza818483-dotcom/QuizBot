@@ -9432,7 +9432,8 @@ async def _send_quiz_question_inner(uid: int):
 
     poll_r = await send_poll(
         st["chat_id"], q_text[:300], [o[:100] for o in opts], ans_idx,
-        explanation=exp[:200], is_anonymous=False, open_period=QUIZ_Q_SEC + 5
+        explanation=exp[:200], is_anonymous=False, open_period=QUIZ_Q_SEC + 5,
+        reply_to_message_id=st.get("last_msg_id")
     )
 
     if not poll_r.get("ok"):
@@ -9445,6 +9446,7 @@ async def _send_quiz_question_inner(uid: int):
         return
 
     st["poll_id"] = poll_r["result"]["poll"]["id"]
+    st["last_msg_id"] = poll_r["result"]["message_id"]
     st["answered"] = False
     st["timer_task"] = None
     await qs_set(uid, st)
@@ -9608,14 +9610,16 @@ async def _finish_quiz(uid: int):
         kb["inline_keyboard"].append([{"text": "↩️ Back to Source", "url": back_url}])
 
     img_id = st.get("image_file_id")
+    last_id = st.get("last_msg_id")
 
     if img_id:
         caption_trimmed = result_caption[:1024]
-        await send_photo_by_id(chat_id, img_id, caption_trimmed, parse_mode="HTML")
-        await send_msg(chat_id, motivation_text, reply_markup=kb)
+        photo_r = await send_photo_by_id(chat_id, img_id, caption_trimmed, parse_mode="HTML", reply_to_message_id=last_id)
+        reply_for_final = photo_r.get("result", {}).get("message_id") or last_id
+        await send_msg(chat_id, motivation_text, reply_markup=kb, reply_to_message_id=reply_for_final)
     else:
         full_result = result_caption + "\n" + motivation_text
-        await send_msg(chat_id, full_result, reply_markup=kb)
+        await send_msg(chat_id, full_result, reply_markup=kb, reply_to_message_id=last_id)
 
 async def handle_quiz_solve(msg: dict, cache_id: str):
     chat_id = msg["chat"]["id"]

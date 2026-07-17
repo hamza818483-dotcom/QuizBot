@@ -533,13 +533,16 @@ async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
         return {"ok": False, "error": str(e)}
 
 async def send_photo_by_id(chat_id, file_id: str, caption: str = "",
-                           parse_mode: str = "HTML") -> dict:
-    return await tg_post("sendPhoto", {
+                           parse_mode: str = "HTML", reply_to_message_id: int = None) -> dict:
+    data = {
         "chat_id": chat_id,
         "photo": file_id,
         "caption": caption,
         "parse_mode": parse_mode
-    })
+    }
+    if reply_to_message_id:
+        data["reply_to_message_id"] = reply_to_message_id
+    return await tg_post("sendPhoto", data)
 
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
