@@ -753,7 +753,7 @@ async def db_get_settings() -> dict:
         # purono columns diye retry kore crash bachai, watermark khali thakbe
         if "watermark" in str(e):
             try:
-                r = sb.table("quiz_settings").select("tag,exp_footer").eq("id", 1).execute()
+                r = await sb_exec(lambda: sb.table("quiz_settings").select("tag,exp_footer").eq("id", 1).execute())
                 if r.data:
                     row = r.data[0]
                     row["watermark"] = ""
