@@ -19,4 +19,4 @@ Telegram PDF MCQ Generation Bot with Gemini AI
 - /expQ - Set footer
 - /channel - Add channel
 - /permit - Add admin
-# restart Tue Jun  9 23:51:08 +06 2026
+# restart Fri Jul 17 2026 - force rebuild
