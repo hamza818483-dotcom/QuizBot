@@ -10172,11 +10172,8 @@ async def process_update(update: dict):
                         # queue it — it will auto-run right after the current
                         # command releases the lock, no resend needed.
                         chat_id = update["message"].get("chat", {}).get("id")
-                        qlen = len(_USER_PENDING_QUEUE.get(uid, []))
-                        if qlen == 0 and chat_id is not None:
-                            await send_msg(chat_id, "⏳ আগের command এখনো process হচ্ছে — শেষ হলে এটা automatic চলে যাবে।")
                         _USER_PENDING_QUEUE.setdefault(uid, []).append(update)
-                        if qlen >= 20:
+                        if len(_USER_PENDING_QUEUE[uid]) > 20:
                             # Safety cap — drop oldest queued item rather than growing unbounded
                             _USER_PENDING_QUEUE[uid].pop(0)
                         return
