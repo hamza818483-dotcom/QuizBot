@@ -3146,11 +3146,30 @@ async def handle_csv_command(msg: dict):
     # document er filename shobshomoy ".csv"-te shesh hoy na). Ekhon shorashori
     # try kore, parse fail hoile tobei error dekhabe.
 
-    loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
+    loading = await send_msg(chat_id, "⏳ CSV download হচ্ছে...\n[░░░░░░░░░░ 0%]")
     loading_id = loading.get("result", {}).get("message_id")
 
+    _last_pct = {"v": -1}
+    async def _dl_progress(done, total):
+        if not loading_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct["v"] < 10 and pct != 100:
+            return
+        _last_pct["v"] = pct
+        bar = "\u2588" * (pct // 10) + "\u2591" * (10 - pct // 10)
+        try:
+            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n[{bar} {pct}%]")
+        except Exception:
+            pass
+
     try:
-        csv_bytes = await download_tg_file(doc["file_id"])
+        csv_bytes = await download_tg_file(
+            doc["file_id"], progress_cb=_dl_progress,
+            chat_id=chat_id, message_id=reply["message_id"]
+        )
+        if loading_id:
+            await edit_msg(chat_id, loading_id, "✅ Download complete!\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
 
         if not mcqs:
@@ -3248,11 +3267,30 @@ async def handle_csvs_command(msg: dict):
         await send_msg(chat_id, "❌ CSV ফাইলে reply করে /csvS দাও!")
         return
 
-    loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
+    loading = await send_msg(chat_id, "⏳ CSV download হচ্ছে...\n[░░░░░░░░░░ 0%]")
     loading_id = loading.get("result", {}).get("message_id")
 
+    _last_pct_s = {"v": -1}
+    async def _dl_progress_s(done, total):
+        if not loading_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct_s["v"] < 10 and pct != 100:
+            return
+        _last_pct_s["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        try:
+            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n[{bar} {pct}%]")
+        except Exception:
+            pass
+
     try:
-        csv_bytes = await download_tg_file(reply["document"]["file_id"])
+        csv_bytes = await download_tg_file(
+            reply["document"]["file_id"], progress_cb=_dl_progress_s,
+            chat_id=chat_id, message_id=reply["message_id"]
+        )
+        if loading_id:
+            await edit_msg(chat_id, loading_id, "✅ Download complete!\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
 
         if not mcqs:
