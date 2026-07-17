@@ -414,10 +414,21 @@ async def send_quiz_question(chat_id: int, session: dict):
         else:
             opts = opts[:4]
 
-    poll_r = await send_poll(
-        chat_id, q_text, [o[:100] for o in opts], ans_idx,
-        explanation=exp, is_anonymous=False
-    )
+    try:
+        poll_r = await send_poll(
+            chat_id, q_text, [o[:100] for o in opts], ans_idx,
+            explanation=exp, is_anonymous=False
+        )
+    except Exception as e:
+        # sendPoll ke exception dhoreche (network blip etc) - guard clear kore
+        # dite hobe, nahole retry-o eki guard e atke thakbe (permanent stall)
+        logger.error(f"[Quiz] send_poll raised q{session['cur']+1}/{session['tot']}: {e}")
+        live = QUIZ_SESSIONS.get(uid)
+        if live is not None:
+            live["_sending_for"] = None
+            QUIZ_SESSIONS[uid] = live
+        session["_sending_for"] = None
+        poll_r = {"ok": False, "description": str(e)}
 
     if poll_r.get("ok"):
         poll_id = poll_r["result"].get("poll", {}).get("id", "")
@@ -510,6 +521,9 @@ async def handle_quiz_poll_answer(pa: dict):
         session["wrong"] += 1
 
     session["cur"] += 1
+    # user answer ashle leftover kono guard thakle clear kore dao,
+    # nahole eibar-er advance stale guard e atke jete pare
+    session["_sending_for"] = None
 
     if uid in QUIZ_TIMERS:
         QUIZ_TIMERS[uid].cancel()
