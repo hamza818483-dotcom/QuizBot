@@ -25,3 +25,4 @@ lxml
 telethon
 psutil
 numpy
+opencv-python-headless
