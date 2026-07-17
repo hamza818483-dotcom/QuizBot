@@ -43,12 +43,12 @@ export default {
     // TG send document (multipart)
     if (url.pathname === '/tg-senddoc') return await handleTgSendDoc(request);
 
-    // Web Quiz — CF serves index.html, API data via HF→D1→Supabase chain
-    if (url.pathname.startsWith('/quiz/')) return await handleWebQuiz(request, url, env);
-    if (url.pathname.startsWith('/exam/')) return await handleWebQuiz(request, url, env);
-    if (url.pathname.startsWith('/api/exam/')) return await handleQuizData(request, url, env);
-    if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url, env);
-
+    // v4.2: HF account permanently banned — these routes now go to Render.
+    // NOTE: checked BEFORE the generic /api/exam/ prefix match below, since
+    // /api/exam/result also starts with /api/exam/ and was being swallowed
+    // by handleQuizData (which then misread "result" as a quiz id and 404'd) —
+    // result-saving never reached Render at all, regardless of bot uptime.
+    //
     // Backend host for exam-related write/read APIs. If this host is down,
     // we no longer just 502 — result/leaderboard/bookmark now fall back to
     // writing/reading D1 + both Supabase accounts directly from the Worker,
@@ -75,6 +75,12 @@ export default {
       if (fb) return fb;
       return jsonResp({ ok: false, error: 'Backend unavailable, no fallback path for this route' }, 502);
     }
+
+    // Web Quiz — CF serves index.html, API data via Render→Supabase→D1 chain
+    if (url.pathname.startsWith('/quiz/')) return await handleWebQuiz(request, url, env);
+    if (url.pathname.startsWith('/exam/')) return await handleWebQuiz(request, url, env);
+    if (url.pathname.startsWith('/api/exam/')) return await handleQuizData(request, url, env);
+    if (url.pathname === '/quiz-data' && request.method === 'GET') return await handleQuizData(request, url, env);
 
     // Webhook → ack Telegram INSTANTLY, forward to Render in background.
     // v4.4: previously this awaited Render synchronously, so a cold Render
@@ -778,8 +784,13 @@ async function handleWebQuiz(request, url, env) {
   const uid  = url.searchParams.get('uid') || '0';
   const name = url.searchParams.get('name') || 'Student';
 
-  // index.html fetch করো — raw.githubusercontent rate-limit (429) হলে GH Pages fallback + retry
-  const WORKER_ORIGIN = `https://hamza-02-quizbot.hf.space`;
+  // Bug fix: this was hardcoded to a stale/retired HF Space URL, which meant
+  // every fetch the exam page makes (quiz data, results, leaderboard, bookmarks)
+  // was pointed at a dead host — silently breaking the entire "bot is down"
+  // fallback this Worker exists for. The Worker's own live origin (wherever
+  // it's actually deployed/reached from) is always correct and always up,
+  // since handleQuizData/handleWebQuiz live in this same file.
+  const WORKER_ORIGIN = url.origin;
   const HTML_SOURCES = [
     'https://raw.githubusercontent.com/hamza818483-dotcom/QuizBot/main/index.html',
     'https://hamza818483-dotcom.github.io/QuizBot/index.html',
