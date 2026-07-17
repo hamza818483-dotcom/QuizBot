@@ -11990,6 +11990,24 @@ async def _keepalive_task() -> None:
         await asyncio.sleep(300)
 
 
+async def _cf_connection_warmer_task() -> None:
+    """CF Worker-এর pooled connection warm রাখে (shared client-এর
+    keepalive_expiry=60s এর চেয়ে ছোট interval-এ ping করে), যাতে user কোনো
+    command দেওয়ার সময় cold connection-এ পড়তে না হয়। Measured impact:
+    cold connection ~950ms, warm connection ~30-60ms — তাই প্রথম command
+    সবসময় দ্রুত response পাবে।"""
+    from core import _get_shared_http_client, TG_API
+    await asyncio.sleep(20)
+    logger.info("[App] CF connection warmer started")
+    while True:
+        try:
+            client = await _get_shared_http_client()
+            await client.get(f"{TG_API}/getMe", timeout=10)
+        except Exception:
+            pass
+        await asyncio.sleep(45)
+
+
 async def _webhook_healer_task() -> None:
     """Every 10 min, checks Telegram webhook is set and non-empty. If it's
     empty (e.g. setWebhook failed at startup due to a transient DNS resolve
@@ -12212,6 +12230,7 @@ async def startup():
     # Self-ping keep-alive: prevents platform sleep. Watchdog alert tasks
     # disabled per request — AtlasBot now handles all external monitoring.
     _spawn_task(_supervised(_keepalive_task, "_keepalive_task"))
+    _spawn_task(_supervised(_cf_connection_warmer_task, "_cf_connection_warmer_task"))
     _spawn_task(_supervised(_webhook_healer_task, "_webhook_healer_task"))
     _spawn_task(_supervised(_memory_cleanup_task, "_memory_cleanup_task"))
     _spawn_task(_supervised(_ram_guard_task, "_ram_guard_task"))
