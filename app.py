@@ -203,7 +203,7 @@ async def _process_mhtml_auto(msg: dict):
         "csv_ready": False, "error": None,
         "dl_done": 0, "dl_total": 0, "dl_speed": 0,
     }
-    updater_task = asyncio.create_task(_mhtml_live_updater(job_id, chat_id, loading_id))
+    updater_task = _spawn_task(_mhtml_live_updater(job_id, chat_id, loading_id))
 
     try:
         _dl_start = time.time()
@@ -241,7 +241,7 @@ async def _process_mhtml_auto(msg: dict):
                 await asyncio.sleep(1)
                 j = MHTML_JOBS.get(job_id)
 
-        ticker_task = asyncio.create_task(_detect_ticker())
+        ticker_task = _spawn_task(_detect_ticker())
         try:
             fmt = await asyncio.to_thread(_detect_mhtml_format, raw_bytes, file_name)
         finally:
@@ -326,7 +326,7 @@ async def _process_mhtml_auto(msg: dict):
             updater_task.cancel()
         except Exception:
             pass
-        asyncio.create_task(_cleanup_job_later(job_id))
+        _spawn_task(_cleanup_job_later(job_id))
         await _safe_error_reply(chat_id, e)
 
 # D1 Quiz System (fully independent module — see quiz.py)
@@ -1831,8 +1831,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     # MCQs call-1 missed) touch disjoint data — run concurrently instead of
     # sequentially to cut per-page latency roughly in half. Verify appends
     # new items to `out`, so run it first into a temp var and merge after.
-    repair_task = asyncio.create_task(_repair_thin_explanations(list(out), img, topic))
-    verify_task = asyncio.create_task(_verify_and_fix_page(list(out), img, topic, page_num, mcq_count))
+    repair_task = _spawn_task(_repair_thin_explanations(list(out), img, topic))
+    verify_task = _spawn_task(_verify_and_fix_page(list(out), img, topic, page_num, mcq_count))
     repaired, verified = await asyncio.gather(repair_task, verify_task)
     # verified = original out + any newly-found MCQs (appended at the end).
     # Rebuild: take repaired explanations for the original items, then append
@@ -1956,8 +1956,8 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
         # misses a single model's blind spots would let through, at the cost
         # of one extra parallel call (not sequential, so latency impact is
         # small since both run at once).
-        groq_task = asyncio.create_task(_gen_groq_raw_text(img, verify_prompt))
-        gemini_task = asyncio.create_task(_gemini_verify_raw_text(img, verify_prompt))
+        groq_task = _spawn_task(_gen_groq_raw_text(img, verify_prompt))
+        gemini_task = _spawn_task(_gemini_verify_raw_text(img, verify_prompt))
         extra_txt, extra_txt_gemini = await asyncio.gather(groq_task, gemini_task)
 
         extra = _parse_mcq_json(extra_txt) if extra_txt else []
@@ -2991,7 +2991,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
         except asyncio.CancelledError:
             pass
 
-    ticker_task = asyncio.create_task(_progress_ticker())
+    ticker_task = _spawn_task(_progress_ticker())
 
     try:
         img_bytes = await download_tg_file(file_id)
@@ -3343,7 +3343,7 @@ async def handle_txt_command(msg: dict):
                     except Exception:
                         pass
 
-        progress_task = asyncio.create_task(_progress_updater())
+        progress_task = _spawn_task(_progress_updater())
         try:
             mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count,
                                                  on_progress=_on_mcq_done)
@@ -3733,7 +3733,7 @@ async def handle_csv_command(msg: dict):
             if loading_id:
                 await edit_msg(chat_id, loading_id,
                     f"✅ {len(mcqs)} MCQ | 📢 সরাসরি {inline_channel}-এ পাঠানো হচ্ছে...")
-            asyncio.create_task(process_csv_to_channel(
+            _spawn_task(process_csv_to_channel(
                 cache_id, inline_channel, chat_id, uid
             ))
             return
@@ -4406,7 +4406,7 @@ async def handle_wm_command(msg: dict):
             file_id = reply["document"]["file_id"]
         if file_id:
             await send_msg(chat_id, f"⏳ Watermark apply হচ্ছে: <b>{wm_text}</b>", parse_mode="HTML")
-            asyncio.create_task(_apply_watermark_to_pdf(chat_id, file_id, wm_text, reply["message_id"]))
+            _spawn_task(_apply_watermark_to_pdf(chat_id, file_id, wm_text, reply["message_id"]))
             return
 
     await send_msg(chat_id,
@@ -5789,10 +5789,10 @@ async def pdf_generate_all_pages(
                 _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
 
         tasks = [
-            asyncio.create_task(_run_one(idx, page_num, img))
+            _spawn_task(_run_one(idx, page_num, img))
             for idx, (page_num, img) in enumerate(pages)
         ]
-        watcher = asyncio.create_task(_watch_cancel(tasks))
+        watcher = _spawn_task(_watch_cancel(tasks))
         await asyncio.gather(*tasks, return_exceptions=True)
         watcher.cancel()
         try:
@@ -5948,7 +5948,7 @@ async def _process_pdf_pages_inner(
                 # with it instead of waiting its turn after).
                 if not skip_generate and idx + 1 < len(pages):
                     _next_page_num, _next_img = pages[idx + 1]
-                    _prefetch_task = asyncio.create_task(_gen_with_retry(_next_img, _next_page_num))
+                    _prefetch_task = _spawn_task(_gen_with_retry(_next_img, _next_page_num))
                     _prefetch_idx = idx + 1
 
                 poll_links = []
@@ -7992,7 +7992,7 @@ async def handle_rapid_time_text(msg: dict) -> bool:
     }).execute())
 
     delay = (run_at - now).total_seconds()
-    task = asyncio.create_task(_rapid_wait_and_run(job_id, delay))
+    task = _spawn_task(_rapid_wait_and_run(job_id, delay))
     RAPID_TASKS[job_id] = task
 
     await send_msg(chat_id,
@@ -8070,7 +8070,7 @@ async def _run_rapid_job(job_id: str):
             })
             q_msg_id = q_r.get("result", {}).get("message_id") if q_r.get("ok") else None
 
-            reveal_tasks.append(asyncio.create_task(_reveal_answer(i, mcq, q_msg_id)))
+            reveal_tasks.append(_spawn_task(_reveal_answer(i, mcq, q_msg_id)))
 
             if i < total:
                 await asyncio.sleep(RAPID_Q_INTERVAL)
@@ -8188,7 +8188,7 @@ async def _recover_rapid_jobs():
                     .eq("key", row["key"]).execute())
                 continue
             delay = run_at_ts - now_ts
-            task = asyncio.create_task(_rapid_wait_and_run(job_id, delay))
+            task = _spawn_task(_rapid_wait_and_run(job_id, delay))
             RAPID_TASKS[job_id] = task
             logger.info(f"[RAPID] recovered job {job_id}, fires in {int(delay)}s")
     except Exception as e:
@@ -8911,7 +8911,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
                 except Exception:
                     pass
 
-    progress_task = asyncio.create_task(update_progress())
+    progress_task = _spawn_task(update_progress())
     try:
         new_mcqs = _cap_mcq_options(await asyncio.wait_for(
             generate_new_mcq(img, topic, page, mcq_count=15), timeout=90))
@@ -9019,7 +9019,7 @@ _QUIZ_START_LOCK: set = set()  # v4.1: per-uid debounce — prevents double-tap/
 async def qs_set(uid: int, state: dict):
     QUIZ_STATE[uid] = state
     state_copy = {k: v for k, v in state.items() if k != "timer_task"}
-    asyncio.create_task(d1_set(f"qs_{uid}", state_copy, ttl=3600))
+    _spawn_task(d1_set(f"qs_{uid}", state_copy, ttl=3600))
 
 async def qs_get(uid: int) -> dict:
     if uid in QUIZ_STATE:
@@ -9034,7 +9034,7 @@ async def qs_get(uid: int) -> dict:
 
 async def qs_del(uid: int):
     QUIZ_STATE.pop(uid, None)
-    asyncio.create_task(d1_del(f"qs_{uid}"))
+    _spawn_task(d1_del(f"qs_{uid}"))
 
 async def _run_quiz_start_debounced(coro, uid: int):
     """v4.1: runs a quiz-start coroutine then releases the debounce lock,
@@ -9049,7 +9049,7 @@ async def _run_quiz_start_debounced(coro, uid: int):
 async def lq_set(uid: int, state: dict):
     LAST_QUIZ[uid] = state
     state_copy = {k: v for k, v in state.items() if k != "timer_task"}
-    asyncio.create_task(d1_set(f"lq_{uid}", state_copy, ttl=86400))
+    _spawn_task(d1_set(f"lq_{uid}", state_copy, ttl=86400))
 
 async def lq_get(uid: int) -> dict:
     if uid in LAST_QUIZ:
@@ -9180,7 +9180,7 @@ async def _send_quiz_question_inner(uid: int):
     st["answered"] = False
     st["timer_task"] = None
     await qs_set(uid, st)
-    st["timer_task"] = asyncio.create_task(_quiz_timeout(uid, st["poll_id"]))
+    st["timer_task"] = _spawn_task(_quiz_timeout(uid, st["poll_id"]))
 
 async def _quiz_timeout(uid: int, poll_id: str):
     try:
@@ -9267,7 +9267,7 @@ async def _finish_quiz(uid: int):
         st["timer_task"].cancel()
 
     await lq_set(uid, st)
-    asyncio.create_task(db_save_last_quiz(uid, st))
+    _spawn_task(db_save_last_quiz(uid, st))
 
     chat_id = st["chat_id"]
     cache_id = st["cache_id"]
@@ -9289,7 +9289,7 @@ async def _finish_quiz(uid: int):
         grade = "💪 পড়া হয়নি!হাল ছেড়ো না!আবার পড়ে প্রাক্টিস করো-শুভকামনায়--রাফি ভাইয়া(এটলাস)"
 
     if not st["is_new_gen"] and st["mode"] == "quiz":
-        asyncio.create_task(db_save_leaderboard(cache_id, uid, st["uname"], st["topic"], st["page"], right, total, fin))
+        _spawn_task(db_save_leaderboard(cache_id, uid, st["uname"], st["topic"], st["page"], right, total, fin))
 
     ayat = get_random_ayat()
     motivation = get_motivation(pct)
@@ -9407,7 +9407,7 @@ async def handle_quiz_new(cache_id: str, user: dict, chat_id: int):
                 except Exception:
                     pass
 
-    progress_task = asyncio.create_task(update_progress())
+    progress_task = _spawn_task(update_progress())
     try:
         new_mcqs = _cap_mcq_options(await asyncio.wait_for(
             generate_new_mcq(img, cache["topic"], cache["page_number"], mcq_count=15), timeout=90))
@@ -9771,7 +9771,7 @@ async def handle_convert_command(msg: dict):
 # ============================================================
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
-# Fire-and-forget asyncio.create_task() calls can be silently garbage-collected
+# Fire-and-forget _spawn_task() calls can be silently garbage-collected
 # mid-execution if nothing holds a reference to the Task object — this is a
 # well-known asyncio pitfall and matches "first command silent, retry works"
 # (the very first task in a fresh loop has nothing else referencing it yet).
@@ -9955,7 +9955,7 @@ async def handle_message(msg: dict):
     # db_track_user শুধু analytics/tracking — command response-এর জন্য দরকার নাই,
     # তাই await না করে background-এ ছেড়ে দিলে প্রতিটা command-এর latency থেকে
     # এই ২টা network round-trip বাদ পড়ে (fire-and-forget)
-    asyncio.create_task(db_track_user(uid, uname))
+    _spawn_task(db_track_user(uid, uname))
     is_auth = await db_is_owner_or_admin(uid)
 
     # Image collection mode check
@@ -10001,7 +10001,7 @@ async def handle_message(msg: dict):
 
     # DB cleanup (every ~100 requests, random)
     if random.random() < 0.01:
-        asyncio.create_task(db_auto_cleanup_if_needed())
+        _spawn_task(db_auto_cleanup_if_needed())
 
     # Plain t.me link পাঠালেই (কোনো command ছাড়া) auto-resolve করে ID দিয়ে দেওয়া
     if (is_private and text and not text.startswith("/")
@@ -10033,31 +10033,31 @@ async def handle_message(msg: dict):
         return
     if text.startswith("/start premium_"):
         cache_id = text.replace("/start premium_", "").strip()
-        asyncio.create_task(handle_premium_pdf_start(msg, cache_id))
+        _spawn_task(handle_premium_pdf_start(msg, cache_id))
         return
     if text.startswith("/start pdf_"):
         cache_id = text.replace("/start pdf_", "").strip()
-        asyncio.create_task(handle_quiz_solve(msg, cache_id))
+        _spawn_task(handle_quiz_solve(msg, cache_id))
         return
     if text.startswith("/start poll_"):
         cache_id = text.replace("/start poll_", "").strip()
-        asyncio.create_task(handle_poll_again(cache_id, msg["from"], chat_id))
+        _spawn_task(handle_poll_again(cache_id, msg["from"], chat_id))
         return
     if text.startswith("/start pdfnew_"):
         cache_id = text.replace("/start pdfnew_", "").strip()
         if uid not in _QUIZ_START_LOCK:
             _QUIZ_START_LOCK.add(uid)
-            asyncio.create_task(_run_quiz_start_debounced(handle_quiz_new(cache_id, msg["from"], chat_id), uid))
+            _spawn_task(_run_quiz_start_debounced(handle_quiz_new(cache_id, msg["from"], chat_id), uid))
         return
     if text.startswith("/start pollnew_"):
         cache_id = text.replace("/start pollnew_", "").strip()
         if uid not in _QUIZ_START_LOCK:
             _QUIZ_START_LOCK.add(uid)
-            asyncio.create_task(_run_quiz_start_debounced(handle_poll_new(cache_id, msg["from"], chat_id, None), uid))
+            _spawn_task(_run_quiz_start_debounced(handle_poll_new(cache_id, msg["from"], chat_id, None), uid))
         return
     if text.startswith("/start qz_"):
         quiz_id = text.split()[1] if len(text.split()) > 1 else text.replace("/start ", "")
-        asyncio.create_task(start_d1_quiz(chat_id, quiz_id, msg["from"]))
+        _spawn_task(start_d1_quiz(chat_id, quiz_id, msg["from"]))
         return
     if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm")) or text.startswith("/bangla"):
         if not is_auth:
@@ -10100,7 +10100,7 @@ async def handle_message(msg: dict):
         await handle_bm(msg)
         return
     if text == "/bmexam":
-        asyncio.create_task(handle_bmexam(msg))
+        _spawn_task(handle_bmexam(msg))
         return
     if text in ("/collect", "/cstatus", "/cdone", "/ccancel"):
         await handle_collect_command(msg)
@@ -10143,7 +10143,7 @@ async def handle_message(msg: dict):
     elif text.startswith("/qbm"):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
         # 100% ported from AtlasMasterBot's qbm_handler
-        asyncio.create_task(handle_qbm(msg))
+        _spawn_task(handle_qbm(msg))
     elif text.startswith("/pdfm"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
@@ -10161,59 +10161,59 @@ async def handle_message(msg: dict):
             return
         await handle_txt_command(msg)
     elif text.startswith("/cancel"):
-        asyncio.create_task(handle_cancel_command(msg))
+        _spawn_task(handle_cancel_command(msg))
     elif text.startswith("/sheet"):
-        asyncio.create_task(handle_sheet_command(msg))
+        _spawn_task(handle_sheet_command(msg))
     elif text.startswith("/qcsv"):
-        asyncio.create_task(handle_qcsv_command(msg))
+        _spawn_task(handle_qcsv_command(msg))
     elif text.startswith("/qpdf"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        asyncio.create_task(handle_qpdf_command(msg))
+        _spawn_task(handle_qpdf_command(msg))
     elif text.startswith("/split"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        asyncio.create_task(handle_split_command(msg))
+        _spawn_task(handle_split_command(msg))
     elif text.startswith("/csvS"):
         # /csvS অবশ্যই /csv এর আগে check করতে হবে
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        asyncio.create_task(handle_csvs_command(msg))
+        _spawn_task(handle_csvs_command(msg))
     elif text.startswith("/csv"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        asyncio.create_task(handle_csv_command(msg))
+        _spawn_task(handle_csv_command(msg))
     elif text.startswith("/rapid ") or text == "/rapid":
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        asyncio.create_task(handle_rapid_command(msg))
+        _spawn_task(handle_rapid_command(msg))
     elif text.startswith("/wm"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        asyncio.create_task(handle_wm_command(msg))
+        _spawn_task(handle_wm_command(msg))
     elif text.startswith("/live") and not text.startswith("/livetime"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        asyncio.create_task(handle_live_command(msg))
+        _spawn_task(handle_live_command(msg))
 
     elif text.startswith("/pollcsv") or text.startswith("/pcsv"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        asyncio.create_task(handle_poll_extract(msg))
+        _spawn_task(handle_poll_extract(msg))
 
     elif text.startswith("/poll") and "\n" in text and "t.me/" in text:
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        asyncio.create_task(handle_poll_extract(msg))
+        _spawn_task(handle_poll_extract(msg))
 
     elif text == "/setcommand":
         if uid != OWNER_ID:
@@ -10485,18 +10485,18 @@ async def handle_callback(query: dict):
 
         elif data.startswith("pollagain_"):
             cache_id = data.replace("pollagain_", "")
-            asyncio.create_task(handle_poll_again(cache_id, user, chat_id))
+            _spawn_task(handle_poll_again(cache_id, user, chat_id))
 
         elif data.startswith("qsame_"):
             cache_id = data.replace("qsame_", "")
-            asyncio.create_task(handle_quiz_same(cache_id, user, chat_id))
+            _spawn_task(handle_quiz_same(cache_id, user, chat_id))
 
         elif data.startswith("pollnew_"):
             cache_id = data.replace("pollnew_", "")
             if uid in _QUIZ_START_LOCK:
                 return
             _QUIZ_START_LOCK.add(uid)
-            asyncio.create_task(_run_quiz_start_debounced(handle_poll_new(cache_id, user, chat_id, msg_id), uid))
+            _spawn_task(_run_quiz_start_debounced(handle_poll_new(cache_id, user, chat_id, msg_id), uid))
 
         elif data.startswith("polllb_"):
             cache_id = data.replace("polllb_", "")
@@ -10507,19 +10507,19 @@ async def handle_callback(query: dict):
             if uid in _QUIZ_START_LOCK:
                 return
             _QUIZ_START_LOCK.add(uid)
-            asyncio.create_task(_run_quiz_start_debounced(handle_quiz_new(cache_id, user, chat_id), uid))
+            _spawn_task(_run_quiz_start_debounced(handle_quiz_new(cache_id, user, chat_id), uid))
 
         elif data == "qmis":
             if uid in _QUIZ_START_LOCK:
                 return
             _QUIZ_START_LOCK.add(uid)
-            asyncio.create_task(_run_quiz_start_debounced(handle_quiz_practice(uid, chat_id, uname, "mis"), uid))
+            _spawn_task(_run_quiz_start_debounced(handle_quiz_practice(uid, chat_id, uname, "mis"), uid))
 
         elif data == "qspe":
             if uid in _QUIZ_START_LOCK:
                 return
             _QUIZ_START_LOCK.add(uid)
-            asyncio.create_task(_run_quiz_start_debounced(handle_quiz_practice(uid, chat_id, uname, "spe"), uid))
+            _spawn_task(_run_quiz_start_debounced(handle_quiz_practice(uid, chat_id, uname, "spe"), uid))
 
         elif data == "bm_pdf":
             fake_msg = {"chat": {"id": chat_id}, "from": {"id": uid, "first_name": uname}}
@@ -10527,7 +10527,7 @@ async def handle_callback(query: dict):
 
         elif data == "bmexam_again":
             fake_msg = {"chat": {"id": chat_id}, "from": {"id": uid, "first_name": uname}}
-            asyncio.create_task(handle_bmexam(fake_msg))
+            _spawn_task(handle_bmexam(fake_msg))
 
         elif data.startswith("imgsrc_"):
             parts = data.split("_")
@@ -10578,7 +10578,7 @@ async def handle_callback(query: dict):
             if not channel:
                 await send_msg(chat_id, "❌ Channel select করা হয়নি!")
                 return
-            asyncio.create_task(process_img_to_poll(
+            _spawn_task(process_img_to_poll(
                 img_data["file_id"], channel, mode,
                 chat_id, uid, uname, topic=img_data.get("topic", "ATLAS Special MCQ"),
                 source=img_data.get("source", "new"), mcq_count=img_data.get("mcq_count")
@@ -10590,7 +10590,7 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
-            asyncio.create_task(process_txt_to_poll(channel, chat_id, uid, uname))
+            _spawn_task(process_txt_to_poll(channel, chat_id, uid, uname))
 
         elif data.startswith("csvact_"):
             # csvact_{action}_{cache_id}_{uid}
@@ -10665,7 +10665,7 @@ async def handle_callback(query: dict):
                     await send_msg(chat_id, "❌ Session expired!")
                     return
                 pages = [mcqs_row["mcq_data"]]
-                asyncio.create_task(process_pdfm_pages(
+                _spawn_task(process_pdfm_pages(
                     chat_id, uid, uname, pages, topic_cb,
                     None, None, None, None
                 ))
@@ -10693,7 +10693,7 @@ async def handle_callback(query: dict):
             channel = "_".join(parts[1:-2])
             if uid != orig_uid:
                 return
-            asyncio.create_task(process_csv_to_channel(
+            _spawn_task(process_csv_to_channel(
                 cache_id_ch, channel, chat_id, uid
             ))
 
@@ -10767,7 +10767,7 @@ async def handle_callback(query: dict):
                     return
             csv_only = channel == "csv"
             ch = None if csv_only else channel
-            asyncio.create_task(process_pdfm_pages(
+            _spawn_task(process_pdfm_pages(
                 chat_id, uid, user.get("first_name","User"), pages,
                 pending["topic"], pending.get("mcq_count"), ch, csv_only,
                 pending.get("file_name","document.pdf"),
@@ -10793,7 +10793,7 @@ async def handle_callback(query: dict):
             if pages:
                 # Cache hit: `pages` is already the extracted (page_num, img, mcqs)
                 # tuples from Phase 1 — skip re-extraction entirely.
-                asyncio.create_task(process_qbm_pages(
+                _spawn_task(process_qbm_pages(
                     chat_id, uid, user.get("first_name","User"), pages,
                     pending["topic"], ch, csv_only,
                     pending.get("file_name","document.pdf"),
@@ -10835,7 +10835,7 @@ async def handle_callback(query: dict):
                         thread_id=pending.get("thread_id"),
                         skip_extract=True
                     )
-                asyncio.create_task(_reextract_and_post())
+                _spawn_task(_reextract_and_post())
             getattr(app.state,"qbm_cache",{}).pop(f"qbm_img_{uid}", None)
 
         elif data.startswith("livechannel_"):
@@ -10867,7 +10867,7 @@ async def handle_callback(query: dict):
                 f"📝 {len(live_data['mcqs'])} MCQ"
             )
 
-            asyncio.create_task(start_live_quiz(
+            _spawn_task(start_live_quiz(
                 channel,
                 live_data["session_id"],
                 live_data["topic"],
@@ -10892,13 +10892,13 @@ async def handle_callback(query: dict):
             count_choice = parts[1]
             target_uid = int(parts[2])
             if uid == target_uid:
-                asyncio.create_task(handle_bmexam_start(chat_id, uid, uname, count_choice))
+                _spawn_task(handle_bmexam_start(chat_id, uid, uname, count_choice))
 
         # D1 Quiz System callbacks
         elif data.startswith("qznext_"):
             target_uid = int(data.replace("qznext_", ""))
             if uid == target_uid:
-                asyncio.create_task(handle_quiz_next(uid))
+                _spawn_task(handle_quiz_next(uid))
 
         elif data.startswith("qzlb_"):
             quiz_id = data.replace("qzlb_", "")
@@ -10910,11 +10910,11 @@ async def handle_callback(query: dict):
 
         elif data.startswith("qzmp1_"):
             quiz_id = data.replace("qzmp1_", "")
-            asyncio.create_task(handle_d1_mistake(chat_id, quiz_id, uid, user, "wrong"))
+            _spawn_task(handle_d1_mistake(chat_id, quiz_id, uid, user, "wrong"))
 
         elif data.startswith("qzmp2_"):
             quiz_id = data.replace("qzmp2_", "")
-            asyncio.create_task(handle_d1_mistake(chat_id, quiz_id, uid, user, "wrong+skip"))
+            _spawn_task(handle_d1_mistake(chat_id, quiz_id, uid, user, "wrong+skip"))
 
         elif data.startswith("d1send_"):
             await handle_d1_send_cb(query)
@@ -11383,7 +11383,7 @@ async def generate_new_exam_start(request: Request):
             "new_cache_id": None,
             "error": None,
         }
-        asyncio.create_task(_run_new_exam_job(job_id, cache_id, user_id, cache, image_file_id))
+        _spawn_task(_run_new_exam_job(job_id, cache_id, user_id, cache, image_file_id))
         return JSONResponse({"ok": True, "job_id": job_id, "page": cache.get("page_number", 0)})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -11412,7 +11412,7 @@ async def _run_new_exam_job(job_id: str, cache_id: str, user_id, cache: dict, im
                 if job["pct"] < 90:
                     job["pct"] = min(90, job["pct"] + 4)
 
-        ticker_task = asyncio.create_task(_ticker())
+        ticker_task = _spawn_task(_ticker())
         new_mcqs = _cap_mcq_options(await generate_new_mcq(img, cache["topic"], cache["page_number"], mcq_count=15))
         ticker_task.cancel()
 
@@ -11739,7 +11739,7 @@ async def startup():
     # Start mhtml/html auto-queue worker (serial processing, one file at a time)
     global _mhtml_worker_started
     if not _mhtml_worker_started:
-        asyncio.create_task(_mhtml_auto_worker())
+        _spawn_task(_mhtml_auto_worker())
         _mhtml_worker_started = True
         logger.info("[App] mhtml auto-queue worker started")
 
@@ -11766,13 +11766,13 @@ async def startup():
 
     # Self-ping keep-alive: prevents platform sleep. Watchdog alert tasks
     # disabled per request — AtlasBot now handles all external monitoring.
-    asyncio.create_task(_supervised(_keepalive_task, "_keepalive_task"))
-    asyncio.create_task(_supervised(_memory_cleanup_task, "_memory_cleanup_task"))
-    asyncio.create_task(_supervised(_ram_guard_task, "_ram_guard_task"))
-    asyncio.create_task(_supervised(_scheduled_restart_task, "_scheduled_restart_task"))
-    # asyncio.create_task(_supervised(_watchdog_task, "_watchdog_task"))  # DISABLED — AtlasBot monitors instead
-    # asyncio.create_task(_supervised(_watchdog2_task, "_watchdog2_task"))  # DISABLED — AtlasBot monitors instead
-    # asyncio.create_task(_supervised(_cross_bot_watchdog_task, "_cross_bot_watchdog_task"))  # DISABLED
+    _spawn_task(_supervised(_keepalive_task, "_keepalive_task"))
+    _spawn_task(_supervised(_memory_cleanup_task, "_memory_cleanup_task"))
+    _spawn_task(_supervised(_ram_guard_task, "_ram_guard_task"))
+    _spawn_task(_supervised(_scheduled_restart_task, "_scheduled_restart_task"))
+    # _spawn_task(_supervised(_watchdog_task, "_watchdog_task"))  # DISABLED — AtlasBot monitors instead
+    # _spawn_task(_supervised(_watchdog2_task, "_watchdog2_task"))  # DISABLED — AtlasBot monitors instead
+    # _spawn_task(_supervised(_cross_bot_watchdog_task, "_cross_bot_watchdog_task"))  # DISABLED
 
     if not BOT_TOKEN:
         logger.error("[App] BOT_TOKEN missing!")
