@@ -557,6 +557,7 @@ function doSubmit(){
       topic:examData.topic,page:examData.page,total:questions.length,
       correct,wrong,skipped,time_taken:timeTaken})
   }).then(r=>r.json()).then(rd=>{
+    if (rd && rd.error) throw new Error('proxy failed');
     const motivation=rd.motivation||'', ayat=rd.ayat||'';
     if(!motivation && !ayat) return;
     const grade = pct>=80?'🏆 অসাধারণ! অনেক ভালো করেছো!':
@@ -570,7 +571,40 @@ function doSubmit(){
       ${motivation?`<div class="mot-text">${motivation}</div>`:''}
       ${ayat?`<div class="ayat-text">📖 ${ayat}</div>`:''}
     </div>`;
-  }).catch(()=>{});
+  }).catch(async ()=>{
+    // Bot (HF Space) unreachable — save the score straight to Supabase so
+    // the leaderboard still reflects this attempt. The AI motivation/ayat
+    // message is skipped here since generating it needs the bot itself.
+    try {
+      const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+      const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+      const headers = { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}`, 'Content-Type': 'application/json' };
+      // Check existing score first — leaderboard only keeps the best attempt per user.
+      const existingR = await fetch(
+        `${SB_URL}/rest/v1/web_exam_leaderboard?cache_id=eq.${CACHE_ID}&user_id=eq.${USER_ID}&select=final_score`,
+        { headers }
+      );
+      const existing = await existingR.json();
+      const scoreBody = {
+        cache_id: CACHE_ID, user_id: USER_ID, user_name: USER_NAME,
+        topic: examData.topic, page_number: examData.page || 1,
+        correct, total: questions.length, final_score: fin,
+        updated_at: Math.floor(Date.now()/1000),
+      };
+      if (existing && existing[0]) {
+        if (fin > existing[0].final_score) {
+          await fetch(
+            `${SB_URL}/rest/v1/web_exam_leaderboard?cache_id=eq.${CACHE_ID}&user_id=eq.${USER_ID}`,
+            { method: 'PATCH', headers, body: JSON.stringify(scoreBody) }
+          );
+        }
+      } else {
+        await fetch(`${SB_URL}/rest/v1/web_exam_leaderboard`,
+          { method: 'POST', headers, body: JSON.stringify(scoreBody) }
+        );
+      }
+    } catch(_e2) { /* best-effort only — never block the result screen */ }
+  });
 
   const backUrl = buildBackUrl(channelId, endMsgId || imageMsgId);
 
