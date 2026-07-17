@@ -421,7 +421,7 @@ async def send_quiz_question(chat_id: int, session: dict):
                 return
             # Auto-advance — skip হিসেবে count করো
             for qr in s["q_results"]:
-                if qr["index"] == s["cur"] and qr["type"] == "pending":
+                if qr["index"] == s["cur"] and qr["type"] is None:
                     qr["type"] = "skip"
                     break
             s["skip"] += 1
@@ -433,6 +433,23 @@ async def send_quiz_question(chat_id: int, session: dict):
         if session["uid"] in QUIZ_TIMERS:
             QUIZ_TIMERS[session["uid"]].cancel()
         QUIZ_TIMERS[session["uid"]] = asyncio.create_task(_quiz_timeout())
+    else:
+        # sendPoll fail hole quiz silently atke thakto (auto-next asto na) -
+        # ei question skip kore porerta te auto-advance koro
+        logger.error(f"[Quiz] sendPoll failed q{session['cur']+1}/{session['tot']}: "
+                     f"{poll_r.get('description') or poll_r.get('error')}")
+        for qr in session["q_results"]:
+            if qr["index"] == session["cur"]:
+                qr["type"] = "skip"
+                break
+        session["skip"] += 1
+        session["cur"] += 1
+        QUIZ_SESSIONS[session["uid"]] = session
+        if session["cur"] >= session["tot"]:
+            await finish_d1_quiz(session)
+        else:
+            await asyncio.sleep(0.5)
+            await send_quiz_question(chat_id, session)
 
 
 async def handle_quiz_poll_answer(pa: dict):
