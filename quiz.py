@@ -490,10 +490,29 @@ async def handle_quiz_poll_answer(pa: dict):
     if uid in QUIZ_TIMERS:
         QUIZ_TIMERS[uid].cancel()
 
-    if session["cur"] >= session["tot"]:
-        await finish_d1_quiz(session)
-    else:
-        await send_quiz_question(session["chat_id"], session)
+    try:
+        if session["cur"] >= session["tot"]:
+            await finish_d1_quiz(session)
+        else:
+            await send_quiz_question(session["chat_id"], session)
+    except Exception as e:
+        logger.error(f"[Quiz] advance failed q{session['cur']}/{session['tot']}: {e}")
+        try:
+            await asyncio.sleep(0.7)
+            if session["cur"] >= session["tot"]:
+                await finish_d1_quiz(session)
+            else:
+                await send_quiz_question(session["chat_id"], session)
+        except Exception as e2:
+            logger.error(f"[Quiz] retry also failed q{session['cur']}/{session['tot']}: {e2}")
+            session["skip"] += 1
+            session["cur"] += 1
+            QUIZ_SESSIONS[uid] = session
+            if session["cur"] >= session["tot"]:
+                await finish_d1_quiz(session)
+            else:
+                await asyncio.sleep(0.5)
+                await send_quiz_question(session["chat_id"], session)
 
 
 async def handle_quiz_next(uid: int):
@@ -524,10 +543,29 @@ async def handle_quiz_next(uid: int):
     if uid in QUIZ_TIMERS:
         QUIZ_TIMERS[uid].cancel()
 
-    if session["cur"] >= session["tot"]:
-        await finish_d1_quiz(session)
-    else:
-        await send_quiz_question(session["chat_id"], session)
+    try:
+        if session["cur"] >= session["tot"]:
+            await finish_d1_quiz(session)
+        else:
+            await send_quiz_question(session["chat_id"], session)
+    except Exception as e:
+        logger.error(f"[Quiz] advance failed q{session['cur']}/{session['tot']}: {e}")
+        try:
+            await asyncio.sleep(0.7)
+            if session["cur"] >= session["tot"]:
+                await finish_d1_quiz(session)
+            else:
+                await send_quiz_question(session["chat_id"], session)
+        except Exception as e2:
+            logger.error(f"[Quiz] retry also failed q{session['cur']}/{session['tot']}: {e2}")
+            session["skip"] += 1
+            session["cur"] += 1
+            QUIZ_SESSIONS[uid] = session
+            if session["cur"] >= session["tot"]:
+                await finish_d1_quiz(session)
+            else:
+                await asyncio.sleep(0.5)
+                await send_quiz_question(session["chat_id"], session)
 
 
 async def finish_d1_quiz(session: dict):
