@@ -5859,11 +5859,13 @@ async def _process_pdf_pages_inner(
 
     async def _gen_with_retry(img_, page_num_):
         """Page-level retry: try twice before giving up on a page entirely,
-        so a single transient failure doesn't silently drop the whole page."""
+        so a single transient failure doesn't silently drop the whole page.
+        Uses generate_mcq_from_image() (full pipeline: raw-gen + option-cap +
+        repair thin explanations + cross-verify missed MCQs) — same as /img,
+        so /pdf and /bangla get identical quality, not a stripped-down path."""
         for _pg_attempt in range(2):
             try:
-                _mcqs = await _generate_mcq_from_image_raw(img_, topic, page_num_, mcq_count)
-                _mcqs = _cap_mcq_options(_mcqs, 4)
+                _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count)
                 if _mcqs:
                     return _mcqs
             except Exception as _pg_e:
@@ -6824,7 +6826,7 @@ async def qbm_get_active_prompt() -> str:
     if _qbm_prompt_cache["prompt"]:
         return _qbm_prompt_cache["prompt"]
     try:
-        r = sb.table("quiz_sessions").select("data").eq("key", "qbm_active_prompt").execute()
+        r = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", "qbm_active_prompt").execute())
         if r.data:
             p = json.loads(r.data[0]["data"]).get("prompt")
             if p:
@@ -6840,11 +6842,11 @@ async def qbm_set_active_prompt(new_prompt: str):
     (নতুন update না আসা অবধি) এই prompt-ই সবসময় ব্যবহার হবে।"""
     _qbm_prompt_cache["prompt"] = new_prompt
     try:
-        sb.table("quiz_sessions").upsert({
+        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
             "key": "qbm_active_prompt",
             "data": json.dumps({"prompt": new_prompt}),
             "updated_at": int(time.time())
-        }).execute()
+        }).execute())
     except Exception as e:
         logger.warning(f"[QBM] prompt memory save failed: {e}")
 
