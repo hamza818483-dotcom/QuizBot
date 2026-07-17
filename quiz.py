@@ -376,7 +376,7 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
         if r_cd.get("ok"):
             last_cd_id = r_cd.get("result", {}).get("message_id")
     if last_cd_id:
-        session["last_msg_id"] = last_cd_id
+        session["first_msg_id"] = last_cd_id
         QUIZ_SESSIONS[uid] = session
     await asyncio.sleep(1)
     await send_quiz_question(chat_id, session)
@@ -424,7 +424,7 @@ async def send_quiz_question(chat_id: int, session: dict):
         poll_r = await send_poll(
             chat_id, q_text, [o[:100] for o in opts], ans_idx,
             explanation=exp, is_anonymous=False, open_period=session["timer"] + 5,
-            reply_to_message_id=session.get("last_msg_id")
+            reply_to_message_id=session.get("first_msg_id")
         )
     except Exception as e:
         # sendPoll ke exception dhoreche (network blip etc) - guard clear kore
@@ -442,7 +442,6 @@ async def send_quiz_question(chat_id: int, session: dict):
         session["pid"] = poll_id
         session["cor"] = ans_idx
         session["_sending_for"] = None
-        session["last_msg_id"] = poll_r["result"].get("message_id")
         QUIZ_SESSIONS[session["uid"]] = session
 
         # Timer: auto-skip after timer expires
@@ -731,7 +730,7 @@ async def finish_d1_quiz(session: dict):
             kb_rows.append([{"text": f"🟡 Practice (Wrong+Skip) ({wrong + skip})", "callback_data": f"qzmp2_{quiz_id}"}])
         kb = {"inline_keyboard": kb_rows}
 
-    await send_msg(chat_id, txt, reply_markup=kb, reply_to_message_id=session.get("last_msg_id"))
+    await send_msg(chat_id, txt, reply_markup=kb, reply_to_message_id=session.get("first_msg_id"))
 
 
 async def handle_d1_leaderboard(chat_id: int, quiz_id: str, uid: int):

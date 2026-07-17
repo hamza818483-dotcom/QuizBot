@@ -9522,7 +9522,7 @@ async def start_sequential_quiz(chat_id: int, uid: int, uname: str,
     if go_msg_id:
         st_now = await qs_get(uid)
         if st_now:
-            st_now["last_msg_id"] = go_msg_id
+            st_now["first_msg_id"] = go_msg_id
             await qs_set(uid, st_now)
     await asyncio.sleep(0.5)
     await _send_quiz_question(uid)
@@ -9577,7 +9577,7 @@ async def _send_quiz_question_inner(uid: int):
     poll_r = await send_poll(
         st["chat_id"], q_text[:300], [o[:100] for o in opts], ans_idx,
         explanation=exp[:200], is_anonymous=False, open_period=QUIZ_Q_SEC + 5,
-        reply_to_message_id=st.get("last_msg_id")
+        reply_to_message_id=st.get("first_msg_id")
     )
 
     if not poll_r.get("ok"):
@@ -9590,7 +9590,6 @@ async def _send_quiz_question_inner(uid: int):
         return
 
     st["poll_id"] = poll_r["result"]["poll"]["id"]
-    st["last_msg_id"] = poll_r["result"]["message_id"]
     st["answered"] = False
     st["timer_task"] = None
     await qs_set(uid, st)
@@ -9754,7 +9753,7 @@ async def _finish_quiz(uid: int):
         kb["inline_keyboard"].append([{"text": "↩️ Back to Source", "url": back_url}])
 
     img_id = st.get("image_file_id")
-    last_id = st.get("last_msg_id")
+    last_id = st.get("first_msg_id")
 
     if img_id:
         caption_trimmed = result_caption[:1024]
