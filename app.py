@@ -4153,19 +4153,25 @@ def _strip_opt_prefix(opt: str) -> str:
     return re.sub(pattern, '', opt).strip()
 
 def _strip_q_source_tag(q: str) -> str:
-    """Question এর শেষে [source] জাতীয় ট্যাগ সরায় (যেমন [ATLAS], [৩৫তম BCS])।
-    Closed এবং unclosed (ভাঙা/truncated) bracket দুটোই কভার করে।"""
+    """Question এর মূল '?' বা '।' চিহ্নের পরে যা থাকে (source reference) বাদ
+    দেয়। এরপরও যদি শেষে [..] বা (..) থেকে যায় (যেমন '-' দিয়ে শেষ হওয়া প্রশ্নে),
+    সেটাও সরিয়ে দেয়।"""
     if not q:
         return q
     q = q.strip()
-    closed_pattern = r'\s*\[[^\[\]]*\]\s*$'
-    unclosed_pattern = r'\s*\[[^\[\]]*$'
+    m = re.search(r'[?।]', q)
+    if m:
+        q = q[:m.end()].strip()
+    closed_patterns = [r'\s*\[[^\[\]]*\]\s*$', r'\s*\([^()]*\)\s*$']
+    unclosed_patterns = [r'\s*\[[^\[\]]*$', r'\s*\([^()]*$']
     prev = None
     cur = q
     while prev != cur:
         prev = cur
-        cur = re.sub(closed_pattern, '', cur).strip()
-    cur = re.sub(unclosed_pattern, '', cur).strip()
+        for pat in closed_patterns:
+            cur = re.sub(pat, '', cur).strip()
+    for pat in unclosed_patterns:
+        cur = re.sub(pat, '', cur).strip()
     return cur
 
 def _clean_mcqs(mcqs: list) -> list:
