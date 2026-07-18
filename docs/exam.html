@@ -178,7 +178,58 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
   body.printing-solve-sheet > *:not(#modeResult) { display:none !important; }
   body.printing-solve-sheet #resultWrap > *:not(#solveSheet) { display:none !important; }
   body.printing-solve-sheet #solveSheet { display:block !important; }
-  body.printing-solve-sheet .mcq-card { break-inside: avoid; page-break-inside: avoid; }
+
+  body.printing-solve-sheet {
+    background:#fff !important;
+    color:#1a1a1a !important;
+    font-family:'Noto Sans Bengali','Inter',sans-serif;
+  }
+  body.printing-solve-sheet #solveSheet::before {
+    content: attr(data-print-title);
+    display:block;
+    font-size:18px; font-weight:800;
+    color:#0a3d62;
+    border-bottom:2px solid #0a3d62;
+    padding-bottom:10px; margin-bottom:16px;
+    white-space:pre-line;
+  }
+  body.printing-solve-sheet .mcq-card {
+    background:#fff !important;
+    border:1px solid #ccc !important;
+    box-shadow:none !important;
+    border-radius:8px;
+    padding:14px !important;
+    margin-bottom:14px !important;
+    break-inside: avoid; page-break-inside: avoid;
+  }
+  body.printing-solve-sheet .q-result-badge {
+    font-weight:700; padding:2px 10px; border-radius:20px;
+    border:1px solid currentColor;
+  }
+  body.printing-solve-sheet .q-result-badge.correct { background:#e6f7ec !important; color:#0f7a3d !important; }
+  body.printing-solve-sheet .q-result-badge.wrong   { background:#fde8e8 !important; color:#c0292f !important; }
+  body.printing-solve-sheet .q-result-badge.skip    { background:#fff6e0 !important; color:#a06a00 !important; }
+  body.printing-solve-sheet .q-num {
+    background:#eef3fb !important; color:#0a3d62 !important;
+    border:1px solid #cddcef; font-weight:700;
+  }
+  body.printing-solve-sheet .q-text { color:#1a1a1a !important; font-weight:700; font-size:13px; }
+  body.printing-solve-sheet .opt {
+    background:#fafafa !important; border:1px solid #ddd !important; color:#1a1a1a !important;
+  }
+  body.printing-solve-sheet .opt.correct-r { background:#e6f7ec !important; border-color:#0f7a3d !important; }
+  body.printing-solve-sheet .opt.wrong-r   { background:#fde8e8 !important; border-color:#c0292f !important; }
+  body.printing-solve-sheet .opt.dim { opacity:.6 !important; }
+  body.printing-solve-sheet .opt-radio {
+    border-color:#999 !important; color:#1a1a1a !important; background:#fff !important;
+  }
+  body.printing-solve-sheet .opt.correct-r .opt-radio { background:#0f7a3d !important; border-color:#0f7a3d !important; color:#fff !important; }
+  body.printing-solve-sheet .opt.wrong-r .opt-radio   { background:#c0292f !important; border-color:#c0292f !important; color:#fff !important; }
+  body.printing-solve-sheet .exp-box {
+    background:#f5f8fc !important; border-left:3px solid #0a3d62 !important; color:#1a1a1a !important;
+  }
+  body.printing-solve-sheet .exp-hd { color:#0a3d62 !important; }
+  @page { margin: 16mm 12mm; }
 }
 </style>
 </head>
@@ -973,6 +1024,23 @@ async function solvePDF(){
 function printSolveSheet(){
   const sheet = document.getElementById('solveSheet');
   if(!sheet){ showToast('❌ Solve Sheet পাওয়া যায়নি'); return; }
+
+  let correct=0,wrong=0,skipped=0;
+  questions.forEach((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=userAnswers[i];
+    if(ua===undefined) skipped++;
+    else if(ua===ci)   correct++;
+    else               wrong++;
+  });
+  const neg = parseFloat((wrong*.25).toFixed(2));
+  const fin = parseFloat((correct-neg).toFixed(2));
+  const dateStr = new Date().toLocaleDateString('bn-BD', {year:'numeric', month:'long', day:'numeric'});
+  sheet.setAttribute('data-print-title',
+    `${examData.topic||'ATLAS Exam'}  |  Page: ${examData.page||1}\n` +
+    `স্কোর: ${fin}/${questions.length}  (✅ ${correct}  ❌ ${wrong}  ⏭️ ${skipped})  |  ${dateStr}`
+  );
+
   document.body.classList.add('printing-solve-sheet');
   showToast('🖨️ Print dialog খুলছে...');
   setTimeout(()=>{
