@@ -3886,11 +3886,17 @@ async def handle_csv_command(msg: dict):
         # chat_id/message_id পাস করা হচ্ছে না — pyrogram path (client connect
         # overhead) স্কিপ হয়ে সরাসরি দ্রুত Bot API getFile ব্যবহার হবে।
         csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress)
-        if not loading_task.done():
-            await loading_task  # need the message_id before we can edit it
+        # Download can finish faster than the loading message send (small
+        # CSVs are near-instant now) — in that case every _dl_progress call
+        # above silently no-op'd since loading_id_box["id"] was still None,
+        # so the user's screen is stuck showing the original "0%" text. We
+        # MUST await here (not just check .done()) so the message_id is
+        # guaranteed available before the completion edit below fires,
+        # otherwise that edit itself would also silently no-op.
+        await loading_task
         loading_id = loading_id_box["id"]
         if loading_id:
-            _spawn_task(edit_msg(chat_id, loading_id, "✅ Download complete!\n⏳ CSV parse হচ্ছে..."))
+            await edit_msg(chat_id, loading_id, "✅ Download complete!\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
 
         if not mcqs:
