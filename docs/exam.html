@@ -200,11 +200,13 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
     -webkit-print-color-adjust:exact; print-color-adjust:exact;
   }
   body.printing-solve-sheet #solveSheet {
-    display:grid !important;
-    grid-template-columns:1fr 1fr;
-    gap:10px;
+    display:block !important;
+    column-count:2;
+    column-gap:15px;
+    column-fill:balance;
+    column-rule:1px solid #ddd;
   }
-  body.printing-solve-sheet #solveSheet::before { grid-column: 1 / -1; }
+  body.printing-solve-sheet #solveSheet::before { column-span: all; }
 
   body.printing-solve-sheet .mcq-card {
     background:#fff !important;
@@ -248,7 +250,7 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
   body.printing-solve-sheet .exp-hd { color:#3949ab !important; font-size:11px; }
   body.printing-solve-sheet #solveSheet::after {
     content:"🚀 ATLAS Special MCQ System — Atlascourses.com";
-    display:block; grid-column:1/-1; text-align:center;
+    display:block; column-span:all; text-align:center;
     font-size:10px; color:#9e9e9e !important; margin-top:8px;
   }
 }
