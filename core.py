@@ -255,18 +255,26 @@ async def d1_run(sql: str, params: list = None, return_id: bool = False):
             }
             SB2_URL = "https://xnkuuzstschdovcyomfk.supabase.co"
             SB2_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4"
-            async with httpx.AsyncClient(timeout=10) as c:
-                for url, key in ((SUPABASE_URL, SUPABASE_KEY), (SB2_URL, SB2_KEY)):
-                    if not url or not key:
-                        continue
-                    try:
-                        headers = {"apikey": key, "Authorization": f"Bearer {key}",
-                                   "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"}
+
+            async def _mirror_one(url, key):
+                if not url or not key:
+                    return
+                try:
+                    headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                               "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"}
+                    async with httpx.AsyncClient(timeout=10) as c:
                         rr = await c.post(f"{url}/rest/v1/quiz_backups",
                                           headers=headers, json=payload)
-                        logger.info(f"[D1] Supabase mirror ({url}): {rr.status_code}")
-                    except Exception as e2:
-                        logger.warning(f"[D1] Supabase mirror failed ({url}): {e2}")
+                    logger.info(f"[D1] Supabase mirror ({url}): {rr.status_code}")
+                except Exception as e2:
+                    logger.warning(f"[D1] Supabase mirror failed ({url}): {e2}")
+
+            async def _mirror_both():
+                await asyncio.gather(
+                    _mirror_one(SUPABASE_URL, SUPABASE_KEY),
+                    _mirror_one(SB2_URL, SB2_KEY),
+                )
+            asyncio.create_task(_mirror_both())
     except Exception as e:
         logger.warning(f"[D1] Supabase mirror step failed: {e}")
 
@@ -940,14 +948,14 @@ async def db_save_mcq_cache(cache_id: str, session_id: str, page: int,
         }).execute())
     except Exception as e:
         logger.error(f"[DB] save_mcq_cache error: {e}")
-    # DURABILITY: mirror into D1 `quizzes` table too (same table/schema the
-    # qz_ web-quiz path already uses) so the Website Exam link survives even
-    # if Supabase (primary store above) is ever unreachable/deleted — get_exam_data
-    # already knows how to read this table as a fallback source.
-    # This is a non-critical backup copy — run it in the background instead of
-    # blocking the caller, so commands like /csv respond instantly instead of
-    # waiting on a 2nd sequential DB round-trip for every single call.
-    async def _mirror_to_d1():
+
+    async def _d1_write():
+        # DURABILITY: mirror into D1 `quizzes` table too (same table/schema the
+        # qz_ web-quiz path already uses) so the Website Exam link survives even
+        # if Supabase (primary store above) is ever unreachable/deleted — get_exam_data
+        # already knows how to read this table as a fallback source.
+        # Non-critical backup copy — fire-and-forget so commands like /csv
+        # respond instantly instead of waiting on a 2nd sequential DB round-trip.
         try:
             import json as _json
             await d1_run(
@@ -956,7 +964,8 @@ async def db_save_mcq_cache(cache_id: str, session_id: str, page: int,
             )
         except Exception as e:
             logger.warning(f"[DB] D1 mirror for pdf_mcq_cache failed (non-fatal): {e}")
-    asyncio.create_task(_mirror_to_d1())
+
+    asyncio.create_task(_d1_write())
 
 async def db_update_cache(cache_id: str, fields: dict):
     try:
