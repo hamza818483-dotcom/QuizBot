@@ -4728,6 +4728,87 @@ def enqueue_csv_to_channel(cache_id: str, channel_id: str, chat_id: int, uid: in
             f"⏳ আগের {pos}টা কাজ শেষ হওয়ার পর এটা শুরু হবে (সিরিয়ালি চলছে)।"))
     q.put_nowait((cache_id, channel_id, chat_id, uid, existing_loading_id))
 
+async def _resume_page_job(job_row: dict):
+    """Startup-এ পাওয়া অসম্পূর্ণ /pdf বা /qbm page-job resume করে — PDF
+    re-download + re-render করে resume_page_num থেকে বাকি page গুলো নিয়ে
+    processing আবার চালায় (আগের page গুলো skip হয়, duplicate পোস্ট হয় না)।
+    qbm এর ক্ষেত্রে extraction pipeline (3-call) বাকি page গুলোর জন্য আবার
+    চালাতে হয়, কারণ ছবি D1-এ persist করা হয় না।"""
+    try:
+        job_type = job_row.get("job_type")
+        job_id = job_row.get("job_id")
+        file_id = job_row.get("file_id")
+        chat_id = job_row.get("chat_id")
+        uid = job_row.get("uid")
+        uname = job_row.get("uname") or "User"
+        topic = job_row.get("topic") or "ATLAS MCQ"
+        channel_id = job_row.get("channel_id")
+        file_name = job_row.get("file_name") or "document.pdf"
+        thread_id = job_row.get("thread_id") or None
+        page_range_str = job_row.get("page_range") or None
+        resume_page_num = job_row.get("resume_page_num")
+
+        if not file_id or not chat_id or resume_page_num is None or resume_page_num == -1:
+            logger.warning(f"[Page-Resume] Skipping malformed/already-finished job row: {job_row}")
+            return
+
+        if job_type == "pdf":
+            mcq_count_raw = job_row.get("mcq_count") or ""
+            mcq_count = int(mcq_count_raw) if str(mcq_count_raw).isdigit() else None
+
+            logger.info(f"[PDF-Resume] Resuming job_id={job_id} from page {resume_page_num} for chat_id={chat_id}")
+            await send_msg(chat_id, f"🔄 Bot restart হয়েছিল — আগের অসম্পূর্ণ /pdf কাজ page {resume_page_num} থেকে আবার শুরু হচ্ছে (আগের page গুলো আবার পোস্ট হবে না)...")
+
+            pdf_bytes = await _download_pdf_cached(file_id)
+            ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range_str)
+            if not ok or not pages:
+                await send_msg(chat_id, f"❌ Resume ব্যর্থ: PDF re-render হয়নি ({pages if not ok else 'no pages'})")
+                return
+
+            remaining_pages = [(p, img) for p, img in pages if p >= resume_page_num]
+            if not remaining_pages:
+                await db_finish_page_job(job_id)
+                return
+
+            r = await send_msg(chat_id, f"⏳ বাকি {len(remaining_pages)} page processing হচ্ছে...")
+            new_status_msg_id = r.get("result", {}).get("message_id")
+
+            await process_pdfm_pages(
+                chat_id, uid, uname, remaining_pages, topic, mcq_count,
+                channel_id, False, file_name, new_status_msg_id, thread_id,
+                file_id=file_id, page_range_str=page_range_str
+            )
+            await db_finish_page_job(job_id)
+
+        elif job_type == "qbm":
+            logger.info(f"[QBM-Resume] Resuming job_id={job_id} from page {resume_page_num} for chat_id={chat_id}")
+            await send_msg(chat_id, f"🔄 Bot restart হয়েছিল — আগের অসম্পূর্ণ /qbm কাজ page {resume_page_num} থেকে আবার শুরু হচ্ছে (আগের page গুলো আবার পোস্ট হবে না)...")
+
+            pdf_bytes = await _download_pdf_cached(file_id)
+            ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range_str)
+            if not ok or not pages:
+                await send_msg(chat_id, f"❌ Resume ব্যর্থ: PDF re-render হয়নি ({pages if not ok else 'no pages'})")
+                return
+
+            remaining_pages = [(p, img) for p, img in pages if p >= resume_page_num]
+            if not remaining_pages:
+                await db_finish_page_job(job_id)
+                return
+
+            r = await send_msg(chat_id, f"⏳ বাকি {len(remaining_pages)} page re-extract + post হচ্ছে...")
+            new_status_msg_id = r.get("result", {}).get("message_id")
+
+            extracted = await qbm_extract_all_pages(chat_id, remaining_pages, topic, file_name, new_status_msg_id)
+            await process_qbm_pages(
+                chat_id, uid, uname, extracted, topic, channel_id, False,
+                file_name, new_status_msg_id, thread_id, skip_extract=True,
+                file_id=file_id, page_range_str=page_range_str
+            )
+            await db_finish_page_job(job_id)
+    except Exception as e:
+        logger.error(f"[Page-Resume] Failed to resume job {job_row.get('job_id')}: {e}")
+
+
 async def _resume_csv_job(job_row: dict):
     """Startup-এ পাওয়া অসম্পূর্ণ job resume করে — সরাসরি
     _process_csv_to_channel_impl কল করে, যেটা নিজেই D1 থেকে sent_index পড়ে
@@ -8720,7 +8801,9 @@ async def process_qbm_pages(
     file_name: str = "document.pdf",
     status_msg_id: int = None,
     thread_id: int = None,
-    skip_extract: bool = False
+    skip_extract: bool = False,
+    file_id: str = None,
+    page_range_str: str = None
 ):
     """
     QBM posting loop. If skip_extract=True, `pages` is already a list of
@@ -8738,6 +8821,19 @@ async def process_qbm_pages(
     else:
         page_tuples = None
         display_pages = pages
+
+    job_id = None
+    if file_id and channel_id:  # শুধু actual posting job resumable
+        job_id = gen_session_id()
+        await db_save_page_job(
+            job_id, job_type="qbm", uid=uid, chat_id=chat_id, uname=uname,
+            file_id=file_id, page_range=page_range_str or "", topic=topic,
+            mcq_count="", channel_id=str(channel_id),
+            csv_only=0, file_name=file_name, thread_id=thread_id or 0,
+            status_msg_id=status_msg_id or 0,
+            resume_page_num=(display_pages[0][0] if display_pages else 0),
+            status="running"
+        )
 
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in display_pages]
     start_time = time.time()
@@ -8896,12 +8992,18 @@ async def process_qbm_pages(
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
 
+            if job_id:
+                next_page = display_pages[idx + 1][0] if idx + 1 < len(display_pages) else -1
+                await db_update_page_job_progress(job_id, next_page)
+
         except Exception as e:
             logger.error(f"[QBM] Page {page_num} error: {e}")
             page_status[idx]["current"] = False
             page_status[idx]["done"] = True
 
     clear_active_job(chat_id)
+    if job_id:
+        await db_finish_page_job(job_id)
 
     if all_mcqs_csv:
         import io as _io, csv as _csv_mod
@@ -12108,7 +12210,8 @@ async def handle_callback(query: dict):
                     pending.get("file_name","document.pdf"),
                     pending.get("status_msg_id"),
                     thread_id=pending.get("thread_id"),
-                    skip_extract=True
+                    skip_extract=True,
+                    file_id=pending.get("file_id"), page_range_str=pending.get("page_range")
                 ))
             else:
                 # Cache expired -> re-download and re-run the full 3-call
@@ -13171,6 +13274,18 @@ async def startup():
                 _spawn_task(_resume_csv_job(_job))
     except Exception as e:
         logger.warning(f"[App] CSV job resume check failed (non-fatal): {e}")
+
+    # RESUME incomplete /pdf page-jobs (PDF/PPT poll posting) — same idea:
+    # restart হলে resume_page_num থেকে বাকি page গুলো নিয়ে চালিয়ে যায়,
+    # আগের page গুলো আবার post হয় না (duplicate polls avoid হয়)।
+    try:
+        _incomplete_page_jobs = await db_get_incomplete_page_jobs()
+        if _incomplete_page_jobs:
+            logger.info(f"[App] Found {len(_incomplete_page_jobs)} incomplete page-job(s) from before restart — resuming")
+            for _pjob in _incomplete_page_jobs:
+                _spawn_task(_resume_page_job(_pjob))
+    except Exception as e:
+        logger.warning(f"[App] Page-job resume check failed (non-fatal): {e}")
 
     async def _supervised(coro_fn, name):
         """Core background task crash korle silently die na kore auto-restart hobe.
