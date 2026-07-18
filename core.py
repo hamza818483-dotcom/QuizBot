@@ -1178,6 +1178,80 @@ async def db_save_leaderboard(cache_id: str, user_id: int, user_name: str,
 
 _D1_CHANNELS_TABLE_ENSURED = False
 
+# ============================================================
+# CSV/CSVS POLL-JOB PROGRESS — CRASH/RESTART RESUME
+# ============================================================
+# HF Space restart/crash হলে আগে সব চলমান /csv poll-sending job memory থেকে
+# হারিয়ে যেত (asyncio.Queue শুধু RAM-এ থাকে) — user কে পুরো batch আবার
+# শুরু থেকে পাঠাতে হতো (duplicate polls সহ)। এখন প্রতিটা poll পাঠানোর পরে
+# progress D1-এ save হয়, আর bot startup-এ অসম্পূর্ণ job থাকলে সেখান থেকে
+# resume করে — কোনো poll মিস বা duplicate ছাড়াই।
+async def _ensure_csv_job_table():
+    await _ensure_d1_table("csv_poll_jobs",
+        "CREATE TABLE IF NOT EXISTS csv_poll_jobs ("
+        "job_id TEXT PRIMARY KEY, cache_id TEXT, channel_id TEXT, chat_id INTEGER, uid INTEGER, "
+        "mode TEXT, batch_size INTEGER, topic TEXT, csv_fname TEXT, thread_id INTEGER, "
+        "loading_id INTEGER, sent_index INTEGER, total INTEGER, first_poll_link TEXT, "
+        "status TEXT, updated_at INTEGER)")
+
+async def db_save_csv_job(job_id: str, **fields):
+    """Job শুরু হওয়ার সময় বা progress update হওয়ার সময় কল হয়। fields-এ যা
+    দেওয়া হবে শুধু সেগুলোই upsert হবে (partial update, non-fatal on error —
+    progress-save fail হলেও poll পাঠানো থেমে থাকবে না)।"""
+    try:
+        await _ensure_csv_job_table()
+        cols = ["job_id"] + list(fields.keys()) + ["updated_at"]
+        placeholders = ",".join(f"?{i+1}" for i in range(len(cols)))
+        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "job_id")
+        vals = [job_id] + list(fields.values()) + [int(time.time())]
+        await d1_run(
+            f"INSERT INTO csv_poll_jobs ({','.join(cols)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(job_id) DO UPDATE SET {updates}",
+            vals
+        )
+    except Exception as e:
+        logger.warning(f"[D1] save_csv_job warn (non-fatal, job continues): {e}")
+
+async def db_update_csv_job_progress(job_id: str, sent_index: int, first_poll_link: str = None):
+    try:
+        await _ensure_csv_job_table()
+        if first_poll_link:
+            await d1_run(
+                "UPDATE csv_poll_jobs SET sent_index=?1, first_poll_link=?2, updated_at=?3 WHERE job_id=?4",
+                [sent_index, first_poll_link, int(time.time()), job_id]
+            )
+        else:
+            await d1_run(
+                "UPDATE csv_poll_jobs SET sent_index=?1, updated_at=?2 WHERE job_id=?3",
+                [sent_index, int(time.time()), job_id]
+            )
+    except Exception as e:
+        logger.warning(f"[D1] update_csv_job_progress warn (non-fatal): {e}")
+
+async def db_finish_csv_job(job_id: str):
+    try:
+        await _ensure_csv_job_table()
+        await d1_run("UPDATE csv_poll_jobs SET status='done', updated_at=?1 WHERE job_id=?2",
+                     [int(time.time()), job_id])
+    except Exception as e:
+        logger.warning(f"[D1] finish_csv_job warn (non-fatal): {e}")
+
+async def db_get_incomplete_csv_jobs() -> list:
+    """Startup-এ কল হয় — status='running' রেখে যাওয়া job মানেই আগের
+    process restart/crash-এ মাঝপথে থেমে গেছে। 24 ঘণ্টার বেশি পুরনো job
+    resume করা হয় না (session/cache ততক্ষণে expired হয়ে যাওয়ার কথা)।"""
+    try:
+        await _ensure_csv_job_table()
+        cutoff = int(time.time()) - 86400
+        rows = await d1_select(
+            "SELECT * FROM csv_poll_jobs WHERE status='running' AND updated_at > ?1",
+            [cutoff]
+        )
+        return rows or []
+    except Exception as e:
+        logger.warning(f"[D1] get_incomplete_csv_jobs warn: {e}")
+        return []
+
 async def _ensure_d1_channels_table():
     global _D1_CHANNELS_TABLE_ENSURED
     if _D1_CHANNELS_TABLE_ENSURED:

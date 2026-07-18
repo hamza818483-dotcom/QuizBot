@@ -54,6 +54,7 @@ from core import (
     db_save_mcq_cache, db_update_cache, db_get_mcq_cache,
     db_get_new_gen_count, db_increment_gen_count, db_save_leaderboard,
     db_get_channels, db_save_channel, db_delete_channel, db_rename_channel, db_save_last_quiz, db_get_last_quiz,
+    db_save_csv_job, db_update_csv_job_progress, db_finish_csv_job, db_get_incomplete_csv_jobs,
     build_back_url, source_msg_id,
     get_recent_errors, clear_error_logs,
     add_watermark_to_pdf,
@@ -4284,19 +4285,25 @@ async def _send_csv_polls_to_channel(
     chat_id: int, pre_msg_id: int = None,
     thread_id: int = None,
     loading_id: int = None,
-    csv_fname: str = ""
+    csv_fname: str = "",
+    job_id: str = None,
+    start_index: int = 0,
+    first_poll_link_so_far: str = ""
 ) -> tuple:
     """
     একটা batch-এর polls পাঠাও।
+    job_id দেওয়া থাকলে প্রতিটা successful poll-এর পর D1-এ progress (sent_index)
+    save হয় — HF restart/crash হলে bot startup-এ সেই progress পড়ে start_index
+    থেকে resume করা যায়, শুরু থেকে আবার না পাঠিয়ে (duplicate এড়াতে)।
     Returns: (sent_count, first_poll_link)
     """
     settings = await db_get_settings()
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
 
-    sent = 0
+    sent = start_index
     total = len(mcqs)
-    first_poll_link = ""
+    first_poll_link = first_poll_link_so_far
 
     # Adaptive pacing — Telegram channel/group এ প্রতি ~60s এ ~20টা message
     # burst limit আছে। আগে fixed 1.1s gap দিয়ে 19-20টা পাঠিয়ে হার্ড 429 খেয়ে
@@ -4319,6 +4326,10 @@ async def _send_csv_polls_to_channel(
         return 1.1  # normal pace, well under the limit
 
     for i, mcq in enumerate(mcqs):
+        if i < start_index:
+            # আগের run-এ ইতিমধ্যে পাঠানো হয়ে গেছে (resume path) — আবার
+            # পাঠালে duplicate poll হয়ে যাবে চ্যানেলে, তাই skip।
+            continue
         opts = mcq.get("options", [])[:4]
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
 
@@ -4369,6 +4380,7 @@ async def _send_csv_polls_to_channel(
                 # Genuinely bad request (malformed poll data etc.) — retrying
                 # won't help, skip this one MCQ so the rest of the batch continues.
                 logger.error(f"[CSV] Poll {i+1} non-retryable error ({error_code}): {desc} — skipping this MCQ")
+                sent += 1  # count as processed so resume index stays correct
                 break
 
             # Transient (network blip, 5xx, proxy hiccup) — keep retrying with
@@ -4377,6 +4389,11 @@ async def _send_csv_polls_to_channel(
             wait_s = min(2 ** attempt, 30)
             logger.warning(f"[CSV] Poll {i+1} attempt {attempt} failed ({desc or 'unknown'}), retrying in {wait_s}s...")
             await asyncio.sleep(wait_s)
+
+        if job_id:
+            # প্রতিটা poll পাঠানোর সাথে সাথেই progress D1-এ save — non-fatal,
+            # save fail হলেও poll পাঠানো থেমে থাকবে না।
+            _spawn_task(db_update_csv_job_progress(job_id, sent, first_poll_link or None))
 
         if loading_id:
             pct = int(sent * 100 / total) if total else 0
@@ -4480,6 +4497,26 @@ def enqueue_csv_to_channel(cache_id: str, channel_id: str, chat_id: int, uid: in
         _spawn_task(send_msg(chat_id,
             f"⏳ আগের {pos}টা কাজ শেষ হওয়ার পর এটা শুরু হবে (সিরিয়ালি চলছে)।"))
     q.put_nowait((cache_id, channel_id, chat_id, uid, existing_loading_id))
+
+async def _resume_csv_job(job_row: dict):
+    """Startup-এ পাওয়া অসম্পূর্ণ job resume করে — সরাসরি
+    _process_csv_to_channel_impl কল করে, যেটা নিজেই D1 থেকে sent_index পড়ে
+    সেখান থেকে বাকি poll পাঠানো শুরু করবে (pre-message আবার পাঠাবে না)।"""
+    try:
+        cache_id = job_row.get("cache_id") or job_row.get("job_id")
+        channel_id = job_row.get("channel_id")
+        chat_id = job_row.get("chat_id")
+        uid = job_row.get("uid")
+        loading_id = job_row.get("loading_id") or None
+        if not cache_id or not channel_id or not chat_id:
+            logger.warning(f"[CSV-Resume] Skipping malformed job row: {job_row}")
+            return
+        logger.info(f"[CSV-Resume] Resuming job cache_id={cache_id} for chat_id={chat_id}")
+        if chat_id:
+            await send_msg(chat_id, "🔄 Bot restart হয়েছিল — আগের অসম্পূর্ণ CSV poll job আবার শুরু হচ্ছে (আগে যা পাঠানো হয়েছে সেটা আবার পাঠানো হবে না)...")
+        await _process_csv_to_channel_impl(cache_id, channel_id, chat_id, uid, existing_loading_id=loading_id)
+    except Exception as e:
+        logger.error(f"[CSV-Resume] Failed to resume job {job_row.get('job_id')}: {e}")
 
 async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                                   chat_id: int, uid: int, existing_loading_id: int = None):
@@ -4652,21 +4689,55 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
 
     else:
         # Normal /csv mode — single batch
-        pre_text = csv_get_pre_message(topic, total)
-        pre_send_data = {"chat_id": channel_id, "text": pre_text}
-        if thread_id:
-            pre_send_data["message_thread_id"] = thread_id
-        pre_r = await tg_post("sendMessage", pre_send_data)
-        if not pre_r.get("ok") and thread_id:
-            pre_send_data.pop("message_thread_id", None)
+        job_id = cache_id  # cache_id ইতিমধ্যেই unique, আলাদা job_id বানানোর দরকার নেই
+
+        # আগের run-এ (restart-এর আগে) কতটা পাঠানো হয়ে গিয়েছিল সেটা চেক —
+        # থাকলে সেখান থেকেই resume করবে, না থাকলে fresh job হিসেবে শুরু হবে।
+        _existing = await d1_select(
+            "SELECT sent_index, first_poll_link, status FROM csv_poll_jobs WHERE job_id=?1",
+            [job_id]
+        )
+        resume_from = 0
+        resume_link = ""
+        if _existing and _existing[0].get("status") == "running":
+            resume_from = _existing[0].get("sent_index") or 0
+            resume_link = _existing[0].get("first_poll_link") or ""
+            if resume_from > 0:
+                logger.info(f"[CSV] Resuming job {job_id} from index {resume_from}/{total}")
+                if loading_id:
+                    await edit_msg(chat_id, loading_id,
+                        f"📄 {csv_fname}\n🔄 আগের অসম্পূর্ণ কাজ resume হচ্ছে ({resume_from}/{total} থেকে)...")
+
+        if resume_from > 0:
+            # Resume করলে pre-message আবার পাঠানো হবে না — আগেরটাই ব্যবহার হবে
+            # (channel-এ duplicate pre-message এড়াতে)। pre_msg_id ছাড়া polls
+            # (কোনো reply ছাড়া) পাঠানো হবে, functionally ঠিক থাকে।
+            pre_msg_id = None
+        else:
+            pre_text = csv_get_pre_message(topic, total)
+            pre_send_data = {"chat_id": channel_id, "text": pre_text}
+            if thread_id:
+                pre_send_data["message_thread_id"] = thread_id
             pre_r = await tg_post("sendMessage", pre_send_data)
-            thread_id = None
-        pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
+            if not pre_r.get("ok") and thread_id:
+                pre_send_data.pop("message_thread_id", None)
+                pre_r = await tg_post("sendMessage", pre_send_data)
+                thread_id = None
+            pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
+
+            await db_save_csv_job(
+                job_id, cache_id=cache_id, channel_id=channel_id, chat_id=chat_id, uid=uid,
+                mode="csv", batch_size=0, topic=topic, csv_fname=csv_fname,
+                thread_id=thread_id or 0, loading_id=loading_id or 0,
+                sent_index=0, total=total, first_poll_link="", status="running"
+            )
 
         sent, first_link = await _send_csv_polls_to_channel(
             channel_id, mcqs, topic, chat_id, pre_msg_id,
-            thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname
+            thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname,
+            job_id=job_id, start_index=resume_from, first_poll_link_so_far=resume_link
         )
+        await db_finish_csv_job(job_id)
         if loading_id:
             await edit_msg(chat_id, loading_id,
                 f"📄 {csv_fname}\n✅ {sent}/{total} poll পাঠানো শেষ!\n⏳ PDF বানানো হচ্ছে...")
@@ -12749,6 +12820,19 @@ async def startup():
         _spawn_task(_mhtml_auto_worker())
         _mhtml_worker_started = True
         logger.info("[App] mhtml auto-queue worker started")
+
+    # RESUME incomplete /csv poll jobs from before a restart/crash — এই
+    # bot-এর কোনো poll-job memory-only ছিল আগে (asyncio.Queue), HF restart
+    # হলে হারিয়ে যেত। এখন D1-এ status='running' রেখে যাওয়া job থাকলে
+    # (মানে আগের process মাঝপথে থেমেছে) সেগুলো একে একে resume করা হয়।
+    try:
+        _incomplete_jobs = await db_get_incomplete_csv_jobs()
+        if _incomplete_jobs:
+            logger.info(f"[App] Found {len(_incomplete_jobs)} incomplete CSV job(s) from before restart — resuming")
+            for _job in _incomplete_jobs:
+                _spawn_task(_resume_csv_job(_job))
+    except Exception as e:
+        logger.warning(f"[App] CSV job resume check failed (non-fatal): {e}")
 
     async def _supervised(coro_fn, name):
         """Core background task crash korle silently die na kore auto-restart hobe.
