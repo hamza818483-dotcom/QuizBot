@@ -3883,9 +3883,11 @@ async def handle_csv_command(msg: dict):
         _spawn_task(edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n[{bar} {pct}%]"))
 
     try:
-        # chat_id/message_id পাস করা হচ্ছে না — pyrogram path (client connect
-        # overhead) স্কিপ হয়ে সরাসরি দ্রুত Bot API getFile ব্যবহার হবে।
-        csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress)
+        # pyrogram path ব্যবহার করা হচ্ছে (chat_id/message_id pass করে) — CF proxy
+        # getFile roundtrip-এর delay এড়িয়ে দ্রুত download, progress bar আর
+        # "0%"-এ আটকে থাকবে না।
+        csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress,
+                                            chat_id=chat_id, message_id=reply["message_id"])
         # Download can finish faster than the loading message send (small
         # CSVs are near-instant now) — in that case every _dl_progress call
         # above silently no-op'd since loading_id_box["id"] was still None,
