@@ -8477,7 +8477,7 @@ async def _qbm_groq_text_call(prompt: str, model: str = "openai/gpt-oss-120b") -
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.0,
-                "max_tokens": 50,
+                "max_tokens": 300,
             }
             async with httpx.AsyncClient(timeout=30) as c:
                 r = await c.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
@@ -8497,30 +8497,66 @@ async def _qbm_web_resolve_answer(mc: dict) -> str | None:
     """
     LAST-RESORT answer resolution -- used ONLY when the answer could not be
     found anywhere in the page/PDF (no mark, no inline answer, no answer-key
-    table, no nearby-page lookahead match). Groq-only (no Gemini/web-search
-    tool): asks the Groq reasoning model directly for its best-known factual
-    answer. This is a knowledge-based best-effort, not a live web/Wikipedia
-    lookup -- returns the correct option letter (A/B/C/D) or None if the
-    model itself is not confident.
+    table, no nearby-page lookahead match). Groq-only, pure model-knowledge
+    best-effort (no image/web tool). Strengthened for max accuracy:
+    - forces step-by-step reasoning + elimination BEFORE committing to a letter
+    - runs the reasoning TWICE independently (self-consistency check) and
+      only accepts the answer if both passes agree
+    - explicit confidence gate: model must say NONE rather than guess
+    Returns the correct option letter (A/B/C/D) or None if unresolved.
     """
     try:
         q = mc.get("question", "")
         opts = mc.get("options", [])
         opts_txt = "\n".join(f"{L}) {o}" for L, o in zip("ABCD", opts))
-        prompt = f"""This MCQ's answer could not be found anywhere in its source document.
+        prompt = f"""This MCQ's answer could not be found anywhere in its source document (no
+mark, no inline answer, no answer-key table, no nearby page match). You must now determine
+the correct answer purely from your own factual knowledge.
 
 প্রশ্ন: {q}
 {opts_txt}
 
-Using your own factual knowledge, determine the correct option. Reply with ONLY the single
-correct option letter: A, B, C, or D. If you are not confident of the correct answer, reply
-with exactly: NONE"""
+STRICT PROCESS (follow all steps, do not skip any):
+1) Identify exactly what the question is asking (topic, subject area, specific fact type).
+2) Go through EACH of the 4 options one by one and evaluate it against your factual knowledge:
+   state briefly why it could be correct or why it must be wrong/eliminated.
+3) Cross-check: are any options obviously wrong/irrelevant/a distractor pattern (opposite
+   meaning, wrong category, wrong time period, wrong entity)? Eliminate those first.
+4) Of the remaining option(s), pick the one you are most factually confident is correct based
+   on real, verifiable knowledge -- NOT a plausible-sounding guess.
+5) Rate your own confidence: only proceed to a final answer if you are genuinely confident
+   (would bet on it being factually correct) -- if there is real doubt or the fact is obscure/
+   unverifiable from memory, do NOT guess.
 
-        txt = (await _qbm_groq_text_call(prompt)).strip().upper()
-        if "NONE" in txt:
+OUTPUT FORMAT (mandatory, in this exact order):
+Line 1: one-line reasoning summary (max 20 words)
+Line 2: ONLY the final answer -- either a single letter A/B/C/D, or the word NONE if not
+        genuinely confident. Nothing else on this line."""
+
+        async def _one_pass() -> str | None:
+            txt = (await _qbm_groq_text_call(prompt, model="openai/gpt-oss-120b")).strip().upper()
+            lines = [l.strip() for l in txt.splitlines() if l.strip()]
+            last_line = lines[-1] if lines else txt
+            if "NONE" in last_line:
+                return None
+            m = re.search(r'[ABCD]', last_line)
+            return m.group() if m else None
+
+        # Self-consistency: two independent reasoning passes must agree before
+        # the answer is trusted -- a single pass alone is not enough for a
+        # knowledge-only (no source) answer.
+        pass1 = await _one_pass()
+        if pass1 is None:
             return None
-        m = re.search(r'[ABCD]', txt)
-        return m.group() if m else None
+        pass2 = await _one_pass()
+        if pass2 is None:
+            return None
+        if pass1 == pass2:
+            return pass1
+        # Disagreement between two independent reasoning passes -> genuinely
+        # uncertain, do not guess; leave unresolved rather than risk a wrong answer.
+        logger.warning(f"[QBM] Web-resolve self-consistency mismatch: {pass1} vs {pass2} for Q: {q[:60]}")
+        return None
     except Exception as e:
         logger.warning(f"[QBM] Web answer-resolve failed: {e}")
         return None
