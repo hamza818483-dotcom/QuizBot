@@ -4082,7 +4082,7 @@ async def handle_csvs_command(msg: dict):
             ch_name = ch.get("channel_name", ch_id)
             kb["inline_keyboard"].append([{
                 "text": f"📢 {ch_name}",
-                "callback_data": f"csvchannel_{ch_id}_{uid}"
+                "callback_data": f"csvchannel_{ch_id}_{cache_id}_{uid}"
             }])
         kb["inline_keyboard"].append([{
             "text": "❌ Cancel",
@@ -4236,6 +4236,7 @@ async def _handle_clean_command_inner(msg: dict):
                          caption=f"✅ Clean CSV — {len(cleaned)}টি MCQ (numbering/source-tag/option-marker মুক্ত)")
 
 
+async def handle_split_command(msg: dict):
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
     try:
         return await _handle_split_command_inner(msg)
@@ -11775,7 +11776,7 @@ async def handle_callback(query: dict):
                 for ch in channels:
                     kb2["inline_keyboard"].append([{
                         "text": f"📢 {ch.get('channel_name', ch.get('channel_id'))}",
-                        "callback_data": f"csvchannel_{ch['channel_id']}_{uid}"
+                        "callback_data": f"csvchannel_{ch['channel_id']}_{c_id}_{uid}"
                     }])
                 kb2["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}])
                 await send_msg(chat_id, "📢 Channel select করো:", reply_markup=kb2)
