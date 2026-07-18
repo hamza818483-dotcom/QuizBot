@@ -3720,22 +3720,29 @@ async def handle_csv_command(msg: dict):
             return
 
         # Session save (topic + mcqs) — cache_id দিয়ে key করা, uid দিয়ে না;
-        # তাই একই user দ্রুত ২টা /csv দিলে একে-অপরকে overwrite করবে না
+        # তাই একই user দ্রুত ২টা /csv দিলে একে-অপরকে overwrite করবে না।
+        # db_save_mcq_cache আর quiz_sessions upsert দুটো আলাদা টেবিলে independent
+        # write — parallel করলে একটার জন্য অন্যটাকে অপেক্ষা করতে হয় না।
         cache_id = gen_session_id()
-        await db_save_mcq_cache(cache_id, cache_id, 0, topic or "CSV MCQ", mcqs)
 
-        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
-            "key": f"csv_cmd_{cache_id}",
-            "data": json.dumps({
-                "cache_id": cache_id,
-                "topic": topic,
-                "mcq_count": len(mcqs),
-                "mode": "csv",
-                "inline_channel": inline_channel,
-                "inline_topic_id": inline_topic_id
-            }),
-            "updated_at": int(time.time())
-        }).execute())
+        async def _save_session_row():
+            await sb_exec(lambda: sb.table("quiz_sessions").upsert({
+                "key": f"csv_cmd_{cache_id}",
+                "data": json.dumps({
+                    "cache_id": cache_id,
+                    "topic": topic,
+                    "mcq_count": len(mcqs),
+                    "mode": "csv",
+                    "inline_channel": inline_channel,
+                    "inline_topic_id": inline_topic_id
+                }),
+                "updated_at": int(time.time())
+            }).execute())
+
+        await asyncio.gather(
+            db_save_mcq_cache(cache_id, cache_id, 0, topic or "CSV MCQ", mcqs),
+            _save_session_row()
+        )
 
         # Inline mode: directly send to specified channel
         if inline_channel:
@@ -3841,22 +3848,27 @@ async def handle_csvs_command(msg: dict):
             await send_msg(chat_id, "❌ CSV-এ MCQ নেই!")
             return
 
-        # Session save
+        # Session save — db_save_mcq_cache আর quiz_sessions upsert একসাথে
+        # (independent টেবিল, sequential রাখার দরকার নাই)
         cache_id = gen_session_id()
-        await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs)
 
-        # cache_id দিয়ে key — uid দিয়ে না, একই user দ্রুত ২টা /csvS দিলে overwrite এড়াতে
-        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
-            "key": f"csv_cmd_{cache_id}",
-            "data": json.dumps({
-                "cache_id": cache_id,
-                "topic": topic,
-                "batch_size": batch_size,
-                "mcq_count": len(mcqs),
-                "mode": "csvs"  # serial/batch mode
-            }),
-            "updated_at": int(time.time())
-        }).execute())
+        async def _save_session_row_s():
+            await sb_exec(lambda: sb.table("quiz_sessions").upsert({
+                "key": f"csv_cmd_{cache_id}",
+                "data": json.dumps({
+                    "cache_id": cache_id,
+                    "topic": topic,
+                    "batch_size": batch_size,
+                    "mcq_count": len(mcqs),
+                    "mode": "csvs"  # serial/batch mode
+                }),
+                "updated_at": int(time.time())
+            }).execute())
+
+        await asyncio.gather(
+            db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs),
+            _save_session_row_s()
+        )
 
         batches = [mcqs[i:i+batch_size] for i in range(0, len(mcqs), batch_size)]
 
