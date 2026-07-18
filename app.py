@@ -6986,6 +6986,59 @@ async def pdf_generate_all_pages(
     return results
 
 
+async def _pdf_relaxed_last_resort_extract(img, topic, page_num, mcq_count=None) -> list:
+    """
+    PERMANENT, ALWAYS-ACTIVE last-resort fallback — called ONLY after the
+    normal full pipeline (4 attempts, racing/rotating every provider) still
+    returned zero for a page. A strict/complex generation prompt can itself
+    reject a page's content that a plain reader would still find MCQ-worthy
+    material on. This pass uses a deliberately LOOSENED, code-level-triggered
+    prompt (still going straight to the vision model, no extra outer retry
+    layer needed) so a page is never conceded as empty on the very first
+    genuine attempt at extraction leniency. NEVER raises; returns [] only if
+    every key/provider is truly exhausted.
+    """
+    keys = groq_key_rotator.all_keys()
+    if not keys:
+        return []
+    data_url = _img_to_data_url(img)
+    if not data_url:
+        return []
+    count_hint = ""
+    if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
+        count_hint = f" Aim for roughly {mcq_count[0]}-{mcq_count[1]} MCQs if the page supports it."
+    relaxed_prompt = f"""এই পেজে যেকোনো প্রশ্ন-উত্তর ভিত্তিক তথ্য (MCQ, প্রশ্নোত্তর, তথ্যভিত্তিক লাইন, সংজ্ঞা,
+তালিকা, ঘটনা) থাকলে সেখান থেকে যতগুলো সম্ভব MCQ বানাও। এই পাস আগের কঠোর extraction থেকে একটু
+শিথিল — পেজে সরাসরি MCQ ফরম্যাট না থাকলেও, যেকোনো fact/তথ্য/লাইন থেকে একটা প্রাসঙ্গিক MCQ
+বানানো যায় কিনা চেষ্টা করো, বিষয়: {topic}.{count_hint}
+পেজে সত্যিই কোনো ব্যবহারযোগ্য তথ্য/টেক্সট না থাকলে (সম্পূর্ণ ফাঁকা/অপ্রাসঙ্গিক ছবি) তখনই শুধু [] দাও।
+Output ONLY a valid JSON array, no extra text:
+[{{"question":"...","options":["...","...","...","..."],"answer":"A/B/C/D","explanation":"... (Bengali, max 165 chars, covers all 4 options)"}}]"""
+    for i, key in enumerate(keys):
+        txt, status = await _post_openai_compat(
+            "https://api.groq.com/openai/v1/chat/completions",
+            key, "qwen/qwen3.6-27b",
+            data_url, relaxed_prompt
+        )
+        if txt:
+            parsed = _parse_mcq_json(txt)
+            if parsed:
+                return _cap_mcq_options(_validate_mcq_structure(parsed), 4)
+        if status == 429:
+            continue
+    # Groq exhausted -> try Gemini once with the same relaxed prompt as a
+    # final code-level fallback before truly conceding zero.
+    try:
+        gem_txt = await _qbm_gemini_raw(img, relaxed_prompt)
+        if gem_txt:
+            gem_out = _parse_mcq_json(gem_txt)
+            if gem_out:
+                return _cap_mcq_options(_validate_mcq_structure(gem_out), 4)
+    except Exception as e:
+        logger.warning(f"[PDF] relaxed Gemini pass failed: {e}")
+    return []
+
+
 async def process_pdf_pages(
     chat_id: int, uid: int, uname: str,
     pages: list, topic: str, mcq_count: int,
@@ -7046,21 +7099,43 @@ async def _process_pdf_pages_inner(
     _prefetch_idx = None
 
     async def _gen_with_retry(img_, page_num_):
-        """Page-level retry: try twice before giving up on a page entirely,
-        so a single transient failure doesn't silently drop the whole page.
-        Uses generate_mcq_from_image() (full pipeline: raw-gen + option-cap +
-        repair thin explanations + cross-verify missed MCQs) — same as /img,
-        so /pdf and /bangla get identical quality, not a stripped-down path."""
-        for _pg_attempt in range(2):
+        """
+        PERMANENT FIX — a page must NEVER be silently skipped/dropped just
+        because generation returned empty on the first couple of tries.
+        Multi-stage, always-active retry ladder before we ever accept zero:
+          Stage 1: up to 4 full-pipeline attempts (was 2), with backoff,
+                    each attempt independently races/rotates ALL providers
+                    (Groq, Gemini, NVIDIA, OpenRouter, etc. via
+                    generate_mcq_from_image -> _generate_mcq_from_image_raw).
+          Stage 2: if ALL 4 attempts still return empty, run one final
+                    RELAXED extraction pass with a loosened prompt (in case
+                    the strict generation prompt itself rejected valid page
+                    content) before conceding the page has nothing.
+        Only after both stages fail does the page get marked 0 MCQ — and
+        even then it's clearly flagged (⚠️) and the owner is alerted, never
+        silently shown as a normal success.
+        """
+        last_mcqs = []
+        for _pg_attempt in range(4):
             try:
                 _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count)
                 if _mcqs:
                     return _mcqs
+                last_mcqs = _mcqs
             except Exception as _pg_e:
                 logger.warning(f"[PDF] Page {page_num_} gen attempt {_pg_attempt+1} failed: {_pg_e}")
-            if _pg_attempt == 0:
-                await asyncio.sleep(1)
-        return []
+            await asyncio.sleep(1.5 * (_pg_attempt + 1))  # backoff: 1.5s, 3s, 4.5s, 6s
+
+        logger.warning(f"[PDF] Page {page_num_} empty after 4 full attempts — running relaxed last-resort pass.")
+        try:
+            relaxed = await _pdf_relaxed_last_resort_extract(img_, topic, page_num_, mcq_count)
+            if relaxed:
+                logger.info(f"[PDF] Page {page_num_} recovered via relaxed last-resort pass ({len(relaxed)} MCQ).")
+                return relaxed
+        except Exception as _relaxed_e:
+            logger.warning(f"[PDF] Page {page_num_} relaxed pass crashed: {_relaxed_e}")
+
+        return last_mcqs
 
     for idx, page_tuple in enumerate(pages):
         if skip_generate:
