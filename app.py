@@ -8293,9 +8293,11 @@ VERIFY each MCQ against the actual page image, in this exact order of checks:
    your own best answer, and base the explanation on that chosen answer.
 4) SPELLING CHECK: check question + all options + explanation for spelling mistakes (Bangla or
    English) and correct them, without changing meaning.
-5) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
+5) COMPLETENESS CHECK: re-read the full question and every option word-by-word against the
+   image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail).
+6) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
    Na⁺ etc.) are correctly rendered everywhere.
-6) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
+7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
    is prepended to the question (self-contained). Fix/add if missing.
 
 Output ONLY the corrected full JSON array (same length as input, same schema, all fixes applied):
@@ -8898,7 +8900,7 @@ async def qbm_extract_all_pages(
     # pages that don't depend on each other's extraction result. Each page now
     # updates the live dashboard the moment IT finishes (not the whole window),
     # so progress is visible page-by-page instead of jumping in blocks of 5.
-    WINDOW = 5
+    WINDOW = 8
     for start in range(0, len(pages), WINDOW):
         if is_cancelled(chat_id):
             break
