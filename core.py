@@ -1252,6 +1252,67 @@ async def db_get_incomplete_csv_jobs() -> list:
         logger.warning(f"[D1] get_incomplete_csv_jobs warn: {e}")
         return []
 
+# ============================================================
+# /PDF (pdfm) & /QBM PAGE-JOB PROGRESS — CRASH/RESTART RESUME
+# একই কারণে: HF restart হলে /pdf বা /qbm এর poll-posting মাঝপথে হারিয়ে
+# যেত। প্রতিটা page শেষ হওয়ার পর resume_page_num D1-এ save হয়, restart এর
+# পর সেখান থেকেই বাকি page গুলো নিয়ে কাজ চালিয়ে যায় (আগের page duplicate
+# পোস্ট হয় না)।
+# ============================================================
+async def _ensure_page_job_table():
+    await _ensure_d1_table("page_jobs",
+        "CREATE TABLE IF NOT EXISTS page_jobs ("
+        "job_id TEXT PRIMARY KEY, job_type TEXT, uid INTEGER, chat_id INTEGER, uname TEXT, "
+        "file_id TEXT, page_range TEXT, topic TEXT, mcq_count TEXT, channel_id TEXT, "
+        "csv_only INTEGER, file_name TEXT, thread_id INTEGER, status_msg_id INTEGER, "
+        "resume_page_num INTEGER, status TEXT, updated_at INTEGER)")
+
+async def db_save_page_job(job_id: str, **fields):
+    try:
+        await _ensure_page_job_table()
+        cols = ["job_id"] + list(fields.keys()) + ["updated_at"]
+        placeholders = ",".join(f"?{i+1}" for i in range(len(cols)))
+        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "job_id")
+        vals = [job_id] + list(fields.values()) + [int(time.time())]
+        await d1_run(
+            f"INSERT INTO page_jobs ({','.join(cols)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(job_id) DO UPDATE SET {updates}",
+            vals
+        )
+    except Exception as e:
+        logger.warning(f"[D1] save_page_job warn (non-fatal, job continues): {e}")
+
+async def db_update_page_job_progress(job_id: str, resume_page_num: int):
+    try:
+        await _ensure_page_job_table()
+        await d1_run(
+            "UPDATE page_jobs SET resume_page_num=?1, updated_at=?2 WHERE job_id=?3",
+            [resume_page_num, int(time.time()), job_id]
+        )
+    except Exception as e:
+        logger.warning(f"[D1] update_page_job_progress warn (non-fatal): {e}")
+
+async def db_finish_page_job(job_id: str):
+    try:
+        await _ensure_page_job_table()
+        await d1_run("UPDATE page_jobs SET status='done', updated_at=?1 WHERE job_id=?2",
+                     [int(time.time()), job_id])
+    except Exception as e:
+        logger.warning(f"[D1] finish_page_job warn (non-fatal): {e}")
+
+async def db_get_incomplete_page_jobs() -> list:
+    try:
+        await _ensure_page_job_table()
+        cutoff = int(time.time()) - 86400
+        rows = await d1_select(
+            "SELECT * FROM page_jobs WHERE status='running' AND updated_at > ?1",
+            [cutoff]
+        )
+        return rows or []
+    except Exception as e:
+        logger.warning(f"[D1] get_incomplete_page_jobs warn: {e}")
+        return []
+
 async def _ensure_d1_channels_table():
     global _D1_CHANNELS_TABLE_ENSURED
     if _D1_CHANNELS_TABLE_ENSURED:
