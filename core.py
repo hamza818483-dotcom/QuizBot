@@ -944,14 +944,19 @@ async def db_save_mcq_cache(cache_id: str, session_id: str, page: int,
     # qz_ web-quiz path already uses) so the Website Exam link survives even
     # if Supabase (primary store above) is ever unreachable/deleted — get_exam_data
     # already knows how to read this table as a fallback source.
-    try:
-        import json as _json
-        await d1_run(
-            "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            [cache_id, topic or "ATLAS MCQ", "", 30, 0, _json.dumps(mcqs), "", "", 0]
-        )
-    except Exception as e:
-        logger.warning(f"[DB] D1 mirror for pdf_mcq_cache failed (non-fatal): {e}")
+    # This is a non-critical backup copy — run it in the background instead of
+    # blocking the caller, so commands like /csv respond instantly instead of
+    # waiting on a 2nd sequential DB round-trip for every single call.
+    async def _mirror_to_d1():
+        try:
+            import json as _json
+            await d1_run(
+                "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                [cache_id, topic or "ATLAS MCQ", "", 30, 0, _json.dumps(mcqs), "", "", 0]
+            )
+        except Exception as e:
+            logger.warning(f"[DB] D1 mirror for pdf_mcq_cache failed (non-fatal): {e}")
+    asyncio.create_task(_mirror_to_d1())
 
 async def db_update_cache(cache_id: str, fields: dict):
     try:
