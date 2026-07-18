@@ -11209,56 +11209,19 @@ async def handle_message(msg: dict):
             today_start_ts = int(today_start.timestamp())
 
             key_count = len(key_rotator.keys)
-            import os as _os, httpx as _hx
+            import os as _os
             _platform = _os.environ.get("RUNNING_ON", "") or "HuggingFace Space"
-            _wh_short = "❓ Check failed"
 
-            async def _get_webhook_status():
-                nonlocal _wh_short
-                try:
-                    # 15s timeout ছিল আগে — /ping "late full update" এর মূল
-                    # কারণ এটাই ছিল যদি Telegram API ধীর হয় (worst case
-                    # /ping edit ১৫ সেকেন্ড পর্যন্ত আটকে থাকতো)। 4s এ নামানো
-                    # হলো — webhook status একটা nice-to-have field, MCQ কাজে
-                    # লাগে না, তাই দ্রুত fail-fast ভালো slow-hang এর চেয়ে।
-                    async with _hx.AsyncClient(timeout=4) as _c:
-                        _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
-                        _wh_data = _wr.json()
-                        _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
-                        _render_primary = (os.environ.get("RENDER_URL", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
-                        _render_secondary = (os.environ.get("RENDER_URL_2", "") or "").replace("https://", "").replace("http://", "").rstrip("/")
-                        if _render_secondary and _render_secondary in _wh_url:
-                            _wh_short = "🟠 Render SECONDARY (failover active!)"
-                        elif _render_primary and _render_primary in _wh_url:
-                            _wh_short = "🟡 Render PRIMARY"
-                        elif "onrender.com" in _wh_url:
-                            _wh_short = "🟡 Render (unknown account)"
-                        elif "workers.dev" in _wh_url or "pages.dev" in _wh_url:
-                            _wh_short = "🟢 CF Worker (normal)"
-                        elif "hf.space" in _wh_url:
-                            _wh_short = "🔵 HF Space (direct)"
-                        else:
-                            _wh_short = f"⚪ {_wh_url[:40]}"
-                except Exception:
-                    _wh_short = "❓ Check failed"
-
-            # These lookups don't depend on each other — run them
-            # concurrently instead of one-by-one so /ping's real latency is
-            # max(all) instead of the sum of all. Hard 5s ceiling on the
-            # whole group so a slow Supabase/Telegram response can never
-            # delay the final edit beyond that -- whichever field didn't
-            # finish in time just falls back to its default placeholder.
-            try:
-                await asyncio.wait_for(_get_webhook_status(), timeout=4)
-            except asyncio.TimeoutError:
-                pass
-
+            # No network/DB calls at all now — webhook status check (which
+            # needed a Telegram API round-trip) removed since it was the
+            # last remaining source of latency. /ping is pure in-memory
+            # data (uptime, start time, key count) so the edit fires
+            # instantly with zero external dependency.
             _latency_ms = int((time.time() - _t0) * 1000)
             final_text = (
                 "🏓 <b>Pong! ATLAS QuizBot Online</b>\n\n"
                 f"⚡ <b>Latency:</b> {_latency_ms}ms\n"
                 f"🖥 <b>Running on:</b> {_platform}\n"
-                f"🔗 <b>Webhook:</b> {_wh_short}\n"
                 f"🕐 চালু হয়েছে: {started_at}\n"
                 f"⏱ Active আছে: {uptime_str}\n"
                 f"🔑 Gemini Keys: {key_count}"
