@@ -3980,7 +3980,7 @@ async def handle_csvs_command(msg: dict):
     loading_id = loading.get("result", {}).get("message_id")
 
     _last_pct_s = {"v": -1}
-    async def _dl_progress_s(done, total):
+    def _dl_progress_s(done, total):
         if not loading_id or not total:
             return
         pct = int(done * 100 / total)
@@ -3988,10 +3988,7 @@ async def handle_csvs_command(msg: dict):
             return
         _last_pct_s["v"] = pct
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        try:
-            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n[{bar} {pct}%]")
-        except Exception:
-            pass
+        _spawn_task(edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n[{bar} {pct}%]"))
 
     try:
         # CSV ফাইল ছোট, pyrogram path স্কিপ করে সরাসরি দ্রুত Bot API getFile
@@ -4144,7 +4141,7 @@ async def _handle_split_command_inner(msg: dict):
     status_msg_id = status_r.get("result", {}).get("message_id")
 
     _last_pct_split = {"v": -1}
-    async def _dl_progress_split(done, total):
+    def _dl_progress_split(done, total):
         if not status_msg_id or not total:
             return
         pct = int(done * 100 / total)
@@ -4152,10 +4149,7 @@ async def _handle_split_command_inner(msg: dict):
             return
         _last_pct_split["v"] = pct
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        try:
-            await edit_msg(chat_id, status_msg_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]")
-        except Exception:
-            pass
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]"))
 
     try:
         csv_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_split)
@@ -5793,7 +5787,7 @@ async def handle_sheet_command(msg: dict):
     loading_id = loading.get("result", {}).get("message_id")
 
     _last_pct_sheet = {"v": -1}
-    async def _dl_progress_sheet(done, total):
+    def _dl_progress_sheet(done, total):
         if not loading_id or not total:
             return
         pct = int(done * 100 / total)
@@ -5801,10 +5795,7 @@ async def handle_sheet_command(msg: dict):
             return
         _last_pct_sheet["v"] = pct
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        try:
-            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]")
-        except Exception:
-            pass
+        _spawn_task(edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]"))
 
     try:
         csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress_sheet)
@@ -6049,7 +6040,7 @@ async def handle_pdf(msg: dict):
                 f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[░░░░░░░░░░ 0%]")
 
         _last_pct5820 = {"v": -1}
-        async def _dl_progress5820(done, total):
+        def _dl_progress5820(done, total):
             if not status_msg_id or not total:
                 return
             pct = int(done * 100 / total)
@@ -6058,11 +6049,8 @@ async def handle_pdf(msg: dict):
             _last_pct5820["v"] = pct
             bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
             size_mb = round(file_size / 1024 / 1024, 1) if file_size else "?"
-            try:
-                await edit_msg(chat_id, status_msg_id,
-                    f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[{bar} {pct}%]")
-            except Exception:
-                pass
+            _spawn_task(edit_msg(chat_id, status_msg_id,
+                f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[{bar} {pct}%]"))
 
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress5820, chat_id=chat_id, message_id=reply["message_id"])
 
@@ -6717,7 +6705,7 @@ async def handle_pdfm(msg: dict):
     status_msg_id = status_r.get("result",{}).get("message_id")
 
     _last_pct6471 = {"v": -1}
-    async def _dl_progress6471(done, total):
+    def _dl_progress6471(done, total):
         if not status_msg_id or not total:
             return
         pct = int(done * 100 / total)
@@ -6725,10 +6713,7 @@ async def handle_pdfm(msg: dict):
             return
         _last_pct6471["v"] = pct
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        try:
-            await edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n[{bar} {pct}%]")
-        except Exception:
-            pass
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n[{bar} {pct}%]"))
 
     try:
         pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress6471, chat_id=chat_id, message_id=reply["message_id"])
@@ -7856,7 +7841,7 @@ async def _handle_qbm_impl(msg: dict):
     status_msg_id = status_r.get("result", {}).get("message_id")
 
     _last_pct = {"v": -1}
-    async def _dl_progress_pdf(done, total):
+    def _dl_progress_pdf(done, total):
         if not status_msg_id or not total:
             return
         pct = int(done * 100 / total)
@@ -7865,10 +7850,7 @@ async def _handle_qbm_impl(msg: dict):
         _last_pct["v"] = pct
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
         label = "Image" if is_image_reply else "PDF"
-        try:
-            await edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n[{bar} {pct}%]")
-        except Exception:
-            pass
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n[{bar} {pct}%]"))
 
     try:
         if is_image_reply:
@@ -8427,7 +8409,7 @@ async def handle_rapid_command(msg: dict):
     loading_id = loading.get("result", {}).get("message_id")
 
     _last_pct_rapid = {"v": -1}
-    async def _dl_progress_rapid(done, total):
+    def _dl_progress_rapid(done, total):
         if not loading_id or not total:
             return
         pct = int(done * 100 / total)
@@ -8435,10 +8417,7 @@ async def handle_rapid_command(msg: dict):
             return
         _last_pct_rapid["v"] = pct
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        try:
-            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]")
-        except Exception:
-            pass
+        _spawn_task(edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]"))
 
     try:
         csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress_rapid)
@@ -8799,7 +8778,7 @@ async def handle_live_command(msg: dict):
     loading_id = loading.get("result", {}).get("message_id")
 
     _last_pct_live = {"v": -1}
-    async def _dl_progress_live(done, total):
+    def _dl_progress_live(done, total):
         if not loading_id or not total:
             return
         pct = int(done * 100 / total)
@@ -8807,10 +8786,7 @@ async def handle_live_command(msg: dict):
             return
         _last_pct_live["v"] = pct
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        try:
-            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]")
-        except Exception:
-            pass
+        _spawn_task(edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]"))
 
     try:
         csv_bytes  = await download_tg_file(doc["file_id"], progress_cb=_dl_progress_live)
