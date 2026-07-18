@@ -6500,7 +6500,7 @@ async def _process_pdf_pages_inner(
                             first_poll_link = f"https://t.me/{str(channel_id).lstrip('@')}/{msg_id}"
                         poll_links.append(first_poll_link)
                     total_polls += 1
-                    await asyncio.sleep(0.35)
+                    await asyncio.sleep(0.25)
                   except Exception as _mcq_e:
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
