@@ -822,6 +822,14 @@ async def download_tg_file(file_id: str, progress_cb=None,
             return big
         logger.warning("[download_tg_file] pyrogram unavailable/failed, falling back to Bot API getFile")
 
+    if progress_cb:
+        try:
+            res = progress_cb(0, 0)  # signal: getFile lookup in progress, size unknown yet
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception:
+            pass
+
     file_res = await tg_post("getFile", {"file_id": file_id})
     if not file_res.get("ok"):
         desc = file_res.get("description")
