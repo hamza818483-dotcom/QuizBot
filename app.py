@@ -8499,12 +8499,76 @@ async def _qbm_extract_from_image(img) -> list:
             if not final_check:
                 return []  # Confirmed by all 3 calls: page genuinely has no MCQ
             # Call 3 found something the first two missed -- verify it properly.
-            return _cap_mcq_options(await _qbm_call3_verify(img, final_check, False))
+            recovered_mcqs = _cap_mcq_options(await _qbm_call3_verify(img, final_check, False))
+            return await _qbm_final_safety_net(img, recovered_mcqs)
 
         call3 = await _qbm_call3_verify(img, call2, page_confirmed_complete)
-        return _cap_mcq_options(call3)
+        final_mcqs = _cap_mcq_options(call3)
+        return await _qbm_final_safety_net(img, final_mcqs)
     finally:
         _QBM_EXTRACT_HARD_CAP.release()
+
+
+def _qbm_question_looks_truncated(q: str, opts: list) -> bool:
+    """Cheap heuristic (no extra API cost) to catch obviously truncated/garbage
+    questions that slipped past the prompt/verify calls -- e.g. a lone word
+    fragment with no terminal punctuation and far too short vs its options."""
+    if not q:
+        return True
+    qs = q.strip()
+    ends_ok = qs.endswith(("?", "।", ":", "-", ")", "”", '"'))
+    word_count = len(qs.split())
+    # A real MCQ question is almost never a single short word with no
+    # question mark/দাঁড়ি and shorter than its own options.
+    max_opt_len = max((len(o.strip()) for o in opts if o), default=0)
+    if not ends_ok and word_count <= 2 and len(qs) < max(max_opt_len, 12):
+        return True
+    return False
+
+
+async def _qbm_final_safety_net(img, mcqs: list) -> list:
+    """
+    Last-line, zero-trust safety net applied to every MCQ right before it
+    leaves the extraction pipeline:
+      1) If the question looks truncated/garbage -> re-run a focused re-OCR
+         extraction pass on this image and try to recover the full question;
+         if recovery fails, drop the MCQ rather than ship a broken one.
+      2) If the explanation is empty/missing -> build one now (4-option
+         covering) so no MCQ is ever sent out without an explanation.
+    """
+    if not mcqs:
+        return mcqs
+    fixed = []
+    for mc in mcqs:
+        q = (mc.get("question") or "").strip()
+        opts = mc.get("options", [])
+        if _qbm_question_looks_truncated(q, opts):
+            try:
+                prompt = (
+                    "The question text below appears TRUNCATED or corrupted: "
+                    f"\"{q}\"\nOptions: {opts}\n"
+                    "Re-read this exact page/image and find the ONE full MCQ whose options "
+                    "match the list above. Output ONLY the complete, correctly-spelled question "
+                    "text (ending in proper punctuation), nothing else. If you cannot find a "
+                    "matching MCQ on this page at all, output exactly: NONE"
+                )
+                recovered = (await _qbm_groq_call(img, prompt)).strip()
+                if recovered and recovered.upper() != "NONE" and len(recovered) > len(q):
+                    mc["question"] = _strip_q_numbering(recovered)
+                else:
+                    logger.warning(f"[QBM safety-net] Dropped unrecoverable truncated MCQ: {q[:60]}")
+                    continue
+            except Exception as e:
+                logger.warning(f"[QBM safety-net] Recovery failed, dropping MCQ: {e}")
+                continue
+        if not (mc.get("explanation") or "").strip():
+            ans = mc.get("answer", "A")
+            try:
+                mc["explanation"] = await _qbm_build_explanation_for_known_answer(mc, ans)
+            except Exception as e:
+                logger.warning(f"[QBM safety-net] Explanation backfill failed: {e}")
+        fixed.append(mc)
+    return fixed
 
 
 async def _qbm_gemini_raw(img, prompt: str) -> str:
