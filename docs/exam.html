@@ -1099,16 +1099,38 @@ body{background:#fff;color:#111;font-family:'Noto Sans Bengali','Inter',sans-ser
   if(ifr) ifr.remove();
   ifr = document.createElement('iframe');
   ifr.id = 'printFrame';
-  ifr.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;';
+  // আগে 0x0 size ছিল — Android Chrome/WebView-এর print engine মাঝেমাঝে
+  // zero-size iframe-এর ভেতরের CSS reflow/layout skip করে, ফলে print
+  // preview-তে raw unstyled text দেখায় (কার্ড/রং/কলাম কিছুই থাকে না)।
+  // দৃশ্যমান কিন্তু off-screen ছোট size দিলে real layout engine চলে।
+  ifr.style.cssText = 'position:fixed;left:-9999px;top:0;width:850px;height:1100px;border:0;';
   document.body.appendChild(ifr);
   const idoc = ifr.contentWindow.document;
   idoc.open(); idoc.write(doc); idoc.close();
 
   showToast('🖨️ Print dialog খুলছে...');
-  setTimeout(()=>{
+  // Fixed 250ms wait ছিল আগে — Bengali web font (Noto Sans Bengali) লোড ও
+  // 2-column layout reflow শেষ হওয়ার আগেই print() ডাকা হতো অনেক সময়,
+  // ফলে unstyled plain text দেখাতো। এখন iframe এর load event + font-ready
+  // এর জন্য অপেক্ষা করে, তারপরও 400ms বাড়তি settle time রাখা হলো।
+  const _firePrint = () => {
     ifr.contentWindow.focus();
     ifr.contentWindow.print();
-  }, 250);
+  };
+  const _waitFontsThenPrint = () => {
+    const ifrDoc = ifr.contentWindow.document;
+    if (ifrDoc.fonts && ifrDoc.fonts.ready) {
+      ifrDoc.fonts.ready.then(() => setTimeout(_firePrint, 400));
+    } else {
+      setTimeout(_firePrint, 400);
+    }
+  };
+  if (ifr.contentWindow.document.readyState === 'complete') {
+    _waitFontsThenPrint();
+  } else {
+    ifr.onload = _waitFontsThenPrint;
+    setTimeout(_waitFontsThenPrint, 800); // safety fallback if onload never fires
+  }
 }
 
 // ── PRACTICE MODES ──
