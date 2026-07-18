@@ -553,7 +553,7 @@ async def generate_mcq_from_image(
                     ]
                 )
 
-            _attempt_timeout = 45 if attempt == 0 else 20
+            _attempt_timeout = 30 if attempt == 0 else 15
             response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
             valid = _parse_mcq_json(response.text)
             valid = await _attach_explanation_images(valid, img)

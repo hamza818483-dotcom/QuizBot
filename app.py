@@ -2201,24 +2201,35 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
 
 
 async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
-    # 1) Groq (primary — fast, set via GROQ_API_KEY)
+    # 1+2) Groq and Gemini raced concurrently instead of sequentially —
+    # previously a slow/failing Groq call blocked Gemini from even starting
+    # (Gemini itself can take 45-85s across key retries), doubling page
+    # latency in the common case where Groq is slow/rate-limited. Racing
+    # them means we only pay the cost of whichever finishes first.
+    groq_task = _spawn_task(_gen_groq(img, topic, mcq_count))
+    gemini_task = _spawn_task(_gemini_gen_mcq(img, topic, page_num, mcq_count))
     try:
-        out = await _gen_groq(img, topic, mcq_count)
-        if out:
-            logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq")
-            return out
-        logger.warning(f"[AI-ROT] groq returned empty (page {page_num}); trying gemini")
-    except Exception as e:
-        logger.warning(f"[AI-ROT] groq failed (page {page_num}): {e}; trying gemini")
+        groq_out, gemini_out = await asyncio.gather(
+            groq_task, gemini_task, return_exceptions=True
+        )
+    except Exception:
+        groq_out, gemini_out = [], []
 
-    # 2) Gemini (secondary — healthy key → use it)
-    try:
-        out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
-        if out:
-            return out
-        logger.warning(f"[AI-ROT] gemini returned empty (page {page_num}); rotating to fallbacks")
-    except Exception as e:
-        logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {e}; rotating to fallbacks")
+    if isinstance(groq_out, Exception):
+        logger.warning(f"[AI-ROT] groq failed (page {page_num}): {groq_out}")
+        groq_out = []
+    if isinstance(gemini_out, Exception):
+        logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {gemini_out}")
+        gemini_out = []
+
+    if groq_out:
+        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq (raced)")
+        return groq_out
+    if gemini_out:
+        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=gemini (raced)")
+        return gemini_out
+
+    logger.warning(f"[AI-ROT] groq+gemini both empty (page {page_num}); rotating to fallbacks")
 
     # 3) Fallback providers (skip silently if key missing / call fails)
     for prov in _AI_PROVIDERS_ORDER:
