@@ -8463,24 +8463,47 @@ async def _qbm_gemini_extract(img, prompt: str = None) -> list:
     return _qbm_parse_json(txt) if txt else []
 
 
+async def _qbm_groq_text_call(prompt: str, model: str = "openai/gpt-oss-120b") -> str:
+    """Text-only Groq call (no image) -- used for pure-reasoning tasks like
+    last-resort answer resolution, where no image/page content is left to read."""
+    keys = groq_key_rotator.all_keys()
+    if not keys:
+        return ""
+    headers_key = None
+    for key in keys:
+        try:
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+                "max_tokens": 50,
+            }
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+                if r.status_code >= 400:
+                    if r.status_code != 429:
+                        logger.warning(f"[Groq-text] {model} HTTP {r.status_code}")
+                    continue
+                j = r.json()
+                return j.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+        except Exception as e:
+            logger.warning(f"[Groq-text] err: {e}")
+            continue
+    return ""
+
+
 async def _qbm_web_resolve_answer(mc: dict) -> str | None:
     """
-    LAST-RESORT answer resolution via Google Search grounding (Gemini
-    google_search tool), restricted to Wikipedia as the trusted source --
-    used ONLY when the answer could not be found anywhere in the page/PDF
-    (no mark, no inline answer, no answer-key table, no nearby-page lookahead
-    match). Returns the correct option letter (A/B/C/D) or None if Wikipedia
-    itself doesn't give a clear answer.
+    LAST-RESORT answer resolution -- used ONLY when the answer could not be
+    found anywhere in the page/PDF (no mark, no inline answer, no answer-key
+    table, no nearby-page lookahead match). Groq-only (no Gemini/web-search
+    tool): asks the Groq reasoning model directly for its best-known factual
+    answer. This is a knowledge-based best-effort, not a live web/Wikipedia
+    lookup -- returns the correct option letter (A/B/C/D) or None if the
+    model itself is not confident.
     """
     try:
-        from google import genai as gai
-        from google.genai import types
-        from pdf_handler import key_rotator
-        if not key_rotator.keys:
-            return None
-        key = key_rotator.get_key()
-        client = gai.Client(api_key=key)
-
         q = mc.get("question", "")
         opts = mc.get("options", [])
         opts_txt = "\n".join(f"{L}) {o}" for L, o in zip("ABCD", opts))
@@ -8489,22 +8512,11 @@ async def _qbm_web_resolve_answer(mc: dict) -> str | None:
 প্রশ্ন: {q}
 {opts_txt}
 
-Use Google Search but ONLY trust and cite Wikipedia results (site:wikipedia.org) for the
-factual answer -- ignore non-Wikipedia sources entirely. Search Wikipedia specifically to
-confirm the correct option. Reply with ONLY the single correct option letter: A, B, C, or D.
-If Wikipedia does not clearly answer this, reply with exactly: NONE"""
+Using your own factual knowledge, determine the correct option. Reply with ONLY the single
+correct option letter: A, B, C, or D. If you are not confident of the correct answer, reply
+with exactly: NONE"""
 
-        def _call():
-            return client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[types.Part.from_text(text=prompt)],
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    tools=[types.Tool(google_search=types.GoogleSearch())]
-                )
-            )
-        response = await asyncio.to_thread(_call)
-        txt = (response.text or "").strip().upper()
+        txt = (await _qbm_groq_text_call(prompt)).strip().upper()
         if "NONE" in txt:
             return None
         m = re.search(r'[ABCD]', txt)
@@ -8884,7 +8896,7 @@ async def qbm_extract_all_pages(
                         m["answer"] = web_ans
                         m["explanation"] = (m.get("explanation") or "").replace(
                             "Answer not found in source",
-                            "উত্তর ওয়েব সার্চ থেকে যাচাই করা হয়েছে"
+                            "উত্তর AI জ্ঞান থেকে নির্ধারণ করা হয়েছে"
                         )
         except Exception as e:
             logger.error(f"[QBM Extract] Page {page_num} error: {e}")
@@ -9027,7 +9039,7 @@ async def process_qbm_pages(
                             m["answer"] = web_ans
                             m["explanation"] = (m.get("explanation") or "").replace(
                                 "Answer not found in source",
-                                "উত্তর ওয়েব সার্চ থেকে যাচাই করা হয়েছে"
+                                "উত্তর AI জ্ঞান থেকে নির্ধারণ করা হয়েছে"
                             )
 
             img_bytes = image_to_bytes(img) if not isinstance(img, (bytes, bytearray)) else img
