@@ -3706,30 +3706,16 @@ async def handle_csv_command(msg: dict):
     # document er filename shobshomoy ".csv"-te shesh hoy na). Ekhon shorashori
     # try kore, parse fail hoile tobei error dekhabe.
 
-    loading = await send_msg(chat_id, "⏳ CSV download হচ্ছে...\n[░░░░░░░░░░ 0%]")
-    loading_id = loading.get("result", {}).get("message_id")
-
-    _last_pct = {"v": -1}
-    async def _dl_progress(done, total):
-        if not loading_id or not total:
-            return
-        pct = int(done * 100 / total)
-        if pct - _last_pct["v"] < 10 and pct != 100:
-            return
-        _last_pct["v"] = pct
-        bar = "\u2588" * (pct // 10) + "\u2591" * (10 - pct // 10)
-        try:
-            await edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n[{bar} {pct}%]")
-        except Exception:
-            pass
+    loading_id = None
 
     try:
-        # CSV ফাইল সবসময় ছোট (কখনো 20MB Bot-API ceiling ছাড়ায় না), তাই chat_id/
-        # message_id পাস করা হচ্ছে না — pyrogram path (client connect overhead)
-        # স্কিপ হয়ে সরাসরি দ্রুত Bot API getFile ব্যবহার হবে।
-        csv_bytes = await download_tg_file(
-            doc["file_id"], progress_cb=_dl_progress
-        )
+        # CSV ফাইল সবসময় ছোট, single-chunk এ শেষ হয়ে যায় — progress bar/
+        # loading message পাঠানো-editing করা মানে ৩টা extra Telegram API
+        # round-trip খরচ করা একটা sub-second task-এর জন্য, যেটাই আসল delay-র
+        # উৎস ছিল (download নিজে দ্রুত, কিন্তু UI updates ধীর মনে হতো)।
+        # chat_id/message_id পাস করা হচ্ছে না — pyrogram path (client connect
+        # overhead) স্কিপ হয়ে সরাসরি দ্রুত Bot API getFile ব্যবহার হবে।
+        csv_bytes = await download_tg_file(doc["file_id"])
         if loading_id:
             await edit_msg(chat_id, loading_id, "✅ Download complete!\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
