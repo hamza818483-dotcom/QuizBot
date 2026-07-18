@@ -4418,7 +4418,8 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
     mcqs = cache["mcq_data"]
     total = len(mcqs)
 
-    await notify_owner(f"🟢 CSV job শুরু — টপিক: {topic} | {total} MCQ | চ্যানেল: {channel_id}")
+    _owner_msg_box = {"id": None}
+    await notify_owner_edit(f"🟢 CSV job শুরু — টপিক: {topic} | {total} MCQ | চ্যানেল: {channel_id}", _owner_msg_box)
 
     loading = await send_msg(chat_id, f"📤 {total} টি poll পাঠানো হচ্ছে...")
     loading_id = loading.get("result", {}).get("message_id")
@@ -4460,7 +4461,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 channel_id, batch, batch_topic, chat_id, pre_msg_id,
                 thread_id=thread_id, loading_id=loading_id
             )
-            await notify_owner(f"✅ Batch {b_idx}/{total_batches} — {sent} poll পাঠানো শেষ ({batch_topic})")
+            await notify_owner_edit(f"✅ Batch {b_idx}/{total_batches} — {sent} poll পাঠানো শেষ ({batch_topic})", _owner_msg_box)
 
             # Button-msg (channel + group উভয়ে): pre-msg টেক্সট + 4 button, pre-msg কে reply
             btn_kb = await _csv_pre_buttons(batch_cache_id)
@@ -4491,7 +4492,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     "channel_id": channel_id,
                     "end_msg_id": end_r["result"]["message_id"]
                 })
-                await notify_owner(f"✅ Batch {b_idx}/{total_batches} — end message + button পাঠানো হয়েছে ({batch_topic})")
+                await notify_owner_edit(f"✅ Batch {b_idx}/{total_batches} — end message + button পাঠানো হয়েছে ({batch_topic})", _owner_msg_box)
             else:
                 await send_msg(chat_id,
                     f"⚠️ '{batch_topic}' এর end message + button পাঠানো ব্যর্থ হয়েছে: {end_r.get('description', 'unknown error')}")
@@ -4520,7 +4521,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     doc_msg_id = doc_r.get("result", {}).get("message_id")
                     if doc_msg_id:
                         await try_pin_message(channel_id, doc_msg_id)
-                await notify_owner(f"✅ Combined PDF পাঠানো হয়েছে — টপিক: {topic}")
+                await notify_owner_edit(f"✅ Combined PDF পাঠানো হয়েছে — টপিক: {topic}", _owner_msg_box)
 
         # Master Summary (শুধু multiple batch হলে) — first pre-msg কে reply
         if total_batches > 1:
@@ -4543,7 +4544,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             await edit_msg(chat_id, loading_id,
                 f"✅ সব batch শেষ! {total} MCQ → {total_batches} batch")
 
-        await notify_owner(f"🏁 CSV batch job সম্পূর্ণ — টপিক: {topic} | {total} MCQ | {total_batches} batch, সব poll+PDF+end message পাঠানো হয়েছে।")
+        await notify_owner_edit(f"🏁 CSV batch job সম্পূর্ণ — টপিক: {topic} | {total} MCQ | {total_batches} batch, সব poll+PDF+end message পাঠানো হয়েছে।", _owner_msg_box)
 
     else:
         # Normal /csv mode — single batch
@@ -4562,7 +4563,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             channel_id, mcqs, topic, chat_id, pre_msg_id,
             thread_id=thread_id, loading_id=loading_id
         )
-        await notify_owner(f"✅ {sent}/{total} poll পাঠানো শেষ — টপিক: {topic}\n⏳ PDF বানানো শুরু হচ্ছে...")
+        await notify_owner_edit(f"✅ {sent}/{total} poll পাঠানো শেষ — টপিক: {topic}\n⏳ PDF বানানো শুরু হচ্ছে...", _owner_msg_box)
 
         # Style1 PDF (সব poll মিলিয়ে) — pre-msg কে reply, auto-pin, polls শেষে
         # end-msg-এর আগে পাঠানো হয়। Guaranteed: 3 বার retry না হওয়া পর্যন্ত
@@ -4580,7 +4581,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 doc_msg_id = doc_r.get("result", {}).get("message_id")
                 if doc_msg_id:
                     await try_pin_message(channel_id, doc_msg_id)
-            await notify_owner(f"✅ PDF পাঠানো হয়েছে — টপিক: {topic}\n⏳ End message + button পাঠানো হচ্ছে...")
+            await notify_owner_edit(f"✅ PDF পাঠানো হয়েছে — টপিক: {topic}\n⏳ End message + button পাঠানো হচ্ছে...", _owner_msg_box)
 
         # End-msg (topic + mcq count + first poll link + 4 button) — PDF-এর পরে,
         # সবার শেষে। Channel-এ score-ask সহ, group-এ score-ask ছাড়া।
@@ -4614,7 +4615,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             await edit_msg(chat_id, loading_id,
                 f"✅ {sent}/{total} polls channel-এ পাঠানো হয়েছে!")
 
-        await notify_owner(f"🏁 CSV job সম্পূর্ণ — টপিক: {topic} | {sent}/{total} poll + PDF + end message পাঠানো হয়েছে।")
+        await notify_owner_edit(f"🏁 CSV job সম্পূর্ণ — টপিক: {topic} | {sent}/{total} poll + PDF + end message পাঠানো হয়েছে।", _owner_msg_box)
 
 async def process_csv_to_channel(cache_id: str, channel_id: str,
                                   chat_id: int, uid: int):
