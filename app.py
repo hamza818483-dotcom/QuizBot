@@ -4236,6 +4236,9 @@ async def _handle_clean_command_inner(msg: dict):
                          caption=f"✅ Clean CSV — {len(cleaned)}টি MCQ (numbering/source-tag/option-marker মুক্ত)")
 
 
+_cut_pdf_cache = {}  # file_id -> pdf_bytes (small in-memory cache to skip re-download)
+_CUT_CACHE_MAX = 5
+
 async def handle_cut_command(msg: dict):
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
     try:
@@ -4280,15 +4283,38 @@ async def _handle_cut_command_inner(msg: dict):
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB")
     status_msg_id = status_r.get("result", {}).get("message_id")
 
-    try:
-        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
+    if file_id in _cut_pdf_cache:
+        pdf_bytes = _cut_pdf_cache[file_id]
         if status_msg_id:
-            await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n⏳ Cut হচ্ছে...")
-    except Exception as e:
-        logger.error(f"[Cut] download error: {e}", exc_info=True)
-        if status_msg_id:
-            await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
-        return
+            await edit_msg(chat_id, status_msg_id, "⚡ Cache থেকে নেওয়া হলো!\n⏳ Cut হচ্ছে...")
+    else:
+        _last_pct = {"v": -1}
+
+        async def _progress(current, total):
+            if not total:
+                return
+            pct = int(current * 100 / total)
+            if pct != _last_pct["v"] and pct % 5 == 0 and status_msg_id:
+                _last_pct["v"] = pct
+                try:
+                    await edit_msg(chat_id, status_msg_id,
+                                    f"⏳ Download হচ্ছে... {pct}%\n📄 {file_name}\n📦 {size_kb} KB")
+                except Exception:
+                    pass
+
+        try:
+            pdf_bytes = await download_tg_file(file_id, progress_cb=_progress,
+                                                chat_id=chat_id, message_id=reply["message_id"])
+            _cut_pdf_cache[file_id] = pdf_bytes
+            if len(_cut_pdf_cache) > _CUT_CACHE_MAX:
+                _cut_pdf_cache.pop(next(iter(_cut_pdf_cache)))
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n⏳ Cut হচ্ছে...")
+        except Exception as e:
+            logger.error(f"[Cut] download error: {e}", exc_info=True)
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
+            return
 
     base_name = re.sub(r'\.pdf$', '', file_name, flags=re.I)
 
