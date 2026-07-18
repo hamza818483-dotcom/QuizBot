@@ -729,7 +729,8 @@ function doSubmit(){
   html+=`<div class="result-btns">
     <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
     <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (${_mistakeCnt})</button>
-    <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>`;
+    <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>
+    <button class="result-btn"          onclick="solvePDF()">📄 Solve PDF</button>`;
   if(hasImageSource)
     html+=`<button class="result-btn" id="newExamBtnResult" onclick="startNewExamV2()">🆕 New Exam</button>`;
   if(!isNewGen)
