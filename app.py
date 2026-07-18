@@ -8465,11 +8465,12 @@ async def _qbm_gemini_extract(img, prompt: str = None) -> list:
 
 async def _qbm_web_resolve_answer(mc: dict) -> str | None:
     """
-    LAST-RESORT answer resolution via real Google Search grounding (Gemini
-    google_search tool) -- used ONLY when the answer could not be found
-    anywhere in the page/PDF (no mark, no inline answer, no answer-key table,
-    no nearby-page lookahead match). Returns the correct option letter
-    (A/B/C/D) or None if the web search itself is inconclusive.
+    LAST-RESORT answer resolution via Google Search grounding (Gemini
+    google_search tool), restricted to Wikipedia as the trusted source --
+    used ONLY when the answer could not be found anywhere in the page/PDF
+    (no mark, no inline answer, no answer-key table, no nearby-page lookahead
+    match). Returns the correct option letter (A/B/C/D) or None if Wikipedia
+    itself doesn't give a clear answer.
     """
     try:
         from google import genai as gai
@@ -8484,13 +8485,14 @@ async def _qbm_web_resolve_answer(mc: dict) -> str | None:
         opts = mc.get("options", [])
         opts_txt = "\n".join(f"{L}) {o}" for L, o in zip("ABCD", opts))
         prompt = f"""This MCQ's answer could not be found anywhere in its source document.
-Use Google Search to find the factually correct answer.
 
 প্রশ্ন: {q}
 {opts_txt}
 
-Search the web (Wikipedia and other reliable sources) for the correct, up-to-date factual
-answer. Reply with ONLY the single correct option letter: A, B, C, or D. No other text."""
+Use Google Search but ONLY trust and cite Wikipedia results (site:wikipedia.org) for the
+factual answer -- ignore non-Wikipedia sources entirely. Search Wikipedia specifically to
+confirm the correct option. Reply with ONLY the single correct option letter: A, B, C, or D.
+If Wikipedia does not clearly answer this, reply with exactly: NONE"""
 
         def _call():
             return client.models.generate_content(
@@ -8503,6 +8505,8 @@ answer. Reply with ONLY the single correct option letter: A, B, C, or D. No othe
             )
         response = await asyncio.to_thread(_call)
         txt = (response.text or "").strip().upper()
+        if "NONE" in txt:
+            return None
         m = re.search(r'[ABCD]', txt)
         return m.group() if m else None
     except Exception as e:
