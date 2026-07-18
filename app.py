@@ -4339,6 +4339,7 @@ async def _send_csv_polls_to_channel(
 # ============================================================
 _csv_job_queue = None
 _csv_worker_task = None
+_csv_stuck_jobs = {}  # cache_id -> Task, jobs currently running past the "slow" threshold
 
 def _get_csv_job_queue():
     global _csv_job_queue
@@ -4346,38 +4347,58 @@ def _get_csv_job_queue():
         _csv_job_queue = asyncio.Queue()
     return _csv_job_queue
 
+async def _run_csv_job_forever(cache_id: str, channel_id: str, chat_id: int, uid: int):
+    """Runs one CSV job to actual completion — no timeout, no abandonment.
+    If it's still running past the slow-warning threshold, it's promoted to
+    run in its own background task (see _csv_queue_worker) so it never blocks
+    the rest of the queue, but it keeps running until it genuinely finishes
+    or errors out."""
+    try:
+        await _process_csv_to_channel_impl(cache_id, channel_id, chat_id, uid)
+    except Exception as e:
+        logger.error(f"[CSV-Queue] Job failed for cache_id={cache_id}: {e}")
+        try:
+            await _safe_error_reply(chat_id, e)
+        except Exception:
+            pass
+    finally:
+        _csv_stuck_jobs.pop(cache_id, None)
+
 async def _csv_queue_worker():
     q = _get_csv_job_queue()
     while True:
         job = await q.get()
         cache_id, channel_id, chat_id, uid = job
+        job_task = asyncio.ensure_future(_run_csv_job_forever(cache_id, channel_id, chat_id, uid))
         try:
-            # Hard timeout — একটা job কোনো কারণে hang করলেও (network stall,
-            # Telegram/Supabase আটকে যাওয়া) queue permanently ব্লক হয়ে থাকবে
-            # না; timeout হলে worker পরের job-এ এগিয়ে যাবে।
-            await asyncio.wait_for(
-                _process_csv_to_channel_impl(cache_id, channel_id, chat_id, uid),
-                timeout=600  # 10 minutes — বড় CSV batch job-এর জন্যও যথেষ্ট
-            )
+            # Slow-warning threshold, NOT a kill switch — if a job is still
+            # running past this, it gets promoted to its own independent
+            # background task (added to _csv_stuck_jobs) so the queue can
+            # move on to the next job immediately. The original job keeps
+            # running to actual completion in the background — it is never
+            # cancelled or abandoned.
+            await asyncio.wait_for(asyncio.shield(job_task), timeout=600)
         except asyncio.TimeoutError:
-            logger.error(f"[CSV-Queue] Job TIMED OUT for cache_id={cache_id} (>10min) — skipping to next job")
+            logger.warning(f"[CSV-Queue] Job cache_id={cache_id} running long (>10min) — "
+                            f"promoting to background so queue can continue; job itself keeps running")
+            _csv_stuck_jobs[cache_id] = job_task
             try:
-                await notify_owner(f"⏱️ CSV job টাইমআউট (cache_id={cache_id}) — পরের job এ এগিয়ে যাচ্ছে")
-                await send_msg(chat_id, "⏱️ কাজটা অনেক সময় নিচ্ছিল, বাতিল করা হলো। আবার চেষ্টা করুন।")
+                await notify_owner(f"⏱️ CSV job (cache_id={cache_id}) অনেক সময় নিচ্ছে — এটা background-এ চলতেই থাকবে, "
+                                    f"queue-র পরের job এগিয়ে যাচ্ছে")
             except Exception:
                 pass
-        except Exception as e:
-            logger.error(f"[CSV-Queue] Job failed for cache_id={cache_id}: {e}")
-            try:
-                await _safe_error_reply(chat_id, e)
-            except Exception:
-                pass
+        except Exception:
+            # job_task itself already logs/handles its own exception in
+            # _run_csv_job_forever — nothing further to do here.
+            pass
         finally:
             q.task_done()
 
 def enqueue_csv_to_channel(cache_id: str, channel_id: str, chat_id: int, uid: int):
     """Replaces direct _spawn_task(process_csv_to_channel(...)) — jobs now
-    queue up and run strictly one after another, never in parallel."""
+    queue up and run one after another (unless one runs long, in which case
+    it's promoted to the background so it never blocks the others — see
+    _csv_queue_worker). No job is ever abandoned before it finishes."""
     global _csv_worker_task
     q = _get_csv_job_queue()
     if _csv_worker_task is None or _csv_worker_task.done():
