@@ -10504,67 +10504,64 @@ _LOCK_ACQUIRED_AT = {}  # uid -> timestamp the currently-held lock was acquired
 _STALE_LOCK_SECONDS = 600  # 10 min — generous even for the slowest /pdf jobs
 _USER_PENDING_QUEUE = {}  # uid -> list of queued update dicts waiting their turn
 
-async def _run_user_message_chain(uid: int, update: dict):
-    """Run this update under the user's lock, then keep draining any updates
-    that got queued up while we were busy — so a 2nd command sent while the
-    1st was still processing auto-runs afterward instead of being lost."""
-    lock = _get_user_lock(uid)
-    _LOCK_ACQUIRED_AT[uid] = time.time()
-    try:
-        async with lock:
-            _active_command_task.pop(uid, None)
+_USER_QUEUE_RUNNING = set()  # uid currently has an active drain-worker running
+
+async def _drain_user_queue(uid: int):
+    """Single worker per user that drains _USER_PENDING_QUEUE strictly in
+    FIFO order. Only one of these ever runs per uid at a time (guarded by
+    _USER_QUEUE_RUNNING) — this replaces the old lock.locked()-check dispatch,
+    which had a race window: two updates for the same uid could each pass the
+    `lock.locked()` check before either had actually entered the lock body,
+    letting both proceed to run concurrently/out of order instead of strictly
+    one-after-another in arrival order."""
+    while True:
+        queue = _USER_PENDING_QUEUE.get(uid)
+        if not queue:
+            _USER_QUEUE_RUNNING.discard(uid)
+            # Re-check after removing from running-set — another update may
+            # have been enqueued in the tiny gap between the empty-check above
+            # and this line, and would have skipped starting a new worker
+            # (since uid was still marked running).
+            if _USER_PENDING_QUEUE.get(uid):
+                _USER_QUEUE_RUNNING.add(uid)
+                continue
+            return
+        update = queue.pop(0)
+        _LOCK_ACQUIRED_AT[uid] = time.time()
+        try:
             await handle_message(update["message"])
-            # handle_message dispatches the real command work via
-            # _spawn_command_task and returns right away — wait for
-            # that specific task to actually finish before releasing
-            # this user's lock, otherwise the "queue" is a no-op.
             task = _active_command_task.pop(uid, None)
             if task is not None and not task.done():
                 await asyncio.gather(task, return_exceptions=True)
-    finally:
-        _LOCK_ACQUIRED_AT.pop(uid, None)
-
-    queued = _USER_PENDING_QUEUE.get(uid)
-    if queued:
-        next_update = queued.pop(0)
-        if not queued:
-            _USER_PENDING_QUEUE.pop(uid, None)
-        await _run_user_message_chain(uid, next_update)
+        except Exception as e:
+            logger.error(f"[Queue] uid={uid} command error: {e}")
+        finally:
+            _LOCK_ACQUIRED_AT.pop(uid, None)
 
 async def process_update(update: dict):
     try:
         if "message" in update:
             uid = update["message"].get("from", {}).get("id")
             if uid is not None:
-                lock = _get_user_lock(uid)
-                if lock.locked():
+                _USER_PENDING_QUEUE.setdefault(uid, []).append(update)
+                if len(_USER_PENDING_QUEUE[uid]) > 20:
+                    # Safety cap — drop oldest queued item rather than growing unbounded
+                    _USER_PENDING_QUEUE[uid].pop(0)
+                if uid not in _USER_QUEUE_RUNNING:
+                    # Stale-worker guard: if a previous worker for this uid
+                    # died without clearing _USER_QUEUE_RUNNING (crash/restart
+                    # mid-task), a stuck flag would silently block this user's
+                    # commands forever. Cross-check against the lock-acquired
+                    # timestamp same as before.
                     acquired_at = _LOCK_ACQUIRED_AT.get(uid)
                     if acquired_at and (time.time() - acquired_at) > _STALE_LOCK_SECONDS:
-                        # Previous task hung/crashed without releasing the lock
-                        # (e.g. process was killed mid-task by a restart) —
-                        # without this, EVERY future command from this user
-                        # would be stuck forever behind a lock that will
-                        # never free, until the whole process restarts.
-                        logger.warning(f"[Queue] Stale lock for uid={uid} "
+                        logger.warning(f"[Queue] Stale worker for uid={uid} "
                                         f"({time.time()-acquired_at:.0f}s old) — force-resetting")
-                        lock = asyncio.Lock()
-                        _USER_LOCKS[uid] = lock
-                    else:
-                        # A previous command (possibly long-running: /pdf, /qbm,
-                        # /csv, etc.) is genuinely still processing. Instead of
-                        # dropping this update (old behavior forced the user to
-                        # manually resend after seeing the "wait" notice, and if
-                        # they didn't, the command was silently lost forever),
-                        # queue it — it will auto-run right after the current
-                        # command releases the lock, no resend needed.
-                        chat_id = update["message"].get("chat", {}).get("id")
-                        _USER_PENDING_QUEUE.setdefault(uid, []).append(update)
-                        if len(_USER_PENDING_QUEUE[uid]) > 20:
-                            # Safety cap — drop oldest queued item rather than growing unbounded
-                            _USER_PENDING_QUEUE[uid].pop(0)
-                        return
-                await _run_user_message_chain(uid, update)
+                        _LOCK_ACQUIRED_AT.pop(uid, None)
+                    _USER_QUEUE_RUNNING.add(uid)
+                    _spawn_task(_drain_user_queue(uid))
             else:
+                await handle_message(update["message"])
                 await handle_message(update["message"])
         elif "callback_query" in update:
             await handle_callback(update["callback_query"])
