@@ -7892,6 +7892,13 @@ QBM_EXTRACT_PROMPT_DEFAULT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SP
   general knowledge of the topic) to independently reason out and output the single BEST,
   most likely complete and CORRECTLY-SPELLED word — never a guessed-wrong fragment, never
   a truncated piece, never a gap.
+- If the QUESTION TEXT ITSELF is unclear/blurry/cut-off but the 4 OPTIONS are readable → use
+  the options as your primary context clue to reconstruct the question. The options reveal
+  the topic/category (e.g. if all 4 options are country names, the question is almost
+  certainly "... কোন দেশের ...?" or "...-এর রাজধানী/মুদ্রা কী?" type; if all 4 are dates, it's
+  a "কত সালে/কবে" question). Combine this option-based inference with general knowledge to
+  output the single BEST, most likely, complete, correctly-spelled question that matches
+  those exact options — never leave the question blank or as an unreadable fragment.
 - This completeness+spelling check applies with equal strictness to the question, all 4
   options, and any explanation/answer-key text — no exceptions, on every MCQ, every time.
 
@@ -8549,8 +8556,14 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
                     f"\"{q}\"\nOptions: {opts}\n"
                     "Re-read this exact page/image and find the ONE full MCQ whose options "
                     "match the list above. Output ONLY the complete, correctly-spelled question "
-                    "text (ending in proper punctuation), nothing else. If you cannot find a "
-                    "matching MCQ on this page at all, output exactly: NONE"
+                    "text (ending in proper punctuation).\n"
+                    "If the question text on the page itself is ALSO unclear/blurry/cut-off "
+                    "there, do NOT leave it partial -- use the 4 options above as context clues "
+                    "(they reveal the topic/category, e.g. all options being country names means "
+                    "the question is about a country) plus general knowledge to construct the "
+                    "single BEST, most likely correct, complete, correctly-spelled question that "
+                    "matches these exact options. Only output NONE if there is genuinely no MCQ "
+                    "on this page with these options at all."
                 )
                 recovered = (await _qbm_groq_call(img, prompt)).strip()
                 if recovered and recovered.upper() != "NONE" and len(recovered) > len(q):
