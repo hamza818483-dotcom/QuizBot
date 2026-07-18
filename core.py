@@ -418,10 +418,15 @@ async def tg_post(method: str, data: dict) -> dict:
     #    falling through to "give up" (which, on HF where direct API is
     #    blocked, previously meant total silent failure on that one stale
     #    connection — exactly "1st command does nothing, 2nd works").
+    # getFile নিজেই ছোট/দ্রুত call (Telegram এ file lookup, কোনো bytes না) —
+    # তাই এটাকে ছোট timeout দেওয়া হলো (5s vs অন্য method গুলোর 12s), যাতে
+    # CF proxy hang/slow হলে /csv এর "ফাইল খোঁজা হচ্ছে..." স্টেপ worst-case
+    # 24s+12s=36s এর বদলে দ্রুত fallback এ চলে যায়।
+    _proxy_timeout = 5 if method == "getFile" else 12
     for _proxy_attempt in range(2):
         try:
             client = await _get_shared_http_client()
-            r = await client.post(f"{TG_API}/{method}", json=data, timeout=12)
+            r = await client.post(f"{TG_API}/{method}", json=data, timeout=_proxy_timeout)
             result = r.json()
             if result.get("ok"):
                 return result
@@ -443,7 +448,7 @@ async def tg_post(method: str, data: dict) -> dict:
         try:
             alt_api = f"{CF_WORKER_URL_2}/tg-proxy"
             client = await _get_shared_http_client()
-            r = await client.post(f"{alt_api}/{method}", json=data, timeout=12)
+            r = await client.post(f"{alt_api}/{method}", json=data, timeout=_proxy_timeout)
             result = r.json()
             if result.get("ok"):
                 logger.info(f"[TG] {method} recovered via secondary CF Worker ({CF_WORKER_URL_2})")
@@ -914,8 +919,14 @@ async def download_tg_file(file_id: str, progress_cb=None,
                         pass
         return buf.getvalue()
 
-    # CF proxy আগে try না করে সরাসরি direct Telegram file API — ছোট/মাঝারি
-    # ফাইলে (mhtml/csv/pdf) extra proxy hop-এর কোনো লাভ নেই, শুধু latency বাড়ায়।
+    # HF-এ (_tg_mode == "cf-proxy") direct Telegram network-level blocked —
+    # আগে এখানে সবসময় প্রথমে direct try করা হতো, shared client-এর 300s
+    # default timeout-এর কারণে সেই attempt fail/hang হতে অনেক সময় লাগতে
+    # পারতো প্রতিটা /csv-তে, তারপর CF proxy fallback চলতো। এখন platform
+    # অনুযায়ী সরাসরি সঠিক path-এ যাওয়া হচ্ছে — HF হলে CF proxy দিয়েই শুরু,
+    # Render/direct মোডে direct API দিয়েই শুরু (যেখানে সেটা আসলে কাজ করে)।
+    if _tg_mode == "cf-proxy":
+        return await _stream_download(f"{CF_WORKER_URL}/tg-file?path={file_path}")
     try:
         return await _stream_download(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
     except Exception as e:
