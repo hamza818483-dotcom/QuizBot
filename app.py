@@ -49,7 +49,7 @@ from core import (
     CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, _tg_mode,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
-    send_document, send_media_group, send_poll, notify_owner, download_tg_file,
+    send_document, send_media_group, send_poll, notify_owner, notify_owner_edit, download_tg_file,
     db_get_settings, db_save_settings, db_save_settings_field, db_is_owner_or_admin, db_track_user, db_save_session,
     db_save_mcq_cache, db_update_cache, db_get_mcq_cache,
     db_get_new_gen_count, db_increment_gen_count, db_save_leaderboard,
