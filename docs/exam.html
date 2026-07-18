@@ -174,6 +174,12 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 /* TOAST */
 .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--card-bg);border:1px solid var(--border);color:var(--text);padding:10px 18px;border-radius:var(--radius-full);font-size:13px;font-weight:600;z-index:1000;opacity:0;transition:opacity .3s;white-space:nowrap;pointer-events:none;}
 .toast.show{opacity:1;}
+@media print {
+  body.printing-solve-sheet > *:not(#modeResult) { display:none !important; }
+  body.printing-solve-sheet #resultWrap > *:not(#solveSheet) { display:none !important; }
+  body.printing-solve-sheet #solveSheet { display:block !important; }
+  body.printing-solve-sheet .mcq-card { break-inside: avoid; page-break-inside: avoid; }
+}
 </style>
 </head>
 <body>
@@ -730,7 +736,8 @@ function doSubmit(){
     <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
     <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (${_mistakeCnt})</button>
     <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>
-    <button class="result-btn"          onclick="solvePDF()">📄 Solve PDF</button>`;
+    <button class="result-btn"          onclick="solvePDF()">📄 Solve PDF</button>
+    <button class="result-btn"          onclick="printSolveSheet()">🖨️ Print/Save PDF</button>`;
   if(hasImageSource)
     html+=`<button class="result-btn" id="newExamBtnResult" onclick="startNewExamV2()">🆕 New Exam</button>`;
   if(!isNewGen)
@@ -958,6 +965,20 @@ async function solvePDF(){
       showToast('❌ '+(d.error||'PDF error'));
     }
   }catch(e){showToast('❌ Server ব্যস্ত/বন্ধ আছে, একটু পর আবার চেষ্টা করো');}
+}
+
+// ── PRINT/SAVE PDF (offline, no server needed — uses browser's native
+// print dialog on the already-rendered Solve Sheet. Works even if HF
+// backend is fully down, since it needs no network call at all) ──
+function printSolveSheet(){
+  const sheet = document.getElementById('solveSheet');
+  if(!sheet){ showToast('❌ Solve Sheet পাওয়া যায়নি'); return; }
+  document.body.classList.add('printing-solve-sheet');
+  showToast('🖨️ Print dialog খুলছে...');
+  setTimeout(()=>{
+    window.print();
+    document.body.classList.remove('printing-solve-sheet');
+  }, 100);
 }
 
 // ── PRACTICE MODES ──
