@@ -181,6 +181,86 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 /* TOAST */
 .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--card-bg);border:1px solid var(--border);color:var(--text);padding:10px 18px;border-radius:var(--radius-full);font-size:13px;font-weight:600;z-index:1000;opacity:0;transition:opacity .3s;white-space:nowrap;pointer-events:none;}
 .toast.show{opacity:1;}
+@media print {
+  body.printing-solve-sheet > *:not(#modeResult) { display:none !important; }
+  body.printing-solve-sheet #resultWrap > *:not(#solveSheet) { display:none !important; }
+  body.printing-solve-sheet #solveSheet { display:block !important; }
+  @page { size:A4; margin:8mm 10mm; }
+
+  body.printing-solve-sheet {
+    background:#fff !important;
+    color:#111 !important;
+    font-family:'Noto Sans Bengali','Inter',sans-serif !important;
+    font-size:12.5px;
+  }
+  body.printing-solve-sheet #solveSheet::before {
+    content: attr(data-print-title);
+    display:block;
+    text-align:center;
+    padding:10px 14px;
+    background:#1a237e !important;
+    color:#fff !important;
+    margin-bottom:12px;
+    border-radius:8px;
+    font-size:14px; font-weight:800;
+    white-space:pre-line;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet #solveSheet {
+    display:block !important;
+    column-count:2;
+    column-gap:15px;
+    column-fill:balance;
+    column-rule:1px solid #ddd;
+  }
+  body.printing-solve-sheet #solveSheet::before { column-span: all; }
+
+  body.printing-solve-sheet .mcq-card {
+    background:#fff !important;
+    border:1.5px solid #c5cae9 !important;
+    box-shadow:none !important;
+    border-radius:8px;
+    padding:9px 10px !important;
+    margin-bottom:10px !important;
+    break-inside: avoid; page-break-inside: avoid;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet .q-result-badge {
+    font-size:11px; font-weight:800; padding:1px 8px; border-radius:4px;
+  }
+  body.printing-solve-sheet .q-result-badge.correct { background:#f1f8e9 !important; color:#1b5e20 !important; border:1px solid #81c784 !important; }
+  body.printing-solve-sheet .q-result-badge.wrong   { background:#ffebee !important; color:#b71c1c !important; border:1px solid #e53935 !important; }
+  body.printing-solve-sheet .q-result-badge.skip    { background:#fff8e1 !important; color:#a06a00 !important; border:1px solid #ffca28 !important; }
+  body.printing-solve-sheet .q-num {
+    background:transparent !important; color:#1a237e !important; font-size:11.5px; font-weight:800;
+    border:none !important; padding:0 !important;
+  }
+  body.printing-solve-sheet .q-text { color:#111 !important; font-weight:700; font-size:13.5px; line-height:1.6; }
+  body.printing-solve-sheet .opt {
+    background:#fff !important; border:1px solid #e0e0e0 !important; color:#333 !important;
+    font-size:12.5px; padding:2px 6px !important; margin-bottom:3px !important;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet .opt.correct-r { background:#e8f5e9 !important; border-color:#43a047 !important; color:#1b5e20 !important; font-weight:700; }
+  body.printing-solve-sheet .opt.wrong-r   { background:#ffebee !important; border-color:#e53935 !important; color:#b71c1c !important; font-weight:600; }
+  body.printing-solve-sheet .opt.dim { opacity:.7 !important; }
+  body.printing-solve-sheet .opt-radio {
+    border-color:#999 !important; background:#fff !important; color:#333 !important; width:16px; height:16px; font-size:10px;
+  }
+  body.printing-solve-sheet .opt.correct-r .opt-radio { background:#43a047 !important; border-color:#43a047 !important; color:#fff !important; }
+  body.printing-solve-sheet .opt.wrong-r .opt-radio   { background:#e53935 !important; border-color:#e53935 !important; color:#fff !important; }
+  body.printing-solve-sheet .exp-box {
+    background:#e8eaf6 !important; border-left:3px solid #3949ab !important; color:#1a237e !important;
+    font-size:12px; padding:5px 7px !important; margin-top:5px !important;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet .exp-hd { color:#3949ab !important; font-size:11px; }
+  body.printing-solve-sheet #solveSheet::after {
+    content:"🚀 ATLAS Special MCQ System — Atlascourses.com";
+    display:block; column-span:all; text-align:center;
+    font-size:10px; color:#9e9e9e !important; margin-top:8px;
+  }
+}
 </style>
 </head>
 <body>
@@ -645,6 +725,7 @@ function doSubmit(){
     <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>`;
   if(!isNewGen)
     html+=`<button class="result-btn warning" onclick="openLb()">🏆 Leaderboard</button>`;
+  html+=`<button class="result-btn" onclick="printSolveSheet()">🖨️ Print/Save PDF</button>`;
   html+=`
     <button class="result-btn"          onclick="window.open('https://Atlascourses.com','_blank')">🌐 ATLAS Courses</button>
     <button class="result-btn"          onclick="window.open('https://wa.me/8801999681290','_blank')">💬 WhatsApp</button>
@@ -729,6 +810,35 @@ function filt(e,t){
   document.querySelectorAll('.solve-item').forEach(el=>{
     el.style.display=(t==='all'||el.dataset.status===t)?'block':'none';
   });
+}
+
+// ── PRINT/SAVE PDF (offline, no server needed) ──
+function printSolveSheet(){
+  const sheet = document.getElementById('solveSheet');
+  if(!sheet){ showToast('❌ Solve Sheet পাওয়া যায়নি'); return; }
+
+  let correct=0,wrong=0,skipped=0;
+  questions.forEach((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=userAnswers[i];
+    if(ua===undefined) skipped++;
+    else if(ua===ci)   correct++;
+    else               wrong++;
+  });
+  const neg = parseFloat((wrong*.25).toFixed(2));
+  const fin = parseFloat((correct-neg).toFixed(2));
+  const dateStr = new Date().toLocaleDateString('bn-BD', {year:'numeric', month:'long', day:'numeric'});
+  sheet.setAttribute('data-print-title',
+    `${examData.topic||'ATLAS Exam'}  |  Page: ${examData.page||1}\n` +
+    `স্কোর: ${fin}/${questions.length}  (✅ ${correct}  ❌ ${wrong}  ⏭️ ${skipped})  |  ${dateStr}`
+  );
+
+  document.body.classList.add('printing-solve-sheet');
+  showToast('🖨️ Print dialog খুলছে...');
+  setTimeout(()=>{
+    window.print();
+    document.body.classList.remove('printing-solve-sheet');
+  }, 100);
 }
 
 // ── NEW EXAM (original, kept exactly as-is) ──
