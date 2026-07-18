@@ -10164,7 +10164,7 @@ async def handle_poll_auto_collect(msg: dict):
 
 
 async def handle_merge_command(msg: dict):
-    """CSV file merge"""
+    """CSV file merge + PDF file merge (auto-detected by reply file type)"""
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     text = msg.get("text", "").strip()
@@ -10173,45 +10173,99 @@ async def handle_merge_command(msg: dict):
     args = text.replace("/merge", "").strip()
 
     if args == "done":
-        row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute())
-        if not row.data:
+        csv_row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute())
+        pdf_row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_pdf_{uid}").execute())
+        csv_files = json.loads(csv_row.data[0]["data"]).get("files", []) if csv_row.data else []
+        pdf_file_ids = json.loads(pdf_row.data[0]["data"]).get("file_ids", []) if pdf_row.data else []
+
+        if not csv_files and not pdf_file_ids:
             await send_msg(chat_id, "❌ No files to merge!")
             return
-        merge_data = json.loads(row.data[0]["data"])
-        files = merge_data.get("files", [])
-        if not files:
-            await send_msg(chat_id, "❌ No files to merge!")
-            return
-        all_rows = []
-        header = None
-        for content in files:
-            lines = [l for l in content.split("\n") if l.strip()]
-            if not header:
-                header = lines[0]
-                all_rows.append(header)
-            all_rows.extend(lines[1:])
-        merged = "\n".join(all_rows)
-        await send_document(chat_id, merged.encode("utf-8"),
-            f"merged_{len(all_rows)-1}.csv",
-            caption=f"✅ Merged: {len(all_rows)-1} rows from {len(files)} files",
-            mime_type="text/csv")
-        await sb_exec(lambda: sb.table("quiz_sessions").delete().eq("key", f"merge_{uid}").execute())
+
+        if csv_files:
+            all_rows = []
+            header = None
+            for content in csv_files:
+                lines = [l for l in content.split("\n") if l.strip()]
+                if not header:
+                    header = lines[0]
+                    all_rows.append(header)
+                all_rows.extend(lines[1:])
+            merged = "\n".join(all_rows)
+            await send_document(chat_id, merged.encode("utf-8"),
+                f"merged_{len(all_rows)-1}.csv",
+                caption=f"✅ Merged: {len(all_rows)-1} rows from {len(csv_files)} files",
+                mime_type="text/csv")
+            await sb_exec(lambda: sb.table("quiz_sessions").delete().eq("key", f"merge_{uid}").execute())
+
+        if pdf_file_ids:
+            status = await send_msg(chat_id, f"⏳ {len(pdf_file_ids)}টা PDF merge হচ্ছে...")
+            status_id = status.get("result", {}).get("message_id")
+            try:
+                from pypdf import PdfReader, PdfWriter
+                import io as _io
+                writer = PdfWriter()
+                total_pages = 0
+                for fid in pdf_file_ids:
+                    pdf_bytes = await download_tg_file(fid)
+                    reader = PdfReader(_io.BytesIO(pdf_bytes))
+                    for page in reader.pages:
+                        writer.add_page(page)
+                    total_pages += len(reader.pages)
+                out_buf = _io.BytesIO()
+                writer.write(out_buf)
+                merged_pdf_bytes = out_buf.getvalue()
+                await send_document(chat_id, merged_pdf_bytes,
+                    f"merged_{len(pdf_file_ids)}files_{total_pages}pages.pdf",
+                    caption=f"✅ Merged: {len(pdf_file_ids)} PDF, মোট {total_pages} page",
+                    mime_type="application/pdf")
+                if status_id:
+                    await edit_msg(chat_id, status_id, "✅ PDF merge সম্পন্ন!")
+            except Exception as e:
+                logger.error(f"[Merge] PDF merge failed: {e}")
+                if status_id:
+                    await edit_msg(chat_id, status_id, "❌ PDF merge করতে সমস্যা হয়েছে।")
+                else:
+                    await _safe_error_reply(chat_id, e)
+            await sb_exec(lambda: sb.table("quiz_sessions").delete().eq("key", f"merge_pdf_{uid}").execute())
         return
 
     if args == "status":
-        row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute())
-        count = len(json.loads(row.data[0]["data"]).get("files", [])) if row.data else 0
-        await send_msg(chat_id, f"📊 Total files: {count}")
+        csv_row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute())
+        pdf_row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_pdf_{uid}").execute())
+        csv_count = len(json.loads(csv_row.data[0]["data"]).get("files", [])) if csv_row.data else 0
+        pdf_count = len(json.loads(pdf_row.data[0]["data"]).get("file_ids", [])) if pdf_row.data else 0
+        await send_msg(chat_id, f"📊 CSV files: {csv_count}\n📊 PDF files: {pdf_count}")
         return
 
     if args == "cancel":
         await sb_exec(lambda: sb.table("quiz_sessions").delete().eq("key", f"merge_{uid}").execute())
+        await sb_exec(lambda: sb.table("quiz_sessions").delete().eq("key", f"merge_pdf_{uid}").execute())
         await send_msg(chat_id, "❌ Merge cancelled!")
         return
 
     if reply and reply.get("document"):
+        doc = reply["document"]
+        fname = (doc.get("file_name") or "").lower()
+        is_pdf = fname.endswith(".pdf") or doc.get("mime_type") == "application/pdf"
+
+        if is_pdf:
+            try:
+                row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_pdf_{uid}").execute())
+                file_ids = json.loads(row.data[0]["data"]).get("file_ids", []) if row.data else []
+                file_ids.append(doc["file_id"])
+                await sb_exec(lambda: sb.table("quiz_sessions").upsert({
+                    "key": f"merge_pdf_{uid}",
+                    "data": json.dumps({"file_ids": file_ids}),
+                    "updated_at": int(time.time())
+                }).execute())
+                await send_msg(chat_id, f"📎 PDF {len(file_ids)} received! Total: {len(file_ids)}\n/merge done when ready")
+            except Exception as e:
+                await _safe_error_reply(chat_id, e)
+            return
+
         try:
-            csv_bytes = await download_tg_file(reply["document"]["file_id"])
+            csv_bytes = await download_tg_file(doc["file_id"])
             content = csv_bytes.decode("utf-8-sig")
             row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute())
             files = json.loads(row.data[0]["data"]).get("files", []) if row.data else []
@@ -10227,7 +10281,7 @@ async def handle_merge_command(msg: dict):
         return
 
     await send_msg(chat_id,
-        "🔗 CSV ফাইলে reply করে /merge দাও\n"
+        "🔗 CSV বা PDF ফাইলে reply করে /merge দাও\n"
         "/merge done — merge করো\n"
         "/merge status — count দেখো\n"
         "/merge cancel — বাতিল"
