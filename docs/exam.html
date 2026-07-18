@@ -837,7 +837,7 @@ async function startNewExam(){
       if(btn){btn.disabled=false;btn.textContent='🆕 New Exam';}
     }
   }catch(e){
-    showToast('❌ Network error');
+    showToast('❌ Server ব্যস্ত/বন্ধ আছে, একটু পর আবার চেষ্টা করো');
     if(btn){btn.disabled=false;btn.textContent='🆕 New Exam';}
   }
 }
@@ -957,7 +957,7 @@ async function solvePDF(){
     }else{
       showToast('❌ '+(d.error||'PDF error'));
     }
-  }catch(e){showToast('❌ Network error');}
+  }catch(e){showToast('❌ Server ব্যস্ত/বন্ধ আছে, একটু পর আবার চেষ্টা করো');}
 }
 
 // ── PRACTICE MODES ──
