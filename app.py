@@ -8502,10 +8502,11 @@ async def _handle_qbm_impl(msg: dict):
         file_id = reply["document"]["file_id"]
         file_name = reply["document"].get("file_name", "document.pdf")
 
-    status_r = await send_msg(chat_id, "⏳ " + ("Image" if is_image_reply else "PDF") + " download হচ্ছে...\n[░░░░░░░░░░ 0%]")
+    status_r = await send_msg(chat_id, "⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]")
     status_msg_id = status_r.get("result", {}).get("message_id")
 
     _last_pct = {"v": -1}
+    _dl_start = time.time()
     def _dl_progress_pdf(done, total):
         if not status_msg_id or not total:
             return
@@ -8515,7 +8516,12 @@ async def _handle_qbm_impl(msg: dict):
         _last_pct["v"] = pct
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
         label = "Image" if is_image_reply else "PDF"
-        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n[{bar} {pct}%]"))
+        elapsed = time.time() - _dl_start
+        eta_txt = ""
+        if pct > 0 and pct < 100:
+            eta_s = int(elapsed * (100 - pct) / pct)
+            eta_txt = f" | ETA {eta_s}s"
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n📄 {file_name}\n[{bar} {pct}%{eta_txt}]"))
 
     try:
         if is_image_reply:
