@@ -8080,6 +8080,26 @@ def _has_mixed_digit_script(text: str) -> bool:
     return False
 
 
+# Generic phrase patterns typical of an AI-generated explanation (rather than
+# text lifted verbatim from a page) -- used only as a cheap, zero-extra-API
+# heuristic to catch a mistagged explanation_source="page" claim, since we
+# have no independent OCR pass to truly verify the claim against.
+_AI_GENERATED_PATTERNS = (
+    "সঠিক উত্তর হলো", "সঠিক উত্তর হচ্ছে", "কারণ এটি", "এই কারণে",
+    "correct answer is", "the correct option is",
+)
+
+def _looks_ai_generated(expl: str) -> bool:
+    """Heuristic only -- flags for review, never auto-corrects, since a false
+    positive here must never silently alter a legitimate page explanation."""
+    if not expl:
+        return True  # empty explanation tagged "page" is definitely wrong
+    if len(expl) < 15:
+        return True  # too short to be a real page-lifted explanation
+    low = expl.lower()
+    return any(p.lower() in low for p in _AI_GENERATED_PATTERNS)
+
+
 def _qbm_parse_json(text: str) -> list:
     """Parse extractor JSON output -> list of {question, options[A-D], answer(A-D), explanation}"""
     if not text:
@@ -8108,8 +8128,15 @@ def _qbm_parse_json(text: str) -> list:
             q = _strip_q_numbering(q)
             opts_list = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
             expl = mc.get("explanation", "")
+            expl_source = mc.get("explanation_source", "")
             if _has_mixed_digit_script(q) or any(_has_mixed_digit_script(o) for o in opts_list) or _has_mixed_digit_script(expl):
                 logger.warning(f"[QBM digit-integrity] Mixed Bengali/English digits detected: {q[:60]}")
+            # Cheap, zero-extra-API-cost sanity check: a "page"-tagged explanation
+            # (claimed verbatim from source) that is suspiciously short or reads
+            # like a generic AI-generated line is almost certainly mistagged --
+            # flag it for review instead of trusting the self-report blindly.
+            if expl_source == "page" and _looks_ai_generated(expl):
+                logger.warning(f"[QBM explanation-tag] Suspect 'page' tag (looks generated): {q[:60]}")
             valid.append({
                 "question": q.strip(),
                 "options": opts_list,
@@ -8299,9 +8326,14 @@ VERIFY each MCQ against the actual page image, in this exact order of checks:
    Na⁺ etc.) are correctly rendered everywhere.
 7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
    is prepended to the question (self-contained). Fix/add if missing.
+8) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
+   either "page" (the explanation is copied verbatim from text physically present on the page,
+   e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
+   page, so the explanation was built from AI knowledge). Be honest and precise about this —
+   it is used for quality auditing, not shown to end users.
 
 Output ONLY the corrected full JSON array (same length as input, same schema, all fixes applied):
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
 
         txt = await _qbm_groq_call(img, prompt)
         verified = _qbm_parse_json(txt) if txt else []
