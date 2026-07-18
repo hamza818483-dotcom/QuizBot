@@ -3936,8 +3936,8 @@ async def handle_csv_command(msg: dict):
         if inline_channel:
             if loading_id:
                 await edit_msg(chat_id, loading_id,
-                    f"✅ {len(mcqs)} MCQ | 📢 সরাসরি {inline_channel}-এ পাঠানো হচ্ছে...")
-            enqueue_csv_to_channel(cache_id, inline_channel, chat_id, uid)
+                    f"📄 {csv_fname}\n✅ {len(mcqs)} MCQ | 📢 সরাসরি {inline_channel}-এ পাঠানো হচ্ছে...")
+            enqueue_csv_to_channel(cache_id, inline_channel, chat_id, uid, existing_loading_id=loading_id)
             return
 
         if loading_id:
@@ -4382,35 +4382,29 @@ def _get_csv_job_queue():
         _csv_job_queue = asyncio.Queue()
     return _csv_job_queue
 
-async def _run_csv_job_forever(cache_id: str, channel_id: str, chat_id: int, uid: int):
+async def _run_csv_job_forever(cache_id: str, channel_id: str, chat_id: int, uid: int, existing_loading_id: int = None):
     """Runs one CSV job to actual completion — no timeout, no abandonment.
     If it's still running past the slow-warning threshold, it's promoted to
     run in its own background task (see _csv_queue_worker) so it never blocks
     the rest of the queue, but it keeps running until it genuinely finishes
     or errors out."""
-    job_key = f"csv_{cache_id}"
     try:
-        await _process_csv_to_channel_impl(cache_id, channel_id, chat_id, uid)
+        await _process_csv_to_channel_impl(cache_id, channel_id, chat_id, uid, existing_loading_id=existing_loading_id)
     except Exception as e:
         logger.error(f"[CSV-Queue] Job failed for cache_id={cache_id}: {e}")
-        try:
-            await notify_owner(f"🚨 CSV job ({cache_id[:8]}) crashed: {e}", job_key=job_key)
-        except Exception:
-            pass
         try:
             await _safe_error_reply(chat_id, e)
         except Exception:
             pass
     finally:
         _csv_stuck_jobs.pop(cache_id, None)
-        clear_owner_job(job_key)
 
 async def _csv_queue_worker():
     q = _get_csv_job_queue()
     while True:
         job = await q.get()
-        cache_id, channel_id, chat_id, uid = job
-        job_task = asyncio.ensure_future(_run_csv_job_forever(cache_id, channel_id, chat_id, uid))
+        cache_id, channel_id, chat_id, uid, existing_loading_id = job
+        job_task = asyncio.ensure_future(_run_csv_job_forever(cache_id, channel_id, chat_id, uid, existing_loading_id))
         try:
             # Slow-warning threshold, NOT a kill switch — if a job is still
             # running past this, it gets promoted to its own independent
@@ -4423,11 +4417,6 @@ async def _csv_queue_worker():
             logger.warning(f"[CSV-Queue] Job cache_id={cache_id} running long (>10min) — "
                             f"promoting to background so queue can continue; job itself keeps running")
             _csv_stuck_jobs[cache_id] = job_task
-            try:
-                await notify_owner(f"⏱️ CSV job (cache_id={cache_id}) অনেক সময় নিচ্ছে — এটা background-এ চলতেই থাকবে, "
-                                    f"queue-র পরের job এগিয়ে যাচ্ছে", job_key=f"csv_{cache_id}")
-            except Exception:
-                pass
         except Exception:
             # job_task itself already logs/handles its own exception in
             # _run_csv_job_forever — nothing further to do here.
@@ -4435,11 +4424,16 @@ async def _csv_queue_worker():
         finally:
             q.task_done()
 
-def enqueue_csv_to_channel(cache_id: str, channel_id: str, chat_id: int, uid: int):
+def enqueue_csv_to_channel(cache_id: str, channel_id: str, chat_id: int, uid: int, existing_loading_id: int = None):
     """Replaces direct _spawn_task(process_csv_to_channel(...)) — jobs now
     queue up and run one after another (unless one runs long, in which case
     it's promoted to the background so it never blocks the others — see
-    _csv_queue_worker). No job is ever abandoned before it finishes."""
+    _csv_queue_worker). No job is ever abandoned before it finishes.
+    existing_loading_id: if the caller already has a status message on
+    screen (from the download/parse stage), pass its message_id so this job
+    keeps editing that same message end-to-end instead of sending a new one —
+    the whole /csv run (download → poll sending → PDF → end message → done)
+    then lives in exactly one continuously-updated message."""
     global _csv_worker_task
     q = _get_csv_job_queue()
     if _csv_worker_task is None or _csv_worker_task.done():
@@ -4450,13 +4444,16 @@ def enqueue_csv_to_channel(cache_id: str, channel_id: str, chat_id: int, uid: in
             logger.error(f"[CSV-Queue] Worker task had died (exc={exc}) — restarting")
         _csv_worker_task = _spawn_task(_csv_queue_worker())
     pos = q.qsize()
-    if pos > 0:
+    if pos > 0 and existing_loading_id:
+        _spawn_task(edit_msg(chat_id, existing_loading_id,
+            f"⏳ আগের {pos}টা কাজ শেষ হওয়ার পর এটা শুরু হবে (সিরিয়ালি চলছে)।"))
+    elif pos > 0:
         _spawn_task(send_msg(chat_id,
             f"⏳ আগের {pos}টা কাজ শেষ হওয়ার পর এটা শুরু হবে (সিরিয়ালি চলছে)।"))
-    q.put_nowait((cache_id, channel_id, chat_id, uid))
+    q.put_nowait((cache_id, channel_id, chat_id, uid, existing_loading_id))
 
 async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
-                                  chat_id: int, uid: int):
+                                  chat_id: int, uid: int, existing_loading_id: int = None):
     # cache_id দিয়ে session read — uid দিয়ে না, কারণ একই user দ্রুত ২টা /csv
     # চালালে uid-based key overwrite হয়ে যেতে পারতো
     row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{cache_id}").execute())
@@ -4494,11 +4491,12 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
     mcqs = cache["mcq_data"]
     total = len(mcqs)
 
-    _owner_msg_box = {"id": None}
-    await notify_owner_edit(f"🟢 CSV job শুরু — ফাইল: {csv_fname} | টপিক: {topic} | {total} MCQ | চ্যানেল: {channel_id}", _owner_msg_box)
-
-    loading = await send_msg(chat_id, f"📄 {csv_fname}\n📤 {total} টি poll পাঠানো হচ্ছে...\n[{'░'*10} 0%]")
-    loading_id = loading.get("result", {}).get("message_id")
+    if existing_loading_id:
+        loading_id = existing_loading_id
+        await edit_msg(chat_id, loading_id, f"📄 {csv_fname}\n📤 {total} টি poll পাঠানো হচ্ছে...\n[{'░'*10} 0%]")
+    else:
+        loading = await send_msg(chat_id, f"📄 {csv_fname}\n📤 {total} টি poll পাঠানো হচ্ছে...\n[{'░'*10} 0%]")
+        loading_id = loading.get("result", {}).get("message_id")
 
     if mode == "csvs":
         # Serial/batch mode
@@ -4537,7 +4535,6 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 channel_id, batch, batch_topic, chat_id, pre_msg_id,
                 thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname
             )
-            await notify_owner_edit(f"✅ Batch {b_idx}/{total_batches} — {sent} poll পাঠানো শেষ ({batch_topic})", _owner_msg_box)
 
             # Button-msg (channel + group উভয়ে): pre-msg টেক্সট + 4 button, pre-msg কে reply
             btn_kb = await _csv_pre_buttons(batch_cache_id)
@@ -4568,7 +4565,9 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     "channel_id": channel_id,
                     "end_msg_id": end_r["result"]["message_id"]
                 })
-                await notify_owner_edit(f"✅ Batch {b_idx}/{total_batches} — end message + button পাঠানো হয়েছে ({batch_topic})", _owner_msg_box)
+                if loading_id:
+                    await edit_msg(chat_id, loading_id,
+                        f"📄 {csv_fname}\n✅ Batch {b_idx}/{total_batches} — end message পাঠানো হয়েছে")
             else:
                 await send_msg(chat_id,
                     f"⚠️ '{batch_topic}' এর end message + button পাঠানো ব্যর্থ হয়েছে: {end_r.get('description', 'unknown error')}")
@@ -4597,7 +4596,9 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     doc_msg_id = doc_r.get("result", {}).get("message_id")
                     if doc_msg_id:
                         await try_pin_message(channel_id, doc_msg_id)
-                await notify_owner_edit(f"✅ Combined PDF পাঠানো হয়েছে — টপিক: {topic}", _owner_msg_box)
+                if loading_id:
+                    await edit_msg(chat_id, loading_id,
+                        f"📄 {csv_fname}\n✅ Combined PDF পাঠানো হয়েছে — টপিক: {topic}")
 
         # Master Summary (শুধু multiple batch হলে) — first pre-msg কে reply
         if total_batches > 1:
@@ -4618,9 +4619,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
-                f"✅ সব batch শেষ! {total} MCQ → {total_batches} batch")
-
-        await notify_owner_edit(f"🏁 CSV batch job সম্পূর্ণ — টপিক: {topic} | {total} MCQ | {total_batches} batch, সব poll+PDF+end message পাঠানো হয়েছে।", _owner_msg_box)
+                f"📄 {csv_fname}\n🏁 CSV batch job সম্পূর্ণ! {total} MCQ → {total_batches} batch, সব poll+PDF+end message পাঠানো হয়েছে।")
 
     else:
         # Normal /csv mode — single batch
@@ -4639,7 +4638,9 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             channel_id, mcqs, topic, chat_id, pre_msg_id,
             thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname
         )
-        await notify_owner_edit(f"✅ {sent}/{total} poll পাঠানো শেষ — টপিক: {topic}\n⏳ PDF বানানো শুরু হচ্ছে...", _owner_msg_box)
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"📄 {csv_fname}\n✅ {sent}/{total} poll পাঠানো শেষ!\n⏳ PDF বানানো হচ্ছে...")
 
         # Style1 PDF (সব poll মিলিয়ে) — pre-msg কে reply, auto-pin, polls শেষে
         # end-msg-এর আগে পাঠানো হয়। Guaranteed: 3 বার retry না হওয়া পর্যন্ত
@@ -4657,7 +4658,9 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 doc_msg_id = doc_r.get("result", {}).get("message_id")
                 if doc_msg_id:
                     await try_pin_message(channel_id, doc_msg_id)
-            await notify_owner_edit(f"✅ PDF পাঠানো হয়েছে — টপিক: {topic}\n⏳ End message + button পাঠানো হচ্ছে...", _owner_msg_box)
+            if loading_id:
+                await edit_msg(chat_id, loading_id,
+                    f"📄 {csv_fname}\n✅ PDF পাঠানো হয়েছে!\n⏳ End message পাঠানো হচ্ছে...")
 
         # End-msg (topic + mcq count + first poll link + 4 button) — PDF-এর পরে,
         # সবার শেষে। Channel-এ score-ask সহ, group-এ score-ask ছাড়া।
@@ -4689,9 +4692,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
-                f"📄 {csv_fname}\n✅ {sent}/{total} polls channel-এ পাঠানো হয়েছে!")
-
-        await notify_owner_edit(f"🏁 CSV job সম্পূর্ণ — ফাইল: {csv_fname} | টপিক: {topic} | {sent}/{total} poll + PDF + end message পাঠানো হয়েছে।", _owner_msg_box)
+                f"📄 {csv_fname}\n🏁 সম্পূর্ণ! {sent}/{total} polls channel-এ পাঠানো হয়েছে!")
 
 async def process_csv_to_channel(cache_id: str, channel_id: str,
                                   chat_id: int, uid: int):
