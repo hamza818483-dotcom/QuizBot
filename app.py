@@ -4458,6 +4458,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 channel_id, batch, batch_topic, chat_id, pre_msg_id,
                 thread_id=thread_id, loading_id=loading_id
             )
+            await notify_owner(f"✅ Batch {b_idx}/{total_batches} — {sent} poll পাঠানো শেষ ({batch_topic})")
 
             # Button-msg (channel + group উভয়ে): pre-msg টেক্সট + 4 button, pre-msg কে reply
             btn_kb = await _csv_pre_buttons(batch_cache_id)
@@ -4488,6 +4489,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     "channel_id": channel_id,
                     "end_msg_id": end_r["result"]["message_id"]
                 })
+                await notify_owner(f"✅ Batch {b_idx}/{total_batches} — end message + button পাঠানো হয়েছে ({batch_topic})")
             else:
                 await send_msg(chat_id,
                     f"⚠️ '{batch_topic}' এর end message + button পাঠানো ব্যর্থ হয়েছে: {end_r.get('description', 'unknown error')}")
@@ -4519,6 +4521,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                         doc_msg_id = doc_r.get("result", {}).get("message_id")
                         if doc_msg_id:
                             await try_pin_message(channel_id, doc_msg_id)
+                    await notify_owner(f"✅ Combined PDF পাঠানো হয়েছে — টপিক: {topic}")
                 else:
                     logger.error(f"[CSV-PDF] Style1 generation empty for topic: {topic}")
                     await send_msg(chat_id,
@@ -4547,6 +4550,8 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
         if loading_id:
             await edit_msg(chat_id, loading_id,
                 f"✅ সব batch শেষ! {total} MCQ → {total_batches} batch")
+
+        await notify_owner(f"🏁 CSV batch job সম্পূর্ণ — টপিক: {topic} | {total} MCQ | {total_batches} batch, সব poll+PDF+end message পাঠানো হয়েছে।")
 
     else:
         # Normal /csv mode — single batch
