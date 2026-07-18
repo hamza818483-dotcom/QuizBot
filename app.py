@@ -331,7 +331,7 @@ async def _process_mhtml_auto(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 # D1 Quiz System (fully independent module — see quiz.py)
-from menu_module import cmd_menu, handle_menu_callback, handle_menu_pending_text, MENU_ADD_PENDING
+from menu_module import cmd_menu, handle_menu_callback, handle_menu_pending_text, MENU_ADD_PENDING, MENU_COUNT_PENDING
 from quiz import (
     QUIZ_SESSIONS, QUIZ_TIMERS,
     handle_quiz_create, handle_qlist, handle_qdel,
@@ -11104,6 +11104,14 @@ async def handle_message(msg: dict):
     _spawn_task(db_track_user(uid, uname))
     is_auth = await db_is_owner_or_admin(uid)
 
+    # /menu "Add more" flow check (awaiting new item name text, or a CSV file) —
+    # must run before generic image/document collection mode grabs the CSV.
+    if (uid in MENU_ADD_PENDING or uid in MENU_COUNT_PENDING):
+        if msg.get("document") or (msg.get("text") and not text.startswith("/")):
+            consumed = await handle_menu_pending_text(msg)
+            if consumed:
+                return
+
     # Image collection mode check
     if msg.get("photo") or msg.get("document"):
         collected = await handle_incoming_image_for_collection(msg)
@@ -11130,12 +11138,6 @@ async def handle_message(msg: dict):
     # v1.3: /rapid flow check (awaiting local time text after channel select)
     if uid in RAPID_PENDING and msg.get("text") and not text.startswith("/"):
         consumed = await handle_rapid_time_text(msg)
-        if consumed:
-            return
-
-    # /menu "Add more" flow check (awaiting new item name text)
-    if uid in MENU_ADD_PENDING and msg.get("text") and not text.startswith("/"):
-        consumed = await handle_menu_pending_text(msg)
         if consumed:
             return
 
