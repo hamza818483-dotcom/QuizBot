@@ -4389,10 +4389,12 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             end_send_data["message_thread_id"] = thread_id
         end_r = await tg_post("sendMessage", end_send_data)
         if end_r.get("ok"):
+            end_msg_id_ = end_r["result"]["message_id"]
             await db_update_cache(cache_id, {
                 "channel_id": channel_id,
-                "end_msg_id": end_r["result"]["message_id"]
+                "end_msg_id": end_msg_id_
             })
+            await try_pin_message(channel_id, end_msg_id_)
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
