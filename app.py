@@ -4338,7 +4338,7 @@ async def _send_csv_polls_to_channel(
 # process করে।
 # ============================================================
 _csv_job_queue = None
-_csv_worker_started = False
+_csv_worker_task = None
 
 def _get_csv_job_queue():
     global _csv_job_queue
@@ -4352,7 +4352,20 @@ async def _csv_queue_worker():
         job = await q.get()
         cache_id, channel_id, chat_id, uid = job
         try:
-            await _process_csv_to_channel_impl(cache_id, channel_id, chat_id, uid)
+            # Hard timeout — একটা job কোনো কারণে hang করলেও (network stall,
+            # Telegram/Supabase আটকে যাওয়া) queue permanently ব্লক হয়ে থাকবে
+            # না; timeout হলে worker পরের job-এ এগিয়ে যাবে।
+            await asyncio.wait_for(
+                _process_csv_to_channel_impl(cache_id, channel_id, chat_id, uid),
+                timeout=600  # 10 minutes — বড় CSV batch job-এর জন্যও যথেষ্ট
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"[CSV-Queue] Job TIMED OUT for cache_id={cache_id} (>10min) — skipping to next job")
+            try:
+                await notify_owner(f"⏱️ CSV job টাইমআউট (cache_id={cache_id}) — পরের job এ এগিয়ে যাচ্ছে")
+                await send_msg(chat_id, "⏱️ কাজটা অনেক সময় নিচ্ছিল, বাতিল করা হলো। আবার চেষ্টা করুন।")
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"[CSV-Queue] Job failed for cache_id={cache_id}: {e}")
             try:
@@ -4365,11 +4378,15 @@ async def _csv_queue_worker():
 def enqueue_csv_to_channel(cache_id: str, channel_id: str, chat_id: int, uid: int):
     """Replaces direct _spawn_task(process_csv_to_channel(...)) — jobs now
     queue up and run strictly one after another, never in parallel."""
-    global _csv_worker_started
+    global _csv_worker_task
     q = _get_csv_job_queue()
-    if not _csv_worker_started:
-        _csv_worker_started = True
-        _spawn_task(_csv_queue_worker())
+    if _csv_worker_task is None or _csv_worker_task.done():
+        # Worker never started, OR it died (crashed/cancelled) leaving queued
+        # jobs stuck forever — restart it so the queue keeps moving.
+        if _csv_worker_task is not None and _csv_worker_task.done():
+            exc = _csv_worker_task.exception() if not _csv_worker_task.cancelled() else None
+            logger.error(f"[CSV-Queue] Worker task had died (exc={exc}) — restarting")
+        _csv_worker_task = _spawn_task(_csv_queue_worker())
     pos = q.qsize()
     if pos > 0:
         _spawn_task(send_msg(chat_id,
