@@ -456,3 +456,185 @@ async def handle_poll_extract(msg: dict):
             })
     except Exception as e:
         logger.warning(f"[poll_extract] Auto-pin failed: {e}")
+
+
+# ── Batch-grouped scan (for /ok summary) ─────────────────────
+async def scan_poll_batches_telethon(channel, start_id: int, end_id: int,
+                                      progress_cb=None, topic_id=None) -> list:
+    """
+    Range এর সব message স্ক্যান করে quiz poll গুলোকে 'batch' এ ভাগ করে।
+    Consecutive quiz poll messages একই batch; মাঝে non-poll message (pre-msg/
+    end-msg/gap) পড়লে নতুন batch শুরু হয়।
+    Returns: [(first_poll_msg_id, poll_count_in_batch), ...]
+    """
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    batches = []
+    current_first_id = None
+    current_count = 0
+
+    client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
+    await client.connect()
+    try:
+        try:
+            entity = await client.get_entity(channel)
+        except (ValueError, TypeError):
+            await client.get_dialogs(limit=200)
+            entity = await client.get_entity(channel)
+
+        checked = 0
+        async for message in client.iter_messages(
+            entity,
+            min_id=start_id - 1,
+            max_id=end_id + 1,
+            limit=end_id - start_id + 1,
+            reverse=True,
+        ):
+            checked += 1
+
+            if topic_id and message.reply_to:
+                msg_topic = getattr(message.reply_to, "reply_to_top_id", None) or getattr(message.reply_to, "reply_to_msg_id", None)
+                if msg_topic != topic_id:
+                    continue
+            elif topic_id and not message.reply_to:
+                continue
+
+            is_quiz_poll = bool(message.poll) and getattr(message.poll.poll, "quiz", False)
+
+            if is_quiz_poll:
+                if current_first_id is None:
+                    current_first_id = message.id
+                    current_count = 1
+                else:
+                    current_count += 1
+            else:
+                if current_first_id is not None:
+                    batches.append((current_first_id, current_count))
+                    current_first_id = None
+                    current_count = 0
+
+            if progress_cb and checked % 100 == 0:
+                await progress_cb(checked, len(batches))
+
+        if current_first_id is not None:
+            batches.append((current_first_id, current_count))
+    finally:
+        await client.disconnect()
+
+    return batches
+
+
+def build_batch_link(channel, msg_id: int, topic_id=None) -> str:
+    """channel + msg_id → t.me link (public username বা private /c/ format)"""
+    if isinstance(channel, str):
+        base = f"https://t.me/{channel}"
+    else:
+        ch_str = str(channel).replace("-100", "")
+        base = f"https://t.me/c/{ch_str}"
+    if topic_id:
+        return f"{base}/{topic_id}/{msg_id}"
+    return f"{base}/{msg_id}"
+
+
+def build_ok_summary(total_polls: int, batches_with_links: list) -> str:
+    """
+    batches_with_links = [(part_num, link, count), ...]
+    csv_get_master_summary এর same style এ summary বানায়।
+    """
+    text = (
+        f"🌟মোট প্রশ্ন: {total_polls}\n"
+        f"📦 মোট ব্যাচ: {len(batches_with_links)}\n\n"
+    )
+    for part_n, link, count in batches_with_links:
+        text += f"📍Part-{part_n:02d}: ({count}টি প্রশ্ন)\n{link}\n\n"
+    text += (
+        "📌 *এটলাসের Exam Batch* এ অসংখ্য প্রশ্ন প্রাক্টিসের সুযোগ আছে।\n"
+        "💬 *Whatsapp:* wa.me/8801999681290\n"
+        "🌟 *Website:* Atlascourses.com"
+    )
+    return text
+
+
+# ── /ok handler ───────────────────────────────────────────────
+async def handle_ok_command(msg: dict):
+    """
+    /ok
+    https://t.me/c/.../101
+    https://t.me/c/.../250
+
+    Range এর মধ্যে প্রতিটা batch এর first poll link নিয়ে
+    master-summary style এ একটা summary message পাঠায়।
+    """
+    from core import send_msg, edit_msg
+
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+
+    body = re.sub(r"^/ok\s*", "", text, flags=re.IGNORECASE).strip()
+    lines = [l.strip() for l in body.splitlines() if l.strip()]
+    links = [l for l in lines if "t.me/" in l]
+
+    if len(links) < 2:
+        await send_msg(chat_id,
+            "❌ দুটো link দাও!\n\n"
+            "📌 Format:\n"
+            "<code>/ok\n"
+            "https://t.me/c/.../101\n"
+            "https://t.me/c/.../250</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    ch1, start_id, topic1 = parse_tg_link(links[0])
+    ch2, end_id, topic2 = parse_tg_link(links[1])
+
+    if not ch1 or not start_id or not end_id:
+        await send_msg(chat_id, "❌ Link parse হয়নি। সঠিক Telegram link দাও।")
+        return
+    if ch1 != ch2:
+        await send_msg(chat_id, "❌ দুটো link একই channel/group এর হতে হবে!")
+        return
+
+    topic_id = topic1 or topic2
+    if start_id > end_id:
+        start_id, end_id = end_id, start_id
+
+    total = end_id - start_id + 1
+    if total > 3000:
+        await send_msg(chat_id, f"❌ Range বড় ({total})। সর্বোচ্চ ৩০০০ রাখো।")
+        return
+    if not SESSION_STR:
+        await send_msg(chat_id, "❌ SESSION_STRING set নেই। HF Space secrets এ add করো।")
+        return
+
+    r = await send_msg(chat_id, f"⏳ Scan করছি: {start_id} → {end_id} ({total} messages)...")
+    status_id = r.get("result", {}).get("message_id")
+
+    async def progress(checked, found):
+        if status_id:
+            await edit_msg(chat_id, status_id, f"⏳ চেক: {checked}/{total} — Batch পেয়েছি: {found}")
+
+    try:
+        batches = await scan_poll_batches_telethon(ch1, start_id, end_id, progress_cb=progress, topic_id=topic_id)
+    except Exception as e:
+        logger.error(f"[ok] Telethon error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+        return
+
+    if not batches:
+        await send_msg(chat_id, f"😕 এই range এ কোনো quiz poll batch পাওয়া যায়নি।\n({total} messages চেক হয়েছে)")
+        return
+
+    total_polls = sum(c for _, c in batches)
+    batches_with_links = [
+        (i + 1, build_batch_link(ch1, first_id, topic_id), count)
+        for i, (first_id, count) in enumerate(batches)
+    ]
+
+    summary = build_ok_summary(total_polls, batches_with_links)
+
+    if status_id:
+        await edit_msg(chat_id, status_id, "✅ সম্পন্ন!")
+    await send_msg(chat_id, summary, parse_mode="Markdown")
+
