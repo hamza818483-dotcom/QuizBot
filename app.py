@@ -4281,7 +4281,7 @@ async def _handle_cut_command_inner(msg: dict):
     status_msg_id = status_r.get("result", {}).get("message_id")
 
     try:
-        pdf_bytes = await download_tg_file(file_id)
+        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n⏳ Cut হচ্ছে...")
     except Exception as e:
