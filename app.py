@@ -12773,7 +12773,9 @@ async def _webhook_healer_task() -> None:
     """Every 10 min, checks Telegram webhook is set and non-empty. If it's
     empty (e.g. setWebhook failed at startup due to a transient DNS resolve
     error on the CF domain), retries setting it — using tg_post's built-in
-    primary/secondary domain fallback."""
+    primary/secondary domain fallback. If the CF-proxy webhook URL itself
+    keeps failing, falls back to setting the webhook directly against the
+    HF Space URL so the bot doesn't stay silently dead."""
     await asyncio.sleep(120)
     logger.info("[App] Webhook healer task started")
     while True:
@@ -12792,6 +12794,23 @@ async def _webhook_healer_task() -> None:
                         logger.info(f"[App] Webhook healer: re-set webhook → {result}")
                     else:
                         logger.warning(f"[App] Webhook healer: re-set attempt failed: {result}")
+                        # CF proxy target failed (DNS/routing) — fall back to
+                        # setting the webhook directly against HF Space so
+                        # the bot recovers instead of staying silently dead.
+                        if HF_SPACE_URL:
+                            hf_webhook = HF_SPACE_URL.rstrip("/") + "/webhook"
+                            payload["url"] = hf_webhook
+                            try:
+                                import httpx as _httpx_local
+                                async with _httpx_local.AsyncClient(timeout=10) as _c:
+                                    r = await _c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook", json=payload)
+                                    r2 = r.json()
+                                if r2.get("ok"):
+                                    logger.info(f"[App] Webhook healer: HF direct fallback succeeded → {hf_webhook}")
+                                else:
+                                    logger.warning(f"[App] Webhook healer: HF direct fallback also failed: {r2}")
+                            except Exception as fe:
+                                logger.warning(f"[App] Webhook healer: HF direct fallback error: {fe}")
         except Exception as e:
             logger.warning(f"[App] Webhook healer error: {e}")
         await asyncio.sleep(600)
