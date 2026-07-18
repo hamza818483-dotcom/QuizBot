@@ -12813,7 +12813,7 @@ async def _webhook_healer_task() -> None:
                                 logger.warning(f"[App] Webhook healer: HF direct fallback error: {fe}")
         except Exception as e:
             logger.warning(f"[App] Webhook healer error: {e}")
-        await asyncio.sleep(600)
+        await asyncio.sleep(120)
 
 
 async def _watchdog_task() -> None:
