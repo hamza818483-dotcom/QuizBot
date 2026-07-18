@@ -2932,15 +2932,16 @@ async def handle_gallery_command(msg: dict):
         "pdf_bytes": pdf_bytes, "chat_id": chat_id, "ts": time.time()
     }
 
-    page_note = f" ({total_pages} page)" if total_pages else ""
     kb = {"inline_keyboard": [
         [{"text": "⬇️ Download করো (Gallery-তে save করার জন্য)", "callback_data": f"gdl_{uid}"}]
     ]}
+    page_note = f" ({total_pages} page)" if total_pages else ""
     if loading_id:
         await tg_post("editMessageText", {
             "chat_id": chat_id, "message_id": loading_id,
-            "text": f"✅ PDF রেডি{page_note}!\n\nনিচের বাটনে ক্লিক করো — প্রতিটা page photo হিসেবে album আকারে আসবে। "
-                    f"প্রতি album-এর উপরে থাকা ⬇️ icon দিয়ে এক ট্যাপে সব ছবি Gallery-তে save করতে পারবে।",
+            "text": f"✅ PDF রেডি{page_note}!\n\nনিচের বাটনে ক্লিক করো — প্রতিটা page আলাদা photo হিসেবে, "
+                    f"সিরিয়াল ক্রমে (1, 2, 3...) একে একে আসবে। প্রতিটা ছবি long-press করে save করলে "
+                    f"ক্রম ঠিক থাকবে।",
             "reply_markup": kb
         })
 
@@ -2982,23 +2983,19 @@ async def handle_gallery_download_callback(query: dict):
 
     total = len(pages)
     sent = 0
-    for batch_start in range(0, total, _GALLERY_ALBUM_SIZE):
-        batch = pages[batch_start:batch_start + _GALLERY_ALBUM_SIZE]
-        photos = []
-        for i, img in enumerate(batch):
-            page_num = batch_start + i + 1
-            buf = BytesIO()
-            # quality=95: high quality, still JPEG-compressed enough to stay
-            # well under Telegram's per-photo size limit for large A4 pages.
-            img.save(buf, format="JPEG", quality=95)
-            photos.append((f"page_{page_num:03d}.jpg", buf.getvalue()))
+    for i, img in enumerate(pages):
+        page_num = i + 1
+        buf = BytesIO()
+        # quality=95: high quality, still JPEG-compressed enough to stay
+        # well under Telegram's per-photo size limit for large A4 pages.
+        img.save(buf, format="JPEG", quality=95)
 
-        result = await send_media_group(chat_id, photos)
+        result = await send_photo(chat_id, buf.getvalue(), caption=f"📄 Page {page_num}/{total}")
         if result.get("ok"):
-            sent += len(batch)
+            sent += 1
         else:
-            logger.error(f"[Gallery] sendMediaGroup batch failed: {result.get('description') or result.get('error')}")
-        if status_id:
+            logger.error(f"[Gallery] sendPhoto page {page_num} failed: {result.get('description') or result.get('error')}")
+        if status_id and (page_num % 3 == 0 or page_num == total):
             pct = int(sent * 100 / total)
             try:
                 await edit_msg(chat_id, status_id, f"⏳ পাঠানো হচ্ছে... {sent}/{total} page [{pct}%]")
@@ -3009,14 +3006,14 @@ async def handle_gallery_download_callback(query: dict):
 
     if status_id:
         if sent == total:
-            n_albums = (total + _GALLERY_ALBUM_SIZE - 1) // _GALLERY_ALBUM_SIZE
             await edit_msg(chat_id, status_id,
-                f"✅ {total} page পাঠানো শেষ!\n\n"
-                f"প্রতিটা album-এর উপরে ⬇️ icon-এ ট্যাপ করে সব ছবি একসাথে Gallery-তে save করো "
-                f"({n_albums} টা album আছে, প্রতিটাতে আলাদা করে করতে হবে)।"
+                f"✅ {total} page serial ক্রমে পাঠানো শেষ!\n\n"
+                f"প্রতিটা ছবি long-press করে 'Save to Gallery' করলে ক্রম ঠিক থাকবে। "
+                f"(একসাথে সব select করে bulk-save করলে gallery app কিভাবে sort করে তার উপর "
+                f"ক্রম নির্ভর করবে, guaranteed serial না।)"
             )
         else:
-            await edit_msg(chat_id, status_id, f"⚠️ {sent}/{total} page পাঠানো গেছে, কিছু batch fail হয়েছে।")
+            await edit_msg(chat_id, status_id, f"⚠️ {sent}/{total} page পাঠানো গেছে, কিছু page fail হয়েছে।")
 
 
 # ============================================================
