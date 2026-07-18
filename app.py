@@ -8595,6 +8595,31 @@ async def _handle_qbm_impl(msg: dict):
             page_breakdown = "\n".join(
                 f"📌 Page {fmt_page(p)}: {len(mcqs)} MCQ" for p, _, mcqs in extracted_pages
             )
+
+            # Extraction শেষ হওয়ার সাথে সাথেই CSV auto-send — channel select
+            # এর জন্য অপেক্ষা করতে হবে না, সব MCQ সাথে সাথেই CSV আকারে হাতে পেয়ে যাবে
+            if total_mcq_found:
+                import io as _io_qbm, csv as _csv_mod_qbm
+                _buf_qbm = _io_qbm.StringIO()
+                _w_qbm = _csv_mod_qbm.writer(_buf_qbm)
+                _w_qbm.writerow(["questions", "option1", "option2", "option3", "option4",
+                                  "answer", "explanation", "type", "section"])
+                _ans_map_qbm = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                for _, _, mcqs in extracted_pages:
+                    for m in mcqs:
+                        opts = m.get("options", ["", "", "", ""])
+                        _w_qbm.writerow([
+                            m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                            opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                            opts[3] if len(opts) > 3 else "",
+                            _ans_map_qbm.get(m.get("answer", "A"), "1"),
+                            _strip_img_tag(m.get("explanation", "")), "1", "1"
+                        ])
+                await send_document(chat_id, _buf_qbm.getvalue().encode("utf-8"),
+                    f"{topic}_QBM.csv",
+                    caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted)",
+                    mime_type="text/csv")
+
             kb = {"inline_keyboard": []}
             for ch in channels:
                 ch_id = ch.get("channel_id", "")
@@ -8736,9 +8761,13 @@ async def qbm_extract_all_pages(
             _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
 
     async def _extract_one(idx, page_num, img):
+        nonlocal total_mcq
         if is_cancelled(chat_id):
             return idx, page_num, img, []
         page_status[idx]["current"] = True
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
         mcqs = []
         try:
             mcqs = await _qbm_extract_from_image(img)
@@ -8764,12 +8793,22 @@ async def qbm_extract_all_pages(
                         unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
         except Exception as e:
             logger.error(f"[QBM Extract] Page {page_num} error: {e}")
+
+        page_status[idx]["current"] = False
+        page_status[idx]["done"] = True
+        page_status[idx]["mcq"] = len(mcqs)
+        total_mcq += len(mcqs)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
         return idx, page_num, img, mcqs
 
     # Windowed concurrency: extract several pages in parallel instead of one at
     # a time -- the RAM-aware semaphore (_QBM_EXTRACT_HARD_CAP) still throttles
     # actual concurrent Gemini calls, this just stops needlessly serializing
-    # pages that don't depend on each other's extraction result.
+    # pages that don't depend on each other's extraction result. Each page now
+    # updates the live dashboard the moment IT finishes (not the whole window),
+    # so progress is visible page-by-page instead of jumping in blocks of 5.
     WINDOW = 5
     for start in range(0, len(pages), WINDOW):
         if is_cancelled(chat_id):
@@ -8782,13 +8821,6 @@ async def qbm_extract_all_pages(
         chunk_results = await asyncio.gather(*tasks)
         for idx, page_num, img, mcqs in chunk_results:
             results[idx] = (page_num, img, mcqs)
-            total_mcq += len(mcqs)
-            page_status[idx]["current"] = False
-            page_status[idx]["done"] = True
-            page_status[idx]["mcq"] = len(mcqs)
-        if status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
 
     clear_active_job(chat_id)
     return [r for r in results if r is not None]
