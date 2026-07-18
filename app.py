@@ -6818,7 +6818,7 @@ async def handle_pdf(msg: dict):
 
             total_mcq_found = sum(len(mcqs) for _, _, mcqs in generated_pages)
             page_breakdown = "\n".join(
-                f"📌 Page {fmt_page(p)}: {len(mcqs)} MCQ" for p, _, mcqs in generated_pages
+                f"✅ Page {fmt_page(p)}: {len(mcqs)} MCQ ✓" for p, _, mcqs in generated_pages
             )
             kb = {"inline_keyboard": []}
             for ch in channels:
@@ -6827,8 +6827,12 @@ async def handle_pdf(msg: dict):
                 kb["inline_keyboard"].append([{"text": f"📢 {ch_name}", "callback_data": f"pdfch_{ch_id}_{uid}"}])
             kb["inline_keyboard"].append([{"text": "📄 CSV File Only", "callback_data": f"pdfch_csv_{uid}"}])
             await send_msg(chat_id,
-                f"✅ Generation Complete! {total_mcq_found} MCQ পাওয়া গেছে ({len(generated_pages)} page)\n\n"
-                f"{page_breakdown}\n\n"
+                f"✅ <b>Generation Complete!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📝 Total MCQ: {total_mcq_found}  |  📋 Pages: {len(generated_pages)}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{page_breakdown}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🎯 Topic: {topic}\n\nChannel select করো:",
                 reply_markup=kb)
             return
