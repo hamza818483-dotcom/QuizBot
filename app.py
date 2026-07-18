@@ -3856,7 +3856,16 @@ async def handle_csv_command(msg: dict):
     # slowing down the actual download/parse work underneath it.
     _last_pct = {"v": -1}
     def _dl_progress(done, total):
-        if not loading_id or not total:
+        if not loading_id:
+            return
+        if not total:
+            # getFile lookup phase — file size not known yet. Without this,
+            # the bar sits frozen at "0%" the whole time the bot is waiting
+            # on Telegram's getFile response, looking stuck even though it's
+            # actively working.
+            if _last_pct["v"] != -2:
+                _last_pct["v"] = -2
+                _spawn_task(edit_msg(chat_id, loading_id, "⏳ ফাইল খোঁজা হচ্ছে...\n[░░░░░░░░░░ 0%]"))
             return
         pct = int(done * 100 / total)
         if pct - _last_pct["v"] < 10 and pct != 100:
