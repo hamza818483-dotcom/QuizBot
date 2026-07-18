@@ -435,6 +435,22 @@ async def tg_post(method: str, data: dict) -> dict:
             logger.warning(f"[TG] {method} proxy error (attempt {_proxy_attempt+1}/2): {type(e).__name__}: {e}")
             if _proxy_attempt == 0:
                 continue  # retry once — likely a stale reused connection
+    # ── Fallback: Secondary CF Worker domain (primary just failed twice —
+    #    could be that specific edge/domain having issues while the 2nd
+    #    domain, already proven reachable for setWebhook, still works).
+    #    Only meaningful in cf-proxy mode; skip if no 2nd domain configured. ──
+    if _tg_mode == "cf-proxy" and CF_WORKER_URL_2:
+        try:
+            alt_api = f"{CF_WORKER_URL_2}/tg-proxy"
+            client = await _get_shared_http_client()
+            r = await client.post(f"{alt_api}/{method}", json=data, timeout=12)
+            result = r.json()
+            if result.get("ok"):
+                logger.info(f"[TG] {method} recovered via secondary CF Worker ({CF_WORKER_URL_2})")
+                return result
+            logger.warning(f"[TG] {method} secondary CF proxy also failed: {result.get('description')}")
+        except Exception as e:
+            logger.warning(f"[TG] {method} secondary CF proxy error: {type(e).__name__}: {e}")
     # ── Fallback: Direct Telegram API (skipped when running where TG is
     #    network-blocked, e.g. HF Space — trying it there just wastes time
     #    on a guaranteed failure before eventually giving up) ──
