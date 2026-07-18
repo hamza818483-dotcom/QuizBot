@@ -702,6 +702,23 @@ async def notify_owner(text: str):
     if OWNER_ID:
         await send_msg(OWNER_ID, f"🔔 <b>ATLAS BOT Alert</b>\n\n{text}")
 
+async def notify_owner_edit(text: str, msg_id_box: dict):
+    """Single-message progress notifier — edits the same owner message
+    throughout a job instead of sending a new message per stage, so the
+    owner's chat doesn't get flooded with one line per step."""
+    if not OWNER_ID:
+        return
+    full = f"🔔 <b>ATLAS BOT Alert</b>\n\n{text}"
+    mid = msg_id_box.get("id")
+    if mid:
+        r = await edit_msg(OWNER_ID, mid, full)
+        if r and r.get("ok"):
+            return
+    r = await send_msg(OWNER_ID, full)
+    new_id = r.get("result", {}).get("message_id")
+    if new_id:
+        msg_id_box["id"] = new_id
+
 # ============================================================
 # PYROGRAM CLIENT (large file download, >20MB, Bot API getFile bypass)
 # ============================================================
