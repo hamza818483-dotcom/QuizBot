@@ -808,7 +808,6 @@ function doSubmit(){
     <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
     <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (${_mistakeCnt})</button>
     <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>
-    <button class="result-btn"          onclick="solvePDF()">📄 Solve PDF</button>
     <button class="result-btn"          onclick="printSolveSheet()">🖨️ Print/Save PDF</button>`;
   if(hasImageSource)
     html+=`<button class="result-btn" id="newExamBtnResult" onclick="startNewExamV2()">🆕 New Exam</button>`;
@@ -1014,30 +1013,6 @@ function goToNewExam(){
 }
 
 
-// ── SOLVE PDF ──
-async function solvePDF(){
-  showToast('⏳ PDF তৈরি হচ্ছে...');
-  const answers={};
-  Object.keys(lastAnswers).forEach(k=>{ answers[String(k)]=lastAnswers[k]; });
-  try{
-    const r=await fetch(`${HF_URL}/api/solve-pdf`,{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({cache_id:CACHE_ID,answers})
-    });
-    const d=await r.json();
-    if(d.ok&&d.pdf_b64){
-      const bytes=Uint8Array.from(atob(d.pdf_b64),c=>c.charCodeAt(0));
-      const blob=new Blob([bytes],{type:'application/pdf'});
-      const url=URL.createObjectURL(blob);
-      const a=document.createElement('a');
-      a.href=url; a.download=`ATLAS_Solve_${examData.topic}_P${examData.page}.pdf`;
-      a.click(); URL.revokeObjectURL(url);
-      showToast('✅ PDF Download শুরু হয়েছে!');
-    }else{
-      showToast('❌ '+(d.error||'PDF error'));
-    }
-  }catch(e){showToast('❌ Server ব্যস্ত/বন্ধ আছে, একটু পর আবার চেষ্টা করো');}
-}
 
 // ── PRINT/SAVE PDF (offline, no server needed — uses browser's native
 // print dialog on the already-rendered Solve Sheet. Works even if HF
