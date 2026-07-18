@@ -742,7 +742,9 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_c
         if progress_cb:
             async def _progress_fn(current, total):
                 try:
-                    await progress_cb(current, total)
+                    res = progress_cb(current, total)
+                    if asyncio.iscoroutine(res):
+                        await res
                 except Exception:
                     pass
 
