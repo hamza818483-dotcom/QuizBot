@@ -7138,6 +7138,31 @@ async def _process_pdf_pages_inner(
     await edit_msg(chat_id, status_msg_id,
         _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
 
+    # PERMANENT FIX: dashboard previously only updated on page start/finish —
+    # if one page's generation takes 30-90s, "Elapsed" looked frozen the
+    # whole time, making the bot look stuck. A lightweight background ticker
+    # refreshes the same message every few seconds purely for the live clock/
+    # progress bar, independent of page completion events.
+    _dash_stop = asyncio.Event()
+    async def _dashboard_ticker():
+        # Safety cap: even if the explicit stop call is missed due to an
+        # unexpected exception path, this ticker auto-terminates after 30
+        # minutes so it can never leak/run forever editing a dead job's message.
+        _ticker_deadline = time.time() + 1800
+        while not _dash_stop.is_set() and time.time() < _ticker_deadline:
+            try:
+                await asyncio.wait_for(_dash_stop.wait(), timeout=4)
+            except asyncio.TimeoutError:
+                pass
+            if _dash_stop.is_set():
+                break
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+            except Exception:
+                pass
+    _dash_ticker_task = _spawn_task(_dashboard_ticker())
+
     summary_pages = []
     all_mcqs_csv = []
     all_mcqs_raw = []
@@ -7396,6 +7421,12 @@ async def _process_pdf_pages_inner(
             except Exception:
                 pass
             img = None
+
+    _dash_stop.set()
+    try:
+        await asyncio.wait_for(_dash_ticker_task, timeout=2)
+    except Exception:
+        pass
 
     if all_mcqs_csv:
         import io, csv as csv_mod
