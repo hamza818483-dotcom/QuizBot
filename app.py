@@ -3847,8 +3847,15 @@ async def handle_csv_command(msg: dict):
     # document er filename shobshomoy ".csv"-te shesh hoy na). Ekhon shorashori
     # try kore, parse fail hoile tobei error dekhabe.
 
-    loading = await send_msg(chat_id, "⏳ CSV download হচ্ছে...\n[░░░░░░░░░░ 0%]")
-    loading_id = loading.get("result", {}).get("message_id")
+    # Fire the initial loading message without waiting for it — starting the
+    # actual download immediately (not after this round-trip completes) is
+    # the single biggest lever for /csv responsiveness on small files, since
+    # download+parse itself is normally sub-second.
+    loading_id_box = {"id": None}
+    async def _send_loading():
+        r = await send_msg(chat_id, "⏳ CSV download হচ্ছে...\n[░░░░░░░░░░ 0%]")
+        loading_id_box["id"] = r.get("result", {}).get("message_id")
+    loading_task = asyncio.ensure_future(_send_loading())
 
     # Live % bar restored, but edit_msg calls are fired via _spawn_task
     # (non-blocking) instead of awaited inline — the download loop never
@@ -3856,6 +3863,7 @@ async def handle_csv_command(msg: dict):
     # slowing down the actual download/parse work underneath it.
     _last_pct = {"v": -1}
     def _dl_progress(done, total):
+        loading_id = loading_id_box["id"]
         if not loading_id:
             return
         if not total:
@@ -3878,6 +3886,9 @@ async def handle_csv_command(msg: dict):
         # chat_id/message_id পাস করা হচ্ছে না — pyrogram path (client connect
         # overhead) স্কিপ হয়ে সরাসরি দ্রুত Bot API getFile ব্যবহার হবে।
         csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress)
+        if not loading_task.done():
+            await loading_task  # need the message_id before we can edit it
+        loading_id = loading_id_box["id"]
         if loading_id:
             _spawn_task(edit_msg(chat_id, loading_id, "✅ Download complete!\n⏳ CSV parse হচ্ছে..."))
         mcqs = _parse_csv_bytes(csv_bytes)
