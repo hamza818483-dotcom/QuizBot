@@ -55,6 +55,7 @@ from core import (
     db_get_new_gen_count, db_increment_gen_count, db_save_leaderboard,
     db_get_channels, db_save_channel, db_delete_channel, db_rename_channel, db_save_last_quiz, db_get_last_quiz,
     db_save_csv_job, db_update_csv_job_progress, db_finish_csv_job, db_get_incomplete_csv_jobs,
+    db_save_page_job, db_update_page_job_progress, db_finish_page_job, db_get_incomplete_page_jobs,
     build_back_url, source_msg_id,
     get_recent_errors, clear_error_logs,
     add_watermark_to_pdf,
@@ -7330,7 +7331,8 @@ async def handle_pdfm(msg: dict):
             return
 
         await process_pdfm_pages(chat_id, uid, uname, pages, topic,
-            mcq_count, channel_id, False, file_name, status_msg_id, thread_id)
+            mcq_count, channel_id, False, file_name, status_msg_id, thread_id,
+            file_id=file_id, page_range_str=page_range)
 
     except Exception as e:
         logger.error(f"[PDFM] Error: {e}")
@@ -7403,7 +7405,9 @@ async def process_pdfm_pages(
     channel_id, csv_only: bool,
     file_name: str = "document.pdf",
     status_msg_id: int = None,
-    thread_id: int = None
+    thread_id: int = None,
+    file_id: str = None,
+    page_range_str: str = None
 ):
     lock = _get_pdfm_lock(uid)
     if lock.locked():
@@ -7417,7 +7421,8 @@ async def process_pdfm_pages(
         _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
         return await _process_pdfm_pages_impl(
             chat_id, uid, uname, pages, topic, mcq_count,
-            channel_id, csv_only, file_name, status_msg_id, thread_id
+            channel_id, csv_only, file_name, status_msg_id, thread_id,
+            file_id=file_id, page_range_str=page_range_str
         )
 
 
@@ -7427,7 +7432,9 @@ async def _process_pdfm_pages_impl(
     channel_id, csv_only: bool,
     file_name: str = "document.pdf",
     status_msg_id: int = None,
-    thread_id: int = None
+    thread_id: int = None,
+    file_id: str = None,
+    page_range_str: str = None
 ):
     """
     /pdfm এর main processing — /pdf এর মতো কিন্তু নতুন caption format সহ।
@@ -7450,6 +7457,18 @@ async def _process_pdfm_pages_impl(
     tag = settings.get("tag","")
     exp_footer = settings.get("exp_footer","")
     session_id = gen_session_id()
+
+    job_id = None
+    if file_id and channel_id:  # শুধু actual posting job resumable — channel-select flow-এ না
+        job_id = gen_session_id()
+        await db_save_page_job(
+            job_id, job_type="pdf", uid=uid, chat_id=chat_id, uname=uname,
+            file_id=file_id, page_range=page_range_str or "", topic=topic,
+            mcq_count=str(mcq_count or ""), channel_id=str(channel_id),
+            csv_only=0, file_name=file_name, thread_id=thread_id or 0,
+            status_msg_id=status_msg_id or 0, resume_page_num=(pages[0][0] if pages else 0),
+            status="running"
+        )
 
     page_status = [{"page":p,"done":False,"current":False,"mcq":0} for p,_ in pages]
     start_time = time.time()
@@ -7637,12 +7656,18 @@ async def _process_pdfm_pages_impl(
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
 
+            if job_id:
+                next_page = pages[idx + 1][0] if idx + 1 < len(pages) else -1
+                await db_update_page_job_progress(job_id, next_page)
+
         except Exception as e:
             logger.error(f"[PDFM] Page {page_num} error: {e}")
             page_status[idx]["current"] = False
             page_status[idx]["done"] = True
 
     clear_active_job(chat_id)
+    if job_id:
+        await db_finish_page_job(job_id)
 
     # CSV send
     if all_mcqs_csv:
@@ -12055,7 +12080,8 @@ async def handle_callback(query: dict):
                 pending["topic"], pending.get("mcq_count"), ch, csv_only,
                 pending.get("file_name","document.pdf"),
                 pending.get("status_msg_id"),
-                thread_id=pending.get("thread_id")
+                thread_id=pending.get("thread_id"),
+                file_id=pending.get("file_id"), page_range_str=pending.get("page_range")
             ))
             getattr(app.state,"pdf_cache",{}).pop(f"pdfm_img_{uid}", None)
 
