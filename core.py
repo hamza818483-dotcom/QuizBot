@@ -35,7 +35,7 @@ logger = logging.getLogger("atlas.core")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+OWNER_ID = 5341425626  # hardcoded — env var was unreliable across HF Space secrets
 
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://atlasquizbotpro.hamza818483.workers.dev")
 CF_WORKER_URL_2 = os.environ.get("CF_WORKER_URL_2", "https://quizbot.pages.dev")
