@@ -331,6 +331,7 @@ async def _process_mhtml_auto(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 # D1 Quiz System (fully independent module — see quiz.py)
+from menu_module import cmd_menu, handle_menu_callback, handle_menu_pending_text, MENU_ADD_PENDING
 from quiz import (
     QUIZ_SESSIONS, QUIZ_TIMERS,
     handle_quiz_create, handle_qlist, handle_qdel,
@@ -11048,6 +11049,12 @@ async def handle_message(msg: dict):
         if consumed:
             return
 
+    # /menu "Add more" flow check (awaiting new item name text)
+    if uid in MENU_ADD_PENDING and msg.get("text") and not text.startswith("/"):
+        consumed = await handle_menu_pending_text(msg)
+        if consumed:
+            return
+
     # Channel rename flow check (awaiting new name text after ✏️ Name Update tap)
     if uid in CHANNEL_RENAME_PENDING and msg.get("text") and not text.startswith("/"):
         channel_id = CHANNEL_RENAME_PENDING.pop(uid)
@@ -11298,6 +11305,8 @@ async def handle_message(msg: dict):
         await handle_pin(msg)
     elif text in ("/pdfc", "/pdf_collect", "/done", "/cancel"):
         await handle_pdf_image_mode(msg)
+    elif text.startswith("/menu"):
+        await cmd_menu(msg)
     elif text.startswith("/q") and not text.startswith("/qlist") and not text.startswith("/qdel"):
         await handle_quiz_create(msg)
     elif text == "/qlist":
@@ -11379,6 +11388,10 @@ async def handle_callback(query: dict):
     uname = user.get("username") or user.get("first_name", "User")
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
+        if data.startswith("mnu"):
+            handled = await handle_menu_callback(query)
+            if handled:
+                return
         if data.startswith("gdl_"):
             await handle_gallery_download_callback(query)
             return
