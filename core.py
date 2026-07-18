@@ -806,7 +806,9 @@ async def download_tg_file(file_id: str, progress_cb=None,
                 downloaded += len(chunk)
                 if progress_cb:
                     try:
-                        progress_cb(downloaded, total_size)
+                        res = progress_cb(downloaded, total_size)
+                        if asyncio.iscoroutine(res):
+                            await res
                     except Exception:
                         pass
         return buf.getvalue()

@@ -6379,6 +6379,7 @@ async def _process_pdf_pages_inner(
                 })
 
                 exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+                solve_pdf_url = f"{CF_WORKER_URL}/api/solve-pdf-view/{cache_id}"
                 bot_un = await get_bot_username()
                 quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
                 poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
@@ -6393,7 +6394,8 @@ async def _process_pdf_pages_inner(
                          {"text": "🆕 New Quiz", "url": new_quiz_url}],
                         [{"text": "🔄 Poll Again", "url": poll_url},
                          {"text": "🆕 New Poll", "url": new_poll_url}],
-                        [{"text": "🌐 Website Exam", "url": exam_url}]
+                        [{"text": "🌐 Website Exam", "url": exam_url},
+                         {"text": "📄 Solve PDF", "url": solve_pdf_url}]
                     ]},
                     "reply_to_message_id": image_msg_id
                 }
@@ -11620,6 +11622,28 @@ async def tg_image_proxy(file_id: str):
                         headers={"Cache-Control": "public, max-age=86400"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=404)
+
+@app.get("/api/solve-pdf-view/{cache_id}")
+async def solve_pdf_view(cache_id: str):
+    """GET version of /api/solve-pdf for direct Telegram URL buttons — user
+    taps 'Solve PDF' and the PDF opens straight in browser, no JSON/base64
+    round-trip. Uses answers={} (blank answer-sheet view of the already-made
+    MCQs), not a fresh MCQ generation — same cached mcq_data as the poll."""
+    try:
+        cache = await db_get_mcq_cache(cache_id)
+        if not cache:
+            return JSONResponse({"error": "Cache not found"}, status_code=404)
+        html = _build_solve_sheet_html(cache["topic"], cache["page_number"], cache["mcq_data"], {})
+        pdf_bytes = await _html_to_pdf(html)
+        pdf_bytes = await _apply_saved_watermark(pdf_bytes)
+        if not pdf_bytes:
+            return JSONResponse({"error": "PDF generation failed"}, status_code=500)
+        return Response(
+            content=pdf_bytes, media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="solve_{cache_id}.pdf"'}
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/solve-pdf")
 async def solve_pdf(request: Request):
