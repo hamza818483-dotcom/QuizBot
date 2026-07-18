@@ -128,7 +128,7 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 .mot-text{font-size:13px;font-weight:700;color:var(--accent);margin-bottom:6px;}
 .ayat-text{font-size:11px;color:var(--text-secondary);line-height:1.6;}
 
-.result-btns{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;}
+.result-btns{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;}
 .result-btn{padding:12px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--btn-bg);color:var(--text);font-size:13px;font-weight:700;cursor:pointer;transition:all .2s;font-family:'Noto Sans Bengali','Inter',sans-serif;width:100%;text-align:center;}
 .result-btn:hover{border-color:var(--accent);color:var(--accent);}
 .result-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
@@ -304,6 +304,7 @@ let userAnswers = {}, bookmarks = {};
 let submitted = false;
 let tag = '', expFooter = '', channelId = '', imageMsgId = null, endMsgId = null;
 let isNewGen = false;
+let hasImageSource = false;
 let totalSec = 0, totalLeft = 0, totalTimer = null;
 
 // ── INIT ──
@@ -414,6 +415,7 @@ async function init() {
     imageMsgId = d.image_msg_id || null;
     endMsgId   = d.end_msg_id   || null;
     isNewGen   = d.is_new_gen   || false;
+    hasImageSource = !!d.image_file_id;
 
     document.getElementById('headerSub').textContent = d.topic || 'Special Exam';
 
@@ -728,7 +730,7 @@ function doSubmit(){
     <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
     <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (${_mistakeCnt})</button>
     <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>`;
-  if(!isNewGen)
+  if(hasImageSource)
     html+=`<button class="result-btn" id="newExamBtnResult" onclick="startNewExamV2()">🆕 New Exam</button>`;
   if(!isNewGen)
     html+=`<button class="result-btn warning" onclick="openLb()">🏆 Leaderboard</button>`;
