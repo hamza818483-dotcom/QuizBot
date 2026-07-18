@@ -4236,7 +4236,114 @@ async def _handle_clean_command_inner(msg: dict):
                          caption=f"✅ Clean CSV — {len(cleaned)}টি MCQ (numbering/source-tag/option-marker মুক্ত)")
 
 
+async def handle_cut_command(msg: dict):
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    try:
+        return await _handle_cut_command_inner(msg)
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+async def _handle_cut_command_inner(msg: dict):
+    """/cut <page or range> — reply to a PDF file.
+    Single page (e.g. /cut 5) -> sends that page as a photo.
+    Range (e.g. /cut 3-7) -> sends a new PDF with those pages."""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id, "❌ PDF ফাইলে reply করে <code>/cut 5</code> বা <code>/cut 3-7</code> দাও")
+        return
+
+    m = re.match(r"^/cut\s+(\d+)\s*-\s*(\d+)\s*$", text, re.IGNORECASE)
+    is_range = bool(m)
+    if is_range:
+        start_page, end_page = int(m.group(1)), int(m.group(2))
+        if start_page < 1 or end_page < start_page:
+            await send_msg(chat_id, "❌ সঠিক page range দাও! যেমন: <code>/cut 3-7</code>")
+            return
+    else:
+        m2 = re.match(r"^/cut\s+(\d+)\s*$", text, re.IGNORECASE)
+        if not m2:
+            await send_msg(chat_id, "❌ Usage:\n<code>/cut 5</code> — single page (photo)\n<code>/cut 3-7</code> — page range (PDF)")
+            return
+        single_page = int(m2.group(1))
+        if single_page < 1:
+            await send_msg(chat_id, "❌ Page number ১ বা তার বেশি হতে হবে!")
+            return
+
+    file_id = reply["document"]["file_id"]
+    file_name = reply["document"].get("file_name", "file.pdf")
+    file_size = reply["document"].get("file_size", 0)
+    size_kb = round(file_size / 1024, 1) if file_size else "?"
+
+    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    try:
+        pdf_bytes = await download_tg_file(file_id)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n⏳ Cut হচ্ছে...")
+    except Exception as e:
+        logger.error(f"[Cut] download error: {e}", exc_info=True)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
+        return
+
+    base_name = re.sub(r'\.pdf$', '', file_name, flags=re.I)
+
+    try:
+        from pypdf import PdfReader, PdfWriter
+        reader = PdfReader(BytesIO(pdf_bytes))
+        num_pages = len(reader.pages)
+
+        if is_range:
+            if start_page > num_pages:
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, f"❌ PDF এ মোট {num_pages} পাতা আছে, {start_page} পাতা নেই!")
+                return
+            end_page = min(end_page, num_pages)
+            writer = PdfWriter()
+            for p in range(start_page - 1, end_page):
+                writer.add_page(reader.pages[p])
+            out_io = BytesIO()
+            writer.write(out_io)
+            out_bytes = out_io.getvalue()
+            out_name = f"{base_name}_p{start_page}-{end_page}.pdf"
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
+            await send_document(chat_id, out_bytes, out_name,
+                                 caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)")
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "✅ সম্পন্ন!")
+        else:
+            if single_page > num_pages:
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, f"❌ PDF এ মোট {num_pages} পাতা আছে, {single_page} পাতা নেই!")
+                return
+            from pdf2image import convert_from_bytes
+            images = convert_from_bytes(pdf_bytes, first_page=single_page, last_page=single_page, dpi=200)
+            if not images:
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "❌ Page render করা যায়নি!")
+                return
+            img_io = BytesIO()
+            images[0].save(img_io, format="JPEG", quality=90)
+            img_bytes = img_io.getvalue()
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "⏳ Photo পাঠানো হচ্ছে...")
+            await send_photo(chat_id, img_bytes, caption=f"✂️ Page {single_page}/{num_pages}")
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "✅ সম্পন্ন!")
+    except Exception as e:
+        logger.error(f"[Cut] error: {e}", exc_info=True)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
+        return
+
+
 async def handle_split_command(msg: dict):
+
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
     try:
         return await _handle_split_command_inner(msg)
@@ -11342,7 +11449,10 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         _spawn_command_task(uid, handle_clean_command(msg))
+    elif text.startswith("/cut"):
+        _spawn_command_task(uid, handle_cut_command(msg))
     elif text.startswith("/split"):
+
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
