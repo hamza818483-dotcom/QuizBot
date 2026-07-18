@@ -3843,6 +3843,7 @@ async def handle_csv_command(msg: dict):
         return
 
     doc = reply["document"]
+    csv_fname = doc.get("file_name") or "CSV file"
     # v: strict ".csv" filename check hotay silent-fail hocchilo (bot-generated
     # document er filename shobshomoy ".csv"-te shesh hoy na). Ekhon shorashori
     # try kore, parse fail hoile tobei error dekhabe.
@@ -3853,7 +3854,7 @@ async def handle_csv_command(msg: dict):
     # download+parse itself is normally sub-second.
     loading_id_box = {"id": None}
     async def _send_loading():
-        r = await send_msg(chat_id, "⏳ CSV download হচ্ছে...\n[░░░░░░░░░░ 0%]")
+        r = await send_msg(chat_id, f"📄 {csv_fname}\n⏳ CSV download হচ্ছে...\n[░░░░░░░░░░ 0%]")
         loading_id_box["id"] = r.get("result", {}).get("message_id")
     loading_task = asyncio.ensure_future(_send_loading())
 
@@ -3873,14 +3874,14 @@ async def handle_csv_command(msg: dict):
             # actively working.
             if _last_pct["v"] != -2:
                 _last_pct["v"] = -2
-                _spawn_task(edit_msg(chat_id, loading_id, "⏳ ফাইল খোঁজা হচ্ছে...\n[░░░░░░░░░░ 0%]"))
+                _spawn_task(edit_msg(chat_id, loading_id, f"📄 {csv_fname}\n⏳ ফাইল খোঁজা হচ্ছে...\n[░░░░░░░░░░ 0%]"))
             return
         pct = int(done * 100 / total)
         if pct - _last_pct["v"] < 10 and pct != 100:
             return
         _last_pct["v"] = pct
         bar = "\u2588" * (pct // 10) + "\u2591" * (10 - pct // 10)
-        _spawn_task(edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n[{bar} {pct}%]"))
+        _spawn_task(edit_msg(chat_id, loading_id, f"📄 {csv_fname}\n⏳ CSV download হচ্ছে...\n[{bar} {pct}%]"))
 
     try:
         # pyrogram path ব্যবহার করা হচ্ছে (chat_id/message_id pass করে) — CF proxy
@@ -3898,7 +3899,7 @@ async def handle_csv_command(msg: dict):
         await loading_task
         loading_id = loading_id_box["id"]
         if loading_id:
-            await edit_msg(chat_id, loading_id, "✅ Download complete!\n⏳ CSV parse হচ্ছে...")
+            await edit_msg(chat_id, loading_id, f"📄 {csv_fname}\n✅ Download complete!\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
 
         if not mcqs:
@@ -3920,7 +3921,8 @@ async def handle_csv_command(msg: dict):
                     "mcq_count": len(mcqs),
                     "mode": "csv",
                     "inline_channel": inline_channel,
-                    "inline_topic_id": inline_topic_id
+                    "inline_topic_id": inline_topic_id,
+                    "csv_fname": csv_fname
                 }),
                 "updated_at": int(time.time())
             }).execute())
@@ -4273,7 +4275,8 @@ async def _send_csv_polls_to_channel(
     channel_id: str, mcqs: list, topic: str,
     chat_id: int, pre_msg_id: int = None,
     thread_id: int = None,
-    loading_id: int = None
+    loading_id: int = None,
+    csv_fname: str = ""
 ) -> tuple:
     """
     একটা batch-এর polls পাঠাও।
@@ -4348,8 +4351,11 @@ async def _send_csv_polls_to_channel(
             await asyncio.sleep(wait_s)
 
         if loading_id:
+            pct = int(sent * 100 / total) if total else 0
+            bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+            fname_line = f"📄 {csv_fname}\n" if csv_fname else ""
             _spawn_task(edit_msg(chat_id, loading_id,
-                f"📤 poll পাঠানো হচ্ছে... {sent}/{total}"))
+                f"{fname_line}📤 poll পাঠানো হচ্ছে... {sent}/{total} [{bar} {pct}%]"))
 
         # Telegram allows roughly 1 message/sec to the same chat — 0.25s (4x
         # too fast) was triggering real 429s that looked identical to proxy
@@ -4461,6 +4467,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
     session = json.loads(row.data[0]["data"])
     topic = session.get("topic", "") or "Special MCQ By ATLAS"
     mode = session.get("mode", "csv")
+    csv_fname = session.get("csv_fname", "") or "CSV MCQ"
     thread_id = session.get("inline_topic_id") or None  # group topic/thread ID
 
     # Bot admin check — সব কিছুর আগে
@@ -4488,9 +4495,9 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
     total = len(mcqs)
 
     _owner_msg_box = {"id": None}
-    await notify_owner_edit(f"🟢 CSV job শুরু — টপিক: {topic} | {total} MCQ | চ্যানেল: {channel_id}", _owner_msg_box)
+    await notify_owner_edit(f"🟢 CSV job শুরু — ফাইল: {csv_fname} | টপিক: {topic} | {total} MCQ | চ্যানেল: {channel_id}", _owner_msg_box)
 
-    loading = await send_msg(chat_id, f"📤 {total} টি poll পাঠানো হচ্ছে...")
+    loading = await send_msg(chat_id, f"📄 {csv_fname}\n📤 {total} টি poll পাঠানো হচ্ছে...\n[{'░'*10} 0%]")
     loading_id = loading.get("result", {}).get("message_id")
 
     if mode == "csvs":
@@ -4528,7 +4535,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             # Polls পাঠাও (pre-msg কে reply করে)
             sent, first_link = await _send_csv_polls_to_channel(
                 channel_id, batch, batch_topic, chat_id, pre_msg_id,
-                thread_id=thread_id, loading_id=loading_id
+                thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname
             )
             await notify_owner_edit(f"✅ Batch {b_idx}/{total_batches} — {sent} poll পাঠানো শেষ ({batch_topic})", _owner_msg_box)
 
@@ -4630,7 +4637,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
 
         sent, first_link = await _send_csv_polls_to_channel(
             channel_id, mcqs, topic, chat_id, pre_msg_id,
-            thread_id=thread_id, loading_id=loading_id
+            thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname
         )
         await notify_owner_edit(f"✅ {sent}/{total} poll পাঠানো শেষ — টপিক: {topic}\n⏳ PDF বানানো শুরু হচ্ছে...", _owner_msg_box)
 
@@ -4682,9 +4689,9 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
-                f"✅ {sent}/{total} polls channel-এ পাঠানো হয়েছে!")
+                f"📄 {csv_fname}\n✅ {sent}/{total} polls channel-এ পাঠানো হয়েছে!")
 
-        await notify_owner_edit(f"🏁 CSV job সম্পূর্ণ — টপিক: {topic} | {sent}/{total} poll + PDF + end message পাঠানো হয়েছে।", _owner_msg_box)
+        await notify_owner_edit(f"🏁 CSV job সম্পূর্ণ — ফাইল: {csv_fname} | টপিক: {topic} | {sent}/{total} poll + PDF + end message পাঠানো হয়েছে।", _owner_msg_box)
 
 async def process_csv_to_channel(cache_id: str, channel_id: str,
                                   chat_id: int, uid: int):
