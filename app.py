@@ -3933,9 +3933,7 @@ async def handle_csv_command(msg: dict):
             if loading_id:
                 await edit_msg(chat_id, loading_id,
                     f"✅ {len(mcqs)} MCQ | 📢 সরাসরি {inline_channel}-এ পাঠানো হচ্ছে...")
-            _spawn_task(process_csv_to_channel(
-                cache_id, inline_channel, chat_id, uid
-            ))
+            enqueue_csv_to_channel(cache_id, inline_channel, chat_id, uid)
             return
 
         if loading_id:
@@ -4329,8 +4327,55 @@ async def _send_csv_polls_to_channel(
 
     return sent, first_poll_link
 
-async def process_csv_to_channel(cache_id: str, channel_id: str,
-                                  chat_id: int, uid: int):
+# ============================================================
+# CSV→CHANNEL SERIAL QUEUE
+# একাধিক /csv (বা একাধিক ফাইল) একসাথে চাইলেও এখন থেকে STRICTLY
+# একটার পুরো কাজ (polls + PDF + end-msg) 100% শেষ না হওয়া পর্যন্ত
+# পরেরটা শুরু হবে না। _spawn_task দিয়ে সরাসরি parallel চালানোর বদলে
+# সব job এই queue-তে জমা হয়, একটা single worker সেগুলো one-by-one
+# process করে।
+# ============================================================
+_csv_job_queue = None
+_csv_worker_started = False
+
+def _get_csv_job_queue():
+    global _csv_job_queue
+    if _csv_job_queue is None:
+        _csv_job_queue = asyncio.Queue()
+    return _csv_job_queue
+
+async def _csv_queue_worker():
+    q = _get_csv_job_queue()
+    while True:
+        job = await q.get()
+        cache_id, channel_id, chat_id, uid = job
+        try:
+            await _process_csv_to_channel_impl(cache_id, channel_id, chat_id, uid)
+        except Exception as e:
+            logger.error(f"[CSV-Queue] Job failed for cache_id={cache_id}: {e}")
+            try:
+                await _safe_error_reply(chat_id, e)
+            except Exception:
+                pass
+        finally:
+            q.task_done()
+
+def enqueue_csv_to_channel(cache_id: str, channel_id: str, chat_id: int, uid: int):
+    """Replaces direct _spawn_task(process_csv_to_channel(...)) — jobs now
+    queue up and run strictly one after another, never in parallel."""
+    global _csv_worker_started
+    q = _get_csv_job_queue()
+    if not _csv_worker_started:
+        _csv_worker_started = True
+        _spawn_task(_csv_queue_worker())
+    pos = q.qsize()
+    if pos > 0:
+        _spawn_task(send_msg(chat_id,
+            f"⏳ আগের {pos}টা কাজ শেষ হওয়ার পর এটা শুরু হবে (সিরিয়ালি চলছে)।"))
+    q.put_nowait((cache_id, channel_id, chat_id, uid))
+
+async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
+                                        chat_id: int, uid: int):
     """
     /csv — single batch, সব polls একসাথে পাঠাও
     /csvS — serial batch mode
@@ -4370,6 +4415,8 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
 
     mcqs = cache["mcq_data"]
     total = len(mcqs)
+
+    await notify_owner(f"🟢 CSV job শুরু — টপিক: {topic} | {total} MCQ | চ্যানেল: {channel_id}")
 
     loading = await send_msg(chat_id, f"📤 {total} টি poll পাঠানো হচ্ছে...")
     loading_id = loading.get("result", {}).get("message_id")
@@ -4434,11 +4481,16 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             if thread_id:
                 end_send_data2["message_thread_id"] = thread_id
             end_r = await tg_post("sendMessage", end_send_data2)
+            if not end_r.get("ok"):
+                end_r = await tg_post("sendMessage", end_send_data2)  # one retry
             if end_r.get("ok"):
                 await db_update_cache(batch_cache_id, {
                     "channel_id": channel_id,
                     "end_msg_id": end_r["result"]["message_id"]
                 })
+            else:
+                await send_msg(chat_id,
+                    f"⚠️ '{batch_topic}' এর end message + button পাঠানো ব্যর্থ হয়েছে: {end_r.get('description', 'unknown error')}")
 
             batch_links.append((b_idx, first_link, len(batch)))
 
@@ -4469,8 +4521,11 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                             await try_pin_message(channel_id, doc_msg_id)
                 else:
                     logger.error(f"[CSV-PDF] Style1 generation empty for topic: {topic}")
+                    await send_msg(chat_id,
+                        f"⚠️ '{topic}' এর জন্য PDF তৈরি ব্যর্থ হয়েছে: {_last_pdf_error.get('msg', 'unknown error')}")
             except Exception as e:
                 logger.error(f"[CSV-PDF] Error generating Style1 PDF: {e}")
+                await send_msg(chat_id, f"⚠️ '{topic}' এর PDF তৈরিতে সমস্যা হয়েছে: {e}")
 
         # Master Summary (শুধু multiple batch হলে) — first pre-msg কে reply
         if total_batches > 1:
@@ -4510,6 +4565,7 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             channel_id, mcqs, topic, chat_id, pre_msg_id,
             thread_id=thread_id, loading_id=loading_id
         )
+        await notify_owner(f"✅ {sent}/{total} poll পাঠানো শেষ — টপিক: {topic}\n⏳ PDF বানানো শুরু হচ্ছে...")
 
         # Style1 PDF (সব poll মিলিয়ে) — pre-msg কে reply, auto-pin, polls শেষে
         # end-msg-এর আগে পাঠানো হয়
@@ -4530,10 +4586,14 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                     doc_msg_id = doc_r.get("result", {}).get("message_id")
                     if doc_msg_id:
                         await try_pin_message(channel_id, doc_msg_id)
+                await notify_owner(f"✅ PDF পাঠানো হয়েছে — টপিক: {topic}\n⏳ End message + button পাঠানো হচ্ছে...")
             else:
                 logger.error(f"[CSV-PDF] Style1 generation empty for topic: {topic}")
+                await send_msg(chat_id,
+                    f"⚠️ '{topic}' এর জন্য PDF তৈরি ব্যর্থ হয়েছে: {_last_pdf_error.get('msg', 'unknown error')}")
         except Exception as e:
             logger.error(f"[CSV-PDF] Error generating Style1 PDF: {e}")
+            await send_msg(chat_id, f"⚠️ '{topic}' এর PDF তৈরিতে সমস্যা হয়েছে: {e}")
 
         # End-msg (topic + mcq count + first poll link + 4 button) — PDF-এর পরে,
         # সবার শেষে। Channel-এ score-ask সহ, group-এ score-ask ছাড়া।
@@ -4550,6 +4610,8 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
         if thread_id:
             end_send_data["message_thread_id"] = thread_id
         end_r = await tg_post("sendMessage", end_send_data)
+        if not end_r.get("ok"):
+            end_r = await tg_post("sendMessage", end_send_data)  # one retry
         if end_r.get("ok"):
             end_msg_id_ = end_r["result"]["message_id"]
             await db_update_cache(cache_id, {
@@ -4557,10 +4619,22 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 "end_msg_id": end_msg_id_
             })
             await try_pin_message(channel_id, end_msg_id_)
+        else:
+            await send_msg(chat_id,
+                f"⚠️ '{topic}' এর end message + button পাঠানো ব্যর্থ হয়েছে: {end_r.get('description', 'unknown error')}")
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
                 f"✅ {sent}/{total} polls channel-এ পাঠানো হয়েছে!")
+
+        await notify_owner(f"🏁 CSV job সম্পূর্ণ — টপিক: {topic} | {sent}/{total} poll + PDF + end message পাঠানো হয়েছে।")
+
+async def process_csv_to_channel(cache_id: str, channel_id: str,
+                                  chat_id: int, uid: int):
+    """Back-compat shim — any old direct caller of process_csv_to_channel
+    now transparently goes through the serial queue instead of running
+    in parallel with other jobs."""
+    enqueue_csv_to_channel(cache_id, channel_id, chat_id, uid)
 
 async def handle_premium_pdf_start(msg: dict, cache_id: str):
     """Premium PDF button clicked — generate Style1 PDF from cache with live progress"""
@@ -5240,7 +5314,7 @@ def _build_print_style1(data, heading):
     for d in data:
         is_short = _check_short_option(d["opts"])
         body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
-        ans_circle = f'[{[chr(97+d["ai"])] if d["ai"]>=0 else "?"}]'
+        ans_circle = f'[{chr(65+d["ai"]) if d["ai"]>=0 else "?"}]'
         if is_short:
             body += f'<table class="options-table-short"><tr><td class="option-col">(A) {d["opts"][0]}{d["oimgs"][0]}</td><td class="option-col">(B) {d["opts"][1]}{d["oimgs"][1]}</td><td rowspan="2" class="answer-col"><span class="answer-circle">{ans_circle}</span></td></tr><tr><td class="option-col">(C) {d["opts"][2]}{d["oimgs"][2]}</td><td class="option-col">(D) {d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
         else:
@@ -11437,9 +11511,7 @@ async def handle_callback(query: dict):
             channel = "_".join(parts[1:-2])
             if uid != orig_uid:
                 return
-            _spawn_task(process_csv_to_channel(
-                cache_id_ch, channel, chat_id, uid
-            ))
+            enqueue_csv_to_channel(cache_id_ch, channel, chat_id, uid)
 
         elif data.startswith("rapidch_"):
             parts = data.split("_", 2)
