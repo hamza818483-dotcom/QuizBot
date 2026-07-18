@@ -20,6 +20,7 @@ import random
 import string
 import re
 import difflib
+import hashlib
 import base64
 from io import BytesIO
 from collections import deque
@@ -364,37 +365,64 @@ def _cap_page_cache(cache: dict) -> None:
 _PDF_BYTES_CACHE_MAX = 40  # HF has 16GB RAM (not Render free tier) — safe to hold more raw PDFs
 _pdf_bytes_cache = {}  # file_id -> bytes
 
+# SPEED: Telegram's file_id changes on every re-upload/re-forward of the SAME
+# file, but file_unique_id stays identical for identical file content across
+# uploads (Telegram guarantees this). This secondary index lets a fresh
+# upload of a PDF the user already sent before still hit the bytes cache,
+# instead of re-downloading just because the file_id differs this time.
+_pdf_unique_id_index = {}  # file_unique_id -> file_id (points into _pdf_bytes_cache)
+
 def _cap_pdf_bytes_cache() -> None:
     while len(_pdf_bytes_cache) > _PDF_BYTES_CACHE_MAX:
-        _pdf_bytes_cache.pop(next(iter(_pdf_bytes_cache)), None)
+        evicted_fid = next(iter(_pdf_bytes_cache))
+        _pdf_bytes_cache.pop(evicted_fid, None)
+        # Also drop any unique_id index entries pointing at the evicted file_id
+        for uid, fid in list(_pdf_unique_id_index.items()):
+            if fid == evicted_fid:
+                _pdf_unique_id_index.pop(uid, None)
 
-async def _download_pdf_cached(file_id: str, progress_cb=None, chat_id: int = None, message_id: int = None) -> bytes:
+async def _download_pdf_cached(file_id: str, progress_cb=None, chat_id: int = None,
+                                message_id: int = None, file_unique_id: str = None) -> bytes:
     cached = _pdf_bytes_cache.get(file_id)
     if cached is not None:
         logger.info(f"[PDF Cache] hit for file_id={file_id[:16]}... skipping download")
         return cached
+    # Same file content re-uploaded under a new file_id -> still skip download
+    # by matching on the stable file_unique_id instead.
+    if file_unique_id:
+        prior_fid = _pdf_unique_id_index.get(file_unique_id)
+        if prior_fid and prior_fid in _pdf_bytes_cache:
+            logger.info(f"[PDF Cache] hit via file_unique_id={file_unique_id[:16]}... (re-upload) skipping download")
+            data = _pdf_bytes_cache[prior_fid]
+            _pdf_bytes_cache[file_id] = data  # also index under new file_id for this session
+            _cap_pdf_bytes_cache()
+            return data
     data = await download_tg_file(file_id, progress_cb=progress_cb, chat_id=chat_id, message_id=message_id)
     _pdf_bytes_cache[file_id] = data
+    if file_unique_id:
+        _pdf_unique_id_index[file_unique_id] = file_id
     _cap_pdf_bytes_cache()
     return data
 
-# SPEED: cache RENDERED page images by (file_id, page_range) so a re-run of
-# /pdf on the same file+range skips pdf2image rasterization too (the
-# heaviest CPU step). Safe now that we're on HF's 16GB RAM instance instead
-# of Render's memory-constrained free tier.
+# SPEED: cache RENDERED page images by (content_hash, page_range) so a re-run
+# of /pdf on the same file+range skips pdf2image rasterization too (the
+# heaviest CPU step). Keyed by a hash of the actual PDF bytes (not file_id),
+# so this also hits when the same PDF is re-uploaded under a new file_id.
 _PDF_RENDER_CACHE_MAX = 15
-_pdf_render_cache = {}  # (file_id, page_range) -> pages list
+_pdf_render_cache = {}  # (content_hash, page_range) -> pages list
 
 def _cap_pdf_render_cache() -> None:
     while len(_pdf_render_cache) > _PDF_RENDER_CACHE_MAX:
         _pdf_render_cache.pop(next(iter(_pdf_render_cache)), None)
 
 def _render_pdf_cached(file_id: str, pdf_bytes: bytes, page_range: str = None):
-    """Wraps pdf_to_images_safe with a render cache keyed by (file_id, page_range)."""
-    key = (file_id, page_range or "ALL")
+    """Wraps pdf_to_images_safe with a render cache keyed by (content_hash, page_range)
+    -- content_hash (not file_id) so a re-upload of the identical PDF still hits."""
+    content_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    key = (content_hash, page_range or "ALL")
     cached = _pdf_render_cache.get(key)
     if cached is not None:
-        logger.info(f"[Render Cache] hit for {key[0][:16]}...:{key[1]} — skipping rasterization")
+        logger.info(f"[Render Cache] hit for hash={content_hash[:12]}...:{key[1]} — skipping rasterization")
         return True, cached
     ok, pages = pdf_to_images_safe(pdf_bytes, page_range)
     if ok and pages:
@@ -8693,11 +8721,14 @@ async def _handle_qbm_impl(msg: dict):
     if is_image_reply:
         if reply.get("photo"):
             file_id = reply["photo"][-1]["file_id"]
+            file_unique_id = reply["photo"][-1].get("file_unique_id")
         else:
             file_id = reply["document"]["file_id"]
+            file_unique_id = reply["document"].get("file_unique_id")
         file_name = reply.get("document", {}).get("file_name", "image.jpg")
     else:
         file_id = reply["document"]["file_id"]
+        file_unique_id = reply["document"].get("file_unique_id")
         file_name = reply["document"].get("file_name", "document.pdf")
 
     status_r = await send_msg(chat_id, "⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]")
@@ -8728,7 +8759,8 @@ async def _handle_qbm_impl(msg: dict):
             img = PILImage.open(BytesIO(img_bytes))
             pages = [(1, img)]
         else:
-            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id, message_id=reply["message_id"])
+            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id,
+                                                    message_id=reply["message_id"], file_unique_id=file_unique_id)
             ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
             if not ok:
                 await send_msg(chat_id, pages)
