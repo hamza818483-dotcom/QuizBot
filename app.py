@@ -11229,7 +11229,12 @@ async def handle_message(msg: dict):
             async def _get_webhook_status():
                 nonlocal _wh_short
                 try:
-                    async with _hx.AsyncClient(timeout=15) as _c:
+                    # 15s timeout ছিল আগে — /ping "late full update" এর মূল
+                    # কারণ এটাই ছিল যদি Telegram API ধীর হয় (worst case
+                    # /ping edit ১৫ সেকেন্ড পর্যন্ত আটকে থাকতো)। 4s এ নামানো
+                    # হলো — webhook status একটা nice-to-have field, MCQ কাজে
+                    # লাগে না, তাই দ্রুত fail-fast ভালো slow-hang এর চেয়ে।
+                    async with _hx.AsyncClient(timeout=4) as _c:
                         _wr = await _c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo")
                         _wh_data = _wr.json()
                         _wh_url = _wh_data.get("result", {}).get("url", "Not set") or "Not set"
@@ -11250,10 +11255,19 @@ async def handle_message(msg: dict):
                 except Exception:
                     _wh_short = "❓ Check failed"
 
-            # These three lookups don't depend on each other — run them
+            # These lookups don't depend on each other — run them
             # concurrently instead of one-by-one so /ping's real latency is
-            # max(all three) instead of the sum of all three.
-            await asyncio.gather(_get_user_counts(), _get_webhook_status())
+            # max(all) instead of the sum of all. Hard 5s ceiling on the
+            # whole group so a slow Supabase/Telegram response can never
+            # delay the final edit beyond that -- whichever field didn't
+            # finish in time just falls back to its default placeholder.
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(_get_user_counts(), _get_webhook_status()),
+                    timeout=5
+                )
+            except asyncio.TimeoutError:
+                pass
 
             _latency_ms = int((time.time() - _t0) * 1000)
             final_text = (
