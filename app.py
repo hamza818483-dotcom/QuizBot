@@ -4299,8 +4299,16 @@ async def _send_csv_polls_to_channel(
         if exp_footer:
             exp = f"{exp}\n{exp_footer}"
 
-        # Retry logic — poll অবশ্যই যেতে হবে
-        for attempt in range(3):
+        # Retry logic — poll অবশ্যই যেতে হবে। 3-বার চেষ্টার পর silently skip
+        # করা হতো আগে, যেটা 429 (rate limit) burst-এ একসাথে অনেকগুলো poll
+        # miss করাতো আর ব্যাচ "থেমে গেছে" মনে হতো। এখন: 429 হলে Telegram-এর
+        # নিজের বলা retry_after সময় মেনে wait করে retry, আর অন্য transient
+        # network/৫xx এরর হলেও permanently skip না করে বাড়তে থাকা backoff
+        # দিয়ে retry করতে থাকে যতক্ষণ না সত্যিকারে পাঠানো যায়। শুধুমাত্র
+        # genuinely non-retryable error (যেমন bad poll data/400) হলে skip করে
+        # পরের MCQ-তে যাবে, যাতে একটা ভাঙা প্রশ্নের জন্য পুরো ব্যাচ আটকে না যায়।
+        attempt = 0
+        while True:
             poll_r = await send_poll(
                 channel_id, q_text, opts, ans_idx,
                 explanation=exp,
@@ -4314,9 +4322,30 @@ async def _send_csv_polls_to_channel(
                     )
                 sent += 1
                 break
-            else:
-                logger.warning(f"[CSV] Poll {i+1} attempt {attempt+1} failed, retrying...")
-                await asyncio.sleep(1)
+
+            desc = (poll_r.get("description") or "").lower()
+            error_code = poll_r.get("error_code")
+            retry_after = (poll_r.get("parameters") or {}).get("retry_after")
+
+            if error_code == 429 or "too many requests" in desc:
+                wait_s = retry_after or (2 ** min(attempt, 5))
+                logger.warning(f"[CSV] Poll {i+1} rate-limited (429), waiting {wait_s}s before retry...")
+                await asyncio.sleep(wait_s + 0.5)
+                attempt += 1
+                continue
+
+            if error_code and 400 <= error_code < 500 and error_code != 429:
+                # Genuinely bad request (malformed poll data etc.) — retrying
+                # won't help, skip this one MCQ so the rest of the batch continues.
+                logger.error(f"[CSV] Poll {i+1} non-retryable error ({error_code}): {desc} — skipping this MCQ")
+                break
+
+            # Transient (network blip, 5xx, proxy hiccup) — keep retrying with
+            # capped exponential backoff instead of giving up after 3 tries.
+            attempt += 1
+            wait_s = min(2 ** attempt, 30)
+            logger.warning(f"[CSV] Poll {i+1} attempt {attempt} failed ({desc or 'unknown'}), retrying in {wait_s}s...")
+            await asyncio.sleep(wait_s)
 
         if loading_id:
             _spawn_task(edit_msg(chat_id, loading_id,
