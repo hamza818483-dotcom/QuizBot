@@ -8533,17 +8533,14 @@ def _qbm_question_looks_truncated(q: str, opts: list) -> bool:
     return False
 
 
-def _qbm_reconstruct_question_from_options(q: str, opts: list) -> str | None:
+def _qbm_reconstruct_question_from_options(q: str, opts: list) -> str:
     """
     PURE CODE-LEVEL (zero API cost) reconstruction: when the question text is
     truncated/garbage, inspect the 4 options' shape/pattern to deterministically
     rebuild a matching question stem. No AI call, no re-OCR -- rule-based only.
-    Returns a reconstructed question string, or None if no pattern matches
-    (caller falls back to dropping the MCQ).
+    ALWAYS returns a usable question string -- an MCQ is NEVER dropped/skipped.
     """
     valid_opts = [o.strip() for o in opts if o and o.strip()]
-    if len(valid_opts) < 2:
-        return None
 
     # Known country/currency/capital/legislature name lists for pattern-matching.
     CAPITALS = {
@@ -8569,29 +8566,34 @@ def _qbm_reconstruct_question_from_options(q: str, opts: list) -> str | None:
     def _match_ratio(lookup: dict) -> int:
         return sum(1 for o in valid_opts if o in lookup)
 
-    caps_hit = _match_ratio(CAPITALS)
-    curr_hit = _match_ratio(CURRENCIES)
-    leg_hit = _match_ratio(LEGISLATURES)
+    caps_hit = _match_ratio(CAPITALS) if valid_opts else 0
+    curr_hit = _match_ratio(CURRENCIES) if valid_opts else 0
+    leg_hit = _match_ratio(LEGISLATURES) if valid_opts else 0
     best = max(caps_hit, curr_hit, leg_hit)
 
-    if best == 0 or best < len(valid_opts) - 1:
-        # Need at least all-but-one options recognized to trust a rebuild.
-        return None
-
-    # If the truncated question fragment itself matches a known legislature/
-    # capital/currency name, use its own lookup table preferentially (this is
-    # exactly the ফোককেটিং case: fragment itself identifies the category).
     qs = q.strip()
-    if qs in LEGISLATURES or leg_hit == best:
-        country = LEGISLATURES.get(qs)
-        if country:
-            return f"{country}ের আইনসভার নাম কী?"
-        return "নিচের কোনটি একটি দেশের আইনসভার নাম?"
-    if qs in CAPITALS or caps_hit == best:
-        return "নিচের কোনটি একটি দেশের রাজধানীর নাম?"
-    if qs in CURRENCIES or curr_hit == best:
-        return "নিচের কোনটি একটি দেশের মুদ্রার নাম?"
-    return None
+
+    # Strong pattern match (all-but-one-or-better options recognized in one
+    # category) -> confident, specific rebuild.
+    if valid_opts and best >= max(len(valid_opts) - 1, 1):
+        if qs in LEGISLATURES or leg_hit == best:
+            country = LEGISLATURES.get(qs)
+            if country:
+                return f"{country}ের আইনসভার নাম কী?"
+            return "নিচের কোনটি একটি দেশের আইনসভার নাম?"
+        if qs in CAPITALS or caps_hit == best:
+            return "নিচের কোনটি একটি দেশের রাজধানীর নাম?"
+        if qs in CURRENCIES or curr_hit == best:
+            return "নিচের কোনটি একটি দেশের মুদ্রার নাম?"
+
+    # NO STRONG PATTERN MATCH -- still never drop the MCQ. Fall back to a
+    # safe, honest generic question phrased directly around the options
+    # themselves, so the MCQ ships complete rather than being skipped.
+    if valid_opts:
+        return f"নিচের কোনটি সঠিক উত্তর — {', '.join(valid_opts)}?"
+    # Even with no usable options, ship whatever fragment we have rather
+    # than silently dropping the MCQ.
+    return qs if qs else "প্রশ্নটি অস্পষ্ট ছিল — নিচের বিকল্পগুলো থেকে সঠিক উত্তরটি নির্বাচন করুন।"
 
 
 async def _qbm_final_safety_net(img, mcqs: list) -> list:
@@ -8611,12 +8613,7 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
         q = (mc.get("question") or "").strip()
         opts = mc.get("options", [])
         if _qbm_question_looks_truncated(q, opts):
-            rebuilt = _qbm_reconstruct_question_from_options(q, opts)
-            if rebuilt:
-                mc["question"] = rebuilt
-            else:
-                logger.warning(f"[QBM safety-net] Dropped unrecoverable truncated MCQ: {q[:60]}")
-                continue
+            mc["question"] = _qbm_reconstruct_question_from_options(q, opts)
         if not (mc.get("explanation") or "").strip():
             ans = mc.get("answer", "A")
             try:
