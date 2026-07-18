@@ -4502,33 +4502,23 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
 
             await asyncio.sleep(2.5)
 
-        # Style1 PDF (সব poll মিলিয়ে) — summary এর আগে, first pre-msg কে reply, auto-pin
+        # Style1 PDF (সব poll মিলিয়ে) — summary এর আগে, first pre-msg কে reply,
+        # auto-pin। Guaranteed: 3 বার retry না হওয়া পর্যন্ত PDF miss হবে না।
         if all_batch_mcqs:
-            try:
-                data_adapted = _adapt_mcqs_for_print(all_batch_mcqs)
-                html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
-                pdf_bytes = await _html_to_pdf(html_s)
-                pdf_bytes = await _apply_saved_watermark(pdf_bytes)
-                if pdf_bytes:
-                    safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
-                    doc_r = await send_document(
-                        channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
-                        caption=f"📖 Practice Sheet (Style 1)\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 ATLAS APP",
-                        message_thread_id=thread_id,
-                        reply_to_message_id=first_pre_msg_id
-                    )
-                    if doc_r and doc_r.get("ok"):
-                        doc_msg_id = doc_r.get("result", {}).get("message_id")
-                        if doc_msg_id:
-                            await try_pin_message(channel_id, doc_msg_id)
-                    await notify_owner(f"✅ Combined PDF পাঠানো হয়েছে — টপিক: {topic}")
-                else:
-                    logger.error(f"[CSV-PDF] Style1 generation empty for topic: {topic}")
-                    await send_msg(chat_id,
-                        f"⚠️ '{topic}' এর জন্য PDF তৈরি ব্যর্থ হয়েছে: {_last_pdf_error.get('msg', 'unknown error')}")
-            except Exception as e:
-                logger.error(f"[CSV-PDF] Error generating Style1 PDF: {e}")
-                await send_msg(chat_id, f"⚠️ '{topic}' এর PDF তৈরিতে সমস্যা হয়েছে: {e}")
+            pdf_bytes = await _generate_style1_pdf_guaranteed(all_batch_mcqs, topic, chat_id)
+            if pdf_bytes:
+                safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                doc_r = await send_document(
+                    channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
+                    caption=f"📖 Practice Sheet (Style 1)\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 ATLAS APP",
+                    message_thread_id=thread_id,
+                    reply_to_message_id=first_pre_msg_id
+                )
+                if doc_r and doc_r.get("ok"):
+                    doc_msg_id = doc_r.get("result", {}).get("message_id")
+                    if doc_msg_id:
+                        await try_pin_message(channel_id, doc_msg_id)
+                await notify_owner(f"✅ Combined PDF পাঠানো হয়েছে — টপিক: {topic}")
 
         # Master Summary (শুধু multiple batch হলে) — first pre-msg কে reply
         if total_batches > 1:
@@ -4573,32 +4563,22 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
         await notify_owner(f"✅ {sent}/{total} poll পাঠানো শেষ — টপিক: {topic}\n⏳ PDF বানানো শুরু হচ্ছে...")
 
         # Style1 PDF (সব poll মিলিয়ে) — pre-msg কে reply, auto-pin, polls শেষে
-        # end-msg-এর আগে পাঠানো হয়
-        try:
-            data_adapted = _adapt_mcqs_for_print(mcqs)
-            html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
-            pdf_bytes = await _html_to_pdf(html_s)
-            pdf_bytes = await _apply_saved_watermark(pdf_bytes)
-            if pdf_bytes:
-                safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
-                doc_r = await send_document(
-                    channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
-                    caption=f"📖 Practice Sheet (Style 1)\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 ATLAS APP",
-                    message_thread_id=thread_id,
-                    reply_to_message_id=pre_msg_id
-                )
-                if doc_r and doc_r.get("ok"):
-                    doc_msg_id = doc_r.get("result", {}).get("message_id")
-                    if doc_msg_id:
-                        await try_pin_message(channel_id, doc_msg_id)
-                await notify_owner(f"✅ PDF পাঠানো হয়েছে — টপিক: {topic}\n⏳ End message + button পাঠানো হচ্ছে...")
-            else:
-                logger.error(f"[CSV-PDF] Style1 generation empty for topic: {topic}")
-                await send_msg(chat_id,
-                    f"⚠️ '{topic}' এর জন্য PDF তৈরি ব্যর্থ হয়েছে: {_last_pdf_error.get('msg', 'unknown error')}")
-        except Exception as e:
-            logger.error(f"[CSV-PDF] Error generating Style1 PDF: {e}")
-            await send_msg(chat_id, f"⚠️ '{topic}' এর PDF তৈরিতে সমস্যা হয়েছে: {e}")
+        # end-msg-এর আগে পাঠানো হয়। Guaranteed: 3 বার retry না হওয়া পর্যন্ত
+        # PDF miss হবে না।
+        pdf_bytes = await _generate_style1_pdf_guaranteed(mcqs, topic, chat_id)
+        if pdf_bytes:
+            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+            doc_r = await send_document(
+                channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
+                caption=f"📖 Practice Sheet (Style 1)\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 ATLAS APP",
+                message_thread_id=thread_id,
+                reply_to_message_id=pre_msg_id
+            )
+            if doc_r and doc_r.get("ok"):
+                doc_msg_id = doc_r.get("result", {}).get("message_id")
+                if doc_msg_id:
+                    await try_pin_message(channel_id, doc_msg_id)
+            await notify_owner(f"✅ PDF পাঠানো হয়েছে — টপিক: {topic}\n⏳ End message + button পাঠানো হচ্ছে...")
 
         # End-msg (topic + mcq count + first poll link + 4 button) — PDF-এর পরে,
         # সবার শেষে। Channel-এ score-ask সহ, group-এ score-ask ছাড়া।
@@ -4980,6 +4960,31 @@ async def _get_pw_browser():
                 args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
             )
         return _PW_BROWSER["browser"]
+
+async def _generate_style1_pdf_guaranteed(mcqs: list, topic: str, chat_id: int, max_attempts: int = 3):
+    """Wraps _html_to_pdf + watermark with retries so PDF generation is
+    guaranteed to succeed unless every attempt genuinely fails — poll
+    sending must never be followed by a silently-skipped PDF. Returns
+    the final pdf_bytes (or None only after all attempts exhausted,
+    with the error already reported to chat_id)."""
+    data_adapted = _adapt_mcqs_for_print(mcqs)
+    html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            pdf_bytes = await _html_to_pdf(html_s)
+            if pdf_bytes:
+                pdf_bytes = await _apply_saved_watermark(pdf_bytes)
+                return pdf_bytes
+            last_err = _last_pdf_error.get("msg", "unknown error")
+        except Exception as e:
+            last_err = str(e)
+        logger.warning(f"[CSV-PDF] Attempt {attempt}/{max_attempts} failed for '{topic}': {last_err}")
+        if attempt < max_attempts:
+            await asyncio.sleep(1.5 * attempt)
+    await send_msg(chat_id,
+        f"⚠️ '{topic}' এর PDF তৈরি {max_attempts} বার চেষ্টা করেও ব্যর্থ হয়েছে: {last_err}")
+    return None
 
 async def _apply_saved_watermark(pdf_bytes: bytes) -> bytes:
     """Stamps the /wm-saved watermark onto any generated PDF before sending.
