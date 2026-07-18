@@ -2874,7 +2874,7 @@ async def handle_livetime(msg: dict):
 # ============================================================
 # FEATURE: /poll — Poll Extract (see poll_extract.py)
 # ============================================================
-from poll_extract import handle_poll_extract
+from poll_extract import handle_poll_extract, handle_ok_command
 
 
 # ============================================================
@@ -11489,6 +11489,12 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         _spawn_command_task(uid, handle_poll_extract(msg))
+
+    elif text.startswith("/ok") and "\n" in text and "t.me/" in text:
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        _spawn_command_task(uid, handle_ok_command(msg))
 
     elif text.startswith("/poll") and "\n" in text and "t.me/" in text:
         if not is_auth:
