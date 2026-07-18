@@ -11208,23 +11208,10 @@ async def handle_message(msg: dict):
             today_start = datetime.now(bd_tz).replace(hour=0, minute=0, second=0, microsecond=0)
             today_start_ts = int(today_start.timestamp())
 
-            total_users = 0
-            daily_active = 0
             key_count = len(key_rotator.keys)
             import os as _os, httpx as _hx
             _platform = _os.environ.get("RUNNING_ON", "") or "HuggingFace Space"
             _wh_short = "❓ Check failed"
-
-            async def _get_user_counts():
-                nonlocal total_users, daily_active
-                try:
-                    total_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact").execute())
-                    total_users = total_r.count or 0
-                    active_r = await sb_exec(lambda: sb.table("pdf_users").select("user_id", count="exact")
-                        .gte("last_seen", today_start_ts).execute())
-                    daily_active = active_r.count or 0
-                except Exception as e:
-                    logger.error(f"[Ping] user count error: {e}")
 
             async def _get_webhook_status():
                 nonlocal _wh_short
@@ -11262,10 +11249,7 @@ async def handle_message(msg: dict):
             # delay the final edit beyond that -- whichever field didn't
             # finish in time just falls back to its default placeholder.
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(_get_user_counts(), _get_webhook_status()),
-                    timeout=5
-                )
+                await asyncio.wait_for(_get_webhook_status(), timeout=4)
             except asyncio.TimeoutError:
                 pass
 
@@ -11277,9 +11261,7 @@ async def handle_message(msg: dict):
                 f"🔗 <b>Webhook:</b> {_wh_short}\n"
                 f"🕐 চালু হয়েছে: {started_at}\n"
                 f"⏱ Active আছে: {uptime_str}\n"
-                f"🔑 Gemini Keys: {key_count}\n"
-                f"👥 Total Users: {total_users}\n"
-                f"🟢 আজকে Active: {daily_active}"
+                f"🔑 Gemini Keys: {key_count}"
             )
             if _msg_id:
                 await edit_msg(chat_id, _msg_id, final_text, parse_mode="HTML")
