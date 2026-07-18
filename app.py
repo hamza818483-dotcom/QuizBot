@@ -3890,7 +3890,9 @@ async def handle_csv_command(msg: dict):
         # প্ল্যাটফর্মে MTProto connection block/slow হলে client.start() বা
         # get_messages() নিঃশব্দে অনেকক্ষণ আটকে থাকতে পারে (কোনো দ্রুত
         # timeout নেই) — সেই hang এড়াতে সরাসরি দ্রুত getFile পথে যাওয়া হচ্ছে।
+        _t0 = time.time()
         csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress)
+        logger.info(f"[csv-timing] uid={uid} download done in {time.time()-_t0:.2f}s")
         # Download can finish faster than the loading message send (small
         # CSVs are near-instant now) — in that case every _dl_progress call
         # above silently no-op'd since loading_id_box["id"] was still None,
@@ -3902,7 +3904,9 @@ async def handle_csv_command(msg: dict):
         loading_id = loading_id_box["id"]
         if loading_id:
             await edit_msg(chat_id, loading_id, f"📄 {csv_fname}\n✅ Download complete!\n⏳ CSV parse হচ্ছে...")
+        _t1 = time.time()
         mcqs = _parse_csv_bytes(csv_bytes)
+        logger.info(f"[csv-timing] uid={uid} parse done in {time.time()-_t1:.2f}s, {len(mcqs)} mcqs")
 
         if not mcqs:
             await send_msg(chat_id, "❌ CSV-এ কোনো valid MCQ পাওয়া যায়নি!")
