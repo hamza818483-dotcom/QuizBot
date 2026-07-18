@@ -1,0 +1,62 @@
+name: Webhook Healer (10min)
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check_and_heal:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check webhook status
+        id: check
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          if [ -z "$BOT_TOKEN" ]; then
+            echo "::error::BOT_TOKEN secret missing"
+            exit 0
+          fi
+          RESP=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo")
+          echo "Response: $RESP"
+          CURRENT_URL=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('result',{}).get('url',''))" 2>/dev/null || echo "")
+          PENDING=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('result',{}).get('pending_update_count',0))" 2>/dev/null || echo "0")
+          echo "current_url=$CURRENT_URL" >> $GITHUB_OUTPUT
+          echo "pending=$PENDING" >> $GITHUB_OUTPUT
+          if [ -z "$CURRENT_URL" ]; then
+            echo "needs_heal=true" >> $GITHUB_OUTPUT
+          else
+            echo "needs_heal=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Re-set webhook if empty/broken
+        if: ${{ steps.check.outputs.needs_heal == 'true' }}
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          URL="${HF_SPACE_URL:-https://hamza-02-quizbot.hf.space}"
+          echo "Re-setting webhook to ${URL}/webhook"
+          RESP=$(curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
+            -d "url=${URL}/webhook" \
+            -d "secret_token=${WEBHOOK_SECRET}" \
+            -d "max_connections=40" \
+            -d "allowed_updates=[\"message\",\"callback_query\",\"poll_answer\",\"poll\"]")
+          echo "setWebhook response: $RESP"
+          OK=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('ok', False))" 2>/dev/null || echo "False")
+          if [ "$OK" != "True" ]; then
+            echo "::error::setWebhook failed: $RESP"
+          fi
+
+      - name: Alert owner if webhook was broken
+        if: ${{ steps.check.outputs.needs_heal == 'true' }}
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+        run: |
+          if [ -z "$OWNER_ID" ] || [ -z "$BOT_TOKEN" ]; then exit 0; fi
+          MSG="⚠️ Webhook Healer (GitHub Actions): webhook ছিল খালি/ভাঙা — auto re-set করা হয়েছে।"
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${OWNER_ID}" -d "text=${MSG}" || true
