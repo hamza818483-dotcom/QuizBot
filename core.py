@@ -901,15 +901,15 @@ async def download_tg_file(file_id: str, progress_cb=None,
     async def _stream_download(url: str) -> bytes:
         # In-memory buffer — ছোট/মাঝারি ফাইলে (bot download সাধারণত <50MB)
         # disk write/read এর extra I/O latency বাদ দিলে ভালো speed পাওয়া যায়।
-        # 25s explicit timeout — আগে shared client-এর 300s default inherit
+        # 10s explicit timeout — আগে shared client-এর 300s default inherit
         # হতো, তাই CF Worker/Telegram ওপাশে hang করলে "0%-এ আটকে থাকা" screen
         # কয়েক মিনিট পর্যন্ত silently চলতে পারতো কোনো error/fallback ছাড়াই।
-        # CSV ছোট ফাইল, 25s এর বেশি লাগলে সেটা আসলেই একটা failure — দ্রুত
+        # CSV ছোট ফাইল, 10s এর বেশি লাগলে সেটা আসলেই একটা failure — দ্রুত
         # fail করে caller-কে জানানো ভালো, চুপচাপ hang হওয়ার চেয়ে।
         downloaded = 0
         buf = io.BytesIO()
         client = await _get_shared_http_client()
-        async with client.stream("GET", url, timeout=25) as r:
+        async with client.stream("GET", url, timeout=10) as r:
             if r.status_code != 200:
                 raise Exception(f"HTTP {r.status_code}")
             async for chunk in r.aiter_bytes(chunk_size=1048576):  # 1MB chunks
