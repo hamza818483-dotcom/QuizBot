@@ -80,11 +80,7 @@ async def _delete_item_recursive(item_id: int):
 
 
 def _item_row_buttons(item_id: int, name: str) -> list:
-    return [
-        {"text": f"📁 {name}", "callback_data": f"mnuopen_{item_id}"},
-        {"text": "➕", "callback_data": f"mnuadd_{item_id}"},
-        {"text": "🗑", "callback_data": f"mnudelask_{item_id}"},
-    ]
+    return [{"text": f"📁 {name}", "callback_data": f"mnuopen_{item_id}"}]
 
 
 async def _render_listing(parent_id: int) -> tuple:
@@ -98,8 +94,12 @@ async def _render_listing(parent_id: int) -> tuple:
         back_target = None
 
     children = await _get_children(parent_id)
-    buttons = [_item_row_buttons(ch["id"], ch["name"]) for ch in children]
-    buttons.append([{"text": "➕ Add more (এখানে)", "callback_data": f"mnuadd_{parent_id}"}])
+    flat = [{"text": f"📁 {ch['name']}", "callback_data": f"mnuopen_{ch['id']}"} for ch in children]
+    buttons = [flat[i:i + 3] for i in range(0, len(flat), 3)]
+    action_row = [{"text": "➕ Add", "callback_data": f"mnuadd_{parent_id}"}]
+    if children:
+        action_row.append({"text": "🗑 Delete", "callback_data": f"mnudelpick_{parent_id}"})
+    buttons.append(action_row)
     if back_target:
         buttons.append([{"text": "🔙 Back", "callback_data": back_target}])
     return title, {"inline_keyboard": buttons}
@@ -143,6 +143,21 @@ async def handle_menu_callback(query: dict) -> bool:
         await tg_post("editMessageText", {
             "chat_id": chat_id, "message_id": msg_id,
             "text": "✏️ নতুন item-এর নাম লিখে পাঠাও।\n📎 অথবা CSV ফাইল পাঠাও (নাম হিসেবে ফাইলের নাম ব্যবহার হবে)।",
+        })
+        return True
+
+    if data.startswith("mnudelpick_"):
+        parent_id = int(data[len("mnudelpick_"):])
+        children = await _get_children(parent_id)
+        if not children:
+            return True
+        flat = [{"text": f"🗑 {ch['name']}", "callback_data": f"mnudelask_{ch['id']}"} for ch in children]
+        buttons = [flat[i:i + 2] for i in range(0, len(flat), 2)]
+        back_target = f"mnuopen_{parent_id}" if parent_id else "mnuroot"
+        buttons.append([{"text": "🔙 Back", "callback_data": back_target}])
+        await tg_post("editMessageText", {
+            "chat_id": chat_id, "message_id": msg_id,
+            "text": "🗑 কোনটা Delete করবে?", "reply_markup": {"inline_keyboard": buttons},
         })
         return True
 
