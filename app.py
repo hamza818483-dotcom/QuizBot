@@ -4296,8 +4296,10 @@ async def _send_csv_polls_to_channel(
             _spawn_task(edit_msg(chat_id, loading_id,
                 f"📤 poll পাঠানো হচ্ছে... {sent}/{total}"))
 
-        await asyncio.sleep(0.25)  # Rate limit — matches main /pdf poll loop;
-        # existing 3x retry-with-backoff above already absorbs any 429s
+        # Telegram allows roughly 1 message/sec to the same chat — 0.25s (4x
+        # too fast) was triggering real 429s that looked identical to proxy
+        # failures in logs, both surfacing as "giving up" after retries.
+        await asyncio.sleep(1.1)
 
     return sent, first_poll_link
 
@@ -6489,7 +6491,9 @@ async def _process_pdf_pages_inner(
                             first_poll_link = f"https://t.me/{str(channel_id).lstrip('@')}/{msg_id}"
                         poll_links.append(first_poll_link)
                     total_polls += 1
-                    await asyncio.sleep(0.25)
+                    # Telegram allows ~1 message/sec to the same chat —
+                    # 0.25s was too fast, causing real 429s.
+                    await asyncio.sleep(1.1)
                   except Exception as _mcq_e:
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
