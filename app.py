@@ -4299,10 +4299,11 @@ async def _send_csv_polls_to_channel(
                 await asyncio.sleep(1)
 
         if loading_id:
-            await edit_msg(chat_id, loading_id,
-                f"📤 poll পাঠানো হচ্ছে... {sent}/{total}")
+            _spawn_task(edit_msg(chat_id, loading_id,
+                f"📤 poll পাঠানো হচ্ছে... {sent}/{total}"))
 
-        await asyncio.sleep(1.5)  # Rate limit
+        await asyncio.sleep(0.25)  # Rate limit — matches main /pdf poll loop;
+        # existing 3x retry-with-backoff above already absorbs any 429s
 
     return sent, first_poll_link
 
