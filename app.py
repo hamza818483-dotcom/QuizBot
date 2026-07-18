@@ -9361,11 +9361,17 @@ async def handle_incoming_image_for_collection(msg: dict):
 # ============================================================
 def _poll_end_kb(cache_id: str, cache: dict) -> dict:
     exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+    has_image = bool(cache.get("image_file_id"))
+    row1 = [{"text": "🔄 Same Quiz", "callback_data": f"qsame_{cache_id}"}]
+    row2 = [{"text": "🔄 Same Poll", "callback_data": f"pollagain_{cache_id}"}]
+    # New Quiz/New Poll re-generate fresh MCQs from the original source image
+    # via AI — CSV/csvS-origin caches have no image_file_id (no image source
+    # to regenerate from), so these buttons must not appear for them.
+    if has_image:
+        row1.append({"text": "🆕 New Quiz", "callback_data": f"qnew_{cache_id}"})
+        row2.append({"text": "🆕 New Poll", "callback_data": f"pollnew_{cache_id}"})
     kb = {"inline_keyboard": [
-        [{"text": "🔄 Same Quiz", "callback_data": f"qsame_{cache_id}"},
-         {"text": "🆕 New Quiz", "callback_data": f"qnew_{cache_id}"}],
-        [{"text": "🔄 Same Poll", "callback_data": f"pollagain_{cache_id}"},
-         {"text": "🆕 New Poll", "callback_data": f"pollnew_{cache_id}"}],
+        row1, row2,
         [{"text": "🌐 Website Exam", "url": exam_url}]
     ]}
     back_url = build_back_url(cache.get("channel_id", ""), source_msg_id(cache))
