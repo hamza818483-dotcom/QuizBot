@@ -784,7 +784,7 @@ async def _get_pyro_client():
         client = Client(
             "atlas_pyrogram", api_id=int(TELEGRAM_API_ID),
             api_hash=TELEGRAM_API_HASH, bot_token=BOT_TOKEN, no_updates=True,
-            in_memory=True,
+            in_memory=True, max_concurrent_transmissions=8,
         )
         try:
             await client.start()
