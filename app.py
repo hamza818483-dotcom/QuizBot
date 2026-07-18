@@ -7839,6 +7839,22 @@ QBM_EXTRACT_PROMPT_DEFAULT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SP
 ✅ If any obvious spelling mistake is seen, correct it — but do not alter meaning
 
 ════════════════════════════════
+🔴 FULL QUESTION/OPTION COMPLETENESS CHECK (MANDATORY, ZERO-TOLERANCE)
+════════════════════════════════
+- NEVER output a partial/truncated question or option — a common failure mode is capturing
+  only the tail of a word (e.g. source says "ফোকেটিং(Folketing) কোন দেশের আইনসভা?" but output
+  wrongly captures only "ফোককেটিং"). This is STRICTLY FORBIDDEN.
+- Before finalizing each MCQ, re-read the FULL question line end-to-end (including any
+  parenthetical English/transliteration term) and every option, character by character,
+  and confirm nothing from the start, middle, or end of the text was dropped or cut off.
+- If any word/name is genuinely hard to read (blurry, low-res, cut by image edge, unclear
+  handwriting) → do NOT leave it partial or skip it. Use every available clue (surrounding
+  context, partial visible letters, the parenthetical English term if present, general
+  knowledge of the topic) to determine and output the single BEST, most likely complete
+  and correct word — never a guessed-wrong or truncated fragment, never leave a gap.
+- Apply this same full-completeness check to options and to any answer-key text as well.
+
+════════════════════════════════
 🎯 ANSWER DETECTION (ALL FORMATS) — triple-check before finalizing
 ════════════════════════════════
 The correct answer MUST come from an actual source found in the page/image content.
@@ -7957,6 +7973,14 @@ mandatory copy — never a rewritten or condensed version. Only if this case doe
 - This priority order (1 → 2 → 3) is permanent and always active — never skip a step or
   reorder it, on every single MCQ, every time. Case 1 (verbatim source copy) is checked FIRST
   for every MCQ, before considering generating any explanation yourself.
+
+🔴 ALL-4-OPTIONS COVERAGE RULE (STRICT):
+- The explanation must relate to ALL FOUR options, not just the correct one — briefly note
+  why each of the 3 wrong options is incorrect/irrelevant, alongside why the correct one is right.
+- Case 1 exception: if the page's own verbatim explanation only covers the correct option, still
+  copy it exactly as-is (never edit source text) — do NOT add extra option-coverage text on top.
+- Case 2/3 (page has no dedicated explanation, or nothing relevant at all): you MUST build/write
+  the explanation yourself so it clearly touches on all 4 options within the 165-character limit.
 
 ════════════════════════════════
 🧮 MATH / CHEMISTRY FORMATTING (MANDATORY, ALWAYS ACTIVE — question, options, AND explanation)
