@@ -192,10 +192,29 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                     f"PDF_RANGE_TOO_LARGE:{first}:{last}:{_PDF_MAX_PAGES_PER_CALL}"
                 )
             result = []
+            missing_pages = []
             for p in range(first, last + 1):
-                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
+                imgs = None
+                # PERMANENT FIX: a page must never be silently dropped just
+                # because a single convert_from_bytes call returned empty
+                # (transient poppler hiccup, momentary resource blip, etc).
+                # Retry up to 3 times with backoff before giving up on it.
+                for _attempt in range(3):
+                    try:
+                        imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
+                        if imgs:
+                            break
+                    except Exception as _conv_e:
+                        logger.warning(f"[PDF] Page {p} convert attempt {_attempt+1} raised: {_conv_e}")
+                    if _attempt < 2:
+                        time.sleep(1)
                 if imgs:
                     result.append((p, imgs[0]))
+                else:
+                    missing_pages.append(p)
+                    logger.error(f"[PDF] Page {p} FAILED to convert after 3 attempts — page will be missing from output.")
+            if missing_pages:
+                logger.error(f"[PDF] Conversion produced 0 image for pages: {missing_pages} (out of range {first}-{last})")
             logger.info(f"[PDF] Converted {len(result)} pages")
             return result
         else:
