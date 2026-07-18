@@ -8461,6 +8461,53 @@ async def _qbm_gemini_extract(img, prompt: str = None) -> list:
     return _qbm_parse_json(txt) if txt else []
 
 
+async def _qbm_web_resolve_answer(mc: dict) -> str | None:
+    """
+    LAST-RESORT answer resolution via real Google Search grounding (Gemini
+    google_search tool) -- used ONLY when the answer could not be found
+    anywhere in the page/PDF (no mark, no inline answer, no answer-key table,
+    no nearby-page lookahead match). Returns the correct option letter
+    (A/B/C/D) or None if the web search itself is inconclusive.
+    """
+    try:
+        from google import genai as gai
+        from google.genai import types
+        from pdf_handler import key_rotator
+        if not key_rotator.keys:
+            return None
+        key = key_rotator.get_key()
+        client = gai.Client(api_key=key)
+
+        q = mc.get("question", "")
+        opts = mc.get("options", [])
+        opts_txt = "\n".join(f"{L}) {o}" for L, o in zip("ABCD", opts))
+        prompt = f"""This MCQ's answer could not be found anywhere in its source document.
+Use Google Search to find the factually correct answer.
+
+প্রশ্ন: {q}
+{opts_txt}
+
+Search the web (Wikipedia and other reliable sources) for the correct, up-to-date factual
+answer. Reply with ONLY the single correct option letter: A, B, C, or D. No other text."""
+
+        def _call():
+            return client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[types.Part.from_text(text=prompt)],
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    tools=[types.Tool(google_search=types.GoogleSearch())]
+                )
+            )
+        response = await asyncio.to_thread(_call)
+        txt = (response.text or "").strip().upper()
+        m = re.search(r'[ABCD]', txt)
+        return m.group() if m else None
+    except Exception as e:
+        logger.warning(f"[QBM] Web answer-resolve failed: {e}")
+        return None
+
+
 async def handle_qbm(msg: dict):
     """
     /qbm -p (pages) -c (channel) -m (topic) -t (thread_id)
@@ -8821,6 +8868,18 @@ async def qbm_extract_all_pages(
                                     f"Answer key p.{fmt_page(pages[idx + lookahead_offset][0])} থেকে matched"
                                 )
                         unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
+
+            # Still unresolved after scanning nearby pages -> last-resort real
+            # web search (Google Search grounding via Gemini), never a blind guess.
+            if unresolved:
+                for m in unresolved:
+                    web_ans = await _qbm_web_resolve_answer(m)
+                    if web_ans:
+                        m["answer"] = web_ans
+                        m["explanation"] = (m.get("explanation") or "").replace(
+                            "Answer not found in source",
+                            "উত্তর ওয়েব সার্চ থেকে যাচাই করা হয়েছে"
+                        )
         except Exception as e:
             logger.error(f"[QBM Extract] Page {page_num} error: {e}")
 
@@ -8955,6 +9014,15 @@ async def process_qbm_pages(
                                         f"Answer key p.{fmt_page(display_pages[idx + lookahead_offset][0])} থেকে matched"
                                     )
                             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
+                if unresolved:
+                    for m in unresolved:
+                        web_ans = await _qbm_web_resolve_answer(m)
+                        if web_ans:
+                            m["answer"] = web_ans
+                            m["explanation"] = (m.get("explanation") or "").replace(
+                                "Answer not found in source",
+                                "উত্তর ওয়েব সার্চ থেকে যাচাই করা হয়েছে"
+                            )
 
             img_bytes = image_to_bytes(img) if not isinstance(img, (bytes, bytearray)) else img
 
