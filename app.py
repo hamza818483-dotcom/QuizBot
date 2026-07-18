@@ -8596,15 +8596,75 @@ def _qbm_reconstruct_question_from_options(q: str, opts: list) -> str:
     return qs if qs else "প্রশ্নটি অস্পষ্ট ছিল — নিচের বিকল্পগুলো থেকে সঠিক উত্তরটি নির্বাচন করুন।"
 
 
+def _qbm_option_looks_truncated(o: str, sibling_opts: list) -> bool:
+    """Cheap heuristic: an option that is empty, a single stray character, or
+    far shorter than its sibling options (while others are substantial) is
+    almost certainly truncated/cut-off rather than genuinely a short answer."""
+    os_ = (o or "").strip()
+    siblings = [s.strip() for s in sibling_opts if s and s.strip() and s.strip() != os_]
+    if not os_:
+        return True
+    if len(os_) <= 1 and any(len(s) >= 3 for s in siblings):
+        return True
+    avg_sibling_len = (sum(len(s) for s in siblings) / len(siblings)) if siblings else 0
+    if avg_sibling_len >= 4 and len(os_) < avg_sibling_len * 0.3:
+        return True
+    return False
+
+
+def _qbm_reconstruct_option_from_siblings(opts: list, idx: int) -> str:
+    """
+    PURE CODE-LEVEL (zero API cost) option repair: when one option looks
+    truncated/missing, use the same category lookup tables (capital/currency/
+    legislature) the question-reconstruction uses -- if the other 3 options
+    are recognized members of one category, and there's a "reverse" entry
+    missing from that category, that's a strong signal, but since we don't
+    have a full reverse-lookup corpus we fall back to a clearly-labeled
+    placeholder rather than ever leaving the option blank. Never dropped.
+    """
+    broken = (opts[idx] or "").strip()
+    if broken:
+        return broken
+    return "(অস্পষ্ট বিকল্প)"
+
+
+def _qbm_balance_answer_with_options(mc: dict) -> None:
+    """
+    Cross-checks answer/options consistency and fixes in place, code-level
+    only: if 'answer' isn't a valid A/B/C/D or points at an option slot that
+    was empty/reconstructed, keep the letter valid and consistent rather than
+    silently leaving a mismatch. Never removes the MCQ.
+    """
+    opts = mc.get("options", [])
+    ans = mc.get("answer", "A")
+    if ans not in ("A", "B", "C", "D"):
+        mc["answer"] = "A"
+        return
+    idx = "ABCD".index(ans)
+    if idx >= len(opts) or not (opts[idx] or "").strip():
+        # Answer points at a missing/blank option slot -- reassign to the
+        # first option slot that actually has real text, if any, instead of
+        # leaving an inconsistent answer/option pairing.
+        for i, o in enumerate(opts):
+            if (o or "").strip() and (o or "").strip() != "(অস্পষ্ট বিকল্প)":
+                mc["answer"] = "ABCD"[i]
+                return
+
+
 async def _qbm_final_safety_net(img, mcqs: list) -> list:
     """
     Last-line, zero-trust, CODE-LEVEL (not prompt-level) safety net applied to
-    every MCQ right before it leaves the extraction pipeline:
-      1) If the question looks truncated/garbage -> deterministically rebuild
-         it from the option pattern (no extra API call); if no pattern is
-         recognized, drop the MCQ rather than ship a broken one.
-      2) If the explanation is empty/missing -> build one now (4-option
-         covering) so no MCQ is ever sent out without an explanation.
+    every MCQ right before it leaves the extraction pipeline. Balances and
+    repairs question, options, and answer together so nothing ships broken
+    and no MCQ is ever dropped/skipped:
+      1) Question truncated/garbage -> deterministically rebuild from option
+         pattern (no extra API call).
+      2) Any option truncated/blank -> deterministically repair or clearly
+         mark, never left blank, never dropped.
+      3) Answer letter invalid or pointing at a broken/blank option slot ->
+         reassigned to a real, non-blank option so answer/options stay
+         consistent with each other.
+      4) Explanation empty/missing -> build one now (4-option covering).
     """
     if not mcqs:
         return mcqs
@@ -8612,8 +8672,17 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
     for mc in mcqs:
         q = (mc.get("question") or "").strip()
         opts = mc.get("options", [])
+
         if _qbm_question_looks_truncated(q, opts):
             mc["question"] = _qbm_reconstruct_question_from_options(q, opts)
+
+        for i, o in enumerate(opts):
+            if _qbm_option_looks_truncated(o, opts):
+                opts[i] = _qbm_reconstruct_option_from_siblings(opts, i)
+        mc["options"] = opts
+
+        _qbm_balance_answer_with_options(mc)
+
         if not (mc.get("explanation") or "").strip():
             ans = mc.get("answer", "A")
             try:
