@@ -4153,10 +4153,20 @@ def _strip_opt_prefix(opt: str) -> str:
     return re.sub(pattern, '', opt).strip()
 
 def _strip_q_source_tag(q: str) -> str:
-    """Question এর শেষে [source] জাতীয় ট্যাগ সরায় (যেমন [ATLAS], [৩৫তম BCS])।"""
+    """Question এর শেষে [source] জাতীয় ট্যাগ সরায় (যেমন [ATLAS], [৩৫তম BCS])।
+    Closed এবং unclosed (ভাঙা/truncated) bracket দুটোই কভার করে।"""
     if not q:
         return q
-    return re.sub(r'\s*\[[^\[\]]{1,60}\]\s*$', '', q.strip()).strip()
+    q = q.strip()
+    closed_pattern = r'\s*\[[^\[\]]*\]\s*$'
+    unclosed_pattern = r'\s*\[[^\[\]]*$'
+    prev = None
+    cur = q
+    while prev != cur:
+        prev = cur
+        cur = re.sub(closed_pattern, '', cur).strip()
+    cur = re.sub(unclosed_pattern, '', cur).strip()
+    return cur
 
 def _clean_mcqs(mcqs: list) -> list:
     """Numbering, option-prefix marker, question-end source tag — সব সরিয়ে দেয়।"""
