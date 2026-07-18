@@ -4573,7 +4573,37 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
         first_pre_msg_id = None
         all_batch_mcqs = []
 
+        # Batch-level resume — প্রতিটা batch (pre-msg + polls + button + end-msg)
+        # atomic unit হিসেবে ধরা হয়েছে। sent_index এখানে "কয়টা batch পুরোপুরি
+        # শেষ হয়েছে" বোঝায় (poll-count না) — restart হলে সম্পূর্ণ হওয়া batch
+        # গুলো আবার পাঠানো হবে না, শুধু বাকি batch থেকে চলবে।
+        job_id = f"csvs_{cache_id}"
+        _existing = await d1_select(
+            "SELECT sent_index, status FROM csv_poll_jobs WHERE job_id=?1", [job_id]
+        )
+        resume_from_batch = 0
+        if _existing and _existing[0].get("status") == "running":
+            resume_from_batch = _existing[0].get("sent_index") or 0
+            if resume_from_batch > 0:
+                logger.info(f"[CSVS] Resuming job {job_id} from batch {resume_from_batch+1}/{total_batches}")
+                if loading_id:
+                    await edit_msg(chat_id, loading_id,
+                        f"📄 {csv_fname}\n🔄 আগের অসম্পূর্ণ কাজ resume হচ্ছে (batch {resume_from_batch+1}/{total_batches} থেকে)...")
+        else:
+            await db_save_csv_job(
+                job_id, cache_id=cache_id, channel_id=channel_id, chat_id=chat_id, uid=uid,
+                mode="csvs", batch_size=batch_size, topic=topic, csv_fname=csv_fname,
+                thread_id=thread_id or 0, loading_id=loading_id or 0,
+                sent_index=0, total=total_batches, first_poll_link="", status="running"
+            )
+
         for b_idx, batch in enumerate(batches, 1):
+            if b_idx <= resume_from_batch:
+                # আগের run-এ ইতিমধ্যে সম্পূর্ণ হয়ে গেছে এই batch — skip, তবে
+                # PDF/summary এর জন্য mcq list-এ যোগ করতে হবে (সংখ্যা ঠিক রাখতে)।
+                all_batch_mcqs.extend(batch)
+                continue
+
             batch_topic = f"{topic} (Part-{b_idx:02d})"
 
             # প্রতিটা batch-এর জন্য আগেই cache — বাটন লিংকের জন্য দরকার
@@ -4640,6 +4670,10 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
 
             batch_links.append((b_idx, first_link, len(batch)))
 
+            # এই batch সম্পূর্ণ (pre+polls+button+end-msg সব পাঠানো শেষ) —
+            # progress D1-এ save, restart হলে এই batch আর resend হবে না।
+            await db_update_csv_job_progress(job_id, b_idx)
+
             if loading_id:
                 await edit_msg(chat_id, loading_id,
                     f"⏳ Batch {b_idx}/{total_batches} done — {sent} polls sent")
@@ -4686,6 +4720,8 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
         if loading_id:
             await edit_msg(chat_id, loading_id,
                 f"📄 {csv_fname}\n🏁 CSV batch job সম্পূর্ণ! {total} MCQ → {total_batches} batch, সব poll+PDF+end message পাঠানো হয়েছে।")
+
+        await db_finish_csv_job(job_id)
 
     else:
         # Normal /csv mode — single batch
