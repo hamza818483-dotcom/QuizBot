@@ -4796,7 +4796,23 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
 
             await page.goto(f"file://{os.path.abspath(temp_path)}", wait_until="networkidle")
             await page.evaluate("document.fonts.ready")
-            await asyncio.sleep(1.5)
+            # আগে blind 1.5s wait ছিল "just in case" রেন্ডার সম্পূর্ণ হওয়ার জন্য —
+            # তার বদলে সরাসরি সব <img> element load হয়েছে কিনা targeted check করা
+            # হচ্ছে (দ্রুত হলে আগেই এগোবে, ধীর হলে যথেষ্ট অপেক্ষা করবে — blind
+            # fixed-delay এর চেয়ে দ্রুত + নির্ভরযোগ্য দুটোই)
+            try:
+                await page.evaluate("""
+                    () => Promise.all(
+                        Array.from(document.images)
+                            .filter(img => !img.complete)
+                            .map(img => new Promise(res => {
+                                img.onload = img.onerror = res;
+                            }))
+                    )
+                """)
+            except Exception:
+                pass
+            await asyncio.sleep(0.4)  # ছোট safety margin, layout settle-এর জন্য
             if progress_cb:
                 await progress_cb(70)
 
