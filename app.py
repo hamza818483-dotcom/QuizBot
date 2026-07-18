@@ -7867,20 +7867,33 @@ QBM_EXTRACT_PROMPT_DEFAULT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SP
 ✅ If any obvious spelling mistake is seen, correct it — but do not alter meaning
 
 ════════════════════════════════
-🔴 FULL QUESTION/OPTION COMPLETENESS CHECK (MANDATORY, ZERO-TOLERANCE)
+🔴 FULL QUESTION/OPTION COMPLETENESS CHECK (MANDATORY, ZERO-TOLERANCE, HIGHEST PRIORITY)
 ════════════════════════════════
-- NEVER output a partial/truncated question or option — a common failure mode is capturing
-  only the tail of a word (e.g. source says "ফোকেটিং(Folketing) কোন দেশের আইনসভা?" but output
-  wrongly captures only "ফোককেটিং"). This is STRICTLY FORBIDDEN.
-- Before finalizing each MCQ, re-read the FULL question line end-to-end (including any
-  parenthetical English/transliteration term) and every option, character by character,
-  and confirm nothing from the start, middle, or end of the text was dropped or cut off.
+- NEVER output a partial/truncated/cut-off question or option — a common and SEVERE failure
+  mode is capturing only a fragment of a word or dropping the rest of the question (e.g.
+  source says "ফোকেটিং(Folketing) কোন দেশের আইনসভা?" but output wrongly captures only
+  "ফোককেটিং" — missing the parenthetical term AND the entire rest of the question, AND
+  misspelling the word itself). This exact failure mode is STRICTLY, ABSOLUTELY FORBIDDEN.
+- MANDATORY PROCEDURE for every single MCQ before finalizing:
+  1) Read the ENTIRE question line from the very first character to the final punctuation
+     mark (usually ? or ।) — including any parenthetical English/transliteration term,
+     any number, and any trailing clause. A question is NEVER complete until it ends in
+     proper terminal punctuation or a clearly finished clause.
+  2) Compare word-count/segment-count of your extracted question against what the source
+     line clearly shows. If your output has fewer words/segments, you have TRUNCATED — go
+     back and re-read the full line before outputting anything.
+  3) Do the same full end-to-end read for all 4 options and for any answer-key text.
+- Spelling accuracy is part of completeness: re-check every word character-by-character
+  against the source. A misspelled word (extra/missing/wrong letter) is just as much a
+  failure as a truncated word — both must be corrected before output.
 - If any word/name is genuinely hard to read (blurry, low-res, cut by image edge, unclear
-  handwriting) → do NOT leave it partial or skip it. Use every available clue (surrounding
-  context, partial visible letters, the parenthetical English term if present, general
-  knowledge of the topic) to determine and output the single BEST, most likely complete
-  and correct word — never a guessed-wrong or truncated fragment, never leave a gap.
-- Apply this same full-completeness check to options and to any answer-key text as well.
+  handwriting) → do NOT leave it partial, blank, or skip it. Use every available clue
+  (surrounding context, partial visible letters, the parenthetical English term if present,
+  general knowledge of the topic) to independently reason out and output the single BEST,
+  most likely complete and CORRECTLY-SPELLED word — never a guessed-wrong fragment, never
+  a truncated piece, never a gap.
+- This completeness+spelling check applies with equal strictness to the question, all 4
+  options, and any explanation/answer-key text — no exceptions, on every MCQ, every time.
 
 ════════════════════════════════
 🎯 ANSWER DETECTION (ALL FORMATS) — triple-check before finalizing
@@ -8002,13 +8015,18 @@ mandatory copy — never a rewritten or condensed version. Only if this case doe
   reorder it, on every single MCQ, every time. Case 1 (verbatim source copy) is checked FIRST
   for every MCQ, before considering generating any explanation yourself.
 
-🔴 ALL-4-OPTIONS COVERAGE RULE (STRICT):
-- The explanation must relate to ALL FOUR options, not just the correct one — briefly note
-  why each of the 3 wrong options is incorrect/irrelevant, alongside why the correct one is right.
-- Case 1 exception: if the page's own verbatim explanation only covers the correct option, still
-  copy it exactly as-is (never edit source text) — do NOT add extra option-coverage text on top.
-- Case 2/3 (page has no dedicated explanation, or nothing relevant at all): you MUST build/write
-  the explanation yourself so it clearly touches on all 4 options within the 165-character limit.
+🔴 ALL-4-OPTIONS COVERAGE RULE (STRICT, MANDATORY):
+- DECISION RULE, checked for every single MCQ, every time:
+  → If the page/source has an explanation for this MCQ (Case 1 above) → copy it 100%
+    VERBATIM/hubuhu, byte-for-byte, exactly as-is, no matter which/how many options it
+    covers, no matter its length. NEVER edit, extend, or add anything to source text.
+  → If the page/source has NO explanation for this MCQ (Case 2 or 3) → you MUST write the
+    explanation YOURSELF such that it explicitly covers ALL 4 OPTIONS: state why the correct
+    option is right, AND briefly why each of the 3 wrong options is incorrect/irrelevant —
+    all 4 options addressed, within the 165-character Bengali limit. This is mandatory and
+    never skipped when you are the one generating the explanation.
+- Never mix the two behaviors: verbatim-copy source text is never partially rewritten to
+  "add" 4-option coverage, and self-written explanations never skip 4-option coverage.
 
 ════════════════════════════════
 🧮 MATH / CHEMISTRY FORMATTING (MANDATORY, ALWAYS ACTIVE — question, options, AND explanation)
