@@ -4298,6 +4298,26 @@ async def _send_csv_polls_to_channel(
     total = len(mcqs)
     first_poll_link = ""
 
+    # Adaptive pacing — Telegram channel/group এ প্রতি ~60s এ ~20টা message
+    # burst limit আছে। আগে fixed 1.1s gap দিয়ে 19-20টা পাঠিয়ে হার্ড 429 খেয়ে
+    # তারপর wait করতো (থামা-থামি চোখে পড়তো)। এখন rolling 60s window এ পাঠানো
+    # timestamp track করে limit এর কাছে (>=17) গেলে নিজে থেকেই gap বাড়িয়ে
+    # দেয় — Telegram নিজে 429 দেওয়ার আগেই ধীর হয়ে যায়, ফলে hard stop/resume
+    # চোখে কম পড়ে, smooth continuous flow হয়।
+    _send_times = deque()
+    _SAFE_BURST = 17          # 20 এর hard limit এর নিচে safety margin
+    _WINDOW = 60.0
+
+    def _adaptive_gap() -> float:
+        now = time.time()
+        while _send_times and now - _send_times[0] > _WINDOW:
+            _send_times.popleft()
+        if len(_send_times) >= _SAFE_BURST:
+            # window এর মধ্যে limit ছুঁয়ে ফেলেছে — oldest send window থেকে
+            # বের না হওয়া পর্যন্ত wait করে naturally slot খালি করে
+            return max(0.0, _WINDOW - (now - _send_times[0]) + 0.3)
+        return 1.1  # normal pace, well under the limit
+
     for i, mcq in enumerate(mcqs):
         opts = mcq.get("options", [])[:4]
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
@@ -4365,10 +4385,11 @@ async def _send_csv_polls_to_channel(
             _spawn_task(edit_msg(chat_id, loading_id,
                 f"{fname_line}📤 poll পাঠানো হচ্ছে... {sent}/{total} [{bar} {pct}%]"))
 
-        # Telegram allows roughly 1 message/sec to the same chat — 0.25s (4x
-        # too fast) was triggering real 429s that looked identical to proxy
-        # failures in logs, both surfacing as "giving up" after retries.
-        await asyncio.sleep(1.1)
+        _send_times.append(time.time())
+        # Telegram allows roughly 1 message/sec to the same chat, with a
+        # rolling burst cap around 20/min — adaptive gap slows down BEFORE
+        # hitting that ceiling instead of only reacting after a 429.
+        await asyncio.sleep(_adaptive_gap())
 
     return sent, first_poll_link
 
