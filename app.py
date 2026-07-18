@@ -6865,7 +6865,10 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
     ]
     for s in page_status:
         if s["done"]:
-            lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ ✓")
+            if s.get("failed") or s["mcq"] == 0:
+                lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ (content না পাওয়া গেছে/fail)")
+            else:
+                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ ✓")
         elif s["current"]:
             lines.append(f"⏳ Page {fmt_page(s['page'])}: Processing...")
         else:
@@ -7082,6 +7085,9 @@ async def _process_pdf_pages_inner(
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
                 page_status[idx]["mcq"] = 0
+                page_status[idx]["failed"] = True
+                logger.warning(f"[PDF] Page {page_num} produced 0 MCQ after retries — generation failed or page has no extractable content.")
+                await notify_owner(f"⚠️ [PDF] Page {fmt_page(page_num)} ({file_name}) থেকে 0 MCQ — content নেই বা generation fail করেছে, চেক করে দেখো।")
                 continue
 
             cache_id = gen_session_id()
