@@ -1160,7 +1160,7 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
         "max_tokens": 8192,
     }
     try:
-        async with httpx.AsyncClient(timeout=30) as c:
+        async with httpx.AsyncClient(timeout=60) as c:
             r = await c.post(url, headers=headers, json=payload)
             if r.status_code >= 400:
                 logger.warning(f"[AI-ROT] {model} HTTP {r.status_code}: {r.text[:200]}")
@@ -1193,12 +1193,22 @@ class GroqKeyRotator:
 
 groq_key_rotator = GroqKeyRotator()
 
+# Module-level "last known failure reason" trackers -- populated by each
+# provider's generation function whenever it returns empty, so the outer
+# pipeline (and ultimately the dashboard/owner alert) can surface the EXACT
+# cause instead of a vague "failed"/"0 MCQ" with no explanation.
+_LAST_GROQ_ERROR = {"reason": ""}
+_LAST_GEMINI_ERROR = {"reason": ""}
+_LAST_FALLBACK_ERROR = {"reason": ""}
+
 async def _gen_groq(img, topic, count):
     keys = groq_key_rotator.all_keys()
     if not keys:
+        _LAST_GROQ_ERROR["reason"] = "কোনো GROQ_KEYS/GROQ_API_KEY সেট করা নেই"
         return []
     data_url = _img_to_data_url(img)
     if not data_url:
+        _LAST_GROQ_ERROR["reason"] = "Image কে data URL এ convert করতে ব্যর্থ হয়েছে"
         return []
     prompt = _build_mcq_prompt(topic, count)
     # meta-llama/llama-4-scout-17b-16e-instruct was deprecated by Groq on
@@ -1206,6 +1216,7 @@ async def _gen_groq(img, topic, count):
     # now fails, which silently fell through to Gemini. qwen/qwen3.6-27b is
     # Groq's current vision-capable replacement (openai/gpt-oss-120b, their
     # other suggested replacement, is text-only and can't process images).
+    key_errors = []
     for i, key in enumerate(keys):
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -1213,14 +1224,23 @@ async def _gen_groq(img, topic, count):
             data_url, prompt
         )
         if txt:
-            return _parse_mcq_json(txt)
+            parsed = _parse_mcq_json(txt)
+            if parsed:
+                return parsed
+            key_errors.append(f"key#{i+1}: HTTP {status} but JSON parse যোগ্য কোনো MCQ পাওয়া যায়নি")
+            continue
         if status == 429:
             logger.warning(f"[Groq] key #{i+1}/{len(keys)} quota exhausted (429), trying next key")
+            key_errors.append(f"key#{i+1}: 429 quota exhausted")
             continue
-        # Any other error (400/404/5xx/network) — log and still try the next
-        # key instead of giving up immediately, since a single bad key/model
-        # response shouldn't block the whole provider when others might work.
-        logger.warning(f"[Groq] key #{i+1}/{len(keys)} failed (status={status}), trying next key")
+        # Any other error (400/404/5xx/network/timeout) — log and still try
+        # the next key instead of giving up immediately, since a single bad
+        # key/model response shouldn't block the whole provider when others
+        # might work.
+        reason = "network/timeout (no HTTP response)" if status == 0 else f"HTTP {status}"
+        logger.warning(f"[Groq] key #{i+1}/{len(keys)} failed ({reason}), trying next key")
+        key_errors.append(f"key#{i+1}: {reason}")
+    _LAST_GROQ_ERROR["reason"] = f"Groq সব {len(keys)}টি key-তেই fail করেছে — [" + "; ".join(key_errors) + "]"
     return []
 
 async def _gen_nvidia(img, topic, count):
@@ -2237,6 +2257,9 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
     # (Gemini itself can take 45-85s across key retries), doubling page
     # latency in the common case where Groq is slow/rate-limited. Racing
     # them means we only pay the cost of whichever finishes first.
+    _LAST_GROQ_ERROR["reason"] = ""
+    _LAST_GEMINI_ERROR["reason"] = ""
+    _LAST_FALLBACK_ERROR["reason"] = ""
     groq_task = _spawn_task(_gen_groq(img, topic, mcq_count))
     gemini_task = _spawn_task(_gemini_gen_mcq(img, topic, page_num, mcq_count))
     try:
@@ -2247,9 +2270,11 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
         groq_out, gemini_out = [], []
 
     if isinstance(groq_out, Exception):
+        _LAST_GROQ_ERROR["reason"] = f"{type(groq_out).__name__}: {groq_out}"
         logger.warning(f"[AI-ROT] groq failed (page {page_num}): {groq_out}")
         groq_out = []
     if isinstance(gemini_out, Exception):
+        _LAST_GEMINI_ERROR["reason"] = f"{type(gemini_out).__name__}: {gemini_out}"
         logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {gemini_out}")
         gemini_out = []
 
@@ -2263,6 +2288,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
     logger.warning(f"[AI-ROT] groq+gemini both empty (page {page_num}); rotating to fallbacks")
 
     # 3) Fallback providers (skip silently if key missing / call fails)
+    fallback_errors = []
     for prov in _AI_PROVIDERS_ORDER:
         fn = _AI_FALLBACK_FNS.get(prov)
         if not fn:
@@ -2272,12 +2298,28 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
             if out:
                 logger.info(f"[AI-ROT] page {page_num} satisfied by provider={prov}")
                 return out
+            fallback_errors.append(f"{prov}: খালি ফলাফল")
         except Exception as e:
             logger.warning(f"[AI-ROT] provider {prov} crashed: {e}")
+            fallback_errors.append(f"{prov}: {type(e).__name__}: {e}")
             continue
 
+    _LAST_FALLBACK_ERROR["reason"] = "; ".join(fallback_errors) if fallback_errors else "কোনো fallback provider configure করা নেই"
     logger.error(f"[AI-ROT] all providers exhausted for page {page_num}")
     return []
+
+
+def _get_last_generation_error() -> str:
+    """Combines whatever exact reasons each provider left behind into one
+    human-readable string for dashboard/owner-alert display."""
+    parts = []
+    if _LAST_GROQ_ERROR["reason"]:
+        parts.append(f"Groq: {_LAST_GROQ_ERROR['reason']}")
+    if _LAST_GEMINI_ERROR["reason"]:
+        parts.append(f"Gemini: {_LAST_GEMINI_ERROR['reason']}")
+    if _LAST_FALLBACK_ERROR["reason"]:
+        parts.append(f"Fallbacks: {_LAST_FALLBACK_ERROR['reason']}")
+    return " | ".join(parts) if parts else "সব provider থেকে খালি ফলাফল এসেছে (no exception, but 0 MCQ returned)"
 
 
 # ============================================================
@@ -6866,7 +6908,12 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
     for s in page_status:
         if s["done"]:
             if s.get("failed") or s["mcq"] == 0:
-                lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ (content না পাওয়া গেছে/fail)")
+                err = (s.get("error") or "").strip()
+                err_short = (err[:80] + "…") if len(err) > 80 else err
+                if err_short:
+                    lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ — {err_short}")
+                else:
+                    lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ (content না পাওয়া গেছে)")
             else:
                 lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ ✓")
         elif s["current"]:
@@ -7112,30 +7159,35 @@ async def _process_pdf_pages_inner(
                     the strict generation prompt itself rejected valid page
                     content) before conceding the page has nothing.
         Only after both stages fail does the page get marked 0 MCQ — and
-        even then it's clearly flagged (⚠️) and the owner is alerted, never
-        silently shown as a normal success.
+        even then it's clearly flagged (⚠️) and the owner is alerted with
+        the EXACT reason (last exception / "all providers returned empty"),
+        never a vague "failed" with no cause.
         """
         last_mcqs = []
+        last_error = ""
         for _pg_attempt in range(4):
             try:
                 _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count)
                 if _mcqs:
-                    return _mcqs
+                    return _mcqs, None
                 last_mcqs = _mcqs
+                last_error = _get_last_generation_error()
             except Exception as _pg_e:
+                last_error = f"{type(_pg_e).__name__}: {_pg_e}"
                 logger.warning(f"[PDF] Page {page_num_} gen attempt {_pg_attempt+1} failed: {_pg_e}")
             await asyncio.sleep(1.5 * (_pg_attempt + 1))  # backoff: 1.5s, 3s, 4.5s, 6s
 
-        logger.warning(f"[PDF] Page {page_num_} empty after 4 full attempts — running relaxed last-resort pass.")
+        logger.warning(f"[PDF] Page {page_num_} empty after 4 full attempts ({last_error}) — running relaxed last-resort pass.")
         try:
             relaxed = await _pdf_relaxed_last_resort_extract(img_, topic, page_num_, mcq_count)
             if relaxed:
                 logger.info(f"[PDF] Page {page_num_} recovered via relaxed last-resort pass ({len(relaxed)} MCQ).")
-                return relaxed
+                return relaxed, None
         except Exception as _relaxed_e:
+            last_error = f"{last_error} | Relaxed-pass {type(_relaxed_e).__name__}: {_relaxed_e}"
             logger.warning(f"[PDF] Page {page_num_} relaxed pass crashed: {_relaxed_e}")
 
-        return last_mcqs
+        return last_mcqs, last_error
 
     for idx, page_tuple in enumerate(pages):
         if skip_generate:
@@ -7152,17 +7204,21 @@ async def _process_pdf_pages_inner(
                 # prefetched (started while this page's polls were being
                 # sent), use that result instead of generating again.
                 if _prefetch_task is not None and _prefetch_idx == idx:
-                    mcqs = await _prefetch_task
+                    mcqs, gen_error = await _prefetch_task
                 else:
-                    mcqs = await _gen_with_retry(img, page_num)
+                    mcqs, gen_error = await _gen_with_retry(img, page_num)
                 _prefetch_task = None
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
                 page_status[idx]["mcq"] = 0
                 page_status[idx]["failed"] = True
-                logger.warning(f"[PDF] Page {page_num} produced 0 MCQ after retries — generation failed or page has no extractable content.")
-                await notify_owner(f"⚠️ [PDF] Page {fmt_page(page_num)} ({file_name}) থেকে 0 MCQ — content নেই বা generation fail করেছে, চেক করে দেখো।")
+                page_status[idx]["error"] = gen_error or "Unknown"
+                logger.warning(f"[PDF] Page {page_num} produced 0 MCQ after retries — reason: {gen_error}")
+                await notify_owner(
+                    f"⚠️ [PDF] Page {fmt_page(page_num)} ({file_name}) থেকে 0 MCQ।\n"
+                    f"কারণ: {gen_error or 'অজানা — সব provider খালি ফলাফল দিয়েছে'}"
+                )
                 continue
 
             cache_id = gen_session_id()
