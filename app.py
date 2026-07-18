@@ -3670,6 +3670,14 @@ async def handle_csv_command(msg: dict):
     m_match = _re.search(r'-m\s+(.+?)(?=\s+-c\b|\s+-t\b|$)', raw_args)
     if m_match:
         topic = m_match.group(1).strip()
+    else:
+        # -m flag ছাড়াই topic সরাসরি লেখা হলে (positional): -c/-t এর আগের
+        # সবটুকু text-ই topic ধরা হবে। কিন্তু raw_args শুরুতেই -c/-t দিয়ে শুরু
+        # হলে topic দেওয়াই হয়নি ধরে নেওয়া হবে।
+        if not _re.match(r'^\s*-[ct]\b', raw_args):
+            pos_match = _re.match(r'(.+?)(?=\s+-c\b|\s+-t\b|$)', raw_args)
+            if pos_match:
+                topic = pos_match.group(1).strip()
 
     c_match = _re.search(r'-c\s+(\S+)', raw_args)
     if c_match:
@@ -4350,26 +4358,8 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
             btn_send_data["message_thread_id"] = thread_id
         await tg_post("sendMessage", btn_send_data)
 
-        # Score-ask End-msg (channel only, no button, pre-msg কে reply) |
-        # Group: plain thank-you end-msg, score-ask/button নাই
-        ending = csv_get_ending_message(topic, sent, first_link, ask_score=ask_score)
-        end_send_data = {
-            "chat_id": channel_id,
-            "text": ending,
-            "disable_web_page_preview": True
-        }
-        if pre_msg_id:
-            end_send_data["reply_to_message_id"] = pre_msg_id
-        if thread_id:
-            end_send_data["message_thread_id"] = thread_id
-        end_r = await tg_post("sendMessage", end_send_data)
-        if end_r.get("ok"):
-            await db_update_cache(cache_id, {
-                "channel_id": channel_id,
-                "end_msg_id": end_r["result"]["message_id"]
-            })
-
-        # Style1 PDF (সব poll মিলিয়ে) — pre-msg কে reply, auto-pin
+        # Style1 PDF (সব poll মিলিয়ে) — pre-msg কে reply, auto-pin, polls শেষে
+        # end-msg-এর আগে পাঠানো হয়
         try:
             data_adapted = _adapt_mcqs_for_print(mcqs)
             html_s = PRINT_STYLE_BUILDERS["style1"](data_adapted, topic)
@@ -4391,6 +4381,27 @@ async def process_csv_to_channel(cache_id: str, channel_id: str,
                 logger.error(f"[CSV-PDF] Style1 generation empty for topic: {topic}")
         except Exception as e:
             logger.error(f"[CSV-PDF] Error generating Style1 PDF: {e}")
+
+        # End-msg (topic + mcq count + first poll link + 4 button) — PDF-এর পরে,
+        # সবার শেষে। Channel-এ score-ask সহ, group-এ score-ask ছাড়া।
+        ending = csv_get_ending_message(topic, sent, first_link, ask_score=ask_score)
+        end_kb = await _csv_pre_buttons(cache_id)
+        end_send_data = {
+            "chat_id": channel_id,
+            "text": ending,
+            "disable_web_page_preview": True,
+            "reply_markup": end_kb
+        }
+        if pre_msg_id:
+            end_send_data["reply_to_message_id"] = pre_msg_id
+        if thread_id:
+            end_send_data["message_thread_id"] = thread_id
+        end_r = await tg_post("sendMessage", end_send_data)
+        if end_r.get("ok"):
+            await db_update_cache(cache_id, {
+                "channel_id": channel_id,
+                "end_msg_id": end_r["result"]["message_id"]
+            })
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
