@@ -3884,11 +3884,13 @@ async def handle_csv_command(msg: dict):
         _spawn_task(edit_msg(chat_id, loading_id, f"📄 {csv_fname}\n⏳ CSV download হচ্ছে...\n[{bar} {pct}%]"))
 
     try:
-        # pyrogram path ব্যবহার করা হচ্ছে (chat_id/message_id pass করে) — CF proxy
-        # getFile roundtrip-এর delay এড়িয়ে দ্রুত download, progress bar আর
-        # "0%"-এ আটকে থাকবে না।
-        csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress,
-                                            chat_id=chat_id, message_id=reply["message_id"])
+        # সরাসরি Bot API getFile ব্যবহার করা হচ্ছে (pyrogram/MTProto স্কিপ) —
+        # CSV ফাইল সবসময় ছোট (কখনো Bot API-র 20MB limit ছোঁবে না), তাই
+        # pyrogram-এর একমাত্র সুবিধা (>20MB bypass) এখানে অপ্রাসঙ্গিক। এই
+        # প্ল্যাটফর্মে MTProto connection block/slow হলে client.start() বা
+        # get_messages() নিঃশব্দে অনেকক্ষণ আটকে থাকতে পারে (কোনো দ্রুত
+        # timeout নেই) — সেই hang এড়াতে সরাসরি দ্রুত getFile পথে যাওয়া হচ্ছে।
+        csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress)
         # Download can finish faster than the loading message send (small
         # CSVs are near-instant now) — in that case every _dl_progress call
         # above silently no-op'd since loading_id_box["id"] was still None,
