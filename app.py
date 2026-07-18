@@ -49,7 +49,7 @@ from core import (
     CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, _tg_mode,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
-    send_document, send_media_group, send_poll, notify_owner, notify_owner_edit, download_tg_file,
+    send_document, send_media_group, send_poll, notify_owner, notify_owner_edit, clear_owner_job, download_tg_file,
     db_get_settings, db_save_settings, db_save_settings_field, db_is_owner_or_admin, db_track_user, db_save_session,
     db_save_mcq_cache, db_update_cache, db_get_mcq_cache,
     db_get_new_gen_count, db_increment_gen_count, db_save_leaderboard,
@@ -4449,6 +4449,17 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
     /csv — single batch, সব polls একসাথে পাঠাও
     /csvS — serial batch mode
     """
+    job_key = f"csv_{cache_id}"
+    try:
+        await _process_csv_to_channel_impl(cache_id, channel_id, chat_id, uid, job_key)
+    except Exception as e:
+        await notify_owner(f"🚨 CSV job ({cache_id[:8]}) crashed: {e}", job_key=job_key)
+        raise
+    finally:
+        clear_owner_job(job_key)
+
+async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
+                                  chat_id: int, uid: int, job_key: str):
     # cache_id দিয়ে session read — uid দিয়ে না, কারণ একই user দ্রুত ২টা /csv
     # চালালে uid-based key overwrite হয়ে যেতে পারতো
     row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{cache_id}").execute())

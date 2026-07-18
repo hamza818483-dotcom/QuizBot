@@ -698,9 +698,42 @@ async def send_poll(chat_id, question: str, options: list, correct_idx: int,
     plain_data["explanation"] = (exp_clean or explanation)[:200]
     return await tg_post("sendPoll", plain_data)
 
-async def notify_owner(text: str):
-    if OWNER_ID:
+_OWNER_JOB_MSG = {}  # job_key -> {"msg_id": int, "lines": [str]}
+
+async def notify_owner(text: str, job_key: str = None):
+    """job_key: pass the same key for every alert belonging to one logical
+    job (e.g. one /csv run) — instead of each call sending a brand new
+    message, they all edit a single rolling message, appending a new line
+    per step. Without job_key, behaves exactly as before (one-off message)."""
+    if not OWNER_ID:
+        return
+    if not job_key:
         await send_msg(OWNER_ID, f"🔔 <b>ATLAS BOT Alert</b>\n\n{text}")
+        return
+
+    state = _OWNER_JOB_MSG.get(job_key)
+    if state is None:
+        r = await send_msg(OWNER_ID, f"🔔 <b>ATLAS BOT Alert</b>\n\n{text}")
+        msg_id = r.get("result", {}).get("message_id") if r.get("ok") else None
+        _OWNER_JOB_MSG[job_key] = {"msg_id": msg_id, "lines": [text]}
+        return
+
+    state["lines"].append(text)
+    body = "\n\n".join(state["lines"])[-3800:]  # stay under Telegram's 4096-char cap
+    if state["msg_id"]:
+        r = await edit_msg(OWNER_ID, state["msg_id"], f"🔔 <b>ATLAS BOT Alert</b>\n\n{body}")
+        if not r.get("ok"):
+            # message may have been deleted/too old to edit — fall back to a fresh one
+            r2 = await send_msg(OWNER_ID, f"🔔 <b>ATLAS BOT Alert</b>\n\n{body}")
+            state["msg_id"] = r2.get("result", {}).get("message_id") if r2.get("ok") else None
+    else:
+        r = await send_msg(OWNER_ID, f"🔔 <b>ATLAS BOT Alert</b>\n\n{body}")
+        state["msg_id"] = r.get("result", {}).get("message_id") if r.get("ok") else None
+
+def clear_owner_job(job_key: str):
+    """Call once a job is fully done (success or fail) so the next run
+    starts a fresh rolling message instead of appending to a stale one."""
+    _OWNER_JOB_MSG.pop(job_key, None)
 
 async def notify_owner_edit(text: str, msg_id_box: dict):
     """Single-message progress notifier — edits the same owner message
