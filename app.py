@@ -4290,6 +4290,10 @@ async def _handle_cut_command_inner(msg: dict):
     else:
         _last_pct = {"v": -1}
 
+        def _bar(pct):
+            filled = pct // 10
+            return "█" * filled + "░" * (10 - filled)
+
         async def _progress(current, total):
             if not total:
                 return
@@ -4298,7 +4302,7 @@ async def _handle_cut_command_inner(msg: dict):
                 _last_pct["v"] = pct
                 try:
                     await edit_msg(chat_id, status_msg_id,
-                                    f"⏳ Download হচ্ছে... {pct}%\n📄 {file_name}\n📦 {size_kb} KB")
+                                    f"⏳ PDF download হচ্ছে...\n[{_bar(pct)} {pct}%]")
                 except Exception:
                     pass
 
