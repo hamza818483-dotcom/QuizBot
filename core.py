@@ -552,6 +552,31 @@ async def send_photo_by_id(chat_id, file_id: str, caption: str = "",
         data["reply_to_message_id"] = reply_to_message_id
     return await tg_post("sendPhoto", data)
 
+async def send_media_group(chat_id, photos: list, reply_to_message_id: int = None) -> dict:
+    """Send up to 10 photos as a single Telegram album (media group).
+    photos: list of (filename, bytes) tuples, in the order they should appear.
+    Uses direct multipart upload (attach://) since CF Worker's JSON proxy
+    doesn't support multi-file album uploads."""
+    import json as _j
+    media = []
+    files = {}
+    for i, (fname, fbytes) in enumerate(photos):
+        key = f"photo{i}"
+        media.append({"type": "photo", "media": f"attach://{key}"})
+        files[key] = (fname, fbytes, "image/jpeg")
+    fields = {"chat_id": str(chat_id), "media": _j.dumps(media)}
+    if reply_to_message_id:
+        fields["reply_to_message_id"] = str(reply_to_message_id)
+    try:
+        c = await _get_shared_http_client()
+        r = await c.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMediaGroup",
+            data=fields, files=files, timeout=180)
+        return r.json()
+    except Exception as e:
+        logger.error(f"[sendMediaGroup] failed: {e}")
+        return {"ok": False, "error": str(e)}
+
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",

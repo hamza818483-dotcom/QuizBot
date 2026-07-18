@@ -49,7 +49,7 @@ from core import (
     CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, _tg_mode,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
-    send_document, send_poll, notify_owner, download_tg_file,
+    send_document, send_media_group, send_poll, notify_owner, download_tg_file,
     db_get_settings, db_save_settings, db_save_settings_field, db_is_owner_or_admin, db_track_user, db_save_session,
     db_save_mcq_cache, db_update_cache, db_get_mcq_cache,
     db_get_new_gen_count, db_increment_gen_count, db_save_leaderboard,
@@ -2873,6 +2873,150 @@ async def handle_livetime(msg: dict):
 # FEATURE: /poll — Poll Extract (see poll_extract.py)
 # ============================================================
 from poll_extract import handle_poll_extract
+
+
+# ============================================================
+# FEATURE: /g — PDF → Photo Album (for saving to phone Gallery)
+# ============================================================
+# Telegram bots cannot write to a phone's storage/gallery directly — that's a
+# platform-level restriction, not something any bot can bypass. The closest
+# equivalent: send every page as a genuine photo (not a document), in order,
+# as albums (media groups). Telegram shows its own bulk-download icon on each
+# album, letting the user save all photos in that batch to their gallery with
+# one tap — no per-photo long-press needed. Max 10 photos per Telegram album,
+# so PDFs over 10 pages are split into multiple sequential album messages.
+_GALLERY_ALBUM_SIZE = 10
+_GALLERY_MAX_PAGES = 150  # sanity ceiling — a 150-page PDF is already 15 albums
+
+async def handle_gallery_command(msg: dict):
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF ফাইলে reply করে /g দাও!\n\n"
+            "📸 প্রতিটা page high-quality photo হিসেবে album আকারে পাঠানো হবে, "
+            "যাতে Telegram-এর bulk-download দিয়ে সব ছবি একসাথে ফোনের Gallery-তে save করা যায়।"
+        )
+        return
+
+    doc = reply["document"]
+    fname = (doc.get("file_name") or "").lower()
+    if not fname.endswith(".pdf") and doc.get("mime_type") != "application/pdf":
+        await send_msg(chat_id, "❌ এটা PDF ফাইল না মনে হচ্ছে। PDF ফাইলে reply করে /g দাও।")
+        return
+
+    loading = await send_msg(chat_id, "⏳ PDF download হচ্ছে...")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        pdf_bytes = await download_tg_file(doc["file_id"])
+    except Exception as e:
+        await _safe_error_reply(chat_id, e)
+        return
+
+    try:
+        total_pages = await asyncio.to_thread(get_pdf_page_count, pdf_bytes)
+    except Exception:
+        total_pages = None
+
+    if total_pages and total_pages > _GALLERY_MAX_PAGES:
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"❌ এই PDF-এ {total_pages} page — সর্বোচ্চ {_GALLERY_MAX_PAGES} page পর্যন্ত সাপোর্টেড।")
+        return
+
+    app.state.gallery_cache = getattr(app.state, "gallery_cache", {})
+    app.state.gallery_cache[f"gallery_{uid}"] = {
+        "pdf_bytes": pdf_bytes, "chat_id": chat_id, "ts": time.time()
+    }
+
+    page_note = f" ({total_pages} page)" if total_pages else ""
+    kb = {"inline_keyboard": [
+        [{"text": "⬇️ Download করো (Gallery-তে save করার জন্য)", "callback_data": f"gdl_{uid}"}]
+    ]}
+    if loading_id:
+        await tg_post("editMessageText", {
+            "chat_id": chat_id, "message_id": loading_id,
+            "text": f"✅ PDF রেডি{page_note}!\n\nনিচের বাটনে ক্লিক করো — প্রতিটা page photo হিসেবে album আকারে আসবে। "
+                    f"প্রতি album-এর উপরে থাকা ⬇️ icon দিয়ে এক ট্যাপে সব ছবি Gallery-তে save করতে পারবে।",
+            "reply_markup": kb
+        })
+
+
+async def handle_gallery_download_callback(query: dict):
+    uid_str = query["data"][len("gdl_"):]
+    uid = int(uid_str)
+    caller_uid = query["from"]["id"]
+    chat_id = query["message"]["chat"]["id"]
+
+    if caller_uid != uid:
+        return
+
+    cache = getattr(app.state, "gallery_cache", {}).get(f"gallery_{uid}")
+    if not cache:
+        await send_msg(chat_id, "❌ Session expired — আবার PDF-এ reply করে /g দাও।")
+        return
+
+    pdf_bytes = cache["pdf_bytes"]
+    status = await send_msg(chat_id, "⏳ Photo গুলো তৈরি হচ্ছে...")
+    status_id = status.get("result", {}).get("message_id")
+
+    try:
+        from pdf2image import convert_from_bytes
+        # dpi=200: noticeably sharper than the 150 used for MCQ-extraction
+        # elsewhere in the bot — here the image *is* the deliverable the user
+        # will keep, so quality matters more than render speed.
+        pages = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=200, thread_count=4)
+    except Exception as e:
+        logger.error(f"[Gallery] PDF render failed: {e}")
+        if status_id:
+            await edit_msg(chat_id, status_id, "❌ PDF থেকে ছবি বানাতে সমস্যা হয়েছে।")
+        return
+
+    if not pages:
+        if status_id:
+            await edit_msg(chat_id, status_id, "❌ কোনো page পাওয়া যায়নি।")
+        return
+
+    total = len(pages)
+    sent = 0
+    for batch_start in range(0, total, _GALLERY_ALBUM_SIZE):
+        batch = pages[batch_start:batch_start + _GALLERY_ALBUM_SIZE]
+        photos = []
+        for i, img in enumerate(batch):
+            page_num = batch_start + i + 1
+            buf = BytesIO()
+            # quality=95: high quality, still JPEG-compressed enough to stay
+            # well under Telegram's per-photo size limit for large A4 pages.
+            img.save(buf, format="JPEG", quality=95)
+            photos.append((f"page_{page_num:03d}.jpg", buf.getvalue()))
+
+        result = await send_media_group(chat_id, photos)
+        if result.get("ok"):
+            sent += len(batch)
+        else:
+            logger.error(f"[Gallery] sendMediaGroup batch failed: {result.get('description') or result.get('error')}")
+        if status_id:
+            pct = int(sent * 100 / total)
+            try:
+                await edit_msg(chat_id, status_id, f"⏳ পাঠানো হচ্ছে... {sent}/{total} page [{pct}%]")
+            except Exception:
+                pass
+
+    getattr(app.state, "gallery_cache", {}).pop(f"gallery_{uid}", None)
+
+    if status_id:
+        if sent == total:
+            n_albums = (total + _GALLERY_ALBUM_SIZE - 1) // _GALLERY_ALBUM_SIZE
+            await edit_msg(chat_id, status_id,
+                f"✅ {total} page পাঠানো শেষ!\n\n"
+                f"প্রতিটা album-এর উপরে ⬇️ icon-এ ট্যাপ করে সব ছবি একসাথে Gallery-তে save করো "
+                f"({n_albums} টা album আছে, প্রতিটাতে আলাদা করে করতে হবে)।"
+            )
+        else:
+            await edit_msg(chat_id, status_id, f"⚠️ {sent}/{total} page পাঠানো গেছে, কিছু batch fail হয়েছে।")
 
 
 # ============================================================
@@ -10370,6 +10514,7 @@ async def set_bot_commands(notify_chat_id: int = None):
         {"command": "qpdf", "description": "chorcha mhtml/html → Premium Q&A PDF"},
         {"command": "pdfm", "description": "PDF pagewise MCQ with image"},
         {"command": "img", "description": "Image থেকে MCQ poll channel-এ পাঠাও"},
+        {"command": "g", "description": "PDF-এর page গুলো photo album হিসেবে পাঠাও (Gallery save-এর জন্য)"},
         {"command": "txt", "description": "Text থেকে MCQ poll"},
         {"command": "csv", "description": "CSV থেকে channel poll"},
         {"command": "csvs", "description": "CSV থেকে sequential poll (csvS)"},
@@ -10668,6 +10813,11 @@ async def handle_message(msg: dict):
             return
         clear_cancel(chat_id)
         await handle_pdfm(msg)
+    elif text.startswith("/g") and (text == "/g" or text.startswith("/g ") or text.startswith("/g\n")):
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        _spawn_command_task(uid, handle_gallery_command(msg))
     elif text.startswith("/img"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
@@ -10872,6 +11022,9 @@ async def handle_callback(query: dict):
     uname = user.get("username") or user.get("first_name", "User")
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
+        if data.startswith("gdl_"):
+            await handle_gallery_download_callback(query)
+            return
         if data.startswith("chsel_"):
             channel_id = data[len("chsel_"):]
             await _show_channel_actions(chat_id, msg_id, channel_id)
