@@ -4145,7 +4145,81 @@ def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
         ])
     return buf.getvalue().encode("utf-8-sig")
 
-async def handle_split_command(msg: dict):
+def _strip_opt_prefix(opt: str) -> str:
+    """Option টেক্সটের শুরুতে A) B) ক) খ) 1) 2) ইত্যাদি marker সরায়।"""
+    if not opt:
+        return opt
+    pattern = r'^\s*(?:[A-Da-d]|[ক-ঘ]|[1234১২৩৪])\s*[).।:.\-]\s*'
+    return re.sub(pattern, '', opt).strip()
+
+def _strip_q_source_tag(q: str) -> str:
+    """Question এর শেষে [source] জাতীয় ট্যাগ সরায় (যেমন [ATLAS], [৩৫তম BCS])।"""
+    if not q:
+        return q
+    return re.sub(r'\s*\[[^\[\]]{1,60}\]\s*$', '', q.strip()).strip()
+
+def _clean_mcqs(mcqs: list) -> list:
+    """Numbering, option-prefix marker, question-end source tag — সব সরিয়ে দেয়।"""
+    cleaned = []
+    for m in mcqs:
+        q = _strip_q_source_tag(_strip_q_numbering(m.get("question", "")))
+        opts = [_strip_opt_prefix(o) for o in m.get("options", [])]
+        cleaned.append({
+            "question": q, "options": opts,
+            "answer": m.get("answer", "A"),
+            "explanation": m.get("explanation", "")
+        })
+    return cleaned
+
+async def handle_clean_command(msg: dict):
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    try:
+        return await _handle_clean_command_inner(msg)
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+async def _handle_clean_command_inner(msg: dict):
+    """/clean — reply to a CSV file, strips question numbering, [source] tags,
+    and option prefix markers (A/B/C/D, ক/খ/গ/ঘ, 1/2/3/4), returns cleaned CSV."""
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id, "❌ CSV ফাইলে reply করে <code>/clean</code> দাও")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_name = reply["document"].get("file_name", "file.csv")
+    file_size = reply["document"].get("file_size", 0)
+    size_kb = round(file_size / 1024, 1) if file_size else "?"
+
+    status_r = await send_msg(chat_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    try:
+        csv_bytes = await download_tg_file(file_id)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n⏳ Clean হচ্ছে...")
+        mcqs = _parse_csv_bytes(csv_bytes)
+    except Exception as e:
+        logger.error(f"[Clean] error: {e}", exc_info=True)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
+        return
+    if not mcqs:
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, "❌ ফাইলে কোনো MCQ পাওয়া যায়নি!")
+        return
+
+    cleaned = _clean_mcqs(mcqs)
+    out_bytes = _mcqs_to_csv_bytes(cleaned)
+    base_name = re.sub(r'\.(csv|json)$', '', file_name, flags=re.I)
+
+    if status_msg_id:
+        await edit_msg(chat_id, status_msg_id, f"✅ {len(cleaned)}টি MCQ clean হয়েছে!")
+    await send_document(chat_id, out_bytes, f"{base_name}_clean.csv",
+                         caption=f"✅ Clean CSV — {len(cleaned)}টি MCQ (numbering/source-tag/option-marker মুক্ত)")
+
+
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
     try:
         return await _handle_split_command_inner(msg)
@@ -11244,6 +11318,11 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         _spawn_command_task(uid, handle_qpdf_command(msg))
+    elif text.startswith("/clean"):
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        _spawn_command_task(uid, handle_clean_command(msg))
     elif text.startswith("/split"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
