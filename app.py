@@ -10710,6 +10710,19 @@ async def process_update(update: dict):
     try:
         if "message" in update:
             uid = update["message"].get("from", {}).get("id")
+            _msg = update.get("message", {})
+            _txt_check = (_msg.get("text") or "").strip()
+            # /csv and /csvS bypass the per-user serialize queue entirely —
+            # they reply to an already-uploaded document with an independent
+            # cache_id, so they never share mutable state with other running
+            # commands (unlike /txt, /pdf which mutate shared per-user
+            # progress state). Previously these silently waited behind any
+            # earlier still-running command for the same uid, which was the
+            # actual cause of "/csv stuck at 0%" — the download itself was
+            # always fast, the command just hadn't started yet.
+            if _txt_check.startswith("/csv") or _txt_check.startswith("/csvS"):
+                _spawn_task(handle_message(_msg))
+                return
             if uid is not None:
                 _USER_PENDING_QUEUE.setdefault(uid, []).append(update)
                 if len(_USER_PENDING_QUEUE[uid]) > 20:
