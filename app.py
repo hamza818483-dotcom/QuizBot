@@ -2201,24 +2201,35 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
 
 
 async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
-    # 1) Groq (primary — fast, set via GROQ_API_KEY)
+    # 1+2) Groq and Gemini raced concurrently instead of sequentially —
+    # previously a slow/failing Groq call blocked Gemini from even starting
+    # (Gemini itself can take 45-85s across key retries), doubling page
+    # latency in the common case where Groq is slow/rate-limited. Racing
+    # them means we only pay the cost of whichever finishes first.
+    groq_task = _spawn_task(_gen_groq(img, topic, mcq_count))
+    gemini_task = _spawn_task(_gemini_gen_mcq(img, topic, page_num, mcq_count))
     try:
-        out = await _gen_groq(img, topic, mcq_count)
-        if out:
-            logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq")
-            return out
-        logger.warning(f"[AI-ROT] groq returned empty (page {page_num}); trying gemini")
-    except Exception as e:
-        logger.warning(f"[AI-ROT] groq failed (page {page_num}): {e}; trying gemini")
+        groq_out, gemini_out = await asyncio.gather(
+            groq_task, gemini_task, return_exceptions=True
+        )
+    except Exception:
+        groq_out, gemini_out = [], []
 
-    # 2) Gemini (secondary — healthy key → use it)
-    try:
-        out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
-        if out:
-            return out
-        logger.warning(f"[AI-ROT] gemini returned empty (page {page_num}); rotating to fallbacks")
-    except Exception as e:
-        logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {e}; rotating to fallbacks")
+    if isinstance(groq_out, Exception):
+        logger.warning(f"[AI-ROT] groq failed (page {page_num}): {groq_out}")
+        groq_out = []
+    if isinstance(gemini_out, Exception):
+        logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {gemini_out}")
+        gemini_out = []
+
+    if groq_out:
+        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq (raced)")
+        return groq_out
+    if gemini_out:
+        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=gemini (raced)")
+        return gemini_out
+
+    logger.warning(f"[AI-ROT] groq+gemini both empty (page {page_num}); rotating to fallbacks")
 
     # 3) Fallback providers (skip silently if key missing / call fails)
     for prov in _AI_PROVIDERS_ORDER:
@@ -9534,7 +9545,7 @@ async def start_sequential_quiz(chat_id: int, uid: int, uname: str,
     if go_msg_id:
         st_now = await qs_get(uid)
         if st_now:
-            st_now["last_msg_id"] = go_msg_id
+            st_now["first_msg_id"] = go_msg_id
             await qs_set(uid, st_now)
     await asyncio.sleep(0.5)
     await _send_quiz_question(uid)
@@ -9589,7 +9600,7 @@ async def _send_quiz_question_inner(uid: int):
     poll_r = await send_poll(
         st["chat_id"], q_text[:300], [o[:100] for o in opts], ans_idx,
         explanation=exp[:200], is_anonymous=False, open_period=QUIZ_Q_SEC + 5,
-        reply_to_message_id=st.get("last_msg_id")
+        reply_to_message_id=st.get("first_msg_id")
     )
 
     if not poll_r.get("ok"):
@@ -9602,7 +9613,6 @@ async def _send_quiz_question_inner(uid: int):
         return
 
     st["poll_id"] = poll_r["result"]["poll"]["id"]
-    st["last_msg_id"] = poll_r["result"]["message_id"]
     st["answered"] = False
     st["timer_task"] = None
     await qs_set(uid, st)
@@ -9766,7 +9776,7 @@ async def _finish_quiz(uid: int):
         kb["inline_keyboard"].append([{"text": "↩️ Back to Source", "url": back_url}])
 
     img_id = st.get("image_file_id")
-    last_id = st.get("last_msg_id")
+    last_id = st.get("first_msg_id")
 
     if img_id:
         caption_trimmed = result_caption[:1024]
