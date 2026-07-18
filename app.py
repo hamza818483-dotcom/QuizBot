@@ -4382,16 +4382,22 @@ async def _run_csv_job_forever(cache_id: str, channel_id: str, chat_id: int, uid
     run in its own background task (see _csv_queue_worker) so it never blocks
     the rest of the queue, but it keeps running until it genuinely finishes
     or errors out."""
+    job_key = f"csv_{cache_id}"
     try:
         await _process_csv_to_channel_impl(cache_id, channel_id, chat_id, uid)
     except Exception as e:
         logger.error(f"[CSV-Queue] Job failed for cache_id={cache_id}: {e}")
+        try:
+            await notify_owner(f"🚨 CSV job ({cache_id[:8]}) crashed: {e}", job_key=job_key)
+        except Exception:
+            pass
         try:
             await _safe_error_reply(chat_id, e)
         except Exception:
             pass
     finally:
         _csv_stuck_jobs.pop(cache_id, None)
+        clear_owner_job(job_key)
 
 async def _csv_queue_worker():
     q = _get_csv_job_queue()
@@ -4413,7 +4419,7 @@ async def _csv_queue_worker():
             _csv_stuck_jobs[cache_id] = job_task
             try:
                 await notify_owner(f"⏱️ CSV job (cache_id={cache_id}) অনেক সময় নিচ্ছে — এটা background-এ চলতেই থাকবে, "
-                                    f"queue-র পরের job এগিয়ে যাচ্ছে")
+                                    f"queue-র পরের job এগিয়ে যাচ্ছে", job_key=f"csv_{cache_id}")
             except Exception:
                 pass
         except Exception:
@@ -4444,22 +4450,7 @@ def enqueue_csv_to_channel(cache_id: str, channel_id: str, chat_id: int, uid: in
     q.put_nowait((cache_id, channel_id, chat_id, uid))
 
 async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
-                                        chat_id: int, uid: int):
-    """
-    /csv — single batch, সব polls একসাথে পাঠাও
-    /csvS — serial batch mode
-    """
-    job_key = f"csv_{cache_id}"
-    try:
-        await _process_csv_to_channel_impl(cache_id, channel_id, chat_id, uid, job_key)
-    except Exception as e:
-        await notify_owner(f"🚨 CSV job ({cache_id[:8]}) crashed: {e}", job_key=job_key)
-        raise
-    finally:
-        clear_owner_job(job_key)
-
-async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
-                                  chat_id: int, uid: int, job_key: str):
+                                  chat_id: int, uid: int):
     # cache_id দিয়ে session read — uid দিয়ে না, কারণ একই user দ্রুত ২টা /csv
     # চালালে uid-based key overwrite হয়ে যেতে পারতো
     row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"csv_cmd_{cache_id}").execute())
