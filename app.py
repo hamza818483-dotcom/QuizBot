@@ -7328,7 +7328,11 @@ async def _process_pdf_pages_inner(
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
     await edit_msg(chat_id, status_msg_id,
-        f"✅ <b>Processing Complete!</b>\n\n📄 File: {file_name}\n🎯 Topic: {topic}\n📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}")
+        "✅ <b>Processing Complete!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 File: {file_name}\n🎯 Topic: {topic}\n"
+        f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━")
 
 # ============================================================
 # FEATURE: /pdfm — PDF pagewise MCQ to channel
@@ -7822,8 +7826,11 @@ async def _process_pdfm_pages_impl(
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
     await edit_msg(chat_id, status_msg_id,
-        f"✅ <b>PDFM Complete!</b>\n\n📄 {file_name}\n🎯 {topic}\n"
-        f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ {mins}:{secs:02d}")
+        "✅ <b>PDFM Complete!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 {file_name}\n🎯 {topic}\n"
+        f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ {mins}:{secs:02d}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━")
 
 def _get_bd_time() -> str:
     """Bangladesh current time"""
@@ -9037,7 +9044,7 @@ async def _handle_qbm_impl(msg: dict):
 
             total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
             page_breakdown = "\n".join(
-                f"📌 Page {fmt_page(p)}: {len(mcqs)} MCQ" for p, _, mcqs in extracted_pages
+                f"✅ Page {fmt_page(p)}: {len(mcqs)} MCQ ✓" for p, _, mcqs in extracted_pages
             )
 
             # Extraction শেষ হওয়ার সাথে সাথেই CSV auto-send — channel select
@@ -9077,8 +9084,12 @@ async def _handle_qbm_impl(msg: dict):
                 "callback_data": f"qbmch_csv_{uid}"
             }])
             await send_msg(chat_id,
-                f"✅ Extraction Complete! {total_mcq_found} MCQ পাওয়া গেছে ({len(pages)} page)\n\n"
-                f"{page_breakdown}\n\n"
+                "✅ <b>Extraction Complete!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📝 Total MCQ: {total_mcq_found}  |  📋 Pages: {len(pages)}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{page_breakdown}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🎯 Topic: {topic}\n\nChannel select করো:",
                 reply_markup=kb
             )
@@ -9535,12 +9546,17 @@ async def process_qbm_pages(
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
     page_breakdown_final = "\n".join(
-        f"📌 Page {fmt_page(p)}: {ps['mcq']} MCQ" for p, ps in zip([pp for pp, _ in display_pages], page_status)
+        f"✅ Page {fmt_page(p)}: {ps['mcq']} MCQ ✓" for p, ps in zip([pp for pp, _ in display_pages], page_status)
     )
     await edit_msg(chat_id, status_msg_id,
-        f"✅ <b>QBM Extraction Complete!</b>\n\n📄 {file_name}\n📋 {topic}\n\n"
-        f"{page_breakdown_final}\n\n"
-        f"📝 Total MCQ Extracted: {total_mcq}\n📋 Pages: {len(display_pages)}\n⏱️ {mins}:{secs:02d}")
+        "✅ <b>QBM Extraction Complete!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 {file_name}\n📋 {topic}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{page_breakdown_final}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 Total MCQ Extracted: {total_mcq}\n📋 Pages: {len(display_pages)}\n⏱️ {mins}:{secs:02d}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━")
 
 # ============================================================
 # FEATURE: /rapid — CSV রিপ্লাই করে Topic দিলে, channel + local time select
