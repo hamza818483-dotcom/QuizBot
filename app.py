@@ -3929,10 +3929,12 @@ async def handle_csv_command(msg: dict):
                 "updated_at": int(time.time())
             }).execute())
 
+        _t2 = time.time()
         await asyncio.gather(
             db_save_mcq_cache(cache_id, cache_id, 0, topic or "CSV MCQ", mcqs),
             _save_session_row()
         )
+        logger.info(f"[csv-timing] uid={uid} db save done in {time.time()-_t2:.2f}s, total {time.time()-_t0:.2f}s")
 
         # Inline mode: directly send to specified channel
         if inline_channel:
@@ -10713,6 +10715,16 @@ async def process_update(update: dict):
                 if len(_USER_PENDING_QUEUE[uid]) > 20:
                     # Safety cap — drop oldest queued item rather than growing unbounded
                     _USER_PENDING_QUEUE[uid].pop(0)
+                elif uid in _USER_QUEUE_RUNNING:
+                    # Aager command akhono cholche - silent wait er bodole
+                    # sathe sathe janano hocche je queue te ache (root cause
+                    # of "stuck at 0%" reports: /csv silently queued behind a
+                    # slow earlier command from same user, no feedback shown).
+                    _msg_obj = update.get("message", {})
+                    _cid = _msg_obj.get("chat", {}).get("id")
+                    _txt = (_msg_obj.get("text") or "").strip().split()[0] if _msg_obj.get("text") else "command"
+                    if _cid:
+                        _spawn_task(send_msg(_cid, f"⏳ Ager command sesh howar opekkhay ache — {_txt} ektu porei shuru hobe..."))
                 if uid not in _USER_QUEUE_RUNNING:
                     # Stale-worker guard: if a previous worker for this uid
                     # died without clearing _USER_QUEUE_RUNNING (crash/restart
