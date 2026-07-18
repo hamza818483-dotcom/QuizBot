@@ -8493,7 +8493,7 @@ async def _qbm_groq_text_call(prompt: str, model: str = "openai/gpt-oss-120b") -
     return ""
 
 
-async def _qbm_web_resolve_answer(mc: dict) -> str | None:
+async def _qbm_web_resolve_answer(mc: dict) -> dict | None:
     """
     LAST-RESORT answer resolution -- used ONLY when the answer could not be
     found anywhere in the page/PDF (no mark, no inline answer, no answer-key
@@ -8503,7 +8503,11 @@ async def _qbm_web_resolve_answer(mc: dict) -> str | None:
     - runs the reasoning TWICE independently (self-consistency check) and
       only accepts the answer if both passes agree
     - explicit confidence gate: model must say NONE rather than guess
-    Returns the correct option letter (A/B/C/D) or None if unresolved.
+    - also produces a clean 4-option-covering explanation (max 165 chars,
+      Bengali) with NO mention of "answer not found", "AI knowledge", "web
+      search", or any other meta/source-reference note -- explanation must
+      read exactly like a normal question-related explanation.
+    Returns {"answer": "A/B/C/D", "explanation": "..."} or None if unresolved.
     """
     try:
         q = mc.get("question", "")
@@ -8527,39 +8531,76 @@ STRICT PROCESS (follow all steps, do not skip any):
 5) Rate your own confidence: only proceed to a final answer if you are genuinely confident
    (would bet on it being factually correct) -- if there is real doubt or the fact is obscure/
    unverifiable from memory, do NOT guess.
+6) If confident, write a Bengali explanation (max 165 characters) that briefly covers ALL 4
+   options: why the correct one is right, and why each of the other 3 is wrong -- stated as
+   plain direct fact, exactly like a normal textbook explanation. NEVER mention that the
+   answer was missing from the source, found via AI/web/search, or reference this process in
+   any way -- the explanation must read as pure, ordinary subject-matter content.
 
-OUTPUT FORMAT (mandatory, in this exact order):
-Line 1: one-line reasoning summary (max 20 words)
-Line 2: ONLY the final answer -- either a single letter A/B/C/D, or the word NONE if not
-        genuinely confident. Nothing else on this line."""
+OUTPUT FORMAT (mandatory, in this exact order, nothing else):
+Line 1: one-line internal reasoning summary (max 20 words) -- for logging only
+Line 2: ONLY the final answer letter A/B/C/D, or the word NONE if not genuinely confident
+Line 3: the 165-char-max Bengali explanation (omit this line entirely if Line 2 is NONE)"""
 
-        async def _one_pass() -> str | None:
-            txt = (await _qbm_groq_text_call(prompt, model="openai/gpt-oss-120b")).strip().upper()
+        async def _one_pass() -> dict | None:
+            txt = (await _qbm_groq_text_call(prompt, model="openai/gpt-oss-120b")).strip()
             lines = [l.strip() for l in txt.splitlines() if l.strip()]
-            last_line = lines[-1] if lines else txt
-            if "NONE" in last_line:
+            if len(lines) < 2:
                 return None
-            m = re.search(r'[ABCD]', last_line)
-            return m.group() if m else None
+            ans_line = lines[1].upper()
+            if "NONE" in ans_line:
+                return None
+            m = re.search(r'[ABCD]', ans_line)
+            if not m:
+                return None
+            expl = lines[2][:165].strip() if len(lines) >= 3 else ""
+            return {"answer": m.group(), "explanation": expl}
 
-        # Self-consistency: two independent reasoning passes must agree before
-        # the answer is trusted -- a single pass alone is not enough for a
-        # knowledge-only (no source) answer.
+        # Self-consistency: two independent reasoning passes must agree on the
+        # ANSWER LETTER before it's trusted -- a single pass alone is not
+        # enough for a knowledge-only (no source) answer.
         pass1 = await _one_pass()
         if pass1 is None:
             return None
         pass2 = await _one_pass()
         if pass2 is None:
             return None
-        if pass1 == pass2:
-            return pass1
+        if pass1["answer"] == pass2["answer"]:
+            # Prefer whichever pass produced a non-empty explanation.
+            return pass1 if pass1["explanation"] else pass2
         # Disagreement between two independent reasoning passes -> genuinely
         # uncertain, do not guess; leave unresolved rather than risk a wrong answer.
-        logger.warning(f"[QBM] Web-resolve self-consistency mismatch: {pass1} vs {pass2} for Q: {q[:60]}")
+        logger.warning(f"[QBM] Web-resolve self-consistency mismatch: {pass1['answer']} vs {pass2['answer']} for Q: {q[:60]}")
         return None
     except Exception as e:
         logger.warning(f"[QBM] Web answer-resolve failed: {e}")
         return None
+
+
+async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str) -> str:
+    """
+    Builds a clean, question-related, 4-option-covering Bengali explanation
+    (max 165 chars) when the correct answer is already known (e.g. matched
+    from an answer-key on a nearby page) but no real explanation text came
+    with it. NEVER references the source, page, or how the answer was found.
+    """
+    try:
+        q = mc.get("question", "")
+        opts = mc.get("options", [])
+        opts_txt = "\n".join(f"{L}) {o}" for L, o in zip("ABCD", opts))
+        prompt = f"""প্রশ্ন: {q}
+{opts_txt}
+সঠিক উত্তর: {answer_letter}
+
+Write a Bengali explanation (max 165 characters) that briefly covers ALL 4 options: why the
+correct option ({answer_letter}) is right, and why each of the other 3 is wrong -- stated as
+plain direct fact, exactly like a normal textbook explanation. NEVER mention the source, page,
+answer key, or how the answer was determined. Output ONLY the explanation text, nothing else."""
+        txt = (await _qbm_groq_text_call(prompt)).strip()
+        return txt[:165]
+    except Exception as e:
+        logger.warning(f"[QBM] Explanation build failed: {e}")
+        return ""
 
 
 async def handle_qbm(msg: dict):
@@ -8918,22 +8959,22 @@ async def qbm_extract_all_pages(
                             if key in found_map:
                                 m["answer"] = found_map[key]
                                 m["explanation"] = (m.get("explanation") or "").replace(
-                                    "Answer not found in source",
-                                    f"Answer key p.{fmt_page(pages[idx + lookahead_offset][0])} থেকে matched"
-                                )
+                                    "Answer not found in source", ""
+                                ).strip()
+                                if not m["explanation"]:
+                                    m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"])
                         unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
 
-            # Still unresolved after scanning nearby pages -> last-resort real
-            # web search (Google Search grounding via Gemini), never a blind guess.
+            # Still unresolved after scanning nearby pages -> last-resort Groq
+            # knowledge-based resolution, never a blind guess.
             if unresolved:
                 for m in unresolved:
-                    web_ans = await _qbm_web_resolve_answer(m)
-                    if web_ans:
-                        m["answer"] = web_ans
-                        m["explanation"] = (m.get("explanation") or "").replace(
-                            "Answer not found in source",
-                            "উত্তর AI জ্ঞান থেকে নির্ধারণ করা হয়েছে"
-                        )
+                    resolved = await _qbm_web_resolve_answer(m)
+                    if resolved:
+                        m["answer"] = resolved["answer"]
+                        m["explanation"] = resolved["explanation"] or (m.get("explanation") or "").replace(
+                            "Answer not found in source", ""
+                        ).strip()
         except Exception as e:
             logger.error(f"[QBM Extract] Page {page_num} error: {e}")
 
@@ -9064,19 +9105,19 @@ async def process_qbm_pages(
                                 if key in found_map:
                                     m["answer"] = found_map[key]
                                     m["explanation"] = (m.get("explanation") or "").replace(
-                                        "Answer not found in source",
-                                        f"Answer key p.{fmt_page(display_pages[idx + lookahead_offset][0])} থেকে matched"
-                                    )
+                                        "Answer not found in source", ""
+                                    ).strip()
+                                    if not m["explanation"]:
+                                        m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"])
                             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
                 if unresolved:
                     for m in unresolved:
-                        web_ans = await _qbm_web_resolve_answer(m)
-                        if web_ans:
-                            m["answer"] = web_ans
-                            m["explanation"] = (m.get("explanation") or "").replace(
-                                "Answer not found in source",
-                                "উত্তর AI জ্ঞান থেকে নির্ধারণ করা হয়েছে"
-                            )
+                        resolved = await _qbm_web_resolve_answer(m)
+                        if resolved:
+                            m["answer"] = resolved["answer"]
+                            m["explanation"] = resolved["explanation"] or (m.get("explanation") or "").replace(
+                                "Answer not found in source", ""
+                            ).strip()
 
             img_bytes = image_to_bytes(img) if not isinstance(img, (bytes, bytearray)) else img
 
