@@ -9401,6 +9401,29 @@ async def qbm_extract_all_pages(
         await edit_msg(chat_id, status_msg_id,
             _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
 
+    # Live ticker: QBM's 3-call pipeline (full Call1+Call2+Call3, no shortcuts)
+    # can take 30-90s per page, and the dashboard previously only refreshed on
+    # page start/finish -- elapsed time looked frozen the whole time. This
+    # refreshes the same message every few seconds purely for the live clock,
+    # independent of page completion events (same pattern as /pdf's ticker).
+    _qbm_dash_stop = asyncio.Event()
+    async def _qbm_dashboard_ticker():
+        _ticker_deadline = time.time() + 1800
+        while not _qbm_dash_stop.is_set() and time.time() < _ticker_deadline:
+            try:
+                await asyncio.wait_for(_qbm_dash_stop.wait(), timeout=4)
+            except asyncio.TimeoutError:
+                pass
+            if _qbm_dash_stop.is_set():
+                break
+            if status_msg_id:
+                try:
+                    await edit_msg(chat_id, status_msg_id,
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+                except Exception:
+                    pass
+    _qbm_ticker_task = _spawn_task(_qbm_dashboard_ticker())
+
     async def _extract_one(idx, page_num, img):
         nonlocal total_mcq
         if is_cancelled(chat_id):
@@ -9482,6 +9505,11 @@ async def qbm_extract_all_pages(
         for idx, page_num, img, mcqs in chunk_results:
             results[idx] = (page_num, img, mcqs)
 
+    _qbm_dash_stop.set()
+    try:
+        await asyncio.wait_for(_qbm_ticker_task, timeout=2)
+    except Exception:
+        pass
     clear_active_job(chat_id)
     return [r for r in results if r is not None]
 
