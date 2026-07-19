@@ -8535,14 +8535,8 @@ async def _qbm_call3_verify(img, mcqs: list, page_confirmed_complete: bool) -> l
             for m in mcqs
         ], ensure_ascii=False)
 
-        mode_note = (
-            "Call 1 and Call 2 already fully confirmed this page (no misses, no "
-            "duplicates) — so do ONE FAST recheck pass only, do not over-analyze."
-            if page_confirmed_complete else
-            "Do a careful full verification pass on every MCQ below."
-        )
-
-        prompt = f"""{mode_note}
+        prompt = f"""Do a careful full verification pass on every MCQ below — never skip or
+shortcut this check, regardless of how confident earlier passes were.
 
 Here is the current MCQ list extracted from this page image (Call 1 + Call 2 combined):
 {mcq_json}
