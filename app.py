@@ -9427,7 +9427,12 @@ async def qbm_extract_all_pages(
                             "Answer not found in source", ""
                         ).strip()
         except Exception as e:
-            logger.error(f"[QBM Extract] Page {page_num} error: {e}")
+            logger.error(f"[QBM Extract] Page {page_num} error: {e} — retrying once before giving up (page must never be silently skipped)")
+            try:
+                mcqs = await _qbm_extract_from_image(img)
+            except Exception as e2:
+                logger.error(f"[QBM Extract] Page {page_num} retry also failed: {e2}")
+                mcqs = []
 
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
