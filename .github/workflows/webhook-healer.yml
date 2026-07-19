@@ -38,9 +38,10 @@ jobs:
           echo "Response: $RESP"
           CURRENT_URL=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('result',{}).get('url',''))" 2>/dev/null || echo "")
           PENDING=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('result',{}).get('pending_update_count',0))" 2>/dev/null || echo "0")
+          MISSING_PA=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); allowed=d.get('result',{}).get('allowed_updates', []); print('true' if allowed and 'poll_answer' not in allowed else 'false')" 2>/dev/null || echo "false")
           echo "current_url=$CURRENT_URL" >> $GITHUB_OUTPUT
           echo "pending=$PENDING" >> $GITHUB_OUTPUT
-          if [ -z "$CURRENT_URL" ]; then
+          if [ -z "$CURRENT_URL" ] || [ "$MISSING_PA" = "true" ]; then
             echo "needs_heal=true" >> $GITHUB_OUTPUT
           else
             echo "needs_heal=false" >> $GITHUB_OUTPUT

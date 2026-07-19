@@ -13914,12 +13914,26 @@ async def _webhook_healer_task() -> None:
     HF Space URL so the bot doesn't stay silently dead."""
     await asyncio.sleep(120)
     logger.info("[App] Webhook healer task started")
+    _REQUIRED_UPDATES = {"message", "callback_query", "poll_answer", "poll"}
     while True:
         try:
             if _tg_mode == "cf-proxy":
                 info = await tg_post("getWebhookInfo", {})
                 current_url = info.get("result", {}).get("url", "") if info.get("ok") else ""
-                if not current_url:
+                current_allowed = set(info.get("result", {}).get("allowed_updates", []) or [])
+                # allowed_updates empty/missing in getWebhookInfo response means
+                # Telegram is NOT restricting - i.e. ALL update types are sent
+                # (this is Telegram's actual documented behavior). Only treat
+                # it as broken if it's non-empty AND missing something we need
+                # (e.g. some earlier setWebhook call - ours or an external one
+                # like a GitHub Action / manual call - narrowed it and silently
+                # dropped poll_answer, which is exactly what caused quiz
+                # answers to stop auto-advancing while timeouts kept working).
+                missing_updates = bool(current_allowed) and not _REQUIRED_UPDATES.issubset(current_allowed)
+                if not current_url or missing_updates:
+                    if missing_updates:
+                        logger.warning(f"[App] Webhook healer: allowed_updates missing required types! "
+                                       f"current={current_allowed} required={_REQUIRED_UPDATES} — repairing")
                     worker_webhook = CF_WORKER_URL.rstrip("/") + "/webhook"
                     payload = {"url": worker_webhook, "drop_pending_updates": False, "max_connections": 40,
                                "allowed_updates": ["message", "callback_query", "poll_answer", "poll"]}
@@ -13928,6 +13942,11 @@ async def _webhook_healer_task() -> None:
                     result = await tg_post("setWebhook", payload)
                     if result.get("ok"):
                         logger.info(f"[App] Webhook healer: re-set webhook → {result}")
+                        if missing_updates:
+                            await notify_owner(
+                                "⚠️ Webhook Healer: allowed_updates ছিল অসম্পূর্ণ (poll_answer বা অন্য কিছু বাদ পড়েছিল) — "
+                                "auto-repair করা হয়েছে। এই কারণে quiz answer দিলে next question আসছিল না।"
+                            )
                     else:
                         logger.warning(f"[App] Webhook healer: re-set attempt failed: {result}")
                         # CF proxy target failed (DNS/routing) — fall back to
