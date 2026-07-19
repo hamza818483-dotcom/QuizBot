@@ -12546,6 +12546,22 @@ async def handle_message(msg: dict):
         await handle_convert_command(msg)
     elif text.startswith("/error") or text.startswith("/errors"):
         await handle_error_command(msg)
+    elif text == "/whinfo":
+        try:
+            _wi = await tg_post("getWebhookInfo", {})
+            _res = _wi.get("result", {})
+            await send_msg(chat_id,
+                f"🔗 <b>Webhook Info</b>\n\n"
+                f"URL: <code>{_res.get('url', '(none)')}</code>\n"
+                f"Pending updates: {_res.get('pending_update_count', 0)}\n"
+                f"Max connections: {_res.get('max_connections', '?')}\n"
+                f"Allowed updates: <code>{_res.get('allowed_updates', '(all - not restricted)')}</code>\n"
+                f"Has custom cert: {_res.get('has_custom_certificate', False)}\n"
+                f"Last error: {_res.get('last_error_message', 'none')}\n"
+                f"Last error date: {_res.get('last_error_date', 'none')}"
+            )
+        except Exception as e:
+            await send_msg(chat_id, f"❌ /whinfo failed: {e}")
     elif text == "/ping":
         try:
             _t0 = time.time()
