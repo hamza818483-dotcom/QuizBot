@@ -8578,7 +8578,13 @@ Output ONLY the corrected full JSON array (same length as input, same schema, al
         txt = await _qbm_groq_call(img, prompt)
         verified = _qbm_parse_json(txt) if txt else []
         if verified and len(verified) >= len(mcqs) * 0.8:
-            return _cap_mcq_options(verified)
+            deduped_verified = _qbm_dedup_list(verified)
+            # sanity: if dedup collapsed it down close to (or below) the pre-verify
+            # count, trust the deduped version; if dedup removed almost everything
+            # (parsing weirdness), fall back to the pre-verify list instead.
+            if deduped_verified and len(deduped_verified) >= len(mcqs) * 0.8:
+                return _cap_mcq_options(deduped_verified)
+            return _cap_mcq_options(mcqs)
         return mcqs  # verify failed/degraded -> keep Call1+2 result, never lose data
     except Exception as e:
         logger.warning(f"[QBM Call3] failed: {e}")
