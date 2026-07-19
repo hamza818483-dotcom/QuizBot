@@ -447,9 +447,14 @@ async def send_quiz_question(chat_id: int, session: dict):
         session["_sending_for"] = None
         QUIZ_SESSIONS[session["uid"]] = session
 
-        # Timer: auto-skip after timer expires
+        # Timer: auto-skip after timer expires. NOTE: must wait LONGER than the
+        # poll's own open_period (timer+5) so this never fires while the poll
+        # can still legitimately receive an answer -- firing earlier caused a
+        # race where a real, on-time answer arrived just after the session
+        # had already moved on via timeout, producing a pid mismatch and a
+        # stalled quiz (no next question sent).
         async def _quiz_timeout():
-            await asyncio.sleep(session["timer"] + 2)
+            await asyncio.sleep(session["timer"] + 6)
             s = QUIZ_SESSIONS.get(session["uid"])
             if not s or s["pid"] != poll_id or s["cur"] != session["cur"]:
                 return
@@ -506,6 +511,29 @@ async def handle_quiz_poll_answer(pa: dict):
             )
         except Exception:
             pass
+        # SAFETY NET: never leave the quiz permanently stalled on a mismatch.
+        # If nothing has advanced the session shortly after this, force it
+        # forward using this answer so the user isn't stuck forever.
+        async def _stall_recovery():
+            await asyncio.sleep(2)
+            s2 = QUIZ_SESSIONS.get(uid)
+            if not s2 or s2.get("pid") != session.get("pid") or s2.get("cur") != session.get("cur"):
+                return  # something else already advanced it -- no stall after all
+            logger.warning(f"[Quiz] Force-recovering stalled quiz uid={uid} cur={s2.get('cur')}")
+            option_ids2 = pa.get("option_ids", [])
+            if option_ids2 and option_ids2[0] == s2.get("cor"):
+                s2["right"] += 1
+            elif not option_ids2:
+                s2["skip"] += 1
+            else:
+                s2["wrong"] += 1
+            s2["cur"] += 1
+            QUIZ_SESSIONS[uid] = s2
+            if s2["cur"] >= s2["tot"]:
+                await finish_d1_quiz(s2)
+            else:
+                await send_quiz_question(s2["chat_id"], s2)
+        asyncio.create_task(_stall_recovery())
         return
 
     option_ids = pa.get("option_ids", [])
