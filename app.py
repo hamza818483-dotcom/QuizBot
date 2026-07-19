@@ -9415,9 +9415,11 @@ async def qbm_extract_all_pages(
 
             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
             if unresolved and idx + 1 < len(pages):
-                for lookahead_offset in (1, 2):
-                    if idx + lookahead_offset >= len(pages):
-                        break
+                # Scan ALL remaining pages (not just the next 2) — an answer
+                # key/table can legitimately sit many pages later, and giving
+                # up early would mean falling back to an AI-guessed answer
+                # instead of the real one actually present in the source.
+                for lookahead_offset in range(1, len(pages) - idx):
                     if not unresolved:
                         break
                     _, lookahead_img = pages[idx + lookahead_offset]
@@ -9566,9 +9568,7 @@ async def process_qbm_pages(
             if not skip_extract:
                 unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
                 if unresolved and idx + 1 < len(display_pages):
-                    for lookahead_offset in (1, 2):
-                        if idx + lookahead_offset >= len(display_pages):
-                            break
+                    for lookahead_offset in range(1, len(display_pages) - idx):
                         if not unresolved:
                             break
                         _, lookahead_img = display_pages[idx + lookahead_offset]
