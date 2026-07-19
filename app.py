@@ -11340,9 +11340,27 @@ async def handle_poll_answer(pa: dict):
 
         await qs_set(uid, st)
         await asyncio.sleep(0.1)
-        await _advance_quiz(uid)
+        try:
+            await _advance_quiz(uid)
+        except Exception as e:
+            logger.error(f"[PollAnswer] _advance_quiz failed, retrying: {e}")
+            try:
+                await asyncio.sleep(0.7)
+                await _advance_quiz(uid)
+            except Exception as e2:
+                logger.error(f"[PollAnswer] retry also failed: {e2}")
+                st2 = await qs_get(uid)
+                if st2:
+                    st2["idx"] += 1
+                    await qs_set(uid, st2)
+                    if st2["idx"] >= len(st2["mcqs"]):
+                        await _finish_quiz(uid)
+                    else:
+                        await _send_quiz_question(uid)
+                await notify_owner(f"⚠️ Quiz advance FAILED after retry uid={uid}: {e2}")
     except Exception as e:
         logger.error(f"[PollAnswer] {e}")
+        await notify_owner(f"⚠️ handle_poll_answer error uid={pa.get('user',{}).get('id')}: {e}")
 
 async def _finish_quiz(uid: int):
     st = await qs_get(uid)
@@ -12064,7 +12082,6 @@ async def process_update(update: dict):
                     _USER_QUEUE_RUNNING.add(uid)
                     _spawn_task(_drain_user_queue(uid))
             else:
-                await handle_message(update["message"])
                 await handle_message(update["message"])
         elif "callback_query" in update:
             await handle_callback(update["callback_query"])
