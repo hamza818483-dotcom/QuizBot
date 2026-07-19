@@ -5410,15 +5410,28 @@ async def handle_info2(msg: dict):
             }
         top_sorted = sorted(top_counts.values(), key=lambda x: x["count"], reverse=True)[:3]
         medals = ["🥇", "🥈", "🥉"]
-        txt = "📊 <b>ATLAS Bot Statistics</b>\n\n"
-        txt += f"👥 Total Users: {users.count or 0}\n"
-        txt += f"📄 PDF Sessions: {sessions.count or 0}\n"
-        txt += f"🌐 Web Exams: {web_exams.count or 0}\n"
-        txt += f"🔑 Gemini Keys: {len(key_rotator.keys)}\n\n"
-        txt += "🔝 <b>Top Exam Takers:</b>\n"
+        stats_md = (
+            "# 📊 ATLAS Bot Statistics\n\n"
+            "| Metric | Value |\n"
+            "| --- | --- |\n"
+            f"| 👥 Total Users | {users.count or 0} |\n"
+            f"| 📄 PDF Sessions | {sessions.count or 0} |\n"
+            f"| 🌐 Web Exams | {web_exams.count or 0} |\n"
+            f"| 🔑 Gemini Keys | {len(key_rotator.keys)} |\n\n"
+            "## 🔝 Top Exam Takers\n"
+            "| # | Name | Exams |\n"
+            "| --- | --- | --- |\n"
+        )
+        fallback = "📊 <b>ATLAS Bot Statistics</b>\n\n"
+        fallback += f"👥 Total Users: {users.count or 0}\n"
+        fallback += f"📄 PDF Sessions: {sessions.count or 0}\n"
+        fallback += f"🌐 Web Exams: {web_exams.count or 0}\n"
+        fallback += f"🔑 Gemini Keys: {len(key_rotator.keys)}\n\n"
+        fallback += "🔝 <b>Top Exam Takers:</b>\n"
         for i, u in enumerate(top_sorted):
-            txt += f"{medals[i]} {u['name']} — {u['count']} exams\n"
-        await send_msg(chat_id, txt)
+            stats_md += f"| {medals[i]} | {u['name']} | {u['count']} |\n"
+            fallback += f"{medals[i]} {u['name']} — {u['count']} exams\n"
+        await send_rich_msg(chat_id, stats_md, fallback_text=fallback)
     except Exception as e:
         await _safe_error_reply(chat_id, e)
 

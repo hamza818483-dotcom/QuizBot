@@ -19,7 +19,7 @@ import pytz
 from core import (
     logger, sb, sb_exec, OWNER_ID,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
-    tg_post, send_msg, edit_msg, send_photo_by_id, send_poll,
+    tg_post, send_msg, send_rich_msg, edit_msg, send_photo_by_id, send_poll,
     download_tg_file, db_get_settings, notify_owner,
 )
 
@@ -126,10 +126,13 @@ async def handle_qlist(msg: dict):
         return
     bot_info = await tg_post("getMe", {})
     bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
-    txt = "📋 <b>All Quizzes</b>\n\n"
+    md = "# 📋 All Quizzes\n\n| Quiz | Link |\n| --- | --- |\n"
+    fallback = "📋 <b>All Quizzes</b>\n\n"
     for q in quizzes:
-        txt += f"📝 {q['name']}\n🔗 https://t.me/{bot_username}?start={q['id']}\n\n"
-    await send_msg(chat_id, txt)
+        link = f"https://t.me/{bot_username}?start={q['id']}"
+        md += f"| {q['name']} | [{q['id']}]({link}) |\n"
+        fallback += f"📝 {q['name']}\n🔗 {link}\n\n"
+    await send_rich_msg(chat_id, md, fallback_text=fallback)
 
 
 async def handle_qdel(msg: dict):
