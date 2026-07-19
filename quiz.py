@@ -385,18 +385,24 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
     await send_quiz_question(chat_id, session)
 
 
-async def send_quiz_question(chat_id: int, session: dict):
-    """Send the current quiz question as a poll"""
+async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
+    """Send the current quiz question as a poll.
+    force=True (used by the real user-answer path) always proceeds, even if
+    the timeout path had already claimed the guard for this question - a
+    genuine answer must never be silently dropped just because a timeout
+    task raced it. force=False (timeout path) still respects the guard so
+    two auto-timeouts can't double-send."""
     if session["cur"] >= session["tot"]:
         await finish_d1_quiz(session)
         return
 
-    # ── Race guard: prevent duplicate sendPoll if answer-path and
-    # timeout-path both try to advance to the same question at once ──
+    # ── Race guard: prevent duplicate sendPoll if two auto/timeout paths
+    # both try to advance to the same question at once. The real answer
+    # path (force=True) always bypasses this so it can never get stuck. ──
     uid = session["uid"]
     guard_key = (uid, session["cur"])
     live = QUIZ_SESSIONS.get(uid)
-    if live is not None and live.get("_sending_for") == guard_key:
+    if not force and live is not None and live.get("_sending_for") == guard_key:
         return
     if live is not None:
         live["_sending_for"] = guard_key
@@ -532,7 +538,7 @@ async def handle_quiz_poll_answer(pa: dict):
             if s2["cur"] >= s2["tot"]:
                 await finish_d1_quiz(s2)
             else:
-                await send_quiz_question(s2["chat_id"], s2)
+                await send_quiz_question(s2["chat_id"], s2, force=True)
         asyncio.create_task(_stall_recovery())
         return
 
@@ -570,7 +576,7 @@ async def handle_quiz_poll_answer(pa: dict):
         if session["cur"] >= session["tot"]:
             await finish_d1_quiz(session)
         else:
-            await send_quiz_question(session["chat_id"], session)
+            await send_quiz_question(session["chat_id"], session, force=True)
     except Exception as e:
         logger.error(f"[Quiz] advance failed q{session['cur']}/{session['tot']}: {e}")
         try:
@@ -578,7 +584,7 @@ async def handle_quiz_poll_answer(pa: dict):
             if session["cur"] >= session["tot"]:
                 await finish_d1_quiz(session)
             else:
-                await send_quiz_question(session["chat_id"], session)
+                await send_quiz_question(session["chat_id"], session, force=True)
         except Exception as e2:
             logger.error(f"[Quiz] retry also failed q{session['cur']}/{session['tot']}: {e2}")
             session["skip"] += 1
@@ -588,7 +594,7 @@ async def handle_quiz_poll_answer(pa: dict):
                 await finish_d1_quiz(session)
             else:
                 await asyncio.sleep(0.5)
-                await send_quiz_question(session["chat_id"], session)
+                await send_quiz_question(session["chat_id"], session, force=True)
 
 
 async def handle_quiz_next(uid: int):
@@ -623,7 +629,7 @@ async def handle_quiz_next(uid: int):
         if session["cur"] >= session["tot"]:
             await finish_d1_quiz(session)
         else:
-            await send_quiz_question(session["chat_id"], session)
+            await send_quiz_question(session["chat_id"], session, force=True)
     except Exception as e:
         logger.error(f"[Quiz] advance failed q{session['cur']}/{session['tot']}: {e}")
         try:
@@ -631,7 +637,7 @@ async def handle_quiz_next(uid: int):
             if session["cur"] >= session["tot"]:
                 await finish_d1_quiz(session)
             else:
-                await send_quiz_question(session["chat_id"], session)
+                await send_quiz_question(session["chat_id"], session, force=True)
         except Exception as e2:
             logger.error(f"[Quiz] retry also failed q{session['cur']}/{session['tot']}: {e2}")
             session["skip"] += 1
@@ -641,7 +647,7 @@ async def handle_quiz_next(uid: int):
                 await finish_d1_quiz(session)
             else:
                 await asyncio.sleep(0.5)
-                await send_quiz_question(session["chat_id"], session)
+                await send_quiz_question(session["chat_id"], session, force=True)
 
 
 async def finish_d1_quiz(session: dict):
