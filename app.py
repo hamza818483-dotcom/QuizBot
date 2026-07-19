@@ -11300,13 +11300,16 @@ async def _advance_quiz(uid: int):
 
 async def handle_poll_answer(pa: dict):
     try:
+        logger.info(f"[PollAnswer][TRACE] ENTER poll_id={pa.get('poll_id')} uid={pa.get('user',{}).get('id')} option_ids={pa.get('option_ids')}")
         # Live quiz check FIRST (v4) — poll_id based routing
         poll_id_ck = pa.get("poll_id", "")
         if poll_id_ck and poll_id_ck in LIVE_POLL_MAP:
+            logger.info(f"[PollAnswer][TRACE] routed to LIVE_POLL_MAP path")
             await handle_live_poll_answer(pa)
             return
         # Fallback: legacy active-state check
         if LIVE_QUIZ_STATE:
+            logger.info(f"[PollAnswer][TRACE] LIVE_QUIZ_STATE truthy, trying legacy live path first")
             try:
                 await handle_live_poll_answer(pa)
             except Exception:
@@ -11315,8 +11318,10 @@ async def handle_poll_answer(pa: dict):
         # D1 quiz system check
         uid_ck = pa.get("user", {}).get("id")
         if uid_ck and uid_ck in QUIZ_SESSIONS:
+            logger.info(f"[PollAnswer][TRACE] routed to D1 quiz (handle_quiz_poll_answer) uid={uid_ck}")
             await handle_quiz_poll_answer(pa)
             return
+        logger.info(f"[PollAnswer][TRACE] fell through to legacy qs_get path, uid={uid_ck} in_QUIZ_SESSIONS={uid_ck in QUIZ_SESSIONS if uid_ck else 'no-uid'}")
 
         uid = pa["user"]["id"]
         st = await qs_get(uid)

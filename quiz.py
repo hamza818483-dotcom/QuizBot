@@ -392,6 +392,7 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
     genuine answer must never be silently dropped just because a timeout
     task raced it. force=False (timeout path) still respects the guard so
     two auto-timeouts can't double-send."""
+    logger.info(f"[Quiz][TRACE] send_quiz_question ENTER uid={session.get('uid')} cur={session.get('cur')} force={force}")
     if session["cur"] >= session["tot"]:
         await finish_d1_quiz(session)
         return
@@ -447,6 +448,7 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
         poll_r = {"ok": False, "description": str(e)}
 
     if poll_r.get("ok"):
+        logger.info(f"[Quiz][TRACE] send_poll OK uid={session.get('uid')} cur={session.get('cur')}")
         poll_id = poll_r["result"].get("poll", {}).get("id", "")
         session["pid"] = poll_id
         session["cor"] = ans_idx
@@ -501,8 +503,10 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
 async def handle_quiz_poll_answer(pa: dict):
     """Handle poll answer for D1 quiz system"""
     uid = pa.get("user", {}).get("id")
+    logger.info(f"[Quiz][TRACE] handle_quiz_poll_answer ENTER uid={uid} poll_id={pa.get('poll_id')} option_ids={pa.get('option_ids')}")
     logger.info(f"[Quiz] poll_answer received uid={uid} poll_id={pa.get('poll_id')} in_sessions={uid in QUIZ_SESSIONS if uid else False}")
     if not uid or uid not in QUIZ_SESSIONS:
+        logger.info(f"[Quiz][TRACE] EXIT early - uid not in QUIZ_SESSIONS uid={uid}")
         return
 
     session = QUIZ_SESSIONS[uid]
@@ -572,11 +576,13 @@ async def handle_quiz_poll_answer(pa: dict):
     if uid in QUIZ_TIMERS:
         QUIZ_TIMERS[uid].cancel()
 
+    logger.info(f"[Quiz][TRACE] about to advance uid={uid} new_cur={session['cur']}/{session['tot']}")
     try:
         if session["cur"] >= session["tot"]:
             await finish_d1_quiz(session)
         else:
             await send_quiz_question(session["chat_id"], session, force=True)
+        logger.info(f"[Quiz][TRACE] advance call completed uid={uid}")
     except Exception as e:
         logger.error(f"[Quiz] advance failed q{session['cur']}/{session['tot']}: {e}")
         try:
