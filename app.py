@@ -8733,67 +8733,45 @@ def _qbm_question_looks_truncated(q: str, opts: list) -> bool:
     return False
 
 
+async def _qbm_reextract_truncated_question(img, q: str, opts: list) -> str:
+    """
+    Targeted single-call re-read: when a question looks truncated, ask the
+    model to look ONLY at the question-stem region of this exact page image
+    and report the REAL missing part of the text — this is still EXTRACTION
+    (reading what's actually printed), never invention of new wording.
+    """
+    try:
+        opts_str = ", ".join(o.strip() for o in opts if o and o.strip())
+        prompt = f"""This MCQ's question text was cut off during OCR: "{q}"
+Its 4 options are: {opts_str}
+
+Look ONLY at this exact page image and find the FULL, complete original
+question stem that these options belong to — read the actual printed text
+around/above these options, do not guess or invent new wording. Output ONLY
+the complete question text as plain text (Bangla/English exactly as printed,
+no JSON, no quotes, no extra commentary). If you genuinely cannot locate the
+question text on this page, output exactly: NOT_FOUND"""
+        txt = (await _qbm_groq_call(img, prompt)).strip()
+        if txt and txt != "NOT_FOUND" and len(txt) > len(q.strip()):
+            return txt
+        gem_txt = (await _qbm_gemini_raw(img, prompt)).strip()
+        if gem_txt and gem_txt != "NOT_FOUND" and len(gem_txt) > len(q.strip()):
+            return gem_txt
+    except Exception as e:
+        logger.warning(f"[QBM] Truncated-question re-extract failed: {e}")
+    return ""
+
+
 def _qbm_reconstruct_question_from_options(q: str, opts: list) -> str:
     """
-    PURE CODE-LEVEL (zero API cost) reconstruction: when the question text is
-    truncated/garbage, inspect the 4 options' shape/pattern to deterministically
-    rebuild a matching question stem. No AI call, no re-OCR -- rule-based only.
-    ALWAYS returns a usable question string -- an MCQ is NEVER dropped/skipped.
+    Fallback ONLY when the targeted image re-read (_qbm_reextract_truncated_question)
+    could not recover the real text. NEVER fabricates a new question — if the
+    actual source text can't be recovered, ships the original fragment as-is
+    (never a made-up generic filler question), so nothing invented ever reaches
+    the user.
     """
-    valid_opts = [o.strip() for o in opts if o and o.strip()]
-
-    # Known country/currency/capital/legislature name lists for pattern-matching.
-    CAPITALS = {
-        "মাসকাট": "ওমান", "কিয়েভ": "ইউক্রেন", "হেলসিংকি": "ফিনল্যান্ড",
-        "লুসাকা": "জাম্বিয়া", "লিসবন": "পর্তুগাল", "কিগালি": "রুয়ান্ডা",
-        "আস্তানা": "কাজাখস্তান", "ব্রাজাভিল": "কঙ্গো প্রজাতন্ত্র",
-        "কাম্পালা": "উগান্ডা", "হারারে": "জিম্বাবুয়ে", "বুজুম্বুরা": "বুরুন্ডি",
-        "দিলি": "পূর্ব তিমুর", "সুভা": "ফিজি",
-    }
-    CURRENCIES = {
-        "ডং": "ভিয়েতনাম", "ক্রোনা": "সুইডেন", "ল্যারি": "জর্জিয়া",
-        "পেসো": "আর্জেন্টিনা", "লিরা": "তুরস্ক", "রিঙ্গিত": "মালয়েশিয়া",
-        "রুপিয়া": "ইন্দোনেশিয়া", "কিয়াট": "মিয়ানমার", "দিরহাম": "সংযুক্ত আরব আমিরাত",
-        "দিনার": "ইরাক",
-    }
-    LEGISLATURES = {
-        "কংগ্রেস": "মার্কিন যুক্তরাষ্ট্র", "পার্লামেন্ট": "যুক্তরাজ্য",
-        "ডায়েট": "জাপান", "স্টরটিং": "নরওয়ে", "রিকসডাগ": "সুইডেন",
-        "ফোকেটিং": "ডেনমার্ক", "নেসেট": "ইসরায়েল", "বুন্দেসতাগ": "জার্মানি",
-        "ডুমা": "রাশিয়া",
-    }
-
-    def _match_ratio(lookup: dict) -> int:
-        return sum(1 for o in valid_opts if o in lookup)
-
-    caps_hit = _match_ratio(CAPITALS) if valid_opts else 0
-    curr_hit = _match_ratio(CURRENCIES) if valid_opts else 0
-    leg_hit = _match_ratio(LEGISLATURES) if valid_opts else 0
-    best = max(caps_hit, curr_hit, leg_hit)
-
     qs = q.strip()
-
-    # Strong pattern match (all-but-one-or-better options recognized in one
-    # category) -> confident, specific rebuild.
-    if valid_opts and best >= max(len(valid_opts) - 1, 1):
-        if qs in LEGISLATURES or leg_hit == best:
-            country = LEGISLATURES.get(qs)
-            if country:
-                return f"{country}ের আইনসভার নাম কী?"
-            return "নিচের কোনটি একটি দেশের আইনসভার নাম?"
-        if qs in CAPITALS or caps_hit == best:
-            return "নিচের কোনটি একটি দেশের রাজধানীর নাম?"
-        if qs in CURRENCIES or curr_hit == best:
-            return "নিচের কোনটি একটি দেশের মুদ্রার নাম?"
-
-    # NO STRONG PATTERN MATCH -- still never drop the MCQ. Fall back to a
-    # safe, honest generic question phrased directly around the options
-    # themselves, so the MCQ ships complete rather than being skipped.
-    if valid_opts:
-        return f"নিচের কোনটি সঠিক উত্তর — {', '.join(valid_opts)}?"
-    # Even with no usable options, ship whatever fragment we have rather
-    # than silently dropping the MCQ.
-    return qs if qs else "প্রশ্নটি অস্পষ্ট ছিল — নিচের বিকল্পগুলো থেকে সঠিক উত্তরটি নির্বাচন করুন।"
+    return qs if qs else "(প্রশ্নের অংশ অস্পষ্ট — মূল পাতায় যাচাই করুন)"
 
 
 def _qbm_option_looks_truncated(o: str, sibling_opts: list) -> bool:
@@ -8874,7 +8852,8 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
         opts = mc.get("options", [])
 
         if _qbm_question_looks_truncated(q, opts):
-            mc["question"] = _qbm_reconstruct_question_from_options(q, opts)
+            reread = await _qbm_reextract_truncated_question(img, q, opts)
+            mc["question"] = reread if reread else _qbm_reconstruct_question_from_options(q, opts)
 
         for i, o in enumerate(opts):
             if _qbm_option_looks_truncated(o, opts):
