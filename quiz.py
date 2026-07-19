@@ -329,6 +329,17 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
             "updated_at": int(time.time())
         }).execute())
 
+    # tag/exp_footer live global settings theke prottekbar play korar somoy nea
+    # hoy - quiz creation-er somoy stored value ke priority na diye, karon
+    # /tagQ ba /expQ diye admin je kono somoy global tag/footer change korte
+    # pare, ar purono (age-e create kora) quiz-gulo-o sathe sathe notun
+    # tag/footer pawa uchit, sudhu notun quiz-e na (etai chilo asol bug: shob
+    # jaygay apply hoto na karon purono quiz nijer frozen tag/footer babohar
+    # korto).
+    _live_settings = await db_get_settings()
+    _live_tag = _live_settings.get("tag", "")
+    _live_exp = _live_settings.get("exp_footer", "")
+
     session = {
         "quiz_id": (quiz_id + "mp") if mistake_qs else quiz_id,
         "name": quiz.get("name", "Quiz") + (" — Practice" if mistake_qs else ""),
@@ -340,8 +351,8 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
         "wrong": 0,
         "skip": 0,
         "timer": quiz.get("timer", 15) if isinstance(quiz.get("timer"), int) else int(quiz.get("timer", 15)),
-        "tag": quiz.get("tag", ""),
-        "exp": quiz.get("exp_footer", ""),
+        "tag": _live_tag,
+        "exp": _live_exp,
         "chat_id": chat_id,
         "uname": uname,
         "uid": uid,
