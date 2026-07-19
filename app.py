@@ -2700,6 +2700,85 @@ async def handle_remove(msg: dict):
 # ============================================================
 # FEATURE 4: /tagQ + /expQ
 # ============================================================
+async def handle_rename(msg: dict):
+    """Kono file (document/video/audio/photo) e reply kore /rename NewName
+    dile - Telegram e already-uploaded file "rename" kora jay na (API-tei
+    support nei), tai file ta re-download kore notun filename diye
+    re-upload kora hoy - eta e Telegram-e "rename" korar ekmatro upay."""
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+    text = msg.get("text", "")
+    new_name = re.sub(r'(?i)^/rename', '', text).strip()
+
+    if not reply:
+        await send_msg(chat_id, "❌ Kono file (document/video/audio/photo) e reply kore likho:\n<code>/rename NewName.ext</code>")
+        return
+    if not new_name:
+        await send_msg(chat_id, "❌ Notun name dao:\n<code>/rename NewName.ext</code>")
+        return
+    # Telegram filenames don't allow these - strip to be safe
+    new_name = re.sub(r'[\\/:*?"<>|]', '_', new_name)
+
+    doc = reply.get("document")
+    video = reply.get("video")
+    audio = reply.get("audio")
+    photo = reply.get("photo")
+
+    if doc:
+        file_id = doc["file_id"]
+        mime = doc.get("mime_type", "application/octet-stream")
+    elif video:
+        file_id = video["file_id"]
+        mime = video.get("mime_type", "video/mp4")
+        if "." not in new_name:
+            new_name += ".mp4"
+    elif audio:
+        file_id = audio["file_id"]
+        mime = audio.get("mime_type", "audio/mpeg")
+        if "." not in new_name:
+            new_name += ".mp3"
+    elif photo:
+        file_id = photo[-1]["file_id"]  # largest resolution
+        mime = "image/jpeg"
+        if "." not in new_name:
+            new_name += ".jpg"
+    else:
+        await send_msg(chat_id, "❌ Ei message type support kore na — document/video/audio/photo e reply koro।")
+        return
+
+    status = await send_msg(chat_id, "⏳ File download hocche...")
+    status_id = status.get("result", {}).get("message_id") if status.get("ok") else None
+
+    try:
+        file_bytes = await download_tg_file(
+            file_id, chat_id=reply["chat"]["id"], message_id=reply["message_id"]
+        )
+    except Exception as e:
+        if status_id:
+            await edit_msg(chat_id, status_id, f"❌ Download failed: {e}")
+        else:
+            await send_msg(chat_id, f"❌ Download failed: {e}")
+        return
+
+    if status_id:
+        await edit_msg(chat_id, status_id, f"📤 '{new_name}' name e upload hocche...")
+
+    result = await send_document(
+        chat_id, file_bytes, new_name,
+        caption=f"✅ Renamed: {new_name}", mime_type=mime,
+        reply_to_message_id=msg.get("message_id")
+    )
+    if result.get("ok"):
+        if status_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_id})
+    else:
+        err = result.get("description") or result.get("error") or "unknown error"
+        if status_id:
+            await edit_msg(chat_id, status_id, f"❌ Upload failed: {err}")
+        else:
+            await send_msg(chat_id, f"❌ Upload failed: {err}")
+
+
 async def handle_tagQ(msg: dict):
     chat_id = msg["chat"]["id"]
     text = re.sub(r'(?i)^/tagq', '', msg.get("text", "")).strip()
@@ -12121,6 +12200,7 @@ async def set_bot_commands(notify_chat_id: int = None):
         {"command": "livetime", "description": "Live Quiz-এর প্রতি প্রশ্নের সময় set করো"},
         {"command": "channel", "description": "Channel/Group add করো (custom name সহ)"},
         {"command": "channelist", "description": "Channel list দেখো"},
+        {"command": "rename", "description": "File reply kore rename koro"},
         {"command": "tagq", "description": "Poll-এ tag set করো (tagQ)"},
         {"command": "expq", "description": "Explanation footer set করো (expQ)"},
         {"command": "bm", "description": "Bookmark PDF বানাও"},
@@ -12382,6 +12462,8 @@ async def handle_message(msg: dict):
         await handle_permit(msg)
     elif text.startswith("/remove"):
         await handle_remove(msg)
+    elif text.lower().startswith("/rename"):
+        _spawn_command_task(uid, handle_rename(msg))
     elif text.lower().startswith("/tagq"):
         await handle_tagQ(msg)
     elif text.lower().startswith("/expq"):
