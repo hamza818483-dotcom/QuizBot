@@ -1020,7 +1020,11 @@ def _strip_q_numbering(q: str) -> str:
     if not q:
         return q
     # ইংরেজি/বাংলা সংখ্যা + ঐচ্ছিক ) . । স্পেস — শুরুতে একবার বা দুইবার (Q1. এর মতো)
-    pattern = r'^\s*(?:[Qq]\.?\s*)?[\d১২৩৪৫৬৭৮৯০]{1,3}\s*[).।:.\-]\s*'
+    # NOTE: negative lookahead (?!\d) after the punctuation prevents this from
+    # eating the leading digit of a DECIMAL NUMBER like "0.05M" or "1.5g" --
+    # those must never be mistaken for question numbering (list numbering is
+    # always followed by a space/letter, decimals are followed by more digits).
+    pattern = r'^\s*(?:[Qq]\.?\s*)?[\d১২৩৪৫৬৭৮৯০]{1,3}\s*[).।:.\-](?!\d)\s*'
     prev = None
     cur = q
     # চেইনড prefix (যেমন "Q1) 2." ভুলে দুইবার) ধরার জন্য সর্বোচ্চ ২ বার strip
@@ -4297,7 +4301,11 @@ def _strip_opt_prefix(opt: str) -> str:
     """Option টেক্সটের শুরুতে A) B) ক) খ) 1) 2) ইত্যাদি marker সরায়।"""
     if not opt:
         return opt
-    pattern = r'^\s*(?:[A-Da-d]|[ক-ঘ]|[1234১২৩৪])\s*[).।:.\-]\s*'
+    # NOTE: negative lookahead (?!\d) prevents eating the leading digit of a
+    # decimal number in an option (e.g. option text "1.05 M" must not become
+    # "05 M") -- option markers are always followed by a space/letter, never
+    # by another digit.
+    pattern = r'^\s*(?:[A-Da-d]|[ক-ঘ]|[1234১২৩৪])\s*[).।:.\-](?!\d)\s*'
     return re.sub(pattern, '', opt).strip()
 
 def _strip_q_source_tag(q: str) -> str:
