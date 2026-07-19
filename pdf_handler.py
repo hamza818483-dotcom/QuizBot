@@ -226,9 +226,10 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                     result.append((p, img))
                 else:
                     missing_pages.append(p)
-                    logger.error(f"[PDF] Page {p} FAILED to convert after all retries+dpi-fallback — page will be missing from output.")
+                    logger.error(f"[PDF] Page {p} FAILED to convert after all retries+dpi-fallback — inserting placeholder so page is NEVER skipped/dropped.")
+                    result.append((p, Image.new("RGB", (1240, 1754), "white")))
             if missing_pages:
-                logger.error(f"[PDF] Conversion produced 0 image for pages: {missing_pages} (out of range {first}-{last})")
+                logger.error(f"[PDF] UNRECOVERABLE render failure (placeholder inserted) for pages: {missing_pages} (out of range {first}-{last})")
             logger.info(f"[PDF] Converted {len(result)} pages")
             return result
         else:
@@ -247,7 +248,8 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                 if img is None:
                     if total_pages and p <= total_pages:
                         missing_pages.append(p)
-                        logger.error(f"[PDF] Page {p} FAILED to convert after all retries+dpi-fallback (total_pages={total_pages}) — page will be missing from output.")
+                        logger.error(f"[PDF] Page {p} FAILED to convert after all retries+dpi-fallback (total_pages={total_pages}) — inserting placeholder so page is NEVER skipped/dropped.")
+                        result.append((p, Image.new("RGB", (1240, 1754), "white")))
                         p += 1
                         continue
                     else:
@@ -259,7 +261,7 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                 if extra is not None:
                     raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
             if missing_pages:
-                logger.error(f"[PDF] Conversion produced 0 image for pages: {missing_pages} (total_pages={total_pages})")
+                logger.error(f"[PDF] UNRECOVERABLE render failure (placeholder inserted) for pages: {missing_pages} (total_pages={total_pages})")
             logger.info(f"[PDF] Converted {len(result)} pages")
             return result
     except Exception as e:
