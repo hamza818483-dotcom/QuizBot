@@ -49,7 +49,7 @@ from core import (
     BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
     CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, _tg_mode,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
-    tg_post, send_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
+    tg_post, send_msg, send_rich_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
     send_document, send_media_group, send_poll, notify_owner, notify_owner_edit, clear_owner_job, download_tg_file,
     db_get_settings, db_save_settings, db_save_settings_field, db_is_owner_or_admin, db_track_user, db_save_session,
     db_save_mcq_cache, db_update_cache, db_get_mcq_cache,
@@ -2506,6 +2506,19 @@ async def handle_start(msg: dict):
     is_auth = await db_is_owner_or_admin(uid)
 
     if is_auth:
+        settings_table_md = (
+            "**⚙️ Settings Commands**\n\n"
+            "| Command | কাজ |\n"
+            "| --- | --- |\n"
+            "| `/channel @id Name` | Channel/Group add |\n"
+            "| `/channelist` | Channel list দেখো |\n"
+            "| `/tagQ [text]` | Poll tag set |\n"
+            "| `/expQ [text]` | Explanation footer set |\n"
+            "| `/permit [user_id]` | Admin add |\n"
+            "| `/remove [user_id]` | Admin remove |\n"
+            "| `/pinon` / `/pinoff` | Auto-pin on/off |\n"
+        )
+        await send_rich_msg(chat_id, settings_table_md)
         await send_msg(chat_id,
             "🌟 <b>ATLAS BOT — Admin Panel</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -2532,14 +2545,6 @@ async def handle_start(msg: dict):
             "🎯 <b>Live Quiz</b>\n"
             "<code>/live [topic]  </code> CSV reply → Live Quiz শুরু\n"
             "<code>/livetime [sec]</code> প্রতি প্রশ্নের সময়\n\n"
-            "⚙️ <b>Settings</b>\n"
-            "<code>/channel @id Name</code> Channel/Group add\n"
-            "<code>/channelist       </code> Channel list\n"
-            "<code>/tagQ [text]      </code> Poll tag set\n"
-            "<code>/expQ [text]      </code> Explanation footer set\n"
-            "<code>/permit [user_id] </code> Admin add\n"
-            "<code>/remove [user_id] </code> Admin remove\n"
-            "<code>/pinon / /pinoff  </code> Auto-pin on/off\n\n"
             "📊 <b>Info</b>\n"
             "<code>/info2   </code> Bot stats\n\n"
             "🔖 <b>Bookmark</b>\n"
