@@ -502,6 +502,29 @@ async def get_bot_username() -> str:
         logger.error(f"[BotUsername] getMe failed: {e}")
     return "atlasQuizProBot"  # last-resort fallback only
 
+async def send_rich_msg(chat_id, markdown_text: str, fallback_text: str = None) -> dict:
+    """
+    Sends a REAL Telegram table/rich-formatted message using Bot API 10.1's
+    sendRichMessage (via telegramify-markdown's richify()). This is a brand
+    new (June 2026) endpoint -- if it's rejected/unsupported/errors for any
+    reason, automatically falls back to plain sendMessage (HTML) using
+    fallback_text (or a stripped-markdown version) so the message is NEVER
+    lost/silently dropped.
+    """
+    try:
+        from telegramify_markdown import richify
+        rich_message = richify(markdown_text)
+        result = await tg_post("sendRichMessage", {
+            "chat_id": chat_id,
+            "rich_message": rich_message.to_dict(),
+        })
+        if result.get("ok"):
+            return result
+        logger.warning(f"[RichMsg] sendRichMessage rejected, falling back to plain text: {result.get('description')}")
+    except Exception as e:
+        logger.warning(f"[RichMsg] sendRichMessage failed, falling back to plain text: {e}")
+    return await send_msg(chat_id, fallback_text if fallback_text else markdown_text, parse_mode="HTML")
+
 async def send_msg(chat_id, text: str, parse_mode: str = "HTML",
                    reply_markup=None, reply_to_message_id: int = None) -> dict:
     data = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
