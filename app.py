@@ -8894,7 +8894,16 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
             try:
                 mc["explanation"] = await _qbm_build_explanation_for_known_answer(mc, ans)
             except Exception as e:
-                logger.warning(f"[QBM safety-net] Explanation backfill failed: {e}")
+                logger.warning(f"[QBM safety-net] Explanation backfill attempt 1 failed: {e}, retrying once")
+                try:
+                    mc["explanation"] = await _qbm_build_explanation_for_known_answer(mc, ans)
+                except Exception as e2:
+                    logger.error(f"[QBM safety-net] Explanation backfill retry also failed: {e2}")
+            if not (mc.get("explanation") or "").strip():
+                opt_letters = ["A", "B", "C", "D"]
+                idx = opt_letters.index(ans) if ans in opt_letters else 0
+                ans_text = opts[idx] if idx < len(opts) else ""
+                mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
         fixed.append(mc)
     return fixed
 
