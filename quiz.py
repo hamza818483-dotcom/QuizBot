@@ -371,7 +371,7 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
         else:
             intro += f"❌ Wrong+Skip: {len(questions)}\n"
         intro += "🔄 Practice\n\nএখনই কুইজ আসবে, আপনি প্রস্তুত তো? 😎"
-        await send_msg(chat_id, intro)
+        r_first = await send_msg(chat_id, intro)
     else:
         preview = await d1_select("SELECT file_id FROM quiz_preview WHERE id=1")
         info_text = (
@@ -379,19 +379,21 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
             f"⏱️ Timer: {session['timer']}s\n📊 Questions: {session['tot']}"
         )
         if preview and preview[0].get("file_id"):
-            await send_photo_by_id(chat_id, preview[0]["file_id"], info_text)
+            r_first = await send_photo_by_id(chat_id, preview[0]["file_id"], info_text)
         else:
-            await send_msg(chat_id, info_text)
+            r_first = await send_msg(chat_id, info_text)
 
-    last_cd_id = None
+    # Quiz poll gulo ei prothom (intro/info) message-ke reply hisebe dhore
+    # rakhbe - countdown "3...2...1..." messages er sathe kono somporko nei,
+    # segulo shudhu visual countdown, reply target hisebe use kora uchit na
+    # (age last "1..." message-e reply hoto, jeta bhul chilo).
+    if r_first and r_first.get("ok"):
+        session["first_msg_id"] = r_first.get("result", {}).get("message_id")
+        QUIZ_SESSIONS[uid] = session
+
     for cd in ["3...", "2...", "1..."]:
         await asyncio.sleep(0.7)
-        r_cd = await send_msg(chat_id, cd)
-        if r_cd.get("ok"):
-            last_cd_id = r_cd.get("result", {}).get("message_id")
-    if last_cd_id:
-        session["first_msg_id"] = last_cd_id
-        QUIZ_SESSIONS[uid] = session
+        await send_msg(chat_id, cd)
     await asyncio.sleep(1)
     await send_quiz_question(chat_id, session)
 
