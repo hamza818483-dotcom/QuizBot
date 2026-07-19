@@ -8735,30 +8735,39 @@ def _qbm_question_looks_truncated(q: str, opts: list) -> bool:
 
 async def _qbm_reextract_truncated_question(img, q: str, opts: list) -> str:
     """
-    Targeted single-call re-read: when a question looks truncated, ask the
-    model to look ONLY at the question-stem region of this exact page image
-    and report the REAL missing part of the text — this is still EXTRACTION
-    (reading what's actually printed), never invention of new wording.
+    Targeted re-read: when a question looks truncated, ask the model to look
+    ONLY at the question-stem region of this exact page image and report the
+    REAL text — this is still EXTRACTION (reading what's actually printed),
+    never invention of new wording. Retries both providers before giving up,
+    since a bare bad first attempt should never be accepted as final.
     """
-    try:
-        opts_str = ", ".join(o.strip() for o in opts if o and o.strip())
-        prompt = f"""This MCQ's question text was cut off during OCR: "{q}"
+    opts_str = ", ".join(o.strip() for o in opts if o and o.strip())
+    prompt = f"""This MCQ's question text was cut off during OCR, only this fragment survived: "{q}"
 Its 4 options are: {opts_str}
 
-Look ONLY at this exact page image and find the FULL, complete original
-question stem that these options belong to — read the actual printed text
-around/above these options, do not guess or invent new wording. Output ONLY
-the complete question text as plain text (Bangla/English exactly as printed,
-no JSON, no quotes, no extra commentary). If you genuinely cannot locate the
-question text on this page, output exactly: NOT_FOUND"""
-        txt = (await _qbm_groq_call(img, prompt)).strip()
-        if txt and txt != "NOT_FOUND" and len(txt) > len(q.strip()):
-            return txt
-        gem_txt = (await _qbm_gemini_raw(img, prompt)).strip()
-        if gem_txt and gem_txt != "NOT_FOUND" and len(gem_txt) > len(q.strip()):
-            return gem_txt
-    except Exception as e:
-        logger.warning(f"[QBM] Truncated-question re-extract failed: {e}")
+Look CAREFULLY at this exact page image and find the FULL original question
+as actually printed — read the complete line/sentence around/above these
+options (it is very often phrased as a question ending in ? or কী/কোনটি/কত,
+e.g. "{q}-এর পূর্ণরূপ কী?" or "নিচের কোনটি {q}?" IF AND ONLY IF that exact
+phrasing is what's printed on the page). Read the real printed text — do not
+invent new wording that isn't on the page.
+Output ONLY the complete question text as plain text (Bangla/English exactly
+as printed, no JSON, no quotes, no extra commentary). If you genuinely cannot
+locate any question text on this page at all, output exactly: NOT_FOUND"""
+    for _attempt in range(2):
+        try:
+            txt = (await _qbm_groq_call(img, prompt)).strip()
+            if txt and txt != "NOT_FOUND" and len(txt) > len(q.strip()):
+                return txt
+        except Exception as e:
+            logger.warning(f"[QBM] Truncated-question re-extract (groq attempt {_attempt+1}) failed: {e}")
+    for _attempt in range(2):
+        try:
+            gem_txt = (await _qbm_gemini_raw(img, prompt)).strip()
+            if gem_txt and gem_txt != "NOT_FOUND" and len(gem_txt) > len(q.strip()):
+                return gem_txt
+        except Exception as e:
+            logger.warning(f"[QBM] Truncated-question re-extract (gemini attempt {_attempt+1}) failed: {e}")
     return ""
 
 
