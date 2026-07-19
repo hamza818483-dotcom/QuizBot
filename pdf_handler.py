@@ -325,7 +325,9 @@ def _strip_q_numbering(q: str) -> str:
     """প্রশ্নের শুরুতে numbering prefix (1) 14) 1. Q1. ইত্যাদি) সরায়।"""
     if not q:
         return q
-    pattern = r'^\s*(?:[Qq]\.?\s*)?[\d১২৩৪৫৬৭৮৯০]{1,3}\s*[).।:.\-]\s*'
+    # NOTE: negative lookahead (?!\d) prevents stripping the leading digit of
+    # a decimal number (e.g. "0.05M" must not become "05M").
+    pattern = r'^\s*(?:[Qq]\.?\s*)?[\d১২৩৪৫৬৭৮৯০]{1,3}\s*[).।:.\-](?!\d)\s*'
     cur = q
     for _ in range(2):
         new = re.sub(pattern, '', cur)
