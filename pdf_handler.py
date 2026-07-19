@@ -183,6 +183,33 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
         raise RuntimeError("PDF conversion queue busy -- try again in a moment")
     try:
         from pdf2image import convert_from_bytes
+        def _convert_one_page(p):
+            # PERMANENT FIX: a page must never be silently dropped just
+            # because a convert_from_bytes call returned empty (transient
+            # poppler hiccup, momentary resource blip, etc). 5 attempts with
+            # progressive backoff at dpi=150, then a last-ditch dpi=100
+            # fallback (some pages fail to render at higher dpi due to
+            # memory/complexity but succeed at lower dpi).
+            imgs = None
+            backoffs = [1, 2, 3, 4]
+            for _attempt in range(5):
+                try:
+                    imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
+                    if imgs:
+                        return imgs[0]
+                except Exception as _conv_e:
+                    logger.warning(f"[PDF] Page {p} convert attempt {_attempt+1}/5 (dpi=150) raised: {_conv_e}")
+                if _attempt < len(backoffs):
+                    time.sleep(backoffs[_attempt])
+            try:
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=100, thread_count=4)
+                if imgs:
+                    logger.warning(f"[PDF] Page {p} recovered via dpi=100 fallback after 5 failed dpi=150 attempts")
+                    return imgs[0]
+            except Exception as _conv_e:
+                logger.warning(f"[PDF] Page {p} dpi=100 fallback attempt also raised: {_conv_e}")
+            return None
+
         if page_range:
             parts = page_range.split("-")
             first = int(parts[0])
@@ -194,42 +221,45 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
             result = []
             missing_pages = []
             for p in range(first, last + 1):
-                imgs = None
-                # PERMANENT FIX: a page must never be silently dropped just
-                # because a single convert_from_bytes call returned empty
-                # (transient poppler hiccup, momentary resource blip, etc).
-                # Retry up to 3 times with backoff before giving up on it.
-                for _attempt in range(3):
-                    try:
-                        imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
-                        if imgs:
-                            break
-                    except Exception as _conv_e:
-                        logger.warning(f"[PDF] Page {p} convert attempt {_attempt+1} raised: {_conv_e}")
-                    if _attempt < 2:
-                        time.sleep(1)
-                if imgs:
-                    result.append((p, imgs[0]))
+                img = _convert_one_page(p)
+                if img is not None:
+                    result.append((p, img))
                 else:
                     missing_pages.append(p)
-                    logger.error(f"[PDF] Page {p} FAILED to convert after 3 attempts — page will be missing from output.")
+                    logger.error(f"[PDF] Page {p} FAILED to convert after all retries+dpi-fallback — page will be missing from output.")
             if missing_pages:
                 logger.error(f"[PDF] Conversion produced 0 image for pages: {missing_pages} (out of range {first}-{last})")
             logger.info(f"[PDF] Converted {len(result)} pages")
             return result
         else:
+            # REAL BUG FIX: previously an empty convert_from_bytes result on
+            # page N was treated as "end of document" via break — but empty
+            # can also mean a TRANSIENT failure on a page that is NOT actually
+            # the last page, silently truncating the rest of the PDF. Now we
+            # retry+dpi-fallback per page, and only treat it as true
+            # end-of-document once confirmed against the real page count.
+            total_pages = get_pdf_page_count(pdf_bytes)
             result = []
+            missing_pages = []
             p = 1
             while p <= _PDF_MAX_PAGES_PER_CALL:
-                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
-                if not imgs:
-                    break
-                result.append((p, imgs[0]))
+                img = _convert_one_page(p)
+                if img is None:
+                    if total_pages and p <= total_pages:
+                        missing_pages.append(p)
+                        logger.error(f"[PDF] Page {p} FAILED to convert after all retries+dpi-fallback (total_pages={total_pages}) — page will be missing from output.")
+                        p += 1
+                        continue
+                    else:
+                        break  # true end of document (or page count unknown)
+                result.append((p, img))
                 p += 1
             if p > _PDF_MAX_PAGES_PER_CALL:
-                extra = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
-                if extra:
+                extra = _convert_one_page(p)
+                if extra is not None:
                     raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
+            if missing_pages:
+                logger.error(f"[PDF] Conversion produced 0 image for pages: {missing_pages} (total_pages={total_pages})")
             logger.info(f"[PDF] Converted {len(result)} pages")
             return result
     except Exception as e:
