@@ -2724,27 +2724,42 @@ async def handle_rename(msg: dict):
     audio = reply.get("audio")
     photo = reply.get("photo")
 
+    def _ext_from_filename(fname: str) -> str:
+        if not fname or "." not in fname:
+            return ""
+        return "." + fname.rsplit(".", 1)[-1]
+
+    def _ext_from_mime(mime: str) -> str:
+        # fallback guess when no original filename/extension is available at all
+        return {
+            "video/mp4": ".mp4", "video/x-matroska": ".mkv", "video/quicktime": ".mov",
+            "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "audio/ogg": ".ogg",
+            "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+            "application/pdf": ".pdf", "application/zip": ".zip",
+        }.get(mime, "")
+
     if doc:
         file_id = doc["file_id"]
         mime = doc.get("mime_type", "application/octet-stream")
+        orig_ext = _ext_from_filename(doc.get("file_name", "")) or _ext_from_mime(mime)
     elif video:
         file_id = video["file_id"]
         mime = video.get("mime_type", "video/mp4")
-        if "." not in new_name:
-            new_name += ".mp4"
+        orig_ext = _ext_from_filename(video.get("file_name", "")) or _ext_from_mime(mime) or ".mp4"
     elif audio:
         file_id = audio["file_id"]
         mime = audio.get("mime_type", "audio/mpeg")
-        if "." not in new_name:
-            new_name += ".mp3"
+        orig_ext = _ext_from_filename(audio.get("file_name", "")) or _ext_from_mime(mime) or ".mp3"
     elif photo:
         file_id = photo[-1]["file_id"]  # largest resolution
         mime = "image/jpeg"
-        if "." not in new_name:
-            new_name += ".jpg"
+        orig_ext = ".jpg"  # Telegram compressed photos are always jpeg regardless of original
     else:
         await send_msg(chat_id, "❌ Ei message type support kore na — document/video/audio/photo e reply koro।")
         return
+
+    if "." not in new_name and orig_ext:
+        new_name += orig_ext
 
     status = await send_msg(chat_id, "⏳ File download hocche...")
     status_id = status.get("result", {}).get("message_id") if status.get("ok") else None
