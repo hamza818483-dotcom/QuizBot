@@ -333,7 +333,10 @@ async def _process_mhtml_auto(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 # D1 Quiz System (fully independent module — see quiz.py)
-from menu_module import cmd_menu, handle_menu_callback, handle_menu_pending_text, MENU_ADD_PENDING, MENU_COUNT_PENDING
+from menu_module import (
+    cmd_menu, handle_menu_callback, handle_menu_pending_text, handle_menu_reply_keyboard,
+    MENU_ADD_PENDING, MENU_COUNT_PENDING, MENU_EDIT_PENDING,
+)
 from quiz import (
     QUIZ_SESSIONS, QUIZ_TIMERS,
     handle_quiz_create, handle_qlist, handle_qdel,
@@ -12317,11 +12320,18 @@ async def handle_message(msg: dict):
 
     # /menu "Add more" flow check (awaiting new item name text, or a CSV file) —
     # must run before generic image/document collection mode grabs the CSV.
-    if (uid in MENU_ADD_PENDING or uid in MENU_COUNT_PENDING):
+    if (uid in MENU_ADD_PENDING or uid in MENU_COUNT_PENDING or uid in MENU_EDIT_PENDING):
         if msg.get("document") or (msg.get("text") and not text.startswith("/")):
             consumed = await handle_menu_pending_text(msg)
             if consumed:
                 return
+
+    # Box-icon (persistent bottom keyboard) menu navigation — taps on item names,
+    # Back/Main Menu buttons. Runs for all users, any nav depth.
+    if msg.get("text") and not text.startswith("/"):
+        consumed = await handle_menu_reply_keyboard(msg)
+        if consumed:
+            return
 
     # Image collection mode check
     if msg.get("photo") or msg.get("document"):
