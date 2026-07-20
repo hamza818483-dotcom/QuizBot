@@ -5468,8 +5468,9 @@ async def handle_wm_command(msg: dict):
         if reply.get("document"):
             file_id = reply["document"]["file_id"]
         if file_id:
+            orig_name = reply["document"].get("file_name") or "watermarked.pdf"
             await send_msg(chat_id, f"⏳ Watermark apply হচ্ছে: <b>{wm_text}</b>", parse_mode="HTML")
-            _spawn_task(_apply_watermark_to_pdf(chat_id, file_id, wm_text, reply["message_id"]))
+            _spawn_task(_apply_watermark_to_pdf(chat_id, file_id, wm_text, reply["message_id"], orig_name))
             return
 
     await send_msg(chat_id,
@@ -5480,13 +5481,13 @@ async def handle_wm_command(msg: dict):
     )
 
 
-async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str, message_id: int = None):
-    """Download PDF, apply watermark using existing add_watermark_to_pdf, resend"""
+async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str, message_id: int = None, orig_name: str = "watermarked.pdf"):
+    """Download PDF, apply watermark using existing add_watermark_to_pdf, resend (keeps original filename)"""
     try:
         pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
         wm_bytes = add_watermark_to_pdf(pdf_bytes, wm_text)
         await send_document(chat_id, wm_bytes,
-            f"watermarked.pdf",
+            orig_name,
             caption=f"✅ Watermark applied: <b>{wm_text}</b>",
             mime_type="application/pdf"
         )
