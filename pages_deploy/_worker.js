@@ -482,17 +482,65 @@ async function handleTgSendDoc(request) {
       bytes[i] = binaryStr.charCodeAt(i);
     }
 
-    const formData = new FormData();
-    formData.append('chat_id', String(body.chat_id));
-    formData.append('caption', body.caption || '');
-    if (body.parse_mode) formData.append('parse_mode', body.parse_mode);
-    formData.append('document', new Blob([bytes], { type: body.mime_type || 'application/octet-stream' }), body.filename || 'file');
-    if (body.reply_to_message_id) formData.append('reply_to_message_id', String(body.reply_to_message_id));
-    if (body.message_thread_id) formData.append('message_thread_id', String(body.message_thread_id));
+    const filename = body.filename || 'file';
+    const isAscii = /^[\x00-\x7F]*$/.test(filename);
 
-    const resp = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
-      method: 'POST', body: formData
-    });
+    let resp;
+    if (isAscii) {
+      // Plain ASCII filename (e.g. English PDF names) — the built-in
+      // FormData/Blob path works fine and is simpler, keep using it.
+      const formData = new FormData();
+      formData.append('chat_id', String(body.chat_id));
+      formData.append('caption', body.caption || '');
+      if (body.parse_mode) formData.append('parse_mode', body.parse_mode);
+      formData.append('document', new Blob([bytes], { type: body.mime_type || 'application/octet-stream' }), filename);
+      if (body.reply_to_message_id) formData.append('reply_to_message_id', String(body.reply_to_message_id));
+      if (body.message_thread_id) formData.append('message_thread_id', String(body.message_thread_id));
+      resp = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: formData });
+    } else {
+      // Non-ASCII filename (Bengali/etc) — Cloudflare Workers' built-in
+      // FormData serializes Content-Disposition's filename as a raw string
+      // without RFC 5987 (filename*=UTF-8''...) encoding, which corrupts
+      // multi-byte UTF-8 names (mojibake) once Telegram/intermediate proxies
+      // re-interpret the bytes as Latin-1. Build the multipart body by hand
+      // instead, with a properly percent-encoded filename* parameter so the
+      // original Bengali name survives intact.
+      const boundary = '----AtlasWM' + crypto.randomUUID().replace(/-/g, '');
+      const encFilenameStar = encodeURIComponent(filename).replace(/'/g, '%27');
+      const enc = new TextEncoder();
+      const parts = [];
+      const pushField = (name, value) => {
+        parts.push(enc.encode(
+          `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`
+        ));
+      };
+      pushField('chat_id', String(body.chat_id));
+      pushField('caption', body.caption || '');
+      if (body.parse_mode) pushField('parse_mode', body.parse_mode);
+      if (body.reply_to_message_id) pushField('reply_to_message_id', String(body.reply_to_message_id));
+      if (body.message_thread_id) pushField('message_thread_id', String(body.message_thread_id));
+      // File part: include BOTH a plain ASCII-safe fallback name and the
+      // RFC 5987 filename* parameter (standard "belt and suspenders" pattern
+      // for non-ASCII filenames in multipart uploads).
+      parts.push(enc.encode(
+        `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="file.pdf"; filename*=UTF-8''${encFilenameStar}\r\n` +
+        `Content-Type: ${body.mime_type || 'application/octet-stream'}\r\n\r\n`
+      ));
+      parts.push(bytes);
+      parts.push(enc.encode(`\r\n--${boundary}--\r\n`));
+
+      const totalLen = parts.reduce((sum, p) => sum + p.length, 0);
+      const fullBody = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const p of parts) { fullBody.set(p, offset); offset += p.length; }
+
+      resp = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+        method: 'POST',
+        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+        body: fullBody,
+      });
+    }
+
     const result = await resp.json();
     return new Response(JSON.stringify(result), {
       status: resp.status, headers: { 'Content-Type': 'application/json' }
