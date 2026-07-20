@@ -147,7 +147,7 @@ def parse_chorcha_file(raw: bytes) -> dict:
                 "div.flex.flex-row.items-center.justify-between"
             )
             stem_text = _clean_node_text(stem_div)
-            stem_text = re.sub(r"^\d+[\.\)]\s*", "", stem_text)  # leading "1." strip
+            stem_text = re.sub(r"^\d+[\.\)](?!\d)\s*", "", stem_text)  # leading "1." strip
             stem_images = _extract_images(stem_div)
             tag = _get_tag(block)
 
@@ -184,7 +184,7 @@ def parse_chorcha_file(raw: bytes) -> dict:
             # ---------- SHORT Q&A FORMAT ----------
             q_container = block.select_one("div.LatexRenderer-module__qDybqa__card")
             q_text = _clean_node_text(q_container)
-            q_text = re.sub(r"^\d+[\.\)]\s*", "", q_text)  # leading "1." strip
+            q_text = re.sub(r"^\d+[\.\)](?!\d)\s*", "", q_text)  # leading "1." strip
             q_images = _extract_images(q_container)
             tag = _get_tag(block)
             section = block.select_one("section")

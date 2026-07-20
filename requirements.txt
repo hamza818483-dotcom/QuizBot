@@ -26,3 +26,4 @@ telethon
 psutil
 numpy
 opencv-python-headless
+telegramify-markdown

@@ -181,6 +181,86 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 /* TOAST */
 .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--card-bg);border:1px solid var(--border);color:var(--text);padding:10px 18px;border-radius:var(--radius-full);font-size:13px;font-weight:600;z-index:1000;opacity:0;transition:opacity .3s;white-space:nowrap;pointer-events:none;}
 .toast.show{opacity:1;}
+@media print {
+  body.printing-solve-sheet > *:not(#modeResult) { display:none !important; }
+  body.printing-solve-sheet #resultWrap > *:not(#solveSheet) { display:none !important; }
+  body.printing-solve-sheet #solveSheet { display:block !important; }
+  @page { size:A4; margin:8mm 10mm; }
+
+  body.printing-solve-sheet {
+    background:#fff !important;
+    color:#111 !important;
+    font-family:'Noto Sans Bengali','Inter',sans-serif !important;
+    font-size:12.5px;
+  }
+  body.printing-solve-sheet #solveSheet::before {
+    content: attr(data-print-title);
+    display:block;
+    text-align:center;
+    padding:10px 14px;
+    background:#1a237e !important;
+    color:#fff !important;
+    margin-bottom:12px;
+    border-radius:8px;
+    font-size:14px; font-weight:800;
+    white-space:pre-line;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet #solveSheet {
+    display:block !important;
+    column-count:2;
+    column-gap:15px;
+    column-fill:balance;
+    column-rule:1px solid #ddd;
+  }
+  body.printing-solve-sheet #solveSheet::before { column-span: all; }
+
+  body.printing-solve-sheet .mcq-card {
+    background:#fff !important;
+    border:1.5px solid #c5cae9 !important;
+    box-shadow:none !important;
+    border-radius:8px;
+    padding:9px 10px !important;
+    margin-bottom:10px !important;
+    break-inside: avoid; page-break-inside: avoid;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet .q-result-badge {
+    font-size:11px; font-weight:800; padding:1px 8px; border-radius:4px;
+  }
+  body.printing-solve-sheet .q-result-badge.correct { background:#f1f8e9 !important; color:#1b5e20 !important; border:1px solid #81c784 !important; }
+  body.printing-solve-sheet .q-result-badge.wrong   { background:#ffebee !important; color:#b71c1c !important; border:1px solid #e53935 !important; }
+  body.printing-solve-sheet .q-result-badge.skip    { background:#fff8e1 !important; color:#a06a00 !important; border:1px solid #ffca28 !important; }
+  body.printing-solve-sheet .q-num {
+    background:transparent !important; color:#1a237e !important; font-size:11.5px; font-weight:800;
+    border:none !important; padding:0 !important;
+  }
+  body.printing-solve-sheet .q-text { color:#111 !important; font-weight:700; font-size:13.5px; line-height:1.6; }
+  body.printing-solve-sheet .opt {
+    background:#fff !important; border:1px solid #e0e0e0 !important; color:#333 !important;
+    font-size:12.5px; padding:2px 6px !important; margin-bottom:3px !important;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet .opt.correct-r { background:#e8f5e9 !important; border-color:#43a047 !important; color:#1b5e20 !important; font-weight:700; }
+  body.printing-solve-sheet .opt.wrong-r   { background:#ffebee !important; border-color:#e53935 !important; color:#b71c1c !important; font-weight:600; }
+  body.printing-solve-sheet .opt.dim { opacity:.7 !important; }
+  body.printing-solve-sheet .opt-radio {
+    border-color:#999 !important; background:#fff !important; color:#333 !important; width:16px; height:16px; font-size:10px;
+  }
+  body.printing-solve-sheet .opt.correct-r .opt-radio { background:#43a047 !important; border-color:#43a047 !important; color:#fff !important; }
+  body.printing-solve-sheet .opt.wrong-r .opt-radio   { background:#e53935 !important; border-color:#e53935 !important; color:#fff !important; }
+  body.printing-solve-sheet .exp-box {
+    background:#e8eaf6 !important; border-left:3px solid #3949ab !important; color:#1a237e !important;
+    font-size:12px; padding:5px 7px !important; margin-top:5px !important;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet .exp-hd { color:#3949ab !important; font-size:11px; }
+  body.printing-solve-sheet #solveSheet::after {
+    content:"🚀 ATLAS Special MCQ System — Atlascourses.com";
+    display:block; column-span:all; text-align:center;
+    font-size:10px; color:#9e9e9e !important; margin-top:8px;
+  }
+}
 </style>
 </head>
 <body>
@@ -645,6 +725,7 @@ function doSubmit(){
     <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>`;
   if(!isNewGen)
     html+=`<button class="result-btn warning" onclick="openLb()">🏆 Leaderboard</button>`;
+  html+=`<button class="result-btn" onclick="printSolveSheet()">🖨️ Print/Save PDF</button>`;
   html+=`
     <button class="result-btn"          onclick="window.open('https://Atlascourses.com','_blank')">🌐 ATLAS Courses</button>
     <button class="result-btn"          onclick="window.open('https://wa.me/8801999681290','_blank')">💬 WhatsApp</button>
@@ -729,6 +810,124 @@ function filt(e,t){
   document.querySelectorAll('.solve-item').forEach(el=>{
     el.style.display=(t==='all'||el.dataset.status===t)?'block':'none';
   });
+}
+
+// ── PRINT/SAVE PDF (offline, no server needed) ──
+function printSolveSheet(){
+  if(!questions || !questions.length){ showToast('❌ Solve Sheet পাওয়া যায়নি'); return; }
+
+  let correct=0,wrong=0,skipped=0;
+  questions.forEach((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=userAnswers[i];
+    if(ua===undefined) skipped++;
+    else if(ua===ci)   correct++;
+    else               wrong++;
+  });
+  const neg = parseFloat((wrong*.25).toFixed(2));
+  const fin = parseFloat((correct-neg).toFixed(2));
+  const dateStr = new Date().toLocaleDateString('bn-BD', {year:'numeric', month:'long', day:'numeric'});
+  const printTitle = `${(examData&&examData.topic)||'ATLAS Exam'}  |  Page: ${(examData&&examData.page)||1}\n` +
+    `স্কোর: ${fin}/${questions.length}  (✅ ${correct}  ❌ ${wrong}  ⏭️ ${skipped})  |  ${dateStr}`;
+
+  const labels=['A','B','C','D'];
+  let cardsHtml='';
+  questions.forEach((q,i)=>{
+    const ci=labels.indexOf(q.answer);
+    const ua=userAnswers[i];
+    const st=ua===undefined?'skip':ua===ci?'correct':'wrong';
+    const stL=st==='correct'?'✅ সঠিক':st==='wrong'?'❌ ভুল':'⏭️ স্কিপ';
+    const qTxt=(tag?tag+'\n\n'+q.question:q.question).replace(/\n/g,'<br>');
+    let exp=q.explanation||'';
+    if(expFooter) exp=exp?exp+'\n'+expFooter:expFooter;
+    const expHtml = exp ? renderExpWithImg(exp) : '';
+
+    let optsHtml='';
+    q.options.forEach((opt,oi)=>{
+      let cls='opt', icon='';
+      if(oi===ci){ cls+=' correct-r'; icon='<span class="opt-icon">✅</span>'; }
+      else if(oi===ua && ua!==ci){ cls+=' wrong-r'; icon='<span class="opt-icon">❌</span>'; }
+      else cls+=' dim';
+      optsHtml += `<div class="${cls}"><span class="opt-radio">${labels[oi]}</span><span>${opt}</span>${icon}</div>`;
+    });
+
+    cardsHtml += `<div class="mcq-card">
+      <div class="q-head"><span class="q-num">প্রশ্ন ${i+1}/${questions.length}</span><span class="q-result-badge ${st}">${stL}</span></div>
+      <div class="q-text">${qTxt}</div>
+      ${optsHtml}
+      ${expHtml ? `<div class="exp-box"><span class="exp-hd">📋 ব্যাখ্যা:</span> ${expHtml}</div>` : ''}
+    </div>`;
+  });
+
+  const doc = `<!DOCTYPE html>
+<html lang="bn"><head><meta charset="UTF-8">
+<style>
+@page{size:A4;margin:8mm 10mm;}
+*{box-sizing:border-box;}
+body{background:#fff;color:#111;font-family:'Noto Sans Bengali','Inter',sans-serif;font-size:12.5px;max-width:850px;margin:0 auto;padding:16px;}
+#solveSheet::before{content:"${printTitle.replace(/"/g,'&quot;')}";display:block;text-align:center;padding:10px 14px;background:#1a237e;color:#fff;margin-bottom:12px;border-radius:8px;font-size:14px;font-weight:800;white-space:pre-line;}
+#solveSheet{display:block;column-count:2;column-gap:15px;column-fill:balance;column-rule:1px solid #ddd;}
+#solveSheet::before{column-span:all;}
+.mcq-card{background:#fff;border:1.5px solid #c5cae9;border-radius:8px;padding:9px 10px;margin-bottom:10px;break-inside:avoid;page-break-inside:avoid;}
+.q-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;}
+.q-result-badge{font-size:11px;font-weight:800;padding:1px 8px;border-radius:4px;}
+.q-result-badge.correct{background:#f1f8e9;color:#1b5e20;border:1px solid #81c784;}
+.q-result-badge.wrong{background:#ffebee;color:#b71c1c;border:1px solid #e53935;}
+.q-result-badge.skip{background:#fff8e1;color:#a06a00;border:1px solid #ffca28;}
+.q-num{color:#1a237e;font-size:11.5px;font-weight:800;}
+.q-text{color:#111;font-weight:700;font-size:13.5px;line-height:1.6;margin-bottom:6px;}
+.opt{background:#fff;border:1px solid #e0e0e0;color:#333;font-size:12.5px;padding:2px 6px;margin-bottom:3px;border-radius:4px;display:flex;align-items:center;gap:6px;}
+.opt.correct-r{background:#e8f5e9;border-color:#43a047;color:#1b5e20;font-weight:700;}
+.opt.wrong-r{background:#ffebee;border-color:#e53935;color:#b71c1c;font-weight:600;}
+.opt.dim{opacity:.7;}
+.opt-radio{border:1px solid #999;background:#fff;color:#333;width:16px;height:16px;font-size:10px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;}
+.opt.correct-r .opt-radio{background:#43a047;border-color:#43a047;color:#fff;}
+.opt.wrong-r .opt-radio{background:#e53935;border-color:#e53935;color:#fff;}
+.exp-box{background:#e8eaf6;border-left:3px solid #3949ab;color:#1a237e;font-size:12px;padding:5px 7px;margin-top:5px;}
+.exp-hd{color:#3949ab;font-size:11px;font-weight:800;}
+#solveSheet::after{content:"🚀 ATLAS Special MCQ System — Atlascourses.com";display:block;column-span:all;text-align:center;font-size:10px;color:#9e9e9e;margin-top:8px;}
+</style></head>
+<body><div id="solveSheet">${cardsHtml}</div></body></html>`;
+
+  // Hidden iframe print — bypasses Android Chrome's unreliable @media print
+  // handling for dynamically toggled classes; this prints a fully
+  // self-contained, already-styled document instead.
+  let ifr = document.getElementById('printFrame');
+  if(ifr) ifr.remove();
+  ifr = document.createElement('iframe');
+  ifr.id = 'printFrame';
+  // আগে 0x0 size ছিল — Android Chrome/WebView-এর print engine মাঝেমাঝে
+  // zero-size iframe-এর ভেতরের CSS reflow/layout skip করে, ফলে print
+  // preview-তে raw unstyled text দেখায় (কার্ড/রং/কলাম কিছুই থাকে না)।
+  // দৃশ্যমান কিন্তু off-screen ছোট size দিলে real layout engine চলে।
+  ifr.style.cssText = 'position:fixed;left:-9999px;top:0;width:850px;height:1100px;border:0;';
+  document.body.appendChild(ifr);
+  const idoc = ifr.contentWindow.document;
+  idoc.open(); idoc.write(doc); idoc.close();
+
+  showToast('🖨️ Print dialog খুলছে...');
+  // Fixed 250ms wait ছিল আগে — Bengali web font (Noto Sans Bengali) লোড ও
+  // 2-column layout reflow শেষ হওয়ার আগেই print() ডাকা হতো অনেক সময়,
+  // ফলে unstyled plain text দেখাতো। এখন iframe এর load event + font-ready
+  // এর জন্য অপেক্ষা করে, তারপরও 400ms বাড়তি settle time রাখা হলো।
+  const _firePrint = () => {
+    ifr.contentWindow.focus();
+    ifr.contentWindow.print();
+  };
+  const _waitFontsThenPrint = () => {
+    const ifrDoc = ifr.contentWindow.document;
+    if (ifrDoc.fonts && ifrDoc.fonts.ready) {
+      ifrDoc.fonts.ready.then(() => setTimeout(_firePrint, 400));
+    } else {
+      setTimeout(_firePrint, 400);
+    }
+  };
+  if (ifr.contentWindow.document.readyState === 'complete') {
+    _waitFontsThenPrint();
+  } else {
+    ifr.onload = _waitFontsThenPrint;
+    setTimeout(_waitFontsThenPrint, 800); // safety fallback if onload never fires
+  }
 }
 
 // ── NEW EXAM (original, kept exactly as-is) ──

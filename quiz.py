@@ -19,7 +19,7 @@ import pytz
 from core import (
     logger, sb, sb_exec, OWNER_ID,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
-    tg_post, send_msg, edit_msg, send_photo_by_id, send_poll,
+    tg_post, send_msg, send_rich_msg, edit_msg, send_photo_by_id, send_poll,
     download_tg_file, db_get_settings, notify_owner,
 )
 
@@ -126,10 +126,13 @@ async def handle_qlist(msg: dict):
         return
     bot_info = await tg_post("getMe", {})
     bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
-    txt = "📋 <b>All Quizzes</b>\n\n"
+    md = "# 📋 All Quizzes\n\n| Quiz | Link |\n| --- | --- |\n"
+    fallback = "📋 <b>All Quizzes</b>\n\n"
     for q in quizzes:
-        txt += f"📝 {q['name']}\n🔗 https://t.me/{bot_username}?start={q['id']}\n\n"
-    await send_msg(chat_id, txt)
+        link = f"https://t.me/{bot_username}?start={q['id']}"
+        md += f"| {q['name']} | [{q['id']}]({link}) |\n"
+        fallback += f"📝 {q['name']}\n🔗 {link}\n\n"
+    await send_rich_msg(chat_id, md, fallback_text=fallback)
 
 
 async def handle_qdel(msg: dict):
@@ -326,6 +329,17 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
             "updated_at": int(time.time())
         }).execute())
 
+    # tag/exp_footer live global settings theke prottekbar play korar somoy nea
+    # hoy - quiz creation-er somoy stored value ke priority na diye, karon
+    # /tagQ ba /expQ diye admin je kono somoy global tag/footer change korte
+    # pare, ar purono (age-e create kora) quiz-gulo-o sathe sathe notun
+    # tag/footer pawa uchit, sudhu notun quiz-e na (etai chilo asol bug: shob
+    # jaygay apply hoto na karon purono quiz nijer frozen tag/footer babohar
+    # korto).
+    _live_settings = await db_get_settings()
+    _live_tag = _live_settings.get("tag", "")
+    _live_exp = _live_settings.get("exp_footer", "")
+
     session = {
         "quiz_id": (quiz_id + "mp") if mistake_qs else quiz_id,
         "name": quiz.get("name", "Quiz") + (" — Practice" if mistake_qs else ""),
@@ -337,8 +351,8 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
         "wrong": 0,
         "skip": 0,
         "timer": quiz.get("timer", 15) if isinstance(quiz.get("timer"), int) else int(quiz.get("timer", 15)),
-        "tag": quiz.get("tag", ""),
-        "exp": quiz.get("exp_footer", ""),
+        "tag": _live_tag,
+        "exp": _live_exp,
         "chat_id": chat_id,
         "uname": uname,
         "uid": uid,
@@ -357,7 +371,7 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
         else:
             intro += f"❌ Wrong+Skip: {len(questions)}\n"
         intro += "🔄 Practice\n\nএখনই কুইজ আসবে, আপনি প্রস্তুত তো? 😎"
-        await send_msg(chat_id, intro)
+        r_first = await send_msg(chat_id, intro)
     else:
         preview = await d1_select("SELECT file_id FROM quiz_preview WHERE id=1")
         info_text = (
@@ -365,9 +379,17 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
             f"⏱️ Timer: {session['timer']}s\n📊 Questions: {session['tot']}"
         )
         if preview and preview[0].get("file_id"):
-            await send_photo_by_id(chat_id, preview[0]["file_id"], info_text)
+            r_first = await send_photo_by_id(chat_id, preview[0]["file_id"], info_text)
         else:
-            await send_msg(chat_id, info_text)
+            r_first = await send_msg(chat_id, info_text)
+
+    # Quiz poll gulo ei prothom (intro/info) message-ke reply hisebe dhore
+    # rakhbe - countdown "3...2...1..." messages er sathe kono somporko nei,
+    # segulo shudhu visual countdown, reply target hisebe use kora uchit na
+    # (age last "1..." message-e reply hoto, jeta bhul chilo).
+    if r_first and r_first.get("ok"):
+        session["first_msg_id"] = r_first.get("result", {}).get("message_id")
+        QUIZ_SESSIONS[uid] = session
 
     for cd in ["3...", "2...", "1..."]:
         await asyncio.sleep(0.7)
@@ -376,18 +398,25 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
     await send_quiz_question(chat_id, session)
 
 
-async def send_quiz_question(chat_id: int, session: dict):
-    """Send the current quiz question as a poll"""
+async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
+    """Send the current quiz question as a poll.
+    force=True (used by the real user-answer path) always proceeds, even if
+    the timeout path had already claimed the guard for this question - a
+    genuine answer must never be silently dropped just because a timeout
+    task raced it. force=False (timeout path) still respects the guard so
+    two auto-timeouts can't double-send."""
+    logger.info(f"[Quiz][TRACE] send_quiz_question ENTER uid={session.get('uid')} cur={session.get('cur')} force={force}")
     if session["cur"] >= session["tot"]:
         await finish_d1_quiz(session)
         return
 
-    # ── Race guard: prevent duplicate sendPoll if answer-path and
-    # timeout-path both try to advance to the same question at once ──
+    # ── Race guard: prevent duplicate sendPoll if two auto/timeout paths
+    # both try to advance to the same question at once. The real answer
+    # path (force=True) always bypasses this so it can never get stuck. ──
     uid = session["uid"]
     guard_key = (uid, session["cur"])
     live = QUIZ_SESSIONS.get(uid)
-    if live is not None and live.get("_sending_for") == guard_key:
+    if not force and live is not None and live.get("_sending_for") == guard_key:
         return
     if live is not None:
         live["_sending_for"] = guard_key
@@ -414,20 +443,39 @@ async def send_quiz_question(chat_id: int, session: dict):
         else:
             opts = opts[:4]
 
-    poll_r = await send_poll(
-        chat_id, q_text, [o[:100] for o in opts], ans_idx,
-        explanation=exp, is_anonymous=False, open_period=session["timer"]
-    )
+    try:
+        poll_r = await send_poll(
+            chat_id, q_text, [o[:100] for o in opts], ans_idx,
+            explanation=exp, is_anonymous=False, open_period=session["timer"] + 5,
+            reply_to_message_id=session.get("first_msg_id")
+        )
+    except Exception as e:
+        # sendPoll ke exception dhoreche (network blip etc) - guard clear kore
+        # dite hobe, nahole retry-o eki guard e atke thakbe (permanent stall)
+        logger.error(f"[Quiz] send_poll raised q{session['cur']+1}/{session['tot']}: {e}")
+        live = QUIZ_SESSIONS.get(uid)
+        if live is not None:
+            live["_sending_for"] = None
+            QUIZ_SESSIONS[uid] = live
+        session["_sending_for"] = None
+        poll_r = {"ok": False, "description": str(e)}
 
     if poll_r.get("ok"):
+        logger.info(f"[Quiz][TRACE] send_poll OK uid={session.get('uid')} cur={session.get('cur')}")
         poll_id = poll_r["result"].get("poll", {}).get("id", "")
         session["pid"] = poll_id
         session["cor"] = ans_idx
+        session["_sending_for"] = None
         QUIZ_SESSIONS[session["uid"]] = session
 
-        # Timer: auto-skip after timer expires
+        # Timer: auto-skip after timer expires. NOTE: must wait LONGER than the
+        # poll's own open_period (timer+5) so this never fires while the poll
+        # can still legitimately receive an answer -- firing earlier caused a
+        # race where a real, on-time answer arrived just after the session
+        # had already moved on via timeout, producing a pid mismatch and a
+        # stalled quiz (no next question sent).
         async def _quiz_timeout():
-            await asyncio.sleep(session["timer"] + 2)
+            await asyncio.sleep(session["timer"] + 6)
             s = QUIZ_SESSIONS.get(session["uid"])
             if not s or s["pid"] != poll_id or s["cur"] != session["cur"]:
                 return
@@ -456,6 +504,7 @@ async def send_quiz_question(chat_id: int, session: dict):
                 break
         session["skip"] += 1
         session["cur"] += 1
+        session["_sending_for"] = None
         QUIZ_SESSIONS[session["uid"]] = session
         if session["cur"] >= session["tot"]:
             await finish_d1_quiz(session)
@@ -467,7 +516,10 @@ async def send_quiz_question(chat_id: int, session: dict):
 async def handle_quiz_poll_answer(pa: dict):
     """Handle poll answer for D1 quiz system"""
     uid = pa.get("user", {}).get("id")
+    logger.info(f"[Quiz][TRACE] handle_quiz_poll_answer ENTER uid={uid} poll_id={pa.get('poll_id')} option_ids={pa.get('option_ids')}")
+    logger.info(f"[Quiz] poll_answer received uid={uid} poll_id={pa.get('poll_id')} in_sessions={uid in QUIZ_SESSIONS if uid else False}")
     if not uid or uid not in QUIZ_SESSIONS:
+        logger.info(f"[Quiz][TRACE] EXIT early - uid not in QUIZ_SESSIONS uid={uid}")
         return
 
     session = QUIZ_SESSIONS[uid]
@@ -482,6 +534,29 @@ async def handle_quiz_poll_answer(pa: dict):
             )
         except Exception:
             pass
+        # SAFETY NET: never leave the quiz permanently stalled on a mismatch.
+        # If nothing has advanced the session shortly after this, force it
+        # forward using this answer so the user isn't stuck forever.
+        async def _stall_recovery():
+            await asyncio.sleep(2)
+            s2 = QUIZ_SESSIONS.get(uid)
+            if not s2 or s2.get("pid") != session.get("pid") or s2.get("cur") != session.get("cur"):
+                return  # something else already advanced it -- no stall after all
+            logger.warning(f"[Quiz] Force-recovering stalled quiz uid={uid} cur={s2.get('cur')}")
+            option_ids2 = pa.get("option_ids", [])
+            if option_ids2 and option_ids2[0] == s2.get("cor"):
+                s2["right"] += 1
+            elif not option_ids2:
+                s2["skip"] += 1
+            else:
+                s2["wrong"] += 1
+            s2["cur"] += 1
+            QUIZ_SESSIONS[uid] = s2
+            if s2["cur"] >= s2["tot"]:
+                await finish_d1_quiz(s2)
+            else:
+                await send_quiz_question(s2["chat_id"], s2, force=True)
+        asyncio.create_task(_stall_recovery())
         return
 
     option_ids = pa.get("option_ids", [])
@@ -507,15 +582,20 @@ async def handle_quiz_poll_answer(pa: dict):
         session["wrong"] += 1
 
     session["cur"] += 1
+    # user answer ashle leftover kono guard thakle clear kore dao,
+    # nahole eibar-er advance stale guard e atke jete pare
+    session["_sending_for"] = None
 
     if uid in QUIZ_TIMERS:
         QUIZ_TIMERS[uid].cancel()
 
+    logger.info(f"[Quiz][TRACE] about to advance uid={uid} new_cur={session['cur']}/{session['tot']}")
     try:
         if session["cur"] >= session["tot"]:
             await finish_d1_quiz(session)
         else:
-            await send_quiz_question(session["chat_id"], session)
+            await send_quiz_question(session["chat_id"], session, force=True)
+        logger.info(f"[Quiz][TRACE] advance call completed uid={uid}")
     except Exception as e:
         logger.error(f"[Quiz] advance failed q{session['cur']}/{session['tot']}: {e}")
         try:
@@ -523,7 +603,7 @@ async def handle_quiz_poll_answer(pa: dict):
             if session["cur"] >= session["tot"]:
                 await finish_d1_quiz(session)
             else:
-                await send_quiz_question(session["chat_id"], session)
+                await send_quiz_question(session["chat_id"], session, force=True)
         except Exception as e2:
             logger.error(f"[Quiz] retry also failed q{session['cur']}/{session['tot']}: {e2}")
             session["skip"] += 1
@@ -533,7 +613,7 @@ async def handle_quiz_poll_answer(pa: dict):
                 await finish_d1_quiz(session)
             else:
                 await asyncio.sleep(0.5)
-                await send_quiz_question(session["chat_id"], session)
+                await send_quiz_question(session["chat_id"], session, force=True)
 
 
 async def handle_quiz_next(uid: int):
@@ -568,7 +648,7 @@ async def handle_quiz_next(uid: int):
         if session["cur"] >= session["tot"]:
             await finish_d1_quiz(session)
         else:
-            await send_quiz_question(session["chat_id"], session)
+            await send_quiz_question(session["chat_id"], session, force=True)
     except Exception as e:
         logger.error(f"[Quiz] advance failed q{session['cur']}/{session['tot']}: {e}")
         try:
@@ -576,7 +656,7 @@ async def handle_quiz_next(uid: int):
             if session["cur"] >= session["tot"]:
                 await finish_d1_quiz(session)
             else:
-                await send_quiz_question(session["chat_id"], session)
+                await send_quiz_question(session["chat_id"], session, force=True)
         except Exception as e2:
             logger.error(f"[Quiz] retry also failed q{session['cur']}/{session['tot']}: {e2}")
             session["skip"] += 1
@@ -586,7 +666,7 @@ async def handle_quiz_next(uid: int):
                 await finish_d1_quiz(session)
             else:
                 await asyncio.sleep(0.5)
-                await send_quiz_question(session["chat_id"], session)
+                await send_quiz_question(session["chat_id"], session, force=True)
 
 
 async def finish_d1_quiz(session: dict):
@@ -706,7 +786,7 @@ async def finish_d1_quiz(session: dict):
             kb_rows.append([{"text": f"🟡 Practice (Wrong+Skip) ({wrong + skip})", "callback_data": f"qzmp2_{quiz_id}"}])
         kb = {"inline_keyboard": kb_rows}
 
-    await send_msg(chat_id, txt, reply_markup=kb)
+    await send_msg(chat_id, txt, reply_markup=kb, reply_to_message_id=session.get("first_msg_id"))
 
 
 async def handle_d1_leaderboard(chat_id: int, quiz_id: str, uid: int):
