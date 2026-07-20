@@ -855,7 +855,21 @@ async def db_save_settings(settings: dict):
     try:
         await sb_exec(lambda: sb.table("quiz_settings").upsert({"id": 1, **settings}).execute())
     except Exception as e:
-        logger.error(f"[DB] save_settings error: {e}")
+        # watermark column ekhono Supabase e add kora hoy nai (migration pending) —
+        # oi field bad diye baki shob field diye retry koro, jate watermark chara
+        # baki settings (tag, exp_footer etc) silently lost na hoy. D1 mirror e
+        # watermark thik e save hobe (D1 table te column already ache).
+        if "watermark" in str(e) and "watermark" in settings:
+            try:
+                fallback = {k: v for k, v in settings.items() if k != "watermark"}
+                if fallback:
+                    await sb_exec(lambda: sb.table("quiz_settings").upsert({"id": 1, **fallback}).execute())
+                logger.warning("[DB] save_settings: 'watermark' column missing in Supabase schema — "
+                               "saved other fields, watermark mirrored to D1 only until migration runs")
+            except Exception as e2:
+                logger.error(f"[DB] save_settings retry (without watermark) error: {e2}")
+        else:
+            logger.error(f"[DB] save_settings error: {e}")
     for field, value in settings.items():
         await db_save_settings_field(field, value)
 
