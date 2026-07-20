@@ -13,6 +13,7 @@ import re
 import json
 import logging
 import time
+from urllib.parse import quote
 import base64
 from typing import Optional
 
@@ -645,15 +646,75 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
         fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode}
         if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
         if message_thread_id: fields["message_thread_id"] = str(message_thread_id)
-        files = {"document": (filename, file_bytes, mime_type)}
         c = await _get_shared_http_client()
-        r = await c.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-            data=fields, files=files, timeout=120)
-        return r.json()
+        if filename.isascii():
+            # Plain ASCII filename — httpx's built-in multipart handling is fine.
+            files = {"document": (filename, file_bytes, mime_type)}
+            r = await c.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                data=fields, files=files, timeout=120)
+            return r.json()
+        else:
+            # Non-ASCII filename (Bengali/etc) — httpx writes the raw UTF-8
+            # bytes directly into the quoted filename="..." parameter with no
+            # RFC 5987 encoding, which Telegram/intermediate proxies can
+            # mis-interpret as Latin-1 and corrupt (mojibake). Build the
+            # multipart body by hand with a proper filename*=UTF-8''...
+            # parameter (RFC 5987) alongside an ASCII-safe fallback name.
+            r = await _send_document_multipart_rfc5987(
+                c, chat_id, file_bytes, filename, caption, mime_type,
+                reply_to_message_id, message_thread_id, parse_mode
+            )
+            return r
     except Exception as e:
         logger.error(f"[sendDoc] direct failed: {e}")
         return {"ok": False, "error": str(e)}
+
+
+async def _send_document_multipart_rfc5987(client, chat_id, file_bytes: bytes, filename: str,
+                                             caption: str, mime_type: str,
+                                             reply_to_message_id: int, message_thread_id: int,
+                                             parse_mode: str) -> dict:
+    """Manually-built multipart/form-data body with RFC 5987 filename*
+    encoding, for non-ASCII (e.g. Bengali) filenames. See send_document's
+    comment above for why this is needed instead of httpx's default files=."""
+    import uuid
+    boundary = "----AtlasWM" + uuid.uuid4().hex
+    enc_filename_star = quote(filename)
+    parts = []
+
+    def push_field(name, value):
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8")
+        )
+
+    push_field("chat_id", str(chat_id))
+    push_field("caption", caption or "")
+    if parse_mode:
+        push_field("parse_mode", parse_mode)
+    if reply_to_message_id:
+        push_field("reply_to_message_id", str(reply_to_message_id))
+    if message_thread_id:
+        push_field("message_thread_id", str(message_thread_id))
+
+    parts.append(
+        (f'--{boundary}\r\nContent-Disposition: form-data; name="document"; '
+         f'filename="file.pdf"; filename*=UTF-8\'\'{enc_filename_star}\r\n'
+         f'Content-Type: {mime_type}\r\n\r\n').encode("utf-8")
+    )
+    parts.append(file_bytes)
+    parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+
+    body = b"".join(parts)
+    r = await client.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+        content=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        timeout=120,
+    )
+    return r.json()
+
+
 
 def extract_image_url(text: str):
     """<img src="URL"> ট্যাগ থেকে image URL বের করে, বাকি টেক্সট ক্লিন করে রিটার্ন করে।"""
