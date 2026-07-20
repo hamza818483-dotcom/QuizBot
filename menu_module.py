@@ -115,7 +115,7 @@ async def _build_reply_keyboard(parent_id: int = 0, expect_name: str = None) -> 
     if not names:
         rows = [[{"text": "📋 Menu খালি — Admin /menu দিয়ে যোগ করবে"}]]
     else:
-        rows = [[{"text": n} for n in names[i:i + 3]] for i in range(0, len(names), 3)]
+        rows = [[{"text": n} for n in names[i:i + 2]] for i in range(0, len(names), 2)]
     if parent_id:
         rows.append([{"text": BACK_LABEL}, {"text": MAIN_MENU_LABEL}])
     return {"keyboard": rows, "resize_keyboard": True}
