@@ -183,6 +183,33 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
         raise RuntimeError("PDF conversion queue busy -- try again in a moment")
     try:
         from pdf2image import convert_from_bytes
+        def _convert_one_page(p):
+            # PERMANENT FIX: a page must never be silently dropped just
+            # because a convert_from_bytes call returned empty (transient
+            # poppler hiccup, momentary resource blip, etc). 5 attempts with
+            # progressive backoff at dpi=150, then a last-ditch dpi=100
+            # fallback (some pages fail to render at higher dpi due to
+            # memory/complexity but succeed at lower dpi).
+            imgs = None
+            backoffs = [1, 2, 3, 4]
+            for _attempt in range(5):
+                try:
+                    imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
+                    if imgs:
+                        return imgs[0]
+                except Exception as _conv_e:
+                    logger.warning(f"[PDF] Page {p} convert attempt {_attempt+1}/5 (dpi=150) raised: {_conv_e}")
+                if _attempt < len(backoffs):
+                    time.sleep(backoffs[_attempt])
+            try:
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=100, thread_count=4)
+                if imgs:
+                    logger.warning(f"[PDF] Page {p} recovered via dpi=100 fallback after 5 failed dpi=150 attempts")
+                    return imgs[0]
+            except Exception as _conv_e:
+                logger.warning(f"[PDF] Page {p} dpi=100 fallback attempt also raised: {_conv_e}")
+            return None
+
         if page_range:
             parts = page_range.split("-")
             first = int(parts[0])
@@ -192,25 +219,49 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                     f"PDF_RANGE_TOO_LARGE:{first}:{last}:{_PDF_MAX_PAGES_PER_CALL}"
                 )
             result = []
+            missing_pages = []
             for p in range(first, last + 1):
-                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
-                if imgs:
-                    result.append((p, imgs[0]))
+                img = _convert_one_page(p)
+                if img is not None:
+                    result.append((p, img))
+                else:
+                    missing_pages.append(p)
+                    logger.error(f"[PDF] Page {p} FAILED to convert after all retries+dpi-fallback — inserting placeholder so page is NEVER skipped/dropped.")
+                    result.append((p, Image.new("RGB", (1240, 1754), "white")))
+            if missing_pages:
+                logger.error(f"[PDF] UNRECOVERABLE render failure (placeholder inserted) for pages: {missing_pages} (out of range {first}-{last})")
             logger.info(f"[PDF] Converted {len(result)} pages")
             return result
         else:
+            # REAL BUG FIX: previously an empty convert_from_bytes result on
+            # page N was treated as "end of document" via break — but empty
+            # can also mean a TRANSIENT failure on a page that is NOT actually
+            # the last page, silently truncating the rest of the PDF. Now we
+            # retry+dpi-fallback per page, and only treat it as true
+            # end-of-document once confirmed against the real page count.
+            total_pages = get_pdf_page_count(pdf_bytes)
             result = []
+            missing_pages = []
             p = 1
             while p <= _PDF_MAX_PAGES_PER_CALL:
-                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
-                if not imgs:
-                    break
-                result.append((p, imgs[0]))
+                img = _convert_one_page(p)
+                if img is None:
+                    if total_pages and p <= total_pages:
+                        missing_pages.append(p)
+                        logger.error(f"[PDF] Page {p} FAILED to convert after all retries+dpi-fallback (total_pages={total_pages}) — inserting placeholder so page is NEVER skipped/dropped.")
+                        result.append((p, Image.new("RGB", (1240, 1754), "white")))
+                        p += 1
+                        continue
+                    else:
+                        break  # true end of document (or page count unknown)
+                result.append((p, img))
                 p += 1
             if p > _PDF_MAX_PAGES_PER_CALL:
-                extra = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
-                if extra:
+                extra = _convert_one_page(p)
+                if extra is not None:
                     raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
+            if missing_pages:
+                logger.error(f"[PDF] UNRECOVERABLE render failure (placeholder inserted) for pages: {missing_pages} (total_pages={total_pages})")
             logger.info(f"[PDF] Converted {len(result)} pages")
             return result
     except Exception as e:
@@ -274,7 +325,9 @@ def _strip_q_numbering(q: str) -> str:
     """প্রশ্নের শুরুতে numbering prefix (1) 14) 1. Q1. ইত্যাদি) সরায়।"""
     if not q:
         return q
-    pattern = r'^\s*(?:[Qq]\.?\s*)?[\d১২৩৪৫৬৭৮৯০]{1,3}\s*[).।:.\-]\s*'
+    # NOTE: negative lookahead (?!\d) prevents stripping the leading digit of
+    # a decimal number (e.g. "0.05M" must not become "05M").
+    pattern = r'^\s*(?:[Qq]\.?\s*)?[\d১২৩৪৫৬৭৮৯০]{1,3}\s*[).।:.\-](?!\d)\s*'
     cur = q
     for _ in range(2):
         new = re.sub(pattern, '', cur)
@@ -553,7 +606,7 @@ async def generate_mcq_from_image(
                     ]
                 )
 
-            _attempt_timeout = 45 if attempt == 0 else 20
+            _attempt_timeout = 30 if attempt == 0 else 15
             response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
             valid = _parse_mcq_json(response.text)
             valid = await _attach_explanation_images(valid, img)

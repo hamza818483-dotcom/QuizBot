@@ -128,7 +128,7 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 .mot-text{font-size:13px;font-weight:700;color:var(--accent);margin-bottom:6px;}
 .ayat-text{font-size:11px;color:var(--text-secondary);line-height:1.6;}
 
-.result-btns{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;}
+.result-btns{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;}
 .result-btn{padding:12px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--btn-bg);color:var(--text);font-size:13px;font-weight:700;cursor:pointer;transition:all .2s;font-family:'Noto Sans Bengali','Inter',sans-serif;width:100%;text-align:center;}
 .result-btn:hover{border-color:var(--accent);color:var(--accent);}
 .result-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
@@ -174,6 +174,86 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 /* TOAST */
 .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--card-bg);border:1px solid var(--border);color:var(--text);padding:10px 18px;border-radius:var(--radius-full);font-size:13px;font-weight:600;z-index:1000;opacity:0;transition:opacity .3s;white-space:nowrap;pointer-events:none;}
 .toast.show{opacity:1;}
+@media print {
+  body.printing-solve-sheet > *:not(#modeResult) { display:none !important; }
+  body.printing-solve-sheet #resultWrap > *:not(#solveSheet) { display:none !important; }
+  body.printing-solve-sheet #solveSheet { display:block !important; }
+  @page { size:A4; margin:8mm 10mm; }
+
+  body.printing-solve-sheet {
+    background:#fff !important;
+    color:#111 !important;
+    font-family:'Noto Sans Bengali','Inter',sans-serif !important;
+    font-size:12.5px;
+  }
+  body.printing-solve-sheet #solveSheet::before {
+    content: attr(data-print-title);
+    display:block;
+    text-align:center;
+    padding:10px 14px;
+    background:#1a237e !important;
+    color:#fff !important;
+    margin-bottom:12px;
+    border-radius:8px;
+    font-size:14px; font-weight:800;
+    white-space:pre-line;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet #solveSheet {
+    display:block !important;
+    column-count:2;
+    column-gap:15px;
+    column-fill:balance;
+    column-rule:1px solid #ddd;
+  }
+  body.printing-solve-sheet #solveSheet::before { column-span: all; }
+
+  body.printing-solve-sheet .mcq-card {
+    background:#fff !important;
+    border:1.5px solid #c5cae9 !important;
+    box-shadow:none !important;
+    border-radius:8px;
+    padding:9px 10px !important;
+    margin-bottom:10px !important;
+    break-inside: avoid; page-break-inside: avoid;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet .q-result-badge {
+    font-size:11px; font-weight:800; padding:1px 8px; border-radius:4px;
+  }
+  body.printing-solve-sheet .q-result-badge.correct { background:#f1f8e9 !important; color:#1b5e20 !important; border:1px solid #81c784 !important; }
+  body.printing-solve-sheet .q-result-badge.wrong   { background:#ffebee !important; color:#b71c1c !important; border:1px solid #e53935 !important; }
+  body.printing-solve-sheet .q-result-badge.skip    { background:#fff8e1 !important; color:#a06a00 !important; border:1px solid #ffca28 !important; }
+  body.printing-solve-sheet .q-num {
+    background:transparent !important; color:#1a237e !important; font-size:11.5px; font-weight:800;
+    border:none !important; padding:0 !important;
+  }
+  body.printing-solve-sheet .q-text { color:#111 !important; font-weight:700; font-size:13.5px; line-height:1.6; }
+  body.printing-solve-sheet .opt {
+    background:#fff !important; border:1px solid #e0e0e0 !important; color:#333 !important;
+    font-size:12.5px; padding:2px 6px !important; margin-bottom:3px !important;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet .opt.correct-r { background:#e8f5e9 !important; border-color:#43a047 !important; color:#1b5e20 !important; font-weight:700; }
+  body.printing-solve-sheet .opt.wrong-r   { background:#ffebee !important; border-color:#e53935 !important; color:#b71c1c !important; font-weight:600; }
+  body.printing-solve-sheet .opt.dim { opacity:.7 !important; }
+  body.printing-solve-sheet .opt-radio {
+    border-color:#999 !important; background:#fff !important; color:#333 !important; width:16px; height:16px; font-size:10px;
+  }
+  body.printing-solve-sheet .opt.correct-r .opt-radio { background:#43a047 !important; border-color:#43a047 !important; color:#fff !important; }
+  body.printing-solve-sheet .opt.wrong-r .opt-radio   { background:#e53935 !important; border-color:#e53935 !important; color:#fff !important; }
+  body.printing-solve-sheet .exp-box {
+    background:#e8eaf6 !important; border-left:3px solid #3949ab !important; color:#1a237e !important;
+    font-size:12px; padding:5px 7px !important; margin-top:5px !important;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  body.printing-solve-sheet .exp-hd { color:#3949ab !important; font-size:11px; }
+  body.printing-solve-sheet #solveSheet::after {
+    content:"🚀 ATLAS Special MCQ System — Atlascourses.com";
+    display:block; column-span:all; text-align:center;
+    font-size:10px; color:#9e9e9e !important; margin-top:8px;
+  }
+}
 </style>
 </head>
 <body>
@@ -304,6 +384,7 @@ let userAnswers = {}, bookmarks = {};
 let submitted = false;
 let tag = '', expFooter = '', channelId = '', imageMsgId = null, endMsgId = null;
 let isNewGen = false;
+let hasImageSource = false;
 let totalSec = 0, totalLeft = 0, totalTimer = null;
 
 // ── INIT ──
@@ -414,6 +495,7 @@ async function init() {
     imageMsgId = d.image_msg_id || null;
     endMsgId   = d.end_msg_id   || null;
     isNewGen   = d.is_new_gen   || false;
+    hasImageSource = !!d.image_file_id;
 
     document.getElementById('headerSub').textContent = d.topic || 'Special Exam';
 
@@ -727,8 +809,9 @@ function doSubmit(){
   html+=`<div class="result-btns">
     <button class="result-btn primary"  onclick="practiceAgain()">🔄 Practice Again</button>
     <button class="result-btn danger"   onclick="mistakePractice()">❌ Mistake Practice (${_mistakeCnt})</button>
-    <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>`;
-  if(!isNewGen)
+    <button class="result-btn purple"   onclick="specialPractice()">🔥 Special Practice (${_specialCnt})</button>
+    <button class="result-btn"          onclick="printSolveSheet()">🖨️ Print/Save PDF</button>`;
+  if(hasImageSource)
     html+=`<button class="result-btn" id="newExamBtnResult" onclick="startNewExamV2()">🆕 New Exam</button>`;
   if(!isNewGen)
     html+=`<button class="result-btn warning" onclick="openLb()">🏆 Leaderboard</button>`;
@@ -834,7 +917,7 @@ async function startNewExam(){
       if(btn){btn.disabled=false;btn.textContent='🆕 New Exam';}
     }
   }catch(e){
-    showToast('❌ Network error');
+    showToast('❌ Server ব্যস্ত/বন্ধ আছে, একটু পর আবার চেষ্টা করো');
     if(btn){btn.disabled=false;btn.textContent='🆕 New Exam';}
   }
 }
@@ -932,29 +1015,49 @@ function goToNewExam(){
 }
 
 
-// ── SOLVE PDF ──
-async function solvePDF(){
-  showToast('⏳ PDF তৈরি হচ্ছে...');
-  const answers={};
-  Object.keys(lastAnswers).forEach(k=>{ answers[String(k)]=lastAnswers[k]; });
-  try{
-    const r=await fetch(`${HF_URL}/api/solve-pdf`,{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({cache_id:CACHE_ID,answers})
-    });
-    const d=await r.json();
-    if(d.ok&&d.pdf_b64){
-      const bytes=Uint8Array.from(atob(d.pdf_b64),c=>c.charCodeAt(0));
-      const blob=new Blob([bytes],{type:'application/pdf'});
-      const url=URL.createObjectURL(blob);
-      const a=document.createElement('a');
-      a.href=url; a.download=`ATLAS_Solve_${examData.topic}_P${examData.page}.pdf`;
-      a.click(); URL.revokeObjectURL(url);
-      showToast('✅ PDF Download শুরু হয়েছে!');
-    }else{
-      showToast('❌ '+(d.error||'PDF error'));
-    }
-  }catch(e){showToast('❌ Network error');}
+
+// ── PRINT/SAVE PDF (offline, no server needed — uses browser's native
+// print dialog on the already-rendered Solve Sheet. Works even if HF
+// backend is fully down, since it needs no network call at all) ──
+function printSolveSheet(){
+  if(!questions || !questions.length){ showToast('❌ Solve Sheet পাওয়া যায়নি'); return; }
+
+  // Set the printTitle (shown via #solveSheet::before, see @media print CSS)
+  let correct=0,wrong=0,skipped=0;
+  questions.forEach((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const ua=userAnswers[i];
+    if(ua===undefined) skipped++;
+    else if(ua===ci)   correct++;
+    else               wrong++;
+  });
+  const neg = parseFloat((wrong*.25).toFixed(2));
+  const fin = parseFloat((correct-neg).toFixed(2));
+  const dateStr = new Date().toLocaleDateString('bn-BD', {year:'numeric', month:'long', day:'numeric'});
+  const printTitle = `${(examData&&examData.topic)||'ATLAS Exam'}  |  Page: ${(examData&&examData.page)||1}\n` +
+    `স্কোর: ${fin}/${questions.length}  (✅ ${correct}  ❌ ${wrong}  ⏭️ ${skipped})  |  ${dateStr}`;
+
+  const solveSheetEl = document.getElementById('solveSheet');
+  if(!solveSheetEl){ showToast('❌ Solve Sheet পাওয়া যায়নি'); return; }
+  solveSheetEl.setAttribute('data-print-title', printTitle);
+
+  // Uses the existing body.printing-solve-sheet @media print CSS (already
+  // defined in <style> above) directly on the real, already-rendered
+  // #solveSheet DOM — replaces the earlier hidden-iframe approach, which
+  // Android Chrome's print/PDF engine was not reliably rendering CSS for
+  // (iframe.contentWindow.print() falling back to printing the raw
+  // un-styled content instead of the iframe's own styled document, even
+  // after attempts to fix it with a visible-size iframe + font-load waits).
+  document.body.classList.add('printing-solve-sheet');
+  showToast('🖨️ Print dialog খুলছে...');
+
+  const cleanup = () => document.body.classList.remove('printing-solve-sheet');
+  window.addEventListener('afterprint', cleanup, {once:true});
+  setTimeout(()=>{
+    window.print();
+    // Fallback cleanup in case 'afterprint' doesn't fire on this browser
+    setTimeout(cleanup, 3000);
+  }, 100);
 }
 
 // ── PRACTICE MODES ──

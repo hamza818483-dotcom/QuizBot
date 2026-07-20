@@ -35,7 +35,7 @@ logger = logging.getLogger("atlas.core")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+OWNER_ID = 5341425626  # hardcoded — env var was unreliable across HF Space secrets
 
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://atlasquizbotpro.hamza818483.workers.dev")
 CF_WORKER_URL_2 = os.environ.get("CF_WORKER_URL_2", "https://quizbot.pages.dev")
@@ -255,18 +255,26 @@ async def d1_run(sql: str, params: list = None, return_id: bool = False):
             }
             SB2_URL = "https://xnkuuzstschdovcyomfk.supabase.co"
             SB2_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4"
-            async with httpx.AsyncClient(timeout=10) as c:
-                for url, key in ((SUPABASE_URL, SUPABASE_KEY), (SB2_URL, SB2_KEY)):
-                    if not url or not key:
-                        continue
-                    try:
-                        headers = {"apikey": key, "Authorization": f"Bearer {key}",
-                                   "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"}
+
+            async def _mirror_one(url, key):
+                if not url or not key:
+                    return
+                try:
+                    headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                               "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"}
+                    async with httpx.AsyncClient(timeout=10) as c:
                         rr = await c.post(f"{url}/rest/v1/quiz_backups",
                                           headers=headers, json=payload)
-                        logger.info(f"[D1] Supabase mirror ({url}): {rr.status_code}")
-                    except Exception as e2:
-                        logger.warning(f"[D1] Supabase mirror failed ({url}): {e2}")
+                    logger.info(f"[D1] Supabase mirror ({url}): {rr.status_code}")
+                except Exception as e2:
+                    logger.warning(f"[D1] Supabase mirror failed ({url}): {e2}")
+
+            async def _mirror_both():
+                await asyncio.gather(
+                    _mirror_one(SUPABASE_URL, SUPABASE_KEY),
+                    _mirror_one(SB2_URL, SB2_KEY),
+                )
+            asyncio.create_task(_mirror_both())
     except Exception as e:
         logger.warning(f"[D1] Supabase mirror step failed: {e}")
 
@@ -410,10 +418,15 @@ async def tg_post(method: str, data: dict) -> dict:
     #    falling through to "give up" (which, on HF where direct API is
     #    blocked, previously meant total silent failure on that one stale
     #    connection — exactly "1st command does nothing, 2nd works").
+    # getFile নিজেই ছোট/দ্রুত call (Telegram এ file lookup, কোনো bytes না) —
+    # তাই এটাকে ছোট timeout দেওয়া হলো (5s vs অন্য method গুলোর 12s), যাতে
+    # CF proxy hang/slow হলে /csv এর "ফাইল খোঁজা হচ্ছে..." স্টেপ worst-case
+    # 24s+12s=36s এর বদলে দ্রুত fallback এ চলে যায়।
+    _proxy_timeout = 5 if method == "getFile" else 12
     for _proxy_attempt in range(2):
         try:
             client = await _get_shared_http_client()
-            r = await client.post(f"{TG_API}/{method}", json=data, timeout=60)
+            r = await client.post(f"{TG_API}/{method}", json=data, timeout=_proxy_timeout)
             result = r.json()
             if result.get("ok"):
                 return result
@@ -427,6 +440,22 @@ async def tg_post(method: str, data: dict) -> dict:
             logger.warning(f"[TG] {method} proxy error (attempt {_proxy_attempt+1}/2): {type(e).__name__}: {e}")
             if _proxy_attempt == 0:
                 continue  # retry once — likely a stale reused connection
+    # ── Fallback: Secondary CF Worker domain (primary just failed twice —
+    #    could be that specific edge/domain having issues while the 2nd
+    #    domain, already proven reachable for setWebhook, still works).
+    #    Only meaningful in cf-proxy mode; skip if no 2nd domain configured. ──
+    if _tg_mode == "cf-proxy" and CF_WORKER_URL_2:
+        try:
+            alt_api = f"{CF_WORKER_URL_2}/tg-proxy"
+            client = await _get_shared_http_client()
+            r = await client.post(f"{alt_api}/{method}", json=data, timeout=_proxy_timeout)
+            result = r.json()
+            if result.get("ok"):
+                logger.info(f"[TG] {method} recovered via secondary CF Worker ({CF_WORKER_URL_2})")
+                return result
+            logger.warning(f"[TG] {method} secondary CF proxy also failed: {result.get('description')}")
+        except Exception as e:
+            logger.warning(f"[TG] {method} secondary CF proxy error: {type(e).__name__}: {e}")
     # ── Fallback: Direct Telegram API (skipped when running where TG is
     #    network-blocked, e.g. HF Space — trying it there just wastes time
     #    on a guaranteed failure before eventually giving up) ──
@@ -472,6 +501,29 @@ async def get_bot_username() -> str:
     except Exception as e:
         logger.error(f"[BotUsername] getMe failed: {e}")
     return "atlasQuizProBot"  # last-resort fallback only
+
+async def send_rich_msg(chat_id, markdown_text: str, fallback_text: str = None) -> dict:
+    """
+    Sends a REAL Telegram table/rich-formatted message using Bot API 10.1's
+    sendRichMessage (via telegramify-markdown's richify()). This is a brand
+    new (June 2026) endpoint -- if it's rejected/unsupported/errors for any
+    reason, automatically falls back to plain sendMessage (HTML) using
+    fallback_text (or a stripped-markdown version) so the message is NEVER
+    lost/silently dropped.
+    """
+    try:
+        from telegramify_markdown import richify
+        rich_message = richify(markdown_text)
+        result = await tg_post("sendRichMessage", {
+            "chat_id": chat_id,
+            "rich_message": rich_message.to_dict(),
+        })
+        if result.get("ok"):
+            return result
+        logger.warning(f"[RichMsg] sendRichMessage rejected, falling back to plain text: {result.get('description')}")
+    except Exception as e:
+        logger.warning(f"[RichMsg] sendRichMessage failed, falling back to plain text: {e}")
+    return await send_msg(chat_id, fallback_text if fallback_text else markdown_text, parse_mode="HTML")
 
 async def send_msg(chat_id, text: str, parse_mode: str = "HTML",
                    reply_markup=None, reply_to_message_id: int = None) -> dict:
@@ -533,13 +585,41 @@ async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
         return {"ok": False, "error": str(e)}
 
 async def send_photo_by_id(chat_id, file_id: str, caption: str = "",
-                           parse_mode: str = "HTML") -> dict:
-    return await tg_post("sendPhoto", {
+                           parse_mode: str = "HTML", reply_to_message_id: int = None) -> dict:
+    data = {
         "chat_id": chat_id,
         "photo": file_id,
         "caption": caption,
         "parse_mode": parse_mode
-    })
+    }
+    if reply_to_message_id:
+        data["reply_to_message_id"] = reply_to_message_id
+    return await tg_post("sendPhoto", data)
+
+async def send_media_group(chat_id, photos: list, reply_to_message_id: int = None) -> dict:
+    """Send up to 10 photos as a single Telegram album (media group).
+    photos: list of (filename, bytes) tuples, in the order they should appear.
+    Uses direct multipart upload (attach://) since CF Worker's JSON proxy
+    doesn't support multi-file album uploads."""
+    import json as _j
+    media = []
+    files = {}
+    for i, (fname, fbytes) in enumerate(photos):
+        key = f"photo{i}"
+        media.append({"type": "photo", "media": f"attach://{key}"})
+        files[key] = (fname, fbytes, "image/jpeg")
+    fields = {"chat_id": str(chat_id), "media": _j.dumps(media)}
+    if reply_to_message_id:
+        fields["reply_to_message_id"] = str(reply_to_message_id)
+    try:
+        c = await _get_shared_http_client()
+        r = await c.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMediaGroup",
+            data=fields, files=files, timeout=180)
+        return r.json()
+    except Exception as e:
+        logger.error(f"[sendMediaGroup] failed: {e}")
+        return {"ok": False, "error": str(e)}
 
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
@@ -646,9 +726,59 @@ async def send_poll(chat_id, question: str, options: list, correct_idx: int,
     plain_data["explanation"] = (exp_clean or explanation)[:200]
     return await tg_post("sendPoll", plain_data)
 
-async def notify_owner(text: str):
-    if OWNER_ID:
+_OWNER_JOB_MSG = {}  # job_key -> {"msg_id": int, "lines": [str]}
+
+async def notify_owner(text: str, job_key: str = None):
+    """job_key: pass the same key for every alert belonging to one logical
+    job (e.g. one /csv run) — instead of each call sending a brand new
+    message, they all edit a single rolling message, appending a new line
+    per step. Without job_key, behaves exactly as before (one-off message)."""
+    if not OWNER_ID:
+        return
+    if not job_key:
         await send_msg(OWNER_ID, f"🔔 <b>ATLAS BOT Alert</b>\n\n{text}")
+        return
+
+    state = _OWNER_JOB_MSG.get(job_key)
+    if state is None:
+        r = await send_msg(OWNER_ID, f"🔔 <b>ATLAS BOT Alert</b>\n\n{text}")
+        msg_id = r.get("result", {}).get("message_id") if r.get("ok") else None
+        _OWNER_JOB_MSG[job_key] = {"msg_id": msg_id, "lines": [text]}
+        return
+
+    state["lines"].append(text)
+    body = "\n\n".join(state["lines"])[-3800:]  # stay under Telegram's 4096-char cap
+    if state["msg_id"]:
+        r = await edit_msg(OWNER_ID, state["msg_id"], f"🔔 <b>ATLAS BOT Alert</b>\n\n{body}")
+        if not r.get("ok"):
+            # message may have been deleted/too old to edit — fall back to a fresh one
+            r2 = await send_msg(OWNER_ID, f"🔔 <b>ATLAS BOT Alert</b>\n\n{body}")
+            state["msg_id"] = r2.get("result", {}).get("message_id") if r2.get("ok") else None
+    else:
+        r = await send_msg(OWNER_ID, f"🔔 <b>ATLAS BOT Alert</b>\n\n{body}")
+        state["msg_id"] = r.get("result", {}).get("message_id") if r.get("ok") else None
+
+def clear_owner_job(job_key: str):
+    """Call once a job is fully done (success or fail) so the next run
+    starts a fresh rolling message instead of appending to a stale one."""
+    _OWNER_JOB_MSG.pop(job_key, None)
+
+async def notify_owner_edit(text: str, msg_id_box: dict):
+    """Single-message progress notifier — edits the same owner message
+    throughout a job instead of sending a new message per stage, so the
+    owner's chat doesn't get flooded with one line per step."""
+    if not OWNER_ID:
+        return
+    full = f"🔔 <b>ATLAS BOT Alert</b>\n\n{text}"
+    mid = msg_id_box.get("id")
+    if mid:
+        r = await edit_msg(OWNER_ID, mid, full)
+        if r and r.get("ok"):
+            return
+    r = await send_msg(OWNER_ID, full)
+    new_id = r.get("result", {}).get("message_id")
+    if new_id:
+        msg_id_box["id"] = new_id
 
 # ============================================================
 # PYROGRAM CLIENT (large file download, >20MB, Bot API getFile bypass)
@@ -662,7 +792,12 @@ _shared_http_client = None
 async def _get_shared_http_client():
     global _shared_http_client
     if _shared_http_client is None:
-        _shared_http_client = httpx.AsyncClient(timeout=300)
+        # keepalive_expiry বাড়িয়ে দিলাম (httpx default মাত্র 5s) — কম গ্যাপে
+        # commands এলে পুরনো connection বেশি সময় বেঁচে থাকবে, তাই "প্রথমবার
+        # stale connection-এ fail করে retry লাগে, দ্বিতীয়বার fast" — এই
+        # pattern-টাই কম ঘটবে (retry logic এখনও fallback হিসেবে থাকছে)।
+        limits = httpx.Limits(max_keepalive_connections=20, keepalive_expiry=60.0)
+        _shared_http_client = httpx.AsyncClient(timeout=300, limits=limits)
     return _shared_http_client
 
 async def _get_pyro_client():
@@ -672,7 +807,7 @@ async def _get_pyro_client():
         client = Client(
             "atlas_pyrogram", api_id=int(TELEGRAM_API_ID),
             api_hash=TELEGRAM_API_HASH, bot_token=BOT_TOKEN, no_updates=True,
-            in_memory=True,
+            in_memory=True, max_concurrent_transmissions=8,
         )
         try:
             await client.start()
@@ -687,7 +822,7 @@ async def _get_pyro_client():
         _pyro_client = client
     return _pyro_client
 
-async def download_large_file_pyrogram(chat_id: int, message_id: int) -> Optional[bytes]:
+async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_cb=None) -> Optional[bytes]:
     try:
         client = await _get_pyro_client()
         if not client:
@@ -696,7 +831,18 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int) -> Optiona
         msg = await client.get_messages(chat_id, message_id)
         if not msg or not (msg.document or msg.video or msg.audio):
             return None
-        file_bytes = await client.download_media(msg, in_memory=True)
+
+        _progress_fn = None
+        if progress_cb:
+            async def _progress_fn(current, total):
+                try:
+                    res = progress_cb(current, total)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    pass
+
+        file_bytes = await client.download_media(msg, in_memory=True, progress=_progress_fn)
         if file_bytes is None:
             return None
         return file_bytes.getvalue() if hasattr(file_bytes, "getvalue") else file_bytes
@@ -749,10 +895,18 @@ async def download_tg_file(file_id: str, progress_cb=None,
     # every file size. Falls back to Bot API getFile if pyrogram isn't
     # configured (no TELEGRAM_API_ID/HASH) or the call itself fails.
     if chat_id is not None and message_id is not None:
-        big = await download_large_file_pyrogram(chat_id, message_id)
+        big = await download_large_file_pyrogram(chat_id, message_id, progress_cb=progress_cb)
         if big is not None:
             return big
         logger.warning("[download_tg_file] pyrogram unavailable/failed, falling back to Bot API getFile")
+
+    if progress_cb:
+        try:
+            res = progress_cb(0, 0)  # signal: getFile lookup in progress, size unknown yet
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception:
+            pass
 
     file_res = await tg_post("getFile", {"file_id": file_id})
     if not file_res.get("ok"):
@@ -770,10 +924,15 @@ async def download_tg_file(file_id: str, progress_cb=None,
     async def _stream_download(url: str) -> bytes:
         # In-memory buffer — ছোট/মাঝারি ফাইলে (bot download সাধারণত <50MB)
         # disk write/read এর extra I/O latency বাদ দিলে ভালো speed পাওয়া যায়।
+        # 10s explicit timeout — আগে shared client-এর 300s default inherit
+        # হতো, তাই CF Worker/Telegram ওপাশে hang করলে "0%-এ আটকে থাকা" screen
+        # কয়েক মিনিট পর্যন্ত silently চলতে পারতো কোনো error/fallback ছাড়াই।
+        # CSV ছোট ফাইল, 10s এর বেশি লাগলে সেটা আসলেই একটা failure — দ্রুত
+        # fail করে caller-কে জানানো ভালো, চুপচাপ hang হওয়ার চেয়ে।
         downloaded = 0
         buf = io.BytesIO()
         client = await _get_shared_http_client()
-        async with client.stream("GET", url) as r:
+        async with client.stream("GET", url, timeout=10) as r:
             if r.status_code != 200:
                 raise Exception(f"HTTP {r.status_code}")
             async for chunk in r.aiter_bytes(chunk_size=1048576):  # 1MB chunks
@@ -781,13 +940,21 @@ async def download_tg_file(file_id: str, progress_cb=None,
                 downloaded += len(chunk)
                 if progress_cb:
                     try:
-                        progress_cb(downloaded, total_size)
+                        res = progress_cb(downloaded, total_size)
+                        if asyncio.iscoroutine(res):
+                            await res
                     except Exception:
                         pass
         return buf.getvalue()
 
-    # CF proxy আগে try না করে সরাসরি direct Telegram file API — ছোট/মাঝারি
-    # ফাইলে (mhtml/csv/pdf) extra proxy hop-এর কোনো লাভ নেই, শুধু latency বাড়ায়।
+    # HF-এ (_tg_mode == "cf-proxy") direct Telegram network-level blocked —
+    # আগে এখানে সবসময় প্রথমে direct try করা হতো, shared client-এর 300s
+    # default timeout-এর কারণে সেই attempt fail/hang হতে অনেক সময় লাগতে
+    # পারতো প্রতিটা /csv-তে, তারপর CF proxy fallback চলতো। এখন platform
+    # অনুযায়ী সরাসরি সঠিক path-এ যাওয়া হচ্ছে — HF হলে CF proxy দিয়েই শুরু,
+    # Render/direct মোডে direct API দিয়েই শুরু (যেখানে সেটা আসলে কাজ করে)।
+    if _tg_mode == "cf-proxy":
+        return await _stream_download(f"{CF_WORKER_URL}/tg-file?path={file_path}")
     try:
         return await _stream_download(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
     except Exception as e:
@@ -937,18 +1104,24 @@ async def db_save_mcq_cache(cache_id: str, session_id: str, page: int,
         }).execute())
     except Exception as e:
         logger.error(f"[DB] save_mcq_cache error: {e}")
-    # DURABILITY: mirror into D1 `quizzes` table too (same table/schema the
-    # qz_ web-quiz path already uses) so the Website Exam link survives even
-    # if Supabase (primary store above) is ever unreachable/deleted — get_exam_data
-    # already knows how to read this table as a fallback source.
-    try:
-        import json as _json
-        await d1_run(
-            "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            [cache_id, topic or "ATLAS MCQ", "", 30, 0, _json.dumps(mcqs), "", "", 0]
-        )
-    except Exception as e:
-        logger.warning(f"[DB] D1 mirror for pdf_mcq_cache failed (non-fatal): {e}")
+
+    async def _d1_write():
+        # DURABILITY: mirror into D1 `quizzes` table too (same table/schema the
+        # qz_ web-quiz path already uses) so the Website Exam link survives even
+        # if Supabase (primary store above) is ever unreachable/deleted — get_exam_data
+        # already knows how to read this table as a fallback source.
+        # Non-critical backup copy — fire-and-forget so commands like /csv
+        # respond instantly instead of waiting on a 2nd sequential DB round-trip.
+        try:
+            import json as _json
+            await d1_run(
+                "INSERT OR REPLACE INTO quizzes (id,name,description,timer,shuffle,csv_data,tag,exp_footer,created_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                [cache_id, topic or "ATLAS MCQ", "", 30, 0, _json.dumps(mcqs), "", "", 0]
+            )
+        except Exception as e:
+            logger.warning(f"[DB] D1 mirror for pdf_mcq_cache failed (non-fatal): {e}")
+
+    asyncio.create_task(_d1_write())
 
 async def db_update_cache(cache_id: str, fields: dict):
     try:
@@ -1041,6 +1214,141 @@ async def db_save_leaderboard(cache_id: str, user_id: int, user_name: str,
         logger.warning(f"[D1] save_leaderboard mirror warn: {e}")
 
 _D1_CHANNELS_TABLE_ENSURED = False
+
+# ============================================================
+# CSV/CSVS POLL-JOB PROGRESS — CRASH/RESTART RESUME
+# ============================================================
+# HF Space restart/crash হলে আগে সব চলমান /csv poll-sending job memory থেকে
+# হারিয়ে যেত (asyncio.Queue শুধু RAM-এ থাকে) — user কে পুরো batch আবার
+# শুরু থেকে পাঠাতে হতো (duplicate polls সহ)। এখন প্রতিটা poll পাঠানোর পরে
+# progress D1-এ save হয়, আর bot startup-এ অসম্পূর্ণ job থাকলে সেখান থেকে
+# resume করে — কোনো poll মিস বা duplicate ছাড়াই।
+async def _ensure_csv_job_table():
+    await _ensure_d1_table("csv_poll_jobs",
+        "CREATE TABLE IF NOT EXISTS csv_poll_jobs ("
+        "job_id TEXT PRIMARY KEY, cache_id TEXT, channel_id TEXT, chat_id INTEGER, uid INTEGER, "
+        "mode TEXT, batch_size INTEGER, topic TEXT, csv_fname TEXT, thread_id INTEGER, "
+        "loading_id INTEGER, sent_index INTEGER, total INTEGER, first_poll_link TEXT, "
+        "status TEXT, updated_at INTEGER)")
+
+async def db_save_csv_job(job_id: str, **fields):
+    """Job শুরু হওয়ার সময় বা progress update হওয়ার সময় কল হয়। fields-এ যা
+    দেওয়া হবে শুধু সেগুলোই upsert হবে (partial update, non-fatal on error —
+    progress-save fail হলেও poll পাঠানো থেমে থাকবে না)।"""
+    try:
+        await _ensure_csv_job_table()
+        cols = ["job_id"] + list(fields.keys()) + ["updated_at"]
+        placeholders = ",".join(f"?{i+1}" for i in range(len(cols)))
+        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "job_id")
+        vals = [job_id] + list(fields.values()) + [int(time.time())]
+        await d1_run(
+            f"INSERT INTO csv_poll_jobs ({','.join(cols)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(job_id) DO UPDATE SET {updates}",
+            vals
+        )
+    except Exception as e:
+        logger.warning(f"[D1] save_csv_job warn (non-fatal, job continues): {e}")
+
+async def db_update_csv_job_progress(job_id: str, sent_index: int, first_poll_link: str = None):
+    try:
+        await _ensure_csv_job_table()
+        if first_poll_link:
+            await d1_run(
+                "UPDATE csv_poll_jobs SET sent_index=?1, first_poll_link=?2, updated_at=?3 WHERE job_id=?4",
+                [sent_index, first_poll_link, int(time.time()), job_id]
+            )
+        else:
+            await d1_run(
+                "UPDATE csv_poll_jobs SET sent_index=?1, updated_at=?2 WHERE job_id=?3",
+                [sent_index, int(time.time()), job_id]
+            )
+    except Exception as e:
+        logger.warning(f"[D1] update_csv_job_progress warn (non-fatal): {e}")
+
+async def db_finish_csv_job(job_id: str):
+    try:
+        await _ensure_csv_job_table()
+        await d1_run("UPDATE csv_poll_jobs SET status='done', updated_at=?1 WHERE job_id=?2",
+                     [int(time.time()), job_id])
+    except Exception as e:
+        logger.warning(f"[D1] finish_csv_job warn (non-fatal): {e}")
+
+async def db_get_incomplete_csv_jobs() -> list:
+    """Startup-এ কল হয় — status='running' রেখে যাওয়া job মানেই আগের
+    process restart/crash-এ মাঝপথে থেমে গেছে। 24 ঘণ্টার বেশি পুরনো job
+    resume করা হয় না (session/cache ততক্ষণে expired হয়ে যাওয়ার কথা)।"""
+    try:
+        await _ensure_csv_job_table()
+        cutoff = int(time.time()) - 86400
+        rows = await d1_select(
+            "SELECT * FROM csv_poll_jobs WHERE status='running' AND updated_at > ?1",
+            [cutoff]
+        )
+        return rows or []
+    except Exception as e:
+        logger.warning(f"[D1] get_incomplete_csv_jobs warn: {e}")
+        return []
+
+# ============================================================
+# /PDF (pdfm) & /QBM PAGE-JOB PROGRESS — CRASH/RESTART RESUME
+# একই কারণে: HF restart হলে /pdf বা /qbm এর poll-posting মাঝপথে হারিয়ে
+# যেত। প্রতিটা page শেষ হওয়ার পর resume_page_num D1-এ save হয়, restart এর
+# পর সেখান থেকেই বাকি page গুলো নিয়ে কাজ চালিয়ে যায় (আগের page duplicate
+# পোস্ট হয় না)।
+# ============================================================
+async def _ensure_page_job_table():
+    await _ensure_d1_table("page_jobs",
+        "CREATE TABLE IF NOT EXISTS page_jobs ("
+        "job_id TEXT PRIMARY KEY, job_type TEXT, uid INTEGER, chat_id INTEGER, uname TEXT, "
+        "file_id TEXT, page_range TEXT, topic TEXT, mcq_count TEXT, channel_id TEXT, "
+        "csv_only INTEGER, file_name TEXT, thread_id INTEGER, status_msg_id INTEGER, "
+        "resume_page_num INTEGER, status TEXT, updated_at INTEGER)")
+
+async def db_save_page_job(job_id: str, **fields):
+    try:
+        await _ensure_page_job_table()
+        cols = ["job_id"] + list(fields.keys()) + ["updated_at"]
+        placeholders = ",".join(f"?{i+1}" for i in range(len(cols)))
+        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "job_id")
+        vals = [job_id] + list(fields.values()) + [int(time.time())]
+        await d1_run(
+            f"INSERT INTO page_jobs ({','.join(cols)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(job_id) DO UPDATE SET {updates}",
+            vals
+        )
+    except Exception as e:
+        logger.warning(f"[D1] save_page_job warn (non-fatal, job continues): {e}")
+
+async def db_update_page_job_progress(job_id: str, resume_page_num: int):
+    try:
+        await _ensure_page_job_table()
+        await d1_run(
+            "UPDATE page_jobs SET resume_page_num=?1, updated_at=?2 WHERE job_id=?3",
+            [resume_page_num, int(time.time()), job_id]
+        )
+    except Exception as e:
+        logger.warning(f"[D1] update_page_job_progress warn (non-fatal): {e}")
+
+async def db_finish_page_job(job_id: str):
+    try:
+        await _ensure_page_job_table()
+        await d1_run("UPDATE page_jobs SET status='done', updated_at=?1 WHERE job_id=?2",
+                     [int(time.time()), job_id])
+    except Exception as e:
+        logger.warning(f"[D1] finish_page_job warn (non-fatal): {e}")
+
+async def db_get_incomplete_page_jobs() -> list:
+    try:
+        await _ensure_page_job_table()
+        cutoff = int(time.time()) - 86400
+        rows = await d1_select(
+            "SELECT * FROM page_jobs WHERE status='running' AND updated_at > ?1",
+            [cutoff]
+        )
+        return rows or []
+    except Exception as e:
+        logger.warning(f"[D1] get_incomplete_page_jobs warn: {e}")
+        return []
 
 async def _ensure_d1_channels_table():
     global _D1_CHANNELS_TABLE_ENSURED
