@@ -2296,37 +2296,35 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
 
 
 async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
-    # 1+2) Groq and Gemini raced concurrently instead of sequentially —
-    # previously a slow/failing Groq call blocked Gemini from even starting
-    # (Gemini itself can take 45-85s across key retries), doubling page
-    # latency in the common case where Groq is slow/rate-limited. Racing
-    # them means we only pay the cost of whichever finishes first.
+    # Groq is the TRUE primary now — tried first, alone. Gemini is only
+    # invoked if Groq fails or comes back empty (sequential, not raced),
+    # so Groq's result is used whenever Groq succeeds, with no latency
+    # penalty from waiting on Gemini in the common case.
     _LAST_GROQ_ERROR["reason"] = ""
     _LAST_GEMINI_ERROR["reason"] = ""
     _LAST_FALLBACK_ERROR["reason"] = ""
-    groq_task = _spawn_task(_gen_groq(img, topic, mcq_count))
-    gemini_task = _spawn_task(_gemini_gen_mcq(img, topic, page_num, mcq_count))
-    try:
-        groq_out, gemini_out = await asyncio.gather(
-            groq_task, gemini_task, return_exceptions=True
-        )
-    except Exception:
-        groq_out, gemini_out = [], []
 
-    if isinstance(groq_out, Exception):
-        _LAST_GROQ_ERROR["reason"] = f"{type(groq_out).__name__}: {groq_out}"
-        logger.warning(f"[AI-ROT] groq failed (page {page_num}): {groq_out}")
+    try:
+        groq_out = await _gen_groq(img, topic, mcq_count)
+    except Exception as e:
+        _LAST_GROQ_ERROR["reason"] = f"{type(e).__name__}: {e}"
+        logger.warning(f"[AI-ROT] groq failed (page {page_num}): {e}")
         groq_out = []
-    if isinstance(gemini_out, Exception):
-        _LAST_GEMINI_ERROR["reason"] = f"{type(gemini_out).__name__}: {gemini_out}"
-        logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {gemini_out}")
-        gemini_out = []
 
     if groq_out:
-        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq (raced)")
+        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq (primary)")
         return groq_out
+
+    logger.warning(f"[AI-ROT] groq empty (page {page_num}); trying gemini")
+    try:
+        gemini_out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
+    except Exception as e:
+        _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"
+        logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {e}")
+        gemini_out = []
+
     if gemini_out:
-        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=gemini (raced)")
+        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=gemini (fallback)")
         return gemini_out
 
     logger.warning(f"[AI-ROT] groq+gemini both empty (page {page_num}); rotating to fallbacks")
