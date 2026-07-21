@@ -56,7 +56,7 @@ export default {
     const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
                      '/api/leaderboard', '/api/solve-pdf', '/api/tg-image', '/api/new-exam/status'];
     if (HF_ONLY.some(p => url.pathname.startsWith(p))) {
-      const RENDER = env.RENDER_URL || 'https://quizbot-s482.onrender.com';
+      const RENDER = env.RENDER_URL || env.HF_SPACE_URL || 'https://hamza-02-quizbot.hf.space';
       const renderReq = new Request(RENDER + url.pathname + url.search, {
         method: request.method,
         headers: request.headers,
@@ -127,7 +127,7 @@ export default {
 };
 
 async function runCronCheck(env) {
-    const RENDER_URL   = env.RENDER_URL   || 'https://quizbot-s482.onrender.com';
+    const RENDER_URL   = env.RENDER_URL || env.HF_SPACE_URL || 'https://hamza-02-quizbot.hf.space';
     const RENDER_URL_2 = env.RENDER_URL_2 || '';
     const BOT_TOKEN     = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
     const OWNER_ID      = env.OWNER_ID || '';
@@ -696,7 +696,7 @@ async function handleQuizData(request, url, env, ctx) {
     const SB_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
     const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
     const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
-    const RENDER_URL   = (env && env.RENDER_URL)   || 'https://quizbot-s482.onrender.com';
+    const RENDER_URL   = (env && (env.RENDER_URL || env.HF_SPACE_URL)) || 'https://hamza-02-quizbot.hf.space';
     const RENDER_URL_2 = (env && env.RENDER_URL_2) || '';
 
     function toMcqs(questions) {
@@ -721,30 +721,32 @@ async function handleQuizData(request, url, env, ctx) {
       });
     }
 
-    // ── Layer 1: Render primary + secondary account (each retried 3x/25s before moving on) ──
+    // ── Layer 1: Render primary + secondary account. Kept short (1 attempt,
+    //    6s timeout per host) — if the bot process is off, this must fail
+    //    FAST so the person doesn't sit on a loading screen for minutes
+    //    before Layer 1.5 (Supabase direct) kicks in. Render is only ever
+    //    fresher than the DB layers when a quiz was JUST generated seconds
+    //    ago and hasn't been mirrored yet — a single quick attempt covers
+    //    that case without punishing the common bot-is-off scenario. ──
     const renderHosts = [RENDER_URL, RENDER_URL_2].filter(Boolean);
     for (const host of renderHosts) {
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          const r = await fetch(`${host}/api/exam/${id}`, {
-            signal: AbortSignal.timeout(25000)
-          });
-          if (r.ok) {
-            const d = await r.json();
-            if (d && d.mcqs && d.mcqs.length > 0) {
-              ctx.waitUntil(backupToR2(env, id, d.topic, d.mcqs, d.timer, {
-                tag: d.tag, exp_footer: d.exp_footer, channel_id: d.channel_id,
-                image_msg_id: d.image_msg_id, end_msg_id: d.end_msg_id,
-                image_file_id: d.image_file_id, is_new_gen: d.is_new_gen, page: d.page,
-              }));
-              return jsonResp(d);
-            }
-            break; // this host answered but no mcqs — real 404 on this host, try next host
+      try {
+        const r = await fetch(`${host}/api/exam/${id}`, {
+          signal: AbortSignal.timeout(6000)
+        });
+        if (r.ok) {
+          const d = await r.json();
+          if (d && d.mcqs && d.mcqs.length > 0) {
+            ctx.waitUntil(backupToR2(env, id, d.topic, d.mcqs, d.timer, {
+              tag: d.tag, exp_footer: d.exp_footer, channel_id: d.channel_id,
+              image_msg_id: d.image_msg_id, end_msg_id: d.end_msg_id,
+              image_file_id: d.image_file_id, is_new_gen: d.is_new_gen, page: d.page,
+            }));
+            return jsonResp(d);
           }
-        } catch(e) {
-          console.warn(`[quiz] Render (${host}) attempt ${attempt} failed:`, e.message);
-          if (attempt < 3) await new Promise(res => setTimeout(res, 1500));
         }
+      } catch(e) {
+        console.warn(`[quiz] Render (${host}) quick-check failed, falling back to DB layers:`, e.message);
       }
     }
 
@@ -941,7 +943,7 @@ async function forwardToHF(request, env) {
   // latency), which silently ate the first attempt of every command until
   // the user resent it and it happened to land on PRIMARY.
   const BOT_TOKEN    = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
-  const PRIMARY      = (env.RENDER_URL   || 'https://quizbot-s482.onrender.com') + '/webhook';
+  const PRIMARY      = (env.RENDER_URL || env.HF_SPACE_URL || 'https://hamza-02-quizbot.hf.space') + '/webhook';
   const SECONDARY    = env.RENDER_URL_2 ? (env.RENDER_URL_2 + '/webhook') : '';
   const TG_API       = `https://api.telegram.org/bot${BOT_TOKEN}`;
   const body = await request.text();
