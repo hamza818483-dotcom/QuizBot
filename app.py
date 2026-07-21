@@ -1308,23 +1308,20 @@ async def _gen_groq(img, topic, count):
 
 class GenericKeyRotator:
     """Reusable multi-key rotator with 429-cooldown, healthy-key-first ordering —
-    same pattern as GroqKeyRotator, for any provider that supports comma-separated
-    keys via an env var (falls back to a single legacy env var if the plural
-    one isn't set)."""
+    same pattern as GroqKeyRotator. Reads keys from the EXISTING env var itself
+    (e.g. NVIDIA_API_KEY) — comma-separate multiple keys in that same variable,
+    no separate _KEYS var needed."""
     COOLDOWN_SECONDS = 60
 
-    def __init__(self, plural_env: str, singular_env: str = None, label: str = ""):
-        self.plural_env = plural_env
-        self.singular_env = singular_env
-        self.label = label or plural_env
+    def __init__(self, env_var: str, label: str = ""):
+        self.env_var = env_var
+        self.label = label or env_var
         self.keys = []
         self._cooldown_until = {}
         self._load_keys()
 
     def _load_keys(self):
-        raw = os.environ.get(self.plural_env, "")
-        if not raw and self.singular_env:
-            raw = os.environ.get(self.singular_env, "")
+        raw = os.environ.get(self.env_var, "")
         if raw:
             self.keys = [k.strip() for k in raw.split(",") if k.strip()]
         logger.info(f"[{self.label}] Loaded {len(self.keys)} keys")
@@ -1348,11 +1345,11 @@ class GenericKeyRotator:
         self._cooldown_until.pop(key, None)
 
 
-nvidia_rotator = GenericKeyRotator("NVIDIA_KEYS", "NVIDIA_API_KEY", "NVIDIA")
-nemotron_rotator = GenericKeyRotator("NEMOTRON_KEYS", "NEMOTRON_API_KEY", "Nemotron")
-gemma_rotator = GenericKeyRotator("GEMMA_KEYS", "GEMMA_API_KEY", "Gemma")
-or_qwen_rotator = GenericKeyRotator("OPENROUTER_KEYS", "OPENROUTER_API_KEY", "OpenRouter-Qwen")
-hf_rotator = GenericKeyRotator("HF_KEYS", "HF_API_KEY", "HF")
+nvidia_rotator = GenericKeyRotator("NVIDIA_API_KEY", "NVIDIA")
+nemotron_rotator = GenericKeyRotator("NEMOTRON_API_KEY", "Nemotron")
+gemma_rotator = GenericKeyRotator("GEMMA_API_KEY", "Gemma")
+or_qwen_rotator = GenericKeyRotator("OPENROUTER_API_KEY", "OpenRouter-Qwen")
+hf_rotator = GenericKeyRotator("HF_API_KEY", "HF")
 
 
 async def _try_rotator_openai_compat(rotator: "GenericKeyRotator", url: str, model: str, data_url: str, prompt: str):
