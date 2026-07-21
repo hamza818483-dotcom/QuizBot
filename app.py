@@ -1306,72 +1306,121 @@ async def _gen_groq(img, topic, count):
     _LAST_GROQ_ERROR["reason"] = f"Groq সব {len(keys)}টি key-তেই fail করেছে — [" + "; ".join(key_errors) + "]"
     return []
 
-async def _gen_nvidia(img, topic, count):
-    key = os.environ.get("NVIDIA_API_KEY", "")
-    if not key:
+class GenericKeyRotator:
+    """Reusable multi-key rotator with 429-cooldown, healthy-key-first ordering —
+    same pattern as GroqKeyRotator, for any provider that supports comma-separated
+    keys via an env var (falls back to a single legacy env var if the plural
+    one isn't set)."""
+    COOLDOWN_SECONDS = 60
+
+    def __init__(self, plural_env: str, singular_env: str = None, label: str = ""):
+        self.plural_env = plural_env
+        self.singular_env = singular_env
+        self.label = label or plural_env
+        self.keys = []
+        self._cooldown_until = {}
+        self._load_keys()
+
+    def _load_keys(self):
+        raw = os.environ.get(self.plural_env, "")
+        if not raw and self.singular_env:
+            raw = os.environ.get(self.singular_env, "")
+        if raw:
+            self.keys = [k.strip() for k in raw.split(",") if k.strip()]
+        logger.info(f"[{self.label}] Loaded {len(self.keys)} keys")
+
+    def all_keys(self):
+        if not self.keys:
+            self._load_keys()
+        return list(self.keys)
+
+    def ordered_keys(self):
+        keys = self.all_keys()
+        now = time.time()
+        healthy = [k for k in keys if self._cooldown_until.get(k, 0) <= now]
+        cooling = [k for k in keys if self._cooldown_until.get(k, 0) > now]
+        return healthy + cooling
+
+    def mark_rate_limited(self, key: str):
+        self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
+
+    def mark_healthy(self, key: str):
+        self._cooldown_until.pop(key, None)
+
+
+nvidia_rotator = GenericKeyRotator("NVIDIA_KEYS", "NVIDIA_API_KEY", "NVIDIA")
+nemotron_rotator = GenericKeyRotator("NEMOTRON_KEYS", "NEMOTRON_API_KEY", "Nemotron")
+gemma_rotator = GenericKeyRotator("GEMMA_KEYS", "GEMMA_API_KEY", "Gemma")
+or_qwen_rotator = GenericKeyRotator("OPENROUTER_KEYS", "OPENROUTER_API_KEY", "OpenRouter-Qwen")
+hf_rotator = GenericKeyRotator("HF_KEYS", "HF_API_KEY", "HF")
+
+
+async def _try_rotator_openai_compat(rotator: "GenericKeyRotator", url: str, model: str, data_url: str, prompt: str):
+    """Try every key in a rotator (healthy-first) against one OpenAI-compatible
+    endpoint; returns parsed MCQs on first success, [] if all keys exhausted."""
+    keys = rotator.ordered_keys()
+    if not keys:
         return []
+    for key in keys:
+        txt, status = await _post_openai_compat(url, key, model, data_url, prompt)
+        if txt:
+            parsed = _parse_mcq_json(txt)
+            if parsed:
+                rotator.mark_healthy(key)
+                return parsed
+            continue
+        if status == 429:
+            rotator.mark_rate_limited(key)
+            continue
+    return []
+
+
+async def _gen_nvidia(img, topic, count):
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
-    txt, _st = await _post_openai_compat(
-        "https://integrate.api.nvidia.com/v1/chat/completions",
-        key, "meta/llama-3.2-11b-vision-instruct",
-        data_url, _build_mcq_prompt(topic, count)
+    return await _try_rotator_openai_compat(
+        nvidia_rotator, "https://integrate.api.nvidia.com/v1/chat/completions",
+        "meta/llama-3.2-11b-vision-instruct", data_url, _build_mcq_prompt(topic, count)
     )
-    return _parse_mcq_json(txt)
 
 async def _gen_openrouter_qwen(img, topic, count):
-    key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not key:
-        return []
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
-    txt, _st = await _post_openai_compat(
-        "https://openrouter.ai/api/v1/chat/completions",
-        key, "qwen/qwen-2-vl-72b-instruct",
-        data_url, _build_mcq_prompt(topic, count)
+    return await _try_rotator_openai_compat(
+        or_qwen_rotator, "https://openrouter.ai/api/v1/chat/completions",
+        "qwen/qwen-2-vl-72b-instruct", data_url, _build_mcq_prompt(topic, count)
     )
-    return _parse_mcq_json(txt)
 
 async def _gen_nemotron(img, topic, count):
-    key = os.environ.get("NEMOTRON_API_KEY", "") or os.environ.get("NVIDIA_API_KEY", "")
-    if not key:
-        return []
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
-    txt, _st = await _post_openai_compat(
-        "https://integrate.api.nvidia.com/v1/chat/completions",
-        key, "nvidia/nemotron-nano-12b-v2-vl",
-        data_url, _build_mcq_prompt(topic, count)
+    rotator = nemotron_rotator if nemotron_rotator.all_keys() else nvidia_rotator
+    return await _try_rotator_openai_compat(
+        rotator, "https://integrate.api.nvidia.com/v1/chat/completions",
+        "nvidia/nemotron-nano-12b-v2-vl", data_url, _build_mcq_prompt(topic, count)
     )
-    return _parse_mcq_json(txt)
 
 async def _gen_gemma(img, topic, count):
-    key = os.environ.get("GEMMA_API_KEY", "") or os.environ.get("OPENROUTER_API_KEY", "")
-    if not key:
-        return []
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
-    # Gemma 3 27B IT vision via OpenRouter
-    txt, _st = await _post_openai_compat(
-        "https://openrouter.ai/api/v1/chat/completions",
-        key, "google/gemma-3-27b-it",
-        data_url, _build_mcq_prompt(topic, count)
+    rotator = gemma_rotator if gemma_rotator.all_keys() else or_qwen_rotator
+    return await _try_rotator_openai_compat(
+        rotator, "https://openrouter.ai/api/v1/chat/completions",
+        "google/gemma-3-27b-it", data_url, _build_mcq_prompt(topic, count)
     )
-    return _parse_mcq_json(txt)
 
 async def _gen_hf(img, topic, count):
     """Hugging Face Inference API — free tier vision fallback (last resort)."""
-    key = os.environ.get("HF_API_KEY", "")
-    if not key:
-        return []
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    keys = hf_rotator.ordered_keys()
+    if not keys:
+        return []
     model = os.environ.get("HF_VISION_MODEL", "meta-llama/Llama-3.2-11B-Vision-Instruct")
     payload = {
         "model": model,
@@ -1385,21 +1434,30 @@ async def _gen_hf(img, topic, count):
         "max_tokens": 8192,
         "temperature": 0.3,
     }
-    try:
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post(
-                "https://router.huggingface.co/v1/chat/completions",
-                headers=headers, json=payload
-            )
-            if r.status_code >= 400:
-                logger.warning(f"[AI-ROT] hf HTTP {r.status_code}: {r.text[:200]}")
-                return []
-            j = r.json()
-            txt = j.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-    except Exception as e:
-        logger.warning(f"[AI-ROT] hf err: {e}")
-        return []
-    return _parse_mcq_json(txt)
+    for key in keys:
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(
+                    "https://router.huggingface.co/v1/chat/completions",
+                    headers=headers, json=payload
+                )
+                if r.status_code == 429:
+                    hf_rotator.mark_rate_limited(key)
+                    continue
+                if r.status_code >= 400:
+                    logger.warning(f"[AI-ROT] hf HTTP {r.status_code}: {r.text[:200]}")
+                    continue
+                j = r.json()
+                txt = j.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+        except Exception as e:
+            logger.warning(f"[AI-ROT] hf err: {e}")
+            continue
+        parsed = _parse_mcq_json(txt)
+        if parsed:
+            hf_rotator.mark_healthy(key)
+            return parsed
+    return []
 
 _AI_PROVIDERS_ORDER = ["nvidia", "openrouter_qwen", "nemotron", "gemma", "hf"]
 
