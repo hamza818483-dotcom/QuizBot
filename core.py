@@ -39,6 +39,10 @@ OWNER_ID = 5341425626  # hardcoded — env var was unreliable across HF Space se
 
 CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "https://atlasquizbotpro.hamza818483.workers.dev")
 CF_WORKER_URL_2 = os.environ.get("CF_WORKER_URL_2", "https://quizbot.pages.dev")
+# ── Sticky-fallback: remembers which of the 2 CF endpoints last worked,
+#    so subsequent calls try the known-good one FIRST instead of always
+#    starting from primary → wasting a timeout on a currently-down one. ──
+_last_good_api = None  # None = try primary first (default); else "primary" or "secondary"
 HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://hamza-02-quizbot.hf.space")
 RENDER_URL = os.environ.get("RENDER_URL", "") or os.environ.get("HF_SPACE_URL", "https://hamza-02-quizbot.hf.space")
 D1_TOKEN = os.environ.get("D1_TOKEN", "")
@@ -423,39 +427,55 @@ async def tg_post(method: str, data: dict) -> dict:
     # CF proxy hang/slow হলে /csv এর "ফাইল খোঁজা হচ্ছে..." স্টেপ worst-case
     # 24s+12s=36s এর বদলে দ্রুত fallback এ চলে যায়।
     _proxy_timeout = 5 if method == "getFile" else 12
-    for _proxy_attempt in range(2):
-        try:
-            client = await _get_shared_http_client()
-            r = await client.post(f"{TG_API}/{method}", json=data, timeout=_proxy_timeout)
-            result = r.json()
-            if result.get("ok"):
-                return result
-            if result.get("error_code") == 429:
-                retry_after = result.get("parameters", {}).get("retry_after", 5)
-                logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
-                await asyncio.sleep(min(retry_after, 30) + 0.5)
-            logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
-            break  # got a real response (not a transport error) — don't retry, fall through
-        except Exception as e:
-            logger.warning(f"[TG] {method} proxy error (attempt {_proxy_attempt+1}/2): {type(e).__name__}: {e}")
-            if _proxy_attempt == 0:
-                continue  # retry once — likely a stale reused connection
-    # ── Fallback: Secondary CF Worker domain (primary just failed twice —
-    #    could be that specific edge/domain having issues while the 2nd
-    #    domain, already proven reachable for setWebhook, still works).
-    #    Only meaningful in cf-proxy mode; skip if no 2nd domain configured. ──
-    if _tg_mode == "cf-proxy" and CF_WORKER_URL_2:
+
+    async def _try_primary():
+        for _proxy_attempt in range(2):
+            try:
+                client = await _get_shared_http_client()
+                r = await client.post(f"{TG_API}/{method}", json=data, timeout=_proxy_timeout)
+                result = r.json()
+                if result.get("ok"):
+                    return result, True
+                if result.get("error_code") == 429:
+                    retry_after = result.get("parameters", {}).get("retry_after", 5)
+                    logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
+                    await asyncio.sleep(min(retry_after, 30) + 0.5)
+                logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
+                return result, False  # real response, don't retry
+            except Exception as e:
+                logger.warning(f"[TG] {method} proxy error (attempt {_proxy_attempt+1}/2): {type(e).__name__}: {e}")
+                if _proxy_attempt == 0:
+                    continue
+        return None, False
+
+    async def _try_secondary():
+        if not (_tg_mode == "cf-proxy" and CF_WORKER_URL_2):
+            return None, False
         try:
             alt_api = f"{CF_WORKER_URL_2}/tg-proxy"
             client = await _get_shared_http_client()
             r = await client.post(f"{alt_api}/{method}", json=data, timeout=_proxy_timeout)
             result = r.json()
             if result.get("ok"):
-                logger.info(f"[TG] {method} recovered via secondary CF Worker ({CF_WORKER_URL_2})")
-                return result
+                return result, True
             logger.warning(f"[TG] {method} secondary CF proxy also failed: {result.get('description')}")
+            return result, False
         except Exception as e:
             logger.warning(f"[TG] {method} secondary CF proxy error: {type(e).__name__}: {e}")
+            return None, False
+
+    global _last_good_api
+    # sticky: try whichever endpoint last succeeded FIRST
+    order = [("secondary", _try_secondary), ("primary", _try_primary)] if _last_good_api == "secondary" \
+        else [("primary", _try_primary), ("secondary", _try_secondary)]
+
+    for name, fn in order:
+        result, ok = await fn()
+        if ok:
+            if _last_good_api != name:
+                logger.info(f"[TG] {method} succeeded via {name} — sticking with it for next calls")
+            _last_good_api = name
+            return result
     # ── Fallback: Direct Telegram API (skipped when running where TG is
     #    network-blocked, e.g. HF Space — trying it there just wastes time
     #    on a guaranteed failure before eventually giving up) ──
