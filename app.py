@@ -1214,10 +1214,15 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
 class GroqKeyRotator:
     """Rotates across multiple Groq keys (GROQ_KEYS comma-separated, falls back
     to single GROQ_API_KEY). On quota/rate-limit (429) for one key, tries the
-    next key immediately within the same page-call before giving up to Gemini."""
+    next key immediately within the same page-call before giving up to Gemini.
+    Keys that hit 429 are put on a short cooldown so future calls start with
+    a healthy key first instead of re-trying an exhausted one every time."""
+    COOLDOWN_SECONDS = 60
+
     def __init__(self):
         self.keys = []
         self.current = 0
+        self._cooldown_until = {}  # key -> unix timestamp when it's usable again
         self._load_keys()
 
     def _load_keys(self):
@@ -1231,6 +1236,22 @@ class GroqKeyRotator:
             self._load_keys()
         return list(self.keys)
 
+    def ordered_keys(self):
+        """All keys, healthy ones first (not currently in cooldown), then
+        cooled-down ones last — so a call never wastes its first attempt on
+        a key we already know is exhausted."""
+        keys = self.all_keys()
+        now = time.time()
+        healthy = [k for k in keys if self._cooldown_until.get(k, 0) <= now]
+        cooling = [k for k in keys if self._cooldown_until.get(k, 0) > now]
+        return healthy + cooling
+
+    def mark_rate_limited(self, key: str):
+        self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
+
+    def mark_healthy(self, key: str):
+        self._cooldown_until.pop(key, None)
+
 groq_key_rotator = GroqKeyRotator()
 
 # Module-level "last known failure reason" trackers -- populated by each
@@ -1242,7 +1263,7 @@ _LAST_GEMINI_ERROR = {"reason": ""}
 _LAST_FALLBACK_ERROR = {"reason": ""}
 
 async def _gen_groq(img, topic, count):
-    keys = groq_key_rotator.all_keys()
+    keys = groq_key_rotator.ordered_keys()
     if not keys:
         _LAST_GROQ_ERROR["reason"] = "কোনো GROQ_KEYS/GROQ_API_KEY সেট করা নেই"
         return []
@@ -1266,11 +1287,13 @@ async def _gen_groq(img, topic, count):
         if txt:
             parsed = _parse_mcq_json(txt)
             if parsed:
+                groq_key_rotator.mark_healthy(key)
                 return parsed
             key_errors.append(f"key#{i+1}: HTTP {status} but JSON parse যোগ্য কোনো MCQ পাওয়া যায়নি")
             continue
         if status == 429:
-            logger.warning(f"[Groq] key #{i+1}/{len(keys)} quota exhausted (429), trying next key")
+            logger.warning(f"[Groq] key #{i+1}/{len(keys)} quota exhausted (429), cooling down {groq_key_rotator.COOLDOWN_SECONDS}s, trying next key")
+            groq_key_rotator.mark_rate_limited(key)
             key_errors.append(f"key#{i+1}: 429 quota exhausted")
             continue
         # Any other error (400/404/5xx/network/timeout) — log and still try
