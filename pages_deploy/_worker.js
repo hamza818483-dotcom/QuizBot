@@ -721,18 +721,18 @@ async function handleQuizData(request, url, env, ctx) {
       });
     }
 
-    // ── Layer 1: Render primary + secondary account. Kept short (1 attempt,
-    //    6s timeout per host) — if the bot process is off, this must fail
+    // ── Layer 1: Bot host (HF Space) check. Kept short (1 attempt, 3s
+    //    timeout per host) — if the bot process is off, this must fail
     //    FAST so the person doesn't sit on a loading screen for minutes
-    //    before Layer 1.5 (Supabase direct) kicks in. Render is only ever
-    //    fresher than the DB layers when a quiz was JUST generated seconds
-    //    ago and hasn't been mirrored yet — a single quick attempt covers
-    //    that case without punishing the common bot-is-off scenario. ──
+    //    before Layer 1.5 (Supabase direct) kicks in. This host is only
+    //    ever fresher than the DB layers when a quiz was JUST generated
+    //    seconds ago and hasn't been mirrored yet — a single quick attempt
+    //    covers that case without punishing the common bot-is-off scenario. ──
     const renderHosts = [RENDER_URL, RENDER_URL_2].filter(Boolean);
     for (const host of renderHosts) {
       try {
         const r = await fetch(`${host}/api/exam/${id}`, {
-          signal: AbortSignal.timeout(6000)
+          signal: AbortSignal.timeout(3000)
         });
         if (r.ok) {
           const d = await r.json();
