@@ -1198,11 +1198,42 @@ def _parse_mcq_json(text: str) -> list:
             })
     return out
 
-async def _post_openai_compat(url: str, key: str, model: str, data_url: str, prompt: str) -> tuple:
-    """Returns (text, status_code). status_code=0 means network/exception (no HTTP response)."""
+async def _post_openai_compat(url: str, key: str, model: str, data_url: str, prompt: str, mcq_count_hint=None) -> tuple:
+    """Returns (text, status_code). status_code=0 means network/exception (no HTTP response).
+
+    bug fix (2026-07-22, same root cause as ATLAS AI proxy worker's Groq issue):
+    max_tokens ছিল FIXED 8192 — Groq-এর free-tier org-level TPM (Tokens-Per-Minute)
+    limit বেশিরভাগ model-এই মাত্র 6000-8000 (Groq-এর officially published free-tier
+    rate limits অনুযায়ী)। এই TPM limit INPUT + max_tokens (output cap) মিলে গণনা হয়,
+    আর এই call-টা IMAGE ইনপুট-সহ (base64 data_url) — vision model-এ ছবি নিজেই বহু
+    টোকেন খরচ করে। ফলে max_tokens:8192 প্রায়ই একাই বা ছবির সাথে মিলে 8000 TPM cross
+    করে ফেলত, Groq সেই EKTA request-কে 429 দিত — key/quota আসলে ঠিক থাকা সত্ত্বেও।
+    Rotator তখন সেই key-কে "quota exhausted" ভেবে cooldown-এ পাঠিয়ে দিত, আর qwen3.6-27b
+    preview-model হওয়ায় এমনিতেই কম stable/lower-limit — ফলে "কিছু MCQ বানছে না" symptom।
+    FIX: max_tokens এখন FIXED-boro (8192) na, DYNAMIC — কত MCQ চাওয়া হয়েছে
+    (mcq_count_hint, default-mode-এ upto 35!) তার উপর ভিত্তি করে output cap ঠিক করা
+    হয় (kom MCQ chaile kom output lagbe, tai kom max_tokens diye TPM bachano jay;
+    beshi MCQ chaile beshi output lagbe, tai shethaneo enough room deoya hoy jate
+    truncate na hoy — কিন্তু কখনোই 8192-এর মতো blanket-boro na, যেটা choto call-eo
+    beshi TPM khoroch korto)। 429 হলে response body-ও log করা হয় যাতে ভবিষ্যতে সহজে
+    বোঝা যায় eta genuine quota-exhaustion, naki TPM-per-request issue (দুটোর ফিক্স
+    আলাদা — TPM হলে key ভালো, শুধু request ছোট করতে হবে; genuine quota হলে
+    key/account সত্যিই exhausted)।
+    """
     if not key:
         return "", 0
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    # ekta MCQ (bangla question + 4 option + explanation) approx 120-180 token
+    # output-e lage. mcq_count_hint na dile (default full-page mode, upto 35 MCQ)
+    # safe-max dhore nেওয়া hoy. Minimum 1536, maximum 6000 (TPM 8000-er onek
+    # niche, image input-er jonno margin rekhe) — kono obosthaei flat 8192 na।
+    if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
+        est_count = mcq_count_hint[1]  # range hole upper-bound dhore safe thaka
+    elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
+        est_count = mcq_count_hint
+    else:
+        est_count = 35  # default full-page mode-er max target
+    dynamic_max_tokens = max(1536, min(6000, int(est_count) * 150 + 512))
     payload = {
         "model": model,
         "messages": [{
@@ -1213,13 +1244,17 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
             ]
         }],
         "temperature": 0.3,
-        "max_tokens": 8192,
+        "max_tokens": dynamic_max_tokens,
     }
     try:
         async with httpx.AsyncClient(timeout=60) as c:
             r = await c.post(url, headers=headers, json=payload)
             if r.status_code >= 400:
-                logger.warning(f"[AI-ROT] {model} HTTP {r.status_code}: {r.text[:200]}")
+                body_preview = r.text[:300]
+                if r.status_code == 429 and re.search(r"tokens per minute|TPM", body_preview, re.I):
+                    logger.warning(f"[AI-ROT] {model} HTTP 429 (TPM/per-request-too-large, NOT genuine quota exhaustion): {body_preview}")
+                else:
+                    logger.warning(f"[AI-ROT] {model} HTTP {r.status_code}: {body_preview}")
                 return "", r.status_code
             j = r.json()
             return j.get("choices", [{}])[0].get("message", {}).get("content", "") or "", r.status_code
@@ -1298,7 +1333,7 @@ async def _gen_groq(img, topic, count):
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
             key, "qwen/qwen3.6-27b",
-            data_url, prompt
+            data_url, prompt, mcq_count_hint=count
         )
         if txt:
             parsed = _parse_mcq_json(txt)
