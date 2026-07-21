@@ -22,9 +22,12 @@ logger = logging.getLogger("atlas.pdf_handler")
 # GEMINI KEY ROTATION
 # ============================================================
 class GeminiKeyRotator:
+    COOLDOWN_SECONDS = 60
+
     def __init__(self):
         self.keys = []
         self.current = 0
+        self._cooldown_until = {}
         self._load_keys()
 
     def _load_keys(self):
@@ -40,15 +43,31 @@ class GeminiKeyRotator:
         self.current = (self.current + 1) % len(self.keys)
         return key
 
+    def ordered_keys(self):
+        """All keys, healthy ones first (skip ones on 429 cooldown)."""
+        now = time.time()
+        healthy = [k for k in self.keys if self._cooldown_until.get(k, 0) <= now]
+        cooling = [k for k in self.keys if self._cooldown_until.get(k, 0) > now]
+        return healthy + cooling
+
+    def mark_rate_limited(self, key: str):
+        self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
+
+    def mark_healthy(self, key: str):
+        self._cooldown_until.pop(key, None)
+
 key_rotator = GeminiKeyRotator()
 
 # ============================================================
 # OPENROUTER KEY ROTATION
 # ============================================================
 class OpenRouterKeyRotator:
+    COOLDOWN_SECONDS = 60
+
     def __init__(self):
         self.keys = []
         self.current = 0
+        self._cooldown_until = {}
         self._load_keys()
 
     def _load_keys(self):
@@ -66,6 +85,18 @@ class OpenRouterKeyRotator:
 
     def has_keys(self) -> bool:
         return len(self.keys) > 0
+
+    def ordered_keys(self):
+        now = time.time()
+        healthy = [k for k in self.keys if self._cooldown_until.get(k, 0) <= now]
+        cooling = [k for k in self.keys if self._cooldown_until.get(k, 0) > now]
+        return healthy + cooling
+
+    def mark_rate_limited(self, key: str):
+        self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
+
+    def mark_healthy(self, key: str):
+        self._cooldown_until.pop(key, None)
 
 openrouter_rotator = OpenRouterKeyRotator()
 
@@ -476,7 +507,8 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
     for attempt in range(max(max_retries, 3)):
         model = OPENROUTER_MODELS[attempt % len(OPENROUTER_MODELS)]
         try:
-            key = openrouter_rotator.get_key()
+            _ordered = openrouter_rotator.ordered_keys()
+            key = _ordered[attempt % len(_ordered)] if _ordered else openrouter_rotator.get_key()
             logger.info(f"[OpenRouter] Attempt {attempt+1}, model: {model}")
 
             async with httpx.AsyncClient(timeout=30) as client:
@@ -503,7 +535,8 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
                 )
 
             if r.status_code == 429:
-                logger.warning(f"[OpenRouter] Rate limit on attempt {attempt+1}, retrying...")
+                logger.warning(f"[OpenRouter] Rate limit on attempt {attempt+1}, cooling down key for {openrouter_rotator.COOLDOWN_SECONDS}s, retrying...")
+                openrouter_rotator.mark_rate_limited(key)
                 await asyncio.sleep(2)
                 continue
 
@@ -516,6 +549,7 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
             text = data["choices"][0]["message"]["content"]
             valid = _parse_mcq_json(text)
             valid = await _attach_explanation_images(valid, img)
+            openrouter_rotator.mark_healthy(key)
             logger.info(f"[OpenRouter] Page {page}: {len(valid)} MCQs via {model}")
             return valid
 
@@ -585,10 +619,11 @@ async def generate_mcq_from_image(
     # reaching the OpenRouter fallback. Cap attempts at 3 keys max, and use a
     # shorter timeout on the 2nd/3rd attempt so a bad/slow key fails fast.
     max_retries = min(len(key_rotator.keys), 3) if key_rotator.keys else 3
+    _ordered = key_rotator.ordered_keys()
 
     for attempt in range(max_retries):
         try:
-            key = key_rotator.get_key()
+            key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
             from google import genai as gai
             from google.genai import types
             client = gai.Client(api_key=key)
@@ -610,11 +645,17 @@ async def generate_mcq_from_image(
             response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
             valid = _parse_mcq_json(response.text)
             valid = await _attach_explanation_images(valid, img)
+            key_rotator.mark_healthy(key)
             logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1})")
             return valid
 
         except Exception as e:
-            logger.warning(f"[Gemini] Attempt {attempt+1} failed: {e}")
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                logger.warning(f"[Gemini] Attempt {attempt+1} rate-limited (429), cooling down key for {key_rotator.COOLDOWN_SECONDS}s: {e}")
+                key_rotator.mark_rate_limited(key)
+            else:
+                logger.warning(f"[Gemini] Attempt {attempt+1} failed: {e}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
@@ -675,9 +716,10 @@ Return ONLY valid JSON array, no markdown, no extra text:
 
     # ── PRIMARY: Gemini (new google.genai SDK, multi-key rotation) ──
     max_retries = len(key_rotator.keys) if key_rotator.keys else 3
+    _ordered = key_rotator.ordered_keys()
     for attempt in range(max_retries):
         try:
-            key = key_rotator.get_key()
+            key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
             from google import genai as gai
             from google.genai import types
             client = gai.Client(api_key=key)
@@ -691,10 +733,16 @@ Return ONLY valid JSON array, no markdown, no extra text:
             response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=45)
             valid = _parse_text_json(response.text)
             if valid:
+                key_rotator.mark_healthy(key)
                 logger.info(f"[Gemini-Text] {len(valid)} MCQs (attempt {attempt+1})")
                 return valid
         except Exception as e:
-            logger.warning(f"[Gemini-Text] Attempt {attempt+1} failed: {e}")
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                key_rotator.mark_rate_limited(key)
+                logger.warning(f"[Gemini-Text] Attempt {attempt+1} rate-limited (429), cooling down: {e}")
+            else:
+                logger.warning(f"[Gemini-Text] Attempt {attempt+1} failed: {e}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
@@ -710,7 +758,8 @@ Return ONLY valid JSON array, no markdown, no extra text:
     for attempt in range(max(max_or_retries, 3)):
         model = OPENROUTER_MODELS[attempt % len(OPENROUTER_MODELS)]
         try:
-            key = openrouter_rotator.get_key()
+            _ordered = openrouter_rotator.ordered_keys()
+            key = _ordered[attempt % len(_ordered)] if _ordered else openrouter_rotator.get_key()
             async with httpx.AsyncClient(timeout=90) as client:
                 r = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -726,6 +775,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
                     }
                 )
             if r.status_code == 429:
+                openrouter_rotator.mark_rate_limited(key)
                 await asyncio.sleep(2)
                 continue
             if r.status_code != 200:
@@ -734,6 +784,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
             raw = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             valid = _parse_text_json(raw)
             if valid:
+                openrouter_rotator.mark_healthy(key)
                 logger.info(f"[OpenRouter-Text] {len(valid)} MCQs via {model}")
                 return valid
         except Exception as e:
