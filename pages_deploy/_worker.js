@@ -1052,40 +1052,92 @@ async function forwardToHFWithFallback(request, bodyText, env) {
   const r = await forwardToHF(request, env);
   if (r.status !== 502) return r; // backend handled it fine, nothing more to do
 
-  // Backend is fully down — check if this update is a /start <quiz_id> deep-link.
+  // Backend is fully down — check if this update is a /start <quiz_id> deep-link,
+  // OR a "Poll Solve"/"Quiz Solve" button callback_query (data starting with
+  // poll_/pdf_/quiz_) that would normally be handled by the bot's callback
+  // router. Either way, we can still send the SAME MCQ set as fresh Telegram
+  // quiz-polls directly from here, using cached data (Supabase/D1), completely
+  // bypassing the (currently down) bot process.
   try {
     const update = JSON.parse(bodyText);
+
+    const cb = update.callback_query;
+    if (cb && cb.data) {
+      const m = cb.data.match(/^(poll|pdf|quiz)_([A-Za-z0-9_]+)/);
+      if (m) {
+        const cacheId = m[2];
+        const chatId = cb.message?.chat?.id || cb.from?.id;
+        if (chatId) await sendCachedQuizFallbackPoll(cacheId, chatId, env);
+        return r;
+      }
+    }
+
     const msg = update.message;
     const text = (msg && msg.text) || '';
-    const m = text.match(/^\/start\s+([A-Za-z0-9_]+)/);
-    if (!m) return r; // not a quiz deep-link — nothing this Worker can do
-    let quizId = m[1];
-    // Deep-links can carry pdf_/poll_/premium_ prefixes for other features —
-    // only D1-quiz plain IDs are handled here; strip a bare "d1_" prefix if present.
+    const startMatch = text.match(/^\/start\s+(?:(poll|pdf|premium)_)?([A-Za-z0-9_]+)/);
+    if (!startMatch) return r; // not a quiz deep-link — nothing this Worker can do
+    let quizId = startMatch[2];
     if (quizId.startsWith('d1_')) quizId = quizId.slice(3);
 
     const chatId = msg.chat.id;
-    await sendD1QuizFallbackPoll(quizId, chatId, env);
+    await sendCachedQuizFallbackPoll(quizId, chatId, env);
   } catch (e) {
     console.warn('[fallback] quiz-poll fallback failed:', e.message);
   }
   return r;
 }
 
-async function sendD1QuizFallbackPoll(quizId, chatId, env) {
+async function sendCachedQuizFallbackPoll(cacheId, chatId, env) {
+  // Try Supabase pdf_mcq_cache FIRST (covers /img, /pdf, /csv-generated items,
+  // which is what "Poll Solve" buttons point at), then fall back to the D1
+  // `quizzes` table (covers the older qz_ web-quiz path).
+  const SB_URL = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+  const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+
+  let name = 'Quiz';
+  let questions = null;
+
+  try {
+    const r = await fetch(
+      `${SB_URL}/rest/v1/pdf_mcq_cache?id=eq.${cacheId}&select=topic,mcq_data`,
+      { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` }, signal: AbortSignal.timeout(8000) }
+    );
+    const data = await r.json();
+    if (data && data[0] && data[0].mcq_data) {
+      name = data[0].topic || name;
+      // mcq_data here is already {question, options, answer, explanation} shaped
+      // (bot's own MCQ format) — normalize answer (A/B/C/D letter) to an index.
+      const ANS = { A: 0, B: 1, C: 2, D: 3, E: 4 };
+      questions = data[0].mcq_data.map(q => ({
+        question: q.question,
+        options: q.options,
+        answer_index: typeof q.answer === 'number' ? q.answer : (ANS[q.answer] ?? 0),
+        explanation: q.explanation,
+      }));
+    }
+  } catch (e) {
+    console.warn('[fallback] Supabase pdf_mcq_cache lookup failed:', e.message);
+  }
+
+  if (!questions) {
+    try {
+      const row = await env.DB.prepare("SELECT * FROM quizzes WHERE id = ?1").bind(cacheId).first();
+      if (row) {
+        name = row.name || name;
+        questions = JSON.parse(row.csv_data || '[]');
+      }
+    } catch (e) {
+      console.warn('[fallback] D1 quizzes lookup failed:', e.message);
+    }
+  }
+
+  if (!questions || questions.length === 0) return; // nothing found anywhere — silently skip
+  await _sendFallbackPollBatch(name, questions, chatId, env);
+}
+
+async function _sendFallbackPollBatch(name, questions, chatId, env) {
   const BOT_TOKEN = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
   const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
-
-  const row = await env.DB.prepare("SELECT * FROM quizzes WHERE id = ?1").bind(quizId).first();
-  if (!row) return; // quiz not found in D1 — silently skip, nothing to notify with (bot is down)
-
-  let questions;
-  try {
-    questions = JSON.parse(row.csv_data);
-  } catch (e) {
-    return;
-  }
-  if (!Array.isArray(questions) || questions.length === 0) return;
 
   // Let the person know upfront this is limited-mode (no scoring), since the
   // bot itself is unreachable to explain further.
@@ -1094,7 +1146,7 @@ async function sendD1QuizFallbackPoll(quizId, chatId, env) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: chatId,
-      text: `📚 ${row.name || 'Quiz'}\n\n⚠️ Bot এখন সাময়িক বন্ধ — score/leaderboard track হবে না, কিন্তু প্রশ্নগুলো normal quiz poll হিসেবে solve করতে পারবে।`,
+      text: `📚 ${name}\n\n⚠️ Bot এখন সাময়িক বন্ধ — score/leaderboard track হবে না, কিন্তু প্রশ্নগুলো normal quiz poll হিসেবে solve করতে পারবে।`,
     }),
   });
 
