@@ -745,23 +745,18 @@ def _build_bangla_prompt(topic: str) -> str:
         f"the correct answer always land on the same letter/position.\n\n"
 
         f"═══════════════════════════════\n"
-        f"💥 ব্যাখ্যা (EXPLANATION) — TWO PARTS, BOTH MANDATORY, NO EXCEPTIONS\n"
+        f"💥 ব্যাখ্যা (EXPLANATION) — ALL 4 OPTIONS COVERED, MANDATORY\n"
         f"═══════════════════════════════\n"
-        f"An explanation that ONLY names/restates the correct answer is INVALID. "
-        f"Every explanation MUST contain BOTH parts:\n"
-        f"  PART 1 (answer confirmation): State which option is correct.\n"
-        f"  PART 2 (source-derived surrounding context — MUST): Add 1-2 sentences "
-        f"of ADDITIONAL related facts/details pulled directly from the same "
-        f"source page (nearby lines, the same paragraph, a related row in the "
-        f"same table/box) so the explanation teaches more than just the bare "
-        f"answer. Must be genuinely new information, not a restatement.\n"
-        f"- If no nearby fact exists for part 2, look again at surrounding "
-        f"lines/paragraph/table before giving up — nearly every source page has "
-        f"at least one adjacent fact usable.\n"
-        f"- Everything must come from the source image — never invent, never "
-        f"guess, never use outside general knowledge.\n"
-        f"- Length: roughly 100-200 characters, within Telegram's explanation "
-        f"character limit — long enough for both parts, but still concise.\n\n"
+        f"An explanation that ONLY confirms the correct option is INVALID. Every "
+        f"explanation MUST briefly cover ALL 4 options:\n"
+        f"  1) State the correct option and briefly why it's right.\n"
+        f"  2) For each of the other 3 options, briefly say why it's wrong.\n"
+        f"- SOURCE-FIRST: use the source page when it has info about a wrong "
+        f"option; if the source is silent on a specific wrong option, use "
+        f"general knowledge to briefly explain why it's incorrect — never leave "
+        f"an option unaddressed.\n"
+        f"- Length: roughly 150-280 characters — enough for all 4 options, "
+        f"still concise.\n\n"
 
         f"═══════════════════════════════\n"
         f"🟩 STRICT LANGUAGE RULE\n"
@@ -961,38 +956,29 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"determined by where the correct option ended up, not forced into a pattern.\n\n"
 
         f"═══════════════════════════════\n"
-        f"💥 ব্যাখ্যা (EXPLANATION) — TWO PARTS, BOTH MANDATORY, NO EXCEPTIONS\n"
+        f"💥 ব্যাখ্যা (EXPLANATION) — ALL 4 OPTIONS COVERED, MANDATORY, NO EXCEPTIONS\n"
         f"═══════════════════════════════\n"
-        f"An explanation that ONLY names/restates the correct answer (a single "
-        f"short line like 'সঠিক উত্তর X' or 'The answer is X') is INVALID and "
-        f"REJECTED — that is not an explanation, that is just repeating the answer. "
-        f"Every explanation MUST contain BOTH of the following parts, in this order:\n"
-        f"  PART 1 (answer confirmation): State which option is correct.\n"
-        f"  PART 2 (source-derived surrounding context — MUST, never optional): "
-        f"Add 1-2 sentences of ADDITIONAL related facts/details pulled directly "
-        f"from the same source image — information near/around this specific "
-        f"fact on the page (nearby lines, the same paragraph, a related row in "
-        f"the same table, a definition/number/date/name that appears close to "
-        f"this fact in the source), so that solving this MCQ and reading the "
-        f"explanation teaches the student a bit more than just the bare answer. "
-        f"This must be genuinely new information beyond the bare answer — not a "
-        f"restatement of the question, not a restatement of the correct option's "
-        f"text, not a generic filler sentence.\n"
-        f"- If you cannot find any nearby related fact in the source for part 2, "
-        f"you MUST look again at the surrounding lines/paragraph/table before "
-        f"giving up — nearly every source page has at least one adjacent fact "
-        f"(a number, a name, a related term, a cause/effect, a definition) that "
-        f"can serve as part 2. Only if the source page is truly a single isolated "
-        f"fact with absolutely nothing else nearby may part 2 be a brief factual "
-        f"elaboration on the answer itself, still from the source, never invented.\n"
-        f"- Everything in both parts must come from the source image — never "
-        f"introduce outside facts, never guess, never use general knowledge not "
-        f"visible in the source.\n"
-        f"- Self-check before finalizing EVERY explanation: if it reads as one "
-        f"short clause with no additional fact beyond naming the answer, it FAILS "
-        f"this rule — rewrite it to add the required part-2 context before output.\n"
-        f"- Length: roughly 100-200 characters — long enough to fit both parts, "
-        f"but still concise.\n\n"
+        f"An explanation that ONLY confirms the correct option (a single short line "
+        f"like 'সঠিক উত্তর X' or 'The answer is X') is INVALID and REJECTED. Every "
+        f"explanation MUST briefly address ALL 4 options — why the correct one is "
+        f"right AND why each of the other 3 is wrong/less correct:\n"
+        f"  1) State which option is correct and briefly WHY (the actual fact that "
+        f"makes it correct).\n"
+        f"  2) For EACH of the other 3 options, add a short clause on why it's "
+        f"incorrect — e.g. it's a different term/value/concept, it's a common "
+        f"confusion, it's related but not what the question asks, etc.\n"
+        f"- SOURCE-FIRST: if the source image contains info about why a wrong "
+        f"option is wrong (a nearby line, a related row, a contrasting fact), use "
+        f"that. If the source has NOTHING about a specific wrong option, use your "
+        f"own general knowledge to briefly explain why it's incorrect — do NOT "
+        f"leave any option unaddressed just because the source is silent on it.\n"
+        f"- Keep each option's reasoning to a short clause/phrase, not a full "
+        f"sentence each — the whole explanation must still fit the length limit.\n"
+        f"- Self-check before finalizing EVERY explanation: does it touch all 4 "
+        f"options, not just the correct one? If any option is unmentioned, rewrite "
+        f"before output.\n"
+        f"- Length: roughly 150-280 characters — enough to briefly cover all 4 "
+        f"options, but still concise, no filler.\n\n"
 
         f"═══════════════════════════════\n"
         f"🟩 STRICT LANGUAGE RULE\n"
@@ -1400,7 +1386,7 @@ def _is_thin_explanation(exp: str) -> bool:
     e_no_img = re.sub(r'<img[^>]*>', '', e, flags=re.IGNORECASE).strip()
     if not e_no_img:
         return True
-    if len(e_no_img) < 40:  # a genuine 2-part explanation rarely fits under this
+    if len(e_no_img) < 60:  # a genuine all-4-options explanation rarely fits under this
         return True
     for pat in _THIN_EXPLANATION_PATTERNS:
         if re.match(pat, e_no_img, re.IGNORECASE):
@@ -1420,18 +1406,22 @@ async def _repair_thin_explanations(mcqs: list, img, topic: str) -> list:
     if not thin:
         return mcqs
     questions_block = "\n".join(
-        f'{i+1}. Q: {m["question"]}\n   Correct option: {m["options"][{"A":0,"B":1,"C":2,"D":3}.get(m["answer"],0)]}'
+        f'{i+1}. Q: {m["question"]}\n'
+        f'   Options: A) {m["options"][0]}  B) {m["options"][1]}  '
+        f'C) {m["options"][2]}  D) {m["options"][3]}\n'
+        f'   Correct: {m["answer"]}'
         for i, m in enumerate(thin)
     )
     repair_prompt = (
         f"Topic: {topic}\n"
         f"For EACH numbered question below, write a proper explanation using the "
-        f"attached source image. A valid explanation has TWO mandatory parts: "
-        f"(1) confirm the correct option, (2) add 1-2 sentences of ADDITIONAL "
-        f"related facts pulled from NEAR this fact in the source image (a nearby "
-        f"line, a related row, a nearby number/name/date) — never just repeat "
-        f"the answer alone, never invent facts outside the source. Same language "
-        f"as the source (Bengali or English). ~100-200 characters each.\n\n"
+        f"attached source image. A valid explanation must briefly cover ALL 4 "
+        f"options: (1) confirm the correct option and why it's right, (2) briefly "
+        f"say why each of the other 3 options is wrong. Use the source image when "
+        f"it has info about a wrong option; if the source has nothing on a "
+        f"specific wrong option, use general knowledge to briefly explain why "
+        f"it's incorrect — never leave any option unaddressed. Same language "
+        f"as the source (Bengali or English). ~150-280 characters each.\n\n"
         f"{questions_block}\n\n"
         f"Return STRICT JSON array only, same order, no prose: "
         f'[{{"explanation":"..."}}, ...]'
