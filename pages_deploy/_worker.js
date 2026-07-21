@@ -27,6 +27,7 @@ export default {
 
     // D1 raw SQL query
     if (url.pathname === '/d1/query' && request.method === 'POST') return await d1Query(request);
+    if (url.pathname === '/r2/put' && request.method === 'POST') return await r2Put(request, env);
 
     // D1 init tables
     if (url.pathname === '/init-db') return await initDB();
@@ -326,6 +327,30 @@ async function d1Query(request) {
       const result = await stmt.run();
       return jsonResp({ ok: true, meta: result.meta, changes: result.meta?.changes });
     }
+  } catch (e) {
+    return jsonResp({ ok: false, error: e.message }, 500);
+  }
+}
+
+async function r2Put(request, env) {
+  try {
+    const body = await request.json();
+    const token = body.token || request.headers.get('X-D1-Token') || '';
+    if (globalThis.D1_TOKEN && token !== globalThis.D1_TOKEN) {
+      return jsonResp({ ok: false, error: 'Unauthorized' }, 401);
+    }
+    const { id, name, mcqs, timer, extra } = body;
+    if (!id || !mcqs) {
+      return jsonResp({ ok: false, error: 'Missing id or mcqs' }, 400);
+    }
+    if (!env.PDF_BUCKET) {
+      return jsonResp({ ok: false, error: 'R2 bucket not bound' }, 500);
+    }
+    await env.PDF_BUCKET.put(`quiz-backups/${id}.json`,
+      JSON.stringify({ name: name || 'Quiz', mcqs, timer: timer || 30, extra: extra || {} }),
+      { httpMetadata: { contentType: 'application/json' } }
+    );
+    return jsonResp({ ok: true });
   } catch (e) {
     return jsonResp({ ok: false, error: e.message }, 500);
   }

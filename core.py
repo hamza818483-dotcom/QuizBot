@@ -1181,6 +1181,27 @@ async def db_save_session(session_id: str, data: dict):
     except Exception as e:
         logger.error(f"[DB] save_session error: {e}")
 
+async def r2_backup(cache_id: str, name: str, mcqs: list, timer: int = 30, extra: dict = None):
+    """Write straight to R2 (via the Pages Worker's /r2/put route, since R2
+    bindings live there, not on the primary Worker) at GENERATION time —
+    not just on first click. Makes the Website Exam link durable across
+    all 4 storage layers (Supabase-acc1, Supabase-acc2, D1, R2) the moment
+    MCQs are created, instead of R2 only filling in as a read-through cache
+    after someone opens the link."""
+    if not CF_WORKER_URL_2 or not D1_TOKEN:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            await client.post(
+                f"{CF_WORKER_URL_2}/r2/put",
+                json={"token": D1_TOKEN, "id": cache_id, "name": name,
+                      "mcqs": mcqs, "timer": timer, "extra": extra or {}},
+                headers={"Content-Type": "application/json"},
+            )
+    except Exception as e:
+        logger.warning(f"[R2] backup write failed (non-fatal): {e}")
+
+
 async def db_save_mcq_cache(cache_id: str, session_id: str, page: int,
                              topic: str, mcqs: list, poll_links: list = None,
                              image_file_id: str = None, image_msg_id: int = None,
@@ -1214,6 +1235,7 @@ async def db_save_mcq_cache(cache_id: str, session_id: str, page: int,
             logger.warning(f"[DB] D1 mirror for pdf_mcq_cache failed (non-fatal): {e}")
 
     asyncio.create_task(_d1_write())
+    asyncio.create_task(r2_backup(cache_id, topic or "ATLAS MCQ", mcqs, 30, {}))
 
 async def db_update_cache(cache_id: str, fields: dict):
     try:
