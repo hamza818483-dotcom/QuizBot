@@ -12296,11 +12296,11 @@ async def set_bot_commands(notify_chat_id: int = None):
         "scope": {"type": "default"}
     })
 
-    # v1.1: explicitly set the menu button (the icon next to the chat box)
-    # to show the command list. Without this, some Telegram clients don't
-    # surface the '/' menu icon even if setMyCommands succeeded.
+    # v1.1: menu button set to 'default' (NOT 'commands') — 'commands' makes
+    # the box icon next to the chat input pop open the full command-list menu
+    # on every tap, which was unwanted. 'default' leaves the icon inert/plain.
     try:
-        await tg_post("setChatMenuButton", {"menu_button": {"type": "commands"}})
+        await tg_post("setChatMenuButton", {"menu_button": {"type": "default"}})
     except Exception as e:
         logger.error(f"[SetCommand] setChatMenuButton error: {e}")
 
