@@ -477,10 +477,21 @@ async def tg_post(method: str, data: dict) -> dict:
                 logger.info(f"[TG] {method} succeeded via {name} — sticking with it for next calls")
             _last_good_api = name
             return result
-    # ── Fallback: Direct Telegram API (skipped when running where TG is
-    #    network-blocked, e.g. HF Space — trying it there just wastes time
-    #    on a guaranteed failure before eventually giving up) ──
+
+    # ── Both CF endpoints failed — wait briefly (transient blip, e.g. CF edge
+    #    recycling / cold start) and try the full order once more before
+    #    finally giving up. Never falls through to direct API here — HF
+    #    Space blocks outbound Telegram API access at the network level,
+    #    that is a fixed platform constraint, not something to retry around. ──
     if _tg_mode == "cf-proxy":
+        logger.warning(f"[TG] {method} both CF endpoints failed — waiting 2.5s and retrying once more")
+        await asyncio.sleep(2.5)
+        for name, fn in order:
+            result, ok = await fn()
+            if ok:
+                logger.info(f"[TG] {method} recovered via {name} on retry-after-wait")
+                _last_good_api = name
+                return result
         logger.error(f"[TG] {method} CF proxy failed and direct API is blocked on this platform — giving up")
         return {"ok": False, "error": "cf_proxy_failed_direct_blocked"}
     for attempt in range(2):
