@@ -174,9 +174,11 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 .lb-close{display:block;margin:12px 14px;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;}
 
 /* LOADING */
-.loading{text-align:center;padding:60px 20px;color:var(--text-secondary);}
-.spin{font-size:40px;animation:spin 1s linear infinite;display:block;margin-bottom:14px;}
+#modeLoading.mode.active{display:flex;align-items:center;justify-content:center;min-height:100vh;position:fixed;inset:0;background:var(--bg);z-index:9999;}
+.loading{text-align:center;padding:20px;color:var(--text-secondary);}
+.spin{font-size:0;display:block;margin:0 auto 18px;width:44px;height:44px;border:4px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg)}}
+.loading div{font-size:14px;font-weight:600;}
 
 /* TOAST */
 .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--card-bg);border:1px solid var(--border);color:var(--text);padding:10px 18px;border-radius:var(--radius-full);font-size:13px;font-weight:600;z-index:1000;opacity:0;transition:opacity .3s;white-space:nowrap;pointer-events:none;}
