@@ -792,6 +792,7 @@ def _build_mcq_prompt(topic: str, count) -> str:
     if _BANGLA_MODE.get():
         return _build_bangla_prompt(topic)
     count_min = count_max = None
+    full_coverage_rule = ""
     if isinstance(count, (tuple, list)) and len(count) == 2:
         count_min, count_max = count[0], count[1]
         count = None
@@ -825,6 +826,27 @@ def _build_mcq_prompt(topic: str, count) -> str:
             "out; that is under-extracting. Only go below 15 if the page has genuinely "
             "very little text (then at least 10, minimum 5 if truly sparse)."
         )
+        full_coverage_rule = (
+            f"\n═══════════════════════════════\n"
+            f"🟧 FULL-PAGE COVERAGE (DEFAULT MODE — MANDATORY, NO COUNT GIVEN BY USER)\n"
+            f"═══════════════════════════════\n"
+            f"Since no fixed MCQ count was requested, you must treat the ENTIRE image "
+            f"as the scope — not just the first paragraph, the most obvious section, "
+            f"or the most highlighted part. Before finalizing:\n"
+            f"1) Mentally scan the WHOLE page top-to-bottom, left-to-right, including "
+            f"headings, body paragraphs, footnotes, side-notes, captions, tables/boxes, "
+            f"and any small print — every distinct fact is fair game.\n"
+            f"2) List out every separate fact/name/number/term/definition/relationship "
+            f"visible anywhere on the page before writing MCQs, so nothing gets "
+            f"skipped just because it's near the end of the page or in a less "
+            f"prominent spot.\n"
+            f"3) Make sure the final MCQ set collectively touches EVERY one of those "
+            f"facts at least once — do not concentrate all MCQs on only the first "
+            f"half or the most visually prominent block of the page while ignoring "
+            f"the rest.\n"
+            f"4) If the page has multiple distinct sections/topics, every section "
+            f"must contribute at least one MCQ — no section should be left at zero.\n\n"
+        )
     return (
         f"You are an expert MCQ-extraction engine for Bengali/English academic "
         f"textbook pages (medical/HSC/admission-standard quality).\n"
@@ -844,7 +866,8 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"the correct language before outputting.\n"
         f"This rule overrides any default tendency — even if most of your training "
         f"data is Bengali, if THIS source image is in English, your ENTIRE output "
-        f"must be in English, and vice versa.\n\n"
+        f"must be in English, and vice versa.\n"
+        f"{full_coverage_rule}\n"
 
         f"═══════════════════════════════\n"
         f"🟥 OVERALL RULES\n"
