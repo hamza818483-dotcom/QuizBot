@@ -3694,11 +3694,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         caption = ""
         if tag:
             caption = f"{tag}\n\n"
-        caption += (
-            f"⌛ATLAS Special MCQ System\n"
-            f"🌟Topic: {topic}\n"
-            f"💎MCQ: {len(mcqs)}"
-        )
+        caption += csv_get_pre_message(topic, len(mcqs))
         photo_r = await send_photo(channel_id, img_bytes, caption)
         if photo_r.get("ok"):
             image_msg_id = photo_r["result"]["message_id"]
@@ -3713,11 +3709,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             pre_text = ""
             if tag:
                 pre_text = f"{tag}\n\n"
-            pre_text += (
-                f"⌛ATLAS Special MCQ System\n"
-                f"🌟Topic: {topic}\n"
-                f"💎MCQ: {len(mcqs)}"
-            )
+            pre_text += csv_get_pre_message(topic, len(mcqs))
             pre_r = await tg_post("sendMessage", {"chat_id": channel_id, "text": pre_text})
             image_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
 
@@ -3758,32 +3750,32 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         # CSV already auto-sent in handle_img_process right after processing —
         # not repeated here to avoid sending it twice.
 
-        end_text = csv_get_ending_message(topic, len(mcqs), poll_links[0] if poll_links else "", ask_score=True)
-
-        # ✅ নতুন: cache save করো যাতে buttons কাজ করে
+        # ✅ cache save করো যাতে buttons কাজ করে
         cache_id_img = gen_session_id()
         await db_save_mcq_cache(cache_id_img, cache_id_img, 1, topic, mcqs, poll_links,
                                 image_file_id, image_msg_id, channel_id)
 
-        exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id_img}"
-        bot_un = await get_bot_username()
-        quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id_img}"
-        poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id_img}"
+        # 1) Button-msg (pre-msg টেক্সট পুনরাবৃত্তি + 4 button), pre-msg কে reply
+        btn_text = csv_get_pre_message(topic, len(mcqs))
+        btn_kb = await _csv_pre_buttons(cache_id_img)
+        btn_send_data = {"chat_id": channel_id, "text": btn_text, "reply_markup": btn_kb}
+        if image_msg_id:
+            btn_send_data["reply_to_message_id"] = image_msg_id
+        await tg_post("sendMessage", btn_send_data)
 
-        end_kb = {"inline_keyboard": [
-            [{"text": "📝 Quiz Solve", "url": quiz_url},
-             {"text": "🔄 Poll Solve", "url": poll_url}],
-            [{"text": "🌐 Web Exam", "url": exam_url},
-             {"text": "💎 Premium PDF", "url": f"https://t.me/{bot_un}?start=premium_{cache_id_img}"}]
-        ]}
-
-        end_r = await tg_post("sendMessage", {
+        # 2) Score-ask end-msg (কোনো button নেই), pre-msg কে reply
+        end_text = csv_get_ending_message(topic, len(mcqs), poll_links[0] if poll_links else "", ask_score=True)
+        end_send_data = {
             "chat_id": channel_id,
             "text": end_text,
-            "reply_to_message_id": image_msg_id,
             "disable_web_page_preview": True,
-            "reply_markup": end_kb
-        })
+        }
+        if image_msg_id:
+            end_send_data["reply_to_message_id"] = image_msg_id
+
+        end_r = await tg_post("sendMessage", end_send_data)
+        if not end_r.get("ok"):
+            end_r = await tg_post("sendMessage", end_send_data)  # one retry
 
         if end_r.get("ok"):
             end_msg_id = end_r["result"]["message_id"]
