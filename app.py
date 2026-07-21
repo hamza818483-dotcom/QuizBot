@@ -3758,13 +3758,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         # CSV already auto-sent in handle_img_process right after processing —
         # not repeated here to avoid sending it twice.
 
-        end_text = (
-            f"🚀Topic: {topic}\n"
-            f"🌟Page No: N/A\n"
-            f"✅MCQ: {len(mcqs)}\n"
-        )
-        if poll_links:
-            end_text += f"🔗First Poll Link:\n{poll_links[0]}"
+        end_text = csv_get_ending_message(topic, len(mcqs), poll_links[0] if poll_links else "", ask_score=True)
 
         # ✅ নতুন: cache save করো যাতে buttons কাজ করে
         cache_id_img = gen_session_id()
