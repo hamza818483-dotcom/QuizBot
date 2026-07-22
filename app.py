@@ -1117,6 +1117,37 @@ def _strip_q_numbering(q: str) -> str:
         cur = new
     return cur.strip()
 
+_SOURCE_REF_PATTERNS = [
+    r'প্রদত্ত\s*(?:হিসাব|গণনা|ছক|তথ্য|অনুচ্ছেদ|টেবিল|চিত্র|বর্ণনা|অংশ)(?:ে|র|েরই?)?\s*অনুসারে',
+    r'প্রদত্ত\s*(?:হিসাব|গণনা|ছক|তথ্য|অনুচ্ছেদ|টেবিল|চিত্র|বর্ণনা)(?:ে|র)?নুসারে',
+    r'প্রদত্ত\s+(?:হিসাব|গণনা|ছক|তথ্য|অনুচ্ছেদ|টেবিল|চিত্র|বর্ণনা)(?:ে|র)?',
+    r'টেক্সট(?:ে|টি)?\s*অনুসারে', r'টপিক\s*অনুসারে', r'টেক্সটে\s*লিখা\s*আছে',
+    r'ছবিতে\s*দেখা\s*যাচ্ছে', r'উপরের\s*তথ্য\s*অনুযায়ী', r'উক্ত\s*(?:অংশে|অনুচ্ছেদে)\s*উল্লেখ\s*আছে',
+    r'টপিকে\s*বলা\s*হয়েছে', r'(?<!না\s)দেখা\s*যাচ্ছে', r'লিখা\s*আছে', r'বর্ণিত\s*আছে',
+    r'অনুযায়ী\s*উল্লেখ\s*করা\s*হয়েছে', r'হিসেবে\s*উল্লেখ\s*করা\s*হয়েছে',
+]
+_SOURCE_REF_RE = re.compile('|'.join(_SOURCE_REF_PATTERNS))
+_SUPERSCRIPT_MAP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+def _clean_mcq_text(text: str) -> str:
+    """Strip leftover source-reference phrases the model sometimes still
+    slips in despite prompt instructions, and normalize '^' exponent
+    notation (e.g. '10^22', '10^-3') into proper Unicode superscripts so
+    scientific notation renders correctly in plain Telegram text/polls."""
+    if not text:
+        return text
+    t = _SOURCE_REF_RE.sub('', text)
+
+    def _sup(m):
+        sign = m.group(1) or ''
+        digits = m.group(2)
+        return (sign + digits).translate(_SUPERSCRIPT_MAP).translate({ord('-'): '⁻'})
+
+    t = re.sub(r'\^(-?)(\d+)', _sup, t)
+    t = re.sub(r'\s{2,}', ' ', t).strip(" ,।.")
+    return t
+
+
 def _is_mcq_text_sane(text: str) -> bool:
     """
     Cheap heuristic sanity check to catch broken/garbled/ulta-palta text
@@ -1165,14 +1196,14 @@ def _validate_mcq_structure(mcqs: list) -> list:
     clean = []
     for m in mcqs:
         try:
-            q = (m.get("question") or "").strip()
+            q = _clean_mcq_text((m.get("question") or "").strip())
             opts = m.get("options") or []
             ans = str(m.get("answer", "A")).strip().upper()
             if not _is_mcq_text_sane(q):
                 continue
             if not isinstance(opts, list) or len(opts) < 4:
                 continue
-            opts4 = [str(o).strip() for o in opts[:4]]
+            opts4 = [_clean_mcq_text(str(o).strip()) for o in opts[:4]]
             if any(not _is_mcq_text_sane(o) for o in opts4):
                 continue
             # duplicate-option check (case-insensitive) — a real sign of
@@ -1181,9 +1212,12 @@ def _validate_mcq_structure(mcqs: list) -> list:
                 continue
             if ans not in ("A", "B", "C", "D"):
                 continue
-            exp = (m.get("explanation") or "").strip()
+            exp = _clean_mcq_text((m.get("explanation") or "").strip())
             if exp and not _is_mcq_text_sane(exp):
                 continue
+            m["question"] = q
+            m["options"] = opts4
+            m["explanation"] = exp
             clean.append(m)
         except Exception:
             continue
