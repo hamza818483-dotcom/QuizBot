@@ -2064,7 +2064,12 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
         out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
         out = _cap_mcq_options(out, 4)
         out = _validate_mcq_structure(out)
-        _rng_max = mcq_count[1] if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2 else None
+        if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
+            _rng_max = mcq_count[1]
+        elif isinstance(mcq_count, (int, float)) and mcq_count:
+            _rng_max = int(mcq_count)
+        else:
+            _rng_max = None
         if _rng_max and len(out) > _rng_max:
             out = out[:_rng_max]
         # Repair (fixes thin explanations on existing MCQs) and Verify (finds
@@ -2105,8 +2110,11 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
         if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
             count_min, count_max = mcq_count[0], mcq_count[1]
             count_target = count_max
+        elif isinstance(mcq_count, (int, float)) and mcq_count:
+            count_target = int(mcq_count)
+            count_max = int(mcq_count)  # exact-count also acts as a hard cap
         else:
-            count_target = mcq_count if mcq_count else 15
+            count_target = 15
         current_n = len(mcqs or [])
         # If a strict range was given and we're already at/above max, don't
         # ask verify to add more — would violate the user's upper bound.
