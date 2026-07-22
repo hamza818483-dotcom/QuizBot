@@ -1128,6 +1128,7 @@ _SOURCE_REF_PATTERNS = [
 ]
 _SOURCE_REF_RE = re.compile('|'.join(_SOURCE_REF_PATTERNS))
 _SUPERSCRIPT_MAP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+_BN_DIGITS_TO_EN = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 
 def _clean_mcq_text(text: str) -> str:
     """Strip leftover source-reference phrases the model sometimes still
@@ -1140,10 +1141,10 @@ def _clean_mcq_text(text: str) -> str:
 
     def _sup(m):
         sign = m.group(1) or ''
-        digits = m.group(2)
+        digits = m.group(2).translate(_BN_DIGITS_TO_EN)
         return (sign + digits).translate(_SUPERSCRIPT_MAP).translate({ord('-'): '⁻'})
 
-    t = re.sub(r'\^(-?)(\d+)', _sup, t)
+    t = re.sub(r'\^(-?)([\d০-৯]+)', _sup, t)
     t = re.sub(r'\s{2,}', ' ', t).strip(" ,।.")
     return t
 
