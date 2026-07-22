@@ -53,6 +53,12 @@ class GeminiKeyRotator:
     def mark_rate_limited(self, key: str):
         self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
 
+    def mark_banned(self, key: str):
+        """Permanently skip this key (e.g. 403 CONSUMER_SUSPENDED / invalid key)
+        — a 60s cooldown is pointless for a dead key; it will keep failing
+        forever and wasting a full retry cycle every single request."""
+        self._cooldown_until[key] = float("inf")
+
     def mark_healthy(self, key: str):
         self._cooldown_until.pop(key, None)
 
@@ -654,6 +660,9 @@ async def generate_mcq_from_image(
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                 logger.warning(f"[Gemini] Attempt {attempt+1} rate-limited (429), cooling down key for {key_rotator.COOLDOWN_SECONDS}s: {e}")
                 key_rotator.mark_rate_limited(key)
+            elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
+                logger.error(f"[Gemini] Attempt {attempt+1}: key permanently banned (suspended/invalid): {e}")
+                key_rotator.mark_banned(key)
             else:
                 logger.warning(f"[Gemini] Attempt {attempt+1} failed: {e}")
             if attempt < max_retries - 1:
@@ -741,6 +750,9 @@ Return ONLY valid JSON array, no markdown, no extra text:
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                 key_rotator.mark_rate_limited(key)
                 logger.warning(f"[Gemini-Text] Attempt {attempt+1} rate-limited (429), cooling down: {e}")
+            elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
+                logger.error(f"[Gemini-Text] Attempt {attempt+1}: key permanently banned (suspended/invalid): {e}")
+                key_rotator.mark_banned(key)
             else:
                 logger.warning(f"[Gemini-Text] Attempt {attempt+1} failed: {e}")
             if attempt < max_retries - 1:

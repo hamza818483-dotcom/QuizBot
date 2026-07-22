@@ -1659,7 +1659,8 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
         from google import genai as gai
         from google.genai import types
         from pdf_handler import image_to_base64
-        key = key_rotator.get_key()
+        _ordered = key_rotator.ordered_keys()
+        key = _ordered[0] if _ordered else key_rotator.get_key()
         client = gai.Client(api_key=key)
         img_b64 = image_to_base64(img)
 
@@ -1672,8 +1673,14 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
                 ]
             )
         response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=20)
+        key_rotator.mark_healthy(key)
         return response.text or ""
     except Exception as e:
+        err_str = str(e)
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+            key_rotator.mark_rate_limited(key)
+        elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
+            key_rotator.mark_banned(key)
         logger.warning(f"[GeminiVerify] failed: {e}")
         return ""
 
