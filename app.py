@@ -550,8 +550,8 @@ def _img_to_data_url_groq(img, mcq_count_hint=None) -> str:
         if hasattr(image, "convert"):
             image = image.convert("RGB")
         orig_w, orig_h = image.size
-        PROMPT_TOKENS = 2400  # fixed, matches _build_mcq_prompt actual size
-        SAFETY_MARGIN = 300
+        PROMPT_TOKENS = 2600  # fixed, matches _build_mcq_prompt actual size + margin
+        SAFETY_MARGIN = 700   # extra cushion: real 413s showed underestimation
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
@@ -559,9 +559,11 @@ def _img_to_data_url_groq(img, mcq_count_hint=None) -> str:
         else:
             est_count = 25  # default full-page mode target ceiling
         est_output_tokens = max(1536, min(6000, int(est_count) * 150 + 512))
-        TOKEN_BUDGET = max(1200, 8000 - PROMPT_TOKENS - est_output_tokens - SAFETY_MARGIN)
+        TOKEN_BUDGET = max(700, 8000 - PROMPT_TOKENS - est_output_tokens - SAFETY_MARGIN)
         # qwen3.6-27b vision tokenization is roughly proportional to
         # (width/28)*(height/28) patches + a fixed base overhead.
+        # Use a conservative multiplier (1.15x) since observed 413s show
+        # the real token count runs higher than the raw patch estimate.
         for max_dim, quality in [
             (max(orig_w, orig_h), 85),   # try full resolution first
             (1280, 80),
@@ -570,20 +572,25 @@ def _img_to_data_url_groq(img, mcq_count_hint=None) -> str:
             (768, 60),
             (640, 50),
             (512, 45),
+            (384, 40),
+            (256, 35),
         ]:
             w, h = orig_w, orig_h
             if max(w, h) > max_dim:
                 scale = max_dim / max(w, h)
                 w, h = max(1, int(w * scale)), max(1, int(h * scale))
-            est_tokens = int((w / 28) * (h / 28)) + 300
-            if est_tokens <= TOKEN_BUDGET or max_dim == 512:
+            est_tokens = int((w / 28) * (h / 28) * 1.15) + 300
+            is_last = (max_dim == 256)
+            if est_tokens <= TOKEN_BUDGET or is_last:
                 resized = image.resize((w, h)) if (w, h) != (orig_w, orig_h) else image
                 buf = BytesIO()
                 resized.save(buf, format="JPEG", quality=quality)
                 return "data:image/jpeg;base64," + _b64_ai.b64encode(buf.getvalue()).decode()
-        # Fallback (shouldn't reach here given the 640 floor above)
+        # Fallback (shouldn't reach here given the 256 floor above)
         buf = BytesIO()
-        image.save(buf, format="JPEG", quality=50)
+        scale = 256 / max(orig_w, orig_h)
+        w, h = max(1, int(orig_w * scale)), max(1, int(orig_h * scale))
+        image.resize((w, h)).save(buf, format="JPEG", quality=35)
         return "data:image/jpeg;base64," + _b64_ai.b64encode(buf.getvalue()).decode()
     except Exception as e:
         logger.warning(f"[img_to_data_url_groq] resize failed, falling back to full-size: {e}")
@@ -1222,8 +1229,8 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
     elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
         est_count = mcq_count_hint
     else:
-        est_count = 35  # default full-page mode-er max target
-    dynamic_max_tokens = max(1536, min(6000, int(est_count) * 150 + 512))
+        est_count = 25  # aligned with _img_to_data_url_groq's default
+    dynamic_max_tokens = max(1200, min(4500, int(est_count) * 150 + 400))
     payload = {
         "model": model,
         "messages": [{
