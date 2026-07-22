@@ -1470,7 +1470,7 @@ async def _gen_openrouter_qwen(img, topic, count):
         return []
     return await _try_rotator_openai_compat(
         or_qwen_rotator, "https://openrouter.ai/api/v1/chat/completions",
-        "qwen/qwen-2-vl-72b-instruct", data_url, _build_mcq_prompt(topic, count)
+        "google/gemma-4-31b-it:free", data_url, _build_mcq_prompt(topic, count)
     )
 
 async def _gen_nemotron(img, topic, count):
@@ -1490,7 +1490,7 @@ async def _gen_gemma(img, topic, count):
     rotator = gemma_rotator if gemma_rotator.all_keys() else or_qwen_rotator
     return await _try_rotator_openai_compat(
         rotator, "https://openrouter.ai/api/v1/chat/completions",
-        "google/gemma-3-27b-it", data_url, _build_mcq_prompt(topic, count)
+        "google/gemma-4-31b-it:free", data_url, _build_mcq_prompt(topic, count)
     )
 
 async def _gen_hf(img, topic, count):
