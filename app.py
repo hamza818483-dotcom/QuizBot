@@ -533,6 +533,35 @@ def _img_to_data_url(img) -> str:
             logger.error(f"[img_to_data_url] PNG retry also failed: {e2}")
         return ""
 
+
+def _img_to_data_url_groq(img) -> str:
+    """Groq's qwen3.6-27b has an 8000 TPM (tokens-per-minute) hard limit per
+    key — a full-resolution page image (often 11000+ tokens once base64'd
+    and vision-tokenized) exceeds this on EVERY key, every time, guaranteed.
+    That was silently wasting ~11s (12 keys × ~1s each, all failing
+    identically with 413) on every single /img generation before ever
+    reaching Gemini. Groq only needs enough resolution to OCR text — so for
+    Groq specifically (not Gemini/OpenRouter, which have much higher limits
+    and benefit from full resolution), downscale to a token-budget-safe
+    max dimension and use a lower JPEG quality."""
+    try:
+        if not hasattr(img, "save"):
+            return _img_to_data_url(img)
+        image = img
+        if hasattr(image, "convert"):
+            image = image.convert("RGB")
+        max_dim = 1024
+        w, h = image.size
+        if max(w, h) > max_dim:
+            scale = max_dim / max(w, h)
+            image = image.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+        buf = BytesIO()
+        image.save(buf, format="JPEG", quality=70)
+        return "data:image/jpeg;base64," + _b64_ai.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        logger.warning(f"[img_to_data_url_groq] resize failed, falling back to full-size: {e}")
+        return _img_to_data_url(img)
+
 async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
     """SECURITY: never leak raw exception text to the user — log full detail,
     notify owner privately, and show the user a generic Bengali fallback."""
@@ -1318,7 +1347,7 @@ async def _gen_groq(img, topic, count):
     if not keys:
         _LAST_GROQ_ERROR["reason"] = "কোনো GROQ_KEYS/GROQ_API_KEY সেট করা নেই"
         return []
-    data_url = _img_to_data_url(img)
+    data_url = _img_to_data_url_groq(img)
     if not data_url:
         _LAST_GROQ_ERROR["reason"] = "Image কে data URL এ convert করতে ব্যর্থ হয়েছে"
         return []
@@ -1328,6 +1357,9 @@ async def _gen_groq(img, topic, count):
     # now fails, which silently fell through to Gemini. qwen/qwen3.6-27b is
     # Groq's current vision-capable replacement (openai/gpt-oss-120b, their
     # other suggested replacement, is text-only and can't process images).
+    # Image is downscaled (see _img_to_data_url_groq) to stay under Groq's
+    # 8000 TPM per-key limit — previously EVERY call exceeded it on ALL
+    # keys (413 Payload Too Large), wasting ~11s before falling to Gemini.
     key_errors = []
     for i, key in enumerate(keys):
         txt, status = await _post_openai_compat(
@@ -1640,7 +1672,7 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
     keys = groq_key_rotator.all_keys()
     if not keys:
         return ""
-    data_url = _img_to_data_url(img)
+    data_url = _img_to_data_url_groq(img)
     if not data_url:
         return ""
     for key in keys:
@@ -7392,7 +7424,7 @@ async def _pdf_relaxed_last_resort_extract(img, topic, page_num, mcq_count=None)
     keys = groq_key_rotator.all_keys()
     if not keys:
         return []
-    data_url = _img_to_data_url(img)
+    data_url = _img_to_data_url_groq(img)
     if not data_url:
         return []
     count_hint = ""
@@ -8729,7 +8761,7 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     keys = groq_key_rotator.all_keys()
     if not keys:
         return ""
-    data_url = _img_to_data_url(img)
+    data_url = _img_to_data_url_groq(img)
     if not data_url:
         return ""
     for key in keys:
@@ -9659,7 +9691,7 @@ Return ONLY the JSON array, nothing else."""
         keys = groq_key_rotator.all_keys()
         result_json = None
         if keys:
-            data_url = _img_to_data_url(img)
+            data_url = _img_to_data_url_groq(img)
             if data_url:
                 for key in keys:
                     txt, status = await _post_openai_compat(

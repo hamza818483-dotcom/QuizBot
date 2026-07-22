@@ -261,7 +261,7 @@ async def d1_run(sql: str, params: list = None, return_id: bool = False):
             SB2_URL = "https://xnkuuzstschdovcyomfk.supabase.co"
             SB2_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4"
 
-            async def _mirror_one(url, key):
+            async def _mirror_one(url, key, is_secondary=False):
                 if not url or not key:
                     return
                 try:
@@ -271,13 +271,26 @@ async def d1_run(sql: str, params: list = None, return_id: bool = False):
                         rr = await c.post(f"{url}/rest/v1/quiz_backups",
                                           headers=headers, json=payload)
                     logger.info(f"[D1] Supabase mirror ({url}): {rr.status_code}")
+                    if is_secondary:
+                        _SB2_DOWN["flag"] = False
                 except Exception as e2:
-                    logger.warning(f"[D1] Supabase mirror failed ({url}): {e2}")
+                    if is_secondary:
+                        # This account (SB2) has been failing DNS resolution on every
+                        # single call — almost certainly the Supabase project was
+                        # paused/deleted (common on free tier after inactivity), not
+                        # a transient network blip. Logging this at WARNING on every
+                        # write just floods the logs without being actionable there;
+                        # log it once, then stay silent until it recovers.
+                        if not _SB2_DOWN["flag"]:
+                            logger.warning(f"[D1] Supabase secondary mirror failed ({url}): {e2} — suppressing further identical warnings until it recovers. Check if this Supabase project is paused: https://supabase.com/dashboard")
+                            _SB2_DOWN["flag"] = True
+                    else:
+                        logger.warning(f"[D1] Supabase mirror failed ({url}): {e2}")
 
             async def _mirror_both():
                 await asyncio.gather(
                     _mirror_one(SUPABASE_URL, SUPABASE_KEY),
-                    _mirror_one(SB2_URL, SB2_KEY),
+                    _mirror_one(SB2_URL, SB2_KEY, is_secondary=True),
                 )
             asyncio.create_task(_mirror_both())
     except Exception as e:
@@ -437,11 +450,18 @@ async def tg_post(method: str, data: dict) -> dict:
                 result = r.json()
                 if result.get("ok"):
                     return result, True
+                desc = (result.get("description") or "")
+                if "message is not modified" in desc.lower():
+                    # Not a real failure — the message already shows the intended
+                    # content (e.g. two rapid edits landed the same text). Treat
+                    # as success so it doesn't trigger secondary-endpoint fallback
+                    # + a 2.5s retry-wait for something that isn't actually broken.
+                    return result, True
                 if result.get("error_code") == 429:
                     retry_after = result.get("parameters", {}).get("retry_after", 5)
                     logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
                     await asyncio.sleep(min(retry_after, 30) + 0.5)
-                logger.warning(f"[TG] {method} proxy failed: {result.get('description')}")
+                logger.warning(f"[TG] {method} proxy failed: {desc}")
                 return result, False  # real response, don't retry
             except Exception as e:
                 logger.warning(f"[TG] {method} proxy error (attempt {_proxy_attempt+1}/2): {type(e).__name__}: {e}")
@@ -459,7 +479,10 @@ async def tg_post(method: str, data: dict) -> dict:
             result = r.json()
             if result.get("ok"):
                 return result, True
-            logger.warning(f"[TG] {method} secondary CF proxy also failed: {result.get('description')}")
+            desc = (result.get("description") or "")
+            if "message is not modified" in desc.lower():
+                return result, True
+            logger.warning(f"[TG] {method} secondary CF proxy also failed: {desc}")
             return result, False
         except Exception as e:
             logger.warning(f"[TG] {method} secondary CF proxy error: {type(e).__name__}: {e}")
@@ -1200,6 +1223,9 @@ async def r2_backup(cache_id: str, name: str, mcqs: list, timer: int = 30, extra
             )
     except Exception as e:
         logger.warning(f"[R2] backup write failed (non-fatal): {e}")
+
+
+_SB2_DOWN = {"flag": False}  # tracks secondary Supabase account reachability to avoid log spam
 
 
 async def db_save_mcq_cache(cache_id: str, session_id: str, page: int,
