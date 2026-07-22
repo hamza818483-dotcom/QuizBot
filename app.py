@@ -536,27 +536,47 @@ def _img_to_data_url(img) -> str:
 
 def _img_to_data_url_groq(img) -> str:
     """Groq's qwen3.6-27b has an 8000 TPM (tokens-per-minute) hard limit per
-    key — a full-resolution page image (often 11000+ tokens once base64'd
-    and vision-tokenized) exceeds this on EVERY key, every time, guaranteed.
-    That was silently wasting ~11s (12 keys × ~1s each, all failing
-    identically with 413) on every single /img generation before ever
-    reaching Gemini. Groq only needs enough resolution to OCR text — so for
-    Groq specifically (not Gemini/OpenRouter, which have much higher limits
-    and benefit from full resolution), downscale to a token-budget-safe
-    max dimension and use a lower JPEG quality."""
+    key. Most pages fit comfortably at full/near-full resolution — only
+    unusually large/dense page renders (~11000+ vision tokens) exceed it.
+    So instead of blanket-downscaling every page (which was needlessly
+    hurting OCR accuracy on normal pages), this tries progressively lower
+    resolution/quality steps and picks the FIRST one that fits the token
+    budget — normal pages stay near full quality, only oversized ones get
+    scaled down, and only as much as actually needed."""
     try:
         if not hasattr(img, "save"):
             return _img_to_data_url(img)
         image = img
         if hasattr(image, "convert"):
             image = image.convert("RGB")
-        max_dim = 720
-        w, h = image.size
-        if max(w, h) > max_dim:
-            scale = max_dim / max(w, h)
-            image = image.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+        orig_w, orig_h = image.size
+        # qwen3.6-27b vision tokenization is roughly proportional to
+        # (width/28)*(height/28) patches + a fixed text/base overhead.
+        # We budget ~7000 tokens for the image (leaving ~1000 for prompt
+        # text + output), then binary-search dimension steps down from
+        # full size until the estimate fits, only resizing if truly needed.
+        TOKEN_BUDGET = 7000
+        for max_dim, quality in [
+            (max(orig_w, orig_h), 85),   # try full resolution first
+            (1280, 80),
+            (1024, 75),
+            (896, 65),
+            (768, 60),
+            (640, 50),
+        ]:
+            w, h = orig_w, orig_h
+            if max(w, h) > max_dim:
+                scale = max_dim / max(w, h)
+                w, h = max(1, int(w * scale)), max(1, int(h * scale))
+            est_tokens = int((w / 28) * (h / 28)) + 300
+            if est_tokens <= TOKEN_BUDGET or max_dim == 640:
+                resized = image.resize((w, h)) if (w, h) != (orig_w, orig_h) else image
+                buf = BytesIO()
+                resized.save(buf, format="JPEG", quality=quality)
+                return "data:image/jpeg;base64," + _b64_ai.b64encode(buf.getvalue()).decode()
+        # Fallback (shouldn't reach here given the 640 floor above)
         buf = BytesIO()
-        image.save(buf, format="JPEG", quality=55)
+        image.save(buf, format="JPEG", quality=50)
         return "data:image/jpeg;base64," + _b64_ai.b64encode(buf.getvalue()).decode()
     except Exception as e:
         logger.warning(f"[img_to_data_url_groq] resize failed, falling back to full-size: {e}")
