@@ -492,7 +492,7 @@ def crop_explanation_image(img: Image.Image, bbox: list) -> dict:
 OPENROUTER_MODELS = [
     m.strip() for m in
     os.environ.get("OPENROUTER_MODELS",
-        "qwen/qwen2.5-vl-72b-instruct:free,qwen/qwen2.5-vl-32b-instruct:free"
+        "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
     ).split(",") if m.strip()
 ]
 
