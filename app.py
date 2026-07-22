@@ -655,6 +655,15 @@ def _build_chok_prompt(topic: str) -> str:
         f"- Highlighted/marked/boxed/underlined content = highest priority, must be covered.\n\n"
 
         f"═══════════════════════════════\n"
+        f"🟩 STRICT LANGUAGE RULE\n"
+        f"═══════════════════════════════\n"
+        f"Detect the language of the source ছক/box text (Bengali or English) and "
+        f"write the question, ALL options, and the explanation in that exact "
+        f"same language. Never translate. If a page mixes both languages across "
+        f"different boxes, match each individual MCQ to the language of the box "
+        f"it came from.\n\n"
+
+        f"═══════════════════════════════\n"
         f"🟩 OUTPUT\n"
         f"═══════════════════════════════\n"
         f"JSON array only, no markdown fences, no preamble. Format:\n"
@@ -8401,6 +8410,7 @@ QBM_EXTRACT_PROMPT_DEFAULT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SP
 ❌ NEVER skip any existing MCQ — extract ALL of them, serially, in the exact order they appear
 ❌ NEVER guess an answer — only detect it from actual image/page content
 ❌ NEVER modify question or option text (only remove numbering prefixes)
+❌ NEVER translate question, option, or explanation text into a different language than the source — extract in the EXACT language the source page uses (Bengali stays Bengali, English stays English, word-for-word as written)
 ❌ If the page has ZERO existing MCQs → output EXACTLY [] (empty array). Do NOT invent a single MCQ.
 ❌ If the page has exactly N existing MCQs → output EXACTLY those N. Never more, never fewer, never a "similar" or "extra" one.
 ❌ No question count is ever given to you and none is ever needed — extract however many genuinely exist, nothing else.
