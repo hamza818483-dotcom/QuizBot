@@ -534,15 +534,15 @@ def _img_to_data_url(img) -> str:
         return ""
 
 
-def _img_to_data_url_groq(img) -> str:
+def _img_to_data_url_groq(img, mcq_count_hint=None) -> str:
     """Groq's qwen3.6-27b has an 8000 TPM (tokens-per-minute) hard limit per
-    key. Most pages fit comfortably at full/near-full resolution — only
-    unusually large/dense page renders (~11000+ vision tokens) exceed it.
-    So instead of blanket-downscaling every page (which was needlessly
-    hurting OCR accuracy on normal pages), this tries progressively lower
-    resolution/quality steps and picks the FIRST one that fits the token
-    budget — normal pages stay near full quality, only oversized ones get
-    scaled down, and only as much as actually needed."""
+    key, shared across prompt + image + output combined. The prompt is a
+    fixed ~2400 tokens, and output scales with requested MCQ count (see
+    dynamic_max_tokens below, ~1536-6000). This function computes how much
+    of the 8000 budget is LEFT for the image after prompt+output, then picks
+    the highest resolution/quality that fits — so normal (10-25 MCQ) pages
+    stay near-full quality, and only pages needing very high MCQ counts
+    shrink the image further, never accidentally exceeding TPM."""
     try:
         if not hasattr(img, "save"):
             return _img_to_data_url(img)
@@ -550,12 +550,18 @@ def _img_to_data_url_groq(img) -> str:
         if hasattr(image, "convert"):
             image = image.convert("RGB")
         orig_w, orig_h = image.size
+        PROMPT_TOKENS = 2400  # fixed, matches _build_mcq_prompt actual size
+        SAFETY_MARGIN = 300
+        if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
+            est_count = mcq_count_hint[1]
+        elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
+            est_count = mcq_count_hint
+        else:
+            est_count = 25  # default full-page mode target ceiling
+        est_output_tokens = max(1536, min(6000, int(est_count) * 150 + 512))
+        TOKEN_BUDGET = max(1200, 8000 - PROMPT_TOKENS - est_output_tokens - SAFETY_MARGIN)
         # qwen3.6-27b vision tokenization is roughly proportional to
-        # (width/28)*(height/28) patches + a fixed text/base overhead.
-        # We budget ~7000 tokens for the image (leaving ~1000 for prompt
-        # text + output), then binary-search dimension steps down from
-        # full size until the estimate fits, only resizing if truly needed.
-        TOKEN_BUDGET = 7000
+        # (width/28)*(height/28) patches + a fixed base overhead.
         for max_dim, quality in [
             (max(orig_w, orig_h), 85),   # try full resolution first
             (1280, 80),
@@ -563,13 +569,14 @@ def _img_to_data_url_groq(img) -> str:
             (896, 65),
             (768, 60),
             (640, 50),
+            (512, 45),
         ]:
             w, h = orig_w, orig_h
             if max(w, h) > max_dim:
                 scale = max_dim / max(w, h)
                 w, h = max(1, int(w * scale)), max(1, int(h * scale))
             est_tokens = int((w / 28) * (h / 28)) + 300
-            if est_tokens <= TOKEN_BUDGET or max_dim == 640:
+            if est_tokens <= TOKEN_BUDGET or max_dim == 512:
                 resized = image.resize((w, h)) if (w, h) != (orig_w, orig_h) else image
                 buf = BytesIO()
                 resized.save(buf, format="JPEG", quality=quality)
@@ -1301,7 +1308,7 @@ async def _gen_groq(img, topic, count):
     if not keys:
         _LAST_GROQ_ERROR["reason"] = "কোনো GROQ_KEYS/GROQ_API_KEY সেট করা নেই"
         return []
-    data_url = _img_to_data_url_groq(img)
+    data_url = _img_to_data_url_groq(img, count)
     if not data_url:
         _LAST_GROQ_ERROR["reason"] = "Image কে data URL এ convert করতে ব্যর্থ হয়েছে"
         return []
