@@ -2087,39 +2087,48 @@ def _chok_ratio_gap_note(mcqs: list) -> str:
     return "\n" + "\n".join(notes)
 
 
+from pdf_handler import MCQ_PROCESSING_QUEUE_LOCK as _MCQ_PROCESSING_QUEUE_LOCK
+# All MCQ generation (image and text) funnels through generate_mcq_from_image /
+# generate_mcq_from_text below, both of which acquire this lock — so every
+# /img, /pdf, /csv, quiz-master MCQ job runs strictly one-at-a-time (queued),
+# while unrelated commands (menu, settings, admin, etc.) are completely
+# unaffected and continue running in parallel.
+
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     Smart wrapper: Groq first (primary), then Gemini (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
     Missing API keys are skipped silently. Never raises.
+    Queued: only one MCQ-generation job runs at a time across the whole bot.
     """
-    out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
-    out = _cap_mcq_options(out, 4)
-    out = _validate_mcq_structure(out)
-    _rng_max = mcq_count[1] if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2 else None
-    if _rng_max and len(out) > _rng_max:
-        out = out[:_rng_max]
-    # Repair (fixes thin explanations on existing MCQs) and Verify (finds
-    # MCQs call-1 missed) touch disjoint data — run concurrently instead of
-    # sequentially to cut per-page latency roughly in half. Verify appends
-    # new items to `out`, so run it first into a temp var and merge after.
-    repair_task = _spawn_task(_repair_thin_explanations(list(out), img, topic))
-    verify_task = _spawn_task(_verify_and_fix_page(list(out), img, topic, page_num, mcq_count))
-    repaired, verified = await asyncio.gather(repair_task, verify_task)
-    # verified = original out + any newly-found MCQs (appended at the end).
-    # Rebuild: take repaired explanations for the original items, then append
-    # whatever new items verify found.
-    n_orig = len(out)
-    merged = repaired[:n_orig] if len(repaired) >= n_orig else repaired
-    merged = merged + verified[n_orig:]
-    if _rng_max and len(merged) > _rng_max:
-        merged = merged[:_rng_max]
-    if _CHOK_MODE.get():
-        merged = await _chok_final_cv_enforcement(merged, img, topic, page_num)
-    if _BANGLA_MODE.get():
-        merged = await _bangla_verify_and_enforce(merged, img, topic, page_num)
-    merged = _validate_mcq_structure(merged)
-    return merged
+    async with _MCQ_PROCESSING_QUEUE_LOCK:
+        out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
+        out = _cap_mcq_options(out, 4)
+        out = _validate_mcq_structure(out)
+        _rng_max = mcq_count[1] if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2 else None
+        if _rng_max and len(out) > _rng_max:
+            out = out[:_rng_max]
+        # Repair (fixes thin explanations on existing MCQs) and Verify (finds
+        # MCQs call-1 missed) touch disjoint data — run concurrently instead of
+        # sequentially to cut per-page latency roughly in half. Verify appends
+        # new items to `out`, so run it first into a temp var and merge after.
+        repair_task = _spawn_task(_repair_thin_explanations(list(out), img, topic))
+        verify_task = _spawn_task(_verify_and_fix_page(list(out), img, topic, page_num, mcq_count))
+        repaired, verified = await asyncio.gather(repair_task, verify_task)
+        # verified = original out + any newly-found MCQs (appended at the end).
+        # Rebuild: take repaired explanations for the original items, then append
+        # whatever new items verify found.
+        n_orig = len(out)
+        merged = repaired[:n_orig] if len(repaired) >= n_orig else repaired
+        merged = merged + verified[n_orig:]
+        if _rng_max and len(merged) > _rng_max:
+            merged = merged[:_rng_max]
+        if _CHOK_MODE.get():
+            merged = await _chok_final_cv_enforcement(merged, img, topic, page_num)
+        if _BANGLA_MODE.get():
+            merged = await _bangla_verify_and_enforce(merged, img, topic, page_num)
+        merged = _validate_mcq_structure(merged)
+        return merged
 
 
 async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=None) -> list:

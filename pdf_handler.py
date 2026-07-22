@@ -14,6 +14,12 @@ import time
 from io import BytesIO
 from PIL import Image
 
+# Global queue lock: ensures only ONE MCQ-generation job (image or text)
+# runs at a time across the entire bot, regardless of which command
+# triggered it (/img, /pdf, /csv, quiz-master, etc). Other bot commands
+# (menu, settings, admin, etc.) never touch this lock and stay fully parallel.
+MCQ_PROCESSING_QUEUE_LOCK = asyncio.Lock()
+
 import httpx
 
 logger = logging.getLogger("atlas.pdf_handler")
@@ -676,6 +682,12 @@ async def generate_mcq_from_image(
 
 
 async def generate_mcq_from_text(text: str, topic: str = "MCQ", count: int = 15) -> list:
+    """Queued wrapper: only one MCQ-generation job runs at a time across the bot."""
+    async with MCQ_PROCESSING_QUEUE_LOCK:
+        return await _generate_mcq_from_text_raw(text, topic, count)
+
+
+async def _generate_mcq_from_text_raw(text: str, topic: str = "MCQ", count: int = 15) -> list:
     """Text থেকে MCQ generate করে — same SDK + multi-key + fallback as generate_mcq_from_image"""
     import json as _json
 
