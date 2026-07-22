@@ -258,8 +258,8 @@ async def d1_run(sql: str, params: list = None, return_id: bool = False):
                 "quiz_id": params[0], "name": params[1],
                 "questions": questions, "created_by": params[8] or 0,
             }
-            SB2_URL = "https://xnkuuzstschdovcyomfk.supabase.co"
-            SB2_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4"
+            # SB2 (secondary Supabase project) removed — project is paused/deleted
+            # (DNS resolution fails on every call). Mirroring only to primary now.
 
             async def _mirror_one(url, key, is_secondary=False):
                 if not url or not key:
@@ -288,10 +288,7 @@ async def d1_run(sql: str, params: list = None, return_id: bool = False):
                         logger.warning(f"[D1] Supabase mirror failed ({url}): {e2}")
 
             async def _mirror_both():
-                await asyncio.gather(
-                    _mirror_one(SUPABASE_URL, SUPABASE_KEY),
-                    _mirror_one(SB2_URL, SB2_KEY, is_secondary=True),
-                )
+                await _mirror_one(SUPABASE_URL, SUPABASE_KEY)
             asyncio.create_task(_mirror_both())
     except Exception as e:
         logger.warning(f"[D1] Supabase mirror step failed: {e}")

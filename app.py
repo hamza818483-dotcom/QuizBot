@@ -550,13 +550,13 @@ def _img_to_data_url_groq(img) -> str:
         image = img
         if hasattr(image, "convert"):
             image = image.convert("RGB")
-        max_dim = 768
+        max_dim = 640
         w, h = image.size
         if max(w, h) > max_dim:
             scale = max_dim / max(w, h)
             image = image.resize((max(1, int(w * scale)), max(1, int(h * scale))))
         buf = BytesIO()
-        image.save(buf, format="JPEG", quality=60)
+        image.save(buf, format="JPEG", quality=50)
         return "data:image/jpeg;base64," + _b64_ai.b64encode(buf.getvalue()).decode()
     except Exception as e:
         logger.warning(f"[img_to_data_url_groq] resize failed, falling back to full-size: {e}")
