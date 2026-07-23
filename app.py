@@ -6214,6 +6214,166 @@ async def handle_qcsv_command(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 # ============================================================
+# /slide — CSV file reply থেকে 16:9 black-bg MCQ Slide PDF
+# ============================================================
+_SLIDE_FONT_BOLD = "NSBBold"
+_SLIDE_FONT_REG = "NSBReg"
+_slide_fonts_registered = {"done": False}
+
+def _ensure_slide_fonts():
+    if _slide_fonts_registered["done"]:
+        return
+    from reportlab.pdfbase.ttfonts import TTFont as _RLFont
+    from reportlab.pdfbase import pdfmetrics as _pdfmetrics
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    bold_path = os.path.join(base_dir, "fonts", "NotoSansBengali-Bold.ttf")
+    reg_path = os.path.join(base_dir, "fonts", "NotoSansBengali-Regular.ttf")
+    _pdfmetrics.registerFont(_RLFont(_SLIDE_FONT_BOLD, bold_path))
+    _pdfmetrics.registerFont(_RLFont(_SLIDE_FONT_REG, reg_path))
+    _slide_fonts_registered["done"] = True
+
+def _slide_wrap_text(text: str, font_name: str, font_size: float, max_width: float) -> list:
+    """Word-wrap text (Bengali/English) to fit max_width using reportlab's stringWidth."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    words = text.split(" ")
+    lines, cur = [], ""
+    for w in words:
+        trial = (cur + " " + w).strip()
+        if stringWidth(trial, font_name, font_size) <= max_width or not cur:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+def _build_mcq_slides_pdf(mcqs: list, title: str = "ATLAS Special") -> bytes:
+    """Generate a 16:9 landscape PDF, one MCQ per slide/page.
+    Pure black background, yellow bold question on top, white A/B/C/D options
+    on the right side, no explanation shown."""
+    import io as _io_slide
+    from reportlab.pdfgen import canvas as _rl_canvas
+    from reportlab.lib.colors import HexColor, black, white
+
+    _ensure_slide_fonts()
+
+    PAGE_W, PAGE_H = 1280, 720  # 16:9 ratio, points
+    MARGIN_X = 70
+    YELLOW = HexColor("#FFD400")
+    WHITE = white
+    BLACK = black
+
+    buf = _io_slide.BytesIO()
+    c = _rl_canvas.Canvas(buf, pagesize=(PAGE_W, PAGE_H))
+
+    for idx, m in enumerate(mcqs, 1):
+        c.setFillColor(BLACK)
+        c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+
+        # ── Question (top, yellow, bold) ──
+        q_text = (m.get("question") or "").strip()
+        q_font_size = 34
+        max_q_width = PAGE_W - 2 * MARGIN_X
+        q_lines = _slide_wrap_text(q_text, _SLIDE_FONT_BOLD, q_font_size, max_q_width)
+        # shrink font if too many lines (keep question readable, avoid overflow)
+        while len(q_lines) > 4 and q_font_size > 22:
+            q_font_size -= 2
+            q_lines = _slide_wrap_text(q_text, _SLIDE_FONT_BOLD, q_font_size, max_q_width)
+
+        c.setFillColor(YELLOW)
+        c.setFont(_SLIDE_FONT_BOLD, q_font_size)
+        y = PAGE_H - 90
+        line_gap = q_font_size * 1.35
+        for line in q_lines:
+            c.drawString(MARGIN_X, y, line)
+            y -= line_gap
+
+        # ── Options (below question, white, marker+text, right-aligned block) ──
+        options = m.get("options") or []
+        labels = ["A", "B", "C", "D", "E"]
+        opt_font_size = 26
+        opt_start_y = y - 40
+        opt_x_marker = PAGE_W - 640  # right-side block start
+        opt_x_text = opt_x_marker + 55
+        max_opt_width = PAGE_W - MARGIN_X - opt_x_text
+
+        c.setFillColor(WHITE)
+        cur_y = opt_start_y
+        for i, opt in enumerate(options[:5]):
+            label = labels[i] if i < len(labels) else str(i + 1)
+            opt_lines = _slide_wrap_text(str(opt).strip(), _SLIDE_FONT_REG, opt_font_size, max_opt_width)
+            c.setFont(_SLIDE_FONT_BOLD, opt_font_size)
+            c.drawString(opt_x_marker, cur_y, f"{label}.")
+            c.setFont(_SLIDE_FONT_REG, opt_font_size)
+            for j, ol in enumerate(opt_lines):
+                c.drawString(opt_x_text, cur_y, ol)
+                if j < len(opt_lines) - 1:
+                    cur_y -= opt_font_size * 1.3
+            cur_y -= opt_font_size * 1.9  # gap before next option
+            if cur_y < 40:
+                break  # avoid overflow past page bottom
+
+        # footer page number (subtle)
+        c.setFillColor(HexColor("#666666"))
+        c.setFont(_SLIDE_FONT_REG, 14)
+        c.drawRightString(PAGE_W - 30, 20, f"{idx}/{len(mcqs)}")
+
+        c.showPage()
+
+    c.save()
+    return buf.getvalue()
+
+async def handle_slide_command(msg: dict):
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+    text = msg.get("text", "")
+    parts = text.split(None, 1)
+    custom_title = parts[1].strip() if len(parts) > 1 else None
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id, "❌ CSV ফাইলে reply করে /slide দাও!")
+        return
+
+    doc = reply["document"]
+    file_name = doc.get("file_name", "")
+    if not file_name.lower().endswith(".csv"):
+        await send_msg(chat_id, "❌ শুধু .csv file support করে!")
+        return
+
+    loading = await send_msg(chat_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        csv_bytes = await download_tg_file(doc["file_id"])
+        if loading_id:
+            await edit_msg(chat_id, loading_id, "⏳ CSV parse হচ্ছে...")
+        mcqs = _parse_csv_bytes(csv_bytes)
+
+        if not mcqs:
+            if loading_id:
+                await edit_msg(chat_id, loading_id, "❌ CSV থেকে কোনো MCQ পাওয়া যায়নি! Format ঠিক আছে কিনা দেখো।")
+            return
+
+        if loading_id:
+            await edit_msg(chat_id, loading_id, f"🎬 {len(mcqs)} টি MCQ থেকে Slide PDF বানানো হচ্ছে...")
+
+        title = custom_title or "ATLAS Special"
+        pdf_bytes = await asyncio.to_thread(_build_mcq_slides_pdf, mcqs, title)
+
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Slides"
+        await send_document(chat_id, pdf_bytes, f"{safe_title}_Slides.pdf",
+            caption=f"🎬 {title}\n📝 মোট Slide: {len(mcqs)}\n🚀 ATLAS APP",
+            mime_type="application/pdf")
+
+        if loading_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id})
+
+    except Exception as e:
+        logger.error(f"[SLIDE] Error: {e}")
+        await _safe_error_reply(chat_id, e)
+
+# ============================================================
 # /sheet — CSV file reply থেকে সরাসরি Practice Sheet PDF
 # ============================================================
 def _adapt_mcqs_for_print(mcqs: list) -> list:
@@ -12721,6 +12881,8 @@ async def handle_message(msg: dict):
         _spawn_command_task(uid, handle_sheet_command(msg))
     elif text.startswith("/qcsv"):
         _spawn_command_task(uid, handle_qcsv_command(msg))
+    elif text.startswith("/slide"):
+        _spawn_command_task(uid, handle_slide_command(msg))
     elif text.startswith("/qpdf"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
