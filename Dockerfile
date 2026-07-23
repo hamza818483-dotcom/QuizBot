@@ -17,16 +17,24 @@ RUN apt-get update && apt-get install -y \
     libraqm-dev \
     libfribidi-dev \
     libharfbuzz-dev \
+    libjpeg62-turbo-dev \
+    zlib1g-dev \
+    libfreetype-dev \
+    libopenjp2-7-dev \
+    libtiff5-dev \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CHROMIUM_PATH=/usr/bin/chromium
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-# Force-rebuild Pillow from source against system libraqm so raqm (complex
-# script shaping — needed for correct Bengali conjuncts) is actually linked
-# in; prebuilt PyPI wheels usually ship WITHOUT raqm support.
-RUN pip install --no-cache-dir --no-binary=:all: --force-reinstall pillow
+# Rebuild Pillow from source against system libraqm so raqm (complex script
+# shaping — needed for correct Bengali conjuncts) is actually linked in;
+# prebuilt PyPI wheels ship without raqm. If this ever fails to build, the
+# app still runs — /slide falls back to unshaped rendering (with a log
+# warning) instead of the whole image failing.
+RUN pip install --no-cache-dir --no-binary=:all: --force-reinstall pillow \
+    || pip install --no-cache-dir --force-reinstall pillow
 RUN playwright install --with-deps chromium
 
 COPY . .
