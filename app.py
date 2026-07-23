@@ -6216,36 +6216,48 @@ async def handle_qcsv_command(msg: dict):
 # ============================================================
 # /slide — CSV file reply থেকে 16:9 black-bg MCQ Slide PDF
 # ============================================================
-_SLIDE_FONT_BOLD = "NSBBold"
-_SLIDE_FONT_REG = "NSBReg"
-_slide_fonts_registered = {"done": False}
+# NOTE: reportlab's native text drawing does NOT shape complex scripts
+# (Bengali conjuncts/যুক্তাক্ষর render broken — glyphs placed independently
+# instead of properly joined). Fix: render each slide as a high-res PIL
+# image using the 'raqm' text layout engine (proper HarfBuzz-based shaping,
+# correct Bengali/English rendering), then assemble those images into a
+# PDF via PIL's own save (no reportlab text involved at all).
+_slide_fonts_registered = {"done": False, "bold": None, "reg": None}
 
 def _ensure_slide_fonts():
     if _slide_fonts_registered["done"]:
         return
     import base64 as _b64_font
-    from reportlab.pdfbase.ttfonts import TTFont as _RLFont
-    from reportlab.pdfbase import pdfmetrics as _pdfmetrics
-    from io import BytesIO as _BytesIOFont
     base_dir = os.path.dirname(os.path.abspath(__file__))
     bold_b64_path = os.path.join(base_dir, "fonts", "NotoSansBengali-Bold.ttf.b64")
     reg_b64_path = os.path.join(base_dir, "fonts", "NotoSansBengali-Regular.ttf.b64")
     with open(bold_b64_path, "r") as f:
-        bold_bytes = _b64_font.b64decode(f.read())
+        _slide_fonts_registered["bold"] = _b64_font.b64decode(f.read())
     with open(reg_b64_path, "r") as f:
-        reg_bytes = _b64_font.b64decode(f.read())
-    _pdfmetrics.registerFont(_RLFont(_SLIDE_FONT_BOLD, _BytesIOFont(bold_bytes)))
-    _pdfmetrics.registerFont(_RLFont(_SLIDE_FONT_REG, _BytesIOFont(reg_bytes)))
+        _slide_fonts_registered["reg"] = _b64_font.b64decode(f.read())
     _slide_fonts_registered["done"] = True
 
-def _slide_wrap_text(text: str, font_name: str, font_size: float, max_width: float) -> list:
-    """Word-wrap text (Bengali/English) to fit max_width using reportlab's stringWidth."""
-    from reportlab.pdfbase.pdfmetrics import stringWidth
+def _slide_font(weight: str, size: int):
+    from PIL import ImageFont as _PILImageFont, features as _PILFeatures
+    from io import BytesIO as _BytesIOFont
+    _ensure_slide_fonts()
+    raw = _slide_fonts_registered["bold"] if weight == "bold" else _slide_fonts_registered["reg"]
+    layout = _PILImageFont.Layout.RAQM if _PILFeatures.check("raqm") else _PILImageFont.Layout.BASIC
+    if layout == _PILImageFont.Layout.BASIC:
+        logger.warning("[SLIDE] Pillow built without raqm — Bengali conjuncts will render broken. "
+                        "Check Dockerfile libraqm-dev install.")
+    return _PILImageFont.truetype(_BytesIOFont(raw), size, layout_engine=layout)
+
+def _slide_wrap_text_pil(text: str, font, max_width: int, draw) -> list:
+    """Word-wrap text using actual PIL-measured (raqm-shaped) width, so
+    wrapping matches real rendered glyph widths for Bengali/English."""
     words = text.split(" ")
     lines, cur = [], ""
     for w in words:
         trial = (cur + " " + w).strip()
-        if stringWidth(trial, font_name, font_size) <= max_width or not cur:
+        bbox = draw.textbbox((0, 0), trial, font=font)
+        width = bbox[2] - bbox[0]
+        if width <= max_width or not cur:
             cur = trial
         else:
             lines.append(cur)
@@ -6257,77 +6269,82 @@ def _slide_wrap_text(text: str, font_name: str, font_size: float, max_width: flo
 def _build_mcq_slides_pdf(mcqs: list, title: str = "ATLAS Special") -> bytes:
     """Generate a 16:9 landscape PDF, one MCQ per slide/page.
     Pure black background, yellow bold question on top, white A/B/C/D options
-    on the right side, no explanation shown."""
+    on the right side, no explanation shown. Each slide is rendered as a
+    raqm-shaped PIL image (correct Bengali conjuncts) then assembled into PDF."""
     import io as _io_slide
-    from reportlab.pdfgen import canvas as _rl_canvas
-    from reportlab.lib.colors import HexColor, black, white
+    from PIL import Image as _PILImage, ImageDraw as _PILImageDraw
 
     _ensure_slide_fonts()
 
-    PAGE_W, PAGE_H = 1280, 720  # 16:9 ratio, points
-    MARGIN_X = 70
-    YELLOW = HexColor("#FFD400")
-    WHITE = white
-    BLACK = black
+    SCALE = 2  # render at 2x for crisp text, PDF page size stays 16:9 standard
+    PAGE_W, PAGE_H = 1280 * SCALE, 720 * SCALE
+    MARGIN_X = 70 * SCALE
+    YELLOW = (255, 212, 0)
+    WHITE = (255, 255, 255)
+    FOOTER_GREY = (102, 102, 102)
 
-    buf = _io_slide.BytesIO()
-    c = _rl_canvas.Canvas(buf, pagesize=(PAGE_W, PAGE_H))
+    slide_images = []
 
     for idx, m in enumerate(mcqs, 1):
-        c.setFillColor(BLACK)
-        c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+        img = _PILImage.new("RGB", (PAGE_W, PAGE_H), (0, 0, 0))
+        draw = _PILImageDraw.Draw(img)
 
         # ── Question (top, yellow, bold) ──
         q_text = (m.get("question") or "").strip()
-        q_font_size = 34
+        q_font_size = 34 * SCALE
         max_q_width = PAGE_W - 2 * MARGIN_X
-        q_lines = _slide_wrap_text(q_text, _SLIDE_FONT_BOLD, q_font_size, max_q_width)
-        # shrink font if too many lines (keep question readable, avoid overflow)
-        while len(q_lines) > 4 and q_font_size > 22:
-            q_font_size -= 2
-            q_lines = _slide_wrap_text(q_text, _SLIDE_FONT_BOLD, q_font_size, max_q_width)
+        q_font = _slide_font("bold", q_font_size)
+        q_lines = _slide_wrap_text_pil(q_text, q_font, max_q_width, draw)
+        while len(q_lines) > 4 and q_font_size > 22 * SCALE:
+            q_font_size -= 2 * SCALE
+            q_font = _slide_font("bold", q_font_size)
+            q_lines = _slide_wrap_text_pil(q_text, q_font, max_q_width, draw)
 
-        c.setFillColor(YELLOW)
-        c.setFont(_SLIDE_FONT_BOLD, q_font_size)
-        y = PAGE_H - 90
-        line_gap = q_font_size * 1.35
+        y = 60 * SCALE
+        line_gap = int(q_font_size * 1.35)
         for line in q_lines:
-            c.drawString(MARGIN_X, y, line)
-            y -= line_gap
+            draw.text((MARGIN_X, y), line, font=q_font, fill=YELLOW)
+            y += line_gap
 
-        # ── Options (below question, white, marker+text, right-aligned block) ──
+        # ── Options (below question, white, marker+text, right-side block) ──
         options = m.get("options") or []
         labels = ["A", "B", "C", "D", "E"]
-        opt_font_size = 26
-        opt_start_y = y - 40
-        opt_x_marker = PAGE_W - 640  # right-side block start
-        opt_x_text = opt_x_marker + 55
+        opt_font_size = 26 * SCALE
+        opt_font_bold = _slide_font("bold", opt_font_size)
+        opt_font_reg = _slide_font("reg", opt_font_size)
+        opt_start_y = y + 40 * SCALE
+        opt_x_marker = PAGE_W - 640 * SCALE  # right-side block start
+        opt_x_text = opt_x_marker + 55 * SCALE
         max_opt_width = PAGE_W - MARGIN_X - opt_x_text
 
-        c.setFillColor(WHITE)
         cur_y = opt_start_y
         for i, opt in enumerate(options[:5]):
             label = labels[i] if i < len(labels) else str(i + 1)
-            opt_lines = _slide_wrap_text(str(opt).strip(), _SLIDE_FONT_REG, opt_font_size, max_opt_width)
-            c.setFont(_SLIDE_FONT_BOLD, opt_font_size)
-            c.drawString(opt_x_marker, cur_y, f"{label}.")
-            c.setFont(_SLIDE_FONT_REG, opt_font_size)
+            opt_lines = _slide_wrap_text_pil(str(opt).strip(), opt_font_reg, max_opt_width, draw)
+            draw.text((opt_x_marker, cur_y), f"{label}.", font=opt_font_bold, fill=WHITE)
+            line_y = cur_y
             for j, ol in enumerate(opt_lines):
-                c.drawString(opt_x_text, cur_y, ol)
+                draw.text((opt_x_text, line_y), ol, font=opt_font_reg, fill=WHITE)
                 if j < len(opt_lines) - 1:
-                    cur_y -= opt_font_size * 1.3
-            cur_y -= opt_font_size * 1.9  # gap before next option
-            if cur_y < 40:
+                    line_y += int(opt_font_size * 1.3)
+            cur_y += int(opt_font_size * 1.9)
+            if cur_y > PAGE_H - 40 * SCALE:
                 break  # avoid overflow past page bottom
 
         # footer page number (subtle)
-        c.setFillColor(HexColor("#666666"))
-        c.setFont(_SLIDE_FONT_REG, 14)
-        c.drawRightString(PAGE_W - 30, 20, f"{idx}/{len(mcqs)}")
+        footer_font = _slide_font("reg", 14 * SCALE)
+        footer_text = f"{idx}/{len(mcqs)}"
+        fbbox = draw.textbbox((0, 0), footer_text, font=footer_font)
+        fw = fbbox[2] - fbbox[0]
+        draw.text((PAGE_W - 30 * SCALE - fw, PAGE_H - 34 * SCALE), footer_text,
+                   font=footer_font, fill=FOOTER_GREY)
 
-        c.showPage()
+        slide_images.append(img)
 
-    c.save()
+    buf = _io_slide.BytesIO()
+    if slide_images:
+        slide_images[0].save(buf, format="PDF", save_all=True,
+                              append_images=slide_images[1:])
     return buf.getvalue()
 
 async def handle_slide_command(msg: dict):
