@@ -6223,13 +6223,19 @@ _slide_fonts_registered = {"done": False}
 def _ensure_slide_fonts():
     if _slide_fonts_registered["done"]:
         return
+    import base64 as _b64_font
     from reportlab.pdfbase.ttfonts import TTFont as _RLFont
     from reportlab.pdfbase import pdfmetrics as _pdfmetrics
+    from io import BytesIO as _BytesIOFont
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    bold_path = os.path.join(base_dir, "fonts", "NotoSansBengali-Bold.ttf")
-    reg_path = os.path.join(base_dir, "fonts", "NotoSansBengali-Regular.ttf")
-    _pdfmetrics.registerFont(_RLFont(_SLIDE_FONT_BOLD, bold_path))
-    _pdfmetrics.registerFont(_RLFont(_SLIDE_FONT_REG, reg_path))
+    bold_b64_path = os.path.join(base_dir, "fonts", "NotoSansBengali-Bold.ttf.b64")
+    reg_b64_path = os.path.join(base_dir, "fonts", "NotoSansBengali-Regular.ttf.b64")
+    with open(bold_b64_path, "r") as f:
+        bold_bytes = _b64_font.b64decode(f.read())
+    with open(reg_b64_path, "r") as f:
+        reg_bytes = _b64_font.b64decode(f.read())
+    _pdfmetrics.registerFont(_RLFont(_SLIDE_FONT_BOLD, _BytesIOFont(bold_bytes)))
+    _pdfmetrics.registerFont(_RLFont(_SLIDE_FONT_REG, _BytesIOFont(reg_bytes)))
     _slide_fonts_registered["done"] = True
 
 def _slide_wrap_text(text: str, font_name: str, font_size: float, max_width: float) -> list:
