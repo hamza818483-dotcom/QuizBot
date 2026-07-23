@@ -6266,19 +6266,51 @@ def _slide_wrap_text_pil(text: str, font, max_width: int, draw) -> list:
         lines.append(cur)
     return lines
 
-def _build_mcq_slides_pdf(mcqs: list, title: str = "ATLAS Special") -> bytes:
+_IMG_URL_RE = re.compile(r'https?://\S+\.(?:jpg|jpeg|png|webp|gif)(?:\?\S*)?', re.IGNORECASE)
+
+def _extract_img_url(text: str):
+    """Find + strip an embedded image URL from question/option text, if present."""
+    if not text:
+        return text, None
+    m = _IMG_URL_RE.search(text)
+    if not m:
+        return text, None
+    url = m.group(0)
+    cleaned = (text[:m.start()] + text[m.end():]).strip()
+    return cleaned, url
+
+async def _slide_fetch_image(url: str):
+    """Download an image URL for embedding in a slide. Returns PIL Image or None."""
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(url)
+            r.raise_for_status()
+        from PIL import Image as _PILImg
+        import io as _io_img
+        return _PILImg.open(_io_img.BytesIO(r.content)).convert("RGB")
+    except Exception as e:
+        logger.warning(f"[SLIDE] image fetch failed ({url}): {e}")
+        return None
+
+def _build_mcq_slides_pdf(mcqs: list, title: str = "ATLAS Special", images: dict = None) -> bytes:
     """Generate a 16:9 landscape PDF, one MCQ per slide/page.
-    Pure black background, yellow bold question on top, white A/B/C/D options
-    on the right side, no explanation shown. Each slide is rendered as a
-    raqm-shaped PIL image (correct Bengali conjuncts) then assembled into PDF."""
+    Pure black background. Question (yellow, bold) and options (white,
+    slightly-bold) sit in one right-shifted column, question on top,
+    options below — auto-adjusts to the widest option's width. No
+    explanation shown. Each slide is rendered as a raqm-shaped PIL image
+    (correct Bengali conjuncts) then assembled into PDF.
+    `images` is an optional {index: PIL.Image} map for embedded question/
+    option images (pre-fetched by the caller)."""
     import io as _io_slide
     from PIL import Image as _PILImage, ImageDraw as _PILImageDraw
 
     _ensure_slide_fonts()
+    images = images or {}
 
     SCALE = 2  # render at 2x for crisp text, PDF page size stays 16:9 standard
     PAGE_W, PAGE_H = 1280 * SCALE, 720 * SCALE
-    MARGIN_X = 70 * SCALE
+    RIGHT_MARGIN = 70 * SCALE
+    COLUMN_SHIFT = 480 * SCALE  # column starts this far in from the left (right-shifted, not full-width)
     YELLOW = (255, 212, 0)
     WHITE = (255, 255, 255)
     FOOTER_GREY = (102, 102, 102)
@@ -6289,44 +6321,96 @@ def _build_mcq_slides_pdf(mcqs: list, title: str = "ATLAS Special") -> bytes:
         img = _PILImage.new("RGB", (PAGE_W, PAGE_H), (0, 0, 0))
         draw = _PILImageDraw.Draw(img)
 
-        # ── Question (top, yellow, bold) ──
+        col_x = COLUMN_SHIFT
+        max_width = PAGE_W - RIGHT_MARGIN - col_x
+
+        # ── question image (if any), drawn above the text column ──
+        q_img = images.get((idx - 1, "q"))
+        y = 50 * SCALE
+        if q_img is not None:
+            iw, ih = q_img.size
+            max_iw = max_width
+            max_ih = 220 * SCALE
+            scale = min(max_iw / iw, max_ih / ih, 1.0)
+            disp = q_img.resize((max(1, int(iw * scale)), max(1, int(ih * scale))))
+            img.paste(disp, (int(col_x), int(y)))
+            y += disp.size[1] + 20 * SCALE
+
+        # ── Question (yellow, bold) ──
         q_text = (m.get("question") or "").strip()
-        q_font_size = 34 * SCALE
-        max_q_width = PAGE_W - 2 * MARGIN_X
+        q_font_size = 32 * SCALE
         q_font = _slide_font("bold", q_font_size)
-        q_lines = _slide_wrap_text_pil(q_text, q_font, max_q_width, draw)
-        while len(q_lines) > 4 and q_font_size > 22 * SCALE:
+        q_lines = _slide_wrap_text_pil(q_text, q_font, max_width, draw)
+        while len(q_lines) > 3 and q_font_size > 20 * SCALE:
             q_font_size -= 2 * SCALE
             q_font = _slide_font("bold", q_font_size)
-            q_lines = _slide_wrap_text_pil(q_text, q_font, max_q_width, draw)
+            q_lines = _slide_wrap_text_pil(q_text, q_font, max_width, draw)
 
-        y = 60 * SCALE
         line_gap = int(q_font_size * 1.35)
         for line in q_lines:
-            draw.text((MARGIN_X, y), line, font=q_font, fill=YELLOW)
+            draw.text((col_x, y), line, font=q_font, fill=YELLOW)
             y += line_gap
 
-        # ── Options (below question, white, marker+text, right-side block) ──
+        # ── Options (below question, same column, white, semi-bold) ──
         options = m.get("options") or []
         labels = ["A", "B", "C", "D", "E"]
         opt_font_size = 26 * SCALE
+        # auto-shrink options if the widest option would overflow available width
+        opt_font_bold = _slide_font("bold", opt_font_size)  # marker (A./B./...)
+        marker_w = max(
+            (draw.textbbox((0, 0), f"{labels[i]}.", font=opt_font_bold)[2] for i in range(min(len(options), 5))),
+            default=0,
+        )
+        text_x_offset = marker_w + 18 * SCALE
+        max_opt_text_width = max_width - text_x_offset
+
+        def _fits_all(font_size):
+            f = _slide_font("reg", font_size)
+            for opt in options[:5]:
+                clean_opt, _ = _extract_img_url(str(opt).strip())
+                w = draw.textbbox((0, 0), clean_opt, font=f)[2]
+                if w > max_opt_text_width * 3:  # allow wrap up to ~3 lines worth
+                    return False
+            return True
+
+        while opt_font_size > 16 * SCALE and not _fits_all(opt_font_size):
+            opt_font_size -= 2 * SCALE
+
         opt_font_bold = _slide_font("bold", opt_font_size)
         opt_font_reg = _slide_font("reg", opt_font_size)
-        opt_start_y = y + 40 * SCALE
-        opt_x_marker = PAGE_W - 640 * SCALE  # right-side block start
-        opt_x_text = opt_x_marker + 55 * SCALE
-        max_opt_width = PAGE_W - MARGIN_X - opt_x_text
+        text_x_offset = max(
+            (draw.textbbox((0, 0), f"{labels[i]}.", font=opt_font_bold)[2] for i in range(min(len(options), 5))),
+            default=0,
+        ) + 18 * SCALE
+        max_opt_text_width = max_width - text_x_offset
 
-        cur_y = opt_start_y
+        cur_y = y + 36 * SCALE
         for i, opt in enumerate(options[:5]):
             label = labels[i] if i < len(labels) else str(i + 1)
-            opt_lines = _slide_wrap_text_pil(str(opt).strip(), opt_font_reg, max_opt_width, draw)
-            draw.text((opt_x_marker, cur_y), f"{label}.", font=opt_font_bold, fill=WHITE)
+            opt_str = str(opt).strip()
+            clean_opt, opt_img_url = _extract_img_url(opt_str)
+            opt_img = images.get((idx - 1, i))
+
+            draw.text((col_x, cur_y), f"{label}.", font=opt_font_bold, fill=WHITE)
+
             line_y = cur_y
-            for j, ol in enumerate(opt_lines):
-                draw.text((opt_x_text, line_y), ol, font=opt_font_reg, fill=WHITE)
-                if j < len(opt_lines) - 1:
-                    line_y += int(opt_font_size * 1.3)
+            if clean_opt:
+                opt_lines = _slide_wrap_text_pil(clean_opt, opt_font_reg, max_opt_text_width, draw)
+                for j, ol in enumerate(opt_lines):
+                    draw.text((col_x + text_x_offset, line_y), ol, font=opt_font_reg, fill=WHITE)
+                    if j < len(opt_lines) - 1:
+                        line_y += int(opt_font_size * 1.3)
+                cur_y = line_y
+
+            if opt_img is not None:
+                iw, ih = opt_img.size
+                max_iw = max_opt_text_width
+                max_ih = 100 * SCALE
+                scale = min(max_iw / iw, max_ih / ih, 1.0)
+                disp = opt_img.resize((max(1, int(iw * scale)), max(1, int(ih * scale))))
+                img.paste(disp, (int(col_x + text_x_offset), int(cur_y + int(opt_font_size * 1.3))))
+                cur_y += disp.size[1] + 10 * SCALE
+
             cur_y += int(opt_font_size * 1.9)
             if cur_y > PAGE_H - 40 * SCALE:
                 break  # avoid overflow past page bottom
@@ -6381,8 +6465,30 @@ async def handle_slide_command(msg: dict):
         if loading_id:
             await edit_msg(chat_id, loading_id, f"🎬 {len(mcqs)} টি MCQ থেকে Slide PDF বানানো হচ্ছে...")
 
+        # ── detect embedded image URLs in question/options, fetch concurrently ──
+        fetch_jobs = []  # (key, url)
+        for i, m in enumerate(mcqs):
+            _, q_url = _extract_img_url((m.get("question") or "").strip())
+            if q_url:
+                fetch_jobs.append(((i, "q"), q_url))
+            for oi, opt in enumerate(m.get("options") or []):
+                _, o_url = _extract_img_url(str(opt).strip())
+                if o_url:
+                    fetch_jobs.append(((i, oi), o_url))
+
+        images = {}
+        if fetch_jobs:
+            if loading_id:
+                await edit_msg(chat_id, loading_id, f"🖼️ {len(fetch_jobs)}টি image ডাউনলোড হচ্ছে...")
+            results = await asyncio.gather(*[_slide_fetch_image(u) for _, u in fetch_jobs])
+            for (key, _), pil_img in zip(fetch_jobs, results):
+                if pil_img is not None:
+                    images[key] = pil_img
+            if loading_id:
+                await edit_msg(chat_id, loading_id, f"🎬 Slide PDF বানানো হচ্ছে...")
+
         title = custom_title or "ATLAS Special"
-        pdf_bytes = await asyncio.to_thread(_build_mcq_slides_pdf, mcqs, title)
+        pdf_bytes = await asyncio.to_thread(_build_mcq_slides_pdf, mcqs, title, images)
 
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Slides"
         await send_document(chat_id, pdf_bytes, f"{safe_title}_Slides.pdf",
