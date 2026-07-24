@@ -1366,6 +1366,7 @@ async def _gen_groq(img, topic, count):
     # 8000 TPM per-key limit — previously EVERY call exceeded it on ALL
     # keys (413 Payload Too Large), wasting ~11s before falling to Gemini.
     key_errors = []
+    shrunk_url = None
     for i, key in enumerate(keys):
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -1378,6 +1379,29 @@ async def _gen_groq(img, topic, count):
                 groq_key_rotator.mark_healthy(key)
                 return parsed
             key_errors.append(f"key#{i+1}: HTTP {status} but JSON parse যোগ্য কোনো MCQ পাওয়া যায়নি")
+            continue
+        if status == 413:
+            # Payload too large -- the KEY itself is fine, only the image
+            # was too big. Retrying with a different key wastes it for the
+            # same reason. Shrink harder and retry ONCE on this same key
+            # before moving on, so a good key is never burned for a sizing
+            # issue (mirrors the QBM fix in _qbm_groq_call).
+            if shrunk_url is None:
+                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=40)
+            if shrunk_url:
+                txt2, status2 = await _post_openai_compat(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    key, "qwen/qwen3.6-27b",
+                    shrunk_url, prompt, mcq_count_hint=count
+                )
+                if txt2:
+                    parsed2 = _parse_mcq_json(txt2)
+                    if parsed2:
+                        groq_key_rotator.mark_healthy(key)
+                        return parsed2
+                key_errors.append(f"key#{i+1}: 413 even after shrink (status={status2})")
+                continue
+            key_errors.append(f"key#{i+1}: 413 payload too large")
             continue
         if status == 429:
             logger.warning(f"[Groq] key #{i+1}/{len(keys)} quota exhausted (429), cooling down {groq_key_rotator.COOLDOWN_SECONDS}s, trying next key")
