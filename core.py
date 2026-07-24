@@ -732,6 +732,8 @@ async def _send_document_multipart_rfc5987(client, chat_id, file_bytes: bytes, f
     import uuid
     boundary = "----AtlasWM" + uuid.uuid4().hex
     enc_filename_star = quote(filename)
+    _ext = filename.rsplit(".", 1)[-1] if "." in filename else "bin"
+    _ascii_fallback = f"file.{_ext}" if _ext.isascii() else "file.bin"
     parts = []
 
     def push_field(name, value):
@@ -750,7 +752,7 @@ async def _send_document_multipart_rfc5987(client, chat_id, file_bytes: bytes, f
 
     parts.append(
         (f'--{boundary}\r\nContent-Disposition: form-data; name="document"; '
-         f'filename="file.pdf"; filename*=UTF-8\'\'{enc_filename_star}\r\n'
+         f'filename="{_ascii_fallback}"; filename*=UTF-8\'\'{enc_filename_star}\r\n'
          f'Content-Type: {mime_type}\r\n\r\n').encode("utf-8")
     )
     parts.append(file_bytes)
