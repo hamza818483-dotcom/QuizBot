@@ -551,16 +551,22 @@ def _img_to_data_url_groq(img, mcq_count_hint=None) -> str:
         if hasattr(image, "convert"):
             image = image.convert("RGB")
         orig_w, orig_h = image.size
-        PROMPT_TOKENS = 2600  # fixed, matches _build_mcq_prompt actual size + margin
-        SAFETY_MARGIN = 700   # extra cushion: real 413s showed underestimation
+        # NOTE: QBM_EXTRACT_PROMPT_DEFAULT is ~5300 tokens (measured, not the
+        # old 2600 guess) -- the old underestimate is why real pages kept
+        # hitting 413/429 even after "shrinking" the image: almost no image
+        # budget was ever actually being reserved. Fixed here to the real size.
+        PROMPT_TOKENS = 2400  # measured from compacted QBM_EXTRACT_PROMPT_DEFAULT (~8k chars / 3.5) + margin
+        SAFETY_MARGIN = 500   # cushion for output/estimate drift
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
             est_count = mcq_count_hint
         else:
             est_count = 25  # default full-page mode target ceiling
-        est_output_tokens = max(1536, min(6000, int(est_count) * 150 + 512))
-        TOKEN_BUDGET = max(700, 8000 - PROMPT_TOKENS - est_output_tokens - SAFETY_MARGIN)
+        # Output tokens per MCQ tightened (110 vs old 150) since JSON output
+        # is compact; still capped so very high counts don't blow the budget.
+        est_output_tokens = max(900, min(3800, int(est_count) * 110 + 300))
+        TOKEN_BUDGET = max(500, 8000 - PROMPT_TOKENS - est_output_tokens - SAFETY_MARGIN)
         # qwen3.6-27b vision tokenization is roughly proportional to
         # (width/28)*(height/28) patches + a fixed base overhead.
         # Use a conservative multiplier (1.15x) since observed 413s show
@@ -8727,253 +8733,80 @@ def _get_bd_time() -> str:
 # Different from /pdfm: extracts MCQs that ALREADY EXIST in the PDF,
 # never generates new ones. OCR fallback for scanned PDFs. 3x retry per page.
 # ============================================================
-QBM_EXTRACT_PROMPT_DEFAULT = """YOU ARE A STRICT MCQ EXTRACTOR OPERATING IN A SPECIAL PERMANENT MODE. YOUR ONLY JOB IS TO EXTRACT MCQs THAT ALREADY EXIST ON THIS PAGE. YOU NEVER INVENT NEW QUESTIONS. FOLLOW EVERY RULE BELOW WITHOUT A SINGLE EXCEPTION, ALWAYS, ON EVERY PAGE, EVERY TIME.
+QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR — PERMANENT MODE. Extract ONLY MCQs that already exist on this page. Never invent new ones. Follow every rule below, always, every page.
 
-════════════════════════════════
-🔴 ABSOLUTE FORBIDDEN RULES (ZERO TOLERANCE)
-════════════════════════════════
-❌ NEVER create a new question from any text, fact, or information on the page
-❌ NEVER add even ONE extra MCQ beyond what already exists on the page/image
-❌ NEVER skip any existing MCQ — extract ALL of them, serially, in the exact order they appear
-❌ NEVER guess an answer — only detect it from actual image/page content
-❌ NEVER modify question or option text (only remove numbering prefixes)
-❌ NEVER translate question, option, or explanation text into a different language than the source — extract in the EXACT language the source page uses (Bengali stays Bengali, English stays English, word-for-word as written)
-❌ If the page has ZERO existing MCQs → output EXACTLY [] (empty array). Do NOT invent a single MCQ.
-❌ If the page has exactly N existing MCQs → output EXACTLY those N. Never more, never fewer, never a "similar" or "extra" one.
-❌ No question count is ever given to you and none is ever needed — extract however many genuinely exist, nothing else.
-❌ This is a PERMANENT, ALWAYS-ON extraction mode — these rules apply identically to every page, every call, no matter what.
+FORBIDDEN (zero tolerance):
+- Never create a new MCQ from page text/facts; never add extra MCQs; never skip any — extract ALL, in exact page order
+- Never guess an answer without source proof; never modify question/option wording (only strip numbering like ১./1./Q1./ক.)
+- Never translate — keep source language exactly (Bengali stays Bengali, English stays English)
+- 0 MCQs on page → output exactly []. N MCQs → output exactly N, never more/fewer. No target count given/needed.
 
-════════════════════════════════
-📌 EXTRACTION RULES
-════════════════════════════════
-✅ Extract ALL MCQs that already exist on this page — Bangla, English, or mixed language
-✅ Extract from any font style — printed, handwritten, bold, italic
-✅ Extract from blurry, low quality, rotated, or scanned images
-✅ Perform MULTIPLE independent internal read-throughs of the page (at least 3) and
-   cross-check your own extraction before finalizing, so no existing MCQ is missed or misread.
-   Pay special attention to the LAST MCQ on the page/column — it is the most commonly missed one.
-   After the draft list is built, count the visible MCQs on the page and verify your list length
-   matches that count exactly before finalizing.
-✅ Remove question numbering only: (১., 1., Q1., Q.1, ক., a.) from question text
-✅ Keep original question and option wording intact (do not paraphrase or rewrite existing text)
-✅ If any obvious spelling mistake is seen, correct it — but do not alter meaning
+EXTRACTION:
+- Extract all MCQs: Bangla/English/mixed, any font (printed/handwritten/bold/italic), blurry/rotated/low-quality images
+- Do 3+ independent internal read-throughs, cross-check before finalizing — don't miss the LAST MCQ on page/column. Count visible MCQs, verify your list length matches.
+- Strip only numbering prefixes; keep original wording; fix obvious spelling errors without changing meaning
 
-════════════════════════════════
-🔴 FULL QUESTION/OPTION COMPLETENESS CHECK (MANDATORY, ZERO-TOLERANCE, HIGHEST PRIORITY)
-════════════════════════════════
-- NEVER output a partial/truncated/cut-off question or option — a common and SEVERE failure
-  mode is capturing only a fragment of a word or dropping the rest of the question (e.g.
-  source says "ফোকেটিং(Folketing) কোন দেশের আইনসভা?" but output wrongly captures only
-  "ফোককেটিং" — missing the parenthetical term AND the entire rest of the question, AND
-  misspelling the word itself). This exact failure mode is STRICTLY, ABSOLUTELY FORBIDDEN.
-- MANDATORY PROCEDURE for every single MCQ before finalizing:
-  1) Read the ENTIRE question line from the very first character to the final punctuation
-     mark (usually ? or ।) — including any parenthetical English/transliteration term,
-     any number, and any trailing clause. A question is NEVER complete until it ends in
-     proper terminal punctuation or a clearly finished clause.
-  2) Compare word-count/segment-count of your extracted question against what the source
-     line clearly shows. If your output has fewer words/segments, you have TRUNCATED — go
-     back and re-read the full line before outputting anything.
-  3) Do the same full end-to-end read for all 4 options and for any answer-key text.
-- Spelling accuracy is part of completeness: re-check every word character-by-character
-  against the source. A misspelled word (extra/missing/wrong letter) is just as much a
-  failure as a truncated word — both must be corrected before output.
-- If any word/name is genuinely hard to read (blurry, low-res, cut by image edge, unclear
-  handwriting) → do NOT leave it partial, blank, or skip it. Use every available clue
-  (surrounding context, partial visible letters, the parenthetical English term if present,
-  general knowledge of the topic) to independently reason out and output the single BEST,
-  most likely complete and CORRECTLY-SPELLED word — never a guessed-wrong fragment, never
-  a truncated piece, never a gap.
-- If the QUESTION TEXT ITSELF is unclear/blurry/cut-off but the 4 OPTIONS are readable → use
-  the options as your primary context clue to reconstruct the question. The options reveal
-  the topic/category (e.g. if all 4 options are country names, the question is almost
-  certainly "... কোন দেশের ...?" or "...-এর রাজধানী/মুদ্রা কী?" type; if all 4 are dates, it's
-  a "কত সালে/কবে" question). Combine this option-based inference with general knowledge to
-  output the single BEST, most likely, complete, correctly-spelled question that matches
-  those exact options — never leave the question blank or as an unreadable fragment.
-- This completeness+spelling check applies with equal strictness to the question, all 4
-  options, and any explanation/answer-key text — no exceptions, on every MCQ, every time.
+COMPLETENESS (mandatory, zero-tolerance):
+- Never output partial/truncated question or option (e.g. missing parenthetical terms, cut-off clauses). A question ends only at proper punctuation (?।) or a clearly finished clause.
+- Before finalizing each MCQ: read question start-to-end fully; compare word/segment count vs source — fewer means truncated, re-read; do the same full check for all 4 options and any answer-key text
+- Verify spelling character-by-character against source; a misspelled word is as bad as a truncated one
+- If a word/name is hard to read: never leave blank/partial — use context, partial visible letters, parenthetical terms, or general knowledge to output the single best, correctly-spelled, complete word
+- If question text is unclear but 4 options are readable: infer the question type from the options (e.g. all country names → "কোন দেশের...?" type; all dates → "কত সালে/কবে" type) plus general knowledge, output the best complete question matching those options
+- Same completeness+spelling strictness applies to question, all 4 options, and explanation — always
 
-════════════════════════════════
-🎯 ANSWER DETECTION (ALL FORMATS) — triple-check before finalizing
-════════════════════════════════
-The correct answer MUST come from an actual source found in the page/image content.
-NEVER pick/guess an answer yourself — the answer must always be traceable to one of
-the source types below. Scan for ALL of these possible answer sources, in this order
-of likelihood, before concluding no answer exists:
+ANSWER DETECTION (triple-check before finalizing):
+Answer must trace to an actual source on the page — never guess. Check in this priority order:
+A) Mark directly on an option (circle/tick✓/cross✗-elimination/underline/bold/highlight/star) — if ANY option has ANY visual mark, that IS the answer, 100%, no second-guessing, overrides all other sources
+B) Answer given right after the MCQ block, before next question
+C) Answer table at bottom of same page (e.g. "1-A, 2-C...") — only if no mark on any option
+D) Combined answer key several pages later (scan forward through all pages — banks often group answers after 2-3 pages or at document end) — only if no mark on any option
+E) Answer key on page(s) immediately before/after, any format — only if no mark on any option
+Priority is absolute: A > B > C > D > E. Match strictly by question number (or exact text if numbers unclear).
+Only if genuinely no answer found anywhere after scanning all sources → set answer "A" and note in explanation "Answer not found in source" (last resort only).
+Convert source format (number/checkmark/circled letter/bold) to standard A/B/C/D. Re-verify each answer twice before finalizing — wrong is worse than missing.
 
-Source A — Answer marked directly on an option: circle, tick (✓), cross(✗)-elimination,
-  underline, bold, highlight, star (★), or any other visual mark on one option
-  🔴 ABSOLUTE PRIORITY: if ANY option on the page has ANY visual mark on it — no matter
-  which type (tick/circle/cross/underline/bold/highlight/star/anything else) — that marked
-  option IS the answer, 100%, strictly, with zero exception. Do NOT second-guess it, do NOT
-  cross-check it against an answer key elsewhere, and do NOT let a separate answer-key table
-  (Source C/D/E) override or contradict a mark that is physically on the option itself. A
-  mark directly on an option is ground truth and wins over every other source, always.
-Source B — Answer given immediately with/after the MCQ itself (right after the question
-  block, before the next question starts)
-Source C — Answer table/box at the BOTTOM of the SAME page: a small table, boxed list,
-  or line like "Answer: 1-A, 2-C, 3-B..." — match question number → correct option
-  (only use this when NO mark exists directly on any option for that question)
-Source D — Combined/consolidated answer key appearing SEVERAL PAGES LATER (not
-  necessarily the very next page — scan forward through ALL available pages, since many
-  question banks group all answers together after 2-3 pages of questions, or at the very
-  end of the document): match question number exactly → correct option
-  (only use this when NO mark exists directly on any option for that question)
-Source E — Answer key on the page(s) immediately BEFORE or AFTER this one, in any of
-  the above formats (marked option, inline, or boxed table)
-  (only use this when NO mark exists directly on any option for that question)
+OPTION ORDER (absolute, never reorder/shuffle):
+- Whatever label system the source uses (A,B,C,D / a,b,c,d / ক,খ,গ,ঘ / ১,২,৩,৪ / bullets/no label, top-to-bottom or left-to-right) — output uses the SAME VISUAL POSITION order: source's 1st option → output A, 2nd → B, 3rd → C, 4th → D. This is position matching, not label matching.
+- Never reorder/sort option text (alphabetically, by value, or any way) — preserve source sequence exactly
+- Correct position matching auto-gives correct answer letter, since answer = position of correct text in OUTPUT, not source's original label. Example: source order গ,খ,ক,ঘ, correct is source's "ক" → output slot C (3rd position) → answer="C", not "A"
+- Before finalizing each MCQ, verify in 3 steps: (1) output's 4 slots match source's 4 positions, (2) find which slot the correct answer text landed in, (3) confirm answer letter matches that slot — fix any mismatch
+- Numbers/years/dates (Bengali বা English digits) stay exactly as in source — never convert between Bengali/English numerals. Verify digit-by-digit (৯↔9, ৬↔6 mixups strictly forbidden).
 
-Rules while scanning:
-→ 🔴 PRIORITY ORDER IS ABSOLUTE: Source A (mark on option) > Source B > Source C > Source D
-  > Source E. If a mark exists directly on an option, stop right there — that is the answer,
-  do not continue scanning other sources for that question.
-→ Check every source type above before deciding an answer is missing — the answer for a
-  question on this page may live on a completely different page from the ones you've
-  processed so far, so scan broadly, not just this single page.
-→ Match strictly by question number (or exact question text if numbers are unclear/reused).
-→ NEVER invent, guess, or default an answer yourself under any circumstance.
-→ If — and only if — you have scanned all available pages/sources and genuinely found NO
-  answer indication anywhere for that specific question → set answer as "A" and note in
-  explanation "Answer not found in source". This is the last resort, never the first choice.
-→ Convert whatever format the source uses (number, checkmark, circled letter, bold option,
-  etc.) into the standard A/B/C/D letter for output.
-→ Re-verify each detected answer against its source at least twice before finalizing —
-  a wrong answer is worse than a missing one, so confirm carefully.
+উদ্দীপক (PASSAGE/STIMULUS) HANDLING:
+- If a passage/stimulus/scenario precedes a question or group of questions, identify it and prepend its full text to each linked MCQ's question (so each MCQ is self-contained, never incomplete without the passage)
+- If multiple MCQs share one উদ্দীপক, copy the same passage into each one individually
+- Don't confuse regular questions with passage-based ones — only actual passage/scenario/case-study content counts as উদ্দীপক
 
-════════════════════════════════
-🎯 OPTION ORDER (ABSOLUTE, ZERO-TOLERANCE — কখনো শাফল/পুনর্বিন্যাস/re-sort করবে না)
-════════════════════════════════
-- পেজে option যেই label সিস্টেমেই থাকুক (A,B,C,D / a,b,c,d / ক,খ,গ,ঘ / ১,২,৩,৪ / বুলেট/কোনো
-  label ছাড়া top-to-bottom বা left-to-right) — output-এ ঠিক সেই ভিজ্যুয়াল/সোর্স পজিশনের
-  ক্রমেই ১ম, ২য়, ৩য়, ৪র্থ option বসাবে output schema-র A,B,C,D slot-এ। Source-এর ১ম
-  option → output A slot, ২য় → B slot, ৩য় → C slot, ৪র্থ → D slot। এটা label matching নয়,
-  POSITION matching — সোর্সের label যা-ই হোক (a/ক/1/bullet), তার পজিশনই সিদ্ধান্তকারী।
-- Option-এর টেক্সট কখনো reorder/sort/rearrange করবে না (বর্ণানুক্রমিক সাজানো, মান অনুযায়ী
-  সাজানো — কোনোভাবেই না) — সোর্সে যেই sequence-এ ছিল ঠিক সেই sequence অক্ষুণ্ণ রাখবে।
-- Option সিরিয়াল ঠিকভাবে (স্ট্রিক্টলি পজিশন ম্যাচ করে) রাখা হলে answer letter ও স্বয়ংক্রিয়ভাবে
-  সঠিক সিরিয়ালেই পাওয়া যাবে — কারণ answer letter নির্ধারণ করা হয় "সঠিক উত্তরটি output-এর কোন
-  position-এ আছে" তার ভিত্তিতে, সোর্সের original label-এর ভিত্তিতে না।
-  উদাহরণ: সোর্সে option ক্রম গ,খ,ক,ঘ থাকলে এবং সঠিক উত্তর সোর্সের "ক" হলে — output-এ ক পজিশন
-  ৩ নম্বরে থাকবে (output slot C), তাই answer = "C" (পজিশন অনুযায়ী), "A" নয়।
-- প্রতিটা MCQ finalize করার আগে ৩ ধাপে verify করো (STRICT, SKIP করা যাবে না):
-  ধাপ ১: output-এর ৪টা option স্লট সোর্সের ৪টা option-এর পজিশন অনুযায়ী সঠিক কি না চেক করো।
-  ধাপ ২: সঠিক উত্তরের টেক্সট output-এর কোন slot-এ (A/B/C/D) বসেছে খুঁজে বের করো।
-  ধাপ ৩: answer letter ঠিক সেই slot-কেই নির্দেশ করছে কি না নিশ্চিত করো — অমিল থাকলে ঠিক করো।
-- সংখ্যা/সাল/তারিখ (Bengali সংখ্যা যেমন ১৯৭৬ বা English সংখ্যা যেমন 1976) অক্ষত হুবহু রাখবে —
-  Bengali সংখ্যাকে English-এ বা English সংখ্যাকে Bengali-তে কখনো convert করবে না। প্রতিটা
-  সংখ্যা সোর্সের সাথে digit-by-digit মিলিয়ে verify করবে (৯↔9, ৬↔6 গুলিয়ে ফেলা কড়াভাবে নিষিদ্ধ)।
+EXPLANATION RULES (strict priority order, always):
+1) TOP PRIORITY: if the page has ANY explanation/reasoning text attached to this specific MCQ, copy it 100% VERBATIM, byte-for-byte, exactly as written (same spelling/punctuation/wording) — no summarizing, shortening, paraphrasing, translating, or "improving." This overrides the 165-char limit below. Only skip to case 2 if truly no explanation exists near this MCQ.
+2) Else if no direct explanation but page has other relevant info (paragraph/note/box/table/fact) about this MCQ's topic → build explanation from that info as direct fact (see forbidden phrases below). Max 165 chars, Bengali.
+3) Else if nothing relevant exists anywhere → generate the best accurate explanation from your own knowledge. Max 165 chars, Bengali.
+Whichever case applies, explanation should convey why the correct option is right + brief context on wrong options — except case 1, used exactly as-is regardless of length/coverage.
+Case 1 is always checked FIRST for every MCQ before considering self-generation.
 
-════════════════════════════════
-📖 উদ্দীপক (PASSAGE/STIMULUS) HANDLING — STRICT, ALWAYS ACTIVE
-════════════════════════════════
-- যদি কোনো প্রশ্ন বা প্রশ্নগোষ্ঠীর আগে একটা উদ্দীপক (passage/stimulus/scenario paragraph) থাকে,
-  সেই উদ্দীপকটি প্রথমে identify করবে এবং তার সাথে যুক্ত প্রতিটা MCQ-কে উদ্দীপকের সাথে reply/link
-  করেই ধরবে — অর্থাৎ output-এ প্রতিটা সংশ্লিষ্ট MCQ-র question টেক্সটের শুরুতে সেই উদ্দীপকের
-  পূর্ণ টেক্সট জুড়ে দিতে হবে, তারপর তার নিচে সেই নির্দিষ্ট MCQ-র প্রশ্ন — যাতে প্রতিটা MCQ standalone
-  ভাবে বোঝা যায় (উদ্দীপক ছাড়া প্রশ্নটা অসম্পূর্ণ থাকা উচিত নয়)।
-- একই উদ্দীপকের অধীনে একাধিক MCQ থাকলে প্রতিটাতেই সেই একই উদ্দীপক পুনরায় জুড়ে দিতে হবে (কপি
-  করে), প্রতিটা MCQ আলাদা আলাদা ভাবে সম্পূর্ণ (self-contained) থাকতে হবে।
-- উদ্দীপক শনাক্তকরণে সতর্ক থাকবে: সাধারণ প্রশ্নের সাথে উদ্দীপক-ভিত্তিক প্রশ্ন গুলিয়ে ফেলবে না —
-  passage/scenario/case-study টাইপ কনটেন্ট যা একাধিক প্রশ্নের বেস হিসেবে কাজ করছে, সেটাই উদ্দীপক।
+ALL-4-OPTIONS COVERAGE (strict):
+- If source has an explanation (case 1) → copy 100% verbatim regardless of which/how many options it covers, never edit/extend
+- If source has NO explanation (case 2/3) → you must write one covering all 4 options: why correct is right + why each of the 3 wrong ones is incorrect, within 165 Bengali chars
+- Never mix: verbatim source text is never edited to add coverage; self-written explanations always cover all 4
 
-════════════════════════════════
-💡 EXPLANATION RULES (STRICT PRIORITY ORDER — follow exactly, always, in this order)
-════════════════════════════════
-🔴 ABSOLUTE TOP PRIORITY — READ FIRST:
-If the page/image contains ANY explanation/answer-reasoning/ব্যাখ্যা text that is directly
-attached to, written below, or clearly associated with this specific MCQ — you MUST use
-that EXACT text as the explanation, with ZERO exceptions. This overrides every other rule
-in this section, including the character-length limit below. Do NOT summarize, shorten,
-paraphrase, translate, "clean up", or improve it in ANY way — copy it byte-for-byte,
-word-for-word, character-for-character, EXACTLY as it appears in the source (same spelling,
-same punctuation, same wording, same everything). This is a 100% verbatim, same-to-same,
-mandatory copy — never a rewritten or condensed version. Only if this case does not apply
-(no explanation exists anywhere near/for this MCQ) do you move to case 2 below.
+MATH/CHEMISTRY FORMATTING (always active, in question/options/explanation):
+- Use proper Unicode subscript/superscript — never raw underscore/caret or plain digits where sub/superscript belongs
+- Chemical formulas: H₂O, CO₂, NaHCO₃, H₂SO₄, Ca(OH)₂, Fe₂O₃, C₆H₁₂O₆ (never H2O, CO2 style)
+- Ionic charges: Na⁺, Ca²⁺, Fe³⁺, Cl⁻, SO₄²⁻, O²⁻
+- Exponents: x², 10³, a⁻¹, E=mc², 6.02×10²³, v₀, xₙ (never x^2, 10^3, x_0)
+- Units/degrees/multiplication: °C, °F, m/s², cm³, kg·m/s², use × not x
+- Apply consistently across question, all 4 options, and explanation — never mix formats within one MCQ
+- Double-check every number next to a letter/formula/exponent before finalizing
 
-1) If the MCQ already has an explanation/answer-reasoning written directly below or attached
-   to it on the page → copy that explanation 100% VERBATIM, word-for-word, character-for-
-   character, EXACTLY as written in the source — same spelling, same punctuation, same
-   wording. Do NOT paraphrase, shorten, rewrite, "improve", or apply the 165-character limit
-   to this case — the source explanation is used as-is regardless of its length. This is the
-   single highest-priority rule in this entire section and is NEVER skipped when applicable.
-2) Else if there is no explanation directly under the MCQ, but the page contains other
-   relevant information related to this MCQ's topic (a paragraph, note, box, table, or fact
-   elsewhere on the page/related pages that relates to this question) → build the explanation
-   using that relevant information, stated as direct fact (see forbidden-phrase rule below).
-   Max 165 characters, Bengali language, factually accurate.
-3) Else if there is no explanation anywhere and no relevant info anywhere on the page/source
-   related to this MCQ → then, and ONLY then, generate the BEST, most relevant, factually
-   accurate explanation yourself from your own real knowledge.
-   Max 165 characters, Bengali language, factually accurate.
-- Whichever of the 3 cases applies, the explanation content must always convey: why the
-  correct option is correct, AND brief relevant info tied to why the other options are
-  wrong/related context — except in case 1, where you copy the source explanation exactly
-  as-is even if it doesn't explicitly cover the wrong options and even if it exceeds 165 chars.
-- This priority order (1 → 2 → 3) is permanent and always active — never skip a step or
-  reorder it, on every single MCQ, every time. Case 1 (verbatim source copy) is checked FIRST
-  for every MCQ, before considering generating any explanation yourself.
+FORBIDDEN SOURCE-REFERENCE PHRASES (question and explanation, always):
+Never use phrases referring back to the source itself instead of stating facts directly:
+❌ "উল্লেখিত চিত্রে"/"চিত্রে দেখা যাচ্ছে"/"বক্সে"/"ছকে"/"উদ্দীপকে"/"সারণিতে"/"টপিকে"/"পৃষ্ঠায়"/"প্যাসেজে"/"অনুচ্ছেদে"/"গ্রাফে"
+❌ "দেখা যাচ্ছে"/"বলা আছে"/"উল্লেখ করা আছে"/"লক্ষ করা যায়"/"দেখানো হয়েছে"/"দেওয়া আছে"/"প্রদত্ত"
+❌ English equivalents: "as shown in the figure/box/table/diagram/passage", "mentioned in the text/page", "as given"
+Always state facts directly and plainly, as general knowledge — never imply it came from "the shown image/box/table."
 
-🔴 ALL-4-OPTIONS COVERAGE RULE (STRICT, MANDATORY):
-- DECISION RULE, checked for every single MCQ, every time:
-  → If the page/source has an explanation for this MCQ (Case 1 above) → copy it 100%
-    VERBATIM/hubuhu, byte-for-byte, exactly as-is, no matter which/how many options it
-    covers, no matter its length. NEVER edit, extend, or add anything to source text.
-  → If the page/source has NO explanation for this MCQ (Case 2 or 3) → you MUST write the
-    explanation YOURSELF such that it explicitly covers ALL 4 OPTIONS: state why the correct
-    option is right, AND briefly why each of the 3 wrong options is incorrect/irrelevant —
-    all 4 options addressed, within the 165-character Bengali limit. This is mandatory and
-    never skipped when you are the one generating the explanation.
-- Never mix the two behaviors: verbatim-copy source text is never partially rewritten to
-  "add" 4-option coverage, and self-written explanations never skip 4-option coverage.
-
-════════════════════════════════
-🧮 MATH / CHEMISTRY FORMATTING (MANDATORY, ALWAYS ACTIVE — question, options, AND explanation)
-════════════════════════════════
-This rule is PERMANENTLY ON for every MCQ produced, with no exceptions, regardless of subject:
-- Always use proper Unicode subscript characters for chemical formula quantities and
-  proper Unicode superscript characters for exponents/powers/ionic charges — NEVER raw
-  underscore/caret notation, NEVER plain inline digits where a subscript/superscript belongs.
-- Chemical formulas: subscript quantity numbers correctly.
-  Correct: H₂O, CO₂, NaHCO₃, H₂SO₄, Ca(OH)₂, Fe₂O₃, C₆H₁₂O₆
-  Wrong: H2O, CO2, NaHCO3, H2SO4 (never output these)
-- Ionic charges/oxidation states: use superscript with correct sign.
-  Correct: Na⁺, Ca²⁺, Fe³⁺, Cl⁻, SO₄²⁻, O²⁻
-- Exponents/powers/scientific notation: superscript the exponent.
-  Correct: x², 10³, a⁻¹, E=mc², 6.02×10²³, v₀, xₙ
-  Wrong: x^2, 10^3, x_0 (never output caret/underscore literally)
-- Units, degree symbols, and multiplication signs must be correctly formatted: °C, °F, m/s²,
-  cm³, kg·m/s², use × not x for multiplication in scientific/math contexts.
-- Apply this identically and consistently across the question text, all four options, AND
-  the explanation — never mix correct and incorrect formatting within the same MCQ.
-- Double-check every number adjacent to a letter/formula/exponent before finalizing output:
-  if it should be a subscript or superscript, it MUST be rendered as one, always.
-
-════════════════════════════════
-🚫 FORBIDDEN SOURCE-REFERENCE PHRASES (PERMANENT, ALWAYS ACTIVE — question AND explanation)
-════════════════════════════════
-NEVER, under any circumstances, in the question text OR the explanation text, use any of
-these phrase patterns (or their Bengali equivalents, or any semantically similar phrase)
-that refer back to the source material itself instead of stating the fact directly:
-❌ "উল্লেখিত চিত্রে" / "চিত্রে দেখা যাচ্ছে" / "বক্সে" / "ছকে" / "উদ্দীপকে" / "সারণিতে" /
-   "টপিকে" / "পৃষ্ঠা নং এ" / "পৃষ্ঠায়" / "প্যাসেজে" / "অনুচ্ছেদে" / "লেখচিত্রে" / "গ্রাফে"
-❌ "দেখা যাচ্ছে" / "বলা আছে" / "উল্লেখ করা আছে" / "উল্লেখ আছে" / "লক্ষ করা যায়" /
-   "বর্ণনা আছে" / "দেখানো হয়েছে" / "দেওয়া আছে" / "প্রদত্ত" / "উপরে দেখানো"
-❌ Any English equivalents: "as shown in the figure/box/table/diagram/passage", "shown above",
-   "mentioned in the text/page", "as given", "according to the figure/table/passage above"
-❌ Any phrase — in any language, any wording — that talks ABOUT the source (image/box/table/
-   diagram/passage/page number/graph) instead of stating the fact/content directly and plainly.
-Instead: ALWAYS state the actual fact, information, or content directly and naturally, as if
-it were plain general knowledge — NEVER mention or imply that it came from "the shown
-image/box/table/passage/page". This rule applies permanently, always, to every single MCQ's
-question and explanation, with absolutely no exceptions, regardless of subject or source type.
-
-════════════════════════════════
-📤 OUTPUT FORMAT
-════════════════════════════════
-Output ONLY a valid JSON array. No extra text. No markdown. No explanation outside JSON.
-If NO MCQ exists on this page → return exactly: []
-
+OUTPUT FORMAT:
+Only a valid JSON array, no extra text, no markdown, no explanation outside JSON. No MCQ on page → return exactly [].
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}]"""
 
 
