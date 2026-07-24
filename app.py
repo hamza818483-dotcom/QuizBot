@@ -24,7 +24,7 @@ import hashlib
 import base64
 from io import BytesIO
 from collections import deque
-from typing import Optional
+from typing import Optional, Dict
 from datetime import datetime
 from datetime import timedelta
 import pytz
@@ -61,6 +61,7 @@ from core import (
     get_recent_errors, clear_error_logs,
     add_watermark_to_pdf,
     get_bot_username,
+    BD_TZ,
 )
 
 # chorcha.net mhtml/html → Premium PDF (Question Bank converter)
@@ -1259,18 +1260,41 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
         logger.warning(f"[AI-ROT] {model} err: {e}")
         return "", 0
 
+_key_exhausted_day: Dict[str, str] = {}   # key -> 'YYYY-MM-DD' (BD) it was marked exhausted
+_key_exhausted_flag: Dict[str, bool] = {}  # key -> True while exhausted-today
+
+def _is_groq_key_exhausted_today(key: str) -> bool:
+    """Daily (BD-day) quota-exhaustion memory: once a key hits 429, it's
+    skipped for the rest of the BD-day instead of being re-tried every call
+    (the old 60s cooldown re-tried a still-dead key after just a minute)."""
+    today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
+    if _key_exhausted_day.get(key) != today:
+        _key_exhausted_day[key] = today
+        _key_exhausted_flag[key] = False
+    return _key_exhausted_flag.get(key, False)
+
+def _mark_groq_key_exhausted_today(key: str):
+    today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
+    _key_exhausted_day[key] = today
+    _key_exhausted_flag[key] = True
+
+def _mark_groq_key_healthy_today(key: str):
+    _key_exhausted_flag[key] = False
+
 class GroqKeyRotator:
     """Rotates across multiple Groq keys (GROQ_KEYS comma-separated, falls back
     to single GROQ_API_KEY). On quota/rate-limit (429) for one key, tries the
     next key immediately within the same page-call before giving up to Gemini.
-    Keys that hit 429 are put on a short cooldown so future calls start with
-    a healthy key first instead of re-trying an exhausted one every time."""
+    A key that hits 429 is marked exhausted for the rest of the current BD-day
+    (not just a short cooldown) so future calls skip straight past a
+    known-dead key instead of wasting a round-trip re-confirming it's still
+    exhausted."""
     COOLDOWN_SECONDS = 60
 
     def __init__(self):
         self.keys = []
         self.current = 0
-        self._cooldown_until = {}  # key -> unix timestamp when it's usable again
+        self._cooldown_until = {}  # key -> unix timestamp when it's usable again (short-term)
         self._load_keys()
 
     def _load_keys(self):
@@ -1285,20 +1309,27 @@ class GroqKeyRotator:
         return list(self.keys)
 
     def ordered_keys(self):
-        """All keys, healthy ones first (not currently in cooldown), then
-        cooled-down ones last — so a call never wastes its first attempt on
-        a key we already know is exhausted."""
+        """All keys, healthy ones first: not exhausted-today AND not in short
+        cooldown, then short-cooldown keys, then today-exhausted keys last —
+        so a call never wastes its first attempt on a key we already know is
+        dead for the day. If every key is exhausted-today, all are returned
+        anyway (better to retry than return nothing)."""
         keys = self.all_keys()
         now = time.time()
-        healthy = [k for k in keys if self._cooldown_until.get(k, 0) <= now]
-        cooling = [k for k in keys if self._cooldown_until.get(k, 0) > now]
-        return healthy + cooling
+        not_exhausted = [k for k in keys if not _is_groq_key_exhausted_today(k)]
+        exhausted = [k for k in keys if _is_groq_key_exhausted_today(k)]
+        pool = not_exhausted if not_exhausted else keys
+        healthy = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
+        cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
+        return healthy + cooling + (exhausted if not_exhausted else [])
 
     def mark_rate_limited(self, key: str):
         self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
+        _mark_groq_key_exhausted_today(key)
 
     def mark_healthy(self, key: str):
         self._cooldown_until.pop(key, None)
+        _mark_groq_key_healthy_today(key)
 
 groq_key_rotator = GroqKeyRotator()
 
@@ -1357,11 +1388,16 @@ async def _gen_groq(img, topic, count):
     _LAST_GROQ_ERROR["reason"] = f"Groq সব {len(keys)}টি key-তেই fail করেছে — [" + "; ".join(key_errors) + "]"
     return []
 
+_generic_exhausted_day: Dict[str, str] = {}   # "label:key" -> 'YYYY-MM-DD' (BD)
+_generic_exhausted_flag: Dict[str, bool] = {}
+
 class GenericKeyRotator:
     """Reusable multi-key rotator with 429-cooldown, healthy-key-first ordering —
-    same pattern as GroqKeyRotator. Reads keys from the EXISTING env var itself
-    (e.g. NVIDIA_API_KEY) — comma-separate multiple keys in that same variable,
-    no separate _KEYS var needed."""
+    same pattern as GroqKeyRotator, including daily (BD-day) exhaustion memory
+    so a known-dead key for today is skipped instead of re-tried every call.
+    Reads keys from the EXISTING env var itself (e.g. NVIDIA_API_KEY) —
+    comma-separate multiple keys in that same variable, no separate _KEYS var
+    needed."""
     COOLDOWN_SECONDS = 60
 
     def __init__(self, env_var: str, label: str = ""):
@@ -1382,18 +1418,37 @@ class GenericKeyRotator:
             self._load_keys()
         return list(self.keys)
 
+    def _dkey(self, key: str) -> str:
+        return f"{self.label}:{key}"
+
+    def _is_exhausted_today(self, key: str) -> bool:
+        today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
+        dk = self._dkey(key)
+        if _generic_exhausted_day.get(dk) != today:
+            _generic_exhausted_day[dk] = today
+            _generic_exhausted_flag[dk] = False
+        return _generic_exhausted_flag.get(dk, False)
+
     def ordered_keys(self):
         keys = self.all_keys()
         now = time.time()
-        healthy = [k for k in keys if self._cooldown_until.get(k, 0) <= now]
-        cooling = [k for k in keys if self._cooldown_until.get(k, 0) > now]
-        return healthy + cooling
+        not_exhausted = [k for k in keys if not self._is_exhausted_today(k)]
+        exhausted = [k for k in keys if self._is_exhausted_today(k)]
+        pool = not_exhausted if not_exhausted else keys
+        healthy = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
+        cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
+        return healthy + cooling + (exhausted if not_exhausted else [])
 
     def mark_rate_limited(self, key: str):
         self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
+        today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
+        dk = self._dkey(key)
+        _generic_exhausted_day[dk] = today
+        _generic_exhausted_flag[dk] = True
 
     def mark_healthy(self, key: str):
         self._cooldown_until.pop(key, None)
+        _generic_exhausted_flag[self._dkey(key)] = False
 
 
 nvidia_rotator = GenericKeyRotator("NVIDIA_API_KEY", "NVIDIA")
