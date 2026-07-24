@@ -9098,9 +9098,10 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     keys = groq_key_rotator.all_keys()
     if not keys:
         return ""
-    data_url = _img_to_data_url_groq(img, mcq_count_hint=10)
+    data_url = _img_to_data_url_groq(img, mcq_count_hint=25)
     if not data_url:
         return ""
+    shrunk_url = None
     for key in keys:
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -9109,6 +9110,19 @@ async def _qbm_groq_call(img, prompt: str) -> str:
         )
         if txt:
             return txt
+        if status == 413:
+            if shrunk_url is None:
+                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=40)
+            if shrunk_url:
+                txt2, status2 = await _post_openai_compat(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    key, "qwen/qwen3.6-27b",
+                    shrunk_url, prompt
+                )
+                if txt2:
+                    return txt2
+                logger.warning(f"[Groq-QBM] key failed even after shrink (status={status2}), trying next key")
+                continue
         if status != 429:
             logger.warning(f"[Groq-QBM] key failed (status={status}), trying next key")
     return ""
