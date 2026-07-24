@@ -12654,8 +12654,32 @@ async def _drain_user_queue(uid: int):
         finally:
             _LOCK_ACQUIRED_AT.pop(uid, None)
 
+_seen_update_ids = deque(maxlen=2000)
+_seen_update_ids_set = set()
+
+def _is_duplicate_update(update_id) -> bool:
+    """Telegram redelivers the same update on webhook timeout/retry — without
+    dedup, this caused rare double-processing of a single command (e.g. /poll
+    running twice, with one run occasionally hitting a cold is_auth cache/DB
+    race and wrongly falling through to the unauthorized message even though
+    the SAME owner uid succeeded moments earlier on the other run)."""
+    if update_id is None:
+        return False
+    if update_id in _seen_update_ids_set:
+        return True
+    _seen_update_ids.append(update_id)
+    _seen_update_ids_set.add(update_id)
+    while len(_seen_update_ids_set) > _seen_update_ids.maxlen:
+        old = _seen_update_ids.popleft()
+        _seen_update_ids_set.discard(old)
+    return False
+
+
 async def process_update(update: dict):
     try:
+        if _is_duplicate_update(update.get("update_id")):
+            logger.info(f"[Update] Duplicate update_id={update.get('update_id')} ignored")
+            return
         if "message" in update:
             uid = update["message"].get("from", {}).get("id")
             _msg = update.get("message", {})
