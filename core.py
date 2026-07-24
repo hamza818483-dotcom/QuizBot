@@ -1159,8 +1159,11 @@ _admin_check_cache = {}  # uid -> (is_admin: bool, checked_at: float)
 _ADMIN_CACHE_TTL = 300  # 5 min
 
 async def db_is_owner_or_admin(uid: int) -> bool:
-    if uid == OWNER_ID:
-        return True
+    try:
+        if int(uid) == int(OWNER_ID):
+            return True
+    except (TypeError, ValueError):
+        pass
     now = time.time()
     cached = _admin_check_cache.get(uid)
     if cached and (now - cached[1]) < _ADMIN_CACHE_TTL:
@@ -1170,7 +1173,8 @@ async def db_is_owner_or_admin(uid: int) -> bool:
         result = len(r.data) > 0
         _admin_check_cache[uid] = (result, now)
         return result
-    except:
+    except Exception as e:
+        logger.warning(f"[db_is_owner_or_admin] check failed for uid={uid}: {e}")
         return False
 
 async def db_track_user(uid: int, uname: str):
