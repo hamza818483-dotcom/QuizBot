@@ -546,9 +546,15 @@ async function handleTgSendDoc(request) {
       if (body.message_thread_id) pushField('message_thread_id', String(body.message_thread_id));
       // File part: include BOTH a plain ASCII-safe fallback name and the
       // RFC 5987 filename* parameter (standard "belt and suspenders" pattern
-      // for non-ASCII filenames in multipart uploads).
+      // for non-ASCII filenames in multipart uploads). The ASCII fallback
+      // must preserve the REAL extension (.csv/.pdf/etc) — it used to be
+      // hardcoded to "file.pdf", which made every non-ASCII-named CSV
+      // export (e.g. a Bengali topic name) show up in Telegram as a .pdf
+      // file even though the actual content/mime_type was CSV.
+      const extMatch = filename.match(/\.([a-zA-Z0-9]+)$/);
+      const safeExt = extMatch ? extMatch[1] : 'bin';
       parts.push(enc.encode(
-        `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="file.pdf"; filename*=UTF-8''${encFilenameStar}\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="file.${safeExt}"; filename*=UTF-8''${encFilenameStar}\r\n` +
         `Content-Type: ${body.mime_type || 'application/octet-stream'}\r\n\r\n`
       ));
       parts.push(bytes);
