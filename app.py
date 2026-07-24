@@ -13150,6 +13150,7 @@ async def handle_message(msg: dict):
 
     elif text.startswith("/poll") and "\n" in text and "t.me/" in text:
         if not is_auth:
+            logger.warning(f"[UNAUTH] /poll blocked for uid={uid} (type={type(uid).__name__}), OWNER_ID={OWNER_ID} (type={type(OWNER_ID).__name__}), chat_id={chat_id}")
             await send_msg(chat_id, UNAUTH_MSG)
             return
         _spawn_command_task(uid, handle_poll_extract(msg))
