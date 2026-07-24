@@ -9098,7 +9098,7 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     keys = groq_key_rotator.all_keys()
     if not keys:
         return ""
-    data_url = _img_to_data_url_groq(img)
+    data_url = _img_to_data_url_groq(img, mcq_count_hint=10)
     if not data_url:
         return ""
     for key in keys:
