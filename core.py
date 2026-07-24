@@ -330,10 +330,13 @@ def _append_error_log(record: logging.LogRecord):
 
 
 class _FileErrorCaptureHandler(logging.Handler):
-    """Captures every logger.error()/logger.exception() call and appends it
-    to today's local log file, without blocking the caller."""
+    """Captures every logger.warning()/error()/exception() call and appends
+    it to today's local log file, without blocking the caller. Includes
+    WARNING (not just ERROR+) since real diagnosable issues in this bot
+    (auth failures, provider fallbacks, rate limits) are logged at WARNING
+    level — restricting to ERROR-only made /error blind to them."""
     def emit(self, record: logging.LogRecord):
-        if record.levelno < logging.ERROR:
+        if record.levelno < logging.WARNING:
             return
         try:
             _append_error_log(record)
