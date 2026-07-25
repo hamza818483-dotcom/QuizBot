@@ -56,6 +56,23 @@ CHORCHA_BASE_URL = "https://chorcha.net"
 CLICK_TIMEOUT_MS = 15000
 SETTLE_WAIT_MS = 1500
 
+# Some category cards (একাডেমিক / মূলবই / মেডিকেল / ভার্সিটি 'ক') render as a
+# single flattened image with the label baked in, AND their internal URL
+# slug has no derivable relation to the Bengali label or to each other
+# (e.g. একাডেমিক -> hsc-chemistry-1st-test-paper, not chem_1-academic) --
+# so neither text-matching nor data-event-matching can ever find them.
+# Known label -> URL mappings go here, keyed by subject context (the last
+# preceding line before these labels in the user's step list, e.g.
+# "রসায়ন ১ম পত্র"). Extend this table as more subjects are reported.
+KNOWN_CATEGORY_CARD_URLS = {
+    "রসায়ন ১ম পত্র": {
+        "একাডেমিক": "https://chorcha.net/question-bank/hsc-chemistry-1st-test-paper",
+        "মূলবই": "https://chorcha.net/question-bank/chem_1-mainbook",
+        "মেডিকেল": "https://chorcha.net/read-archive/chem_1-medical",
+        "ভার্সিটি 'ক'": "https://chorcha.net/read-archive/chem_1-versity",
+    },
+}
+
 
 def _build_cookies_from_token() -> list:
     """Builds a minimal Playwright cookie list from the CHORCHA_TOKEN env
@@ -197,6 +214,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
     homepage (page must already be there), then returns that run's final
     page HTML."""
     total = len(lines)
+    current_subject = None  # updated each time a step matches a known subject name
     for i, raw_line in enumerate(lines, 1):
         line = raw_line.strip()
         if not line:
@@ -214,6 +232,24 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
             if sub.lower().startswith("input:"):
                 spec = sub[len("input:"):]
                 await _type_into_input(page, i, total, spec)
+                await page.wait_for_timeout(300)
+                continue
+
+            if sub.lower().startswith("goto:"):
+                # Direct URL navigation -- use when a card's label has no
+                # matchable DOM text or data-event (e.g. একাডেমিক/মূলবই/
+                # মেডিকেল/ভার্সিটি category cards, whose internal English
+                # slug bears no derivable relation to the Bengali label,
+                # so text/attribute matching can never find them).
+                url = sub[len("goto:"):].strip()
+                if not url.startswith("http"):
+                    url = CHORCHA_BASE_URL.rstrip("/") + "/" + url.lstrip("/")
+                try:
+                    await page.goto(url, wait_until="networkidle", timeout=30000)
+                except Exception:
+                    raise AutoScrapeError(
+                        f"রান {run_no}/{run_total}, ধাপ {i}/{total}: URL \"{url}\"-এ যাওয়া যায়নি।"
+                    )
                 await page.wait_for_timeout(300)
                 continue
 
@@ -257,12 +293,29 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                     locator = None
 
             if locator is None:
+                # Fallback C: this exact label under the current subject
+                # is a known image-only card whose URL has no derivable
+                # relation to the label (see KNOWN_CATEGORY_CARD_URLS) --
+                # navigate straight there instead of clicking.
+                subj_map = KNOWN_CATEGORY_CARD_URLS.get(current_subject or "", {})
+                known_url = subj_map.get(sub)
+                if known_url:
+                    try:
+                        await page.goto(known_url, wait_until="networkidle", timeout=30000)
+                        await page.wait_for_timeout(300)
+                        continue
+                    except Exception:
+                        pass  # fall through to final error below
+
+            if locator is None:
                 raise AutoScrapeError(
                     f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
                     f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
                 )
             await locator.click(timeout=CLICK_TIMEOUT_MS)
             await page.wait_for_timeout(400)  # small gap between multi-selects
+            if sub in KNOWN_CATEGORY_CARD_URLS:
+                current_subject = sub
 
         await page.wait_for_timeout(SETTLE_WAIT_MS)
         try:
