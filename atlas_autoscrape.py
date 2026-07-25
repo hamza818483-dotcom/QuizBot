@@ -310,7 +310,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
             if locator is None:
                 raise AutoScrapeError(
                     f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
-                    f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
+                    f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন। [v:known-url-map-e2f1acc, subject={current_subject!r}]"
                 )
             await locator.click(timeout=CLICK_TIMEOUT_MS)
             await page.wait_for_timeout(400)  # small gap between multi-selects
