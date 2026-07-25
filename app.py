@@ -9674,6 +9674,7 @@ async def handle_auto_command(msg: dict):
     """
     chat_id = msg["chat"]["id"]
     text = msg.get("text", "")
+    _auto_uid = msg.get("from", {}).get("id")
 
     lines = [l.rstrip() for l in text.split("\n")[1:] if l.strip() != ""]
 
@@ -9737,13 +9738,21 @@ async def handle_auto_command(msg: dict):
     _last_edit_at = {"t": 0.0}
 
     async def _progress(i, total, label):
+        now_t = time.time()
+        if _auto_uid is not None:
+            _prev = _USER_LAST_STATUS.get(_auto_uid, {})
+            _USER_LAST_STATUS[_auto_uid] = {
+                "command": "/auto",
+                "stage": f"{label} ({i}/{total})",
+                "started_at": _prev.get("started_at", now_t) if _prev.get("command") == "/auto" else now_t,
+                "last_update_at": now_t,
+            }
         if not status_msg_id:
             return
         # Throttle edits to avoid Telegram rate limits on fast steps.
-        now = time.time()
-        if now - _last_edit_at["t"] < 0.6 and i != total:
+        if now_t - _last_edit_at["t"] < 0.6 and i != total:
             return
-        _last_edit_at["t"] = now
+        _last_edit_at["t"] = now_t
         pct = max(0, min(100, round((i / total) * 100))) if total else 0
         bar = _mhtml_progress_bar(pct)
         run_tag = ""
@@ -9781,6 +9790,14 @@ async def handle_auto_command(msg: dict):
         run_tag = f"রান {run_no}/{run_total} · " if run_total > 1 else ""
 
         async def _final_stage_update(text):
+            if _auto_uid is not None:
+                _prev = _USER_LAST_STATUS.get(_auto_uid, {})
+                _USER_LAST_STATUS[_auto_uid] = {
+                    "command": "/auto",
+                    "stage": f"{run_tag}{text}",
+                    "started_at": _prev.get("started_at", time.time()),
+                    "last_update_at": time.time(),
+                }
             if not status_msg_id:
                 return
             try:
@@ -9821,28 +9838,32 @@ async def handle_auto_command(msg: dict):
     # with run count since multi-run sequences legitimately take longer.
     overall_timeout_s = 2700 * run_count_for_timeout
     try:
-        html_results = await asyncio.wait_for(
-            run_auto_click_sequence(lines, progress_cb=_progress, on_run_complete=_on_run_complete),
-            timeout=overall_timeout_s,
-        )
-    except asyncio.TimeoutError:
-        logger.error(f"[/auto] entire flow timed out after {overall_timeout_s}s ({run_count_for_timeout} run(s))")
-        if status_msg_id:
-            try:
-                await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
-            except Exception:
-                pass
-        await send_msg(chat_id,
-            f"❌ {overall_timeout_s}s পার হয়ে গেছে, কাজ আটকে গিয়েছিল — বন্ধ করে দেওয়া হলো। "
-            f"যতগুলো run/CSV এর মধ্যে হয়ে গেছে ততগুলো ইতিমধ্যে পাঠানো হয়ে থাকতে পারে (উপরে দেখো)। আবার চেষ্টা করো।")
-        return
-    except AutoScrapeError as e:
-        await send_msg(chat_id, f"❌ {e}")
-        return
-    except Exception as e:
-        logger.error(f"[/auto] navigation failed: {e}")
-        await send_msg(chat_id, f"❌ Navigation ব্যর্থ হয়েছে: {e}")
-        return
+        try:
+            html_results = await asyncio.wait_for(
+                run_auto_click_sequence(lines, progress_cb=_progress, on_run_complete=_on_run_complete),
+                timeout=overall_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"[/auto] entire flow timed out after {overall_timeout_s}s ({run_count_for_timeout} run(s))")
+            if status_msg_id:
+                try:
+                    await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
+                except Exception:
+                    pass
+            await send_msg(chat_id,
+                f"❌ {overall_timeout_s}s পার হয়ে গেছে, কাজ আটকে গিয়েছিল — বন্ধ করে দেওয়া হলো। "
+                f"যতগুলো run/CSV এর মধ্যে হয়ে গেছে ততগুলো ইতিমধ্যে পাঠানো হয়ে থাকতে পারে (উপরে দেখো)। আবার চেষ্টা করো।")
+            return
+        except AutoScrapeError as e:
+            await send_msg(chat_id, f"❌ {e}")
+            return
+        except Exception as e:
+            logger.error(f"[/auto] navigation failed: {e}")
+            await send_msg(chat_id, f"❌ Navigation ব্যর্থ হয়েছে: {e}")
+            return
+    finally:
+        if _auto_uid is not None:
+            _USER_LAST_STATUS.pop(_auto_uid, None)
 
     sent_any = sent_any["v"]
 
@@ -12708,6 +12729,7 @@ _STALE_LOCK_SECONDS = 600  # 10 min — generous even for the slowest /pdf jobs
 _USER_PENDING_QUEUE = {}  # uid -> list of queued update dicts waiting their turn
 
 _USER_QUEUE_RUNNING = set()  # uid currently has an active drain-worker running
+_USER_LAST_STATUS = {}  # uid -> {"command": str, "stage": str, "started_at": float, "last_update_at": float}
 
 async def _drain_user_queue(uid: int):
     """Single worker per user that drains _USER_PENDING_QUEUE strictly in
@@ -12781,7 +12803,7 @@ async def process_update(update: dict):
             # actual cause of "/csv stuck at 0%" / "/ping late" reports; the
             # underlying work was always fast, the command just hadn't
             # started yet.
-            if _txt_check.startswith("/csv") or _txt_check.startswith("/csvS") or _txt_check == "/ping":
+            if _txt_check.startswith("/csv") or _txt_check.startswith("/csvS") or _txt_check == "/ping" or _txt_check == "/error":
                 _spawn_task(handle_message(_msg))
                 return
             if uid is not None:
@@ -13352,6 +13374,38 @@ async def handle_message(msg: dict):
         except Exception as e:
             logger.error(f"[Ping] error: {e}")
             await send_msg(chat_id, f"🏓 Pong! (stats error: {e})")
+    elif text == "/error":
+        # Pure status check, bypasses the per-user queue entirely (like
+        # /ping) -- always answers instantly even if a long /auto (or
+        # similar) run is currently in progress for this user, so the
+        # person can check "is it stuck or still working" without
+        # waiting behind the running command.
+        try:
+            uid_check = msg.get("from", {}).get("id")
+            info = _USER_LAST_STATUS.get(uid_check)
+            if not info:
+                await send_msg(chat_id, "✅ কোনো কাজ চলছে না এই মুহূর্তে — কিছুই আটকে নেই।")
+            else:
+                now_ts = time.time()
+                since_start = int(now_ts - info["started_at"])
+                since_update = int(now_ts - info["last_update_at"])
+                m2, s2 = divmod(since_start, 60)
+                mu, su = divmod(since_update, 60)
+                stuck_warning = ""
+                if since_update > 60:
+                    stuck_warning = (
+                        f"\n⚠️ শেষ update {mu}m {su}s আগে হয়েছিল — এতক্ষণ কোনো নতুন "
+                        f"progress না আসলে সন্দেহজনক (আটকে থাকতে পারে)।"
+                    )
+                await send_msg(chat_id,
+                    f"🔄 <b>চলমান কাজ:</b> {info['command']}\n"
+                    f"📍 বর্তমান ধাপ: {info['stage']}\n"
+                    f"⏱ শুরু হয়েছে: {m2}m {s2}s আগে\n"
+                    f"🕐 শেষ update: {mu}m {su}s আগে{stuck_warning}",
+                    parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"[/error] check failed: {e}")
+            await send_msg(chat_id, f"❌ /error check failed: {e}")
 
 
 # ============================================================
