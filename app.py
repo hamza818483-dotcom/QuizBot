@@ -9744,7 +9744,7 @@ async def handle_auto_command(msg: dict):
         if now - _last_edit_at["t"] < 0.6 and i != total:
             return
         _last_edit_at["t"] = now
-        pct = round((i / total) * 100) if total else 0
+        pct = max(0, min(100, round((i / total) * 100))) if total else 0
         bar = _mhtml_progress_bar(pct)
         run_tag = ""
         m = re.match(r"^\[run (\d+)/(\d+)\]\s*(.*)$", label)
