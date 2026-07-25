@@ -149,51 +149,57 @@ class AutoScrapeError(Exception):
     pass
 
 
-async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wait_ms: int = 8000):
-    # No overall time budget: every ব্যাখ্যা/AI ব্যাখ্যা button must be
-    # expanded regardless of how long it takes (large banks can have
-    # 1000+ buttons). Correctness over speed here.
+async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wait_ms: int = 8000,
+                                       concurrency: int = 15):
     """
     দুই ধরনের ব্যাখ্যা button-ই DOM-এ collapsed/dropdown অবস্থায় থাকে --
     "ব্যাখ্যা" (pre-rendered content, শুধু dropdown খুলতে হয়) এবং
     "AI ব্যাখ্যা" (content lazily fetch হয়, click না করলে DOM-এই আসে না)।
     দুইটাই খোলা এবং populate হওয়া নিশ্চিত না করলে extraction-এ miss হয়ে
-    যায় -- fixed সময় wait করলে অনেক সময় content পুরোপুরি না এসেই HTML
-    capture হয়ে যায়।
+    যায়।
 
-    তাই এখন দুই ধরনের button-ই খুঁজে: click করে, তারপর সংশ্লিষ্ট
-    container-এর টেক্সট আসলেই populate হয়েছে কিনা পোল করে অপেক্ষা করা হয়
-    (aria-expanded "true" হওয়া যথেষ্ট না -- content ফাঁকা থাকতে পারে),
-    max_wait_ms পর্যন্ত। aria-expanded ফ্লিপ না হলে একবার retry-click করা হয়।
+    Speed strategy (guarantees full expansion, no time cap):
+    - "ব্যাখ্যা" (non-AI) content আগে থেকেই DOM-এ থাকে -- শুধু
+      aria-expanded flip/CSS toggle। তাই এইগুলো একটাই JS batch পাসে
+      click করে instant খুলে ফেলা হয় (no per-button wait loop needed)।
+    - "AI ব্যাখ্যা" content lazily fetch হয় (network call লাগে), তাই
+      click করেই content আসবে না -- কিন্তু ১টা-১টা করে sequential না
+      করে `concurrency` সংখ্যক button একসাথে ব্যাচে click করে সবগুলোর
+      populate একসাথে poll করা হয়। এতে 1000+ button থাকলেও total সময়
+      অনেক কমে যায় (sequential হলে যা লাগতো তার ~1/concurrency)।
     """
     try:
-        # "ব্যাখ্যা" matches both "ব্যাখ্যা" and "AI ব্যাখ্যা" buttons since
-        # the latter's label contains the former as a substring.
-        buttons = page.locator("button:has-text('ব্যাখ্যা')")
-        count = await buttons.count()
+        all_buttons = page.locator("button:has-text('ব্যাখ্যা')")
+        count = await all_buttons.count()
     except Exception:
         return
+    if count == 0:
+        return
+
+    # ---- Pass 1: classify + instantly batch-expand plain "ব্যাখ্যা" ----
+    # (those whose content is already in DOM, just needs a click/attr flip)
+    ai_indices = []
     for i in range(count):
         try:
-            btn = buttons.nth(i)
+            btn = all_buttons.nth(i)
+            label = (await btn.inner_text()) or ""
+            if "AI" in label:
+                ai_indices.append(i)
+                continue
             expanded = await btn.get_attribute("aria-expanded")
-            if expanded == "true":
-                # Already expanded (e.g. re-visited page) -- still make
-                # sure content isn't empty; if it is, force a re-click.
-                has_text = await page.evaluate(
-                    """(el) => {
-                        let sib = el.closest('div')?.parentElement;
-                        return !!(sib && sib.innerText && sib.innerText.trim().length > 0);
-                    }""",
-                    await btn.element_handle(),
-                )
-                if has_text:
-                    continue
+            if expanded != "true":
+                await btn.click(timeout=5000)
+        except Exception:
+            continue
 
-            await btn.click(timeout=5000)
-
+    # ---- Pass 2: concurrent batches for "AI ব্যাখ্যা" (lazy-fetch) ----
+    async def _click_and_wait(idx):
+        try:
+            btn = all_buttons.nth(idx)
+            expanded = await btn.get_attribute("aria-expanded")
+            if expanded != "true":
+                await btn.click(timeout=5000)
             elapsed = 0
-            populated = False
             while elapsed < max_wait_ms:
                 await page.wait_for_timeout(per_click_wait_ms)
                 elapsed += per_click_wait_ms
@@ -209,21 +215,24 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wa
                 except Exception:
                     has_text = False
                 if has_text:
-                    populated = True
-                    break
-                # Retry once, halfway through the budget, in case the
-                # first click didn't register / toggled closed again.
+                    return True
                 if elapsed == per_click_wait_ms * 2:
                     try:
-                        still_expanded = await btn.get_attribute("aria-expanded")
-                        if still_expanded != "true":
+                        still = await btn.get_attribute("aria-expanded")
+                        if still != "true":
                             await btn.click(timeout=5000)
                     except Exception:
                         pass
-            if not populated:
-                logger.warning(f"[/auto] ব্যাখ্যা button {i+1}/{count} didn't populate content within {max_wait_ms}ms")
+            return False
         except Exception:
-            continue  # one failed AI-explanation shouldn't break the whole extraction
+            return False
+
+    for batch_start in range(0, len(ai_indices), concurrency):
+        batch = ai_indices[batch_start:batch_start + concurrency]
+        results = await asyncio.gather(*[_click_and_wait(idx) for idx in batch])
+        for idx, ok in zip(batch, results):
+            if not ok:
+                logger.warning(f"[/auto] AI ব্যাখ্যা button index {idx} didn't populate content within {max_wait_ms}ms")
 
 
 async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total=1, poll_ms: int = 1000, max_wait_ms: int = 120000):
