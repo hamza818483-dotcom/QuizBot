@@ -48,6 +48,7 @@ the exact click path. That keeps it reliable instead of guessing selectors.
 import asyncio
 import os
 import logging
+import unicodedata
 from io import BytesIO
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,12 @@ KNOWN_CATEGORY_CARD_URLS = {
         "মেডিকেল": "https://chorcha.net/read-archive/chem_1-medical",
         "ভার্সিটি 'ক'": "https://chorcha.net/read-archive/chem_1-versity",
     },
+}
+KNOWN_CATEGORY_CARD_URLS = {
+    unicodedata.normalize("NFC", k): {
+        unicodedata.normalize("NFC", k2): v2 for k2, v2 in v.items()
+    }
+    for k, v in KNOWN_CATEGORY_CARD_URLS.items()
 }
 
 
@@ -214,7 +221,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
     homepage (page must already be there), then returns that run's final
     page HTML."""
     total = len(lines)
-    current_subject = None  # updated each time a step matches a known subject name
+    processed_subs = []  # every sub-step string processed so far, in order (for subject-lookback)
     for i, raw_line in enumerate(lines, 1):
         line = raw_line.strip()
         if not line:
@@ -229,6 +236,15 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
         # order (e.g. "input:30,Next Topic" types then clicks).
         sub_steps = [s.strip() for s in line.split(",") if s.strip()]
         for sub in sub_steps:
+            sub = unicodedata.normalize("NFC", sub)
+            # Recompute subject context every step by scanning everything
+            # processed so far in this run (stateless -- avoids relying on
+            # a single click-succeeded code path to update it).
+            current_subject = next(
+                (p for p in reversed(processed_subs) if p in KNOWN_CATEGORY_CARD_URLS),
+                None,
+            )
+
             if sub.lower().startswith("input:"):
                 spec = sub[len("input:"):]
                 await _type_into_input(page, i, total, spec)
@@ -253,9 +269,11 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 await page.wait_for_timeout(300)
                 continue
 
+            match_method = None
             locator = page.get_by_text(sub, exact=True).first
             try:
                 await locator.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
+                match_method = "exact-text"
             except Exception:
                 locator = None
 
@@ -275,6 +293,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                     if await candidates.count() > 0:
                         locator = candidates.last  # innermost match is usually last in doc order
                         await locator.wait_for(state="visible", timeout=3000)
+                        match_method = "container-text"
                 except Exception:
                     locator = None
 
@@ -289,6 +308,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                     if await candidates.count() > 0:
                         locator = candidates.last
                         await locator.wait_for(state="visible", timeout=3000)
+                        match_method = "data-event"
                 except Exception:
                     locator = None
 
@@ -301,21 +321,32 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 known_url = subj_map.get(sub)
                 if known_url:
                     try:
+                        logger.info(
+                            f"[/auto] step {i}/{total} sub={sub!r}: matched via known-url-map "
+                            f"(subject={current_subject!r}) -> {known_url}"
+                        )
                         await page.goto(known_url, wait_until="networkidle", timeout=30000)
                         await page.wait_for_timeout(300)
+                        processed_subs.append(sub)
                         continue
-                    except Exception:
-                        pass  # fall through to final error below
+                    except Exception as e:
+                        logger.warning(f"[/auto] known-url-map goto failed for {sub!r}: {e}")
 
             if locator is None:
+                logger.error(
+                    f"[/auto] step {i}/{total} sub={sub!r} NOT FOUND. "
+                    f"subject_context={current_subject!r}, "
+                    f"processed_so_far={processed_subs}, "
+                    f"known_subjects_in_map={list(KNOWN_CATEGORY_CARD_URLS.keys())}"
+                )
                 raise AutoScrapeError(
                     f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
-                    f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন। [v:known-url-map-e2f1acc, subject={current_subject!r}]"
+                    f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
                 )
+            logger.info(f"[/auto] step {i}/{total} sub={sub!r}: matched via {match_method}")
             await locator.click(timeout=CLICK_TIMEOUT_MS)
             await page.wait_for_timeout(400)  # small gap between multi-selects
-            if sub in KNOWN_CATEGORY_CARD_URLS:
-                current_subject = sub
+            processed_subs.append(sub)
 
         await page.wait_for_timeout(SETTLE_WAIT_MS)
         try:
