@@ -72,6 +72,9 @@ KNOWN_CATEGORY_CARD_URLS = {
         "মেডিকেল": "https://chorcha.net/read-archive/chem_1-medical",
         "ভার্সিটি 'ক'": "https://chorcha.net/read-archive/chem_1-versity",
     },
+    "একাডেমিক": {
+        "MCQ": "https://chorcha.net/question-bank/hsc-chemistry-1st-paper-mcq",
+    },
 }
 KNOWN_CATEGORY_CARD_URLS = {
     unicodedata.normalize("NFC", k): {
