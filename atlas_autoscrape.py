@@ -101,6 +101,20 @@ KNOWN_CATEGORY_CARD_URLS = {
         "ভার্সিটি 'ক'": "https://chorcha.net/read-archive/math_2-versity",
         "MCQ": "https://chorcha.net/question-bank/hsc-higher-math-2nd-paper-mcq",
     },
+    "পদার্থবিজ্ঞান ১ম পত্র": {
+        "একাডেমিক": "https://chorcha.net/question-bank/hsc-physics-1st-test-paper",
+        "মূলবই": "https://chorcha.net/question-bank/phys_1-mainbook",
+        "মেডিকেল": "https://chorcha.net/read-archive/phys_1-medical",
+        "ভার্সিটি 'ক'": "https://chorcha.net/read-archive/phys_1-versity",
+        "MCQ": "https://chorcha.net/question-bank/hsc-physics-1st-paper-mcq",
+    },
+    "পদার্থবিজ্ঞান ২য় পত্র": {
+        "একাডেমিক": "https://chorcha.net/question-bank/hsc-physics-2nd-test-paper",
+        "মূলবই": "https://chorcha.net/question-bank/phys_2-mainbook",
+        "মেডিকেল": "https://chorcha.net/read-archive/phys_2-medical",
+        "ভার্সিটি 'ক'": "https://chorcha.net/read-archive/phys_2-versity",
+        "MCQ": "https://chorcha.net/question-bank/hsc-physics-2nd-paper-mcq",
+    },
 }
 KNOWN_CATEGORY_CARD_URLS = {
     unicodedata.normalize("NFC", k): {
