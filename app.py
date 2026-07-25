@@ -9799,8 +9799,28 @@ async def handle_auto_command(msg: dict):
         sent_any["v"] = True
 
     from atlas_autoscrape import run_auto_click_sequence, AutoScrapeError
+    run_count_for_timeout = sum(1 for l in lines if l.strip() == "---") + 1
+    # Hard ceiling for the WHOLE /auto flow (all runs combined), so any
+    # unforeseen hang -- browser stuck, chorcha.net not responding, a
+    # selector looping forever -- can never stall silently forever. Scales
+    # with run count since multi-run sequences legitimately take longer.
+    overall_timeout_s = 300 * run_count_for_timeout
     try:
-        html_results = await run_auto_click_sequence(lines, progress_cb=_progress, on_run_complete=_on_run_complete)
+        html_results = await asyncio.wait_for(
+            run_auto_click_sequence(lines, progress_cb=_progress, on_run_complete=_on_run_complete),
+            timeout=overall_timeout_s,
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"[/auto] entire flow timed out after {overall_timeout_s}s ({run_count_for_timeout} run(s))")
+        if status_msg_id:
+            try:
+                await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
+            except Exception:
+                pass
+        await send_msg(chat_id,
+            f"❌ {overall_timeout_s}s পার হয়ে গেছে, কাজ আটকে গিয়েছিল — বন্ধ করে দেওয়া হলো। "
+            f"যতগুলো run/CSV এর মধ্যে হয়ে গেছে ততগুলো ইতিমধ্যে পাঠানো হয়ে থাকতে পারে (উপরে দেখো)। আবার চেষ্টা করো।")
+        return
     except AutoScrapeError as e:
         await send_msg(chat_id, f"❌ {e}")
         return
