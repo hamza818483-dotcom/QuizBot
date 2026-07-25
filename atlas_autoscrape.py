@@ -180,29 +180,42 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 500, max_wa
 
     # ---- Pass 1: classify + instantly batch-expand plain "ব্যাখ্যা" ----
     # (those whose content is already in DOM, just needs a click/attr flip)
-    # Classification uses computed background color as the primary signal
-    # (AI ব্যাখ্যা renders as a solid darker-green fill vs plain ব্যাখ্যা's
-    # lighter/outlined style) since it's more robust than text matching,
-    # which can be thrown off by whitespace/icon glyphs inside the label.
-    # Text-substring is kept as a fallback if color read fails.
+    # Classification signal priority:
+    #   1. Icon presence: plain "ব্যাখ্যা" button has a leading icon
+    #      (svg/img element) before its text; "AI ব্যাখ্যা" has none.
+    #      This is the most reliable signal (icon markup doesn't shift
+    #      with theme/hover/expanded state the way background color can).
+    #   2. Background color (solid dark green vs lighter/outlined) as
+    #      secondary signal if icon check is inconclusive.
+    #   3. Text-substring ("AI" in label) as final fallback.
     ai_indices = []
     for i in range(count):
         try:
             btn = all_buttons.nth(i)
-            is_ai = False
+            has_icon = False
             try:
-                bg = await btn.evaluate("el => getComputedStyle(el).backgroundColor")
-                # Parse "rgb(r,g,b)" / "rgba(r,g,b,a)" and treat a
-                # sufficiently dark, saturated green as the AI variant.
-                nums = re.findall(r"[\d.]+", bg or "")
-                if len(nums) >= 3:
-                    r, g, b = float(nums[0]), float(nums[1]), float(nums[2])
-                    is_ai = g > r + 15 and g > b + 15 and g < 130
+                has_icon = await btn.evaluate(
+                    "el => !!el.querySelector('svg, img')"
+                )
             except Exception:
                 pass
-            if not is_ai:
-                label = (await btn.inner_text()) or ""
-                is_ai = "AI" in label
+
+            if has_icon:
+                is_ai = False
+            else:
+                is_ai = None  # inconclusive from icon check
+                try:
+                    bg = await btn.evaluate("el => getComputedStyle(el).backgroundColor")
+                    nums = re.findall(r"[\d.]+", bg or "")
+                    if len(nums) >= 3:
+                        r, g, b = float(nums[0]), float(nums[1]), float(nums[2])
+                        is_ai = g > r + 15 and g > b + 15 and g < 130
+                except Exception:
+                    pass
+                if is_ai is None:
+                    label = (await btn.inner_text()) or ""
+                    is_ai = "AI" in label
+
             if is_ai:
                 ai_indices.append(i)
                 continue
