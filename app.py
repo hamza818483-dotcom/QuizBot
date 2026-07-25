@@ -9676,6 +9676,38 @@ async def handle_auto_command(msg: dict):
     text = msg.get("text", "")
 
     lines = [l.rstrip() for l in text.split("\n")[1:] if l.strip() != ""]
+
+    # Shorthand runs: a run consisting of a single "OldName>NewName" line
+    # reuses the FIRST run's steps verbatim, replacing every occurrence of
+    # OldName with NewName. "(new)" suffix on NewName is cosmetic and
+    # stripped. Lets the user avoid retyping the whole step sequence for
+    # every sibling topic under the same parent.
+    if lines:
+        _groups = [[]]
+        for _l in lines:
+            if _l.strip() == "---":
+                _groups.append([])
+            else:
+                _groups[-1].append(_l)
+        _groups = [g for g in _groups if g]
+        if len(_groups) > 1:
+            base_group = _groups[0]
+            expanded_groups = [base_group]
+            for g in _groups[1:]:
+                if len(g) == 1 and ">" in g[0]:
+                    old, new = g[0].split(">", 1)
+                    old = old.strip()
+                    new = re.sub(r"\(new\)\s*$", "", new.strip()).strip()
+                    new_group = [ln.replace(old, new) for ln in base_group]
+                    expanded_groups.append(new_group)
+                else:
+                    expanded_groups.append(g)
+            lines = []
+            for i, g in enumerate(expanded_groups):
+                if i > 0:
+                    lines.append("---")
+                lines.extend(g)
+
     if not lines:
         await send_msg(chat_id,
             "❌ Format:\n\n"
@@ -9687,7 +9719,9 @@ async def handle_auto_command(msg: dict):
             "📌 প্রতি লাইনে একটা button/link-এর নাম, ক্রমানুসারে — bot একে একে click করে "
             "শেষ পেজে পৌঁছে সেই page-এর HTML থেকে সরাসরি MCQ extract করবে (screenshot/AI-vision লাগে না, তাই নির্ভুল)।\n\n"
             "📌 একাধিক আলাদা topic থেকে আলাদা আলাদা CSV চাইলে <code>---</code> দিয়ে ভাগ করো:\n"
-            "<code>/auto\nইতিহাস,ব্রিটিশ শাসনামলে বাংলা\ninput:25\nএগিয়ে যাও\n---\nইতিহাস,মুসলিম শাসন ও সালতানাত\ninput:25\nএগিয়ে যাও</code>",
+            "<code>/auto\nইতিহাস,ব্রিটিশ শাসনামলে বাংলা\ninput:25\nএগিয়ে যাও\n---\nইতিহাস,মুসলিম শাসন ও সালতানাত\ninput:25\nএগিয়ে যাও</code>\n\n"
+            "📌 শুধু topic নাম বদলাতে চাইলে পুরো step আবার না লিখে <code>---</code>-এর পর শুধু <code>OldName&gt;NewName</code> দিলেই হবে (১ম run-এর step-গুলো reuse হবে, শুধু OldName→NewName replace হয়ে):\n"
+            "<code>/auto\nইতিহাস,ব্রিটিশ শাসনামলে বাংলা\ninput:25\nএগিয়ে যাও\n---\nব্রিটিশ শাসনামলে বাংলা&gt;প্রাচীন বাংলার ইতিহাস(new)\n---\nব্রিটিশ শাসনামলে বাংলা&gt;মুসলিম শাসন ও সালতানাত(new)</code>",
             parse_mode="HTML"
         )
         return
