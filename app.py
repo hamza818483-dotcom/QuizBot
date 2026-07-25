@@ -12082,6 +12082,41 @@ async def handle_poll_answer(pa: dict):
         uid = pa["user"]["id"]
         st = await qs_get(uid)
         if not st or not isinstance(st, dict) or pa.get("poll_id") != st.get("poll_id") or st.get("answered"):
+            # SAFETY NET (mirrors D1 quiz's _stall_recovery): a poll_id mismatch
+            # or missing session here previously meant a silent full-timer wait
+            # (up to QUIZ_Q_SEC+5s) before the next question appeared, even
+            # though the user DID answer — this force-advances within ~2s instead.
+            if st and isinstance(st, dict) and not st.get("answered"):
+                _pid_snapshot = st.get("poll_id")
+                _idx_snapshot = st.get("idx")
+                async def _seq_stall_recovery():
+                    await asyncio.sleep(2)
+                    s2 = await qs_get(uid)
+                    if not s2 or s2.get("poll_id") != _pid_snapshot or s2.get("idx") != _idx_snapshot or s2.get("answered"):
+                        return  # something else already advanced it — no stall after all
+                    logger.warning(f"[QuizSolve] Force-recovering stalled quiz uid={uid} idx={s2.get('idx')}")
+                    s2["answered"] = True
+                    if s2.get("timer_task"):
+                        s2["timer_task"].cancel()
+                    option_ids2 = pa.get("option_ids", [])
+                    mcq2 = s2["mcqs"][s2["idx"]]
+                    ci2 = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq2.get("answer", "A"), 0)
+                    chosen2 = option_ids2[0] if option_ids2 else None
+                    if chosen2 == ci2:
+                        s2["right"] += 1
+                    else:
+                        s2["wrong"] += 1
+                        s2["wrong_idx"].append(s2["idx"])
+                    await qs_set(uid, s2)
+                    s3 = await qs_get(uid)
+                    if s3:
+                        s3["idx"] += 1
+                        await qs_set(uid, s3)
+                        if s3["idx"] >= len(s3["mcqs"]):
+                            await _finish_quiz(uid)
+                        else:
+                            await _send_quiz_question(uid)
+                _spawn_task(_seq_stall_recovery())
             return
 
         st["answered"] = True
