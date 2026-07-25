@@ -14740,18 +14740,20 @@ async def _cf_connection_warmer_task() -> None:
 
 
 async def _webhook_healer_task() -> None:
-    """Every 10 min, checks Telegram webhook is set and non-empty. If it's
-    empty (e.g. setWebhook failed at startup due to a transient DNS resolve
-    error on the CF domain), retries setting it — using tg_post's built-in
-    primary/secondary domain fallback. If the CF-proxy webhook URL itself
-    keeps failing, falls back to setting the webhook directly against the
-    HF Space URL so the bot doesn't stay silently dead."""
+    """Every 2 min, checks Telegram webhook is set, non-empty, and has all
+    required allowed_updates (message/callback_query/poll_answer/poll). Runs
+    regardless of direct or cf-proxy mode. If broken, re-sets webhook using
+    whichever URL is already configured (preserving direct-mode Render URLs
+    instead of force-switching to the CF proxy), falling back to HF Space
+    only as a last resort if re-setting fails outright."""
     await asyncio.sleep(120)
     logger.info("[App] Webhook healer task started")
     _REQUIRED_UPDATES = {"message", "callback_query", "poll_answer", "poll"}
     while True:
         try:
-            if _tg_mode == "cf-proxy":
+            if True:  # v4.4: healer now runs in BOTH direct and cf-proxy modes —
+                      # previously gated to cf-proxy only, so Render/direct-mode
+                      # deployments never self-healed a narrowed allowed_updates.
                 info = await tg_post("getWebhookInfo", {})
                 current_url = info.get("result", {}).get("url", "") if info.get("ok") else ""
                 current_allowed = set(info.get("result", {}).get("allowed_updates", []) or [])
@@ -14768,8 +14770,16 @@ async def _webhook_healer_task() -> None:
                     if missing_updates:
                         logger.warning(f"[App] Webhook healer: allowed_updates missing required types! "
                                        f"current={current_allowed} required={_REQUIRED_UPDATES} — repairing")
-                    worker_webhook = CF_WORKER_URL.rstrip("/") + "/webhook"
-                    payload = {"url": worker_webhook, "drop_pending_updates": False, "max_connections": 40,
+                    if current_url:
+                        # Keep whatever URL is already correctly working — only
+                        # allowed_updates needs fixing. Force-switching to
+                        # CF_WORKER_URL here would be wrong in direct/Render mode.
+                        target_webhook = current_url
+                    elif _tg_mode == "direct":
+                        target_webhook = RENDER_URL.rstrip("/") + f"/webhook/{BOT_TOKEN}"
+                    else:
+                        target_webhook = CF_WORKER_URL.rstrip("/") + "/webhook"
+                    payload = {"url": target_webhook, "drop_pending_updates": False, "max_connections": 40,
                                "allowed_updates": ["message", "callback_query", "poll_answer", "poll"]}
                     if WEBHOOK_SECRET:
                         payload["secret_token"] = WEBHOOK_SECRET
