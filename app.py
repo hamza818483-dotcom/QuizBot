@@ -9736,6 +9736,23 @@ async def handle_auto_command(msg: dict):
     status_msg_id = status.get("result", {}).get("message_id") if isinstance(status, dict) else None
 
     _last_edit_at = {"t": 0.0}
+    _completed_steps = []  # list of "✅ label" lines that stay visible once done
+    _last_seen_label = {"v": None}
+
+    def _render_status(current_line, pct):
+        bar = _mhtml_progress_bar(pct)
+        header = f"🌐 <b>ATLAS AutoScrape</b>\n[{bar}] {pct}%\n"
+        # Cap how many completed lines we show inline so the message never
+        # blows past Telegram's length limit on very long step sequences --
+        # keep the most recent ones, summarize the rest as a count.
+        shown = _completed_steps[-15:]
+        hidden_count = len(_completed_steps) - len(shown)
+        body = ""
+        if hidden_count > 0:
+            body += f"…({hidden_count}টা আগের ধাপ সম্পন্ন)…\n"
+        if shown:
+            body += "\n".join(shown) + "\n"
+        return header + body + current_line
 
     async def _progress(i, total, label):
         now_t = time.time()
@@ -9747,6 +9764,21 @@ async def handle_auto_command(msg: dict):
                 "started_at": _prev.get("started_at", now_t) if _prev.get("command") == "/auto" else now_t,
                 "last_update_at": now_t,
             }
+
+        run_tag = ""
+        m = re.match(r"^\[run (\d+)/(\d+)\]\s*(.*)$", label)
+        display_label, run_no, run_total = (m.group(3), m.group(1), m.group(2)) if m else (label, None, None)
+        if run_no:
+            run_tag = f"রান {run_no}/{run_total} · "
+
+        # A NEW label (different from the last one we saw) means the
+        # previous step is now done -- lock it into the completed list
+        # with a ✓ so it stays visible, instead of vanishing when the
+        # message gets overwritten for the next step.
+        if _last_seen_label["v"] is not None and _last_seen_label["v"] != label:
+            _completed_steps.append(f"✅ {_last_seen_label['v']}")
+        _last_seen_label["v"] = label
+
         if not status_msg_id:
             return
         # Throttle edits to avoid Telegram rate limits on fast steps.
@@ -9754,17 +9786,8 @@ async def handle_auto_command(msg: dict):
             return
         _last_edit_at["t"] = now_t
         pct = max(0, min(100, round((i / total) * 100))) if total else 0
-        bar = _mhtml_progress_bar(pct)
-        run_tag = ""
-        m = re.match(r"^\[run (\d+)/(\d+)\]\s*(.*)$", label)
-        display_label, run_no, run_total = (m.group(3), m.group(1), m.group(2)) if m else (label, None, None)
-        if run_no:
-            run_tag = f"রান {run_no}/{run_total} · "
-        text = (
-            f"🌐 <b>ATLAS AutoScrape</b>\n"
-            f"[{bar}] {pct}%\n"
-            f"{run_tag}ধাপ {i}/{total}: \"{display_label}\""
-        )
+        current_line = f"{run_tag}ধাপ {i}/{total}: \"{display_label}\" (চলছে...)"
+        text = _render_status(current_line, pct)
         try:
             await edit_msg(chat_id, status_msg_id, text, parse_mode="HTML")
         except Exception:
@@ -9800,9 +9823,16 @@ async def handle_auto_command(msg: dict):
                 }
             if not status_msg_id:
                 return
+            # Lock the last-seen click-step into the completed list (once,
+            # first time we reach the final stage) so it stays visible
+            # with a ✓ instead of vanishing.
+            if _last_seen_label["v"] is not None:
+                _completed_steps.append(f"✅ {_last_seen_label['v']}")
+                _last_seen_label["v"] = None
+            current_line = f"{run_tag}{text}"
+            rendered = _render_status(current_line, 100)
             try:
-                await edit_msg(chat_id, status_msg_id,
-                    f"🌐 <b>ATLAS AutoScrape</b>\n{run_tag}{text}", parse_mode="HTML")
+                await edit_msg(chat_id, status_msg_id, rendered, parse_mode="HTML")
             except Exception:
                 pass
 
