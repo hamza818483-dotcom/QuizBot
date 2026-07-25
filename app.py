@@ -9804,7 +9804,7 @@ async def handle_auto_command(msg: dict):
     # unforeseen hang -- browser stuck, chorcha.net not responding, a
     # selector looping forever -- can never stall silently forever. Scales
     # with run count since multi-run sequences legitimately take longer.
-    overall_timeout_s = 300 * run_count_for_timeout
+    overall_timeout_s = 2700 * run_count_for_timeout
     try:
         html_results = await asyncio.wait_for(
             run_auto_click_sequence(lines, progress_cb=_progress, on_run_complete=_on_run_complete),

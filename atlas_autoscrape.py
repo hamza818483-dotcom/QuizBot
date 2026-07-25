@@ -149,8 +149,10 @@ class AutoScrapeError(Exception):
     pass
 
 
-async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wait_ms: int = 8000,
-                                       overall_budget_ms: int = 60000):
+async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wait_ms: int = 8000):
+    # No overall time budget: every ব্যাখ্যা/AI ব্যাখ্যা button must be
+    # expanded regardless of how long it takes (large banks can have
+    # 1000+ buttons). Correctness over speed here.
     """
     দুই ধরনের ব্যাখ্যা button-ই DOM-এ collapsed/dropdown অবস্থায় থাকে --
     "ব্যাখ্যা" (pre-rendered content, শুধু dropdown খুলতে হয়) এবং
@@ -171,19 +173,7 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wa
         count = await buttons.count()
     except Exception:
         return
-    start_ts = time.time()
     for i in range(count):
-        if (time.time() - start_ts) * 1000 > overall_budget_ms:
-            # Large MCQ banks can have hundreds of ব্যাখ্যা buttons; each
-            # can burn up to max_wait_ms. Without an overall cap this can
-            # stall the entire /auto run for many minutes with no CSV
-            # ever sent. Stop expanding further and extract with whatever
-            # is already populated rather than hanging indefinitely.
-            logger.warning(
-                f"[/auto] ব্যাখ্যা expansion stopped early at {i}/{count} "
-                f"(overall_budget_ms={overall_budget_ms} exceeded)"
-            )
-            break
         try:
             btn = buttons.nth(i)
             expanded = await btn.get_attribute("aria-expanded")
@@ -734,9 +724,7 @@ async def run_auto_click_sequence(
 
                 if on_run_complete:
                     try:
-                        await asyncio.wait_for(on_run_complete(html, run_no, run_total), timeout=60)
-                    except asyncio.TimeoutError:
-                        logger.error(f"[/auto] on_run_complete timed out for run {run_no} (>60s)")
+                        await on_run_complete(html, run_no, run_total)
                     except Exception as e:
                         logger.warning(f"[/auto] on_run_complete callback failed for run {run_no}: {e}")
 
