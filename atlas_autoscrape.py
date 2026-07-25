@@ -498,6 +498,46 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 except Exception:
                     element_handle = None
 
+            if locator is None and element_handle is None and len(sub) >= 2:
+                # Fallback: partial/keyword match. Only used as a last
+                # resort when nothing matched exactly -- picks the
+                # SMALLEST element (by text length) whose normalized text
+                # contains `sub` as a substring, to reduce the chance of
+                # grabbing an oversized ancestor/wrong sibling when the
+                # label appears in multiple places. If several elements
+                # tie at the same smallest length, none is picked (too
+                # ambiguous to guess safely).
+                try:
+                    element_handle = await page.evaluate_handle(
+                        """(target) => {
+                            const norm = s => (s || '').normalize('NFC').replace(/\\s+/g, ' ').trim();
+                            const wanted = norm(target);
+                            const all = Array.from(document.querySelectorAll('button, a, [data-event], [role="button"], div, span, li'));
+                            let best = null, bestLen = Infinity, tie = false;
+                            for (const el of all) {
+                                if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+                                const ev = el.getAttribute && el.getAttribute('data-event');
+                                const txt = norm(ev || el.textContent);
+                                if (!txt.includes(wanted)) continue;
+                                if (txt.length < bestLen) {
+                                    best = el; bestLen = txt.length; tie = false;
+                                } else if (txt.length === bestLen && el !== best) {
+                                    tie = true;
+                                }
+                            }
+                            return (best && !tie) ? best : null;
+                        }""",
+                        sub,
+                    )
+                    is_null = await page.evaluate("(h) => h === null", element_handle)
+                    if is_null:
+                        element_handle = None
+                    else:
+                        match_method = "partial-keyword"
+                        logger.info(f"[/auto] step {i}/{total} sub={sub!r}: no exact match, used partial/keyword match")
+                except Exception:
+                    element_handle = None
+
             if locator is None and element_handle is None:
                 # Fallback: this exact label under the current subject
                 # is a known image-only card whose URL has no derivable
