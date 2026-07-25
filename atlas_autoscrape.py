@@ -221,10 +221,34 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
             try:
                 await locator.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
             except Exception:
-                raise AutoScrapeError(
-                    f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
-                    f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
+                # Fallback: some cards split the label across sibling
+                # elements (e.g. "রসায়ন" and "১ম পত্র" on separate lines
+                # inside the same card), so no single element's exact
+                # text equals the full sub-string. Match a container
+                # whose full (whitespace-normalized) text content equals
+                # `sub`, picking the innermost/smallest such match.
+                normalized = " ".join(sub.split())
+                candidates = page.locator(
+                    "xpath=//*[not(self::script) and not(self::style)]"
+                    f"[normalize-space(translate(., '\u00a0', ' '))=\"{normalized}\"]"
                 )
+                try:
+                    count = await candidates.count()
+                except Exception:
+                    count = 0
+                if count == 0:
+                    raise AutoScrapeError(
+                        f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
+                        f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
+                    )
+                locator = candidates.last  # innermost match is usually last in document order
+                try:
+                    await locator.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
+                except Exception:
+                    raise AutoScrapeError(
+                        f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
+                        f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
+                    )
             await locator.click(timeout=CLICK_TIMEOUT_MS)
             await page.wait_for_timeout(400)  # small gap between multi-selects
 
