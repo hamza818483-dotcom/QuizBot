@@ -9761,26 +9761,6 @@ async def handle_auto_command(msg: dict):
         except Exception:
             pass
 
-    from atlas_autoscrape import run_auto_click_sequence, AutoScrapeError
-    try:
-        html_results = await run_auto_click_sequence(lines, progress_cb=_progress)
-    except AutoScrapeError as e:
-        await send_msg(chat_id, f"❌ {e}")
-        return
-    except Exception as e:
-        logger.error(f"[/auto] navigation failed: {e}")
-        await send_msg(chat_id, f"❌ Navigation ব্যর্থ হয়েছে: {e}")
-        return
-
-    if status_msg_id:
-        try:
-            await edit_msg(chat_id, status_msg_id,
-                f"🌐 <b>ATLAS AutoScrape</b>\n[{_mhtml_progress_bar(100)}] 100%\n"
-                f"🔍 {len(html_results)}টা page-এর HTML থেকে MCQ extract করা হচ্ছে...",
-                parse_mode="HTML")
-        except Exception:
-            pass
-
     # Recompute per-run topic labels (last click-label of each run, for
     # the filename/caption) by re-splitting the same way the backend did.
     run_line_groups = [[]]
@@ -9791,28 +9771,45 @@ async def handle_auto_command(msg: dict):
             run_line_groups[-1].append(l)
     run_line_groups = [g for g in run_line_groups if any(x.strip() for x in g)]
 
-    sent_any = False
-    for idx, html_bytes in enumerate(html_results, 1):
-        topic = run_line_groups[idx - 1][-1].strip() if idx - 1 < len(run_line_groups) else f"run{idx}"
+    sent_any = {"v": False}  # mutable so the closure below can flip it
+
+    async def _on_run_complete(html_bytes, run_no, run_total):
+        # Sends this run's CSV right away instead of waiting for every
+        # run to finish first -- so a completed topic's file arrives
+        # immediately while later runs are still processing.
+        topic = run_line_groups[run_no - 1][-1].strip() if run_no - 1 < len(run_line_groups) else f"run{run_no}"
         try:
             parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, html_bytes, "auto-scrape.html")
             results = parsed["results"]
         except Exception as e:
-            logger.error(f"[/auto] HTML parse failed (run {idx}): {e}")
-            await send_msg(chat_id, f"❌ রান {idx}: MCQ extract ব্যর্থ হয়েছে: {e}")
-            continue
+            logger.error(f"[/auto] HTML parse failed (run {run_no}): {e}")
+            await send_msg(chat_id, f"❌ রান {run_no}: MCQ extract ব্যর্থ হয়েছে: {e}")
+            return
 
         if not results:
-            await send_msg(chat_id, f"❌ রান {idx} ({topic}): কোনো MCQ খুঁজে পাওয়া যায়নি।")
-            continue
+            await send_msg(chat_id, f"❌ রান {run_no} ({topic}): কোনো MCQ খুঁজে পাওয়া যায়নি।")
+            return
 
         csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
-        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or f"ATLAS_AutoScrape_{idx}"
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or f"ATLAS_AutoScrape_{run_no}"
         await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
             caption=f"📚 {topic}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP (HTML-parse, no AI-vision)"
-                    + (f"\n({idx}/{len(html_results)})" if len(html_results) > 1 else ""),
+                    + (f"\n({run_no}/{run_total})" if run_total > 1 else ""),
             mime_type="text/csv")
-        sent_any = True
+        sent_any["v"] = True
+
+    from atlas_autoscrape import run_auto_click_sequence, AutoScrapeError
+    try:
+        html_results = await run_auto_click_sequence(lines, progress_cb=_progress, on_run_complete=_on_run_complete)
+    except AutoScrapeError as e:
+        await send_msg(chat_id, f"❌ {e}")
+        return
+    except Exception as e:
+        logger.error(f"[/auto] navigation failed: {e}")
+        await send_msg(chat_id, f"❌ Navigation ব্যর্থ হয়েছে: {e}")
+        return
+
+    sent_any = sent_any["v"]
 
     if status_msg_id:
         try:
