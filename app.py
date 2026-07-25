@@ -9738,6 +9738,7 @@ async def handle_auto_command(msg: dict):
     _last_edit_at = {"t": 0.0}
     _completed_steps = []  # list of "✅ label" lines that stay visible once done
     _last_seen_label = {"v": None}
+    _last_seen_stage = {"v": None}
 
     def _render_status(current_line, pct):
         bar = _mhtml_progress_bar(pct)
@@ -9775,8 +9776,10 @@ async def handle_auto_command(msg: dict):
         # previous step is now done -- lock it into the completed list
         # with a ✓ so it stays visible, instead of vanishing when the
         # message gets overwritten for the next step.
-        if _last_seen_label["v"] is not None and _last_seen_label["v"] != label:
+        _stage_key = re.sub(r'[\d০-৯/]+.*$', '', label).strip()
+        if _last_seen_stage["v"] is not None and _last_seen_stage["v"] != _stage_key:
             _completed_steps.append(f"✅ {_last_seen_label['v']}")
+        _last_seen_stage["v"] = _stage_key
         _last_seen_label["v"] = label
 
         if not status_msg_id:
