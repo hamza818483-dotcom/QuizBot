@@ -104,18 +104,25 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wa
             continue  # one failed AI-explanation shouldn't break the whole extraction
 
 
-async def _wait_for_mcq_count_stable(page, poll_ms: int = 1000, max_wait_ms: int = 15000):
+async def _wait_for_mcq_count_stable(page, poll_ms: int = 1000, max_wait_ms: int = 20000):
     """
-    Slow-loading pages may still be adding MCQ cards to the DOM after
-    navigation "settles". Poll the visible card count every `poll_ms`;
-    once it's unchanged for 2 consecutive polls (or `max_wait_ms` is hit),
-    treat the page as fully loaded.
+    Some pages (e.g. প্রশ্নব্যাংক browse) lazy-load MCQ cards only as the
+    user scrolls down (viewport-based), while others (e.g. the post-submit
+    review page) load everything immediately without any scroll. To cover
+    both: scroll to the bottom on every poll (harmless no-op if the page
+    doesn't need it) and watch the MCQ-card count; once it's unchanged for
+    2 consecutive polls (or `max_wait_ms` is hit), treat the page as fully
+    loaded.
     """
     card_selector = "div.border.rounded-xl"
     elapsed = 0
     last_count = -1
     stable_polls = 0
     while elapsed < max_wait_ms:
+        try:
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        except Exception:
+            pass
         try:
             count = await page.locator(card_selector).count()
         except Exception:
@@ -129,6 +136,13 @@ async def _wait_for_mcq_count_stable(page, poll_ms: int = 1000, max_wait_ms: int
         last_count = count
         await page.wait_for_timeout(poll_ms)
         elapsed += poll_ms
+
+    # Scroll back to top so screenshots/DOM order reads naturally (no
+    # functional effect on HTML extraction, just tidy).
+    try:
+        await page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
 
 
 async def _type_into_input(page, step_index, total, spec: str):
