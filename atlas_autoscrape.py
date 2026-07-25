@@ -4,9 +4,11 @@ atlas_autoscrape.py — /auto command backend.
 User gives a sequential list of steps, one per line after /auto:
 
   - Plain label            -> click that single element (as before)
-  - Multiple labels, space-separated on one line
+  - Multiple labels, COMMA-separated on one line ("Label A,Label B")
                             -> click EACH of them in sequence (multi-select
-                               checkboxes/chips on the same page)
+                               checkboxes/chips on the same page). Comma is
+                               used (not space) because a single label like
+                               "সাধারণ জ্ঞান" itself contains a space.
   - "input:<value>"         -> type <value> into the first visible empty
                                text/number input on the page (e.g. "কয়টা
                                MCQ" field). Does not click anything.
@@ -159,8 +161,8 @@ async def run_auto_click_sequence(
                         pass
                     continue
 
-                # --- click step(s): space-separated = multi-select on same page --
-                sub_labels = line.split()
+                # --- click step(s): comma-separated = multi-select on same page --
+                sub_labels = [s.strip() for s in line.split(",") if s.strip()]
                 for label in sub_labels:
                     locator = page.get_by_text(label, exact=True).first
                     try:
