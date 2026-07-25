@@ -332,13 +332,24 @@ async def _type_into_input(page, step_index, total, spec: str):
     await page.wait_for_timeout(300)
 
 
-async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_total: int) -> bytes:
+async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_total: int,
+                                skip_from_line: int = 0, seed_processed_subs: list = None) -> bytes:
     """Executes one run's click/input steps starting from the chorcha.net
     homepage (page must already be there), then returns that run's final
-    page HTML."""
+    page HTML.
+
+    skip_from_line: number of leading `lines` entries to SKIP clicking
+    (the caller has already navigated the browser to that point via
+    back-navigation, reusing a shared prefix with the previous run).
+    seed_processed_subs: processed_subs history to pre-populate with for
+    those skipped lines, so subject-context lookback (KNOWN_CATEGORY_CARD_URLS)
+    still works correctly for the remaining steps.
+    """
     total = len(lines)
-    processed_subs = []  # every sub-step string processed so far, in order (for subject-lookback)
+    processed_subs = list(seed_processed_subs) if seed_processed_subs else []
     for i, raw_line in enumerate(lines, 1):
+        if i <= skip_from_line:
+            continue
         line = raw_line.strip()
         if not line:
             continue
@@ -489,17 +500,24 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
     await _expand_all_ai_explanations(page)
 
     html = await page.content()
-    return html.encode("utf-8")
+    return html.encode("utf-8"), processed_subs
 
 
 async def run_auto_click_sequence(
     labels: list,
     progress_cb=None,
+    on_run_complete=None,
 ) -> list:
     """
     Launches a browser, restores session. `labels` may contain one or more
-    runs separated by a line containing only "---" -- each run starts
-    fresh from the chorcha.net homepage and executes its own steps.
+    runs separated by a line containing only "---" -- each run executes
+    its own steps. When a run shares a leading sequence of identical steps
+    with the immediately previous run (typical for the "OldName>NewName"
+    sibling-topic shorthand, which only changes ONE step near the end),
+    the shared prefix is NOT re-clicked from the homepage again -- instead
+    the browser navigates back exactly enough steps to land back at the
+    divergence point, then only the new/changed steps from there onward
+    are clicked. This is both faster and avoids redundant navigation.
 
     Returns a list of HTML byte-strings, one per run (in order), each for
     direct DOM-based MCQ extraction via parse_mhtml_to_mcqs() — no
@@ -507,6 +525,11 @@ async def run_auto_click_sequence(
 
     progress_cb(step_index, total_steps, label) -- optional async callback
     for live status updates in Telegram.
+
+    on_run_complete(html_bytes, run_no, run_total) -- optional async
+    callback fired immediately after each run's HTML is captured, so the
+    caller can parse+send that run's CSV right away instead of waiting
+    for every run to finish first.
     """
     cookies = _build_cookies_from_token()
     if not cookies:
@@ -540,12 +563,61 @@ async def run_auto_click_sequence(
 
             html_results = []
             run_total = len(runs)
+            prev_run_lines = None  # the previous run's raw `lines` list, for prefix comparison
+            prev_processed_subs = []  # processed_subs history at the end of the previous run
             for run_no, run_lines in enumerate(runs, 1):
-                # Fresh start for every run (independent topic pick).
-                await page.goto(CHORCHA_BASE_URL, wait_until="networkidle", timeout=30000)
-                await page.wait_for_timeout(SETTLE_WAIT_MS)
-                html = await _run_single_sequence(page, run_lines, progress_cb, run_no, run_total)
+                common_prefix = 0
+                if prev_run_lines is not None:
+                    for a, b in zip(prev_run_lines, run_lines):
+                        if a.strip() == b.strip():
+                            common_prefix += 1
+                        else:
+                            break
+
+                if common_prefix > 0:
+                    # Reuse the shared prefix: navigate back exactly enough
+                    # steps to undo everything the previous run did AFTER
+                    # the divergence point, instead of restarting from the
+                    # homepage and re-clicking identical steps.
+                    steps_to_undo = len(prev_run_lines) - common_prefix
+                    logger.info(
+                        f"[/auto] run {run_no}/{run_total}: reusing {common_prefix} shared step(s) "
+                        f"with previous run, going back {steps_to_undo} step(s) instead of restarting"
+                    )
+                    ok = True
+                    for _ in range(steps_to_undo):
+                        try:
+                            await page.go_back(wait_until="networkidle", timeout=15000)
+                            await page.wait_for_timeout(300)
+                        except Exception as e:
+                            logger.warning(f"[/auto] go_back failed mid-way, falling back to full restart: {e}")
+                            ok = False
+                            break
+                    if not ok:
+                        common_prefix = 0  # fall through to full restart below
+
+                if common_prefix == 0:
+                    # Fresh start (first run, or previous run's steps
+                    # diverge immediately / back-navigation failed).
+                    await page.goto(CHORCHA_BASE_URL, wait_until="networkidle", timeout=30000)
+                    await page.wait_for_timeout(SETTLE_WAIT_MS)
+                    seed_subs = []
+                else:
+                    seed_subs = prev_processed_subs[:common_prefix]
+
+                html, processed_subs_this_run = await _run_single_sequence(
+                    page, run_lines, progress_cb, run_no, run_total,
+                    skip_from_line=common_prefix, seed_processed_subs=seed_subs,
+                )
                 html_results.append(html)
+                prev_run_lines = run_lines
+                prev_processed_subs = processed_subs_this_run
+
+                if on_run_complete:
+                    try:
+                        await on_run_complete(html, run_no, run_total)
+                    except Exception as e:
+                        logger.warning(f"[/auto] on_run_complete callback failed for run {run_no}: {e}")
 
             return html_results
         finally:
