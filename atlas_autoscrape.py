@@ -221,34 +221,46 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
             try:
                 await locator.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
             except Exception:
-                # Fallback: some cards split the label across sibling
+                locator = None
+
+            if locator is None:
+                # Fallback A: some cards split the label across sibling
                 # elements (e.g. "রসায়ন" and "১ম পত্র" on separate lines
                 # inside the same card), so no single element's exact
                 # text equals the full sub-string. Match a container
                 # whose full (whitespace-normalized) text content equals
-                # `sub`, picking the innermost/smallest such match.
+                # `sub`.
                 normalized = " ".join(sub.split())
                 candidates = page.locator(
                     "xpath=//*[not(self::script) and not(self::style)]"
                     f"[normalize-space(translate(., '\u00a0', ' '))=\"{normalized}\"]"
                 )
                 try:
-                    count = await candidates.count()
+                    if await candidates.count() > 0:
+                        locator = candidates.last  # innermost match is usually last in doc order
+                        await locator.wait_for(state="visible", timeout=3000)
                 except Exception:
-                    count = 0
-                if count == 0:
-                    raise AutoScrapeError(
-                        f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
-                        f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
-                    )
-                locator = candidates.last  # innermost match is usually last in document order
+                    locator = None
+
+            if locator is None:
+                # Fallback B: card image + label are baked into one image
+                # (no visible/joinable DOM text at all), but chorcha.net
+                # tags these cards with data-event="<Prefix>_<Label>" for
+                # analytics. Match any element whose data-event ends with
+                # "_<sub>".
                 try:
-                    await locator.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
+                    candidates = page.locator(f'[data-event$="_{sub}"]')
+                    if await candidates.count() > 0:
+                        locator = candidates.last
+                        await locator.wait_for(state="visible", timeout=3000)
                 except Exception:
-                    raise AutoScrapeError(
-                        f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
-                        f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
-                    )
+                    locator = None
+
+            if locator is None:
+                raise AutoScrapeError(
+                    f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
+                    f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
+                )
             await locator.click(timeout=CLICK_TIMEOUT_MS)
             await page.wait_for_timeout(400)  # small gap between multi-selects
 
