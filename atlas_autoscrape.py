@@ -150,7 +150,7 @@ class AutoScrapeError(Exception):
 
 
 async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 500, max_wait_ms: int = 8000,
-                                       concurrency: int = 15):
+                                       concurrency: int = 15, progress_cb=None, run_no: int = 1, run_total: int = 1):
     """
     দুই ধরনের ব্যাখ্যা button-ই DOM-এ collapsed/dropdown অবস্থায় থাকে --
     "ব্যাখ্যা" (pre-rendered content, শুধু dropdown খুলতে হয়) এবং
@@ -261,12 +261,23 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 500, max_wa
             return False
 
     unresolved = []
+    total_ai = len(ai_indices)
+    done_ai = 0
     for batch_start in range(0, len(ai_indices), concurrency):
         batch = ai_indices[batch_start:batch_start + concurrency]
         results = await asyncio.gather(*[_click_and_wait(idx) for idx in batch])
         for idx, ok in zip(batch, results):
             if not ok:
                 unresolved.append(idx)
+        done_ai += len(batch)
+        if progress_cb and total_ai:
+            try:
+                await progress_cb(
+                    done_ai, total_ai,
+                    f"[run {run_no}/{run_total}] AI ব্যাখ্যা খোলা হচ্ছে... {done_ai}/{total_ai}",
+                )
+            except Exception:
+                pass
 
     # ---- Final verification sweep: give unresolved buttons one more,
     # focused (lower concurrency, same wait) chance so nothing is
@@ -670,7 +681,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
     # Wait for MCQ cards to finish loading (slow pages keep adding cards
     # after navigation "settles"), then expand AI ব্যাখ্যা before grabbing HTML.
     await _wait_for_mcq_count_stable(page, progress_cb=progress_cb, run_no=run_no, run_total=run_total)
-    await _expand_all_ai_explanations(page)
+    await _expand_all_ai_explanations(page, progress_cb=progress_cb, run_no=run_no, run_total=run_total)
 
     html = await page.content()
     return html.encode("utf-8"), processed_subs
