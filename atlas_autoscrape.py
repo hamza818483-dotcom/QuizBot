@@ -178,6 +178,15 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 500, max_wa
     if count == 0:
         return
 
+    if progress_cb:
+        try:
+            await progress_cb(
+                0, count,
+                f"[run {run_no}/{run_total}] {count}টা ব্যাখ্যা বাটন পাওয়া গেছে, খোলা শুরু হচ্ছে...",
+            )
+        except Exception:
+            pass
+
     # ---- Pass 1: classify + instantly batch-expand plain "ব্যাখ্যা" ----
     # (those whose content is already in DOM, just needs a click/attr flip)
     # Classification signal priority:
@@ -224,6 +233,14 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 500, max_wa
                 await btn.click(timeout=5000)
         except Exception:
             continue
+        if progress_cb and (i + 1) % 25 == 0:
+            try:
+                await progress_cb(
+                    i + 1, count,
+                    f"[run {run_no}/{run_total}] ব্যাখ্যা বাটন যাচাই হচ্ছে... {i + 1}/{count}",
+                )
+            except Exception:
+                pass
 
     # ---- Pass 2: concurrent batches for "AI ব্যাখ্যা" (lazy-fetch) ----
     async def _click_and_wait(idx):
