@@ -236,8 +236,8 @@ def upload_to_imgbb(b64):
 # ============================================================
 # UNICODE MAPS
 # ============================================================
-SUB_MAP = str.maketrans("0123456789+-=()aeoxhklmnpst", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜ")
-SUP_MAP = str.maketrans("0123456789+-=()n", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻₌⁽⁾ⁿ")
+SUB_MAP = str.maketrans("0123456789+\u2212\u2013\u2014-=()aeoxhklmnpst", "₀₁₂₃₄₅₆₇₈₉₊₋₋₋₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜ")
+SUP_MAP = str.maketrans("0123456789+\u2212\u2013\u2014-=()n", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁻⁻⁻₌⁽⁾ⁿ")
 SUP_TO_NORMAL = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
 
 LATEX_SYMBOLS = {
@@ -312,6 +312,48 @@ def aggressive_clean(text):
     text = re.sub(r'(\d+)\s*' + units + r'\b', r'\1 \2', text)
 
     text = re.sub(r'[\{\}]', '', text)
+
+    # --- Scientific-notation / ion-notation cleanup -----------------
+    # Some source pages already contain literal Unicode sub/superscript
+    # characters (⁰-⁹, ₀-₉, ⁺⁻₊₋) but with (a) the wrong minus glyph
+    # (U+2212 "−" instead of the proper superscript/subscript minus) and
+    # (b) stray spaces the original author/AI-generator left between a
+    # base symbol and its sub/superscript, e.g. "NH 4 +" instead of
+    # "NH₄⁺", or "SO 4 2 −" instead of "SO₄²⁻". These are unambiguous,
+    # safe-to-fix spacing/glyph issues (no chemistry knowledge needed):
+
+    # 1) Convert a bare "−" that is directly touching an existing sub/sup
+    #    digit into the matching sub/sup minus, so mixed runs like "¹³−"
+    #    become fully "¹³⁻" instead of a garbled mix of styles.
+    text = re.sub(r'([⁰¹²³⁴⁵⁶⁷⁸⁹])[\u2212\u2013\u2014]', r'\1⁻', text)
+    text = re.sub(r'([₀₁₂₃₄₅₆₇₈₉])[\u2212\u2013\u2014]', r'\1₋', text)
+    text = re.sub(r'[\u2212\u2013\u2014]([⁰¹²³⁴⁵⁶⁷⁸⁹])', r'⁻\1', text)
+    text = re.sub(r'[\u2212\u2013\u2014]([₀₁₂₃₄₅₆₇₈₉])', r'₋\1', text)
+
+    # 2) "× 10" scientific notation: if the digits right after "×" were
+    #    wrongly superscripted along with the real exponent (source HTML
+    #    put the whole "10-13" inside one <sup>), the base "10" should
+    #    read as normal text -- only the true exponent stays raised.
+    #    "×¹⁰⁻¹³" -> "×10⁻¹³", "×¹⁰⁶" -> "×10⁶".
+    text = re.sub(
+        r'×\s*¹⁰([⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]*)',
+        lambda m: '×10' + m.group(1),
+        text,
+    )
+
+    # 3) Squeeze whitespace that shouldn't be there: between a normal
+    #    letter/digit/bracket and an adjacent sub/superscript run, and
+    #    inside bracket pairs used for complex ions e.g. "[ PO 4 3 − ]²".
+    supsub_chars = "⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉⁺⁻₊₋ⁿ"
+    text = re.sub(rf'([A-Za-z\]\)])\s+(?=[{supsub_chars}])', r'\1', text)
+    text = re.sub(rf'([{supsub_chars}])\s+(?=[A-Za-z0-9\[\(])', r'\1', text)
+    text = re.sub(rf'([{supsub_chars}])\s+(?=[{supsub_chars}])', r'\1', text)
+    text = re.sub(r'\[\s+', '[', text)
+    text = re.sub(r'\s+\]', ']', text)
+    # A bare digit immediately before a sub/superscript run inside the
+    # same "word" (e.g. "PO 4 3 −" -> "PO4" + "3−") still needs the
+    # digit-to-digit space closed once the run above has been squeezed.
+    text = re.sub(rf'(\d)\s+(?=[{supsub_chars}])', r'\1', text)
 
     text = text.replace('\ufeff', '').replace('\u200b', '').replace('\u200c', '')
 
