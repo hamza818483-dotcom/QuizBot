@@ -71,9 +71,21 @@ KNOWN_CATEGORY_CARD_URLS = {
         "মূলবই": "https://chorcha.net/question-bank/chem_1-mainbook",
         "মেডিকেল": "https://chorcha.net/read-archive/chem_1-medical",
         "ভার্সিটি 'ক'": "https://chorcha.net/read-archive/chem_1-versity",
-    },
-    "একাডেমিক": {
         "MCQ": "https://chorcha.net/question-bank/hsc-chemistry-1st-paper-mcq",
+    },
+    "জীববিজ্ঞান ১ম পত্র": {
+        "একাডেমিক": "https://chorcha.net/question-bank/hsc-biology-1st-test-paper",
+        "মূলবই": "https://chorcha.net/question-bank/bio_1-mainbook",
+        "মেডিকেল": "https://chorcha.net/read-archive/bio_1-medical",
+        "ভার্সিটি 'ক'": "https://chorcha.net/read-archive/bio_1-versity",
+        "MCQ": "https://chorcha.net/question-bank/hsc-biology-1st-paper-mcq",
+    },
+    "জীববিজ্ঞান ২য় পত্র": {
+        "একাডেমিক": "https://chorcha.net/question-bank/hsc-biology-2nd-test-paper",
+        "মূলবই": "https://chorcha.net/question-bank/bio_2-mainbook",
+        "মেডিকেল": "https://chorcha.net/read-archive/bio_2-medical",
+        "ভার্সিটি 'ক'": "https://chorcha.net/read-archive/bio_2-versity",
+        "MCQ": "https://chorcha.net/question-bank/hsc-biology-2nd-paper-mcq",
     },
 }
 KNOWN_CATEGORY_CARD_URLS = {
