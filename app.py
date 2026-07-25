@@ -12090,7 +12090,7 @@ async def handle_poll_answer(pa: dict):
                 _pid_snapshot = st.get("poll_id")
                 _idx_snapshot = st.get("idx")
                 async def _seq_stall_recovery():
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(0.3)
                     s2 = await qs_get(uid)
                     if not s2 or s2.get("poll_id") != _pid_snapshot or s2.get("idx") != _idx_snapshot or s2.get("answered"):
                         return  # something else already advanced it — no stall after all
