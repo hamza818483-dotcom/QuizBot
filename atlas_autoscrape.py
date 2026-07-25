@@ -4,10 +4,13 @@ atlas_autoscrape.py — /auto command backend.
 User gives a sequential list of steps, one per line after /auto:
 
   - Plain label            -> click that single element (as before)
-  - Multiple labels, COMMA-separated on one line ("Label A,Label B")
-                            -> click EACH of them in sequence (multi-select
-                               checkboxes/chips on the same page). Comma is
-                               used (not space) because a single label like
+  - Multiple sub-steps, COMMA-separated on one line
+                            -> execute EACH in left-to-right order on the
+                               same page. Each sub-step is either a click
+                               label or an "input:" step (see below), so
+                               you can mix them: "input:30,পরবর্তী" types
+                               30 then clicks "পরবর্তী". Comma is used
+                               (not space) because a single label like
                                "সাধারণ জ্ঞান" itself contains a space.
   - "input:<value>"         -> type <value> into the first visible empty
                                text/number input on the page (e.g. "কয়টা
@@ -151,25 +154,23 @@ async def run_auto_click_sequence(
                 if progress_cb:
                     await progress_cb(i, total, line)
 
-                # --- input: step -------------------------------------------------
-                if line.lower().startswith("input:"):
-                    spec = line[len("input:"):]
-                    await _type_into_input(page, i, total, spec)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=8000)
-                    except Exception:
-                        pass
-                    continue
+                # --- comma-separated sub-steps: each can be "input:..." or
+                # a plain click label. Executed strictly in left-to-right
+                # order (e.g. "input:30,Next Topic" types then clicks).
+                sub_steps = [s.strip() for s in line.split(",") if s.strip()]
+                for sub in sub_steps:
+                    if sub.lower().startswith("input:"):
+                        spec = sub[len("input:"):]
+                        await _type_into_input(page, i, total, spec)
+                        await page.wait_for_timeout(300)
+                        continue
 
-                # --- click step(s): comma-separated = multi-select on same page --
-                sub_labels = [s.strip() for s in line.split(",") if s.strip()]
-                for label in sub_labels:
-                    locator = page.get_by_text(label, exact=True).first
+                    locator = page.get_by_text(sub, exact=True).first
                     try:
                         await locator.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
                     except Exception:
                         raise AutoScrapeError(
-                            f"ধাপ {i}/{total}: \"{label}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
+                            f"ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
                             f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
                         )
                     await locator.click(timeout=CLICK_TIMEOUT_MS)
