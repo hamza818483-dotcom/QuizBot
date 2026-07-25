@@ -385,15 +385,10 @@ def format_content(element, img_map):
 
 
 def post_process(results: list) -> list:
-    results = [r for r in results if r.get('questions', '').strip()]
-    seen = set()
-    unique = []
-    for r in results:
-        key = r.get('questions', '').strip()[:120]
-        if key not in seen:
-            seen.add(key)
-            unique.append(r)
-    return unique
+    # Page-এ যতগুলো MCQ card আছে ততগুলোই রাখা হয় — কোনো dedup/filter না,
+    # exact same question hubohu দুইবার থাকলেও (ভিন্ন university tag-এ
+    # legit repeat entry) সবগুলো output-এ থাকবে।
+    return [r for r in results if r.get('questions', '').strip()]
 
 
 # ============================================================
@@ -459,7 +454,7 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
             if options[4].strip() and ans_idx == "5":
                 options[3], ans_idx = options[4], "4"
 
-            exp_div = card.find('div', class_=lambda x: x and 'prose' in x)
+            exp_div = card.find('div', class_=lambda x: x and 'whitespace-pre-line' in x)
             exp_text = format_content(exp_div, img_map) if exp_div else ""
 
             results.append({"questions": q_text, "option1": options[0], "option2": options[1],
