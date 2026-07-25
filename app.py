@@ -9640,6 +9640,86 @@ answer key, or how the answer was determined. Output ONLY the explanation text, 
         return ""
 
 
+async def handle_auto_command(msg: dict):
+    """
+    /auto
+    বাংলা
+    প্রথম পত্র
+    অধ্যায় ১
+    টপিক ১
+
+    Clicks through chorcha.net using the given button-text labels (one per
+    line, in order), takes a screenshot of the final page reached, then
+    runs it through the existing QBM AI-extraction pipeline and returns a
+    CSV (same output shape as /qbm). Requires CHORCHA_TOKEN env var to be
+    set with a valid session token.
+    """
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    uname = msg["from"].get("first_name", "User")
+    text = msg.get("text", "")
+
+    lines = [l for l in text.split("\n")[1:] if l.strip()]
+    if not lines:
+        await send_msg(chat_id,
+            "❌ Format:\n\n"
+            "<code>/auto\n"
+            "বাংলা\n"
+            "প্রথম পত্র\n"
+            "অধ্যায় ১\n"
+            "টপিক ১</code>\n\n"
+            "📌 প্রতি লাইনে একটা button/link-এর নাম, ক্রমানুসারে — bot একে একে click করে "
+            "শেষ পেজে পৌঁছে সেখান থেকে MCQ extract করবে।",
+            parse_mode="HTML"
+        )
+        return
+
+    if not os.environ.get("CHORCHA_TOKEN", "").strip():
+        await send_msg(chat_id, "❌ CHORCHA_TOKEN সেট করা নেই — আগে login session token env var-এ সেভ করতে হবে।")
+        return
+
+    status = await send_msg(chat_id, f"🌐 শুরু হচ্ছে... (ধাপ 0/{len(lines)})")
+    status_msg_id = status.get("result", {}).get("message_id") if isinstance(status, dict) else None
+
+    async def _progress(i, total, label):
+        if status_msg_id:
+            try:
+                await edit_msg(chat_id, status_msg_id, f"🌐 Click করছে: \"{label}\" (ধাপ {i}/{total})")
+            except Exception:
+                pass
+
+    from atlas_autoscrape import run_auto_click_sequence, AutoScrapeError
+    try:
+        screenshot_bytes = await run_auto_click_sequence(lines, progress_cb=_progress)
+    except AutoScrapeError as e:
+        await send_msg(chat_id, f"❌ {e}")
+        return
+    except Exception as e:
+        logger.error(f"[/auto] navigation failed: {e}")
+        await send_msg(chat_id, f"❌ Navigation ব্যর্থ হয়েছে: {e}")
+        return
+
+    if status_msg_id:
+        try:
+            await edit_msg(chat_id, status_msg_id, "📸 Screenshot নেওয়া হয়েছে, MCQ extract শুরু হচ্ছে...")
+        except Exception:
+            pass
+
+    from PIL import Image as PILImage
+    img = PILImage.open(BytesIO(screenshot_bytes)).convert("RGB")
+    topic = lines[-1]
+    pages = [(1, img)]
+
+    extracted = await qbm_extract_all_pages(chat_id, pages, topic, "auto-scrape", status_msg_id)
+    await process_qbm_pages(
+        chat_id, uid, uname, extracted, topic,
+        channel_id=None, csv_only=True,
+        file_name="auto-scrape.png",
+        status_msg_id=status_msg_id,
+        skip_extract=True,
+    )
+
+
 async def handle_qbm(msg: dict):
     """
     /qbm -p (pages) -c (channel) -m (topic) -t (thread_id)
@@ -12933,6 +13013,14 @@ async def handle_message(msg: dict):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
         # 100% ported from AtlasMasterBot's qbm_handler
         _spawn_command_task(uid, handle_qbm(msg))
+    elif text.startswith("/auto"):
+        # /auto = clicks through chorcha.net using user-given button-text
+        # labels (one per line), screenshots the final page, runs it
+        # through the QBM AI-extraction pipeline, returns CSV.
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        _spawn_command_task(uid, handle_auto_command(msg))
     elif text.startswith("/pdfm"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
