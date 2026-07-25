@@ -149,7 +149,7 @@ class AutoScrapeError(Exception):
     pass
 
 
-async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wait_ms: int = 8000,
+async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 500, max_wait_ms: int = 8000,
                                        concurrency: int = 15):
     """
     দুই ধরনের ব্যাখ্যা button-ই DOM-এ collapsed/dropdown অবস্থায় থাকে --
@@ -158,15 +158,17 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wa
     দুইটাই খোলা এবং populate হওয়া নিশ্চিত না করলে extraction-এ miss হয়ে
     যায়।
 
-    Speed strategy (guarantees full expansion, no time cap):
-    - "ব্যাখ্যা" (non-AI) content আগে থেকেই DOM-এ থাকে -- শুধু
-      aria-expanded flip/CSS toggle। তাই এইগুলো একটাই JS batch পাসে
-      click করে instant খুলে ফেলা হয় (no per-button wait loop needed)।
-    - "AI ব্যাখ্যা" content lazily fetch হয় (network call লাগে), তাই
-      click করেই content আসবে না -- কিন্তু ১টা-১টা করে sequential না
-      করে `concurrency` সংখ্যক button একসাথে ব্যাচে click করে সবগুলোর
-      populate একসাথে poll করা হয়। এতে 1000+ button থাকলেও total সময়
-      অনেক কমে যায় (sequential হলে যা লাগতো তার ~1/concurrency)।
+    Speed + accuracy balance:
+    - Plain "ব্যাখ্যা" (content already in DOM): batch-expanded instantly,
+      single pass, no wait.
+    - "AI ব্যাখ্যা" (lazy-fetch): clicked in concurrent batches of
+      `concurrency` instead of sequential (~15x faster for large banks).
+      Poll tick shortened to 500ms for quicker detection of populated
+      content (less time wasted per button once it's actually ready).
+    - Final verification sweep: after the batch pass, every AI button is
+      re-checked once more; anything still empty gets one more click +
+      wait. This guarantees no explanation is silently left blank just
+      because it was slow during its batch window.
     """
     try:
         all_buttons = page.locator("button:has-text('ব্যাখ্যা')")
@@ -227,12 +229,29 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wa
         except Exception:
             return False
 
+    unresolved = []
     for batch_start in range(0, len(ai_indices), concurrency):
         batch = ai_indices[batch_start:batch_start + concurrency]
         results = await asyncio.gather(*[_click_and_wait(idx) for idx in batch])
         for idx, ok in zip(batch, results):
             if not ok:
-                logger.warning(f"[/auto] AI ব্যাখ্যা button index {idx} didn't populate content within {max_wait_ms}ms")
+                unresolved.append(idx)
+
+    # ---- Final verification sweep: give unresolved buttons one more,
+    # focused (lower concurrency, same wait) chance so nothing is
+    # silently left blank because it was slow during its batch window.
+    if unresolved:
+        logger.warning(f"[/auto] {len(unresolved)}/{len(ai_indices)} AI ব্যাখ্যা needed a retry sweep")
+        still_bad = []
+        retry_concurrency = max(3, concurrency // 3)
+        for batch_start in range(0, len(unresolved), retry_concurrency):
+            batch = unresolved[batch_start:batch_start + retry_concurrency]
+            results = await asyncio.gather(*[_click_and_wait(idx) for idx in batch])
+            for idx, ok in zip(batch, results):
+                if not ok:
+                    still_bad.append(idx)
+        if still_bad:
+            logger.warning(f"[/auto] {len(still_bad)} AI ব্যাখ্যা still unpopulated after retry sweep: indices {still_bad}")
 
 
 async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total=1, poll_ms: int = 1000, max_wait_ms: int = 120000):
