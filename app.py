@@ -9731,15 +9731,35 @@ async def handle_auto_command(msg: dict):
         return
 
     run_count = sum(1 for l in lines if l.strip() == "---") + 1
-    status = await send_msg(chat_id, f"🌐 শুরু হচ্ছে... ({run_count}টা run)")
+    status = await send_msg(chat_id, f"🌐 <b>ATLAS AutoScrape</b>\n[{_mhtml_progress_bar(0)}] 0%\nশুরু হচ্ছে... ({run_count}টা run)", parse_mode="HTML")
     status_msg_id = status.get("result", {}).get("message_id") if isinstance(status, dict) else None
 
+    _last_edit_at = {"t": 0.0}
+
     async def _progress(i, total, label):
-        if status_msg_id:
-            try:
-                await edit_msg(chat_id, status_msg_id, f"🌐 Click করছে: \"{label}\" (ধাপ {i}/{total})")
-            except Exception:
-                pass
+        if not status_msg_id:
+            return
+        # Throttle edits to avoid Telegram rate limits on fast steps.
+        now = time.time()
+        if now - _last_edit_at["t"] < 0.6 and i != total:
+            return
+        _last_edit_at["t"] = now
+        pct = round((i / total) * 100) if total else 0
+        bar = _mhtml_progress_bar(pct)
+        run_tag = ""
+        m = re.match(r"^\[run (\d+)/(\d+)\]\s*(.*)$", label)
+        display_label, run_no, run_total = (m.group(3), m.group(1), m.group(2)) if m else (label, None, None)
+        if run_no:
+            run_tag = f"রান {run_no}/{run_total} · "
+        text = (
+            f"🌐 <b>ATLAS AutoScrape</b>\n"
+            f"[{bar}] {pct}%\n"
+            f"{run_tag}ধাপ {i}/{total}: \"{display_label}\""
+        )
+        try:
+            await edit_msg(chat_id, status_msg_id, text, parse_mode="HTML")
+        except Exception:
+            pass
 
     from atlas_autoscrape import run_auto_click_sequence, AutoScrapeError
     try:
@@ -9754,7 +9774,10 @@ async def handle_auto_command(msg: dict):
 
     if status_msg_id:
         try:
-            await edit_msg(chat_id, status_msg_id, f"🔍 {len(html_results)}টা page-এর HTML থেকে MCQ extract করা হচ্ছে...")
+            await edit_msg(chat_id, status_msg_id,
+                f"🌐 <b>ATLAS AutoScrape</b>\n[{_mhtml_progress_bar(100)}] 100%\n"
+                f"🔍 {len(html_results)}টা page-এর HTML থেকে MCQ extract করা হচ্ছে...",
+                parse_mode="HTML")
         except Exception:
             pass
 
