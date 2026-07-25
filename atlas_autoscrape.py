@@ -171,38 +171,58 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wa
             continue  # one failed AI-explanation shouldn't break the whole extraction
 
 
-async def _wait_for_mcq_count_stable(page, poll_ms: int = 1000, max_wait_ms: int = 20000):
+async def _wait_for_mcq_count_stable(page, poll_ms: int = 1000, max_wait_ms: int = 120000):
     """
     Some pages (e.g. প্রশ্নব্যাংক browse) lazy-load MCQ cards only as the
     user scrolls down (viewport-based), while others (e.g. the post-submit
-    review page) load everything immediately without any scroll. To cover
-    both: scroll to the bottom on every poll (harmless no-op if the page
-    doesn't need it) and watch the MCQ-card count; once it's unchanged for
-    2 consecutive polls (or `max_wait_ms` is hit), treat the page as fully
-    loaded.
+    review page) load everything immediately without any scroll.
+
+    Chorcha.net prints the literal text "আর কোনো প্রশ্ন নেই" once every MCQ
+    has been loaded -- this is the ONLY reliable end-of-list signal. A
+    naive "count unchanged for 2 polls" heuristic falsely triggers during
+    a normal network pause between batches (e.g. loading stalls briefly
+    after 750/967 cards), truncating results. So: keep scrolling + polling
+    until that end marker appears, or until `max_wait_ms` is hit as a
+    last-resort safety cap (raised well above normal load time since large
+    banks can take a while).
     """
+    end_marker = "আর কোনো প্রশ্ন নেই"
     card_selector = "div.border.rounded-xl"
     elapsed = 0
     last_count = -1
-    stable_polls = 0
+    stale_polls = 0  # consecutive polls with literally zero new cards AND no end marker yet
     while elapsed < max_wait_ms:
         try:
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         except Exception:
             pass
         try:
+            body_text = await page.evaluate("() => document.body.innerText")
+        except Exception:
+            body_text = ""
+        if end_marker in body_text:
+            logger.info(f"[/auto] MCQ list end marker found after {elapsed}ms, count={last_count}")
+            break
+        try:
             count = await page.locator(card_selector).count()
         except Exception:
             break
         if count == last_count:
-            stable_polls += 1
-            if stable_polls >= 2:
-                break
+            stale_polls += 1
         else:
-            stable_polls = 0
+            stale_polls = 0
         last_count = count
         await page.wait_for_timeout(poll_ms)
         elapsed += poll_ms
+        if stale_polls >= 15:
+            # ~15s with zero growth AND no end-marker -- likely a page
+            # that never shows the marker (e.g. a short list with no
+            # "no more" footer). Stop here rather than burning the full
+            # max_wait_ms budget.
+            logger.info(f"[/auto] MCQ count stable at {last_count} for {stale_polls}s with no end marker, stopping")
+            break
+    else:
+        logger.warning(f"[/auto] MCQ wait hit max_wait_ms={max_wait_ms} without end marker, count={last_count}")
 
     # Scroll back to top so screenshots/DOM order reads naturally (no
     # functional effect on HTML extraction, just tidy).
