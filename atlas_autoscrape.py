@@ -68,6 +68,30 @@ class AutoScrapeError(Exception):
     pass
 
 
+async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wait_ms: int = 6000):
+    """
+    "AI ব্যাখ্যা" button-এর content DOM-এ lazily load হয় (click না করলে
+    fetch হয় না), তাই extraction-এর আগে প্রতিটা card-এর AI ব্যাখ্যা button
+    খুঁজে click করে content load হওয়া পর্যন্ত অপেক্ষা করে।
+    """
+    try:
+        buttons = page.locator("button:has-text('AI ব্যাখ্যা')")
+        count = await buttons.count()
+    except Exception:
+        return
+    for i in range(count):
+        try:
+            btn = buttons.nth(i)
+            expanded = await btn.get_attribute("aria-expanded")
+            if expanded == "true":
+                continue
+            await btn.click(timeout=5000)
+            # Wait briefly for the AI-generated text to populate.
+            await page.wait_for_timeout(per_click_wait_ms)
+        except Exception:
+            continue  # one failed AI-explanation shouldn't break the whole extraction
+
+
 async def _type_into_input(page, step_index, total, spec: str):
     """
     spec is the text after "input:" prefix.
@@ -187,9 +211,13 @@ async def run_auto_click_sequence(
                 except Exception:
                     pass  # some steps are pure client-side, no network wait needed
 
-            # Final settle, then grab the rendered page HTML for direct
-            # DOM-based extraction (no screenshot / AI-vision needed).
+            # Final settle. Before grabbing HTML, auto-click every "AI
+            # ব্যাখ্যা" button so its lazily-generated content loads into
+            # the DOM (it's not present until clicked, unlike the regular
+            # ব্যাখ্যা section which is pre-rendered hidden).
             await page.wait_for_timeout(1000)
+            await _expand_all_ai_explanations(page)
+
             html = await page.content()
             return html.encode("utf-8")
         finally:
