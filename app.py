@@ -9778,6 +9778,18 @@ async def handle_auto_command(msg: dict):
         # run to finish first -- so a completed topic's file arrives
         # immediately while later runs are still processing.
         topic = run_line_groups[run_no - 1][-1].strip() if run_no - 1 < len(run_line_groups) else f"run{run_no}"
+        run_tag = f"রান {run_no}/{run_total} · " if run_total > 1 else ""
+
+        async def _final_stage_update(text):
+            if not status_msg_id:
+                return
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                    f"🌐 <b>ATLAS AutoScrape</b>\n{run_tag}{text}", parse_mode="HTML")
+            except Exception:
+                pass
+
+        await _final_stage_update("📄 HTML থেকে MCQ বের করা হচ্ছে...")
         try:
             parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, html_bytes, "auto-scrape.html")
             results = parsed["results"]
@@ -9790,8 +9802,11 @@ async def handle_auto_command(msg: dict):
             await send_msg(chat_id, f"❌ রান {run_no} ({topic}): কোনো MCQ খুঁজে পাওয়া যায়নি।")
             return
 
+        await _final_stage_update(f"📊 CSV তৈরি হচ্ছে... ({len(results)}টা MCQ)")
         csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or f"ATLAS_AutoScrape_{run_no}"
+
+        await _final_stage_update(f"📤 CSV পাঠানো হচ্ছে... ({len(results)}টা MCQ)")
         await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
             caption=f"📚 {topic}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP (HTML-parse, no AI-vision)"
                     + (f"\n({run_no}/{run_total})" if run_total > 1 else ""),
