@@ -48,6 +48,7 @@ the exact click path. That keeps it reliable instead of guessing selectors.
 import asyncio
 import os
 import logging
+import re
 import unicodedata
 from io import BytesIO
 
@@ -171,7 +172,7 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wa
             continue  # one failed AI-explanation shouldn't break the whole extraction
 
 
-async def _wait_for_mcq_count_stable(page, poll_ms: int = 1000, max_wait_ms: int = 120000):
+async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total=1, poll_ms: int = 1000, max_wait_ms: int = 120000):
     """
     Some pages (e.g. প্রশ্নব্যাংক browse) lazy-load MCQ cards only as the
     user scrolls down (viewport-based), while others (e.g. the post-submit
@@ -185,12 +186,34 @@ async def _wait_for_mcq_count_stable(page, poll_ms: int = 1000, max_wait_ms: int
     until that end marker appears, or until `max_wait_ms` is hit as a
     last-resort safety cap (raised well above normal load time since large
     banks can take a while).
+
+    If `progress_cb` is given, emits a live "কতটা MCQ পাওয়া গেছে" update on
+    every poll so the person can see loading progress in real time, and
+    (if the page shows an expected total, e.g. "৯৬৭ টি প্রশ্ন") the running
+    count against that target.
     """
     end_marker = "আর কোনো প্রশ্ন নেই"
     card_selector = "div.border.rounded-xl"
     elapsed = 0
     last_count = -1
     stale_polls = 0  # consecutive polls with literally zero new cards AND no end marker yet
+    expected_total = None
+
+    async def _try_read_expected_total():
+        try:
+            text = await page.evaluate("() => document.body.innerText")
+        except Exception:
+            return None
+        m = re.search(r"([০-৯0-9]+)\s*(?:টি|টা)?\s*প্রশ্ন", text)
+        if not m:
+            return None
+        digits = m.group(1)
+        bn_to_en = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+        try:
+            return int(digits.translate(bn_to_en))
+        except ValueError:
+            return None
+
     while elapsed < max_wait_ms:
         try:
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -200,13 +223,30 @@ async def _wait_for_mcq_count_stable(page, poll_ms: int = 1000, max_wait_ms: int
             body_text = await page.evaluate("() => document.body.innerText")
         except Exception:
             body_text = ""
-        if end_marker in body_text:
-            logger.info(f"[/auto] MCQ list end marker found after {elapsed}ms, count={last_count}")
-            break
+
         try:
             count = await page.locator(card_selector).count()
         except Exception:
             break
+
+        if expected_total is None:
+            expected_total = await _try_read_expected_total()
+
+        if progress_cb:
+            target_str = f"/{expected_total}" if expected_total else ""
+            try:
+                await progress_cb(
+                    count, expected_total or max(count, 1),
+                    f"[run {run_no}/{run_total}] MCQ লোড হচ্ছে... {count}{target_str} টা পাওয়া গেছে",
+                )
+            except Exception:
+                pass
+
+        if end_marker in body_text:
+            logger.info(f"[/auto] MCQ list end marker found after {elapsed}ms, count={count}")
+            last_count = count
+            break
+
         if count == last_count:
             stale_polls += 1
         else:
@@ -222,7 +262,19 @@ async def _wait_for_mcq_count_stable(page, poll_ms: int = 1000, max_wait_ms: int
             logger.info(f"[/auto] MCQ count stable at {last_count} for {stale_polls}s with no end marker, stopping")
             break
     else:
+        # Loop exhausted max_wait_ms without hitting the marker or the
+        # stale-polls cutoff -- likely still actively loading. Flag this
+        # clearly rather than silently returning what we have.
         logger.warning(f"[/auto] MCQ wait hit max_wait_ms={max_wait_ms} without end marker, count={last_count}")
+        if progress_cb:
+            try:
+                await progress_cb(
+                    last_count, expected_total or last_count,
+                    f"[run {run_no}/{run_total}] ⚠️ {max_wait_ms // 1000}s পার হয়ে গেছে, এখনো \"আর কোনো প্রশ্ন নেই\" পাওয়া যায়নি "
+                    f"({last_count}টা পর্যন্ত পাওয়া গেছে) -- কিছু MCQ miss হতে পারে",
+                )
+            except Exception:
+                pass
 
     # Scroll back to top so screenshots/DOM order reads naturally (no
     # functional effect on HTML extraction, just tidy).
@@ -230,6 +282,7 @@ async def _wait_for_mcq_count_stable(page, poll_ms: int = 1000, max_wait_ms: int
         await page.evaluate("window.scrollTo(0, 0)")
     except Exception:
         pass
+    return last_count, expected_total
 
 
 async def _type_into_input(page, step_index, total, spec: str):
@@ -432,7 +485,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
 
     # Wait for MCQ cards to finish loading (slow pages keep adding cards
     # after navigation "settles"), then expand AI ব্যাখ্যা before grabbing HTML.
-    await _wait_for_mcq_count_stable(page)
+    await _wait_for_mcq_count_stable(page, progress_cb=progress_cb, run_no=run_no, run_total=run_total)
     await _expand_all_ai_explanations(page)
 
     html = await page.content()
