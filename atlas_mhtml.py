@@ -454,8 +454,16 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
             if options[4].strip() and ans_idx == "5":
                 options[3], ans_idx = options[4], "4"
 
-            exp_div = card.find('div', class_=lambda x: x and 'whitespace-pre-line' in x)
-            exp_text = format_content(exp_div, img_map) if exp_div else ""
+            # chorcha.net-এ দুই ধরনের ব্যাখ্যা section থাকতে পারে: সাধারণ
+            # "ব্যাখ্যা" (pre-rendered hidden div) এবং "AI ব্যাখ্যা" (lazy —
+            # button click করলে DOM-এ content আসে)। দুইটাই থাকলে দুইটাই
+            # জোড়া লাগিয়ে নেওয়া হয়; যেকোনো একটা খালি হলে সেটা skip হয়।
+            exp_parts = []
+            for exp_div in card.find_all('div', class_=lambda x: x and 'whitespace-pre-line' in x):
+                t = format_content(exp_div, img_map)
+                if t.strip():
+                    exp_parts.append(t.strip())
+            exp_text = "\n\n".join(exp_parts)
 
             results.append({"questions": q_text, "option1": options[0], "option2": options[1],
                              "option3": options[2], "option4": options[3], "option5": "",
