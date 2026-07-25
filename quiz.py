@@ -23,6 +23,21 @@ from core import (
     download_tg_file, db_get_settings, notify_owner,
 )
 
+_quiz_preview_table_ready = False
+
+async def _ensure_quiz_preview_table():
+    """quiz_preview table was referenced but never created via migration —
+    caused 'no such table: quiz_preview' D1 errors on every /pre call and
+    quiz-start preview lookup. Created lazily on first use, then cached."""
+    global _quiz_preview_table_ready
+    if _quiz_preview_table_ready:
+        return
+    try:
+        await d1_run("CREATE TABLE IF NOT EXISTS quiz_preview (id INTEGER PRIMARY KEY, file_id TEXT)")
+        _quiz_preview_table_ready = True
+    except Exception as e:
+        logger.warning(f"[D1] _ensure_quiz_preview_table failed: {e}")
+
 # ============================================================
 # D1 QUIZ SESSION STATE (in-memory for active D1 quiz play)
 # Separate from legacy QUIZ_STATE (image/csv poll quiz) in app.py
@@ -150,6 +165,7 @@ async def handle_qdel(msg: dict):
 
 async def handle_d1_pre(msg: dict):
     """Quiz Preview Image set/remove"""
+    await _ensure_quiz_preview_table()
     chat_id = msg["chat"]["id"]
     text = msg.get("text", "").replace("/pre", "").strip()
     reply = msg.get("reply_to_message")
@@ -373,6 +389,7 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
         intro += "🔄 Practice\n\nএখনই কুইজ আসবে, আপনি প্রস্তুত তো? 😎"
         r_first = await send_msg(chat_id, intro)
     else:
+        await _ensure_quiz_preview_table()
         preview = await d1_select("SELECT file_id FROM quiz_preview WHERE id=1")
         info_text = (
             f"📝 {session['name']}\n📄 {session['desc']}\n"
