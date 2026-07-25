@@ -375,6 +375,11 @@ async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total
             last_count = count
             break
 
+        if expected_total and count >= expected_total:
+            logger.info(f"[/auto] MCQ count reached expected_total={expected_total} (count={count}), stopping without waiting for end marker")
+            last_count = count
+            break
+
         if count == last_count:
             stale_polls += 1
         else:
