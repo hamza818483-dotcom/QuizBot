@@ -277,43 +277,52 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
             except Exception:
                 locator = None
 
+            element_handle = None  # used for the JS-normalized fallback (bypasses locator)
             if locator is None:
-                # Fallback A: some cards split the label across sibling
-                # elements (e.g. "রসায়ন" and "১ম পত্র" on separate lines
-                # inside the same card), so no single element's exact
-                # text equals the full sub-string. Match a container
-                # whose full (whitespace-normalized) text content equals
-                # `sub`.
-                normalized = " ".join(sub.split())
-                candidates = page.locator(
-                    "xpath=//*[not(self::script) and not(self::style)]"
-                    f"[normalize-space(translate(., '\u00a0', ' '))=\"{normalized}\"]"
-                )
+                # Fallback A+B combined, JS-side: Bengali text can be
+                # represented in two different Unicode forms for the same
+                # visible glyph (e.g. "য়" as one precomposed codepoint
+                # U+09DF, or as "য"+nukta two codepoints) -- visually
+                # identical but byte-different. CSS attribute selectors
+                # and XPath string comparisons do NOT Unicode-normalize,
+                # so they silently fail to match across these forms even
+                # though Python's own unicodedata.normalize("NFC", ...)
+                # was applied to `sub`. Do the comparison inside the page
+                # via JS's String.normalize("NFC"), which normalizes both
+                # sides consistently.
                 try:
-                    if await candidates.count() > 0:
-                        locator = candidates.last  # innermost match is usually last in doc order
-                        await locator.wait_for(state="visible", timeout=3000)
-                        match_method = "container-text"
+                    element_handle = await page.evaluate_handle(
+                        """(target) => {
+                            const norm = s => (s || '').normalize('NFC').replace(/\\s+/g, ' ').trim();
+                            const wanted = norm(target);
+                            const all = Array.from(document.querySelectorAll('*'));
+                            // Prefer an element whose OWN data-event attribute
+                            // ends with "_<label>" (image-only cards).
+                            for (const el of all.reverse()) {
+                                const ev = el.getAttribute && el.getAttribute('data-event');
+                                if (ev && norm(ev).endsWith('_' + wanted)) return el;
+                            }
+                            // Fallback: element whose full text content
+                            // (own + descendants) equals the label, e.g.
+                            // a card title split across sibling spans.
+                            for (const el of all) {
+                                if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+                                if (norm(el.textContent) === wanted) return el;
+                            }
+                            return null;
+                        }""",
+                        sub,
+                    )
+                    is_null = await page.evaluate("(h) => h === null", element_handle)
+                    if is_null:
+                        element_handle = None
+                    else:
+                        match_method = "js-normalized"
                 except Exception:
-                    locator = None
+                    element_handle = None
 
-            if locator is None:
-                # Fallback B: card image + label are baked into one image
-                # (no visible/joinable DOM text at all), but chorcha.net
-                # tags these cards with data-event="<Prefix>_<Label>" for
-                # analytics. Match any element whose data-event ends with
-                # "_<sub>".
-                try:
-                    candidates = page.locator(f'[data-event$="_{sub}"]')
-                    if await candidates.count() > 0:
-                        locator = candidates.last
-                        await locator.wait_for(state="visible", timeout=3000)
-                        match_method = "data-event"
-                except Exception:
-                    locator = None
-
-            if locator is None:
-                # Fallback C: this exact label under the current subject
+            if locator is None and element_handle is None:
+                # Fallback: this exact label under the current subject
                 # is a known image-only card whose URL has no derivable
                 # relation to the label (see KNOWN_CATEGORY_CARD_URLS) --
                 # navigate straight there instead of clicking.
@@ -332,7 +341,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                     except Exception as e:
                         logger.warning(f"[/auto] known-url-map goto failed for {sub!r}: {e}")
 
-            if locator is None:
+            if locator is None and element_handle is None:
                 logger.error(
                     f"[/auto] step {i}/{total} sub={sub!r} NOT FOUND. "
                     f"subject_context={current_subject!r}, "
@@ -344,7 +353,11 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                     f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
                 )
             logger.info(f"[/auto] step {i}/{total} sub={sub!r}: matched via {match_method}")
-            await locator.click(timeout=CLICK_TIMEOUT_MS)
+            if locator is not None:
+                await locator.click(timeout=CLICK_TIMEOUT_MS)
+            else:
+                await element_handle.as_element().scroll_into_view_if_needed()
+                await element_handle.as_element().click(timeout=CLICK_TIMEOUT_MS)
             await page.wait_for_timeout(400)  # small gap between multi-selects
             processed_subs.append(sub)
 
