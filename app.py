@@ -9662,19 +9662,20 @@ async def handle_auto_command(msg: dict):
     প্রথম পত্র
     অধ্যায় ১
     টপিক ১
+    ---
+    (আরেকটা independent run, চাইলে)
 
     Clicks through chorcha.net using the given button-text labels (one per
-    line, in order), takes a screenshot of the final page reached, then
-    runs it through the existing QBM AI-extraction pipeline and returns a
-    CSV (same output shape as /qbm). Requires CHORCHA_TOKEN env var to be
-    set with a valid session token.
+    line, in order per run; "---" separates independent runs), grabs each
+    run's final page HTML, and extracts MCQs directly from the DOM
+    (parse_mhtml_to_mcqs) -- no screenshot/AI-vision. Each run produces
+    its own CSV; multiple runs = multiple CSVs from one command. Requires
+    CHORCHA_TOKEN env var to be set with a valid session token.
     """
     chat_id = msg["chat"]["id"]
-    uid = msg["from"]["id"]
-    uname = msg["from"].get("first_name", "User")
     text = msg.get("text", "")
 
-    lines = [l for l in text.split("\n")[1:] if l.strip()]
+    lines = [l.rstrip() for l in text.split("\n")[1:] if l.strip() != ""]
     if not lines:
         await send_msg(chat_id,
             "❌ Format:\n\n"
@@ -9684,7 +9685,9 @@ async def handle_auto_command(msg: dict):
             "অধ্যায় ১\n"
             "টপিক ১</code>\n\n"
             "📌 প্রতি লাইনে একটা button/link-এর নাম, ক্রমানুসারে — bot একে একে click করে "
-            "শেষ পেজে পৌঁছে সেই page-এর HTML থেকে সরাসরি MCQ extract করবে (screenshot/AI-vision লাগে না, তাই নির্ভুল)।",
+            "শেষ পেজে পৌঁছে সেই page-এর HTML থেকে সরাসরি MCQ extract করবে (screenshot/AI-vision লাগে না, তাই নির্ভুল)।\n\n"
+            "📌 একাধিক আলাদা topic থেকে আলাদা আলাদা CSV চাইলে <code>---</code> দিয়ে ভাগ করো:\n"
+            "<code>/auto\nইতিহাস,ব্রিটিশ শাসনামলে বাংলা\ninput:25\nএগিয়ে যাও\n---\nইতিহাস,মুসলিম শাসন ও সালতানাত\ninput:25\nএগিয়ে যাও</code>",
             parse_mode="HTML"
         )
         return
@@ -9693,7 +9696,8 @@ async def handle_auto_command(msg: dict):
         await send_msg(chat_id, "❌ CHORCHA_TOKEN সেট করা নেই — আগে login session token env var-এ সেভ করতে হবে।")
         return
 
-    status = await send_msg(chat_id, f"🌐 শুরু হচ্ছে... (ধাপ 0/{len(lines)})")
+    run_count = sum(1 for l in lines if l.strip() == "---") + 1
+    status = await send_msg(chat_id, f"🌐 শুরু হচ্ছে... ({run_count}টা run)")
     status_msg_id = status.get("result", {}).get("message_id") if isinstance(status, dict) else None
 
     async def _progress(i, total, label):
@@ -9705,7 +9709,7 @@ async def handle_auto_command(msg: dict):
 
     from atlas_autoscrape import run_auto_click_sequence, AutoScrapeError
     try:
-        html_bytes = await run_auto_click_sequence(lines, progress_cb=_progress)
+        html_results = await run_auto_click_sequence(lines, progress_cb=_progress)
     except AutoScrapeError as e:
         await send_msg(chat_id, f"❌ {e}")
         return
@@ -9716,34 +9720,51 @@ async def handle_auto_command(msg: dict):
 
     if status_msg_id:
         try:
-            await edit_msg(chat_id, status_msg_id, "🔍 Page HTML থেকে MCQ extract করা হচ্ছে...")
+            await edit_msg(chat_id, status_msg_id, f"🔍 {len(html_results)}টা page-এর HTML থেকে MCQ extract করা হচ্ছে...")
         except Exception:
             pass
 
-    topic = lines[-1]
-    try:
-        parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, html_bytes, "auto-scrape.html")
-        results = parsed["results"]
-    except Exception as e:
-        logger.error(f"[/auto] HTML parse failed: {e}")
-        await send_msg(chat_id, f"❌ MCQ extract ব্যর্থ হয়েছে: {e}")
-        return
+    # Recompute per-run topic labels (last click-label of each run, for
+    # the filename/caption) by re-splitting the same way the backend did.
+    run_line_groups = [[]]
+    for l in lines:
+        if l.strip() == "---":
+            run_line_groups.append([])
+        else:
+            run_line_groups[-1].append(l)
+    run_line_groups = [g for g in run_line_groups if any(x.strip() for x in g)]
 
-    if not results:
-        await send_msg(chat_id, "❌ কোনো MCQ খুঁজে পাওয়া যায়নি এই page-এ। Selector/format মিলছে না হতে পারে।")
-        return
+    sent_any = False
+    for idx, html_bytes in enumerate(html_results, 1):
+        topic = run_line_groups[idx - 1][-1].strip() if idx - 1 < len(run_line_groups) else f"run{idx}"
+        try:
+            parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, html_bytes, "auto-scrape.html")
+            results = parsed["results"]
+        except Exception as e:
+            logger.error(f"[/auto] HTML parse failed (run {idx}): {e}")
+            await send_msg(chat_id, f"❌ রান {idx}: MCQ extract ব্যর্থ হয়েছে: {e}")
+            continue
 
-    csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
-    safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_AutoScrape"
-    await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
-        caption=f"📚 {topic}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP (HTML-parse, no AI-vision)",
-        mime_type="text/csv")
+        if not results:
+            await send_msg(chat_id, f"❌ রান {idx} ({topic}): কোনো MCQ খুঁজে পাওয়া যায়নি।")
+            continue
+
+        csv_bytes = await asyncio.to_thread(results_to_csv_bytes, results)
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or f"ATLAS_AutoScrape_{idx}"
+        await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
+            caption=f"📚 {topic}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP (HTML-parse, no AI-vision)"
+                    + (f"\n({idx}/{len(html_results)})" if len(html_results) > 1 else ""),
+            mime_type="text/csv")
+        sent_any = True
 
     if status_msg_id:
         try:
             await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_msg_id})
         except Exception:
             pass
+
+    if not sent_any:
+        await send_msg(chat_id, "❌ কোনো run থেকেই MCQ পাওয়া যায়নি।")
 
 
 async def handle_qbm(msg: dict):
