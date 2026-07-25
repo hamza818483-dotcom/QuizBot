@@ -148,11 +148,18 @@ class AutoScrapeError(Exception):
     pass
 
 
-async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wait_ms: int = 6000):
+async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wait_ms: int = 8000):
     """
     "AI ব্যাখ্যা" button-এর content DOM-এ lazily load হয় (click না করলে
-    fetch হয় না), তাই extraction-এর আগে প্রতিটা card-এর AI ব্যাখ্যা button
-    খুঁজে click করে content load হওয়া পর্যন্ত অপেক্ষা করে।
+    fetch হয় না) -- এবং click করার পরেও AI-generated text আসতে সময় লাগে
+    (network fetch + generation), fixed 900ms wait-এর মধ্যে অনেক সময়
+    content পুরোপুরি না এসেই HTML capture হয়ে যায় (ফলে সেই card-এর AI
+    ব্যাখ্যা খালি থেকে যায়, যদিও button click হয়ে "expanded" দেখাচ্ছে)।
+
+    তাই এখন প্রতিটা button-এর জন্য: click করে, তারপর সংশ্লিষ্ট container-এর
+    টেক্সট আসলেই populate হয়েছে কিনা পোল করে অপেক্ষা করা হয় (aria-expanded
+    "true" হওয়া যথেষ্ট না -- content ফাঁকা থাকতে পারে), max_wait_ms পর্যন্ত।
+    aria-expanded ফ্লিপ না হলে একবার retry-click করা হয়।
     """
     try:
         buttons = page.locator("button:has-text('AI ব্যাখ্যা')")
@@ -164,10 +171,50 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wa
             btn = buttons.nth(i)
             expanded = await btn.get_attribute("aria-expanded")
             if expanded == "true":
-                continue
+                # Already expanded (e.g. re-visited page) -- still make
+                # sure content isn't empty; if it is, force a re-click.
+                has_text = await page.evaluate(
+                    """(el) => {
+                        let sib = el.closest('div')?.parentElement;
+                        return !!(sib && sib.innerText && sib.innerText.trim().length > 0);
+                    }""",
+                    await btn.element_handle(),
+                )
+                if has_text:
+                    continue
+
             await btn.click(timeout=5000)
-            # Wait briefly for the AI-generated text to populate.
-            await page.wait_for_timeout(per_click_wait_ms)
+
+            elapsed = 0
+            populated = False
+            while elapsed < max_wait_ms:
+                await page.wait_for_timeout(per_click_wait_ms)
+                elapsed += per_click_wait_ms
+                try:
+                    handle = await btn.element_handle()
+                    has_text = await page.evaluate(
+                        """(el) => {
+                            let container = el.closest('div')?.parentElement;
+                            return !!(container && container.innerText && container.innerText.trim().length > 20);
+                        }""",
+                        handle,
+                    )
+                except Exception:
+                    has_text = False
+                if has_text:
+                    populated = True
+                    break
+                # Retry once, halfway through the budget, in case the
+                # first click didn't register / toggled closed again.
+                if elapsed == per_click_wait_ms * 2:
+                    try:
+                        still_expanded = await btn.get_attribute("aria-expanded")
+                        if still_expanded != "true":
+                            await btn.click(timeout=5000)
+                    except Exception:
+                        pass
+            if not populated:
+                logger.warning(f"[/auto] AI ব্যাখ্যা button {i+1}/{count} didn't populate content within {max_wait_ms}ms")
         except Exception:
             continue  # one failed AI-explanation shouldn't break the whole extraction
 
