@@ -254,15 +254,23 @@ async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total
             text = await page.evaluate("() => document.body.innerText")
         except Exception:
             return None
-        m = re.search(r"([০-৯0-9]+)\s*(?:টি|টা)?\s*প্রশ্ন", text)
-        if not m:
+        # Require the stronger/more specific anchor ("X টি প্রশ্ন" or "X টা
+        # প্রশ্ন") rather than a bare "...প্রশ্ন" match, since a loose match
+        # can pick up an unrelated small number elsewhere on the page
+        # (e.g. an input field's placeholder or an unrelated count). If
+        # multiple matches exist, take the LARGEST -- the true total for
+        # a long list is never smaller than a coincidental match.
+        matches = re.findall(r"([০-৯0-9]+)\s*(?:টি|টা)\s*প্রশ্ন", text)
+        if not matches:
             return None
-        digits = m.group(1)
         bn_to_en = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
-        try:
-            return int(digits.translate(bn_to_en))
-        except ValueError:
-            return None
+        values = []
+        for digits in matches:
+            try:
+                values.append(int(digits.translate(bn_to_en)))
+            except ValueError:
+                continue
+        return max(values) if values else None
 
     while elapsed < max_wait_ms:
         try:
@@ -279,8 +287,15 @@ async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total
         except Exception:
             break
 
-        if expected_total is None:
-            expected_total = await _try_read_expected_total()
+        if expected_total is None or (expected_total < count):
+            # Either not found yet, or a stale/wrong smaller reading from
+            # an earlier poll -- re-check and never let it undercut what
+            # we've already visibly counted.
+            fresh_total = await _try_read_expected_total()
+            if fresh_total and fresh_total >= count:
+                expected_total = fresh_total
+            elif expected_total is not None and expected_total < count:
+                expected_total = None  # was wrong; stop showing a bogus target
 
         if progress_cb:
             target_str = f"/{expected_total}" if expected_total else ""
