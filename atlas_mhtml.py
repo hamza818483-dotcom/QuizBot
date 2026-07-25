@@ -292,6 +292,7 @@ def aggressive_clean(text):
     text = re.sub(r'([⁰¹²³⁴⁵⁶⁷⁸⁹]+)°', lambda m: m.group(1).translate(SUP_TO_NORMAL) + '°', text)
     text = text.replace('^\\circ', '°').replace('^{\\circ}', '°').replace('∘', '°')
     text = text.replace('° C', '°C').replace('^ C', '°C')
+    text = re.sub(r'(\d)\s+°', r'\1°', text)
 
     text = text.translate(str.maketrans("ₐₑₒₓₕₖₗₘₙₚₛₜ", "aeoxhklmnpst"))
 
@@ -380,7 +381,19 @@ def format_content(element, img_map):
     for sub in element.find_all(['sub', 'msub']):
         sub.replace_with(sub.get_text(strip=True).translate(SUB_MAP))
     for sup in element.find_all(['sup', 'msup']):
-        sup.replace_with(sup.get_text(strip=True).translate(SUP_MAP))
+        sup_text = sup.get_text(strip=True)
+        # A <sup>/<msup> whose own text ends in "°", OR whose very next
+        # sibling text starts with "°" (source markup sometimes wraps
+        # just the number in <sup> right before a separate "°C"/"° C"
+        # node), is a degree-temperature value (e.g. 20°C) -- not a math
+        # exponent. Keep those digits as plain text so "20°C" never
+        # becomes "²⁰°C".
+        next_sib = sup.next_sibling
+        next_text = next_sib.strip() if isinstance(next_sib, str) else (next_sib.get_text() if next_sib else "")
+        if sup_text.rstrip().endswith('°') or (next_text or "").lstrip().startswith('°'):
+            sup.replace_with(sup_text)
+        else:
+            sup.replace_with(sup_text.translate(SUP_MAP))
 
     for img in element.find_all('img'):
         src = img.get('src', '') or img.get('data-src', '')
