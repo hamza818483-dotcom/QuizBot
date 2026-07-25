@@ -19,15 +19,27 @@ User gives a sequential list of steps, one per line after /auto:
                                nearest to/associated with <label> text
                                (use when a page has more than one input).
 
+MULTIPLE RUNS IN ONE COMMAND: separate independent runs with a line
+containing only "---". Each run starts fresh from the chorcha.net
+homepage, executes its own steps, and produces its own separate CSV —
+e.g. picking 3 different sub-topics under the same dropdown parent (which
+auto-selects all children on click) as 3 clean single-topic exports
+instead of one mixed run.
+
+Before extracting, the final page is polled every ~1s for its MCQ-card
+count; once the count is unchanged for 2 consecutive polls (or a max
+wait is hit) the page is considered fully loaded, avoiding a partial
+extract on slow-loading pages.
+
 This module launches a Playwright browser, restores the chorcha.net login
 session from a saved cookie (CHORCHA_TOKEN env var), then executes each
 step in order (Subject -> Chapter -> Topic -> ... -> input -> Submit).
-After the LAST step, it waits for the page to settle and returns the
-final page's rendered HTML, which is handed to parse_mhtml_to_mcqs()
-(atlas_mhtml.py) for direct DOM-based MCQ extraction — this is far more
-accurate than screenshot + AI-vision (exact question/option text/order,
-correct answer detected from the orange/green highlighted button, no
-OCR misreads).
+After the LAST step of each run, it waits for the page to settle and
+returns that run's final page HTML, which is handed to
+parse_mhtml_to_mcqs() (atlas_mhtml.py) for direct DOM-based MCQ extraction
+— this is far more accurate than screenshot + AI-vision (exact
+question/option text/order, correct answer detected from the
+orange/green highlighted button, no OCR misreads).
 
 This does NOT do auto-discovery of the menu tree — the user must supply
 the exact click path. That keeps it reliable instead of guessing selectors.
@@ -92,6 +104,33 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wa
             continue  # one failed AI-explanation shouldn't break the whole extraction
 
 
+async def _wait_for_mcq_count_stable(page, poll_ms: int = 1000, max_wait_ms: int = 15000):
+    """
+    Slow-loading pages may still be adding MCQ cards to the DOM after
+    navigation "settles". Poll the visible card count every `poll_ms`;
+    once it's unchanged for 2 consecutive polls (or `max_wait_ms` is hit),
+    treat the page as fully loaded.
+    """
+    card_selector = "div.border.rounded-xl"
+    elapsed = 0
+    last_count = -1
+    stable_polls = 0
+    while elapsed < max_wait_ms:
+        try:
+            count = await page.locator(card_selector).count()
+        except Exception:
+            break
+        if count == last_count:
+            stable_polls += 1
+            if stable_polls >= 2:
+                break
+        else:
+            stable_polls = 0
+        last_count = count
+        await page.wait_for_timeout(poll_ms)
+        elapsed += poll_ms
+
+
 async def _type_into_input(page, step_index, total, spec: str):
     """
     spec is the text after "input:" prefix.
@@ -139,13 +178,67 @@ async def _type_into_input(page, step_index, total, spec: str):
     await page.wait_for_timeout(300)
 
 
+async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_total: int) -> bytes:
+    """Executes one run's click/input steps starting from the chorcha.net
+    homepage (page must already be there), then returns that run's final
+    page HTML."""
+    total = len(lines)
+    for i, raw_line in enumerate(lines, 1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if progress_cb:
+            label = line if run_total == 1 else f"[run {run_no}/{run_total}] {line}"
+            await progress_cb(i, total, label)
+
+        # --- comma-separated sub-steps: each can be "input:..." or
+        # a plain click label. Executed strictly in left-to-right
+        # order (e.g. "input:30,Next Topic" types then clicks).
+        sub_steps = [s.strip() for s in line.split(",") if s.strip()]
+        for sub in sub_steps:
+            if sub.lower().startswith("input:"):
+                spec = sub[len("input:"):]
+                await _type_into_input(page, i, total, spec)
+                await page.wait_for_timeout(300)
+                continue
+
+            locator = page.get_by_text(sub, exact=True).first
+            try:
+                await locator.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
+            except Exception:
+                raise AutoScrapeError(
+                    f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
+                    f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
+                )
+            await locator.click(timeout=CLICK_TIMEOUT_MS)
+            await page.wait_for_timeout(400)  # small gap between multi-selects
+
+        await page.wait_for_timeout(SETTLE_WAIT_MS)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass  # some steps are pure client-side, no network wait needed
+
+    # Wait for MCQ cards to finish loading (slow pages keep adding cards
+    # after navigation "settles"), then expand AI ব্যাখ্যা before grabbing HTML.
+    await _wait_for_mcq_count_stable(page)
+    await _expand_all_ai_explanations(page)
+
+    html = await page.content()
+    return html.encode("utf-8")
+
+
 async def run_auto_click_sequence(
     labels: list,
     progress_cb=None,
-) -> bytes:
+) -> list:
     """
-    Launches a browser, restores session, executes each step in `labels`
-    in order, and returns the final page's rendered HTML (UTF-8 bytes) for
+    Launches a browser, restores session. `labels` may contain one or more
+    runs separated by a line containing only "---" -- each run starts
+    fresh from the chorcha.net homepage and executes its own steps.
+
+    Returns a list of HTML byte-strings, one per run (in order), each for
     direct DOM-based MCQ extraction via parse_mhtml_to_mcqs() — no
     screenshot / AI-vision needed.
 
@@ -157,6 +250,17 @@ async def run_auto_click_sequence(
         raise AutoScrapeError(
             "CHORCHA_TOKEN সেট করা নেই। প্রথমে cookie token env var-এ সেভ করতে হবে।"
         )
+
+    # Split into runs on a line containing only "---"
+    runs = [[]]
+    for raw_line in labels:
+        if raw_line.strip() == "---":
+            runs.append([])
+        else:
+            runs[-1].append(raw_line)
+    runs = [r for r in runs if any(l.strip() for l in r)]
+    if not runs:
+        raise AutoScrapeError("কোনো ধাপ পাওয়া যায়নি।")
 
     from playwright.async_api import async_playwright
 
@@ -171,54 +275,15 @@ async def run_auto_click_sequence(
             await context.add_cookies(cookies)
             page = await context.new_page()
 
-            await page.goto(CHORCHA_BASE_URL, wait_until="networkidle", timeout=30000)
-            await page.wait_for_timeout(SETTLE_WAIT_MS)
-
-            total = len(labels)
-            for i, raw_line in enumerate(labels, 1):
-                line = raw_line.strip()
-                if not line:
-                    continue
-
-                if progress_cb:
-                    await progress_cb(i, total, line)
-
-                # --- comma-separated sub-steps: each can be "input:..." or
-                # a plain click label. Executed strictly in left-to-right
-                # order (e.g. "input:30,Next Topic" types then clicks).
-                sub_steps = [s.strip() for s in line.split(",") if s.strip()]
-                for sub in sub_steps:
-                    if sub.lower().startswith("input:"):
-                        spec = sub[len("input:"):]
-                        await _type_into_input(page, i, total, spec)
-                        await page.wait_for_timeout(300)
-                        continue
-
-                    locator = page.get_by_text(sub, exact=True).first
-                    try:
-                        await locator.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
-                    except Exception:
-                        raise AutoScrapeError(
-                            f"ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
-                            f"বানান/স্পেসিং ঠিক আছে কিনা চেক করুন।"
-                        )
-                    await locator.click(timeout=CLICK_TIMEOUT_MS)
-                    await page.wait_for_timeout(400)  # small gap between multi-selects
-
+            html_results = []
+            run_total = len(runs)
+            for run_no, run_lines in enumerate(runs, 1):
+                # Fresh start for every run (independent topic pick).
+                await page.goto(CHORCHA_BASE_URL, wait_until="networkidle", timeout=30000)
                 await page.wait_for_timeout(SETTLE_WAIT_MS)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=8000)
-                except Exception:
-                    pass  # some steps are pure client-side, no network wait needed
+                html = await _run_single_sequence(page, run_lines, progress_cb, run_no, run_total)
+                html_results.append(html)
 
-            # Final settle. Before grabbing HTML, auto-click every "AI
-            # ব্যাখ্যা" button so its lazily-generated content loads into
-            # the DOM (it's not present until clicked, unlike the regular
-            # ব্যাখ্যা section which is pre-rendered hidden).
-            await page.wait_for_timeout(1000)
-            await _expand_all_ai_explanations(page)
-
-            html = await page.content()
-            return html.encode("utf-8")
+            return html_results
         finally:
             await browser.close()
