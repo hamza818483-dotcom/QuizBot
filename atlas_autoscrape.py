@@ -150,19 +150,22 @@ class AutoScrapeError(Exception):
 
 async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wait_ms: int = 8000):
     """
-    "AI ব্যাখ্যা" button-এর content DOM-এ lazily load হয় (click না করলে
-    fetch হয় না) -- এবং click করার পরেও AI-generated text আসতে সময় লাগে
-    (network fetch + generation), fixed 900ms wait-এর মধ্যে অনেক সময়
-    content পুরোপুরি না এসেই HTML capture হয়ে যায় (ফলে সেই card-এর AI
-    ব্যাখ্যা খালি থেকে যায়, যদিও button click হয়ে "expanded" দেখাচ্ছে)।
+    দুই ধরনের ব্যাখ্যা button-ই DOM-এ collapsed/dropdown অবস্থায় থাকে --
+    "ব্যাখ্যা" (pre-rendered content, শুধু dropdown খুলতে হয়) এবং
+    "AI ব্যাখ্যা" (content lazily fetch হয়, click না করলে DOM-এই আসে না)।
+    দুইটাই খোলা এবং populate হওয়া নিশ্চিত না করলে extraction-এ miss হয়ে
+    যায় -- fixed সময় wait করলে অনেক সময় content পুরোপুরি না এসেই HTML
+    capture হয়ে যায়।
 
-    তাই এখন প্রতিটা button-এর জন্য: click করে, তারপর সংশ্লিষ্ট container-এর
-    টেক্সট আসলেই populate হয়েছে কিনা পোল করে অপেক্ষা করা হয় (aria-expanded
-    "true" হওয়া যথেষ্ট না -- content ফাঁকা থাকতে পারে), max_wait_ms পর্যন্ত।
-    aria-expanded ফ্লিপ না হলে একবার retry-click করা হয়।
+    তাই এখন দুই ধরনের button-ই খুঁজে: click করে, তারপর সংশ্লিষ্ট
+    container-এর টেক্সট আসলেই populate হয়েছে কিনা পোল করে অপেক্ষা করা হয়
+    (aria-expanded "true" হওয়া যথেষ্ট না -- content ফাঁকা থাকতে পারে),
+    max_wait_ms পর্যন্ত। aria-expanded ফ্লিপ না হলে একবার retry-click করা হয়।
     """
     try:
-        buttons = page.locator("button:has-text('AI ব্যাখ্যা')")
+        # "ব্যাখ্যা" matches both "ব্যাখ্যা" and "AI ব্যাখ্যা" buttons since
+        # the latter's label contains the former as a substring.
+        buttons = page.locator("button:has-text('ব্যাখ্যা')")
         count = await buttons.count()
     except Exception:
         return
@@ -214,7 +217,7 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 900, max_wa
                     except Exception:
                         pass
             if not populated:
-                logger.warning(f"[/auto] AI ব্যাখ্যা button {i+1}/{count} didn't populate content within {max_wait_ms}ms")
+                logger.warning(f"[/auto] ব্যাখ্যা button {i+1}/{count} didn't populate content within {max_wait_ms}ms")
         except Exception:
             continue  # one failed AI-explanation shouldn't break the whole extraction
 
