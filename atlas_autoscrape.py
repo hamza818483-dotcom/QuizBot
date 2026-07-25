@@ -22,9 +22,12 @@ User gives a sequential list of steps, one per line after /auto:
 This module launches a Playwright browser, restores the chorcha.net login
 session from a saved cookie (CHORCHA_TOKEN env var), then executes each
 step in order (Subject -> Chapter -> Topic -> ... -> input -> Submit).
-After the LAST step, it waits for the page to settle and takes a full-page
-screenshot, ready to be handed to the existing QBM AI-extraction pipeline
-(same as any PDF/QBM page image).
+After the LAST step, it waits for the page to settle and returns the
+final page's rendered HTML, which is handed to parse_mhtml_to_mcqs()
+(atlas_mhtml.py) for direct DOM-based MCQ extraction — this is far more
+accurate than screenshot + AI-vision (exact question/option text/order,
+correct answer detected from the orange/green highlighted button, no
+OCR misreads).
 
 This does NOT do auto-discovery of the menu tree — the user must supply
 the exact click path. That keeps it reliable instead of guessing selectors.
@@ -117,8 +120,10 @@ async def run_auto_click_sequence(
     progress_cb=None,
 ) -> bytes:
     """
-    Launches a browser, restores session, clicks through `labels` in order,
-    and returns PNG screenshot bytes of the final page.
+    Launches a browser, restores session, executes each step in `labels`
+    in order, and returns the final page's rendered HTML (UTF-8 bytes) for
+    direct DOM-based MCQ extraction via parse_mhtml_to_mcqs() — no
+    screenshot / AI-vision needed.
 
     progress_cb(step_index, total_steps, label) -- optional async callback
     for live status updates in Telegram.
@@ -182,9 +187,10 @@ async def run_auto_click_sequence(
                 except Exception:
                     pass  # some steps are pure client-side, no network wait needed
 
-            # Final settle before screenshot
+            # Final settle, then grab the rendered page HTML for direct
+            # DOM-based extraction (no screenshot / AI-vision needed).
             await page.wait_for_timeout(1000)
-            screenshot_bytes = await page.screenshot(full_page=True, type="png")
-            return screenshot_bytes
+            html = await page.content()
+            return html.encode("utf-8")
         finally:
             await browser.close()
