@@ -535,15 +535,22 @@ def _img_to_data_url(img) -> str:
         return ""
 
 
-def _img_to_data_url_groq(img, mcq_count_hint=None) -> str:
+def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str:
     """Groq's qwen3.6-27b has an 8000 TPM (tokens-per-minute) hard limit per
-    key, shared across prompt + image + output combined. The prompt is a
-    fixed ~2400 tokens, and output scales with requested MCQ count (see
-    dynamic_max_tokens below, ~1536-6000). This function computes how much
-    of the 8000 budget is LEFT for the image after prompt+output, then picks
-    the highest resolution/quality that fits — so normal (10-25 MCQ) pages
-    stay near-full quality, and only pages needing very high MCQ counts
-    shrink the image further, never accidentally exceeding TPM."""
+    key, shared across prompt + image + output combined. The MAIN QBM
+    extraction prompt is a fixed ~2400 tokens, but Call 2 (miss-check) and
+    Call 3 (verify) build a DIFFERENT, size-VARYING prompt that embeds the
+    already-extracted MCQ list as JSON -- this can be several thousand
+    tokens on pages with 25-30+ MCQs, and using the fixed 2400 estimate for
+    those calls chronically underbudgets the prompt, leaving almost nothing
+    for the image and blowing the 8000 TPM limit (this was the cause of the
+    /auto 429 "TPM/per-request-too-large" errors on Call 2/3, since those
+    callers were passing their own large prompt but the sizer still assumed
+    the fixed 2400 number for the short static prompt).
+    FIX: callers with a variable-size prompt now pass prompt_len_hint (the
+    actual prompt string) so its real token count is used instead of the
+    hardcoded 2400 default (which remains the correct estimate only for the
+    static main extraction prompt when prompt_len_hint is not given)."""
     try:
         if not hasattr(img, "save"):
             return _img_to_data_url(img)
@@ -551,11 +558,14 @@ def _img_to_data_url_groq(img, mcq_count_hint=None) -> str:
         if hasattr(image, "convert"):
             image = image.convert("RGB")
         orig_w, orig_h = image.size
-        # NOTE: QBM_EXTRACT_PROMPT_DEFAULT is ~5300 tokens (measured, not the
-        # old 2600 guess) -- the old underestimate is why real pages kept
-        # hitting 413/429 even after "shrinking" the image: almost no image
-        # budget was ever actually being reserved. Fixed here to the real size.
-        PROMPT_TOKENS = 2400  # measured from compacted QBM_EXTRACT_PROMPT_DEFAULT (~8k chars / 3.5) + margin
+        if prompt_len_hint:
+            # ~3.5 chars/token is the same rough ratio used to measure the
+            # static prompt; +200 token cushion for JSON structural overhead.
+            PROMPT_TOKENS = max(400, int(len(prompt_len_hint) / 3.5) + 200)
+        else:
+            # Measured from the compacted static QBM_EXTRACT_PROMPT_DEFAULT
+            # (~8k chars / 3.5) + margin. Only accurate for that fixed prompt.
+            PROMPT_TOKENS = 2400
         SAFETY_MARGIN = 500   # cushion for output/estimate drift
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
@@ -8951,11 +8961,16 @@ def _qbm_parse_json(text: str) -> list:
 
 
 async def _qbm_groq_call(img, prompt: str) -> str:
-    """Raw Groq call helper — returns raw text (caller parses)."""
+    """Raw Groq call helper — returns raw text (caller parses).
+    Passes the actual prompt text as prompt_len_hint to _img_to_data_url_groq
+    so Call 2/3's large, variable-size audit prompts (which embed the
+    already-extracted MCQ JSON) get correctly budgeted instead of assuming
+    the fixed static-prompt size -- fixes the 429 TPM errors these calls hit
+    on pages with many MCQs (large embedded JSON)."""
     keys = groq_key_rotator.all_keys()
     if not keys:
         return ""
-    data_url = _img_to_data_url_groq(img, mcq_count_hint=25)
+    data_url = _img_to_data_url_groq(img, mcq_count_hint=25, prompt_len_hint=prompt)
     if not data_url:
         return ""
     shrunk_url = None
@@ -8969,7 +8984,7 @@ async def _qbm_groq_call(img, prompt: str) -> str:
             return txt
         if status == 413:
             if shrunk_url is None:
-                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=40)
+                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=40, prompt_len_hint=prompt)
             if shrunk_url:
                 txt2, status2 = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
