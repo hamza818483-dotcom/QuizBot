@@ -9,6 +9,8 @@ import logging
 
 from bs4 import BeautifulSoup
 
+from atlas_mhtml import SUB_MAP, SUP_MAP, aggressive_clean
+
 logger = logging.getLogger("atlas")
 
 
@@ -42,14 +44,34 @@ def _extract_html_from_bytes(raw: bytes) -> str:
 
 
 def _clean_node_text(node) -> str:
-    """KaTeX duplicate MathML সরিয়ে clean text বের করে (images রেখে দেয়, alt দিয়ে replace করে না)"""
+    """KaTeX duplicate MathML সরিয়ে clean text বের করে (images রেখে দেয়, alt দিয়ে replace করে না)।
+    <sub>/<sup> কে proper Unicode subscript/superscript এ convert করে (atlas_mhtml.py এর
+    format_content() এর মতোই লজিক), তারপর aggressive_clean() দিয়ে chemistry/physics
+    notation স্পেসিং ঠিক করে -- না হলে '80°C' -> '⁸⁰°C', 'SO₄²⁻' -> 'SO 4 2 −',
+    '1s²2s²2p⁶' -> '( 1 s²2 s²2 p⁶' এর মতো ভুল csv তে যেত।"""
     if node is None:
         return ""
     node = node.__copy__()
     for m in node.select(".katex-mathml"):
         m.decompose()
+
+    for sub in node.find_all(["sub", "msub"]):
+        sub.replace_with(sub.get_text(strip=True).translate(SUB_MAP))
+    for sup in node.find_all(["sup", "msup"]):
+        sup_text = sup.get_text(strip=True)
+        # degree-temperature exception: a <sup> digit immediately followed
+        # by "°" text is NOT a math exponent (e.g. source wraps "20" in
+        # <sup> right before separate "°C") -- keep it as plain text so
+        # "20°C" never becomes "²⁰°C".
+        next_sib = sup.next_sibling
+        next_text = next_sib.strip() if isinstance(next_sib, str) else (next_sib.get_text() if next_sib else "")
+        if sup_text.rstrip().endswith("°") or (next_text or "").lstrip().startswith("°"):
+            sup.replace_with(sup_text)
+        else:
+            sup.replace_with(sup_text.translate(SUP_MAP))
+
     text = node.get_text(" ", strip=True)
-    text = re.sub(r"\s+", " ", text).strip()
+    text = aggressive_clean(text)
     return text
 
 
