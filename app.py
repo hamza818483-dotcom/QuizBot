@@ -6616,16 +6616,17 @@ def _adapt_mcqs_for_print(mcqs: list) -> list:
     data = []
     for i, q in enumerate(mcqs):
         opts = q.get("options", ["", "", "", ""])
+        opts = [(o or '').replace('\n', '<br>') for o in opts]
         opts = (opts + ["", "", "", ""])[:4]
         ans = q.get("answer", "A")
         ai = labels_map.get(str(ans).strip().upper(), 0) if not str(ans).isdigit() else int(ans) - 1
         data.append({
             'n': i + 1,
-            'q': q.get('question', ''),
+            'q': (q.get('question', '') or '').replace('\n', '<br>'),
             'qi': '',
             'opts': opts,
             'oimgs': ['', '', '', ''],
-            'exp': q.get('explanation', ''),
+            'exp': (q.get('explanation', '') or '').replace('\n', '<br>'),
             'ei': '',
             'ai': ai,
             'al': BN[ai] if 0 <= ai < len(BN) else '?'
@@ -7064,6 +7065,11 @@ def _am_get_clean(text):
     for s, d in [('&amp;', '&'), ('&lt;', '<'), ('&gt;', '>'), ('&nbsp;', ' ')]:
         text = text.replace(s, d)
     text = _am_fix_chemical(text); text = _am_fix_bn(text.strip())
+    # Preserve CSV line breaks visually: plain '\n' has no effect in HTML
+    # (collapses to a space), so without this, lines that were separate
+    # in the source CSV (e.g. each i./ii./iii. statement on its own line)
+    # were rendering merged into one run-on paragraph in the PDF.
+    text = text.replace('\n', '<br>')
     return text, imgs
 
 def _am_get_css(watermark=""):
