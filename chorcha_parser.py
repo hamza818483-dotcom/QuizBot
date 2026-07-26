@@ -9,9 +9,161 @@ import logging
 
 from bs4 import BeautifulSoup
 
-from atlas_mhtml import SUB_MAP, SUP_MAP, aggressive_clean
+from atlas_mhtml import SUB_MAP, SUP_MAP, LATEX_SYMBOLS, aggressive_clean
 
 logger = logging.getLogger("atlas")
+
+
+def _find_matching_brace(s: str, start: int) -> int:
+    """s[start] must be '{'. Returns the index of its matching '}'."""
+    depth = 0
+    for i in range(start, len(s)):
+        if s[i] == "{":
+            depth += 1
+        elif s[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return len(s) - 1
+
+
+def _read_group(s: str, i: int):
+    """At position i, read either a {...} group or a single token
+    (command like \\alpha, or one char). Returns (content, next_index)."""
+    if i >= len(s):
+        return "", i
+    if s[i] == "{":
+        end = _find_matching_brace(s, i)
+        return s[i + 1:end], end + 1
+    if s[i] == "\\":
+        m = re.match(r"\\[a-zA-Z]+", s[i:])
+        if m:
+            return m.group(0), i + len(m.group(0))
+        return s[i:i + 2], i + 2
+    return s[i], i + 1
+
+
+def _latex_to_text(tex: str) -> str:
+    """
+    Recursively converts a LaTeX math string (from a KaTeX <annotation>
+    tag) into plain Unicode text, correctly handling NESTED sub/superscripts
+    and fractions -- e.g. \\frac{1}{n_1^2} -> "1/n₁²", which the old
+    regex-only approach in aggressive_clean() could not do (its \\frac
+    regex can't see inside its own {..} arguments for nested _{}/^{}).
+    Falls back to leaving unrecognized commands as-is; final polish still
+    goes through aggressive_clean() for spacing/notation cleanup.
+    """
+    if not tex:
+        return ""
+    out = []
+    i = 0
+    n = len(tex)
+    while i < n:
+        ch = tex[i]
+        if ch in " \t\n":
+            i += 1
+            continue
+        if tex[i:i + 2] == "\\ ":
+            out.append(" ")
+            i += 2
+            continue
+        if tex[i:i + 6] == r"\left(":
+            out.append("(")
+            i += 6
+            continue
+        if tex[i:i + 7] == r"\right)":
+            out.append(")")
+            i += 7
+            continue
+        if tex[i:i + 6] == r"\left[":
+            out.append("[")
+            i += 6
+            continue
+        if tex[i:i + 7] == r"\right]":
+            out.append("]")
+            i += 7
+            continue
+        if tex[i:i + 5] in (r"\left", r"\righ"):
+            # \left. \right. or unmatched delimiter commands -- skip word
+            m = re.match(r"\\(left|right)\s*", tex[i:])
+            if m:
+                i += len(m.group(0))
+                continue
+        if tex[i:i + 5] == r"\frac":
+            i += 5
+            num, i = _read_group(tex, i)
+            den, i = _read_group(tex, i)
+            out.append(f"{_latex_to_text(num)}/{_latex_to_text(den)}")
+            continue
+        if tex[i:i + 9] == r"\overline":
+            i += 9
+            inner, i = _read_group(tex, i)
+            out.append(_latex_to_text(inner))
+            continue
+        if tex[i:i + 5] == r"\text":
+            i += 5
+            inner, i = _read_group(tex, i)
+            out.append(inner)
+            continue
+        if tex[i:i + 6] == r"\mathrm":
+            i += 6
+            inner, i = _read_group(tex, i)
+            out.append(_latex_to_text(inner))
+            continue
+        if ch == "_":
+            i += 1
+            sub, i = _read_group(tex, i)
+            sub_txt = _latex_to_text(sub)
+            out.append(sub_txt.translate(SUB_MAP))
+            continue
+        if ch == "^":
+            i += 1
+            sup, i = _read_group(tex, i)
+            sup_txt = _latex_to_text(sup)
+            if sup_txt == r"\circ":
+                out.append("°")
+            else:
+                out.append(sup_txt.translate(SUP_MAP))
+            continue
+        if ch == "\\":
+            m = re.match(r"\\[a-zA-Z]+", tex[i:])
+            if m:
+                cmd = m.group(0)
+                if cmd in LATEX_SYMBOLS:
+                    out.append(LATEX_SYMBOLS[cmd])
+                elif cmd in (r"\left", r"\right"):
+                    pass
+                else:
+                    out.append(cmd)  # unknown command, keep literal
+                i += len(cmd)
+                continue
+        if ch in "{}":
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _render_katex_annotations(node) -> None:
+    """
+    Replace every <span class="katex"> in node (in place) with a plain
+    text node converted from its <annotation encoding="application/x-tex">
+    LaTeX source, instead of leaving the rendered KaTeX HTML (many nested
+    spans) for get_text() to flatten -- that flattening is what produced
+    garbled output like "390. V = R H ( 1 n 1 2 ..." for formulas with
+    fractions containing their own sub/superscripts.
+    """
+    for span in node.select("span.katex"):
+        ann = span.select_one("annotation")
+        if ann is None:
+            continue
+        tex = ann.get_text()
+        try:
+            plain = _latex_to_text(tex)
+        except Exception:
+            continue
+        span.replace_with(" " + plain + " ")
 
 
 def _extract_html_from_bytes(raw: bytes) -> str:
@@ -54,6 +206,8 @@ def _clean_node_text(node) -> str:
     node = node.__copy__()
     for m in node.select(".katex-mathml"):
         m.decompose()
+
+    _render_katex_annotations(node)
 
     for sub in node.find_all(["sub", "msub"]):
         sub.replace_with(sub.get_text(strip=True).translate(SUB_MAP))
