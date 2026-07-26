@@ -257,6 +257,16 @@ def _get_solution_text(section_node) -> str:
     return _clean_node_text(ans_div)
 
 
+_EXPLANATION_LABELS = {"ব্যাখ্যা", "AI ব্যাখ্যা"}
+
+
+def _is_real_answer_text(text: str) -> bool:
+    """False if text is empty or is just the button's own label
+    (e.g. section wasn't expanded/populated yet -- 'AI ব্যাখ্যা' with no
+    actual explanation content behind it)."""
+    return bool(text and text.strip() and text.strip() not in _EXPLANATION_LABELS)
+
+
 def _get_solution_images(section_node) -> list:
     if section_node is None:
         return []
@@ -337,6 +347,19 @@ def parse_chorcha_file(raw: bytes) -> dict:
                 section = sc.select_one("section")
                 a_text = _get_solution_text(section)
                 a_images = _get_solution_images(section)
+                if not _is_real_answer_text(a_text):
+                    # First <section> (plain "ব্যাখ্যা") was empty -- this
+                    # question card may have a second <section> for
+                    # "AI ব্যাখ্যা" instead. Without this fallback its
+                    # answer text is silently dropped even though the AI
+                    # explanation button was correctly expanded in-browser.
+                    all_sections = sc.select("section")
+                    for alt_section in all_sections[1:]:
+                        alt_text = _get_solution_text(alt_section)
+                        if _is_real_answer_text(alt_text):
+                            a_text = alt_text
+                            a_images = _get_solution_images(alt_section)
+                            break
                 if not q_text and not a_text:
                     continue
                 subs.append({
@@ -390,12 +413,28 @@ def parse_chorcha_file(raw: bytes) -> dict:
                 section = nested_subblock.select_one("section")
                 a_text = _get_solution_text(section)
                 a_images = _get_solution_images(section)
+                if not _is_real_answer_text(a_text):
+                    all_sections = nested_subblock.select("section")
+                    for alt_section in all_sections[1:]:
+                        alt_text = _get_solution_text(alt_section)
+                        if _is_real_answer_text(alt_text):
+                            a_text = alt_text
+                            a_images = _get_solution_images(alt_section)
+                            break
             else:
                 q_text = stem_text
                 q_images = stem_images
                 section = block.select_one("section")
                 a_text = _get_solution_text(section)
                 a_images = _get_solution_images(section)
+                if not _is_real_answer_text(a_text):
+                    all_sections = block.select("section")
+                    for alt_section in all_sections[1:]:
+                        alt_text = _get_solution_text(alt_section)
+                        if _is_real_answer_text(alt_text):
+                            a_text = alt_text
+                            a_images = _get_solution_images(alt_section)
+                            break
 
             if not q_text and not a_text:
                 continue
