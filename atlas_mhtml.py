@@ -382,7 +382,12 @@ def aggressive_clean(text):
 
     text = _formula_run.sub(_squeeze_formula, text)
 
-    text = re.sub(r'\s+', ' ', text)
+    # Collapse horizontal whitespace runs (spaces/tabs) but keep newlines
+    # intact -- numbered/roman-numeral sub-point lists rely on them to
+    # render as separate lines instead of one run-on line.
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r' *\n *', '\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 
@@ -447,7 +452,45 @@ def format_content(element, img_map):
         else:
             img.decompose()
 
-    raw_text = element.get_text(separator=" ", strip=True)
+    # Insert real newlines at list/block-item boundaries (li, br, p) BEFORE
+    # flattening to text, so numbered sub-point stems like
+    # "1. আকারে ছোট  2. কান্ড ও পাতা রসালো  3. ত্বকে কিউটিকল অনুপস্থিত"
+    # or roman-numeral variants ("i. ... ii. ... iii. ...") come out on
+    # separate lines in the CSV, matching how the source page displays
+    # them, instead of being joined into one run-on line.
+    for br in element.find_all('br'):
+        br.replace_with("\n")
+
+    # numbered/roman-numeral sub-point stems (e.g. "1. ... 2. ... 3. ...")
+    # render as <li> items in the source markup. Build text by walking
+    # direct text runs and only breaking to a new line at <li>/<p>
+    # boundaries -- everything else (inline spans, bold, sub/sup) stays
+    # joined with spaces exactly as before, so this only affects list
+    # items and doesn't fragment normal running prose.
+    line_tags = element.find_all(['li', 'p'])
+    if line_tags:
+        parts = []
+        for lt in line_tags:
+            t = lt.get_text(separator=" ", strip=True)
+            if t:
+                parts.append(t)
+        # anything outside of li/p (e.g. the "নিচের কোনটি সঠিক?" tail
+        # text, or the whole stem when there's no list at all) still
+        # needs to be captured -- fall back to the full element text if
+        # the li/p-only join loses content (e.g. because the list items
+        # are nested inside a <ul> that's itself inside a <p>, causing
+        # double-counting, or because most of the text is NOT in li/p).
+        joined = "\n".join(parts)
+        full_flat = element.get_text(separator=" ", strip=True)
+        # Heuristic: only prefer the line-broken join when it actually
+        # captured most of the same content (avoids silently dropping
+        # text that lives outside li/p tags).
+        if joined and len(joined.replace("\n", " ")) >= len(full_flat) * 0.6:
+            raw_text = joined
+        else:
+            raw_text = full_flat
+    else:
+        raw_text = element.get_text(separator=" ", strip=True)
     img_markers = []
 
     def img_repl(match):
