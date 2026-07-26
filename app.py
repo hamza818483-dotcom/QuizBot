@@ -27,6 +27,7 @@ from collections import deque
 from typing import Optional, Dict
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 import pytz
 import html as html_lib
 
@@ -9738,6 +9739,7 @@ async def handle_auto_command(msg: dict):
     status_msg_id = status.get("result", {}).get("message_id") if isinstance(status, dict) else None
 
     _start_time = time.time()
+    _tz = timezone(timedelta(hours=6))  # Bangladesh time
 
     def _fmt_secs(s):
         s = max(0, int(s))
@@ -9749,6 +9751,9 @@ async def handle_auto_command(msg: dict):
         h, m = divmod(m, 60)
         return f"{h}ঘ {m}মি"
 
+    def _fmt_clock(ts):
+        return datetime.fromtimestamp(ts, _tz).strftime("%I:%M:%S %p")
+
     _last_edit_at = {"t": 0.0}
     _completed_steps = []  # list of "✅ label" lines that stay visible once done
     _last_seen_label = {"v": None}
@@ -9757,11 +9762,15 @@ async def handle_auto_command(msg: dict):
     def _render_status(current_line, pct):
         bar = _mhtml_progress_bar(pct)
         elapsed = time.time() - _start_time
-        time_line = f"⏱️ চলছে: {_fmt_secs(elapsed)}"
+        lines_out = [
+            f"🕐 শুরু হয়েছে: {_fmt_clock(_start_time)}",
+            f"⏱️ চলছে: {_fmt_secs(elapsed)}",
+        ]
         if pct and pct > 0:
             eta = (elapsed / pct) * (100 - pct)
-            time_line += f" | আনুমানিক বাকি: {_fmt_secs(eta)}"
-        header = f"🌐 <b>ATLAS AutoScrape</b>\n[{bar}] {pct}%\n{time_line}\n"
+            lines_out.append(f"⏳ আনুমানিক বাকি: {_fmt_secs(eta)}")
+            lines_out.append(f"🏁 আনুমানিক শেষ হবে: {_fmt_clock(time.time() + eta)}")
+        header = f"🌐 <b>ATLAS AutoScrape</b>\n[{bar}] {pct}%\n" + "\n".join(lines_out) + "\n"
         # Cap how many completed lines we show inline so the message never
         # blows past Telegram's length limit on very long step sequences --
         # keep the most recent ones, summarize the rest as a count.
@@ -9877,7 +9886,7 @@ async def handle_auto_command(msg: dict):
 
         await _final_stage_update(f"📤 CSV পাঠানো হচ্ছে... ({len(results)}টা MCQ)")
         await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
-            caption=f"📚 {topic}\n📝 মোট MCQ: {len(results)}\n⏱️ সময় লেগেছে: {_fmt_secs(time.time() - _start_time)}\n🚀 ATLAS APP (HTML-parse, no AI-vision)"
+            caption=f"📚 {topic}\n📝 মোট MCQ: {len(results)}\n⏱️ সময় লেগেছে: {_fmt_secs(time.time() - _start_time)}\n🕐 শুরু: {_fmt_clock(_start_time)} → 🏁 শেষ: {_fmt_clock(time.time())}\n🚀 ATLAS APP (HTML-parse, no AI-vision)"
                     + (f"\n({run_no}/{run_total})" if run_total > 1 else ""),
             mime_type="text/csv")
         sent_any["v"] = True
