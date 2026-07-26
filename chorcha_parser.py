@@ -204,14 +204,44 @@ def parse_chorcha_file(raw: bytes) -> dict:
                 })
         else:
             # ---------- SHORT Q&A FORMAT ----------
-            q_container = block.select_one("div.LatexRenderer-module__qDybqa__card")
-            q_text = _clean_node_text(q_container)
-            q_text = re.sub(r"^\d+[\.\)](?!\d)\s*", "", q_text)  # leading "1." strip
-            q_images = _extract_images(q_container)
+            # v2: some pages put ONLY an image in the top-level question
+            # card (e.g. "2." + <img>, no real question text), and the
+            # actual MCQ text + options live in a nested sub-block
+            # (div.px-4.pt-4.pb-6.border.rounded-xl inside div.space-y-6)
+            # instead of directly in this block. If this block has no
+            # direct option buttons of its own, look for that nested
+            # sub-block and pull the real question+options+explanation
+            # from there -- otherwise the image-only stem and its actual
+            # question text/options were being silently dropped.
+            direct_options = block.select(":scope > div.grid.grid-cols-1 > button")
+            nested_subblock = None
+            if not direct_options:
+                nested_subblock = block.select_one("div.space-y-6 > div.px-4.pt-4.pb-6.border.rounded-xl")
+
+            stem_container = block.select_one("div.LatexRenderer-module__qDybqa__card")
+            stem_text = _clean_node_text(stem_container)
+            stem_text = re.sub(r"^\d+[\.\)](?!\d)\s*", "", stem_text)  # leading "1." strip
+            stem_images = _extract_images(stem_container)
             tag = _get_tag(block)
-            section = block.select_one("section")
-            a_text = _get_solution_text(section)
-            a_images = _get_solution_images(section)
+
+            if nested_subblock is not None:
+                sub_q_container = nested_subblock.select_one("div.LatexRenderer-module__qDybqa__card")
+                sub_q_text = _clean_node_text(sub_q_container)
+                sub_q_images = _extract_images(sub_q_container)
+                # combine stem (image-bearing) text with the real
+                # question text found in the nested sub-block, so neither
+                # gets lost
+                q_text = (stem_text + " " + sub_q_text).strip() if stem_text else sub_q_text
+                q_images = stem_images + [u for u in sub_q_images if u not in stem_images]
+                section = nested_subblock.select_one("section")
+                a_text = _get_solution_text(section)
+                a_images = _get_solution_images(section)
+            else:
+                q_text = stem_text
+                q_images = stem_images
+                section = block.select_one("section")
+                a_text = _get_solution_text(section)
+                a_images = _get_solution_images(section)
 
             if not q_text and not a_text:
                 continue
