@@ -864,7 +864,7 @@ async def run_auto_click_sequence(
     # Split into runs on a line containing only "---"
     runs = [[]]
     for raw_line in labels:
-        if raw_line.strip() == "---":
+        if raw_line.strip() in ("---", "***"):
             runs.append([])
         else:
             runs[-1].append(raw_line)
