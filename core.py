@@ -1093,6 +1093,38 @@ async def _ensure_d1_table(name: str, create_sql: str):
     except Exception as e:
         logger.warning(f"[D1] ensure {name} table warn: {e}")
 
+async def auto_link_map_set(label: str, url: str):
+    """Persist a /auto label->link mapping (survives bot restart) so image-only
+    or unmatchable-text cards can be goto:'d directly instead of clicked."""
+    await _ensure_d1_table(
+        "auto_link_map",
+        "CREATE TABLE IF NOT EXISTS auto_link_map (label TEXT PRIMARY KEY, url TEXT NOT NULL, updated_at INTEGER)",
+    )
+    import time as _t
+    await d1_run(
+        "INSERT INTO auto_link_map (label, url, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(label) DO UPDATE SET url=excluded.url, updated_at=excluded.updated_at",
+        [label, url, int(_t.time())],
+    )
+
+async def auto_link_map_get(label: str) -> str | None:
+    await _ensure_d1_table(
+        "auto_link_map",
+        "CREATE TABLE IF NOT EXISTS auto_link_map (label TEXT PRIMARY KEY, url TEXT NOT NULL, updated_at INTEGER)",
+    )
+    rows = await d1_select("SELECT url FROM auto_link_map WHERE label = ?", [label])
+    if rows:
+        return rows[0].get("url")
+    return None
+
+async def auto_link_map_get_all() -> dict:
+    await _ensure_d1_table(
+        "auto_link_map",
+        "CREATE TABLE IF NOT EXISTS auto_link_map (label TEXT PRIMARY KEY, url TEXT NOT NULL, updated_at INTEGER)",
+    )
+    rows = await d1_select("SELECT label, url FROM auto_link_map", [])
+    return {r["label"]: r["url"] for r in rows}
+
 async def db_get_settings() -> dict:
     try:
         r = await sb_exec(lambda: sb.table("quiz_settings").select("tag,exp_footer,watermark").eq("id", 1).execute())
