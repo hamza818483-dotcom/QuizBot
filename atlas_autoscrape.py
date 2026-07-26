@@ -578,6 +578,29 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 await page.wait_for_timeout(300)
                 continue
 
+            if "=" in sub and not sub.lower().startswith("input:"):
+                # "লেখা=link" -> persist this label->URL mapping (D1,
+                # survives bot restart) AND use it immediately for this
+                # step, instead of clicking. Use for image-only/unmatchable
+                # cards where text-matching can never find the element.
+                _label_part, _url_part = sub.split("=", 1)
+                _label_part, _url_part = _label_part.strip(), _url_part.strip()
+                if _url_part.startswith("http"):
+                    try:
+                        from core import auto_link_map_set
+                        await auto_link_map_set(_label_part, _url_part)
+                    except Exception as e:
+                        logger.warning(f"[/auto] auto_link_map_set failed for {_label_part!r}: {e}")
+                    try:
+                        await page.goto(_url_part, wait_until="networkidle", timeout=30000)
+                        await page.wait_for_timeout(300)
+                        processed_subs.append(_label_part)
+                        continue
+                    except Exception:
+                        raise AutoScrapeError(
+                            f"ধাপ {i}/{total}: link \"{_url_part}\"-এ যাওয়া যায়নি।"
+                        )
+
             match_method = None
             locator = page.get_by_text(sub, exact=True).first
             try:
@@ -689,6 +712,28 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                         continue
                     except Exception as e:
                         logger.warning(f"[/auto] known-url-map goto failed for {sub!r}: {e}")
+
+            if locator is None and element_handle is None:
+                # Fallback: previously-saved persistent label->URL mapping
+                # (set via a "লেখা=link" step in an earlier run; survives
+                # bot restart). Checked after the static in-code map so
+                # user-taught mappings extend it without a code change.
+                try:
+                    from core import auto_link_map_get
+                    saved_url = await auto_link_map_get(sub)
+                except Exception:
+                    saved_url = None
+                if saved_url:
+                    try:
+                        logger.info(
+                            f"[/auto] step {i}/{total} sub={sub!r}: matched via saved link-map -> {saved_url}"
+                        )
+                        await page.goto(saved_url, wait_until="networkidle", timeout=30000)
+                        await page.wait_for_timeout(300)
+                        processed_subs.append(sub)
+                        continue
+                    except Exception as e:
+                        logger.warning(f"[/auto] saved link-map goto failed for {sub!r}: {e}")
 
             if locator is None and element_handle is None:
                 logger.error(
