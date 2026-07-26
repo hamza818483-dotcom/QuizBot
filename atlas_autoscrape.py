@@ -294,6 +294,42 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 300, max_wa
         except Exception:
             return False
 
+    async def _click_and_wait_long(idx):
+        """Same populated-check as _click_and_wait but with a much longer
+        wait budget (15s) and a fresh click -- for the rare AI ব্যাখ্যা
+        whose backend response (Groq/Gemini call on chorcha.net's side) is
+        genuinely slower than the standard max_wait_ms."""
+        try:
+            btn = all_buttons.nth(idx)
+            try:
+                await btn.click(timeout=5000)
+            except Exception:
+                pass
+            long_wait_ms, long_max_ms = 500, 15000
+            elapsed = 0
+            while elapsed < long_max_ms:
+                await page.wait_for_timeout(long_wait_ms)
+                elapsed += long_wait_ms
+                try:
+                    handle = await btn.element_handle()
+                    has_text = await page.evaluate(
+                        """(el) => {
+                            let section = el.closest('section');
+                            if (!section) return false;
+                            let text = section.innerText || '';
+                            let btnText = el.innerText || '';
+                            return (text.length - btnText.length) > 15;
+                        }""",
+                        handle,
+                    )
+                except Exception:
+                    has_text = False
+                if has_text:
+                    return True
+            return False
+        except Exception:
+            return False
+
     unresolved = []
     total_ai = len(ai_indices)
     done_ai = 0
@@ -328,6 +364,19 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 300, max_wa
                     still_bad.append(idx)
         if still_bad:
             logger.warning(f"[/auto] {len(still_bad)} AI ব্যাখ্যা still unpopulated after retry sweep: indices {still_bad}")
+            # Final chance: some buttons are just slower than the standard
+            # max_wait_ms budget (e.g. cold Groq/Gemini API call on
+            # chorcha.net's backend) -- give these specific ones one more
+            # attempt with a much longer wait before giving up for good.
+            still_bad_2 = []
+            for idx in still_bad:
+                ok = await _click_and_wait_long(idx)
+                if not ok:
+                    still_bad_2.append(idx)
+            if still_bad_2:
+                logger.warning(f"[/auto] {len(still_bad_2)} AI ব্যাখ্যা STILL unpopulated after long-wait final attempt: indices {still_bad_2}")
+            else:
+                logger.info(f"[/auto] long-wait final attempt resolved all remaining AI ব্যাখ্যা")
 
 
 async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total=1, poll_ms: int = 1000, max_wait_ms: int = 120000):
