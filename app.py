@@ -9725,7 +9725,9 @@ async def handle_auto_command(msg: dict):
             "📌 শুধু topic নাম বদলাতে চাইলে পুরো step আবার না লিখে <code>---</code>-এর পর শুধু <code>OldName&gt;NewName</code> দিলেই হবে (১ম run-এর step-গুলো reuse হবে, শুধু OldName→NewName replace হয়ে):\n"
             "<code>/auto\nইতিহাস,ব্রিটিশ শাসনামলে বাংলা\ninput:25\nএগিয়ে যাও\n---\nব্রিটিশ শাসনামলে বাংলা&gt;প্রাচীন বাংলার ইতিহাস(new)\n---\nব্রিটিশ শাসনামলে বাংলা&gt;মুসলিম শাসন ও সালতানাত(new)</code>\n\n"
             "📌 কোনো card image-only হলে (text দিয়ে খুঁজে পাওয়া যায় না), সরাসরি লিংক দিয়ে দাও — <code>লেখা=লিংক</code> ফরম্যাটে। এটা একবার সেভ হয়ে যাবে (bot restart-এও থাকবে) — পরের বার শুধু ঐ লেখা দিলেই bot নিজে সেভ করা লিংকে যাবে:\n"
-            "<code>/auto\nজীববিজ্ঞান ১ম পত্র=https://chorcha.net/...\ninput:25\nএগিয়ে যাও</code>",
+            "<code>/auto\nজীববিজ্ঞান ১ম পত্র=https://chorcha.net/...\ninput:25\nএগিয়ে যাও</code>\n\n"
+            "📌 কোনো button-এর নামের ভেতরেই comma (,) থাকলে (যেমন <code>বিস্তার ও সংরক্ষণ, জীবের পরিবেশ</code>), সেটাকে double-quote দিয়ে ঘিরে দাও — নাহলে bot ওই comma দেখে আলাদা ২টা step মনে করে ভুল করবে:\n"
+            "<code>/auto\nপ্রশ্নব্যাংক\nজীববিজ্ঞান ১ম পত্র\n\"বিস্তার ও সংরক্ষণ, জীবের পরিবেশ\"</code>",
             parse_mode="HTML"
         )
         return

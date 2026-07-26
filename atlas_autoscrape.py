@@ -588,7 +588,19 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
         # --- comma-separated sub-steps: each can be "input:..." or
         # a plain click label. Executed strictly in left-to-right
         # order (e.g. "input:30,Next Topic" types then clicks).
-        sub_steps = [s.strip() for s in line.split(",") if s.strip()]
+        # A sub-step wrapped in double-quotes ("...") is taken AS-IS,
+        # commas inside it are literal text (part of the button's own
+        # label, e.g. "বিস্তার ও সংরক্ষণ, জীবের পরিবেশ") and are NOT
+        # treated as step separators.
+        sub_steps = []
+        for part in re.findall(r'"[^"]*"|[^,]+', line):
+            part = part.strip()
+            if not part:
+                continue
+            if part.startswith('"') and part.endswith('"') and len(part) >= 2:
+                part = part[1:-1].strip()
+            if part:
+                sub_steps.append(part)
         for sub in sub_steps:
             sub = unicodedata.normalize("NFC", sub)
             # Recompute subject context every step by scanning everything
