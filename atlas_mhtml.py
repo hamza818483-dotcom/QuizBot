@@ -534,14 +534,41 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
                 options[3], ans_idx = options[4], "4"
 
             # chorcha.net-এ দুই ধরনের ব্যাখ্যা section থাকতে পারে: সাধারণ
-            # "ব্যাখ্যা" (pre-rendered hidden div) এবং "AI ব্যাখ্যা" (lazy —
-            # button click করলে DOM-এ content আসে)। দুইটাই থাকলে দুইটাই
-            # জোড়া লাগিয়ে নেওয়া হয়; যেকোনো একটা খালি হলে সেটা skip হয়।
+            # "ব্যাখ্যা" (pre-rendered hidden div, class="whitespace-pre-line")
+            # এবং "AI ব্যাখ্যা" (lazy -- button click করলে DOM-এ content
+            # আসে)। AI-এর populated content wrapper সবসময় একই
+            # "whitespace-pre-line" class ব্যবহার নাও করতে পারে (React
+            # lazy-render আলাদা markup দিতে পারে), তাই primary পাস তা মিস
+            # করলে সেই section-এর নিজস্ব টেক্সট (button-এর নিজের label বাদ
+            # দিয়ে) fallback হিসেবে নেওয়া হয় -- এতে AI ব্যাখ্যা কখনো silently
+            # blank থেকে যায় না।
             exp_parts = []
+            matched_sections = set()
             for exp_div in card.find_all('div', class_=lambda x: x and 'whitespace-pre-line' in x):
                 t = format_content(exp_div, img_map)
                 if t.strip():
                     exp_parts.append(t.strip())
+                    parent_section = exp_div.find_parent('section')
+                    if parent_section is not None:
+                        matched_sections.add(id(parent_section))
+
+            for sec in card.find_all('section'):
+                if id(sec) in matched_sections:
+                    continue  # already got its content via whitespace-pre-line above
+                btn = sec.find('button')
+                if btn is None:
+                    continue
+                btn_label = btn.get_text(strip=True)
+                if 'AI' not in btn_label and 'ব্যাখ্যা' not in btn_label:
+                    continue  # not an explanation section at all
+                full_text = format_content(sec, img_map)
+                btn_text = format_content(btn, img_map)
+                # subtract the button's own rendered label so we don't
+                # count "AI ব্যাখ্যা" itself as extracted content
+                remainder = full_text.replace(btn_text, '', 1).strip() if btn_text else full_text.strip()
+                if remainder and remainder not in ('ব্যাখ্যা', 'AI ব্যাখ্যা'):
+                    exp_parts.append(remainder)
+
             exp_text = "\n\n".join(exp_parts)
 
             results.append({"questions": q_text, "option1": options[0], "option2": options[1],
