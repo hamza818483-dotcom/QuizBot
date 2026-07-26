@@ -9687,7 +9687,7 @@ async def handle_auto_command(msg: dict):
     if lines:
         _groups = [[]]
         for _l in lines:
-            if _l.strip() == "---":
+            if _l.strip() in ("---", "***"):
                 _groups.append([])
             else:
                 _groups[-1].append(_l)
@@ -9720,10 +9720,10 @@ async def handle_auto_command(msg: dict):
             "টপিক ১</code>\n\n"
             "📌 প্রতি লাইনে একটা button/link-এর নাম, ক্রমানুসারে — bot একে একে click করে "
             "শেষ পেজে পৌঁছে সেই page-এর HTML থেকে সরাসরি MCQ extract করবে (screenshot/AI-vision লাগে না, তাই নির্ভুল)।\n\n"
-            "📌 একাধিক আলাদা topic থেকে আলাদা আলাদা CSV চাইলে <code>---</code> দিয়ে ভাগ করো:\n"
-            "<code>/auto\nইতিহাস,ব্রিটিশ শাসনামলে বাংলা\ninput:25\nএগিয়ে যাও\n---\nইতিহাস,মুসলিম শাসন ও সালতানাত\ninput:25\nএগিয়ে যাও</code>\n\n"
-            "📌 শুধু topic নাম বদলাতে চাইলে পুরো step আবার না লিখে <code>---</code>-এর পর শুধু <code>OldName&gt;NewName</code> দিলেই হবে (১ম run-এর step-গুলো reuse হবে, শুধু OldName→NewName replace হয়ে):\n"
-            "<code>/auto\nইতিহাস,ব্রিটিশ শাসনামলে বাংলা\ninput:25\nএগিয়ে যাও\n---\nব্রিটিশ শাসনামলে বাংলা&gt;প্রাচীন বাংলার ইতিহাস(new)\n---\nব্রিটিশ শাসনামলে বাংলা&gt;মুসলিম শাসন ও সালতানাত(new)</code>\n\n"
+            "📌 একাধিক আলাদা topic থেকে আলাদা আলাদা CSV চাইলে <code>---</code> অথবা <code>***</code> দিয়ে ভাগ করো:\n"
+            "<code>/auto\nইতিহাস,ব্রিটিশ শাসনামলে বাংলা\ninput:25\nএগিয়ে যাও\n***\nইতিহাস,মুসলিম শাসন ও সালতানাত\ninput:25\nএগিয়ে যাও</code>\n\n"
+            "📌 শুধু topic নাম বদলাতে চাইলে পুরো step আবার না লিখে <code>---</code>/<code>***</code>-এর পর শুধু <code>OldName&gt;NewName</code> দিলেই হবে (১ম run-এর step-গুলো reuse হবে, শুধু OldName→NewName replace হয়ে):\n"
+            "<code>/auto\nইতিহাস,ব্রিটিশ শাসনামলে বাংলা\ninput:25\nএগিয়ে যাও\n***\nব্রিটিশ শাসনামলে বাংলা&gt;প্রাচীন বাংলার ইতিহাস(new)\n***\nব্রিটিশ শাসনামলে বাংলা&gt;মুসলিম শাসন ও সালতানাত(new)</code>\n\n"
             "📌 কোনো card image-only হলে (text দিয়ে খুঁজে পাওয়া যায় না), সরাসরি লিংক দিয়ে দাও — <code>লেখা=লিংক</code> ফরম্যাটে। এটা একবার সেভ হয়ে যাবে (bot restart-এও থাকবে) — পরের বার শুধু ঐ লেখা দিলেই bot নিজে সেভ করা লিংকে যাবে:\n"
             "<code>/auto\nজীববিজ্ঞান ১ম পত্র=https://chorcha.net/...\ninput:25\nএগিয়ে যাও</code>\n\n"
             "📌 কোনো button-এর নামের ভেতরেই comma (,) থাকলে (যেমন <code>বিস্তার ও সংরক্ষণ, জীবের পরিবেশ</code>), সেটাকে double-quote দিয়ে ঘিরে দাও — নাহলে bot ওই comma দেখে আলাদা ২টা step মনে করে ভুল করবে:\n"
@@ -9736,7 +9736,7 @@ async def handle_auto_command(msg: dict):
         await send_msg(chat_id, "❌ CHORCHA_TOKEN সেট করা নেই — আগে login session token env var-এ সেভ করতে হবে।")
         return
 
-    run_count = sum(1 for l in lines if l.strip() == "---") + 1
+    run_count = sum(1 for l in lines if l.strip() in ("---", "***")) + 1
     status = await send_msg(chat_id, f"🌐 <b>ATLAS AutoScrape</b>\n[{_mhtml_progress_bar(0)}] 0%\nশুরু হচ্ছে... ({run_count}টা run)", parse_mode="HTML")
     status_msg_id = status.get("result", {}).get("message_id") if isinstance(status, dict) else None
 
@@ -9830,7 +9830,7 @@ async def handle_auto_command(msg: dict):
     # the filename/caption) by re-splitting the same way the backend did.
     run_line_groups = [[]]
     for l in lines:
-        if l.strip() == "---":
+        if l.strip() in ("---", "***"):
             run_line_groups.append([])
         else:
             run_line_groups[-1].append(l)
@@ -9894,7 +9894,7 @@ async def handle_auto_command(msg: dict):
         sent_any["v"] = True
 
     from atlas_autoscrape import run_auto_click_sequence, AutoScrapeError
-    run_count_for_timeout = sum(1 for l in lines if l.strip() == "---") + 1
+    run_count_for_timeout = sum(1 for l in lines if l.strip() in ("---", "***")) + 1
     # Hard ceiling for the WHOLE /auto flow (all runs combined), so any
     # unforeseen hang -- browser stuck, chorcha.net not responding, a
     # selector looping forever -- can never stall silently forever. Scales
