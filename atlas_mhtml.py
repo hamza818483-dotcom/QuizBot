@@ -480,8 +480,25 @@ def format_content(element, img_map):
         parts = []
         for lt in line_tags:
             t = lt.get_text(separator=" ", strip=True)
-            if t:
-                parts.append(t)
+            if not t:
+                continue
+            if lt.name == 'li':
+                parent = lt.find_parent(['ol', 'ul'])
+                if parent is not None and parent.name == 'ol':
+                    # number relative to this <li>'s position among its
+                    # OWN <ol> siblings (not the flat line_tags list),
+                    # so nested/adjacent lists each number from 1.
+                    siblings = [c for c in parent.find_all('li', recursive=False)]
+                    try:
+                        n = siblings.index(lt) + 1
+                        # ZZZOLDOTZZZ protects the number-marker's period
+                        # from aggressive_clean's generic ". "->"." collapse
+                        # (meant for decimal numbers), which would otherwise
+                        # turn "1. বোটানিক্যাল" into "1.বোটানিক্যাল".
+                        t = f"{n}ZZZOLDOTZZZ {t}"
+                    except ValueError:
+                        pass
+            parts.append(t)
         # anything outside of li/p (e.g. the "নিচের কোনটি সঠিক?" tail
         # text, or the whole stem when there's no list at all) still
         # needs to be captured -- fall back to the full element text if
@@ -507,6 +524,7 @@ def format_content(element, img_map):
 
     raw_text = re.sub(r'img_s.*?img_e', img_repl, raw_text)
     cleaned_text = aggressive_clean(raw_text)
+    cleaned_text = cleaned_text.replace("ZZZOLDOTZZZ", ".")
 
     for i, marker in enumerate(img_markers):
         cleaned_text = cleaned_text.replace(f"ZZZIMG{i}ZZZ", marker)
