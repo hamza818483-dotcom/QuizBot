@@ -9737,6 +9737,18 @@ async def handle_auto_command(msg: dict):
     status = await send_msg(chat_id, f"🌐 <b>ATLAS AutoScrape</b>\n[{_mhtml_progress_bar(0)}] 0%\nশুরু হচ্ছে... ({run_count}টা run)", parse_mode="HTML")
     status_msg_id = status.get("result", {}).get("message_id") if isinstance(status, dict) else None
 
+    _start_time = time.time()
+
+    def _fmt_secs(s):
+        s = max(0, int(s))
+        if s < 60:
+            return f"{s}সে"
+        m, s = divmod(s, 60)
+        if m < 60:
+            return f"{m}মি {s}সে"
+        h, m = divmod(m, 60)
+        return f"{h}ঘ {m}মি"
+
     _last_edit_at = {"t": 0.0}
     _completed_steps = []  # list of "✅ label" lines that stay visible once done
     _last_seen_label = {"v": None}
@@ -9744,7 +9756,12 @@ async def handle_auto_command(msg: dict):
 
     def _render_status(current_line, pct):
         bar = _mhtml_progress_bar(pct)
-        header = f"🌐 <b>ATLAS AutoScrape</b>\n[{bar}] {pct}%\n"
+        elapsed = time.time() - _start_time
+        time_line = f"⏱️ চলছে: {_fmt_secs(elapsed)}"
+        if pct and pct > 0:
+            eta = (elapsed / pct) * (100 - pct)
+            time_line += f" | আনুমানিক বাকি: {_fmt_secs(eta)}"
+        header = f"🌐 <b>ATLAS AutoScrape</b>\n[{bar}] {pct}%\n{time_line}\n"
         # Cap how many completed lines we show inline so the message never
         # blows past Telegram's length limit on very long step sequences --
         # keep the most recent ones, summarize the rest as a count.
@@ -9860,7 +9877,7 @@ async def handle_auto_command(msg: dict):
 
         await _final_stage_update(f"📤 CSV পাঠানো হচ্ছে... ({len(results)}টা MCQ)")
         await send_document(chat_id, csv_bytes, f"ATLAS_{safe_title}.csv",
-            caption=f"📚 {topic}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP (HTML-parse, no AI-vision)"
+            caption=f"📚 {topic}\n📝 মোট MCQ: {len(results)}\n⏱️ সময় লেগেছে: {_fmt_secs(time.time() - _start_time)}\n🚀 ATLAS APP (HTML-parse, no AI-vision)"
                     + (f"\n({run_no}/{run_total})" if run_total > 1 else ""),
             mime_type="text/csv")
         sent_any["v"] = True
