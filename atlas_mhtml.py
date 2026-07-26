@@ -361,6 +361,27 @@ def aggressive_clean(text):
 
     text = text.replace('\ufeff', '').replace('\u200b', '').replace('\u200c', '')
 
+    # --- Universal bracket-spacing squeeze (chemical formulas ONLY) --
+    # e.g. "Al ( OH) 3" -> "Al(OH)3", "Ca ( NO3 )2" -> "Ca(NO3)2".
+    # Scoped to formula-like runs (element symbols/digits/brackets only,
+    # no lowercase words) so normal English parentheticals like
+    # "this is (a bird)" are never touched.
+    _formula_run = re.compile(
+        r'(?:[A-Z][a-z]?\d*\s*){1,}'
+        r'(?:\(\s*(?:[A-Za-z]{1,2}\d*\s*)+\)\s*\d*\s*)+'
+        r'(?:[A-Z][a-z]?\d*\s*)*'
+    )
+
+    def _squeeze_formula(m):
+        s = m.group(0)
+        s = re.sub(r'\(\s+', '(', s)
+        s = re.sub(r'\s+\)', ')', s)
+        s = re.sub(r'([A-Za-z0-9\)])\s+\(', r'\1(', s)
+        s = re.sub(r'\)\s+(?=\d)', ')', s)
+        return s.rstrip() + (' ' if m.group(0).endswith(' ') else '')
+
+    text = _formula_run.sub(_squeeze_formula, text)
+
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
