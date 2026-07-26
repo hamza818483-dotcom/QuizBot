@@ -325,11 +325,14 @@ def aggressive_clean(text):
 
     # 1) Convert a bare "−" that is directly touching an existing sub/sup
     #    digit into the matching sub/sup minus, so mixed runs like "¹³−"
-    #    become fully "¹³⁻" instead of a garbled mix of styles.
-    text = re.sub(r'([⁰¹²³⁴⁵⁶⁷⁸⁹])[\u2212\u2013\u2014]', r'\1⁻', text)
-    text = re.sub(r'([₀₁₂₃₄₅₆₇₈₉])[\u2212\u2013\u2014]', r'\1₋', text)
-    text = re.sub(r'[\u2212\u2013\u2014]([⁰¹²³⁴⁵⁶⁷⁸⁹])', r'⁻\1', text)
-    text = re.sub(r'[\u2212\u2013\u2014]([₀₁₂₃₄₅₆₇₈₉])', r'₋\1', text)
+    #    become fully "¹³⁻" instead of a garbled mix of styles. Also
+    #    handles the case where a space sits between the digit and the
+    #    minus (source often renders base/charge/sign as separate nodes,
+    #    e.g. sup"2" + text"−" -> "² −" instead of "²⁻").
+    text = re.sub(r'([⁰¹²³⁴⁵⁶⁷⁸⁹])\s*[\u2212\u2013\u2014]', r'\1⁻', text)
+    text = re.sub(r'([₀₁₂₃₄₅₆₇₈₉])\s*[\u2212\u2013\u2014]', r'\1₋', text)
+    text = re.sub(r'[\u2212\u2013\u2014]\s*([⁰¹²³⁴⁵⁶⁷⁸⁹])', r'⁻\1', text)
+    text = re.sub(r'[\u2212\u2013\u2014]\s*([₀₁₂₃₄₅₆₇₈₉])', r'₋\1', text)
 
     # 2) "× 10" scientific notation: if the digits right after "×" were
     #    wrongly superscripted along with the real exponent (source HTML
