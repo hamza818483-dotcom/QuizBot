@@ -467,7 +467,15 @@ def format_content(element, img_map):
     # boundaries -- everything else (inline spans, bold, sub/sup) stays
     # joined with spaces exactly as before, so this only affects list
     # items and doesn't fragment normal running prose.
-    line_tags = element.find_all(['li', 'p'])
+    line_tags_raw = element.find_all(['li', 'p'])
+    # Skip a <p> that is nested inside an <li> we've already matched --
+    # e.g. <li><p>চিরসবুজ বৃক্ষ</p></li> -- otherwise find_all(['li','p'])
+    # matches BOTH tags and the same text gets collected twice, producing
+    # duplicated lines like "চিরসবুজ বৃক্ষ\nচিরসবুজ বৃক্ষ" in the output.
+    line_tags = [
+        lt for lt in line_tags_raw
+        if not (lt.name == 'p' and lt.find_parent('li') in line_tags_raw)
+    ]
     if line_tags:
         parts = []
         for lt in line_tags:
