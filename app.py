@@ -6346,20 +6346,27 @@ def _slide_font(weight: str, size: int):
 
 def _slide_wrap_text_pil(text: str, font, max_width: int, draw) -> list:
     """Word-wrap text using actual PIL-measured (raqm-shaped) width, so
-    wrapping matches real rendered glyph widths for Bengali/English."""
-    words = text.split(" ")
-    lines, cur = [], ""
-    for w in words:
-        trial = (cur + " " + w).strip()
-        bbox = draw.textbbox((0, 0), trial, font=font)
-        width = bbox[2] - bbox[0]
-        if width <= max_width or not cur:
-            cur = trial
-        else:
-            lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
+    wrapping matches real rendered glyph widths for Bengali/English.
+    Existing '\\n' line breaks in the source text (e.g. each roman-numeral
+    i./ii./iii. statement on its own CSV line) are preserved as hard
+    breaks -- only over-wide segments get further wrapped, never merged
+    across a '\\n'."""
+    lines = []
+    for segment in text.split("\n"):
+        words = segment.split(" ")
+        cur = ""
+        seg_lines = []
+        for w in words:
+            trial = (cur + " " + w).strip()
+            bbox = draw.textbbox((0, 0), trial, font=font)
+            width = bbox[2] - bbox[0]
+            if width <= max_width or not cur:
+                cur = trial
+            else:
+                seg_lines.append(cur)
+                cur = w
+        seg_lines.append(cur)  # always emit, even if segment was empty ("" preserves a blank line)
+        lines.extend(seg_lines)
     return lines
 
 _IMG_URL_RE = re.compile(r'https?://\S+\.(?:jpg|jpeg|png|webp|gif)(?:\?\S*)?', re.IGNORECASE)
