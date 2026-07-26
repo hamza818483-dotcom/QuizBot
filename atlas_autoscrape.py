@@ -190,28 +190,25 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 300, max_wa
     # ---- Pass 1: classify + instantly batch-expand plain "ব্যাখ্যা" ----
     # (those whose content is already in DOM, just needs a click/attr flip)
     # Classification signal priority:
-    #   1. Icon presence: plain "ব্যাখ্যা" button has a leading icon
-    #      (svg/img element) before its text; "AI ব্যাখ্যা" has none.
-    #      This is the most reliable signal (icon markup doesn't shift
-    #      with theme/hover/expanded state the way background color can).
+    #   1. Text label ("AI ব্যাখ্যা" vs plain "ব্যাখ্যা") -- MOST reliable.
+    #      Both button variants render a leading icon, so icon-presence
+    #      cannot distinguish them (was misclassifying "AI ব্যাখ্যা" as
+    #      plain, causing lazy-fetch content to be silently skipped).
     #   2. Background color (solid dark green vs lighter/outlined) as
-    #      secondary signal if icon check is inconclusive.
-    #   3. Text-substring ("AI" in label) as final fallback.
+    #      fallback only if label text is unavailable/empty.
     async def _classify_and_expand(i):
         try:
             btn = all_buttons.nth(i)
-            has_icon = False
+            label = ""
             try:
-                has_icon = await btn.evaluate(
-                    "el => !!el.querySelector('svg, img')"
-                )
+                label = (await btn.inner_text()) or ""
             except Exception:
                 pass
 
-            if has_icon:
-                is_ai = False
+            if label:
+                is_ai = "AI" in label
             else:
-                is_ai = None  # inconclusive from icon check
+                is_ai = None
                 try:
                     bg = await btn.evaluate("el => getComputedStyle(el).backgroundColor")
                     nums = re.findall(r"[\d.]+", bg or "")
@@ -221,8 +218,7 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 300, max_wa
                 except Exception:
                     pass
                 if is_ai is None:
-                    label = (await btn.inner_text()) or ""
-                    is_ai = "AI" in label
+                    is_ai = False  # last resort default: treat as plain
 
             if is_ai:
                 return i
