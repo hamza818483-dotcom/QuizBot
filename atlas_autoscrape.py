@@ -149,8 +149,8 @@ class AutoScrapeError(Exception):
     pass
 
 
-async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 500, max_wait_ms: int = 8000,
-                                       concurrency: int = 15, progress_cb=None, run_no: int = 1, run_total: int = 1):
+async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 300, max_wait_ms: int = 5000,
+                                       concurrency: int = 25, progress_cb=None, run_no: int = 1, run_total: int = 1):
     """
     দুই ধরনের ব্যাখ্যা button-ই DOM-এ collapsed/dropdown অবস্থায় থাকে --
     "ব্যাখ্যা" (pre-rendered content, শুধু dropdown খুলতে হয়) এবং
@@ -257,8 +257,21 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 500, max_wa
                     handle = await btn.element_handle()
                     has_text = await page.evaluate(
                         """(el) => {
-                            let container = el.closest('div')?.parentElement;
-                            return !!(container && container.innerText && container.innerText.trim().length > 20);
+                            // The button's real wrapper on chorcha.net is
+                            // <section class="...">, which holds ONLY the
+                            // button until content is lazily fetched after
+                            // click -- so checking the section's own text
+                            // length (button label excluded) is the exact
+                            // signal for "populated". closest('div') was
+                            // unreliable: it could match an unrelated
+                            // ancestor div and miss/false-positive.
+                            let section = el.closest('section');
+                            if (!section) return false;
+                            let text = section.innerText || '';
+                            // subtract the button's own label so we don't
+                            // count "AI ব্যাখ্যা" itself as content
+                            let btnText = el.innerText || '';
+                            return (text.length - btnText.length) > 15;
                         }""",
                         handle,
                     )
