@@ -719,6 +719,11 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 # label appears in multiple places. If several elements
                 # tie at the same smallest length, none is picked (too
                 # ambiguous to guess safely).
+                # A trailing "..."/"…" in the user's given label is a
+                # truncation marker, not literal text -- strip it so
+                # "বিস্তার ও সংরক্ষণ, জী..." matches the same way as
+                # "বিস্তার ও সংরক্ষণ, জী" against the real button text.
+                sub_for_match = re.sub(r'(\.\.\.|…)\s*$', '', sub).strip() or sub
                 try:
                     element_handle = await page.evaluate_handle(
                         """(target) => {
@@ -739,7 +744,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                             }
                             return (best && !tie) ? best : null;
                         }""",
-                        sub,
+                        sub_for_match,
                     )
                     is_null = await page.evaluate("(h) => h === null", element_handle)
                     if is_null:
