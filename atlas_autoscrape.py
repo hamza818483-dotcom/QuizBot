@@ -197,8 +197,7 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 300, max_wa
     #   2. Background color (solid dark green vs lighter/outlined) as
     #      secondary signal if icon check is inconclusive.
     #   3. Text-substring ("AI" in label) as final fallback.
-    ai_indices = []
-    for i in range(count):
+    async def _classify_and_expand(i):
         try:
             btn = all_buttons.nth(i)
             has_icon = False
@@ -226,18 +225,27 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 300, max_wa
                     is_ai = "AI" in label
 
             if is_ai:
-                ai_indices.append(i)
-                continue
+                return i
             expanded = await btn.get_attribute("aria-expanded")
             if expanded != "true":
                 await btn.click(timeout=5000)
         except Exception:
-            continue
-        if progress_cb and (i + 1) % 25 == 0:
+            pass
+        return None
+
+    ai_indices = []
+    classify_concurrency = max(concurrency, 40)
+    done_classify = 0
+    for batch_start in range(0, count, classify_concurrency):
+        batch = list(range(batch_start, min(batch_start + classify_concurrency, count)))
+        results = await asyncio.gather(*[_classify_and_expand(i) for i in batch])
+        ai_indices.extend([r for r in results if r is not None])
+        done_classify += len(batch)
+        if progress_cb:
             try:
                 await progress_cb(
-                    i + 1, count,
-                    f"[run {run_no}/{run_total}] ব্যাখ্যা বাটন যাচাই হচ্ছে... {i + 1}/{count}",
+                    done_classify, count,
+                    f"[run {run_no}/{run_total}] ব্যাখ্যা বাটন যাচাই হচ্ছে... {done_classify}/{count}",
                 )
             except Exception:
                 pass
