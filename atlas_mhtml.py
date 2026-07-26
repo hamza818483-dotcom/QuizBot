@@ -498,6 +498,8 @@ def format_content(element, img_map):
                         t = f"{n}ZZZOLDOTZZZ {t}"
                     except ValueError:
                         pass
+                elif parent is not None and parent.name == 'ul':
+                    t = f"• {t}"
             parts.append(t)
         # anything outside of li/p (e.g. the "নিচের কোনটি সঠিক?" tail
         # text, or the whole stem when there's no list at all) still
