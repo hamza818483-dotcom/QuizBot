@@ -626,17 +626,24 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
             for sec in card.find_all('section'):
                 if id(sec) in matched_sections:
                     continue  # already got its content via whitespace-pre-line above
-                btn = sec.find('button')
-                if btn is None:
+                btns = sec.find_all('button')
+                if not btns:
                     continue
-                btn_label = btn.get_text(strip=True)
+                btn_label = btns[0].get_text(strip=True)
                 if 'AI' not in btn_label and 'ব্যাখ্যা' not in btn_label:
                     continue  # not an explanation section at all
                 full_text = format_content(sec, img_map)
-                btn_text = format_content(btn, img_map)
-                # subtract the button's own rendered label so we don't
-                # count "AI ব্যাখ্যা" itself as extracted content
-                remainder = full_text.replace(btn_text, '', 1).strip() if btn_text else full_text.strip()
+                # Subtract EVERY button's own rendered text (not just the
+                # first) -- the section can have the top toggle button,
+                # a thumbs up/down feedback control, AND a separate
+                # "AI Explanation" source-link button below the answer
+                # text, all of which are UI controls, not explanation
+                # content, and must not leak into the remainder.
+                for b in btns:
+                    b_text = format_content(b, img_map)
+                    if b_text:
+                        full_text = full_text.replace(b_text, '', 1)
+                remainder = full_text.strip()
                 if remainder and remainder not in ('ব্যাখ্যা', 'AI ব্যাখ্যা'):
                     exp_parts.append(remainder)
 
