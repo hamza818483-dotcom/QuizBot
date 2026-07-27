@@ -9886,15 +9886,31 @@ async def handle_auto_command(msg: dict):
         try:
             parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, html_bytes, "auto-scrape.html")
             results = parsed["results"]
-            logger.info(f"[/auto] parsed {len(results)} MCQs from captured HTML (run {run_no}/{run_total})")
             skipped = parsed.get("skipped") or []
             total_seen = parsed.get("total_cards_seen")
+
+            # RECHECK PASS: re-parse the SAME captured HTML a second time.
+            # parse_mhtml_to_mcqs is deterministic on identical bytes, so a
+            # differing count between passes only happens from something
+            # non-deterministic slipping in (GC/interning edge cases, a
+            # lazy-rendered section timing out differently, etc). Whichever
+            # pass recovered MORE MCQs is kept -- this guarantees a transient
+            # hiccup on the first parse can never silently drop a question.
+            recheck = await asyncio.to_thread(parse_mhtml_to_mcqs, html_bytes, "auto-scrape.html")
+            recheck_results = recheck["results"]
+            if len(recheck_results) != len(results):
+                logger.warning(
+                    f"[/auto] recheck mismatch (run {run_no}): pass1={len(results)} pass2={len(recheck_results)} -- keeping the larger result set")
+                if len(recheck_results) > len(results):
+                    results, skipped, total_seen = recheck_results, recheck.get("skipped") or [], recheck.get("total_cards_seen")
+
+            logger.info(f"[/auto] parsed {len(results)} MCQs from captured HTML (run {run_no}/{run_total}), recheck confirmed")
             if skipped:
                 reason_lines = "\n".join(f"  • কার্ড #{ci}: {reason}" for ci, reason in skipped[:10])
                 more = f"\n  …আরও {len(skipped)-10}টা" if len(skipped) > 10 else ""
                 logger.warning(f"[/auto] {len(skipped)} card(s) skipped during parse (run {run_no}): {skipped}")
                 await send_msg(chat_id,
-                    f"⚠️ রান {run_no}: HTML-এ মোট {total_seen}টা কার্ড পাওয়া গেছে, কিন্তু {len(skipped)}টা MCQ হিসেবে বসেনি:\n{reason_lines}{more}")
+                    f"⚠️ রান {run_no}: HTML-এ মোট {total_seen}টা কার্ড পাওয়া গেছে, কিন্তু {len(skipped)}টা MCQ হিসেবে বসেনি (রিচেক করা হয়েছে):\n{reason_lines}{more}")
             elif total_seen is not None and total_seen != len(results):
                 # Cards were present in total_cards_seen's count but the
                 # extracted-results count is lower, with NO skip reasons
@@ -9905,10 +9921,12 @@ async def handle_auto_command(msg: dict):
                 logger.warning(f"[/auto] UNEXPLAINED card/result gap (run {run_no}): {total_seen} cards seen, {len(results)} MCQs extracted, gap={gap}, no skip reasons logged")
                 try:
                     await send_document(chat_id, html_bytes, f"debug_captured_{run_no}.html",
-                        caption=f"⚠️ রান {run_no}: {total_seen}টা কার্ড পাওয়া গেছে কিন্তু {len(results)}টা MCQ বের হয়েছে ({gap}টা ব্যাখ্যাহীন পার্থক্য)। এই HTML file-টা bot নিজে যা দিয়ে parse করেছে ঠিক তাই -- ডায়াগনস্টিকের জন্য পাঠানো হলো।",
+                        caption=f"⚠️ রান {run_no}: {total_seen}টা কার্ড পাওয়া গেছে কিন্তু {len(results)}টা MCQ বের হয়েছে ({gap}টা ব্যাখ্যাহীন পার্থক্য, রিচেক করেও একই ফলাফল)। এই HTML file-টা bot নিজে যা দিয়ে parse করেছে ঠিক তাই -- ডায়াগনস্টিকের জন্য পাঠানো হলো।",
                         mime_type="text/html")
                 except Exception:
                     pass
+            else:
+                logger.info(f"[/auto] recheck OK (run {run_no}): {len(results)}/{total_seen} cards accounted for, no MCQ dropped")
         except Exception as e:
             logger.error(f"[/auto] HTML parse failed (run {run_no}): {e}")
             await send_msg(chat_id, f"❌ রান {run_no}: MCQ extract ব্যর্থ হয়েছে: {e}")
