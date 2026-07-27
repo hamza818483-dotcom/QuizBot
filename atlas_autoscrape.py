@@ -379,7 +379,7 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 300, max_wa
                 logger.info(f"[/auto] long-wait final attempt resolved all remaining AI ব্যাখ্যা")
 
 
-async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total=1, poll_ms: int = 1000, max_wait_ms: int = 120000):
+async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total=1, poll_ms: int = 1000, max_wait_ms: int = 240000):
     """
     Some pages (e.g. প্রশ্নব্যাংক browse) lazy-load MCQ cards only as the
     user scrolls down (viewport-based), while others (e.g. the post-submit
@@ -484,7 +484,7 @@ async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total
         last_count = count
         await page.wait_for_timeout(poll_ms)
         elapsed += poll_ms
-        if stale_polls >= 15:
+        if stale_polls >= 45:
             # ~15s with zero growth AND no end-marker -- likely a page
             # that never shows the marker (e.g. a short list with no
             # "no more" footer). Stop here rather than burning the full
