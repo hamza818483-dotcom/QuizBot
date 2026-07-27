@@ -900,6 +900,40 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
     except Exception:
         pass
 
+    # FINAL VERIFICATION PASS: right before capturing HTML, do one more
+    # full top-to-bottom scroll + settle. _wait_for_mcq_count_stable's own
+    # re-pass runs BEFORE AI-explanation expansion, which can itself
+    # trigger further lazy-render/layout shifts that reveal a few more
+    # cards lower on the page -- this catches exactly that gap so cards
+    # near the end of a long list are never silently missing from the
+    # final captured HTML.
+    try:
+        pre_final_count = await page.locator(_diag_card_selector).count()
+        await page.evaluate("window.scrollTo(0, 0)")
+        await page.wait_for_timeout(150)
+        await page.evaluate("""
+            async () => {
+                const step = Math.max(400, window.innerHeight * 0.9);
+                let y = 0;
+                const target = document.body.scrollHeight;
+                while (y < target) {
+                    y = Math.min(y + step, target);
+                    window.scrollTo(0, y);
+                    await new Promise(r => setTimeout(r, 90));
+                }
+            }
+        """)
+        await page.wait_for_timeout(1000)  # let any late renders settle
+        post_final_count = await page.locator(_diag_card_selector).count()
+        if post_final_count > pre_final_count:
+            logger.warning(f"[/auto] FINAL verification pass caught {post_final_count - pre_final_count} more card(s) ({pre_final_count} -> {post_final_count}) after AI ব্যাখ্যা expansion -- would have been missing without this pass")
+            await page.wait_for_timeout(800)
+        else:
+            logger.info(f"[/auto] final verification pass: no change ({pre_final_count} cards, confirmed stable)")
+        await page.evaluate("window.scrollTo(0, 0)")
+    except Exception as e_final:
+        logger.warning(f"[/auto] final verification pass failed (non-fatal): {e_final}")
+
     html = await page.content()
     try:
         final_card_count = await page.locator(
