@@ -241,7 +241,7 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 300, max_wa
             try:
                 await progress_cb(
                     done_classify, count,
-                    f"[run {run_no}/{run_total}] ব্যাখ্যা বাটন যাচাই হচ্ছে... {done_classify}/{count}",
+                    f"[run {run_no}/{run_total}] ব্যাখ্যা বাটন যাচাই হচ্ছে... {done_classify}/{count}টা বাটন (প্রতি MCQ-তে ১-২টা বাটন থাকতে পারে)",
                 )
             except Exception:
                 pass
@@ -521,6 +521,39 @@ async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total
                 )
             except Exception:
                 pass
+
+    # One more full top-to-bottom incremental pass before capture. The
+    # wait loop above can finish (end marker found, count stable) even
+    # though some individual card sections never actually rendered during
+    # the live scroll -- a lazy-render/hydration timing gap distinct from
+    # "page still loading". A second full re-walk gives any such gap
+    # another chance to render before we grab the final HTML.
+    try:
+        await page.evaluate("window.scrollTo(0, 0)")
+        await page.wait_for_timeout(150)
+        await page.evaluate("""
+            async () => {
+                const step = Math.max(400, window.innerHeight * 0.9);
+                let y = 0;
+                const target = document.body.scrollHeight;
+                while (y < target) {
+                    y = Math.min(y + step, target);
+                    window.scrollTo(0, y);
+                    await new Promise(r => setTimeout(r, 70));
+                }
+            }
+        """)
+    except Exception:
+        pass
+
+    try:
+        recheck_count = await page.locator(card_selector).count()
+        if recheck_count > last_count:
+            logger.info(f"[/auto] re-pass caught {recheck_count - last_count} additional card(s) ({last_count} -> {recheck_count}) that the live scroll missed")
+            last_count = recheck_count
+            await page.wait_for_timeout(800)  # let any follow-on renders settle
+    except Exception:
+        pass
 
     # Scroll back to top so screenshots/DOM order reads naturally (no
     # functional effect on HTML extraction, just tidy).
