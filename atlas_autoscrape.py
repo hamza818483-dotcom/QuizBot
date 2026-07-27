@@ -528,6 +528,7 @@ async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total
     # the live scroll -- a lazy-render/hydration timing gap distinct from
     # "page still loading". A second full re-walk gives any such gap
     # another chance to render before we grab the final HTML.
+    pre_repass_count = last_count
     try:
         await page.evaluate("window.scrollTo(0, 0)")
         await page.wait_for_timeout(150)
@@ -543,17 +544,19 @@ async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total
                 }
             }
         """)
-    except Exception:
-        pass
+        logger.info(f"[/auto] re-pass scroll completed without error (pre-count={pre_repass_count})")
+    except Exception as e_repass:
+        logger.warning(f"[/auto] re-pass scroll FAILED with exception: {e_repass}")
 
     try:
         recheck_count = await page.locator(card_selector).count()
+        logger.info(f"[/auto] post-re-pass card count: {recheck_count} (was {pre_repass_count})")
         if recheck_count > last_count:
             logger.info(f"[/auto] re-pass caught {recheck_count - last_count} additional card(s) ({last_count} -> {recheck_count}) that the live scroll missed")
             last_count = recheck_count
             await page.wait_for_timeout(800)  # let any follow-on renders settle
-    except Exception:
-        pass
+    except Exception as e_recount:
+        logger.warning(f"[/auto] post-re-pass count check FAILED: {e_recount}")
 
     # Scroll back to top so screenshots/DOM order reads naturally (no
     # functional effect on HTML extraction, just tidy).
@@ -882,7 +885,20 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
     # Wait for MCQ cards to finish loading (slow pages keep adding cards
     # after navigation "settles"), then expand AI ব্যাখ্যা before grabbing HTML.
     await _wait_for_mcq_count_stable(page, progress_cb=progress_cb, run_no=run_no, run_total=run_total)
+    _diag_card_selector = "div.border.rounded-xl"
+    try:
+        pre_expand_count = await page.locator(_diag_card_selector).count()
+        logger.info(f"[/auto] card count before AI ব্যাখ্যা expansion: {pre_expand_count}")
+    except Exception:
+        pre_expand_count = None
     await _expand_all_ai_explanations(page, progress_cb=progress_cb, run_no=run_no, run_total=run_total)
+    try:
+        post_expand_count = await page.locator(_diag_card_selector).count()
+        logger.info(f"[/auto] card count after AI ব্যাখ্যা expansion: {post_expand_count} (was {pre_expand_count})")
+        if pre_expand_count is not None and post_expand_count < pre_expand_count:
+            logger.warning(f"[/auto] CARD COUNT DROPPED during AI ব্যাখ্যা expansion: {pre_expand_count} -> {post_expand_count} (lost {pre_expand_count - post_expand_count})")
+    except Exception:
+        pass
 
     html = await page.content()
     try:
