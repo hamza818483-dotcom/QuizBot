@@ -9887,6 +9887,20 @@ async def handle_auto_command(msg: dict):
             parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, html_bytes, "auto-scrape.html")
             results = parsed["results"]
             logger.info(f"[/auto] parsed {len(results)} MCQs from captured HTML (run {run_no}/{run_total})")
+            skipped = parsed.get("skipped") or []
+            total_seen = parsed.get("total_cards_seen")
+            if skipped:
+                reason_lines = "\n".join(f"  • কার্ড #{ci}: {reason}" for ci, reason in skipped[:10])
+                more = f"\n  …আরও {len(skipped)-10}টা" if len(skipped) > 10 else ""
+                logger.warning(f"[/auto] {len(skipped)} card(s) skipped during parse (run {run_no}): {skipped}")
+                await send_msg(chat_id,
+                    f"⚠️ রান {run_no}: HTML-এ মোট {total_seen}টা কার্ড পাওয়া গেছে, কিন্তু {len(skipped)}টা MCQ হিসেবে বসেনি:\n{reason_lines}{more}")
+            elif total_seen is not None and total_seen != len(results):
+                # Cards were present but the count still doesn't line up
+                # with what got extracted (e.g. parent/context cards, by
+                # design, aren't counted as MCQs -- this is informational,
+                # not necessarily an error).
+                logger.info(f"[/auto] card/result count note (run {run_no}): {total_seen} cards seen, {len(results)} MCQs extracted (difference may be parent/context cards, which is expected)")
         except Exception as e:
             logger.error(f"[/auto] HTML parse failed (run {run_no}): {e}")
             await send_msg(chat_id, f"❌ রান {run_no}: MCQ extract ব্যর্থ হয়েছে: {e}")
