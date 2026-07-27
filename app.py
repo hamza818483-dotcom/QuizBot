@@ -9915,7 +9915,20 @@ async def handle_auto_command(msg: dict):
             return
 
         if not results:
-            await send_msg(chat_id, f"❌ রান {run_no} ({topic}): কোনো MCQ খুঁজে পাওয়া যায়নি।")
+            # MCQ-format-এ কিছু পাওয়া যায়নি -- ফাইনালি হাল ছাড়ার আগে চেক করি এটা
+            # Q&A/CQ ফরম্যাট (চর্চা ক-ভান্ডার/খ-ভান্ডার/CQ) কিনা, ঠিক যেভাবে সরাসরি
+            # HTML file পাঠালে bot নিজে থেকে detect করে -- একই power এখন /auto-তেও।
+            try:
+                qa_data = await asyncio.to_thread(parse_chorcha_file, html_bytes)
+            except Exception:
+                qa_data = None
+            if qa_data and qa_data.get("items"):
+                await send_msg(chat_id,
+                    f"📋 রান {run_no} ({topic}): এই পেজটা Q&A/CQ ফরম্যাটের (MCQ না), তাই CSV বানানো যায়নি। "
+                    f"এই ধরনের কনটেন্টের জন্য PDF বানাতে চাইলে ক্যাপচার করা HTML file-এ reply করে <code>/qpdf</code> দাও।",
+                    parse_mode="HTML")
+            else:
+                await send_msg(chat_id, f"❌ রান {run_no} ({topic}): কোনো MCQ খুঁজে পাওয়া যায়নি।")
             return
 
         await _final_stage_update(f"📊 CSV তৈরি হচ্ছে... ({len(results)}টা MCQ)")
