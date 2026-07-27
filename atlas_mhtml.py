@@ -583,14 +583,17 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
         _total_cards = len(chorcha_cards)
 
         pending_context = ""  # image/text from a parent card with no options, to prepend to child MCQs
+        skipped_info = []  # [(card_index, reason), ...] -- surfaced to the caller for diagnostics
         for _ci, card in enumerate(chorcha_cards, 1):
             q_div = card.find('div', class_=lambda x: x and 'font-medium' in x)
             if not q_div:
+                skipped_info.append((_ci, "no question-text div found in this card"))
                 continue
             q_text_raw = format_content(q_div, img_map)
             q_num_match = re.match(r'^\s*([0-9০-৯]+(?:\.[0-9০-৯]+)?)\s*[\.\)\-ঃ:]', q_text_raw)
             q_text = re.sub(r'^\s*[0-9০-৯]+(?:\.[0-9০-৯]+)?\s*[\.\)\-ঃ:]\s*', '', q_text_raw)
             if not q_text.strip() and not q_text_raw.strip():
+                skipped_info.append((_ci, "question text was completely empty"))
                 continue
 
             nested_cards = card.find_all('div', class_=lambda x: x and 'rounded-xl' in x and ('p-5' in x or 'pb-6' in x))
@@ -619,6 +622,7 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
             elif not is_nested:
                 pending_context = ""  # own top-level question stands alone; clear stale context
             if not q_text.strip():
+                skipped_info.append((_ci, "has options but question text ended up empty after context-merge"))
                 continue
 
             options, ans_idx = [], "1"
@@ -692,7 +696,12 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
 
         results = post_process(results)
         gc.collect()
-        return {"source": "Chorcha.net", "results": results}
+        return {
+            "source": "Chorcha.net",
+            "results": results,
+            "total_cards_seen": _total_cards,
+            "skipped": skipped_info,
+        }
 
     # ============================================================
     # TESTMOZ
