@@ -852,6 +852,13 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
     await _expand_all_ai_explanations(page, progress_cb=progress_cb, run_no=run_no, run_total=run_total)
 
     html = await page.content()
+    try:
+        final_card_count = await page.locator(
+            "div[class*='rounded-xl'][class*='p-5'], div[class*='rounded-xl'][class*='pb-6']"
+        ).count()
+        logger.info(f"[/auto] HTML captured with {final_card_count} card-like divs in final DOM (run {run_no}/{run_total})")
+    except Exception:
+        pass
     return html.encode("utf-8"), processed_subs
 
 
