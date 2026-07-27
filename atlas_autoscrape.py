@@ -429,9 +429,25 @@ async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total
                 continue
         return max(values) if values else None
 
+    last_scroll_y = {"v": 0}
     while elapsed < max_wait_ms:
         try:
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            new_y = await page.evaluate("""
+                async (fromY) => {
+                    const step = Math.max(400, window.innerHeight * 0.9);
+                    let y = fromY;
+                    const target = document.body.scrollHeight;
+                    while (y < target) {
+                        y = Math.min(y + step, target);
+                        window.scrollTo(0, y);
+                        await new Promise(r => setTimeout(r, 90));
+                    }
+                    window.scrollTo(0, document.body.scrollHeight);
+                    return window.scrollY;
+                }
+            """, last_scroll_y["v"])
+            if isinstance(new_y, (int, float)):
+                last_scroll_y["v"] = new_y
         except Exception:
             pass
         try:
