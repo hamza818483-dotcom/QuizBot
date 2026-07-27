@@ -787,12 +787,16 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                             f"[/auto] step {i}/{total} sub={sub!r}: matched via known-url-map "
                             f"(subject={current_subject!r}) -> {known_url}"
                         )
-                        await page.goto(known_url, wait_until="networkidle", timeout=30000)
-                        await page.wait_for_timeout(300)
+                        try:
+                            await page.goto(known_url, wait_until="domcontentloaded", timeout=30000)
+                        except Exception as e_first:
+                            logger.warning(f"[/auto] known-url-map goto failed for {sub!r} (attempt 1): {e_first}, retrying once")
+                            await page.goto(known_url, wait_until="domcontentloaded", timeout=30000)
+                        await page.wait_for_timeout(1200)
                         processed_subs.append(sub)
                         continue
                     except Exception as e:
-                        logger.warning(f"[/auto] known-url-map goto failed for {sub!r}: {e}")
+                        logger.warning(f"[/auto] known-url-map goto failed for {sub!r} (both attempts): {e}")
 
             if locator is None and element_handle is None:
                 # Fallback: previously-saved persistent label->URL mapping
