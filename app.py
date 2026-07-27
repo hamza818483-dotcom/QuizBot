@@ -9898,11 +9898,13 @@ async def handle_auto_command(msg: dict):
             # hiccup on the first parse can never silently drop a question.
             recheck = await asyncio.to_thread(parse_mhtml_to_mcqs, html_bytes, "auto-scrape.html")
             recheck_results = recheck["results"]
+            context_only = parsed.get("context_only_count", 0)
             if len(recheck_results) != len(results):
                 logger.warning(
                     f"[/auto] recheck mismatch (run {run_no}): pass1={len(results)} pass2={len(recheck_results)} -- keeping the larger result set")
                 if len(recheck_results) > len(results):
                     results, skipped, total_seen = recheck_results, recheck.get("skipped") or [], recheck.get("total_cards_seen")
+                    context_only = recheck.get("context_only_count", 0)
 
             logger.info(f"[/auto] parsed {len(results)} MCQs from captured HTML (run {run_no}/{run_total}), recheck confirmed")
             if skipped:
@@ -9914,17 +9916,23 @@ async def handle_auto_command(msg: dict):
             elif total_seen is not None and total_seen != len(results):
                 # Cards were present in total_cards_seen's count but the
                 # extracted-results count is lower, with NO skip reasons
-                # logged -- this is an unexplained gap (not the expected
-                # parent/context-card difference), so attach the bot's
-                # actual captured HTML for diagnosis instead of guessing.
-                gap = total_seen - len(results)
-                logger.warning(f"[/auto] UNEXPLAINED card/result gap (run {run_no}): {total_seen} cards seen, {len(results)} MCQs extracted, gap={gap}, no skip reasons logged")
-                try:
-                    await send_document(chat_id, html_bytes, f"debug_captured_{run_no}.html",
-                        caption=f"⚠️ রান {run_no}: {total_seen}টা কার্ড পাওয়া গেছে কিন্তু {len(results)}টা MCQ বের হয়েছে ({gap}টা ব্যাখ্যাহীন পার্থক্য, রিচেক করেও একই ফলাফল)। এই HTML file-টা bot নিজে যা দিয়ে parse করেছে ঠিক তাই -- ডায়াগনস্টিকের জন্য পাঠানো হলো।",
-                        mime_type="text/html")
-                except Exception:
-                    pass
+                # logged. Some of that gap is EXPECTED: parent/passage
+                # cards (উদ্দীপক/চিত্র সহ প্রশ্ন) have no options of their
+                # own and correctly produce 0 results -- their content
+                # gets folded into the nested child MCQ(s) that follow.
+                # Only flag+attach debug HTML if the gap ISN'T fully
+                # explained by that, i.e. a genuinely unaccounted-for drop.
+                unexplained_gap = total_seen - len(results) - context_only
+                if unexplained_gap > 0:
+                    logger.warning(f"[/auto] UNEXPLAINED card/result gap (run {run_no}): {total_seen} cards seen, {len(results)} MCQs extracted, {context_only} context-only parent(s) accounted for, gap={unexplained_gap} still unexplained, no skip reasons logged")
+                    try:
+                        await send_document(chat_id, html_bytes, f"debug_captured_{run_no}.html",
+                            caption=f"⚠️ রান {run_no}: {total_seen}টা কার্ড পাওয়া গেছে, {context_only}টা passage/context কার্ড (এগুলো নিজে MCQ না, স্বাভাবিক) বাদ দিয়ে {len(results)}টা MCQ বের হয়েছে, তবু {unexplained_gap}টা ব্যাখ্যাহীন পার্থক্য (রিচেক করেও একই ফলাফল)। এই HTML file-টা bot নিজে যা দিয়ে parse করেছে ঠিক তাই -- ডায়াগনস্টিকের জন্য পাঠানো হলো।",
+                            mime_type="text/html")
+                    except Exception:
+                        pass
+                else:
+                    logger.info(f"[/auto] gap fully explained (run {run_no}): {total_seen} cards = {len(results)} MCQs + {context_only} context-only parent(s), nothing missing")
             else:
                 logger.info(f"[/auto] recheck OK (run {run_no}): {len(results)}/{total_seen} cards accounted for, no MCQ dropped")
         except Exception as e:

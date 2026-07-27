@@ -584,6 +584,7 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
 
         pending_context = ""  # image/text from a parent card with no options, to prepend to child MCQs
         skipped_info = []  # [(card_index, reason), ...] -- surfaced to the caller for diagnostics
+        context_only_count = 0  # parent/passage cards with no options -- expected to produce 0 results, not a gap
         for _ci, card in enumerate(chorcha_cards, 1):
             q_div = card.find('div', class_=lambda x: x and 'font-medium' in x)
             if not q_div:
@@ -605,7 +606,13 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
             is_nested = bool(q_num_match and '.' in q_num_match.group(1))
 
             if not has_options_probe:
-                # Parent/context-only card (image or passage, no MCQ here).
+                # Parent/context-only card (image or passage, no MCQ here) --
+                # this card is EXPECTED to produce zero results; its content
+                # gets folded into whichever nested child question(s) follow.
+                # Tracked separately (not as a "skip") so total_cards_seen
+                # accounting stays accurate: total_cards_seen == len(results)
+                # + context_only_count + len(skipped_info), always.
+                context_only_count += 1
                 # A NEW top-level (non-nested) number resets any pending
                 # context from an earlier, unrelated group. Strip the
                 # parent's own leading number ("1. ") -- it belongs to the
@@ -701,6 +708,7 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
             "results": results,
             "total_cards_seen": _total_cards,
             "skipped": skipped_info,
+            "context_only_count": context_only_count,
         }
 
     # ============================================================
