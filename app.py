@@ -9896,11 +9896,19 @@ async def handle_auto_command(msg: dict):
                 await send_msg(chat_id,
                     f"⚠️ রান {run_no}: HTML-এ মোট {total_seen}টা কার্ড পাওয়া গেছে, কিন্তু {len(skipped)}টা MCQ হিসেবে বসেনি:\n{reason_lines}{more}")
             elif total_seen is not None and total_seen != len(results):
-                # Cards were present but the count still doesn't line up
-                # with what got extracted (e.g. parent/context cards, by
-                # design, aren't counted as MCQs -- this is informational,
-                # not necessarily an error).
-                logger.info(f"[/auto] card/result count note (run {run_no}): {total_seen} cards seen, {len(results)} MCQs extracted (difference may be parent/context cards, which is expected)")
+                # Cards were present in total_cards_seen's count but the
+                # extracted-results count is lower, with NO skip reasons
+                # logged -- this is an unexplained gap (not the expected
+                # parent/context-card difference), so attach the bot's
+                # actual captured HTML for diagnosis instead of guessing.
+                gap = total_seen - len(results)
+                logger.warning(f"[/auto] UNEXPLAINED card/result gap (run {run_no}): {total_seen} cards seen, {len(results)} MCQs extracted, gap={gap}, no skip reasons logged")
+                try:
+                    await send_document(chat_id, html_bytes, f"debug_captured_{run_no}.html",
+                        caption=f"⚠️ রান {run_no}: {total_seen}টা কার্ড পাওয়া গেছে কিন্তু {len(results)}টা MCQ বের হয়েছে ({gap}টা ব্যাখ্যাহীন পার্থক্য)। এই HTML file-টা bot নিজে যা দিয়ে parse করেছে ঠিক তাই -- ডায়াগনস্টিকের জন্য পাঠানো হলো।",
+                        mime_type="text/html")
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"[/auto] HTML parse failed (run {run_no}): {e}")
             await send_msg(chat_id, f"❌ রান {run_no}: MCQ extract ব্যর্থ হয়েছে: {e}")
