@@ -567,7 +567,7 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             # Measured from the compacted static QBM_EXTRACT_PROMPT_DEFAULT
             # (~8k chars / 3.5) + margin. Only accurate for that fixed prompt.
             PROMPT_TOKENS = 2400
-        SAFETY_MARGIN = 500   # cushion for output/estimate drift
+        SAFETY_MARGIN = 1000  # cushion for output/estimate drift (observed 413s ran ~700-900 tokens over the old 500 margin)
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
@@ -597,7 +597,7 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             if max(w, h) > max_dim:
                 scale = max_dim / max(w, h)
                 w, h = max(1, int(w * scale)), max(1, int(h * scale))
-            est_tokens = int((w / 28) * (h / 28) * 1.15) + 300
+            est_tokens = int((w / 28) * (h / 28) * 1.3) + 300
             is_last = (max_dim == 256)
             if est_tokens <= TOKEN_BUDGET or is_last:
                 resized = image.resize((w, h)) if (w, h) != (orig_w, orig_h) else image
@@ -8998,7 +8998,7 @@ async def _qbm_groq_call(img, prompt: str) -> str:
             return txt
         if status == 413:
             if shrunk_url is None:
-                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=40, prompt_len_hint=prompt)
+                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=10, prompt_len_hint=prompt)
             if shrunk_url:
                 txt2, status2 = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
