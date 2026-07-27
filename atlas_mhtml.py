@@ -575,23 +575,54 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
     # ============================================================
     # CHORCHA.NET
     # ============================================================
-    chorcha_cards = soup.find_all('div', class_=lambda x: x and 'p-5' in x and 'rounded-xl' in x)
+    chorcha_cards = soup.find_all('div', class_=lambda x: x and 'rounded-xl' in x and ('p-5' in x or 'pb-6' in x))
 
     if chorcha_cards:
         results = []
         ans_map = {'ক': '1', 'খ': '2', 'গ': '3', 'ঘ': '4'}
         _total_cards = len(chorcha_cards)
 
+        pending_context = ""  # image/text from a parent card with no options, to prepend to child MCQs
         for _ci, card in enumerate(chorcha_cards, 1):
             q_div = card.find('div', class_=lambda x: x and 'font-medium' in x)
             if not q_div:
                 continue
-            q_text = re.sub(r'^\s*[0-9০-৯]+\s*[\.\)\-ঃ:]\s*', '', format_content(q_div, img_map))
+            q_text_raw = format_content(q_div, img_map)
+            q_num_match = re.match(r'^\s*([0-9০-৯]+(?:\.[0-9০-৯]+)?)\s*[\.\)\-ঃ:]', q_text_raw)
+            q_text = re.sub(r'^\s*[0-9০-৯]+(?:\.[0-9০-৯]+)?\s*[\.\)\-ঃ:]\s*', '', q_text_raw)
+            if not q_text.strip() and not q_text_raw.strip():
+                continue
+
+            nested_cards = card.find_all('div', class_=lambda x: x and 'rounded-xl' in x and ('p-5' in x or 'pb-6' in x))
+            own_buttons = [
+                btn for btn in card.find_all('button', class_=lambda x: x and 'p-2' in x)
+                if not any(btn in nc.find_all('button') for nc in nested_cards)
+            ]
+            has_options_probe = bool(own_buttons)
+            is_nested = bool(q_num_match and '.' in q_num_match.group(1))
+
+            if not has_options_probe:
+                # Parent/context-only card (image or passage, no MCQ here).
+                # A NEW top-level (non-nested) number resets any pending
+                # context from an earlier, unrelated group. Strip the
+                # parent's own leading number ("1. ") -- it belongs to the
+                # parent, not to the child MCQs that will use this context.
+                q_text_context = re.sub(r'^\s*[0-9০-৯]+(?:\.[0-9০-৯]+)?\s*[\.\)\-ঃ:]\s*', '', q_text_raw).strip()
+                if not is_nested:
+                    pending_context = q_text_context
+                elif pending_context:
+                    pending_context = (pending_context + "\n" + q_text_context).strip()
+                continue
+
+            if is_nested and pending_context:
+                q_text = (pending_context + "\n" + q_text).strip()
+            elif not is_nested:
+                pending_context = ""  # own top-level question stands alone; clear stale context
             if not q_text.strip():
                 continue
 
             options, ans_idx = [], "1"
-            for i, btn in enumerate(card.find_all('button', class_=lambda x: x and 'p-2' in x), 1):
+            for i, btn in enumerate(own_buttons, 1):
                 lbl = btn.find('span', class_=lambda x: x and 'rounded-full' in x)
                 opt_content = btn.find('div', class_='flex-1')
                 if opt_content:
