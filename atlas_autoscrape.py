@@ -434,13 +434,21 @@ async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total
         try:
             new_y = await page.evaluate("""
                 async (fromY) => {
-                    const step = Math.max(400, window.innerHeight * 0.9);
+                    // Smaller step (half a viewport, floor 250px) and a longer
+                    // per-step pause than before -- a fast, large jump can
+                    // leap past an IntersectionObserver-based lazy loader's
+                    // trigger zone before it fires for cards in that zone,
+                    // silently skipping a whole chunk of MCQs (confirmed via
+                    // a real page where ~11 consecutive questions were never
+                    // rendered because of exactly this). Finer, slower steps
+                    // give every card's trigger zone time to be entered.
+                    const step = Math.max(250, window.innerHeight * 0.5);
                     let y = fromY;
                     const target = document.body.scrollHeight;
                     while (y < target) {
                         y = Math.min(y + step, target);
                         window.scrollTo(0, y);
-                        await new Promise(r => setTimeout(r, 90));
+                        await new Promise(r => setTimeout(r, 150));
                     }
                     window.scrollTo(0, document.body.scrollHeight);
                     return window.scrollY;
@@ -534,13 +542,16 @@ async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total
         await page.wait_for_timeout(150)
         await page.evaluate("""
             async () => {
-                const step = Math.max(400, window.innerHeight * 0.9);
+                // Same slower/finer step as the main polling loop, for the
+                // same reason: fast large jumps can skip a lazy loader's
+                // trigger zone for a whole chunk of cards.
+                const step = Math.max(250, window.innerHeight * 0.5);
                 let y = 0;
                 const target = document.body.scrollHeight;
                 while (y < target) {
                     y = Math.min(y + step, target);
                     window.scrollTo(0, y);
-                    await new Promise(r => setTimeout(r, 70));
+                    await new Promise(r => setTimeout(r, 150));
                 }
             }
         """)
@@ -913,13 +924,13 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
         await page.wait_for_timeout(150)
         await page.evaluate("""
             async () => {
-                const step = Math.max(400, window.innerHeight * 0.9);
+                const step = Math.max(250, window.innerHeight * 0.5);
                 let y = 0;
                 const target = document.body.scrollHeight;
                 while (y < target) {
                     y = Math.min(y + step, target);
                     window.scrollTo(0, y);
-                    await new Promise(r => setTimeout(r, 90));
+                    await new Promise(r => setTimeout(r, 150));
                 }
             }
         """)
@@ -958,13 +969,13 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
             await page.wait_for_timeout(150)
             await page.evaluate("""
                 async () => {
-                    const step = Math.max(400, window.innerHeight * 0.9);
+                    const step = Math.max(250, window.innerHeight * 0.5);
                     let y = 0;
                     const target = document.body.scrollHeight;
                     while (y < target) {
                         y = Math.min(y + step, target);
                         window.scrollTo(0, y);
-                        await new Promise(r => setTimeout(r, 90));
+                        await new Promise(r => setTimeout(r, 150));
                     }
                 }
             """)
@@ -987,6 +998,76 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
         await page.evaluate("window.scrollTo(0, 0)")
     except Exception:
         pass
+
+    # TAG-BASED VERIFICATION (the real bug-catching check): a plain card
+    # COUNT can look "stable" even when a whole chunk of real MCQs failed
+    # to render and the page just ends up with fewer total cards overall
+    # (not a positional gap, since chorcha.net doesn't renumber -- it's
+    # simply short by however many failed to load). Each real MCQ card
+    # carries a stable "tag-cyan" span (e.g. "Din.B 25", "SB 23") that
+    # uniquely identifies its source question, present ONLY on real MCQ
+    # cards (never on parent/passage-only cards). Counting these tags is a
+    # far more reliable signal than raw card count, since it's immune to
+    # the parent/context-card accounting confusion entirely. Confirmed on
+    # a real page: the full manually-saved page had 240 tagged cards, the
+    # bot's own capture had only 226 -- 14 real MCQs missing despite the
+    # total *card* count elsewhere looking self-consistent.
+    async def _count_tagged_cards():
+        try:
+            return await page.evaluate("""
+                () => {
+                    const cards = document.querySelectorAll(
+                        "div[class*='rounded-xl'][class*='p-5'], div[class*='rounded-xl'][class*='pb-6']"
+                    );
+                    let n = 0;
+                    for (const c of cards) {
+                        if (c.querySelector("span[class*='tag-cyan']")) n++;
+                    }
+                    return n;
+                }
+            """)
+        except Exception:
+            return None
+
+    prev_tag_count = await _count_tagged_cards()
+    for _tag_retry in range(3):
+        if prev_tag_count is None:
+            break  # selector/eval failed -- don't loop on unreliable data
+        try:
+            await page.evaluate("window.scrollTo(0, 0)")
+            await page.wait_for_timeout(200)
+            await page.evaluate("""
+                async () => {
+                    // Slow, fine-grained scroll -- last-resort pass
+                    // specifically to give a lazy loader every chance to
+                    // fire for cards that were missed the first time.
+                    const step = Math.max(150, window.innerHeight * 0.3);
+                    let y = 0;
+                    const target = document.body.scrollHeight;
+                    while (y < target) {
+                        y = Math.min(y + step, target);
+                        window.scrollTo(0, y);
+                        await new Promise(r => setTimeout(r, 220));
+                    }
+                }
+            """)
+            await page.wait_for_timeout(1500)
+        except Exception as e_tag:
+            logger.warning(f"[/auto] tag-verification scroll pass failed (non-fatal): {e_tag}")
+            break
+        new_tag_count = await _count_tagged_cards()
+        if new_tag_count is None:
+            break
+        if new_tag_count > prev_tag_count:
+            logger.warning(f"[/auto] TAG-VERIFICATION: found MORE real MCQ cards on retry {_tag_retry+1} ({prev_tag_count} -> {new_tag_count}) -- recapturing HTML (would have been missing without this pass)")
+            prev_tag_count = new_tag_count
+            html = await page.content()
+        else:
+            logger.info(f"[/auto] tag-verification stable at {new_tag_count} real MCQ card(s) after retry {_tag_retry+1}, stopping")
+            break
+    else:
+        logger.warning(f"[/auto] tag-verification count still changing after all retries (run {run_no}/{run_total}) -- proceeding with best available capture ({prev_tag_count} tagged cards)")
+
     return html.encode("utf-8"), processed_subs
 
 
