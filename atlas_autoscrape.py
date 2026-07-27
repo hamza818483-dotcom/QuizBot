@@ -935,11 +935,56 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
         logger.warning(f"[/auto] final verification pass failed (non-fatal): {e_final}")
 
     html = await page.content()
+    _parser_selector = "div[class*='rounded-xl'][class*='p-5'], div[class*='rounded-xl'][class*='pb-6']"
     try:
-        final_card_count = await page.locator(
-            "div[class*='rounded-xl'][class*='p-5'], div[class*='rounded-xl'][class*='pb-6']"
-        ).count()
+        final_card_count = await page.locator(_parser_selector).count()
         logger.info(f"[/auto] HTML captured with {final_card_count} card-like divs in final DOM (run {run_no}/{run_total})")
+    except Exception:
+        final_card_count = None
+
+    # EXTRA SAFETY LOOP (additive -- doesn't remove/alter anything above):
+    # re-check using the EXACT selector parse_mhtml_to_mcqs() itself uses
+    # (the diagnostic selectors above use a looser "div.border.rounded-xl"
+    # match, which can under/over-count vs the real parser). If one more
+    # scroll pass still turns up MORE matching cards than what we just
+    # captured, that means content was still settling -- re-capture the
+    # HTML again (up to 2 extra tries) and keep whichever capture has the
+    # most cards, so a late-rendering card near the end of a long list
+    # can never end up missing from the final CSV.
+    best_html, best_count = html, (final_card_count or 0)
+    for _retry in range(2):
+        try:
+            await page.evaluate("window.scrollTo(0, 0)")
+            await page.wait_for_timeout(150)
+            await page.evaluate("""
+                async () => {
+                    const step = Math.max(400, window.innerHeight * 0.9);
+                    let y = 0;
+                    const target = document.body.scrollHeight;
+                    while (y < target) {
+                        y = Math.min(y + step, target);
+                        window.scrollTo(0, y);
+                        await new Promise(r => setTimeout(r, 90));
+                    }
+                }
+            """)
+            await page.wait_for_timeout(1200)
+            recheck_count = await page.locator(_parser_selector).count()
+            if recheck_count > best_count:
+                logger.warning(f"[/auto] SAFETY RETRY {_retry+1}: found {recheck_count} cards (was {best_count}) -- recapturing HTML")
+                await page.evaluate("window.scrollTo(0, 0)")
+                await page.wait_for_timeout(150)
+                new_html = await page.content()
+                best_html, best_count = new_html, recheck_count
+            else:
+                logger.info(f"[/auto] safety retry {_retry+1}: no improvement ({recheck_count} cards), stopping retries")
+                break
+        except Exception as e_retry:
+            logger.warning(f"[/auto] safety retry {_retry+1} failed (non-fatal): {e_retry}")
+            break
+    html = best_html
+    try:
+        await page.evaluate("window.scrollTo(0, 0)")
     except Exception:
         pass
     return html.encode("utf-8"), processed_subs
