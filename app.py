@@ -9886,6 +9886,7 @@ async def handle_auto_command(msg: dict):
         try:
             parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, html_bytes, "auto-scrape.html")
             results = parsed["results"]
+            logger.info(f"[/auto] parsed {len(results)} MCQs from captured HTML (run {run_no}/{run_total})")
         except Exception as e:
             logger.error(f"[/auto] HTML parse failed (run {run_no}): {e}")
             await send_msg(chat_id, f"❌ রান {run_no}: MCQ extract ব্যর্থ হয়েছে: {e}")
