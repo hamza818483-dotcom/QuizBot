@@ -9968,6 +9968,18 @@ async def handle_auto_command(msg: dict):
             mime_type="text/csv")
         sent_any["v"] = True
 
+        # Style-1 PDF, same as /csv — auto-generated right after CSV for every
+        # /auto run, no separate command needed. Same guaranteed-retry helper
+        # /csv uses, so /auto never silently skips the PDF either.
+        await _final_stage_update(f"📖 Style-1 PDF তৈরি হচ্ছে... ({len(results)}টা MCQ)")
+        pdf_bytes = await _generate_style1_pdf_guaranteed(results, topic, chat_id)
+        if pdf_bytes:
+            await send_document(
+                chat_id, pdf_bytes, f"{safe_title}_style1.pdf",
+                caption=f"📖 Practice Sheet (Style 1)\n🎯 Topic: {topic}\n📝 মোট MCQ: {len(results)}\n🚀 ATLAS APP"
+                        + (f"\n({run_no}/{run_total})" if run_total > 1 else "")
+            )
+
     from atlas_autoscrape import run_auto_click_sequence, AutoScrapeError
     run_count_for_timeout = sum(1 for l in lines if l.strip() in ("---", "***")) + 1
     # Hard ceiling for the WHOLE /auto flow (all runs combined), so any
