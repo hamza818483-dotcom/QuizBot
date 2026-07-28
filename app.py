@@ -2622,9 +2622,16 @@ DEFAULT_TOPIC = "Pagewise MCQ Solve By ATLAS"
 
 
 def _strip_img_tag(exp: str) -> str:
-    """CSV-তে <img> tag থাকার দরকার নেই (ওটা শুধু webquiz result page-এর জন্য) —
-    CSV export-এর সব জায়গায় ব্যবহার করো explanation-কে plain রাখতে।"""
-    return re.sub(r'\s*<img\b[^>]*>\s*', ' ', exp or "", flags=re.IGNORECASE).strip()
+    """DEPRECATED no-op (kept only so any remaining call sites don't break):
+    previously stripped <img> tags before CSV export, but that silently
+    dropped the page-figure image entirely wherever that CSV was later
+    turned into polls (channel /csv posting) or opened on the website --
+    both of those already know how to turn an <img src="..."> tag into a
+    REAL rendered image (send_poll's media-poll path, extract_image_url),
+    so stripping it here just deleted the image with no replacement.
+    Now a pass-through: the tag is kept in the CSV cell so downstream
+    consumers can still render it as an actual image, not raw URL text."""
+    return exp or ""
 QUIZ_Q_SEC = 35
 
 # ============================================================
