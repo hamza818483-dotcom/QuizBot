@@ -362,8 +362,7 @@ async def handle_poll_extract(msg: dict):
 
     total = end_id - start_id + 1
     if total > 3000:
-        await send_msg(chat_id, f"❌ Range বড় ({total})। সর্বোচ্চ ৩০০০ রাখো।")
-        return
+        logger.info(f"[poll_extract] Large range requested: {total} messages ({start_id}-{end_id}) — proceeding without cap")
 
     if not SESSION_STR:
         await send_msg(chat_id, "❌ SESSION_STRING set নেই। HF Space secrets এ add করো।")
@@ -588,8 +587,7 @@ async def handle_ok_command(msg: dict):
 
     total = end_id - start_id + 1
     if total > 3000:
-        await send_msg(chat_id, f"❌ Range বড় ({total})। সর্বোচ্চ ৩০০০ রাখো।")
-        return
+        logger.info(f"[poll_extract] Large range requested: {total} messages ({start_id}-{end_id}) — proceeding without cap")
     if not SESSION_STR:
         await send_msg(chat_id, "❌ SESSION_STRING set নেই। HF Space secrets এ add করো।")
         return
