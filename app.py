@@ -347,6 +347,11 @@ from quiz import (
     handle_quiz_poll_answer, handle_quiz_next, finish_d1_quiz,
     handle_d1_leaderboard, handle_d1_history, handle_d1_mistake,
 )
+from special_module import (
+    show_special_channel_list, handle_special_callback, handle_special_text_input,
+    on_channel_join, maybe_approve_join_request, moderate_group_message,
+    SPECIAL_INPUT_PENDING,
+)
 
 # ============================================================
 # APP-LOCAL CONFIG (not shared with quiz.py)
@@ -13032,6 +13037,21 @@ async def process_update(update: dict):
             await handle_callback(update["callback_query"])
         elif "poll_answer" in update:
             await handle_poll_answer(update["poll_answer"])
+        elif "chat_member" in update:
+            cm = update["chat_member"]
+            old_status = cm.get("old_chat_member", {}).get("status")
+            new_status = cm.get("new_chat_member", {}).get("status")
+            if old_status not in ("member", "administrator", "creator") and new_status == "member":
+                chat_id_j = cm.get("chat", {}).get("id")
+                user_id_j = cm.get("new_chat_member", {}).get("user", {}).get("id")
+                if chat_id_j and user_id_j:
+                    _spawn_task(on_channel_join(chat_id_j, user_id_j))
+        elif "chat_join_request" in update:
+            cjr = update["chat_join_request"]
+            chat_id_r = cjr.get("chat", {}).get("id")
+            user_id_r = cjr.get("from", {}).get("id")
+            if chat_id_r and user_id_r:
+                _spawn_task(maybe_approve_join_request(chat_id_r, user_id_r))
     except Exception as e:
         logger.error(f"[Update] Error: {e}")
         await notify_owner(f"[Update] Unhandled error:\n{str(e)[:500]}")
@@ -13047,6 +13067,7 @@ async def set_bot_commands(notify_chat_id: int = None):
     # ---- ADMIN/OWNER command list (full) ----
     admin_commands = [
         {"command": "start", "description": "Bot শুরু করো / সব commands দেখো"},
+        {"command": "special", "description": "Channel join-DM + group word-moderation setup"},
         {"command": "help", "description": "সব commands ও ব্যবহার দেখো"},
         {"command": "pdf", "description": "PDF থেকে MCQ generate করো"},
         {"command": "qpdf", "description": "chorcha mhtml/html → Premium Q&A PDF"},
@@ -13160,6 +13181,14 @@ async def handle_message(msg: dict):
     _spawn_task(db_track_user(uid, uname))
     is_auth = await db_is_owner_or_admin(uid)
 
+    # /special group word-moderation — checked for every group/supergroup
+    # message before anything else, so a banned word is deleted/warned
+    # even if the message would otherwise match some other command/flow.
+    if chat_type in ("group", "supergroup") and msg.get("text"):
+        acted = await moderate_group_message(msg)
+        if acted:
+            return
+
     # /menu "Add more" flow check (awaiting new item name text, or a CSV file) —
     # must run before generic image/document collection mode grabs the CSV.
     if (uid in MENU_ADD_PENDING or uid in MENU_COUNT_PENDING or uid in MENU_EDIT_PENDING):
@@ -13201,6 +13230,12 @@ async def handle_message(msg: dict):
     # v1.3: /rapid flow check (awaiting local time text after channel select)
     if uid in RAPID_PENDING and msg.get("text") and not text.startswith("/"):
         consumed = await handle_rapid_time_text(msg)
+        if consumed:
+            return
+
+    # /special flow check (awaiting DM message / links / group id / banned words text)
+    if uid in SPECIAL_INPUT_PENDING and msg.get("text") and not text.startswith("/"):
+        consumed = await handle_special_text_input(msg)
         if consumed:
             return
 
@@ -13340,6 +13375,9 @@ async def handle_message(msg: dict):
         await handle_channel(msg)
     elif text.startswith("/getid"):
         await handle_getid(msg)
+    elif text.strip() == "/special":
+        if msg.get("from", {}).get("id") == OWNER_ID:
+            await show_special_channel_list(chat_id)
     elif text == "/info2":
         await handle_info2(msg)
     elif text.startswith("/qbmprompt"):
@@ -13612,6 +13650,10 @@ async def handle_callback(query: dict):
     uname = user.get("username") or user.get("first_name", "User")
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
+        if data.startswith(("spch_", "spdm_", "spfl_", "spil_", "spgr_", "spgid_", "spmode_", "spwords_")) or data == "spback":
+            if uid == OWNER_ID:
+                await handle_special_callback(query)
+            return
         if data.startswith("mnu"):
             handled = await handle_menu_callback(query)
             if handled:
@@ -14907,7 +14949,7 @@ async def _webhook_healer_task() -> None:
     only as a last resort if re-setting fails outright."""
     await asyncio.sleep(120)
     logger.info("[App] Webhook healer task started")
-    _REQUIRED_UPDATES = {"message", "callback_query", "poll_answer", "poll"}
+    _REQUIRED_UPDATES = {"message", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"}
     while True:
         try:
             if True:  # v4.4: healer now runs in BOTH direct and cf-proxy modes —
@@ -14939,7 +14981,7 @@ async def _webhook_healer_task() -> None:
                     else:
                         target_webhook = CF_WORKER_URL.rstrip("/") + "/webhook"
                     payload = {"url": target_webhook, "drop_pending_updates": False, "max_connections": 40,
-                               "allowed_updates": ["message", "callback_query", "poll_answer", "poll"]}
+                               "allowed_updates": ["message", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"]}
                     if WEBHOOK_SECRET:
                         payload["secret_token"] = WEBHOOK_SECRET
                     result = await tg_post("setWebhook", payload)
@@ -15225,7 +15267,7 @@ async def startup():
                 if "onrender.com" in current_url:
                     # ইতিমধ্যেই Render-এ ছিল — restart এর পর re-confirm করছি
                     _r_payload = {"url": webhook_url, "drop_pending_updates": True, "max_connections": 40,
-                                  "allowed_updates": ["message", "callback_query", "poll_answer", "poll"]}
+                                  "allowed_updates": ["message", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"]}
                     if WEBHOOK_SECRET:
                         _r_payload["secret_token"] = WEBHOOK_SECRET
                     r = await _c.post(
@@ -15248,7 +15290,7 @@ async def startup():
 
             if current_url != worker_webhook or WEBHOOK_SECRET:
                 _wh_payload = {"url": worker_webhook, "drop_pending_updates": True, "max_connections": 40,
-                               "allowed_updates": ["message", "callback_query", "poll_answer", "poll"]}
+                               "allowed_updates": ["message", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"]}
                 if WEBHOOK_SECRET:
                     _wh_payload["secret_token"] = WEBHOOK_SECRET
                 result = await tg_post("setWebhook", _wh_payload)
