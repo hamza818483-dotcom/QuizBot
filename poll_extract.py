@@ -361,8 +361,8 @@ async def handle_poll_extract(msg: dict):
         start_id, end_id = end_id, start_id
 
     total = end_id - start_id + 1
-    if total > 1000:
-        await send_msg(chat_id, f"❌ Range বড় ({total})। সর্বোচ্চ ১০০০ রাখো।")
+    if total > 3000:
+        await send_msg(chat_id, f"❌ Range বড় ({total})। সর্বোচ্চ ৩০০০ রাখো।")
         return
 
     if not SESSION_STR:
