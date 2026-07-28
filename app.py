@@ -9823,7 +9823,7 @@ async def handle_auto_command(msg: dict):
         if _last_seen_stage["v"] is not None and _last_seen_stage["v"] != _stage_key:
             _completed_steps.append(f"✅ {_last_seen_label['v']}")
         _last_seen_stage["v"] = _stage_key
-        _last_seen_label["v"] = label
+        _last_seen_label["v"] = html_lib.escape(label)
 
         if not status_msg_id:
             return
@@ -9832,7 +9832,7 @@ async def handle_auto_command(msg: dict):
             return
         _last_edit_at["t"] = now_t
         pct = max(0, min(100, round((i / total) * 100))) if total else 0
-        current_line = f"{run_tag}ধাপ {i}/{total}: \"{display_label}\" (চলছে...)"
+        current_line = f"{run_tag}ধাপ {i}/{total}: \"{html_lib.escape(display_label)}\" (চলছে...)"
         text = _render_status(current_line, pct)
         try:
             await edit_msg(chat_id, status_msg_id, text, parse_mode="HTML")
