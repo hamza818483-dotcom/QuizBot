@@ -8865,9 +8865,13 @@ Never use phrases referring back to the source itself instead of stating facts d
 ❌ English equivalents: "as shown in the figure/box/table/diagram/passage", "mentioned in the text/page", "as given"
 Always state facts directly and plainly, as general knowledge — never imply it came from "the shown image/box/table."
 
+OPTION IMAGES (new field, mandatory when applicable):
+- If any option (A/B/C/D) has an actual image/figure/diagram directly on or immediately above it (not just text), give "opt_bboxes": a dict with keys "A","B","C","D" — for each option WITH an image, a TIGHT bounding box around ONLY that image (not the text), normalized to 0-1000 scale ([x_min,y_min,x_max,y_max]); for options with no image, omit the key or use null.
+- Never invent a bbox for an option with no actual image.
+
 OUTPUT FORMAT:
 Only a valid JSON array, no extra text, no markdown, no explanation outside JSON. No MCQ on page → return exactly [].
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)"}]"""
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","opt_bboxes":{"B":[100,200,400,450]}}]"""
 
 
 # ── QBM PERMANENT PROMPT MEMORY ──
@@ -8967,6 +8971,11 @@ def _qbm_parse_json(text: str) -> list:
             opts_list = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
             expl = mc.get("explanation", "")
             expl_source = mc.get("explanation_source", "")
+            raw_obbox = mc.get("opt_bboxes") or {}
+            opt_bboxes = []
+            for k in ("A", "B", "C", "D"):
+                b = raw_obbox.get(k) if isinstance(raw_obbox, dict) else None
+                opt_bboxes.append(b if (isinstance(b, list) and len(b) == 4) else None)
             if _has_mixed_digit_script(q) or any(_has_mixed_digit_script(o) for o in opts_list) or _has_mixed_digit_script(expl):
                 logger.warning(f"[QBM digit-integrity] Mixed Bengali/English digits detected: {q[:60]}")
             # Cheap, zero-extra-API-cost sanity check: a "page"-tagged explanation
@@ -8979,7 +8988,8 @@ def _qbm_parse_json(text: str) -> list:
                 "question": q.strip(),
                 "options": opts_list,
                 "answer": mc.get("answer", "A") if mc.get("answer") in ("A", "B", "C", "D") else "A",
-                "explanation": expl
+                "explanation": expl,
+                "opt_bboxes": opt_bboxes,
             })
         except Exception:
             continue
@@ -9322,10 +9332,11 @@ async def _qbm_extract_from_image(img) -> list:
                         continue
                     return []  # 3 full independent pipeline passes all agree: genuinely no MCQ
                 # Call 3 found something the first two missed -- verify it properly.
-                recovered_mcqs = _cap_mcq_options(await _qbm_call3_verify(img, final_check, False))
+                recovered_mcqs = _cap_mcq_options(_qbm_restore_opt_bboxes(final_check, await _qbm_call3_verify(img, final_check, False)))
                 return await _qbm_final_safety_net(img, recovered_mcqs)
 
             call3 = await _qbm_call3_verify(img, call2, page_confirmed_complete)
+            call3 = _qbm_restore_opt_bboxes(call2, call3)
             final_mcqs = _cap_mcq_options(call3)
             return await _qbm_final_safety_net(img, final_mcqs)
         return []
@@ -9455,6 +9466,46 @@ def _qbm_balance_answer_with_options(mc: dict) -> None:
                 return
 
 
+def _qbm_restore_opt_bboxes(source_mcqs: list, verified_mcqs: list) -> list:
+    """Call3-verify's own prompt schema doesn't ask for opt_bboxes, so its
+    output would silently lose them. Verify keeps the same length/order as
+    its input (per its own contract), so restore by index position."""
+    if not verified_mcqs:
+        return verified_mcqs
+    for i, mc in enumerate(verified_mcqs):
+        if i < len(source_mcqs) and not mc.get("opt_bboxes"):
+            mc["opt_bboxes"] = source_mcqs[i].get("opt_bboxes")
+    return verified_mcqs
+
+
+async def _attach_option_images_if_missing(mcqs: list, img) -> list:
+    """/qbm: if a source MCQ option has an actual image directly on/above it
+    (per opt_bboxes from the extraction prompt), tightly crop JUST that image,
+    upload it, and embed <img src="..."> into that option's text so it flows
+    through to CSV/DB as-is (options are never <img>-stripped, unlike explanation)."""
+    try:
+        from pdf_handler import crop_option_image
+    except Exception:
+        return mcqs
+    for mc in mcqs or []:
+        bboxes = mc.get("opt_bboxes") or []
+        opts = mc.get("options") or []
+        for i, bbox in enumerate(bboxes[:4]):
+            if not bbox or i >= len(opts):
+                continue
+            if "<img" in (opts[i] or "").lower():
+                continue  # already has one, don't double-attach
+            try:
+                url = await asyncio.to_thread(crop_option_image, img, bbox)
+            except Exception as e:
+                logger.warning(f"[QBM OptionImage] crop/upload failed: {e}")
+                url = ""
+            if url:
+                opts[i] = f'{opts[i]} <img src="{url}">'.strip()
+        mc["options"] = opts
+    return mcqs
+
+
 async def _qbm_final_safety_net(img, mcqs: list) -> list:
     """
     Last-line, zero-trust, CODE-LEVEL (not prompt-level) safety net applied to
@@ -9504,6 +9555,7 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
                 ans_text = opts[idx] if idx < len(opts) else ""
                 mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
         fixed.append(mc)
+    fixed = await _attach_option_images_if_missing(fixed, img)
     return fixed
 
 
