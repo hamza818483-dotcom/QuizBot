@@ -391,6 +391,77 @@ def _cap_pdf_bytes_cache() -> None:
             if fid == evicted_fid:
                 _pdf_unique_id_index.pop(uid, None)
 
+# SPEED+DURABILITY: disk-persisted L2 cache, keyed by file_unique_id (stable
+# across re-uploads) -> content-addressed sha256 filename. Unlike the
+# in-memory cache above, this survives a bot process restart (idle-sleep/
+# wake, crash-recover) since it lives on disk, not RAM -- only wiped by a
+# full redeploy/rebuild that resets the filesystem. Cheap: no external
+# storage/bandwidth cost, just local disk the process already has.
+_PDF_DISK_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pdf_cache")
+_PDF_DISK_CACHE_MAX = 60
+_PDF_DISK_INDEX_PATH = os.path.join(_PDF_DISK_CACHE_DIR, "_index.json")
+
+def _pdf_disk_index_load() -> dict:
+    try:
+        with open(_PDF_DISK_INDEX_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _pdf_disk_index_save(idx: dict) -> None:
+    try:
+        os.makedirs(_PDF_DISK_CACHE_DIR, exist_ok=True)
+        with open(_PDF_DISK_INDEX_PATH, "w") as f:
+            json.dump(idx, f)
+    except Exception as e:
+        logger.warning(f"[PDF DiskCache] index save failed: {e}")
+
+def _pdf_disk_cache_get(file_unique_id: str):
+    if not file_unique_id:
+        return None
+    idx = _pdf_disk_index_load()
+    sha = idx.get(file_unique_id)
+    if not sha:
+        return None
+    path = os.path.join(_PDF_DISK_CACHE_DIR, f"{sha}.pdf")
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        os.utime(path, None)  # bump mtime for LRU-ish eviction below
+        return data
+    except Exception:
+        return None
+
+def _pdf_disk_cache_put(file_unique_id: str, data: bytes) -> None:
+    if not file_unique_id or not data:
+        return
+    try:
+        os.makedirs(_PDF_DISK_CACHE_DIR, exist_ok=True)
+        sha = hashlib.sha256(data).hexdigest()
+        path = os.path.join(_PDF_DISK_CACHE_DIR, f"{sha}.pdf")
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                f.write(data)
+        idx = _pdf_disk_index_load()
+        idx[file_unique_id] = sha
+        _pdf_disk_index_save(idx)
+        # Evict oldest-by-mtime PDF files beyond the cap
+        files = [f for f in os.listdir(_PDF_DISK_CACHE_DIR) if f.endswith(".pdf")]
+        if len(files) > _PDF_DISK_CACHE_MAX:
+            files.sort(key=lambda f: os.path.getmtime(os.path.join(_PDF_DISK_CACHE_DIR, f)))
+            for f in files[:len(files) - _PDF_DISK_CACHE_MAX]:
+                evicted_sha = f[:-4]
+                try:
+                    os.remove(os.path.join(_PDF_DISK_CACHE_DIR, f))
+                except Exception:
+                    pass
+                for uid_k, sha_v in list(idx.items()):
+                    if sha_v == evicted_sha:
+                        idx.pop(uid_k, None)
+            _pdf_disk_index_save(idx)
+    except Exception as e:
+        logger.warning(f"[PDF DiskCache] write failed: {e}")
+
 async def _download_pdf_cached(file_id: str, progress_cb=None, chat_id: int = None,
                                 message_id: int = None, file_unique_id: str = None) -> bytes:
     cached = _pdf_bytes_cache.get(file_id)
@@ -407,10 +478,19 @@ async def _download_pdf_cached(file_id: str, progress_cb=None, chat_id: int = No
             _pdf_bytes_cache[file_id] = data  # also index under new file_id for this session
             _cap_pdf_bytes_cache()
             return data
+        # In-memory missed (likely a restart since last time) -> check disk.
+        disk_data = await asyncio.to_thread(_pdf_disk_cache_get, file_unique_id)
+        if disk_data is not None:
+            logger.info(f"[PDF DiskCache] hit via file_unique_id={file_unique_id[:16]}... (post-restart) skipping download")
+            _pdf_bytes_cache[file_id] = disk_data
+            _pdf_unique_id_index[file_unique_id] = file_id
+            _cap_pdf_bytes_cache()
+            return disk_data
     data = await download_tg_file(file_id, progress_cb=progress_cb, chat_id=chat_id, message_id=message_id)
     _pdf_bytes_cache[file_id] = data
     if file_unique_id:
         _pdf_unique_id_index[file_unique_id] = file_id
+        await asyncio.to_thread(_pdf_disk_cache_put, file_unique_id, data)
     _cap_pdf_bytes_cache()
     return data
 
@@ -7515,6 +7595,7 @@ async def handle_pdf(msg: dict):
     thread_id = params.get("thread_id")
     file_name = reply["document"].get("file_name", "document.pdf")
     file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
     file_size = reply["document"].get("file_size", 0)
 
     status_r = await send_msg(chat_id, "⏳ PDF download হচ্ছে...")
@@ -7539,7 +7620,7 @@ async def handle_pdf(msg: dict):
             _spawn_task(edit_msg(chat_id, status_msg_id,
                 f"⏳ PDF download হচ্ছে...\n📄 File: {file_name}\n📦 Size: {size_mb} MB\n[{bar} {pct}%]"))
 
-        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress5820, chat_id=chat_id, message_id=reply["message_id"])
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress5820, chat_id=chat_id, message_id=reply["message_id"], file_unique_id=file_unique_id)
 
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
@@ -8321,6 +8402,7 @@ async def handle_pdfm(msg: dict):
     thread_id = params["thread_id"]
 
     file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
     file_name = reply["document"].get("file_name","document.pdf")
     file_size = reply["document"].get("file_size",0)
 
@@ -8339,7 +8421,7 @@ async def handle_pdfm(msg: dict):
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ PDF download হচ্ছে...\n[{bar} {pct}%]"))
 
     try:
-        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress6471, chat_id=chat_id, message_id=reply["message_id"])
+        pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress6471, chat_id=chat_id, message_id=reply["message_id"], file_unique_id=file_unique_id)
         ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
         if not ok:
             await send_msg(chat_id, pages)
