@@ -428,6 +428,39 @@ def _parse_mcq_json(text: str) -> list:
     return valid
 
 
+def crop_option_image(img: Image.Image, bbox: list) -> str:
+    """
+    /qbm option-image support: a REAL tight crop of just the image sitting on
+    an MCQ option — unlike crop_explanation_image() (which uploads the full
+    page with a highlight overlay for CSS-cropped client rendering), this
+    uploads ONLY the cropped region itself, since it's embedded as a normal
+    <img> tag directly inside that option's CSV/DB text.
+    Returns the uploaded url, or "" on failure.
+    """
+    if not bbox or len(bbox) != 4:
+        return ""
+    try:
+        from atlas_mhtml import upload_to_imgbb
+        w, h = img.size
+        x_min, y_min, x_max, y_max = bbox
+        # small padding (1.5% of each dimension) so the crop isn't razor-tight
+        pad_x, pad_y = w * 0.015, h * 0.015
+        left = max(0, int((x_min / 1000) * w - pad_x))
+        top = max(0, int((y_min / 1000) * h - pad_y))
+        right = min(w, int((x_max / 1000) * w + pad_x))
+        bottom = min(h, int((y_max / 1000) * h + pad_y))
+        if right <= left or bottom <= top:
+            return ""
+        crop = img.convert("RGB").crop((left, top, right, bottom))
+        url = upload_to_imgbb(image_to_base64(crop))
+        if not url:
+            url = upload_to_imgbb(image_to_base64(crop))  # one retry
+        return url or ""
+    except Exception as e:
+        logger.warning(f"[OptionImageCrop] Failed: {e}")
+        return ""
+
+
 def crop_explanation_image(img: Image.Image, bbox: list) -> dict:
     """
     Single upload (full page, red-border marked at exp_box). Client renders
