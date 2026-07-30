@@ -58,6 +58,13 @@ async def _ensure_special_table():
         for stmt in (
             "ALTER TABLE special_groups ADD COLUMN fl_enabled INTEGER DEFAULT 0",
             "ALTER TABLE special_groups ADD COLUMN fl_action TEXT DEFAULT 'delete'",
+            "ALTER TABLE special_groups ADD COLUMN delete_enabled INTEGER DEFAULT 0",
+            "ALTER TABLE special_groups ADD COLUMN delete_words TEXT DEFAULT '[]'",
+            "ALTER TABLE special_groups ADD COLUMN warn_enabled INTEGER DEFAULT 0",
+            "ALTER TABLE special_groups ADD COLUMN warn_words TEXT DEFAULT '[]'",
+            "ALTER TABLE special_groups ADD COLUMN ban_enabled INTEGER DEFAULT 0",
+            "ALTER TABLE special_groups ADD COLUMN ban_words TEXT DEFAULT '[]'",
+            "ALTER TABLE special_groups ADD COLUMN group_name TEXT DEFAULT ''",
         ):
             try:
                 await d1_run(stmt)
@@ -128,18 +135,22 @@ async def list_special_groups(main_channel_id: str) -> list:
     rows = await d1_select(
         "SELECT * FROM special_groups WHERE main_channel_id=?1 ORDER BY id", [main_channel_id]
     )
-    out = []
-    for r in rows:
-        out.append({
-            "id": r.get("id"),
-            "main_channel_id": main_channel_id,
-            "group_id": r.get("group_id") or "",
-            "group_mode": r.get("group_mode") or "delete",
-            "banned_words": json.loads(r.get("banned_words") or "[]"),
-            "fl_enabled": bool(r.get("fl_enabled") or 0),
-            "fl_action": r.get("fl_action") or "delete",
-        })
-    return out
+    return [_row_to_group(r) for r in rows]
+
+
+def _row_to_group(r: dict) -> dict:
+    return {
+        "id": r.get("id"),
+        "main_channel_id": r.get("main_channel_id") or "",
+        "group_id": r.get("group_id") or "",
+        "group_name": r.get("group_name") or "",
+        "delete_enabled": bool(r.get("delete_enabled") or 0),
+        "delete_words": json.loads(r.get("delete_words") or "[]"),
+        "warn_enabled": bool(r.get("warn_enabled") or 0),
+        "warn_words": json.loads(r.get("warn_words") or "[]"),
+        "ban_enabled": bool(r.get("ban_enabled") or 0),
+        "ban_words": json.loads(r.get("ban_words") or "[]"),
+    }
 
 
 async def get_special_group(row_id) -> dict:
@@ -147,29 +158,20 @@ async def get_special_group(row_id) -> dict:
     rows = await d1_select("SELECT * FROM special_groups WHERE id=?1", [row_id])
     if not rows:
         return {}
-    r = rows[0]
-    return {
-        "id": r.get("id"),
-        "main_channel_id": r.get("main_channel_id") or "",
-        "group_id": r.get("group_id") or "",
-        "group_mode": r.get("group_mode") or "delete",
-        "banned_words": json.loads(r.get("banned_words") or "[]"),
-        "fl_enabled": bool(r.get("fl_enabled") or 0),
-        "fl_action": r.get("fl_action") or "delete",
-    }
+    return _row_to_group(rows[0])
 
 
-async def add_special_group(main_channel_id: str, group_id: str) -> int:
+async def add_special_group(group_id: str, main_channel_id: str = "", group_name: str = "") -> int:
+    """Adds a new group. main_channel_id is optional/legacy — groups are
+    managed globally now, not per-channel."""
     import time
     await _ensure_special_table()
     await d1_run(
-        "INSERT INTO special_groups (main_channel_id, group_id, group_mode, banned_words, updated_at) "
-        "VALUES (?1,?2,'delete','[]',?3)",
-        [main_channel_id, group_id, int(time.time())],
+        "INSERT INTO special_groups (main_channel_id, group_id, group_name, updated_at) VALUES (?1,?2,?3,?4)",
+        [main_channel_id, group_id, group_name, int(time.time())],
     )
     rows = await d1_select(
-        "SELECT id FROM special_groups WHERE main_channel_id=?1 AND group_id=?2 ORDER BY id DESC",
-        [main_channel_id, group_id],
+        "SELECT id FROM special_groups WHERE group_id=?1 ORDER BY id DESC", [group_id],
     )
     return rows[0]["id"] if rows else None
 
@@ -182,9 +184,14 @@ async def update_special_group(row_id, **fields):
         return
     cur.update(fields)
     await d1_run(
-        "UPDATE special_groups SET group_mode=?1, banned_words=?2, fl_enabled=?3, fl_action=?4, updated_at=?5 WHERE id=?6",
-        [cur["group_mode"], json.dumps(cur["banned_words"], ensure_ascii=False),
-         1 if cur["fl_enabled"] else 0, cur["fl_action"], int(time.time()), row_id],
+        "UPDATE special_groups SET delete_enabled=?1, delete_words=?2, "
+        "warn_enabled=?3, warn_words=?4, ban_enabled=?5, ban_words=?6, updated_at=?7 WHERE id=?8",
+        [
+            1 if cur["delete_enabled"] else 0, json.dumps(cur["delete_words"], ensure_ascii=False),
+            1 if cur["warn_enabled"] else 0, json.dumps(cur["warn_words"], ensure_ascii=False),
+            1 if cur["ban_enabled"] else 0, json.dumps(cur["ban_words"], ensure_ascii=False),
+            int(time.time()), row_id,
+        ],
     )
 
 
@@ -238,37 +245,35 @@ async def show_special_channel_list(chat_id, edit_message_id=None):
 
 
 async def list_all_special_groups() -> list:
-    """All groups across every channel — for the global /special -> Group view."""
+    """All groups — for the global /special -> Group view. Groups are managed
+    globally now, independent of any channel."""
     await _ensure_special_table()
     rows = await d1_select("SELECT * FROM special_groups ORDER BY id", [])
-    out = []
-    for r in rows or []:
-        out.append({
-            "id": r.get("id"),
-            "main_channel_id": r.get("main_channel_id"),
-            "group_id": r.get("group_id") or "",
-            "group_mode": r.get("group_mode") or "delete",
-            "banned_words": json.loads(r.get("banned_words") or "[]"),
-            "fl_enabled": bool(r.get("fl_enabled") or 0),
-            "fl_action": r.get("fl_action") or "delete",
-        })
-    return out
+    return [_row_to_group(r) for r in (rows or [])]
+
+
+def _nav_row():
+    """Always shown at the bottom of every Group screen."""
+    return [{"text": "📋 Main List", "callback_data": "spmaingr"},
+            {"text": "⬅️ Back", "callback_data": "spmainback"}]
 
 
 async def show_special_group_list_global(chat_id, message_id):
-    """Top-level 'Group' option: every attached group, regardless of channel."""
+    """Top-level 'Group' option: every group, with full moderation setup."""
     groups = await list_all_special_groups()
     if groups:
         lines = ["👥 <b>Group List</b>\n"]
         for g in groups:
-            mode_emoji = "🗑️" if g["group_mode"] == "delete" else "⚠️"
-            lines.append(f"{mode_emoji} <code>{g['group_id']}</code> — {len(g['banned_words'])}টা শব্দ")
+            d = "🗑️✅" if g["delete_enabled"] else "🗑️❌"
+            w = "⚠️✅" if g["warn_enabled"] else "⚠️❌"
+            b = "🚫✅" if g["ban_enabled"] else "🚫❌"
+            name_part = f" — {g['group_name']}" if g["group_name"] else ""
+            lines.append(f"<code>{g['group_id']}</code>{name_part}\n{d} {w} {b}")
         txt = "\n".join(lines)
     else:
-        txt = "👥 <b>Group List</b>\n\n(কোনো group attach করা নেই। একটা channel এর মধ্যে গিয়ে group add করো।)"
-    buttons = []
-    for g in groups:
-        buttons.append([{"text": f"⚙️ {g['group_id']}", "callback_data": f"spgview_{g['id']}"}])
+        txt = "👥 <b>Group List</b>\n\n(কোনো group যোগ করা নেই)"
+    buttons = [[{"text": f"⚙️ {g['group_name'] or g['group_id']}", "callback_data": f"spgview_{g['id']}"}] for g in groups]
+    buttons.append([{"text": "➕ নতুন Group Add", "callback_data": "spgaddg"}])
     buttons.append([{"text": "⬅️ Back", "callback_data": "spmainback"}])
     await tg_post("editMessageText", {"chat_id": chat_id, "message_id": message_id,
                                         "text": txt, "parse_mode": "HTML",
@@ -279,43 +284,17 @@ async def show_special_channel_menu(chat_id, message_id, channel_id: str):
     cfg = await get_special_config(channel_id)
     dm_preview = (cfg["dm_message"][:60] + "…") if len(cfg["dm_message"]) > 60 else (cfg["dm_message"] or "(সেট করা নেই)")
     link_mode = "📁 Folder link" if cfg["folder_link"] else (f"🔗 {len(cfg['extra_links'])}টা link" if cfg["extra_links"] else "(সেট করা নেই)")
-    groups = await list_special_groups(channel_id)
-    group_status = f"✅ {len(groups)}টা Group attached" if groups else "(কোনো group attach নেই)"
     txt = (
         f"⚙️ <b>Special Setup</b>\n🔗 <code>{channel_id}</code>\n\n"
         f"💬 <b>DM Message:</b> {dm_preview}\n"
         f"🔗 <b>Linked channels:</b> {link_mode}\n"
-        f"👥 <b>Attached Group:</b> {group_status}\n"
     )
     buttons = [
         [{"text": "💬 DM Message Set/Edit", "callback_data": f"spdm_{channel_id}"}],
         [{"text": "📁 Folder Link Set", "callback_data": f"spfl_{channel_id}"}],
         [{"text": "🔗 Individual Links Set", "callback_data": f"spil_{channel_id}"}],
-        [{"text": "👥 Group Attach/Edit", "callback_data": f"spgr_{channel_id}"}],
         [{"text": "⬅️ Back", "callback_data": "spmainch"}],
     ]
-    await tg_post("editMessageText", {"chat_id": chat_id, "message_id": message_id,
-                                        "text": txt, "parse_mode": "HTML",
-                                        "reply_markup": {"inline_keyboard": buttons}})
-
-
-async def show_special_group_menu(chat_id, message_id, channel_id: str):
-    """Lists all groups attached to this channel + an Add button."""
-    groups = await list_special_groups(channel_id)
-    if groups:
-        lines = ["👥 <b>Group Attach/Edit</b>\n"]
-        for g in groups:
-            mode_emoji = "🗑️" if g["group_mode"] == "delete" else "⚠️"
-            lines.append(f"{mode_emoji} <code>{g['group_id']}</code> — {len(g['banned_words'])}টা শব্দ")
-        txt = "\n".join(lines)
-    else:
-        txt = "👥 <b>Group Attach/Edit</b>\n\n(কোনো group attach করা নেই)"
-    buttons = []
-    for g in groups:
-        label = f"⚙️ {g['group_id']}"
-        buttons.append([{"text": label, "callback_data": f"spgview_{g['id']}"}])
-    buttons.append([{"text": "➕ নতুন Group Add", "callback_data": f"spgadd_{channel_id}"}])
-    buttons.append([{"text": "⬅️ Back", "callback_data": f"spch_{channel_id}"}])
     await tg_post("editMessageText", {"chat_id": chat_id, "message_id": message_id,
                                         "text": txt, "parse_mode": "HTML",
                                         "reply_markup": {"inline_keyboard": buttons}})
@@ -324,28 +303,32 @@ async def show_special_group_menu(chat_id, message_id, channel_id: str):
 async def show_special_group_detail(chat_id, message_id, row_id):
     g = await get_special_group(row_id)
     if not g:
-        await show_special_channel_list(chat_id, edit_message_id=message_id)
+        await show_special_group_list_global(chat_id, message_id)
         return
-    words_line = ", ".join(g["banned_words"]) if g["banned_words"] else "(কোনো শব্দ সেট নেই)"
-    mode_emoji = "🗑️ Delete" if g["group_mode"] == "delete" else "⚠️ Warn"
-    fl_status = "✅ ON" if g["fl_enabled"] else "❌ OFF"
-    fl_action_label = {"delete": "🗑️ Delete", "warn": "⚠️ Warn", "ban": "🚫 Ban"}.get(g["fl_action"], g["fl_action"])
+    dw = ", ".join(g["delete_words"]) if g["delete_words"] else "(নেই)"
+    ww = ", ".join(g["warn_words"]) if g["warn_words"] else "(নেই)"
+    bw = ", ".join(g["ban_words"]) if g["ban_words"] else "(নেই)"
+    d_status = "✅ ON" if g["delete_enabled"] else "❌ OFF"
+    w_status = "✅ ON" if g["warn_enabled"] else "❌ OFF"
+    b_status = "✅ ON" if g["ban_enabled"] else "❌ OFF"
     txt = (
-        f"👥 <b>Group Rules</b>\n🔗 <code>{g['group_id']}</code>\n\n"
-        f"🚫 <b>Banned Words</b>\n⚙️ Mode: {mode_emoji}\n🔤 Words: {words_line}\n\n"
-        f"↪️ <b>Forward/Link Filter</b>\n⚙️ Status: {fl_status}\n🎯 Action: {fl_action_label}\n"
+        f"👥 <b>Group Rules</b>\n🔗 <code>{g['group_id']}</code>" + (f" — {g['group_name']}" if g['group_name'] else "") + "\n\n"
+        f"🗑️ <b>Delete</b> — {d_status}\n🔤 {dw}\n\n"
+        f"⚠️ <b>Warn</b> — {w_status}\n🔤 {ww}\n\n"
+        f"🚫 <b>Ban</b> — {b_status}\n🔤 {bw}\n"
     )
-    fl_toggle_text = "❌ Forward/Link Filter Off করো" if g["fl_enabled"] else "✅ Forward/Link Filter On করো"
+    d_toggle = "🗑️ Delete: ✅ ON" if g["delete_enabled"] else "🗑️ Delete: ❌ OFF"
+    w_toggle = "⚠️ Warn: ✅ ON" if g["warn_enabled"] else "⚠️ Warn: ❌ OFF"
+    b_toggle = "🚫 Ban: ✅ ON" if g["ban_enabled"] else "🚫 Ban: ❌ OFF"
     buttons = [
-        [{"text": "🗑️ Delete Mode", "callback_data": f"spmode_delete_{row_id}"},
-         {"text": "⚠️ Warn Mode", "callback_data": f"spmode_warn_{row_id}"}],
-        [{"text": "🚫 Banned Words Set", "callback_data": f"spwords_{row_id}"}],
-        [{"text": fl_toggle_text, "callback_data": f"spfltoggle_{row_id}"}],
-        [{"text": "🗑️ Delete", "callback_data": f"spflact_delete_{row_id}"},
-         {"text": "⚠️ Warn", "callback_data": f"spflact_warn_{row_id}"},
-         {"text": "🚫 Ban", "callback_data": f"spflact_ban_{row_id}"}],
+        [{"text": d_toggle, "callback_data": f"sptg_delete_{row_id}"},
+         {"text": w_toggle, "callback_data": f"sptg_warn_{row_id}"},
+         {"text": b_toggle, "callback_data": f"sptg_ban_{row_id}"}],
+        [{"text": "📝 Delete Words", "callback_data": f"spwd_delete_{row_id}"},
+         {"text": "📝 Warn Words", "callback_data": f"spwd_warn_{row_id}"},
+         {"text": "📝 Ban Words", "callback_data": f"spwd_ban_{row_id}"}],
         [{"text": "❌ Group সরাও", "callback_data": f"spgdel_{row_id}"}],
-        [{"text": "⬅️ Back", "callback_data": f"spgback_{g['main_channel_id']}"}],
+        _nav_row(),
     ]
     await tg_post("editMessageText", {"chat_id": chat_id, "message_id": message_id,
                                         "text": txt, "parse_mode": "HTML",
@@ -407,21 +390,12 @@ async def handle_special_callback(query: dict) -> bool:
             "parse_mode": "HTML"})
         return True
 
-    if data.startswith("spgr_"):
-        channel_id = data[len("spgr_"):]
-        await show_special_group_menu(chat_id, msg_id, channel_id)
-        return True
-
-    if data.startswith("spgback_"):
-        channel_id = data[len("spgback_"):]
-        await show_special_group_menu(chat_id, msg_id, channel_id)
-        return True
-
-    if data.startswith("spgadd_"):
-        channel_id = data[len("spgadd_"):]
-        SPECIAL_INPUT_PENDING[uid] = {"channel_id": channel_id, "field": "group_id_new"}
+    if data == "spgaddg":
+        SPECIAL_INPUT_PENDING[uid] = {"field": "group_id_new"}
         await tg_post("editMessageText", {"chat_id": chat_id, "message_id": msg_id,
-            "text": "🆔 নতুন Group এর ID বা @username পাঠাও (bot ওই group এ admin থাকতে হবে):",
+            "text": "🆔 নতুন Group এর ID/@username আর নামটা দাও:\n\n"
+                    "<code>GroupID GroupName</code>\n\n"
+                    "(bot ওই group এ admin থাকতে হবে)",
             "parse_mode": "HTML"})
         return True
 
@@ -432,43 +406,27 @@ async def handle_special_callback(query: dict) -> bool:
 
     if data.startswith("spgdel_"):
         row_id = data[len("spgdel_"):]
-        g = await get_special_group(row_id)
         await delete_special_group(row_id)
-        if g:
-            await show_special_group_menu(chat_id, msg_id, g["main_channel_id"])
-        else:
-            await show_special_channel_list(chat_id, edit_message_id=msg_id)
+        await show_special_group_list_global(chat_id, msg_id)
         return True
 
-    if data.startswith("spmode_"):
-        rest = data[len("spmode_"):]
+    if data.startswith("sptg_"):
+        rest = data[len("sptg_"):]
         mode, row_id = rest.split("_", 1)
-        await update_special_group(row_id, group_mode=mode)
+        g = await get_special_group(row_id)
+        await update_special_group(row_id, **{f"{mode}_enabled": not g.get(f"{mode}_enabled")})
         await show_special_group_detail(chat_id, msg_id, row_id)
         return True
 
-    if data.startswith("spwords_"):
-        row_id = data[len("spwords_"):]
-        SPECIAL_INPUT_PENDING[uid] = {"group_row_id": row_id, "field": "group_words"}
+    if data.startswith("spwd_"):
+        rest = data[len("spwd_"):]
+        mode, row_id = rest.split("_", 1)
+        SPECIAL_INPUT_PENDING[uid] = {"group_row_id": row_id, "field": f"group_words_{mode}"}
         await tg_post("editMessageText", {"chat_id": chat_id, "message_id": msg_id,
-            "text": "🚫 যে শব্দগুলো লিখলে auto-action নেওয়া হবে, কমা দিয়ে আলাদা করে পাঠাও:\n\n"
+            "text": f"🚫 <b>{mode.capitalize()}</b> mode-এ যে শব্দগুলো ধরলে action নেওয়া হবে, কমা দিয়ে আলাদা করে পাঠাও:\n\n"
                     "<code>শব্দ১, শব্দ২, badword3</code>\n\n"
                     "আগের list থাকলে এটা সম্পূর্ণ replace করবে।",
             "parse_mode": "HTML"})
-        return True
-
-    if data.startswith("spfltoggle_"):
-        row_id = data[len("spfltoggle_"):]
-        g = await get_special_group(row_id)
-        await update_special_group(row_id, fl_enabled=not g.get("fl_enabled"))
-        await show_special_group_detail(chat_id, msg_id, row_id)
-        return True
-
-    if data.startswith("spflact_"):
-        rest = data[len("spflact_"):]
-        action, row_id = rest.split("_", 1)
-        await update_special_group(row_id, fl_action=action)
-        await show_special_group_detail(chat_id, msg_id, row_id)
         return True
 
     return False
@@ -499,14 +457,23 @@ async def handle_special_text_input(msg: dict) -> bool:
             await save_special_config(channel_id, extra_links=links, folder_link="")
             await send_msg(chat_id, f"✅ {len(links)}টা link সেভ হয়েছে।")
     elif field == "group_id_new":
-        channel_id = pending["channel_id"]
-        row_id = await add_special_group(channel_id, text)
-        await send_msg(chat_id, "✅ Group attach হয়েছে।")
-    elif field == "group_words":
+        # Accept "GroupID GroupName" or "GroupID | GroupName" or just "GroupID"
+        if "|" in text:
+            gid, gname = [p.strip() for p in text.split("|", 1)]
+        elif " " in text:
+            gid, gname = text.split(" ", 1)
+            gid, gname = gid.strip(), gname.strip()
+        else:
+            gid, gname = text.strip(), ""
+        await add_special_group(gid, group_name=gname)
+        label = f"{gid} ({gname})" if gname else gid
+        await send_msg(chat_id, f"✅ Group যোগ হয়েছে: {label}")
+    elif field.startswith("group_words_"):
+        mode = field[len("group_words_"):]  # delete | warn | ban
         row_id = pending["group_row_id"]
         words = [w.strip() for w in text.split(",") if w.strip()]
-        await update_special_group(row_id, banned_words=words)
-        await send_msg(chat_id, f"✅ {len(words)}টা শব্দ সেভ হয়েছে।")
+        await update_special_group(row_id, **{f"{mode}_words": words})
+        await send_msg(chat_id, f"✅ {mode.capitalize()} — {len(words)}টা শব্দ সেভ হয়েছে।")
     else:
         return False
 
@@ -596,10 +563,10 @@ def _msg_has_forward_or_link(msg: dict) -> bool:
 
 async def moderate_group_message(msg: dict) -> bool:
     """Call this from handle_message for every group/supergroup message.
-    Checks the attached special_groups row for this group_id (banned
-    words + forward/link filter) and takes the configured action.
-    Returns True if action was taken so the caller can skip further
-    processing of this message."""
+    Checks the attached special_groups row for this group_id across all
+    3 independent modes (Delete/Warn/Ban), each with its own word list
+    and on/off toggle. Returns True if action was taken so the caller
+    can skip further processing of this message."""
     chat = msg.get("chat", {})
     if chat.get("type") not in ("group", "supergroup"):
         return False
@@ -611,26 +578,23 @@ async def moderate_group_message(msg: dict) -> bool:
     )
     if not rows:
         return False
-    row = rows[0]
+    g = _row_to_group(rows[0])
 
-    # 1) Forward/Link filter (checked first — independent on/off toggle)
-    if row.get("fl_enabled"):
-        if _msg_has_forward_or_link(msg):
-            action = row.get("fl_action") or "delete"
-            return await _apply_moderation_action(
-                group_id, msg, action, "forward/link পাঠানো এই গ্রুপে নিষেধ।"
-            )
-
-    # 2) Banned words filter
     text = (msg.get("text") or msg.get("caption") or "")
-    banned_words = json.loads(row.get("banned_words") or "[]")
-    if text and banned_words:
-        text_lower = text.lower()
-        hit = next((w for w in banned_words if w.lower() in text_lower), None)
-        if hit:
-            mode = row.get("group_mode") or "delete"
+    if not text:
+        return False
+    text_lower = text.lower()
+
+    # Ban checked first (most severe), then Warn, then Delete.
+    for mode, action in (("ban", "ban"), ("warn", "warn"), ("delete", "delete")):
+        if not g.get(f"{mode}_enabled"):
+            continue
+        words = g.get(f"{mode}_words") or []
+        if not words:
+            continue
+        if any(w.lower() in text_lower for w in words):
             return await _apply_moderation_action(
-                group_id, msg, mode, "এই শব্দ ব্যবহার নিষেধ এই গ্রুপে।"
+                group_id, msg, action, "এই শব্দ ব্যবহার নিষেধ এই গ্রুপে।"
             )
 
     return False
