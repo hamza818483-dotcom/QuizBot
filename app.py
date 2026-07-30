@@ -348,7 +348,7 @@ from quiz import (
     handle_d1_leaderboard, handle_d1_history, handle_d1_mistake,
 )
 from special_module import (
-    show_special_channel_list, handle_special_callback, handle_special_text_input,
+    show_special_channel_list, show_special_main_menu, handle_special_callback, handle_special_text_input,
     on_channel_join, maybe_approve_join_request, moderate_group_message,
     SPECIAL_INPUT_PENDING,
 )
@@ -13377,7 +13377,7 @@ async def handle_message(msg: dict):
         await handle_getid(msg)
     elif text.strip() == "/special":
         if msg.get("from", {}).get("id") == OWNER_ID:
-            await show_special_channel_list(OWNER_ID)
+            await show_special_main_menu(OWNER_ID)
             if chat_id != OWNER_ID:
                 await send_msg(chat_id, "📩 DM চেক করো — channel list পাঠানো হয়েছে।")
     elif text == "/info2":
