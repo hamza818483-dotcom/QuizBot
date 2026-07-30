@@ -13652,7 +13652,8 @@ async def handle_callback(query: dict):
     uname = user.get("username") or user.get("first_name", "User")
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
-        if data.startswith(("spch_", "spdm_", "spfl_", "spil_", "spgr_", "spgid_", "spmode_", "spwords_")) or data == "spback":
+        if data.startswith(("spch_", "spdm_", "spfl_", "spil_", "spgr_", "spgid_", "spmode_", "spwords_",
+                             "spgadd_", "spgview_", "spgdel_", "spgback_")) or data == "spback":
             if uid == OWNER_ID:
                 await handle_special_callback(query)
             return
