@@ -194,30 +194,85 @@ async def delete_special_group(row_id):
 
 
 # ============================================================
-# UI: channel list -> config menu
+# UI: main menu -> (Channel list | Group) -> config menu
 # ============================================================
-async def show_special_channel_list(chat_id, edit_message_id=None):
-    channels = await db_get_channels()
-    if not channels:
-        txt = "📢 কোনো channel সেভ নেই! আগে <code>/channel</code> দিয়ে channel add করো।"
-        if edit_message_id:
-            await tg_post("editMessageText", {"chat_id": chat_id, "message_id": edit_message_id,
-                                                "text": txt, "parse_mode": "HTML"})
-        else:
-            await send_msg(chat_id, txt, parse_mode="HTML")
-        return
-    txt = "⚙️ <b>/special Setup</b>\n\nকোন channel এর জন্য setup করবে?"
-    buttons = []
-    for ch in channels:
-        ch_id = ch.get("channel_id", "")
-        ch_name = ch.get("channel_name", ch_id)
-        buttons.append([{"text": f"📢 {ch_name}", "callback_data": f"spch_{ch_id}"}])
+async def show_special_main_menu(chat_id, edit_message_id=None):
+    txt = "⚙️ <b>/special Setup</b>\n\nকী নিয়ে কাজ করবে?"
+    buttons = [
+        [{"text": "📢 Channel List", "callback_data": "spmainch"}],
+        [{"text": "👥 Group", "callback_data": "spmaingr"}],
+    ]
     reply_markup = {"inline_keyboard": buttons}
     if edit_message_id:
         await tg_post("editMessageText", {"chat_id": chat_id, "message_id": edit_message_id,
                                             "text": txt, "parse_mode": "HTML", "reply_markup": reply_markup})
     else:
         await send_msg(chat_id, txt, parse_mode="HTML", reply_markup=reply_markup)
+
+
+async def show_special_channel_list(chat_id, edit_message_id=None):
+    channels = await db_get_channels()
+    if not channels:
+        txt = "📢 কোনো channel সেভ নেই! আগে <code>/channel</code> দিয়ে channel add করো।"
+        buttons = [[{"text": "⬅️ Back", "callback_data": "spmainback"}]]
+        if edit_message_id:
+            await tg_post("editMessageText", {"chat_id": chat_id, "message_id": edit_message_id,
+                                                "text": txt, "parse_mode": "HTML",
+                                                "reply_markup": {"inline_keyboard": buttons}})
+        else:
+            await send_msg(chat_id, txt, parse_mode="HTML", reply_markup={"inline_keyboard": buttons})
+        return
+    txt = "📢 <b>Channel List</b>\n\nকোন channel এর জন্য setup করবে?"
+    buttons = []
+    for ch in channels:
+        ch_id = ch.get("channel_id", "")
+        ch_name = ch.get("channel_name", ch_id)
+        buttons.append([{"text": f"📢 {ch_name}", "callback_data": f"spch_{ch_id}"}])
+    buttons.append([{"text": "⬅️ Back", "callback_data": "spmainback"}])
+    reply_markup = {"inline_keyboard": buttons}
+    if edit_message_id:
+        await tg_post("editMessageText", {"chat_id": chat_id, "message_id": edit_message_id,
+                                            "text": txt, "parse_mode": "HTML", "reply_markup": reply_markup})
+    else:
+        await send_msg(chat_id, txt, parse_mode="HTML", reply_markup=reply_markup)
+
+
+async def list_all_special_groups() -> list:
+    """All groups across every channel — for the global /special -> Group view."""
+    await _ensure_special_table()
+    rows = await d1_select("SELECT * FROM special_groups ORDER BY id", [])
+    out = []
+    for r in rows or []:
+        out.append({
+            "id": r.get("id"),
+            "main_channel_id": r.get("main_channel_id"),
+            "group_id": r.get("group_id") or "",
+            "group_mode": r.get("group_mode") or "delete",
+            "banned_words": json.loads(r.get("banned_words") or "[]"),
+            "fl_enabled": bool(r.get("fl_enabled") or 0),
+            "fl_action": r.get("fl_action") or "delete",
+        })
+    return out
+
+
+async def show_special_group_list_global(chat_id, message_id):
+    """Top-level 'Group' option: every attached group, regardless of channel."""
+    groups = await list_all_special_groups()
+    if groups:
+        lines = ["👥 <b>Group List</b>\n"]
+        for g in groups:
+            mode_emoji = "🗑️" if g["group_mode"] == "delete" else "⚠️"
+            lines.append(f"{mode_emoji} <code>{g['group_id']}</code> — {len(g['banned_words'])}টা শব্দ")
+        txt = "\n".join(lines)
+    else:
+        txt = "👥 <b>Group List</b>\n\n(কোনো group attach করা নেই। একটা channel এর মধ্যে গিয়ে group add করো।)"
+    buttons = []
+    for g in groups:
+        buttons.append([{"text": f"⚙️ {g['group_id']}", "callback_data": f"spgview_{g['id']}"}])
+    buttons.append([{"text": "⬅️ Back", "callback_data": "spmainback"}])
+    await tg_post("editMessageText", {"chat_id": chat_id, "message_id": message_id,
+                                        "text": txt, "parse_mode": "HTML",
+                                        "reply_markup": {"inline_keyboard": buttons}})
 
 
 async def show_special_channel_menu(chat_id, message_id, channel_id: str):
@@ -237,7 +292,7 @@ async def show_special_channel_menu(chat_id, message_id, channel_id: str):
         [{"text": "📁 Folder Link Set", "callback_data": f"spfl_{channel_id}"}],
         [{"text": "🔗 Individual Links Set", "callback_data": f"spil_{channel_id}"}],
         [{"text": "👥 Group Attach/Edit", "callback_data": f"spgr_{channel_id}"}],
-        [{"text": "⬅️ Back", "callback_data": "spback"}],
+        [{"text": "⬅️ Back", "callback_data": "spmainch"}],
     ]
     await tg_post("editMessageText", {"chat_id": chat_id, "message_id": message_id,
                                         "text": txt, "parse_mode": "HTML",
@@ -307,8 +362,16 @@ async def handle_special_callback(query: dict) -> bool:
     msg_id = query["message"]["message_id"]
     uid = query["from"]["id"]
 
-    if data == "spback":
+    if data == "spmainback":
+        await show_special_main_menu(chat_id, edit_message_id=msg_id)
+        return True
+
+    if data == "spmainch":
         await show_special_channel_list(chat_id, edit_message_id=msg_id)
+        return True
+
+    if data == "spmaingr":
+        await show_special_group_list_global(chat_id, msg_id)
         return True
 
     if data.startswith("spch_"):
