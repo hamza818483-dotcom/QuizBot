@@ -620,5 +620,22 @@ async def handle_ok_command(msg: dict):
 
     if status_id:
         await edit_msg(chat_id, status_id, "✅ সম্পন্ন!")
-    await send_msg(chat_id, summary, parse_mode="Markdown")
+
+    # Post the summary into the source channel/topic itself (not just the
+    # invoking chat), then try to pin it — pin silently no-ops (with an
+    # owner notification) if the bot lacks admin/pin rights there.
+    from core import tg_post
+    from app import try_pin_message
+    post_params = {"chat_id": ch1, "text": summary, "parse_mode": "Markdown",
+                   "disable_web_page_preview": True}
+    if topic_id:
+        post_params["message_thread_id"] = topic_id
+    r = await tg_post("sendMessage", post_params)
+    if r and r.get("ok"):
+        sent_msg_id = r["result"]["message_id"]
+        await try_pin_message(ch1, sent_msg_id)
+        await send_msg(chat_id, f"✅ Summary পাঠানো হয়েছে ও pin করা হয়েছে (admin access থাকলে)।\n\n{summary}", parse_mode="Markdown")
+    else:
+        err = (r or {}).get("description", "unknown error")
+        await send_msg(chat_id, f"⚠️ Channel এ summary পাঠাতে ব্যর্থ: {err}\n\n{summary}", parse_mode="Markdown")
 
