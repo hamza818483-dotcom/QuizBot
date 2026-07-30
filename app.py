@@ -8865,9 +8865,7 @@ Never use phrases referring back to the source itself instead of stating facts d
 ❌ English equivalents: "as shown in the figure/box/table/diagram/passage", "mentioned in the text/page", "as given"
 Always state facts directly and plainly, as general knowledge — never imply it came from "the shown image/box/table."
 
-OPTION IMAGES (new field, mandatory when applicable):
-- If any option (A/B/C/D) has an actual image/figure/diagram directly on or immediately above it (not just text), give "opt_bboxes": a dict with keys "A","B","C","D" — for each option WITH an image, a TIGHT bounding box around ONLY that image (not the text), normalized to 0-1000 scale ([x_min,y_min,x_max,y_max]); for options with no image, omit the key or use null.
-- Never invent a bbox for an option with no actual image.
+If an option (A-D) has an image directly on/above it, add "opt_bboxes": {"B":[x1,y1,x2,y2]} — tight box (0-1000 scale) around ONLY that image, per option with one. Omit options with no image. Never invent.
 
 OUTPUT FORMAT:
 Only a valid JSON array, no extra text, no markdown, no explanation outside JSON. No MCQ on page → return exactly [].
