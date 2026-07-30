@@ -13184,7 +13184,7 @@ async def handle_message(msg: dict):
     # /special group word-moderation — checked for every group/supergroup
     # message before anything else, so a banned word is deleted/warned
     # even if the message would otherwise match some other command/flow.
-    if chat_type in ("group", "supergroup") and msg.get("text"):
+    if chat_type in ("group", "supergroup"):
         acted = await moderate_group_message(msg)
         if acted:
             return
@@ -13653,7 +13653,7 @@ async def handle_callback(query: dict):
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
         if data.startswith(("spch_", "spdm_", "spfl_", "spil_", "spgr_", "spgid_", "spmode_", "spwords_",
-                             "spgadd_", "spgview_", "spgdel_", "spgback_")) or data == "spback":
+                             "spgadd_", "spgview_", "spgdel_", "spgback_", "spfltoggle_", "spflact_")) or data == "spback":
             if uid == OWNER_ID:
                 await handle_special_callback(query)
             return
