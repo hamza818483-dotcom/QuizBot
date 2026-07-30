@@ -49,10 +49,20 @@ async def _ensure_special_table():
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "main_channel_id TEXT, "
             "group_id TEXT, "
-            "group_mode TEXT, "        # 'delete' or 'warn'
+            "group_mode TEXT, "        # 'delete' or 'warn' (for banned_words)
             "banned_words TEXT, "      # JSON list of words
+            "fl_enabled INTEGER DEFAULT 0, "   # forward/link filter on(1)/off(0)
+            "fl_action TEXT DEFAULT 'delete', " # 'delete' | 'warn' | 'ban'
             "updated_at INTEGER)"
         )
+        for stmt in (
+            "ALTER TABLE special_groups ADD COLUMN fl_enabled INTEGER DEFAULT 0",
+            "ALTER TABLE special_groups ADD COLUMN fl_action TEXT DEFAULT 'delete'",
+        ):
+            try:
+                await d1_run(stmt)
+            except Exception:
+                pass  # column already exists
         _SPECIAL_TABLE_ENSURED = True
     except Exception as e:
         logger.warning(f"[Special] ensure table warn: {e}")
@@ -126,6 +136,8 @@ async def list_special_groups(main_channel_id: str) -> list:
             "group_id": r.get("group_id") or "",
             "group_mode": r.get("group_mode") or "delete",
             "banned_words": json.loads(r.get("banned_words") or "[]"),
+            "fl_enabled": bool(r.get("fl_enabled") or 0),
+            "fl_action": r.get("fl_action") or "delete",
         })
     return out
 
@@ -142,6 +154,8 @@ async def get_special_group(row_id) -> dict:
         "group_id": r.get("group_id") or "",
         "group_mode": r.get("group_mode") or "delete",
         "banned_words": json.loads(r.get("banned_words") or "[]"),
+        "fl_enabled": bool(r.get("fl_enabled") or 0),
+        "fl_action": r.get("fl_action") or "delete",
     }
 
 
@@ -168,8 +182,9 @@ async def update_special_group(row_id, **fields):
         return
     cur.update(fields)
     await d1_run(
-        "UPDATE special_groups SET group_mode=?1, banned_words=?2, updated_at=?3 WHERE id=?4",
-        [cur["group_mode"], json.dumps(cur["banned_words"], ensure_ascii=False), int(time.time()), row_id],
+        "UPDATE special_groups SET group_mode=?1, banned_words=?2, fl_enabled=?3, fl_action=?4, updated_at=?5 WHERE id=?6",
+        [cur["group_mode"], json.dumps(cur["banned_words"], ensure_ascii=False),
+         1 if cur["fl_enabled"] else 0, cur["fl_action"], int(time.time()), row_id],
     )
 
 
@@ -258,15 +273,22 @@ async def show_special_group_detail(chat_id, message_id, row_id):
         return
     words_line = ", ".join(g["banned_words"]) if g["banned_words"] else "(কোনো শব্দ সেট নেই)"
     mode_emoji = "🗑️ Delete" if g["group_mode"] == "delete" else "⚠️ Warn"
+    fl_status = "✅ ON" if g["fl_enabled"] else "❌ OFF"
+    fl_action_label = {"delete": "🗑️ Delete", "warn": "⚠️ Warn", "ban": "🚫 Ban"}.get(g["fl_action"], g["fl_action"])
     txt = (
         f"👥 <b>Group Rules</b>\n🔗 <code>{g['group_id']}</code>\n\n"
-        f"⚙️ Mode: {mode_emoji}\n"
-        f"🚫 Banned words: {words_line}\n"
+        f"🚫 <b>Banned Words</b>\n⚙️ Mode: {mode_emoji}\n🔤 Words: {words_line}\n\n"
+        f"↪️ <b>Forward/Link Filter</b>\n⚙️ Status: {fl_status}\n🎯 Action: {fl_action_label}\n"
     )
+    fl_toggle_text = "❌ Forward/Link Filter Off করো" if g["fl_enabled"] else "✅ Forward/Link Filter On করো"
     buttons = [
         [{"text": "🗑️ Delete Mode", "callback_data": f"spmode_delete_{row_id}"},
          {"text": "⚠️ Warn Mode", "callback_data": f"spmode_warn_{row_id}"}],
         [{"text": "🚫 Banned Words Set", "callback_data": f"spwords_{row_id}"}],
+        [{"text": fl_toggle_text, "callback_data": f"spfltoggle_{row_id}"}],
+        [{"text": "🗑️ Delete", "callback_data": f"spflact_delete_{row_id}"},
+         {"text": "⚠️ Warn", "callback_data": f"spflact_warn_{row_id}"},
+         {"text": "🚫 Ban", "callback_data": f"spflact_ban_{row_id}"}],
         [{"text": "❌ Group সরাও", "callback_data": f"spgdel_{row_id}"}],
         [{"text": "⬅️ Back", "callback_data": f"spgback_{g['main_channel_id']}"}],
     ]
@@ -372,6 +394,20 @@ async def handle_special_callback(query: dict) -> bool:
             "parse_mode": "HTML"})
         return True
 
+    if data.startswith("spfltoggle_"):
+        row_id = data[len("spfltoggle_"):]
+        g = await get_special_group(row_id)
+        await update_special_group(row_id, fl_enabled=not g.get("fl_enabled"))
+        await show_special_group_detail(chat_id, msg_id, row_id)
+        return True
+
+    if data.startswith("spflact_"):
+        rest = data[len("spflact_"):]
+        action, row_id = rest.split("_", 1)
+        await update_special_group(row_id, fl_action=action)
+        await show_special_group_detail(chat_id, msg_id, row_id)
+        return True
+
     return False
 
 
@@ -454,19 +490,57 @@ async def maybe_approve_join_request(chat_id, user_id: int) -> bool:
         return False
 
 
+async def _apply_moderation_action(group_id: str, msg: dict, action: str, reason_text: str):
+    """Executes delete / warn / ban on a message. Ban = delete + banChatMember."""
+    msg_id = msg.get("message_id")
+    uid = msg.get("from", {}).get("id")
+    uname = msg.get("from", {}).get("first_name", "User")
+    try:
+        if action == "delete":
+            await tg_post("deleteMessage", {"chat_id": group_id, "message_id": msg_id})
+        elif action == "warn":
+            await tg_post("sendMessage", {
+                "chat_id": group_id,
+                "text": f"⚠️ {uname}, {reason_text}",
+                "reply_to_message_id": msg_id,
+            })
+        elif action == "ban":
+            await tg_post("deleteMessage", {"chat_id": group_id, "message_id": msg_id})
+            if uid:
+                await tg_post("banChatMember", {"chat_id": group_id, "user_id": uid})
+            await tg_post("sendMessage", {
+                "chat_id": group_id,
+                "text": f"🚫 {uname} কে ব্যান করা হলো — {reason_text}",
+            })
+        return True
+    except Exception as e:
+        logger.warning(f"[Special] moderate action ({action}) failed: {e}")
+        return False
+
+
+def _msg_has_forward_or_link(msg: dict) -> bool:
+    if msg.get("forward_origin") or msg.get("forward_from") or msg.get("forward_from_chat") or msg.get("forward_date"):
+        return True
+    text = msg.get("text") or msg.get("caption") or ""
+    entities = (msg.get("entities") or []) + (msg.get("caption_entities") or [])
+    for e in entities:
+        if e.get("type") in ("url", "text_link", "mention"):
+            return True
+    if "t.me/" in text or "://" in text:
+        return True
+    return False
+
+
 async def moderate_group_message(msg: dict) -> bool:
-    """Call this from handle_message for every group/supergroup text
-    message. Checks against that group's banned_words (if this group_id
-    is attached to any special_configs row) and deletes/warns per mode.
-    Returns True if action was taken (delete/warn) so the caller can
-    skip any further processing of this message."""
+    """Call this from handle_message for every group/supergroup message.
+    Checks the attached special_groups row for this group_id (banned
+    words + forward/link filter) and takes the configured action.
+    Returns True if action was taken so the caller can skip further
+    processing of this message."""
     chat = msg.get("chat", {})
     if chat.get("type") not in ("group", "supergroup"):
         return False
     group_id = str(chat.get("id"))
-    text = (msg.get("text") or msg.get("caption") or "")
-    if not text:
-        return False
 
     await _ensure_special_table()
     rows = await d1_select(
@@ -475,28 +549,25 @@ async def moderate_group_message(msg: dict) -> bool:
     if not rows:
         return False
     row = rows[0]
+
+    # 1) Forward/Link filter (checked first — independent on/off toggle)
+    if row.get("fl_enabled"):
+        if _msg_has_forward_or_link(msg):
+            action = row.get("fl_action") or "delete"
+            return await _apply_moderation_action(
+                group_id, msg, action, "forward/link পাঠানো এই গ্রুপে নিষেধ।"
+            )
+
+    # 2) Banned words filter
+    text = (msg.get("text") or msg.get("caption") or "")
     banned_words = json.loads(row.get("banned_words") or "[]")
-    if not banned_words:
-        return False
+    if text and banned_words:
+        text_lower = text.lower()
+        hit = next((w for w in banned_words if w.lower() in text_lower), None)
+        if hit:
+            mode = row.get("group_mode") or "delete"
+            return await _apply_moderation_action(
+                group_id, msg, mode, "এই শব্দ ব্যবহার নিষেধ এই গ্রুপে।"
+            )
 
-    text_lower = text.lower()
-    hit = next((w for w in banned_words if w.lower() in text_lower), None)
-    if not hit:
-        return False
-
-    mode = row.get("group_mode") or "delete"
-    msg_id = msg.get("message_id")
-    try:
-        if mode == "delete":
-            await tg_post("deleteMessage", {"chat_id": group_id, "message_id": msg_id})
-        else:  # warn
-            uname = msg.get("from", {}).get("first_name", "User")
-            await tg_post("sendMessage", {
-                "chat_id": group_id,
-                "text": f"⚠️ {uname}, এই শব্দ ব্যবহার নিষেধ এই গ্রুপে।",
-                "reply_to_message_id": msg_id,
-            })
-        return True
-    except Exception as e:
-        logger.warning(f"[Special] moderate action failed: {e}")
-        return False
+    return False
