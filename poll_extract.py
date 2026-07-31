@@ -549,7 +549,7 @@ async def get_forum_topics_ordered(channel, limit=200) -> list:
     """
     from telethon import TelegramClient
     from telethon.sessions import StringSession
-    from telethon.tl.functions.channels import GetForumTopicsRequest
+    from telethon.tl.functions.messages import GetForumTopicsRequest
 
     client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
     await client.connect()
@@ -561,8 +561,8 @@ async def get_forum_topics_ordered(channel, limit=200) -> list:
             entity = await client.get_entity(channel)
 
         result = await client(GetForumTopicsRequest(
-            channel=entity,
-            offset_date=0,
+            peer=entity,
+            offset_date=None,
             offset_id=0,
             offset_topic=0,
             limit=limit,
