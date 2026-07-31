@@ -1347,7 +1347,7 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
         "max_tokens": dynamic_max_tokens,
     }
     try:
-        async with httpx.AsyncClient(timeout=60) as c:
+        async with httpx.AsyncClient(timeout=20) as c:
             r = await c.post(url, headers=headers, json=payload)
             if r.status_code >= 400:
                 body_preview = r.text[:300]
@@ -1463,7 +1463,11 @@ async def _gen_groq(img, topic, count):
     # keys (413 Payload Too Large), wasting ~11s before falling to Gemini.
     key_errors = []
     shrunk_url = None
-    for i, key in enumerate(keys):
+    # Cap at 5 keys instead of trying the full pool (up to 12) — ordered_keys()
+    # already puts healthy keys first, so if the first 5 all fail (most
+    # commonly today's-TPD-exhaustion, which no amount of retrying fixes),
+    # continuing through the rest just burns minutes before Gemini fallback.
+    for i, key in enumerate(keys[:5]):
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
             key, "qwen/qwen3.6-27b",
