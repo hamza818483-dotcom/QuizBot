@@ -1448,11 +1448,11 @@ async def _gen_groq(img, topic, count):
     if not keys:
         _LAST_GROQ_ERROR["reason"] = "কোনো GROQ_KEYS/GROQ_API_KEY সেট করা নেই"
         return []
-    data_url = _img_to_data_url_groq(img, count)
+    prompt = _build_mcq_prompt(topic, count)
+    data_url = _img_to_data_url_groq(img, count, prompt_len_hint=prompt)
     if not data_url:
         _LAST_GROQ_ERROR["reason"] = "Image কে data URL এ convert করতে ব্যর্থ হয়েছে"
         return []
-    prompt = _build_mcq_prompt(topic, count)
     # meta-llama/llama-4-scout-17b-16e-instruct was deprecated by Groq on
     # 2026-06-17 (see console.groq.com/docs/deprecations) — every call to it
     # now fails, which silently fell through to Gemini. qwen/qwen3.6-27b is
@@ -1483,7 +1483,7 @@ async def _gen_groq(img, topic, count):
             # before moving on, so a good key is never burned for a sizing
             # issue (mirrors the QBM fix in _qbm_groq_call).
             if shrunk_url is None:
-                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=40)
+                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=40, prompt_len_hint=prompt)
             if shrunk_url:
                 txt2, status2 = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
@@ -1828,7 +1828,7 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
     keys = groq_key_rotator.all_keys()
     if not keys:
         return ""
-    data_url = _img_to_data_url_groq(img)
+    data_url = _img_to_data_url_groq(img, prompt_len_hint=prompt)
     if not data_url:
         return ""
     for key in keys:
