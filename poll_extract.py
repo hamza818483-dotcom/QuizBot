@@ -544,7 +544,8 @@ def build_ok_summary(total_polls: int, batches_with_links: list) -> str:
 # ── Forum topic listing ──────────────────────────────────────
 async def get_forum_topics_ordered(channel, limit=200) -> list:
     """
-    Group এর forum topics (উপর থেকে নিচে, i.e. Telegram list order) return করে।
+    Group এর forum topics (উপর থেকে নিচে, অর্থাৎ প্রথম তৈরি topic সবার
+    আগে) return করে।
     Returns: [(topic_id, topic_title), ...]
     """
     from telethon import TelegramClient
@@ -560,23 +561,42 @@ async def get_forum_topics_ordered(channel, limit=200) -> list:
             await client.get_dialogs(limit=200)
             entity = await client.get_entity(channel)
 
-        result = await client(GetForumTopicsRequest(
-            peer=entity,
-            offset_date=None,
-            offset_id=0,
-            offset_topic=0,
-            limit=limit,
-        ))
-        topics = []
-        for t in result.topics:
-            tid = getattr(t, "id", None)
-            title = getattr(t, "title", None)
-            if tid is None or title is None:
-                continue
-            topics.append((tid, title))
-        # Telegram returns newest-first; reverse to get top-to-bottom order
-        topics.reverse()
-        return topics
+        all_topics = []
+        offset_date = None
+        offset_id = 0
+        offset_topic = 0
+        # Paginate through all topics — GetForumTopicsRequest sorts by last
+        # activity, not creation order, so we must fetch everything first
+        # and then sort by topic_id ourselves (lower id = created earlier =
+        # appears higher in the group's topic list).
+        while True:
+            result = await client(GetForumTopicsRequest(
+                peer=entity,
+                offset_date=offset_date,
+                offset_id=offset_id,
+                offset_topic=offset_topic,
+                limit=min(100, limit - len(all_topics)),
+            ))
+            if not result.topics:
+                break
+            for t in result.topics:
+                tid = getattr(t, "id", None)
+                title = getattr(t, "title", None)
+                if tid is None or title is None:
+                    continue
+                all_topics.append((tid, title))
+            if len(result.topics) < 100 or len(all_topics) >= limit:
+                break
+            last = result.topics[-1]
+            offset_topic = last.id
+            offset_id = getattr(last, "top_message", 0) or 0
+            last_date = getattr(last, "date", None)
+            offset_date = last_date
+
+        # Sort by topic_id ascending — matches the group's actual top-to-bottom
+        # topic list order (oldest/first-created topic = position 1).
+        all_topics.sort(key=lambda x: x[0])
+        return all_topics[:limit]
     finally:
         await client.disconnect()
 
