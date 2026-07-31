@@ -167,21 +167,36 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                 correct_idx, explanation, found = _parse_results(results)
 
                 if not found:
-                    # Vote দাও → message refetch করো
+                    # Vote দাও → server-side result force করো
                     try:
-                        await client(functions.messages.SendVoteRequest(
+                        vote_res = await client(functions.messages.SendVoteRequest(
                             peer=channel,
                             msg_id=message.id,
                             options=[p.answers[0].option]
                         ))
+                        vote_poll_results = getattr(vote_res, "results", None) if vote_res else None
+                        if vote_poll_results:
+                            correct_idx, explanation, found = _parse_results(vote_poll_results)
                         await asyncio.sleep(0.4)
                     except Exception:
                         pass  # Already voted — ok
 
-                    # Refetch message — এখন correct flag থাকবে
-                    fetched = await client.get_messages(channel, ids=message.id)
-                    if fetched and fetched.poll:
-                        correct_idx, explanation, _ = _parse_results(fetched.poll.results)
+                    if not found:
+                        try:
+                            gp_res = await client(functions.messages.GetPollResultsRequest(
+                                peer=channel,
+                                msg_id=message.id
+                            ))
+                            gp_poll_results = getattr(gp_res, "results", None)
+                            if gp_poll_results:
+                                correct_idx, explanation, found = _parse_results(gp_poll_results)
+                        except Exception:
+                            pass
+
+                    if not found:
+                        fetched = await client.get_messages(channel, ids=message.id)
+                        if fetched and fetched.poll:
+                            correct_idx, explanation, found = _parse_results(fetched.poll.results)
 
             except Exception as e:
                 logger.warning(f"[poll_extract] msg {message.id}: {type(e).__name__}: {e}")
@@ -657,18 +672,34 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
 
             if not found:
                 try:
-                    await client(functions.messages.SendVoteRequest(
+                    vote_res = await client(functions.messages.SendVoteRequest(
                         peer=channel,
                         msg_id=message.id,
                         options=[p.answers[0].option]
                     ))
+                    vote_poll_results = getattr(vote_res, "results", None) if vote_res else None
+                    if vote_poll_results:
+                        correct_idx, explanation, found = _parse_results(vote_poll_results)
                     await asyncio.sleep(0.4)
                 except Exception:
                     pass
 
-                fetched = await client.get_messages(channel, ids=message.id)
-                if fetched and fetched.poll:
-                    correct_idx, explanation, _ = _parse_results(fetched.poll.results)
+                if not found:
+                    try:
+                        gp_res = await client(functions.messages.GetPollResultsRequest(
+                            peer=channel,
+                            msg_id=message.id
+                        ))
+                        gp_poll_results = getattr(gp_res, "results", None)
+                        if gp_poll_results:
+                            correct_idx, explanation, found = _parse_results(gp_poll_results)
+                    except Exception:
+                        pass
+
+                if not found:
+                    fetched = await client.get_messages(channel, ids=message.id)
+                    if fetched and fetched.poll:
+                        correct_idx, explanation, found = _parse_results(fetched.poll.results)
 
         except Exception as e:
             logger.warning(f"[poll_extract] msg {message.id}: {type(e).__name__}: {e}")
