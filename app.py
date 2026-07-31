@@ -13700,6 +13700,45 @@ async def handle_message(msg: dict):
         await handle_convert_command(msg)
     elif text.startswith("/error") or text.startswith("/errors"):
         await handle_error_command(msg)
+    elif text == "/keys":
+        try:
+            today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
+            now = time.time()
+            lines = ["🔑 <b>AI Provider Key Status</b>\n"]
+
+            # Groq — has daily(TPD)-exhaustion tracking + org-linking
+            gkeys = groq_key_rotator.all_keys()
+            g_exhausted = sum(1 for k in gkeys if _is_groq_key_exhausted_today(k))
+            g_cooling = sum(1 for k in gkeys if groq_key_rotator._cooldown_until.get(k, 0) > now and not _is_groq_key_exhausted_today(k))
+            g_healthy = len(gkeys) - g_exhausted - g_cooling
+            known_orgs = len(set(_key_org_map.values())) if _key_org_map else 0
+            lines.append(f"🟢 <b>Groq</b> (qwen/qwen3.6-27b): {len(gkeys)} key\n"
+                         f"  ✅ Healthy: {g_healthy} | ⏳ Cooldown: {g_cooling} | 🔴 আজকে exhausted: {g_exhausted}"
+                         + (f"\n  🏢 Known orgs: {known_orgs}" if known_orgs else ""))
+
+            # Gemini — only short-cooldown/permanent-ban tracking (no daily counter kept locally)
+            gemini_keys = key_rotator.keys
+            gem_banned = sum(1 for k in gemini_keys if key_rotator._cooldown_until.get(k, 0) == float("inf"))
+            gem_cooling = sum(1 for k in gemini_keys if 0 < key_rotator._cooldown_until.get(k, 0) < float("inf") and key_rotator._cooldown_until.get(k, 0) > now)
+            gem_healthy = len(gemini_keys) - gem_banned - gem_cooling
+            lines.append(f"\n🔵 <b>Gemini</b> (gemini-2.5-flash, free tier ~20 req/day/key): {len(gemini_keys)} key\n"
+                         f"  ✅ Healthy: {gem_healthy} | ⏳ Cooldown: {gem_cooling} | 🚫 Banned: {gem_banned}")
+
+            # Generic rotators (NVIDIA, Nemotron, Gemma, OpenRouter-Qwen, HF)
+            for rot in (nvidia_rotator, nemotron_rotator, gemma_rotator, or_qwen_rotator, hf_rotator):
+                rkeys = rot.all_keys()
+                if not rkeys:
+                    lines.append(f"\n⚪ <b>{rot.label}</b>: 0 key (কনফিগার করা নেই)")
+                    continue
+                r_exhausted = sum(1 for k in rkeys if rot._is_exhausted_today(k))
+                r_cooling = sum(1 for k in rkeys if rot._cooldown_until.get(k, 0) > now and not rot._is_exhausted_today(k))
+                r_healthy = len(rkeys) - r_exhausted - r_cooling
+                lines.append(f"\n⚪ <b>{rot.label}</b>: {len(rkeys)} key\n"
+                             f"  ✅ Healthy: {r_healthy} | ⏳ Cooldown: {r_cooling} | 🔴 আজকে exhausted: {r_exhausted}")
+
+            await send_msg(chat_id, "\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            await send_msg(chat_id, f"❌ /keys failed: {e}")
     elif text == "/whinfo":
         try:
             _wi = await tg_post("getWebhookInfo", {})
