@@ -752,7 +752,8 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
             continue
 
         csv_bytes = build_csv(polls)
-        safe_title = re.sub(r"[^\w\-]+", "_", topic_title)[:50]
+        safe_title = re.sub(r"[^A-Za-z0-9\-]+", "_", topic_title.encode("ascii", "ignore").decode("ascii")) or "topic"
+        safe_title = safe_title[:50].strip("_") or "topic"
         filename = f"{safe_title}_{topic_id}.csv"
         topic_link = build_topic_link(channel, topic_id)
 
@@ -763,7 +764,13 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
         )
 
         try:
-            await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
+            doc_result = await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
+            if not doc_result or not doc_result.get("ok"):
+                logger.warning(f"[ok-range] send_document returned non-ok for topic {topic_id}: {doc_result}. Retrying once...")
+                doc_result = await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
+                if not doc_result or not doc_result.get("ok"):
+                    err = (doc_result or {}).get("error", "unknown error")
+                    await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এর CSV DM এ পাঠাতে ব্যর্থ: {err}")
         except Exception as e:
             logger.error(f"[ok-range] DM send error for topic {topic_id}: {e}")
             await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এর CSV DM এ পাঠাতে ব্যর্থ: {e}")

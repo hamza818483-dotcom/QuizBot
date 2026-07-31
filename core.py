@@ -723,8 +723,9 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
             )
             return r
     except Exception as e:
-        logger.error(f"[sendDoc] direct failed: {e}")
-        return {"ok": False, "error": str(e)}
+        err_detail = f"{type(e).__name__}: {e}" if str(e) else f"{type(e).__name__} (no message)"
+        logger.error(f"[sendDoc] direct failed: {err_detail}")
+        return {"ok": False, "error": err_detail}
 
 
 async def _send_document_multipart_rfc5987(client, chat_id, file_bytes: bytes, filename: str,
