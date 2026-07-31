@@ -682,6 +682,8 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",
                         message_thread_id: int = None) -> dict:
+    if caption and len(caption) > 1024:
+        caption = caption[:1021] + "..."
     data = {
         "chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode,
         "filename": filename, "mime_type": mime_type,
