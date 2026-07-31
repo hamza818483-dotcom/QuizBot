@@ -8166,9 +8166,8 @@ async def _process_pdf_pages_inner(
                             # Item 3: auto-pin the very first image of the job
                             await try_pin_message(channel_id, image_msg_id)
 
-                mcqs = await _repair_thin_explanations(mcqs, img, topic)
-                # explanation crop/attach removed — user requested no
-                # explanation image after submit, for faster /pdf turnaround.
+                # repair already ran inside generate_mcq_from_image() — a
+                # second call here was pure redundant duplicate work on every page
 
                 # Speed fix: start generating the NEXT page's MCQs now, in the
                 # background, while THIS page's polls are being sent below
