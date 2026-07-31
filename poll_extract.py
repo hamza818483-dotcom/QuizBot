@@ -781,17 +781,20 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
             f"📋 প্রশ্ন: {len(polls)}"
         )
 
-        try:
-            doc_result = await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
-            if not doc_result or not doc_result.get("ok"):
-                logger.warning(f"[ok-range] send_document returned non-ok for topic {topic_id}: {doc_result}. Retrying once...")
+        sent = False
+        for attempt in range(3):
+            try:
                 doc_result = await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
-                if not doc_result or not doc_result.get("ok"):
-                    err = (doc_result or {}).get("error", "unknown error")
-                    await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এর CSV DM এ পাঠাতে ব্যর্থ: {err}")
-        except Exception as e:
-            logger.error(f"[ok-range] DM send error for topic {topic_id}: {e}")
-            await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এর CSV DM এ পাঠাতে ব্যর্থ: {e}")
+                if doc_result and doc_result.get("ok"):
+                    sent = True
+                    break
+                logger.warning(f"[ok-range] send_document non-ok (attempt {attempt+1}) for topic {topic_id}: {doc_result}")
+            except Exception as e:
+                logger.error(f"[ok-range] DM send attempt {attempt+1} error for topic {topic_id}: {e}")
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+        if not sent:
+            await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এর CSV DM এ পাঠাতে ব্যর্থ (৩ বার চেষ্টার পরেও)।")
 
     if status_id:
         await edit_msg(chat_id, status_id, f"✅ সম্পন্ন! {len(selected)} টা topic প্রসেস হয়েছে।")
@@ -890,18 +893,20 @@ async def handle_ok_single_topic(msg: dict, topic_link: str):
     if status_id:
         await edit_msg(chat_id, status_id, f"⏳ CSV পাঠাচ্ছি ({len(polls)}টি প্রশ্ন)...")
 
-    try:
-        doc_result = await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
-        if not doc_result or not doc_result.get("ok"):
-            logger.warning(f"[ok-single] send_document non-ok: {doc_result}. Retrying once...")
+    sent = False
+    for attempt in range(3):
+        try:
             doc_result = await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
-            if not doc_result or not doc_result.get("ok"):
-                err = (doc_result or {}).get("error", "unknown error")
-                await send_msg(chat_id, f"⚠️ CSV DM এ পাঠাতে ব্যর্থ: {err}")
-                return
-    except Exception as e:
-        logger.error(f"[ok-single] DM send error: {e}")
-        await send_msg(chat_id, f"⚠️ CSV DM এ পাঠাতে ব্যর্থ: {e}")
+            if doc_result and doc_result.get("ok"):
+                sent = True
+                break
+            logger.warning(f"[ok-single] send_document non-ok (attempt {attempt+1}): {doc_result}")
+        except Exception as e:
+            logger.error(f"[ok-single] DM send attempt {attempt+1} error: {e}")
+        if attempt < 2:
+            await asyncio.sleep(2 * (attempt + 1))
+    if not sent:
+        await send_msg(chat_id, "⚠️ CSV DM এ পাঠাতে ব্যর্থ (৩ বার চেষ্টার পরেও)।")
         return
 
     if status_id:

@@ -682,22 +682,40 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",
                         message_thread_id: int = None) -> dict:
+    data = {
+        "chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode,
+        "filename": filename, "mime_type": mime_type,
+        "doc_b64": base64.b64encode(file_bytes).decode()
+    }
+    if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
+    if message_thread_id: data["message_thread_id"] = message_thread_id
+
     # ── Primary: CF Worker (b64 proxy, shared client) ──
     try:
-        data = {
-            "chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode,
-            "filename": filename, "mime_type": mime_type,
-            "doc_b64": base64.b64encode(file_bytes).decode()
-        }
-        if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
-        if message_thread_id: data["message_thread_id"] = message_thread_id
         c = await _get_shared_http_client()
         r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=60)
         result = r.json()
         if result.get("ok"): return result
+        logger.warning(f"[sendDoc] CF primary non-ok: {result.get('description') or result.get('error')}")
     except Exception as e:
         logger.warning(f"[sendDoc] CF failed: {e}")
-    # ── Fallback: Direct TG API multipart (shared client) ──
+
+    # ── Secondary: alt CF Worker domain (HF blocks direct api.telegram.org
+    #    outbound, so on that platform this is the ONLY real fallback —
+    #    without it, any primary-CF blip becomes a guaranteed failure). ──
+    if CF_WORKER_URL_2:
+        try:
+            c = await _get_shared_http_client()
+            r = await c.post(f"{CF_WORKER_URL_2}/tg-senddoc", json=data, timeout=60)
+            result = r.json()
+            if result.get("ok"): return result
+            logger.warning(f"[sendDoc] CF secondary non-ok: {result.get('description') or result.get('error')}")
+        except Exception as e:
+            logger.warning(f"[sendDoc] CF secondary failed: {e}")
+
+    # ── Last resort: direct TG API multipart (works on Render; on HF this
+    #    will also fail since outbound api.telegram.org is blocked there,
+    #    but costs little to try after both CF paths are exhausted). ──
     try:
         fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode}
         if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
