@@ -1029,10 +1029,53 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
         except Exception:
             return None
 
+    async def _read_serial_numbers():
+        # Universal check (doesn't depend on tag-cyan spans existing) --
+        # reads each card's own leading number and returns only TOP-LEVEL
+        # ones (skips nested "10.1"/"10.2" style, which aren't part of the
+        # main sequence). If the page's own numbering has a gap (e.g.
+        # ...23, 24, 36... skipping 25-35), that means real questions were
+        # never rendered into the DOM at all.
+        try:
+            raw = await page.evaluate("""
+                () => {
+                    const cards = document.querySelectorAll(
+                        "div[class*='rounded-xl'][class*='p-5'], div[class*='rounded-xl'][class*='pb-6']"
+                    );
+                    const out = [];
+                    for (const c of cards) {
+                        const qd = c.querySelector("div[class*='font-medium']");
+                        if (!qd) { continue; }
+                        const t = qd.textContent || "";
+                        const m = t.match(/^\\s*([0-9\\u09E6-\\u09EF]+)\\s*[\\.\\)\\-\\u0983:]/);
+                        if (m) out.push(m[1]);
+                    }
+                    return out;
+                }
+            """)
+        except Exception:
+            return []
+        bn2en = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+        nums = []
+        for n in (raw or []):
+            if "." in n:
+                continue  # nested sub-question, not part of main sequence
+            try:
+                nums.append(int(n.translate(bn2en)))
+            except ValueError:
+                pass
+        return nums
+
+    async def _serial_gap_report():
+        nums = await _read_serial_numbers()
+        gaps = [(a, b) for a, b in zip(nums, nums[1:]) if b - a > 1]
+        return gaps, len(nums)
+
     prev_tag_count = await _count_tagged_cards()
+    prev_gaps, _ = await _serial_gap_report()
     for _tag_retry in range(3):
-        if prev_tag_count is None:
-            break  # selector/eval failed -- don't loop on unreliable data
+        if prev_tag_count is None and not prev_gaps:
+            break
         try:
             await page.evaluate("window.scrollTo(0, 0)")
             await page.wait_for_timeout(200)
