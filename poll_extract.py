@@ -779,6 +779,103 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
         await edit_msg(chat_id, status_id, f"✅ সম্পন্ন! {len(selected)} টা topic প্রসেস হয়েছে।")
 
 
+# ── /ok <single topic link> mode (one topic → CSV → DM) ──────
+async def handle_ok_single_topic(msg: dict, topic_link: str):
+    """
+    /ok
+    https://t.me/c/123456/45   (or public: https://t.me/mychan/45)
+
+    লিংকে থাকা topic_id ধরে নিয়ে সেই টপিকের সব quiz poll বের করে CSV
+    বানিয়ে bot এর DM (owner) এ পাঠায়, caption এ topic name + link সহ —
+    ঠিক /ok N-M মোডে প্রতিটা topic এর জন্য যা হয় তারই single-topic version।
+    """
+    from core import send_msg, edit_msg, send_document, OWNER_ID
+
+    chat_id = msg["chat"]["id"]
+
+    if not SESSION_STR:
+        await send_msg(chat_id, "❌ SESSION_STRING set নেই। HF Space secrets এ add করো।")
+        return
+
+    ch, num, topic_from_parse = parse_tg_link(topic_link)
+    if not ch or not num:
+        await send_msg(chat_id, "❌ Link parse হয়নি। সঠিক topic link দাও (যেমন t.me/c/123/45)।")
+        return
+
+    # A bare "t.me/group/45" or "t.me/c/123/45" link — the trailing number IS
+    # the topic id itself (topic root message), not topic_id+msg_id together.
+    topic_id = topic_from_parse if topic_from_parse else num
+
+    status = await send_msg(chat_id, f"⏳ Topic {topic_id} scan করছি...")
+    status_id = status.get("result", {}).get("message_id")
+
+    try:
+        first_id, last_id = await get_topic_msg_range(ch, topic_id)
+    except Exception as e:
+        logger.error(f"[ok-single] topic {topic_id} range error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+        return
+
+    if not last_id:
+        await send_msg(chat_id, "😕 এই topic এ কোনো message নাই।")
+        return
+
+    try:
+        polls = await extract_polls_telethon(ch, first_id, last_id, topic_id=topic_id)
+    except Exception as e:
+        logger.error(f"[ok-single] topic {topic_id} extract error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+        return
+
+    if not polls:
+        await send_msg(chat_id, "😕 এই topic এ কোনো quiz poll পাওয়া যায়নি।")
+        return
+
+    # Try to get the actual topic title via forum topics list (falls back to
+    # a generic label if lookup fails — extraction itself still succeeds).
+    topic_title = f"Topic {topic_id}"
+    try:
+        all_topics = await get_forum_topics_ordered(ch)
+        for tid, title in all_topics:
+            if tid == topic_id:
+                topic_title = title
+                break
+    except Exception as e:
+        logger.warning(f"[ok-single] topic title lookup failed: {e}")
+
+    csv_bytes = build_csv(polls)
+    safe_title = re.sub(r"[^A-Za-z0-9\-]+", "_", topic_title.encode("ascii", "ignore").decode("ascii")) or "topic"
+    safe_title = safe_title[:50].strip("_") or "topic"
+    filename = f"{safe_title}_{topic_id}.csv"
+    built_link = build_topic_link(ch, topic_id)
+
+    caption = (
+        f"📌 <b>{topic_title}</b>\n"
+        f"🔗 {built_link}\n"
+        f"📋 প্রশ্ন: {len(polls)}"
+    )
+
+    if status_id:
+        await edit_msg(chat_id, status_id, f"⏳ CSV পাঠাচ্ছি ({len(polls)}টি প্রশ্ন)...")
+
+    try:
+        doc_result = await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
+        if not doc_result or not doc_result.get("ok"):
+            logger.warning(f"[ok-single] send_document non-ok: {doc_result}. Retrying once...")
+            doc_result = await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
+            if not doc_result or not doc_result.get("ok"):
+                err = (doc_result or {}).get("error", "unknown error")
+                await send_msg(chat_id, f"⚠️ CSV DM এ পাঠাতে ব্যর্থ: {err}")
+                return
+    except Exception as e:
+        logger.error(f"[ok-single] DM send error: {e}")
+        await send_msg(chat_id, f"⚠️ CSV DM এ পাঠাতে ব্যর্থ: {e}")
+        return
+
+    if status_id:
+        await edit_msg(chat_id, status_id, f"✅ সম্পন্ন! {len(polls)}টি প্রশ্ন DM এ পাঠানো হয়েছে।")
+
+
 # ── /ok handler ───────────────────────────────────────────────
 async def handle_ok_command(msg: dict):
     """
