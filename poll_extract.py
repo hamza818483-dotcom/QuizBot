@@ -541,6 +541,173 @@ def build_ok_summary(total_polls: int, batches_with_links: list) -> str:
     return text
 
 
+# ── Forum topic listing ──────────────────────────────────────
+async def get_forum_topics_ordered(channel, limit=200) -> list:
+    """
+    Group এর forum topics (উপর থেকে নিচে, i.e. Telegram list order) return করে।
+    Returns: [(topic_id, topic_title), ...]
+    """
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    from telethon.tl.functions.channels import GetForumTopicsRequest
+
+    client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
+    await client.connect()
+    try:
+        try:
+            entity = await client.get_entity(channel)
+        except (ValueError, TypeError):
+            await client.get_dialogs(limit=200)
+            entity = await client.get_entity(channel)
+
+        result = await client(GetForumTopicsRequest(
+            channel=entity,
+            offset_date=0,
+            offset_id=0,
+            offset_topic=0,
+            limit=limit,
+        ))
+        topics = []
+        for t in result.topics:
+            tid = getattr(t, "id", None)
+            title = getattr(t, "title", None)
+            if tid is None or title is None:
+                continue
+            topics.append((tid, title))
+        # Telegram returns newest-first; reverse to get top-to-bottom order
+        topics.reverse()
+        return topics
+    finally:
+        await client.disconnect()
+
+
+async def get_topic_msg_range(channel, topic_id: int):
+    """
+    একটা topic এর first ও last message id বের করে (poll scan range এর জন্য)।
+    """
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
+    await client.connect()
+    try:
+        try:
+            entity = await client.get_entity(channel)
+        except (ValueError, TypeError):
+            await client.get_dialogs(limit=200)
+            entity = await client.get_entity(channel)
+
+        first_id = None
+        last_id = None
+        async for message in client.iter_messages(entity, reply_to=topic_id, reverse=True):
+            if first_id is None:
+                first_id = message.id
+            last_id = message.id
+        if first_id is None or first_id > topic_id:
+            first_id = topic_id
+        return first_id, last_id
+    finally:
+        await client.disconnect()
+
+
+def build_topic_link(channel, topic_id: int) -> str:
+    if isinstance(channel, str):
+        return f"https://t.me/{channel}/{topic_id}"
+    ch_str = str(channel).replace("-100", "")
+    return f"https://t.me/c/{ch_str}/{topic_id}"
+
+
+# ── /ok <range> command (per-topic CSV → DM) ─────────────────
+async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: int):
+    """
+    /ok 1-5
+    <group link>
+
+    Group এর উপর থেকে নিচে first N topics নিয়ে প্রতিটার সব quiz poll
+    আলাদা CSV বানিয়ে bot এর DM (owner) এ পাঠায়, caption এ topic
+    name + link সহ।
+    """
+    from core import send_msg, edit_msg, send_document, OWNER_ID
+
+    chat_id = msg["chat"]["id"]
+
+    if not SESSION_STR:
+        await send_msg(chat_id, "❌ SESSION_STRING set নেই। HF Space secrets এ add করো।")
+        return
+
+    m = re.search(r"(?:t\.me/c/|t\.me/)([A-Za-z0-9_]+|\d+)", group_ref)
+    if not m:
+        await send_msg(chat_id, "❌ Group link ঠিক নাই।")
+        return
+    raw = m.group(1)
+    channel = int(f"-100{raw}") if raw.isdigit() else raw
+
+    status = await send_msg(chat_id, "⏳ Topics list করছি (group এর)...")
+    status_id = status.get("result", {}).get("message_id")
+
+    try:
+        all_topics = await get_forum_topics_ordered(channel)
+    except Exception as e:
+        logger.error(f"[ok-range] topic list error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}")
+        return
+
+    if not all_topics:
+        await send_msg(chat_id, "😕 কোনো topic পাওয়া যায়নি।")
+        return
+
+    selected = all_topics[start_n - 1:end_n]
+    if not selected:
+        await send_msg(chat_id, f"❌ {start_n}-{end_n} range এ কোনো topic নাই (মোট {len(all_topics)} টা topic আছে)।")
+        return
+
+    for idx, (topic_id, topic_title) in enumerate(selected, start=start_n):
+        if status_id:
+            await edit_msg(chat_id, status_id, f"⏳ Topic {idx}: {topic_title} — scan করছি...")
+
+        try:
+            first_id, last_id = await get_topic_msg_range(channel, topic_id)
+        except Exception as e:
+            logger.error(f"[ok-range] topic {topic_id} range error: {e}")
+            await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এর message range বের করতে ব্যর্থ: {e}")
+            continue
+
+        if not last_id:
+            await send_msg(chat_id, f"😕 Topic '{topic_title}' এ কোনো message নাই।")
+            continue
+
+        try:
+            polls = await extract_polls_telethon(channel, first_id, last_id, topic_id=topic_id)
+        except Exception as e:
+            logger.error(f"[ok-range] topic {topic_id} extract error: {e}")
+            await send_msg(chat_id, f"⚠️ Topic '{topic_title}' scan এ error: {e}")
+            continue
+
+        if not polls:
+            await send_msg(chat_id, f"😕 Topic '{topic_title}' এ কোনো quiz poll পাওয়া যায়নি।")
+            continue
+
+        csv_bytes = build_csv(polls)
+        safe_title = re.sub(r"[^\w\-]+", "_", topic_title)[:50]
+        filename = f"{safe_title}_{topic_id}.csv"
+        topic_link = build_topic_link(channel, topic_id)
+
+        caption = (
+            f"📌 <b>{topic_title}</b>\n"
+            f"🔗 {topic_link}\n"
+            f"📋 প্রশ্ন: {len(polls)}"
+        )
+
+        try:
+            await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
+        except Exception as e:
+            logger.error(f"[ok-range] DM send error for topic {topic_id}: {e}")
+            await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এর CSV DM এ পাঠাতে ব্যর্থ: {e}")
+
+    if status_id:
+        await edit_msg(chat_id, status_id, f"✅ সম্পন্ন! {len(selected)} টা topic প্রসেস হয়েছে।")
+
+
 # ── /ok handler ───────────────────────────────────────────────
 async def handle_ok_command(msg: dict):
     """
