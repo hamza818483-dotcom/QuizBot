@@ -7480,7 +7480,7 @@ def _build_solve_sheet_html(topic: str, page: int, mcqs: list, answers: dict = N
         ua = answers.get(str(i))
         ans_label = labels[ci] if ci < 4 else str(ci + 1)
         ans_text = q.get("options", ["", "", "", ""])[ci] if ci < len(q.get("options", [])) else ""
-        exp = q.get("explanation", "")
+        exp = _strip_img_tag(q.get("explanation", ""))
 
         opts_html = ""
         for j, opt in enumerate(q.get("options", [])):
