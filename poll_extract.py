@@ -809,15 +809,17 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
     status = await send_msg(chat_id, "⏳ Topics list করছি (group এর)...")
     status_id = status.get("result", {}).get("message_id")
 
-    try:
-        all_topics = await get_forum_topics_ordered(channel)
-    except Exception as e:
-        logger.error(f"[ok-range] topic list error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
-        return
-
+    all_topics = None
+    for attempt in range(3):
+        try:
+            all_topics = await get_forum_topics_ordered(channel)
+            break
+        except Exception as e:
+            logger.error(f"[ok-range] topic list attempt {attempt+1} error: {e}")
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
     if not all_topics:
-        await send_msg(chat_id, "😕 কোনো topic পাওয়া যায়নি।")
+        await send_msg(chat_id, "❌ Topics list করা যায়নি (৩ বার চেষ্টার পরেও)।")
         return
 
     selected = all_topics[start_n - 1:end_n]
