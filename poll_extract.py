@@ -599,6 +599,105 @@ async def get_forum_topics_ordered(channel, limit=200) -> list:
         await client.disconnect()
 
 
+async def extract_polls_by_topic(client, entity, channel, topic_id: int, progress_cb=None) -> list:
+    """
+    একটা connected+entity-resolved client দিয়ে, Telegram-এর নিজের server-side
+    reply_to=topic_id filter ব্যবহার করে সরাসরি ওই topic-এর message গুলো
+    scan করে quiz polls বের করে। get_topic_msg_range + extract_polls_telethon
+    এর duplicate double-pass বাদ দিয়ে single pass এ range+extract একসাথে করে।
+    Poll-parsing logic (quiz check, correct-answer, vote/refetch, option cap)
+    হুবহু extract_polls_telethon থেকে অপরিবর্তিত রাখা হয়েছে — accuracy অক্ষুণ্ণ।
+    """
+    from telethon.tl import functions
+
+    polls = []
+    checked = 0
+    async for message in client.iter_messages(entity, reply_to=topic_id, reverse=True):
+        checked += 1
+
+        if not message.poll:
+            if progress_cb:
+                await progress_cb(checked, len(polls))
+            continue
+
+        p = message.poll.poll
+
+        if not getattr(p, "quiz", False):
+            if progress_cb:
+                await progress_cb(checked, len(polls))
+            continue
+
+        q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
+        q_text = _clean_extracted_text(q_text)
+
+        options = []
+        for ans in p.answers:
+            opt = ans.text.text if hasattr(ans.text, "text") else str(ans.text)
+            options.append(_clean_extracted_text(opt))
+
+        correct_idx = 0
+        explanation = ""
+        try:
+            results = message.poll.results
+
+            def _parse_results(res):
+                cidx, expl = 0, ""
+                found = False
+                if res and getattr(res, "results", None):
+                    for i, r in enumerate(res.results):
+                        if getattr(r, "correct", False):
+                            cidx = i
+                            found = True
+                            break
+                if res and getattr(res, "solution", None):
+                    expl = res.solution
+                return cidx, expl, found
+
+            correct_idx, explanation, found = _parse_results(results)
+
+            if not found:
+                try:
+                    await client(functions.messages.SendVoteRequest(
+                        peer=channel,
+                        msg_id=message.id,
+                        options=[p.answers[0].option]
+                    ))
+                    await asyncio.sleep(0.4)
+                except Exception:
+                    pass
+
+                fetched = await client.get_messages(channel, ids=message.id)
+                if fetched and fetched.poll:
+                    correct_idx, explanation, _ = _parse_results(fetched.poll.results)
+
+        except Exception as e:
+            logger.warning(f"[poll_extract] msg {message.id}: {type(e).__name__}: {e}")
+
+        explanation = _clean_extracted_text(explanation)
+
+        if len(options) > 4:
+            if correct_idx >= 4:
+                options = options[:3] + [options[correct_idx]]
+                correct_idx = 3
+            else:
+                options = options[:4]
+
+        polls.append({
+            "question":    q_text,
+            "options":     options,
+            "correct_idx": correct_idx,
+            "answer":      correct_idx + 1,
+            "explanation": explanation,
+        })
+
+        if progress_cb:
+            await progress_cb(checked, len(polls))
+
+        await asyncio.sleep(0.05)
+
+    return polls
+
+
 async def get_topic_msg_range(channel, topic_id: int):
     """
     একটা topic এর first ও last message id বের করে (poll scan range এর জন্য)।
@@ -959,88 +1058,95 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
     total_topics = len(all_topics)
     done, skipped = 0, 0
 
-    for idx, (topic_id, topic_title) in enumerate(all_topics, start=1):
-        if status_id:
-            await edit_msg(chat_id, status_id, f"⏳ Topic {idx}/{total_topics}: {topic_title} — range বের করছি...")
+    # একটাই client সব topic এর জন্য reuse করা হচ্ছে — আগে প্রতি topic এ
+    # ২টা আলাদা connect+entity-resolve হতো (range বের করতে + scan করতে),
+    # এখন single connect + single pass per topic। Poll parsing logic same।
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
 
-        first_id = last_id = None
-        for attempt in range(3):
-            try:
-                first_id, last_id = await get_topic_msg_range(channel, topic_id)
-                break
-            except Exception as e:
-                logger.error(f"[ok-all] topic {topic_id} range attempt {attempt+1} error: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(2 * (attempt + 1))
-        if not last_id:
-            skipped += 1
-            await send_msg(chat_id, f"⚠️ Topic '{topic_title}' skip (message range বের করা যায়নি)।")
-            continue
+    shared_client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
+    await shared_client.connect()
+    try:
+        try:
+            shared_entity = await shared_client.get_entity(channel)
+        except (ValueError, TypeError):
+            await shared_client.get_dialogs(limit=200)
+            shared_entity = await shared_client.get_entity(channel)
+    except Exception as e:
+        await send_msg(chat_id, f"❌ Channel entity resolve করা যায়নি: {e}")
+        await shared_client.disconnect()
+        return
 
-        total_msgs = last_id - first_id + 1
-        _last_edit_ts = [0.0]
-
-        async def _progress(checked, found, _idx=idx, _title=topic_title, _total=total_msgs, _ts=_last_edit_ts):
-            now = time.time()
-            if now - _ts[0] < 1.1 and checked < _total:
-                return
-            _ts[0] = now
+    try:
+        for idx, (topic_id, topic_title) in enumerate(all_topics, start=1):
             if status_id:
-                await edit_msg(chat_id, status_id,
-                    f"⏳ Topic {_idx}/{total_topics}: {_title}\n"
-                    f"📨 চেক: {checked}/{_total} messages\n"
-                    f"📋 Poll পেয়েছি: {found}")
+                await edit_msg(chat_id, status_id, f"⏳ Topic {idx}/{total_topics}: {topic_title} — scan করছি...")
 
-        polls = None
-        for attempt in range(3):
-            try:
-                polls = await extract_polls_telethon(channel, first_id, last_id, progress_cb=_progress, topic_id=topic_id)
-                break
-            except Exception as e:
-                logger.error(f"[ok-all] topic {topic_id} extract attempt {attempt+1} error: {e}")
+            _last_edit_ts = [0.0]
+
+            async def _progress(checked, found, _idx=idx, _title=topic_title, _ts=_last_edit_ts):
+                now = time.time()
+                if now - _ts[0] < 1.1:
+                    return
+                _ts[0] = now
+                if status_id:
+                    await edit_msg(chat_id, status_id,
+                        f"⏳ Topic {_idx}/{total_topics}: {_title}\n"
+                        f"📨 চেক: {checked} messages\n"
+                        f"📋 Poll পেয়েছি: {found}")
+
+            polls = None
+            for attempt in range(3):
+                try:
+                    polls = await extract_polls_by_topic(shared_client, shared_entity, channel, topic_id, progress_cb=_progress)
+                    break
+                except Exception as e:
+                    logger.error(f"[ok-all] topic {topic_id} extract attempt {attempt+1} error: {e}")
+                    if attempt < 2:
+                        await asyncio.sleep(2 * (attempt + 1))
+            if polls is None:
+                skipped += 1
+                await send_msg(chat_id, f"⚠️ Topic '{topic_title}' skip (scan ৩ বার fail হয়েছে)।")
+                continue
+
+            if not polls:
+                done += 1
+                continue  # no polls found, move on silently — don't stop
+
+            csv_bytes = build_csv(polls)
+            safe_title = re.sub(r"[^A-Za-z0-9\-]+", "_", topic_title.encode("ascii", "ignore").decode("ascii")) or "topic"
+            safe_title = safe_title[:50].strip("_") or "topic"
+            filename = f"{safe_title}_{topic_id}.csv"
+            topic_link = build_topic_link(channel, topic_id)
+
+            caption = (
+                f"📌 <b>{topic_title}</b>\n"
+                f"🔗 {topic_link}\n"
+                f"📋 প্রশ্ন: {len(polls)}"
+            )
+
+            sent = False
+            for attempt in range(3):
+                try:
+                    doc_result = await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
+                    if doc_result and doc_result.get("ok"):
+                        sent = True
+                        break
+                    logger.warning(f"[ok-all] send_document non-ok (attempt {attempt+1}) for topic {topic_id}: {doc_result}")
+                except Exception as e:
+                    logger.error(f"[ok-all] DM send attempt {attempt+1} error for topic {topic_id}: {e}")
                 if attempt < 2:
                     await asyncio.sleep(2 * (attempt + 1))
-        if polls is None:
-            skipped += 1
-            await send_msg(chat_id, f"⚠️ Topic '{topic_title}' skip (scan ৩ বার fail হয়েছে)।")
-            continue
 
-        if not polls:
-            done += 1
-            continue  # no polls found, move on silently — don't stop
+            if sent:
+                done += 1
+            else:
+                skipped += 1
+                await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এর CSV পাঠানো যায়নি (৩ বার চেষ্টার পরেও)।")
 
-        csv_bytes = build_csv(polls)
-        safe_title = re.sub(r"[^A-Za-z0-9\-]+", "_", topic_title.encode("ascii", "ignore").decode("ascii")) or "topic"
-        safe_title = safe_title[:50].strip("_") or "topic"
-        filename = f"{safe_title}_{topic_id}.csv"
-        topic_link = build_topic_link(channel, topic_id)
-
-        caption = (
-            f"📌 <b>{topic_title}</b>\n"
-            f"🔗 {topic_link}\n"
-            f"📋 প্রশ্ন: {len(polls)}"
-        )
-
-        sent = False
-        for attempt in range(3):
-            try:
-                doc_result = await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
-                if doc_result and doc_result.get("ok"):
-                    sent = True
-                    break
-                logger.warning(f"[ok-all] send_document non-ok (attempt {attempt+1}) for topic {topic_id}: {doc_result}")
-            except Exception as e:
-                logger.error(f"[ok-all] DM send attempt {attempt+1} error for topic {topic_id}: {e}")
-            if attempt < 2:
-                await asyncio.sleep(2 * (attempt + 1))
-
-        if sent:
-            done += 1
-        else:
-            skipped += 1
-            await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এর CSV পাঠানো যায়নি (৩ বার চেষ্টার পরেও)।")
-
-        # auto-continue to next topic regardless of outcome — never stop
+            # auto-continue to next topic regardless of outcome — never stop
+    finally:
+        await shared_client.disconnect()
 
     if status_id:
         await edit_msg(chat_id, status_id,
