@@ -2255,6 +2255,23 @@ from pdf_handler import MCQ_PROCESSING_QUEUE_LOCK as _MCQ_PROCESSING_QUEUE_LOCK
 # while unrelated commands (menu, settings, admin, etc.) are completely
 # unaffected and continue running in parallel.
 
+MIN_MCQ = 10
+MAX_MCQ = 20
+
+def _dedupe_mcqs(mcqs: list) -> list:
+    """Remove duplicate MCQs (same question text) so retry-merges don't inflate count with repeats."""
+    seen = set()
+    out = []
+    for m in (mcqs or []):
+        q = (m.get('question') or m.get('q') or '').strip().lower()
+        key = ''.join(q.split())
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        out.append(m)
+    return out
+
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     Smart wrapper: Groq first (primary), then Gemini (internal key rotation via pdf_handler).
@@ -2262,40 +2279,48 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     Missing API keys are skipped silently. Never raises.
     Queued: only one MCQ-generation job runs at a time across the whole bot.
     Always generates fresh — no same-image cache reuse.
+    AtlasBot-style: single generation call, retry only if under MIN_MCQ
+    (max 2 extra attempts) — no mandatory per-page verify/repair call.
     """
     async with _MCQ_PROCESSING_QUEUE_LOCK:
         out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
         out = _cap_mcq_options(out, 4)
         out = _validate_mcq_structure(out)
+        out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
+
         if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
-            _rng_max = mcq_count[1]
+            _rng_min, _rng_max = mcq_count[0], mcq_count[1]
         elif isinstance(mcq_count, (int, float)) and mcq_count:
-            _rng_max = int(mcq_count)
+            _rng_min = _rng_max = int(mcq_count)
         else:
-            _rng_max = None
+            _rng_min, _rng_max = MIN_MCQ, MAX_MCQ
+
+        # AtlasBot-style count-enforcement retry loop — up to 2 extra attempts
+        # if the page came back thin, instead of a mandatory verify call.
+        attempts = 0
+        while len(out) < _rng_min and attempts < 2:
+            attempts += 1
+            logger.info(f"[MCQGen] page {page_num}: only {len(out)} MCQs (attempt {attempts}) — retrying for more")
+            retry_out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
+            retry_out = _cap_mcq_options(retry_out, 4)
+            retry_out = _validate_mcq_structure(retry_out)
+            retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
+            if len(retry_out) > len(out):
+                out = retry_out
+
         if _rng_max and len(out) > _rng_max:
             out = out[:_rng_max]
-        # Repair (fixes thin explanations on existing MCQs) and Verify (finds
-        # MCQs call-1 missed) touch disjoint data — run concurrently instead of
-        # sequentially to cut per-page latency roughly in half. Verify appends
-        # new items to `out`, so run it first into a temp var and merge after.
-        repair_task = _spawn_task(_repair_thin_explanations(list(out), img, topic))
-        verify_task = _spawn_task(_verify_and_fix_page(list(out), img, topic, page_num, mcq_count))
-        repaired, verified = await asyncio.gather(repair_task, verify_task)
-        # verified = original out + any newly-found MCQs (appended at the end).
-        # Rebuild: take repaired explanations for the original items, then append
-        # whatever new items verify found.
-        n_orig = len(out)
-        merged = repaired[:n_orig] if len(repaired) >= n_orig else repaired
-        merged = merged + verified[n_orig:]
-        if _rng_max and len(merged) > _rng_max:
-            merged = merged[:_rng_max]
+
+        # chok/bangla are special coverage-audit modes — keep their dedicated
+        # verify/enforcement passes since they check literal box/line coverage,
+        # not just count. Normal mode skips all extra calls (AtlasBot parity).
         if _CHOK_MODE.get():
-            merged = await _chok_final_cv_enforcement(merged, img, topic, page_num)
+            out = await _chok_final_cv_enforcement(out, img, topic, page_num)
         if _BANGLA_MODE.get():
-            merged = await _bangla_verify_and_enforce(merged, img, topic, page_num)
-        merged = _validate_mcq_structure(merged)
-        return merged
+            out = await _bangla_verify_and_enforce(out, img, topic, page_num)
+
+        out = _validate_mcq_structure(out)
+        return out
 
 
 async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=None) -> list:
