@@ -1355,6 +1355,9 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
                     logger.warning(f"[AI-ROT] {model} HTTP 429 (TPM/per-request-too-large, NOT genuine quota exhaustion): {body_preview}")
                 else:
                     logger.warning(f"[AI-ROT] {model} HTTP {r.status_code}: {body_preview}")
+                org_match = re.search(r"org_[A-Za-z0-9]+", body_preview)
+                if org_match:
+                    _key_org_map[key] = org_match.group(0)
                 return "", r.status_code
             j = r.json()
             return j.get("choices", [{}])[0].get("message", {}).get("content", "") or "", r.status_code
@@ -1364,6 +1367,14 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
 
 _key_exhausted_day: Dict[str, str] = {}   # key -> 'YYYY-MM-DD' (BD) it was marked exhausted
 _key_exhausted_flag: Dict[str, bool] = {}  # key -> True while exhausted-today
+_key_org_map: Dict[str, str] = {}  # key -> Groq org_id, learned from 429 response bodies.
+                                     # Groq's TPD (daily) quota is enforced PER ORGANIZATION,
+                                     # not per key -- if two of our "12 keys" are both under
+                                     # the same free-tier org, exhausting one's daily budget
+                                     # exhausts both, but a plain key-string check can't know
+                                     # that. This lets mark_rate_limited() also flag any other
+                                     # already-seen key sharing the same org, instead of
+                                     # wastefully re-trying it next call for an identical 429.
 
 def _is_groq_key_exhausted_today(key: str) -> bool:
     """Daily (BD-day) quota-exhaustion memory: once a key hits 429, it's
@@ -1428,6 +1439,12 @@ class GroqKeyRotator:
     def mark_rate_limited(self, key: str):
         self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
         _mark_groq_key_exhausted_today(key)
+        org = _key_org_map.get(key)
+        if org:
+            for other_key, other_org in _key_org_map.items():
+                if other_org == org and other_key != key:
+                    self._cooldown_until[other_key] = time.time() + self.COOLDOWN_SECONDS
+                    _mark_groq_key_exhausted_today(other_key)
 
     def mark_healthy(self, key: str):
         self._cooldown_until.pop(key, None)
