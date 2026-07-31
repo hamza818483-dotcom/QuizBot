@@ -7802,11 +7802,11 @@ async def pdf_generate_all_pages(
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
     set_active_job(chat_id, f"PDF MCQ generation ({file_name}, parallel)")
 
-    # Concurrency cap: several pages generated at once instead of strictly
-    # sequential — cuts wall-clock time roughly by this factor while staying
-    # safe against provider rate limits (each page already does its own
-    # internal key rotation across providers).
-    _PDF_PARALLEL_PAGES = 4
+    # Sequential: one page fully completes before the next starts. Multiple
+    # pages in parallel meant N pages hitting Groq's shared 8000 TPM pool at
+    # once, increasing 429/413 collisions and retries -- net slower and less
+    # reliable than doing pages one at a time.
+    _PDF_PARALLEL_PAGES = 1
     sem = asyncio.Semaphore(_PDF_PARALLEL_PAGES)
     lock = asyncio.Lock()
     total_mcq_box = {"n": 0}
