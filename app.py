@@ -3581,7 +3581,7 @@ async def handle_livetime(msg: dict):
 # ============================================================
 # FEATURE: /poll — Poll Extract (see poll_extract.py)
 # ============================================================
-from poll_extract import handle_poll_extract, handle_ok_command
+from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range
 
 
 # ============================================================
@@ -13711,6 +13711,16 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         _spawn_command_task(uid, handle_poll_extract(msg))
+
+    elif text.startswith("/ok") and re.search(r"/ok\s+(\d+)\s*-\s*(\d+)", text) and "t.me/" in text:
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        _m = re.search(r"/ok\s+(\d+)\s*-\s*(\d+)", text)
+        _start_n, _end_n = int(_m.group(1)), int(_m.group(2))
+        _lines = [l.strip() for l in text.splitlines() if "t.me/" in l]
+        _group_ref = _lines[0] if _lines else ""
+        _spawn_command_task(uid, handle_ok_topic_range(msg, _group_ref, _start_n, _end_n))
 
     elif text.startswith("/ok") and "\n" in text and "t.me/" in text:
         if not is_auth:
