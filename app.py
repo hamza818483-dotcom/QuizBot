@@ -652,7 +652,7 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             # Measured from the compacted static QBM_EXTRACT_PROMPT_DEFAULT
             # (~8k chars / 3.5) + margin. Only accurate for that fixed prompt.
             PROMPT_TOKENS = 2400
-        SAFETY_MARGIN = 1000  # cushion for output/estimate drift (observed 413s ran ~700-900 tokens over the old 500 margin)
+        SAFETY_MARGIN = 3000  # was 1000 — that left requests targeting ~7000-7900/8000, so ANY leftover usage from a prior call on the same key within the same 60s window (e.g. "Used 4277") guaranteed a 429 collision. Bigger margin -> requests target ~4500-5000, leaving real headroom.
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
