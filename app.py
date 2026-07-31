@@ -3548,7 +3548,7 @@ async def handle_livetime(msg: dict):
 # ============================================================
 # FEATURE: /poll — Poll Extract (see poll_extract.py)
 # ============================================================
-from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range, handle_ok_single_topic
+from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range, handle_ok_single_topic, handle_ok_all_topics
 
 
 # ============================================================
@@ -13695,8 +13695,14 @@ async def handle_message(msg: dict):
             return
         _ok_links = [l.strip() for l in text.splitlines() if "t.me/" in l]
         if len(_ok_links) == 1:
-            # Single topic link → per-topic CSV DM mode
-            _spawn_command_task(uid, handle_ok_single_topic(msg, _ok_links[0]))
+            _single_ref = _ok_links[0]
+            # Bare group link (no /<message_id> or /<topic_id> suffix) →
+            # scan ALL topics, auto-continue, retry, DM each CSV.
+            if re.search(r"t\.me/(c/\d+|\+[\w-]+|[A-Za-z0-9_]+)/?\s*$", _single_ref):
+                _spawn_command_task(uid, handle_ok_all_topics(msg, _single_ref))
+            else:
+                # Single topic link → per-topic CSV DM mode
+                _spawn_command_task(uid, handle_ok_single_topic(msg, _single_ref))
         else:
             # Two links (range) → old batch-scan summary mode
             _spawn_command_task(uid, handle_ok_command(msg))
