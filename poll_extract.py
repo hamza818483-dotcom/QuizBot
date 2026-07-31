@@ -617,6 +617,51 @@ def build_topic_link(channel, topic_id: int) -> str:
     return f"https://t.me/c/{ch_str}/{topic_id}"
 
 
+async def resolve_group_ref(group_ref: str):
+    """
+    Group link কে Telethon channel entity তে resolve করে। সাপোর্ট করে:
+    - t.me/username (public)
+    - t.me/c/123456 (private, numeric id)
+    - t.me/+HASH বা t.me/joinchat/HASH (private invite link — bot/session
+      account কে আগে থেকে ওই গ্রুপে join থাকতে হবে; শুধু invite hash দিয়ে
+      না-জয়েন-করা গ্রুপ resolve করা যায় না)
+    Returns entity (channel/chat object) বা None।
+    """
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    from telethon.tl.functions.messages import CheckChatInviteRequest
+
+    group_ref = group_ref.strip()
+
+    # Private invite link: t.me/+HASH or t.me/joinchat/HASH
+    m_invite = re.search(r"t\.me/(?:\+|joinchat/)([A-Za-z0-9_-]+)", group_ref)
+    if m_invite:
+        invite_hash = m_invite.group(1)
+        client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
+        await client.connect()
+        try:
+            result = await client(CheckChatInviteRequest(invite_hash))
+            # ChatInviteAlready (already a member) has .chat; ChatInvite
+            # (not yet a member) has no direct entity — session account
+            # must already be in the group for /ok to scan its history.
+            chat = getattr(result, "chat", None)
+            if chat is not None:
+                return chat
+            return None
+        except Exception as e:
+            logger.error(f"[resolve_group_ref] invite check failed: {e}")
+            return None
+        finally:
+            await client.disconnect()
+
+    # Public username or private numeric id
+    m = re.search(r"(?:t\.me/c/|t\.me/)([A-Za-z0-9_]+|\d+)", group_ref)
+    if not m:
+        return None
+    raw = m.group(1)
+    return int(f"-100{raw}") if raw.isdigit() else raw
+
+
 # ── /ok <range> command (per-topic CSV → DM) ─────────────────
 async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: int):
     """
@@ -635,12 +680,14 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
         await send_msg(chat_id, "❌ SESSION_STRING set নেই। HF Space secrets এ add করো।")
         return
 
-    m = re.search(r"(?:t\.me/c/|t\.me/)([A-Za-z0-9_]+|\d+)", group_ref)
-    if not m:
-        await send_msg(chat_id, "❌ Group link ঠিক নাই।")
+    channel = await resolve_group_ref(group_ref)
+    if channel is None:
+        await send_msg(chat_id,
+            "❌ Group link resolve করা যায়নি।\n\n"
+            "📌 Private invite link (t.me/+...) হলে session account টা "
+            "আগে থেকেই ওই গ্রুপে join করা থাকতে হবে — না থাকলে join "
+            "করিয়ে আবার try করো।")
         return
-    raw = m.group(1)
-    channel = int(f"-100{raw}") if raw.isdigit() else raw
 
     status = await send_msg(chat_id, "⏳ Topics list করছি (group এর)...")
     status_id = status.get("result", {}).get("message_id")
