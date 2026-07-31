@@ -55,21 +55,28 @@ async def _ensure_special_table():
             "fl_action TEXT DEFAULT 'delete', " # 'delete' | 'warn' | 'ban'
             "updated_at INTEGER)"
         )
+        try:
+            existing_cols = {r["name"] for r in await d1_select("PRAGMA table_info(special_groups)")}
+        except Exception:
+            existing_cols = set()
         for stmt in (
-            "ALTER TABLE special_groups ADD COLUMN fl_enabled INTEGER DEFAULT 0",
-            "ALTER TABLE special_groups ADD COLUMN fl_action TEXT DEFAULT 'delete'",
-            "ALTER TABLE special_groups ADD COLUMN delete_enabled INTEGER DEFAULT 0",
-            "ALTER TABLE special_groups ADD COLUMN delete_words TEXT DEFAULT '[]'",
-            "ALTER TABLE special_groups ADD COLUMN warn_enabled INTEGER DEFAULT 0",
-            "ALTER TABLE special_groups ADD COLUMN warn_words TEXT DEFAULT '[]'",
-            "ALTER TABLE special_groups ADD COLUMN ban_enabled INTEGER DEFAULT 0",
-            "ALTER TABLE special_groups ADD COLUMN ban_words TEXT DEFAULT '[]'",
-            "ALTER TABLE special_groups ADD COLUMN group_name TEXT DEFAULT ''",
+            ("fl_enabled", "ALTER TABLE special_groups ADD COLUMN fl_enabled INTEGER DEFAULT 0"),
+            ("fl_action", "ALTER TABLE special_groups ADD COLUMN fl_action TEXT DEFAULT 'delete'"),
+            ("delete_enabled", "ALTER TABLE special_groups ADD COLUMN delete_enabled INTEGER DEFAULT 0"),
+            ("delete_words", "ALTER TABLE special_groups ADD COLUMN delete_words TEXT DEFAULT '[]'"),
+            ("warn_enabled", "ALTER TABLE special_groups ADD COLUMN warn_enabled INTEGER DEFAULT 0"),
+            ("warn_words", "ALTER TABLE special_groups ADD COLUMN warn_words TEXT DEFAULT '[]'"),
+            ("ban_enabled", "ALTER TABLE special_groups ADD COLUMN ban_enabled INTEGER DEFAULT 0"),
+            ("ban_words", "ALTER TABLE special_groups ADD COLUMN ban_words TEXT DEFAULT '[]'"),
+            ("group_name", "ALTER TABLE special_groups ADD COLUMN group_name TEXT DEFAULT ''"),
         ):
+            col_name, ddl = stmt
+            if col_name in existing_cols:
+                continue
             try:
-                await d1_run(stmt)
+                await d1_run(ddl)
             except Exception:
-                pass  # column already exists
+                pass  # column already exists (race with another instance)
         _SPECIAL_TABLE_ENSURED = True
     except Exception as e:
         logger.warning(f"[Special] ensure table warn: {e}")
