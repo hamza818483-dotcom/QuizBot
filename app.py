@@ -2255,70 +2255,14 @@ from pdf_handler import MCQ_PROCESSING_QUEUE_LOCK as _MCQ_PROCESSING_QUEUE_LOCK
 # while unrelated commands (menu, settings, admin, etc.) are completely
 # unaffected and continue running in parallel.
 
-_MCQ_PAGE_CACHE_TABLE_READY = False
-
-async def _ensure_mcq_page_cache_table():
-    global _MCQ_PAGE_CACHE_TABLE_READY
-    if _MCQ_PAGE_CACHE_TABLE_READY:
-        return
-    from core import d1_run
-    try:
-        await d1_run(
-            "CREATE TABLE IF NOT EXISTS mcq_page_cache ("
-            "page_hash TEXT PRIMARY KEY, mcqs_json TEXT, created_at INTEGER)"
-        )
-    except Exception:
-        pass
-    _MCQ_PAGE_CACHE_TABLE_READY = True
-
-def _mcq_page_cache_key(img, topic, page_num, mcq_count) -> str:
-    """Content-addressed by the actual image bytes + mode + requested count —
-    same page image reprocessed under the SAME settings is genuinely the same
-    request, so its result can be safely reused instead of re-spending API
-    quota. Different mode (chok/bangla/normal) or count intentionally busts
-    the cache since those produce different prompts/output."""
-    buf = BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=90)
-    img_hash = hashlib.sha256(buf.getvalue()).hexdigest()
-    mode = "chok" if _CHOK_MODE.get() else ("bangla" if _BANGLA_MODE.get() else "normal")
-    return f"{img_hash}:{mode}:{mcq_count}"
-
-async def _mcq_page_cache_get(key: str):
-    from core import d1_select
-    await _ensure_mcq_page_cache_table()
-    try:
-        rows = await d1_select("SELECT mcqs_json FROM mcq_page_cache WHERE page_hash=?1", [key])
-        if rows:
-            return json.loads(rows[0]["mcqs_json"])
-    except Exception as e:
-        logger.warning(f"[MCQPageCache] get failed: {e}")
-    return None
-
-async def _mcq_page_cache_put(key: str, mcqs: list):
-    from core import d1_run
-    if not mcqs:
-        return
-    await _ensure_mcq_page_cache_table()
-    try:
-        await d1_run(
-            "INSERT OR REPLACE INTO mcq_page_cache (page_hash, mcqs_json, created_at) VALUES (?1,?2,?3)",
-            [key, json.dumps(mcqs, ensure_ascii=False), int(time.time())]
-        )
-    except Exception as e:
-        logger.warning(f"[MCQPageCache] put failed: {e}")
-
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
     Smart wrapper: Groq first (primary), then Gemini (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
     Missing API keys are skipped silently. Never raises.
     Queued: only one MCQ-generation job runs at a time across the whole bot.
+    Always generates fresh — no same-image cache reuse.
     """
-    cache_key = _mcq_page_cache_key(img, topic, page_num, mcq_count)
-    cached = await _mcq_page_cache_get(cache_key)
-    if cached is not None:
-        logger.info(f"[MCQPageCache] hit for page {page_num} — skipping all API calls, reusing prior result")
-        return cached
     async with _MCQ_PROCESSING_QUEUE_LOCK:
         out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
         out = _cap_mcq_options(out, 4)
@@ -2351,8 +2295,6 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
         if _BANGLA_MODE.get():
             merged = await _bangla_verify_and_enforce(merged, img, topic, page_num)
         merged = _validate_mcq_structure(merged)
-        if merged:
-            await _mcq_page_cache_put(cache_key, merged)
         return merged
 
 
