@@ -13,6 +13,7 @@ import csv
 import json
 import asyncio
 import logging
+import time
 from io import StringIO
 
 logger = logging.getLogger("atlas.poll_extract")
@@ -122,7 +123,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                 continue
 
             if not message.poll:
-                if progress_cb and checked % 20 == 0:
+                if progress_cb:
                     await progress_cb(checked, len(polls))
                 continue
 
@@ -130,7 +131,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
 
             # Quiz poll only (non-quiz poll এ correct answer নেই)
             if not getattr(p, "quiz", False):
-                if progress_cb and checked % 20 == 0:
+                if progress_cb:
                     await progress_cb(checked, len(polls))
                 continue
 
@@ -205,7 +206,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                 "explanation": explanation,
             })
 
-            if progress_cb and checked % 20 == 0:
+            if progress_cb:
                 await progress_cb(checked, len(polls))
 
             # Rate limit এড়াতে ছোট delay
@@ -741,8 +742,16 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
             continue
 
         total_msgs = last_id - first_id + 1
+        _last_edit_ts = [0.0]  # mutable box for closure
 
-        async def _progress(checked, found, _idx=idx, _title=topic_title, _total=total_msgs):
+        async def _progress(checked, found, _idx=idx, _title=topic_title, _total=total_msgs, _ts=_last_edit_ts):
+            # Telegram rate-limits repeated edits on the same message — throttle
+            # to roughly once per second so updates stay as close to real-time
+            # as possible without triggering a flood-wait.
+            now = time.time()
+            if now - _ts[0] < 1.1 and checked < _total:
+                return
+            _ts[0] = now
             if status_id:
                 await edit_msg(chat_id, status_id,
                     f"⏳ Topic {_idx}/{end_n}: {_title}\n"
@@ -830,8 +839,13 @@ async def handle_ok_single_topic(msg: dict, topic_link: str):
         return
 
     total_msgs = last_id - first_id + 1
+    _last_edit_ts = [0.0]
 
     async def _progress(checked, found):
+        now = time.time()
+        if now - _last_edit_ts[0] < 1.1 and checked < total_msgs:
+            return
+        _last_edit_ts[0] = now
         if status_id:
             await edit_msg(chat_id, status_id,
                 f"⏳ Topic {topic_id}\n"
