@@ -3548,7 +3548,7 @@ async def handle_livetime(msg: dict):
 # ============================================================
 # FEATURE: /poll — Poll Extract (see poll_extract.py)
 # ============================================================
-from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range
+from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range, handle_ok_single_topic
 
 
 # ============================================================
@@ -13693,7 +13693,13 @@ async def handle_message(msg: dict):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
             return
-        _spawn_command_task(uid, handle_ok_command(msg))
+        _ok_links = [l.strip() for l in text.splitlines() if "t.me/" in l]
+        if len(_ok_links) == 1:
+            # Single topic link → per-topic CSV DM mode
+            _spawn_command_task(uid, handle_ok_single_topic(msg, _ok_links[0]))
+        else:
+            # Two links (range) → old batch-scan summary mode
+            _spawn_command_task(uid, handle_ok_command(msg))
 
     elif text.startswith("/poll") and "\n" in text and "t.me/" in text:
         if not is_auth:
