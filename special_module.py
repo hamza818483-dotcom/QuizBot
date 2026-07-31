@@ -20,18 +20,28 @@
 # ============================================================
 import json
 import logging
+import asyncio
 
 logger = logging.getLogger("atlas.special")
 
 from core import d1_run, d1_select, tg_post, send_msg, db_get_channels
 
 _SPECIAL_TABLE_ENSURED = False
+_SPECIAL_TABLE_LOCK = asyncio.Lock()
 
 
 async def _ensure_special_table():
     global _SPECIAL_TABLE_ENSURED
     if _SPECIAL_TABLE_ENSURED:
         return
+    async with _SPECIAL_TABLE_LOCK:
+        if _SPECIAL_TABLE_ENSURED:  # re-check after acquiring lock
+            return
+        await _ensure_special_table_inner()
+
+
+async def _ensure_special_table_inner():
+    global _SPECIAL_TABLE_ENSURED
     try:
         await d1_run(
             "CREATE TABLE IF NOT EXISTS special_configs ("
@@ -74,7 +84,7 @@ async def _ensure_special_table():
             if col_name in existing_cols:
                 continue
             try:
-                await d1_run(ddl)
+                await d1_run(ddl, suppress_log=True)
             except Exception:
                 pass  # column already exists (race with another instance)
         _SPECIAL_TABLE_ENSURED = True

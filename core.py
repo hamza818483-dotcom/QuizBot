@@ -198,18 +198,20 @@ async def d1_del(key: str):
     _mem_kv.pop(key, None)  # always clean memory too
 
 
-async def d1_query(sql: str, params: list = None, is_select: bool = True) -> dict:
+async def d1_query(sql: str, params: list = None, is_select: bool = True, suppress_log: bool = False) -> dict:
     try:
         body = {"sql": sql, "params": params or [], "token": D1_TOKEN}
         c = await _get_shared_http_client()
         r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body, timeout=15)
         data = r.json()
         if not data.get("ok"):
-            logger.warning(f"[D1] query error: {data.get('error')}")
+            if not suppress_log:
+                logger.warning(f"[D1] query error: {data.get('error')}")
             return {"ok": False, "error": data.get("error")}
         return data
     except Exception as e:
-        logger.warning(f"[D1] query error: {e}")
+        if not suppress_log:
+            logger.warning(f"[D1] query error: {e}")
         return {"ok": False, "error": str(e)}
 
 async def d1_select(sql: str, params: list = None) -> list:
@@ -238,8 +240,8 @@ async def d1_select(sql: str, params: list = None) -> list:
         logger.warning(f"[D1] Supabase fallback failed: {e}")
     return []
 
-async def d1_run(sql: str, params: list = None, return_id: bool = False):
-    r = await d1_query(sql, params, False)
+async def d1_run(sql: str, params: list = None, return_id: bool = False, suppress_log: bool = False):
+    r = await d1_query(sql, params, False, suppress_log=suppress_log)
     ok = r.get("ok")
     last_id = None
     if ok:
