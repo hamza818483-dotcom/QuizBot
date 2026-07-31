@@ -730,7 +730,10 @@ async def get_topic_msg_range(channel, topic_id: int):
 def build_topic_link(channel, topic_id: int) -> str:
     if isinstance(channel, str):
         return f"https://t.me/{channel}/{topic_id}"
-    ch_str = str(channel).replace("-100", "")
+    # channel may be a Telethon entity object (Chat/Channel) — extract
+    # its numeric id, not str(obj) which dumps the full repr.
+    ch_id = getattr(channel, "id", channel)
+    ch_str = str(ch_id).replace("-100", "")
     return f"https://t.me/c/{ch_str}/{topic_id}"
 
 
