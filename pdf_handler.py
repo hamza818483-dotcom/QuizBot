@@ -22,11 +22,42 @@ MCQ_PROCESSING_QUEUE_LOCK = asyncio.Lock()
 
 import httpx
 
+try:
+    from core import BD_TZ
+except Exception:
+    BD_TZ = None
+
 logger = logging.getLogger("atlas.pdf_handler")
 
 # ============================================================
 # GEMINI KEY ROTATION
 # ============================================================
+_gemini_key_exhausted_day: dict = {}   # key -> 'YYYY-MM-DD' (BD) it was marked exhausted
+_gemini_key_exhausted_flag: dict = {}  # key -> True while exhausted-today
+
+def _is_gemini_key_exhausted_today(key: str) -> bool:
+    """Daily (BD-day) quota-exhaustion memory for Gemini free-tier keys
+    (20 requests/day/model). A 60s cooldown is pointless for a daily quota —
+    the key stays dead until the quota resets, so once it 429s with a
+    quota/RESOURCE_EXHAUSTED error, skip it for the rest of the BD-day
+    instead of re-trying it every call."""
+    from datetime import datetime
+    today = datetime.now(BD_TZ).strftime('%Y-%m-%d') if 'BD_TZ' in globals() else datetime.utcnow().strftime('%Y-%m-%d')
+    if _gemini_key_exhausted_day.get(key) != today:
+        _gemini_key_exhausted_day[key] = today
+        _gemini_key_exhausted_flag[key] = False
+    return _gemini_key_exhausted_flag.get(key, False)
+
+def _mark_gemini_key_exhausted_today(key: str):
+    from datetime import datetime
+    today = datetime.now(BD_TZ).strftime('%Y-%m-%d') if 'BD_TZ' in globals() else datetime.utcnow().strftime('%Y-%m-%d')
+    _gemini_key_exhausted_day[key] = today
+    _gemini_key_exhausted_flag[key] = True
+
+def _mark_gemini_key_healthy_today(key: str):
+    _gemini_key_exhausted_flag[key] = False
+
+
 class GeminiKeyRotator:
     COOLDOWN_SECONDS = 60
 
@@ -50,14 +81,22 @@ class GeminiKeyRotator:
         return key
 
     def ordered_keys(self):
-        """All keys, healthy ones first (skip ones on 429 cooldown)."""
+        """All keys, healthy ones first: not exhausted-today AND not in short
+        cooldown, then short-cooldown keys, then today-exhausted keys last —
+        so a call never wastes its first attempt on a key already known dead
+        for the day (daily quota resets at day boundary, not after 60s)."""
         now = time.time()
-        healthy = [k for k in self.keys if self._cooldown_until.get(k, 0) <= now]
-        cooling = [k for k in self.keys if self._cooldown_until.get(k, 0) > now]
-        return healthy + cooling
+        not_exhausted = [k for k in self.keys if not _is_gemini_key_exhausted_today(k)]
+        exhausted = [k for k in self.keys if _is_gemini_key_exhausted_today(k)]
+        pool = not_exhausted if not_exhausted else self.keys
+        healthy = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
+        cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
+        return healthy + cooling + (exhausted if not_exhausted else [])
 
-    def mark_rate_limited(self, key: str):
+    def mark_rate_limited(self, key: str, daily_exhausted: bool = False):
         self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
+        if daily_exhausted:
+            _mark_gemini_key_exhausted_today(key)
 
     def mark_banned(self, key: str):
         """Permanently skip this key (e.g. 403 CONSUMER_SUSPENDED / invalid key)
@@ -67,6 +106,7 @@ class GeminiKeyRotator:
 
     def mark_healthy(self, key: str):
         self._cooldown_until.pop(key, None)
+        _mark_gemini_key_healthy_today(key)
 
 key_rotator = GeminiKeyRotator()
 
@@ -663,8 +703,16 @@ async def generate_mcq_from_image(
     # with 5-6 keys that's 4-5 minutes of stalling per image before ever
     # reaching the OpenRouter fallback. Cap attempts at 3 keys max, and use a
     # shorter timeout on the 2nd/3rd attempt so a bad/slow key fails fast.
-    max_retries = min(len(key_rotator.keys), 3) if key_rotator.keys else 3
     _ordered = key_rotator.ordered_keys()
+
+    # If every key is already known daily-exhausted (BD-day), skip Gemini
+    # entirely instead of burning 429 round-trips we already know will fail —
+    # go straight to OpenRouter fallback.
+    if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
+        logger.warning(f"[Gemini] All {len(key_rotator.keys)} keys already daily-exhausted for today — skipping straight to OpenRouter fallback")
+        return await _openrouter_fallback(img, prompt, page)
+
+    max_retries = min(len(key_rotator.keys), 3) if key_rotator.keys else 3
 
     for attempt in range(max_retries):
         try:
@@ -697,8 +745,12 @@ async def generate_mcq_from_image(
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
-                logger.warning(f"[Gemini] Attempt {attempt+1} rate-limited (429), cooling down key for {key_rotator.COOLDOWN_SECONDS}s: {e}")
-                key_rotator.mark_rate_limited(key)
+                is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
+                if is_daily:
+                    logger.warning(f"[Gemini] Attempt {attempt+1}: daily quota exhausted — skipping this key for rest of BD-day: {e}")
+                else:
+                    logger.warning(f"[Gemini] Attempt {attempt+1} rate-limited (429), cooling down key for {key_rotator.COOLDOWN_SECONDS}s: {e}")
+                key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
             elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
                 logger.error(f"[Gemini] Attempt {attempt+1}: key permanently banned (suspended/invalid): {e}")
                 key_rotator.mark_banned(key)
@@ -793,8 +845,9 @@ Return ONLY valid JSON array, no markdown, no extra text:
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
-                key_rotator.mark_rate_limited(key)
-                logger.warning(f"[Gemini-Text] Attempt {attempt+1} rate-limited (429), cooling down: {e}")
+                is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
+                key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
+                logger.warning(f"[Gemini-Text] Attempt {attempt+1} rate-limited (429){' [daily quota]' if is_daily else ''}, cooling down: {e}")
             elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
                 logger.error(f"[Gemini-Text] Attempt {attempt+1}: key permanently banned (suspended/invalid): {e}")
                 key_rotator.mark_banned(key)
