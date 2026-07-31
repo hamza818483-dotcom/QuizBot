@@ -2329,6 +2329,16 @@ async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=
             if count_max is not None else ""
         )
         if _CHOK_MODE.get():
+            # Cheap local CV check first (zero API cost) — if Call 1 already
+            # produced at least as many MCQs as there are real detected boxes,
+            # there is (by definition of the box-driven floor) nothing left
+            # for verify to plausibly add. Skipping saves a full Groq/Gemini
+            # round-trip per page in the common case Call 1 already did well,
+            # with no accuracy loss — the final CV-enforcement pass re-checks
+            # this exact same condition anyway, so nothing goes unaudited.
+            _boxes_precheck = await asyncio.to_thread(_detect_chok_boxes, img)
+            if _boxes_precheck and current_n >= len(_boxes_precheck):
+                return mcqs
             ratio_gap_note = _chok_ratio_gap_note(mcqs)
             cv_box_note = await asyncio.to_thread(_chok_box_coverage_note, img, mcqs)
             verify_prompt = (
