@@ -122,7 +122,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                 continue
 
             if not message.poll:
-                if progress_cb and checked % 100 == 0:
+                if progress_cb and checked % 20 == 0:
                     await progress_cb(checked, len(polls))
                 continue
 
@@ -130,7 +130,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
 
             # Quiz poll only (non-quiz poll এ correct answer নেই)
             if not getattr(p, "quiz", False):
-                if progress_cb and checked % 100 == 0:
+                if progress_cb and checked % 20 == 0:
                     await progress_cb(checked, len(polls))
                 continue
 
@@ -205,7 +205,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                 "explanation": explanation,
             })
 
-            if progress_cb and checked % 100 == 0:
+            if progress_cb and checked % 20 == 0:
                 await progress_cb(checked, len(polls))
 
             # Rate limit এড়াতে ছোট delay
@@ -727,7 +727,7 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
 
     for idx, (topic_id, topic_title) in enumerate(selected, start=start_n):
         if status_id:
-            await edit_msg(chat_id, status_id, f"⏳ Topic {idx}: {topic_title} — scan করছি...")
+            await edit_msg(chat_id, status_id, f"⏳ Topic {idx}/{end_n}: {topic_title} — message range বের করছি...")
 
         try:
             first_id, last_id = await get_topic_msg_range(channel, topic_id)
@@ -740,8 +740,17 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
             await send_msg(chat_id, f"😕 Topic '{topic_title}' এ কোনো message নাই।")
             continue
 
+        total_msgs = last_id - first_id + 1
+
+        async def _progress(checked, found, _idx=idx, _title=topic_title, _total=total_msgs):
+            if status_id:
+                await edit_msg(chat_id, status_id,
+                    f"⏳ Topic {_idx}/{end_n}: {_title}\n"
+                    f"📨 চেক: {checked}/{_total} messages\n"
+                    f"📋 Poll পেয়েছি: {found}")
+
         try:
-            polls = await extract_polls_telethon(channel, first_id, last_id, topic_id=topic_id)
+            polls = await extract_polls_telethon(channel, first_id, last_id, progress_cb=_progress, topic_id=topic_id)
         except Exception as e:
             logger.error(f"[ok-range] topic {topic_id} extract error: {e}")
             await send_msg(chat_id, f"⚠️ Topic '{topic_title}' scan এ error: {e}")
@@ -820,15 +829,24 @@ async def handle_ok_single_topic(msg: dict, topic_link: str):
         await send_msg(chat_id, "😕 এই topic এ কোনো message নাই।")
         return
 
+    total_msgs = last_id - first_id + 1
+
+    async def _progress(checked, found):
+        if status_id:
+            await edit_msg(chat_id, status_id,
+                f"⏳ Topic {topic_id}\n"
+                f"📨 চেক: {checked}/{total_msgs} messages\n"
+                f"📋 Poll পেয়েছি: {found}")
+
     try:
-        polls = await extract_polls_telethon(ch, first_id, last_id, topic_id=topic_id)
+        polls = await extract_polls_telethon(ch, first_id, last_id, progress_cb=_progress, topic_id=topic_id)
     except Exception as e:
         logger.error(f"[ok-single] topic {topic_id} extract error: {e}")
         await send_msg(chat_id, f"❌ Error: {e}")
         return
 
     if not polls:
-        await send_msg(chat_id, "😕 এই topic এ কোনো quiz poll পাওয়া যায়নি।")
+        await send_msg(chat_id, f"😕 এই topic এ কোনো quiz poll পাওয়া যায়নি।\n({total_msgs} messages চেক হয়েছে)")
         return
 
     # Try to get the actual topic title via forum topics list (falls back to
