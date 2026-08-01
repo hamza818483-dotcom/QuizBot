@@ -79,13 +79,15 @@ class PollList(list):
     skipped_ids: list = []
 
 
-async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_cb=None, topic_id=None) -> list:
+async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_cb=None, topic_id=None, checkpoint_cb=None) -> list:
     """
     Telethon দিয়ে channel থেকে start_id→end_id range এর
     সব quiz poll extract করে list of dict return করে।
     Batch of 15 poll ekbare guaranteed vote+confirm kore process kore —
     kono poll silently skip hoy na, na parle "MANUALLY VERIFY" mark kore rakhe.
-    progress_cb(checked, found) — optional callback every 100 msgs
+    progress_cb(checked, found, elapsed) — optional callback every poll
+    checkpoint_cb(polls_so_far, is_final) — optional callback every N polls,
+    boro range e crash/timeout hole ওই porjonto CSV পাঠানোর জন্য।
     """
     from telethon import TelegramClient
     from telethon.sessions import StringSession
@@ -157,24 +159,45 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
         import time as _time
         extract_start = _time.monotonic()
         BATCH_SIZE = 15
-        for batch_start in range(0, len(quiz_messages), BATCH_SIZE):
-            batch = quiz_messages[batch_start:batch_start + BATCH_SIZE]
-            for message in batch:
-                entry, resolved = await _process_single_poll(client, channel, message)
-                if resolved:
-                    polls.append(entry)
-                else:
-                    manual_review_ids.append(message.id)
-                    polls.append(entry)  # rakhbo, kintu MANUALLY VERIFY mark shoho
+        CHECKPOINT_EVERY = 300  # ei koyta poll shesh hole ekbar checkpoint CSV pathabe
+        last_checkpoint_count = 0
 
-                if progress_cb:
-                    elapsed = _time.monotonic() - extract_start
-                    await progress_cb(checked, len(polls), elapsed)
-                await asyncio.sleep(0.3)
+        try:
+            for batch_start in range(0, len(quiz_messages), BATCH_SIZE):
+                batch = quiz_messages[batch_start:batch_start + BATCH_SIZE]
+                for message in batch:
+                    entry, resolved = await _process_single_poll(client, channel, message)
+                    if resolved:
+                        polls.append(entry)
+                    else:
+                        manual_review_ids.append(message.id)
+                        polls.append(entry)  # rakhbo, kintu MANUALLY VERIFY mark shoho
 
-            # Batch er por ektu beshi break — rate-limit/timing safety
-            if batch_start + BATCH_SIZE < len(quiz_messages):
-                await asyncio.sleep(2.0)
+                    if progress_cb:
+                        elapsed = _time.monotonic() - extract_start
+                        await progress_cb(checked, len(polls), elapsed)
+                    await asyncio.sleep(0.3)
+
+                    if checkpoint_cb and (len(polls) - last_checkpoint_count) >= CHECKPOINT_EVERY:
+                        last_checkpoint_count = len(polls)
+                        try:
+                            await checkpoint_cb(list(polls), False)
+                        except Exception as cb_err:
+                            logger.warning(f"[poll_extract] checkpoint_cb error: {cb_err}")
+
+                # Batch er por ektu beshi break — rate-limit/timing safety
+                if batch_start + BATCH_SIZE < len(quiz_messages):
+                    await asyncio.sleep(2.0)
+        except Exception as e:
+            # Bipod hole (crash/timeout) — jotukhon collect hoyeche oi porjonto
+            # CSV pathiye dao, pura kaj shesh na hoyeo kichu na kichu hate thake
+            logger.error(f"[poll_extract] batch loop crashed mid-way at {len(polls)} polls: {type(e).__name__}: {e}")
+            if checkpoint_cb and polls:
+                try:
+                    await checkpoint_cb(list(polls), True)
+                except Exception:
+                    pass
+            raise
 
     finally:
         await client.disconnect()
@@ -504,12 +527,30 @@ async def handle_poll_extract(msg: dict):
             parse_mode="HTML"
         )
 
+    # Checkpoint callback — boro range e crash/timeout hole ওই porjonto CSV pathay
+    async def checkpoint(polls_so_far, is_final):
+        if not polls_so_far:
+            return
+        try:
+            interim_csv = build_csv(polls_so_far)
+            interim_name = f"CHECKPOINT_polls_{ch1_str_holder['v']}_{start_id}_{end_id}_upto{len(polls_so_far)}.csv"
+            label = "🛑 বিপদ! এই পর্যন্ত যা পেয়েছি (process থেমে গেছে):" if is_final else "💾 Checkpoint — এখন পর্যন্ত সংগৃহীত:"
+            await send_document(
+                chat_id, interim_csv, interim_name,
+                caption=f"{label}\n📋 Poll: <b>{len(polls_so_far)}</b>\n📌 Range: {start_id} → {end_id}",
+                mime_type="text/csv"
+            )
+        except Exception as e:
+            logger.error(f"[poll_extract] checkpoint send failed: {e}")
+
+    ch1_str_holder = {"v": str(ch1).lstrip("@").replace("-100", "")}
+
     # Extract
     try:
-        polls = await extract_polls_telethon(ch1, start_id, end_id, progress_cb=progress, topic_id=topic_id)
+        polls = await extract_polls_telethon(ch1, start_id, end_id, progress_cb=progress, topic_id=topic_id, checkpoint_cb=checkpoint)
     except Exception as e:
         logger.error(f"[poll_extract] Telethon error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}\n\n(উপরে যদি কোনো checkpoint CSV পাঠানো হয়ে থাকে, ওটা দিয়ে বাকি অংশের কাজ চালিয়ে যেতে পারো — নতুন range দিয়ে আবার /poll চালাও)")
         return
 
     if not polls:
@@ -719,12 +760,14 @@ async def get_forum_topics_ordered(channel, limit=200) -> list:
         await client.disconnect()
 
 
-async def extract_polls_by_topic(client, entity, channel, topic_id: int, progress_cb=None) -> list:
+async def extract_polls_by_topic(client, entity, channel, topic_id: int, progress_cb=None, checkpoint_cb=None) -> list:
     """
     একটা connected+entity-resolved client দিয়ে, Telegram-এর নিজের server-side
     reply_to=topic_id filter ব্যবহার করে সরাসরি ওই topic-এর message গুলো
     scan করে quiz polls বের করে। Batch of 15 kore guaranteed vote+confirm
     kore process kore — kono poll bot na-check kore skip hoy na.
+    checkpoint_cb(polls_so_far, is_final) — boro topic e crash hole ওই
+    porjonto CSV পাঠানোর জন্য।
     """
     polls = PollList()
     manual_review_ids = []
@@ -740,20 +783,39 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
         quiz_messages.append(message)
 
     BATCH_SIZE = 15
-    for batch_start in range(0, len(quiz_messages), BATCH_SIZE):
-        batch = quiz_messages[batch_start:batch_start + BATCH_SIZE]
-        for message in batch:
-            entry, resolved = await _process_single_poll(client, channel, message)
-            polls.append(entry)
-            if not resolved:
-                manual_review_ids.append(message.id)
+    CHECKPOINT_EVERY = 300
+    last_checkpoint_count = 0
 
-            if progress_cb:
-                await progress_cb(checked, len(polls))
-            await asyncio.sleep(0.3)
+    try:
+        for batch_start in range(0, len(quiz_messages), BATCH_SIZE):
+            batch = quiz_messages[batch_start:batch_start + BATCH_SIZE]
+            for message in batch:
+                entry, resolved = await _process_single_poll(client, channel, message)
+                polls.append(entry)
+                if not resolved:
+                    manual_review_ids.append(message.id)
 
-        if batch_start + BATCH_SIZE < len(quiz_messages):
-            await asyncio.sleep(2.0)
+                if progress_cb:
+                    await progress_cb(checked, len(polls))
+                await asyncio.sleep(0.3)
+
+                if checkpoint_cb and (len(polls) - last_checkpoint_count) >= CHECKPOINT_EVERY:
+                    last_checkpoint_count = len(polls)
+                    try:
+                        await checkpoint_cb(list(polls), False)
+                    except Exception as cb_err:
+                        logger.warning(f"[poll_extract] checkpoint_cb error: {cb_err}")
+
+            if batch_start + BATCH_SIZE < len(quiz_messages):
+                await asyncio.sleep(2.0)
+    except Exception as e:
+        logger.error(f"[poll_extract] topic batch loop crashed mid-way at {len(polls)} polls: {type(e).__name__}: {e}")
+        if checkpoint_cb and polls:
+            try:
+                await checkpoint_cb(list(polls), True)
+            except Exception:
+                pass
+        raise
 
     polls.skipped_ids = manual_review_ids
     return polls
@@ -1033,11 +1095,25 @@ async def handle_ok_single_topic(msg: dict, topic_link: str):
                 f"📨 চেক: {checked}/{total_msgs} messages\n"
                 f"📋 Poll পেয়েছি: {found}")
 
+    async def _checkpoint(polls_so_far, is_final):
+        if not polls_so_far:
+            return
+        try:
+            interim_csv = build_csv(polls_so_far)
+            label = "🛑 বিপদ! এই পর্যন্ত যা পেয়েছি:" if is_final else "💾 Checkpoint:"
+            await send_document(
+                chat_id, interim_csv, f"CHECKPOINT_topic{topic_id}_upto{len(polls_so_far)}.csv",
+                caption=f"{label}\n📋 Poll: <b>{len(polls_so_far)}</b>\nTopic: {topic_id}",
+                mime_type="text/csv"
+            )
+        except Exception as e:
+            logger.error(f"[ok-single] checkpoint send failed: {e}")
+
     try:
-        polls = await extract_polls_telethon(ch, first_id, last_id, progress_cb=_progress, topic_id=topic_id)
+        polls = await extract_polls_telethon(ch, first_id, last_id, progress_cb=_progress, topic_id=topic_id, checkpoint_cb=_checkpoint)
     except Exception as e:
         logger.error(f"[ok-single] topic {topic_id} extract error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        await send_msg(chat_id, f"❌ Error: {e}\n\n(উপরে checkpoint CSV থাকলে ওটা দিয়ে কাজ চালাও)")
         return
 
     if not polls:
