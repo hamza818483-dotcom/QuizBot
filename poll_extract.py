@@ -170,13 +170,15 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
         import time as _time
         extract_start = _time.monotonic()
         BATCH_SIZE = 15
-        MEMORY_LIMIT_MB = 400  # ei level cross korle checkpoint CSV pathabe
+        MEMORY_LIMIT_MB = 10000  # 16GB RAM er beshirbhag, ei level cross korle checkpoint CSV pathabe (safety net)
         checkpoint_sent_for_level = 0  # kotobar checkpoint hoyeche track kore, duplicate na hoy
 
+        _last_msg_id_seen = None
         try:
             for batch_start in range(0, len(quiz_messages), BATCH_SIZE):
                 batch = quiz_messages[batch_start:batch_start + BATCH_SIZE]
                 for message in batch:
+                    _last_msg_id_seen = message.id
                     entry, resolved = await _process_single_poll(client, channel, message)
                     if resolved:
                         polls.append(entry)
@@ -211,6 +213,10 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                     await checkpoint_cb(list(polls), True)
                 except Exception:
                     pass
+            # Last successfully-attempted message id attach kore rakhi, jate
+            # caller auto-resume korte pare oi jaygay theke
+            e.last_message_id = _last_msg_id_seen
+            e.partial_polls = list(polls)
             raise
 
     finally:
@@ -559,13 +565,49 @@ async def handle_poll_extract(msg: dict):
 
     ch1_str_holder = {"v": str(ch1).lstrip("@").replace("-100", "")}
 
-    # Extract
-    try:
-        polls = await extract_polls_telethon(ch1, start_id, end_id, progress_cb=progress, topic_id=topic_id, checkpoint_cb=checkpoint)
-    except Exception as e:
-        logger.error(f"[poll_extract] Telethon error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}\n\n(উপরে যদি কোনো checkpoint CSV পাঠানো হয়ে থাকে, ওটা দিয়ে বাকি অংশের কাজ চালিয়ে যেতে পারো — নতুন range দিয়ে আবার /poll চালাও)")
-        return
+    # Extract — crash hole automatically bakita continue kore (max 5 bar resume try)
+    all_polls = PollList()
+    all_polls.skipped_ids = []
+    resume_start = start_id
+    resume_attempts = 0
+    MAX_RESUME_ATTEMPTS = 5
+
+    while True:
+        try:
+            batch_polls = await extract_polls_telethon(ch1, resume_start, end_id, progress_cb=progress, topic_id=topic_id, checkpoint_cb=checkpoint)
+            all_polls.extend(batch_polls)
+            all_polls.skipped_ids.extend(getattr(batch_polls, "skipped_ids", []))
+            break  # shob shesh, r kono crash hoyni
+        except Exception as e:
+            partial = getattr(e, "partial_polls", None)
+            last_id = getattr(e, "last_message_id", None)
+            if partial:
+                all_polls.extend(partial)
+
+            resume_attempts += 1
+            if last_id and resume_attempts <= MAX_RESUME_ATTEMPTS:
+                logger.warning(f"[poll_extract] crash hoyeche, msg {last_id} theke auto-resume korchi (attempt {resume_attempts})")
+                await send_msg(chat_id, f"⚠️ সমস্যা হয়েছিল, কিন্তু auto-resume করছি msg {last_id} থেকে... (attempt {resume_attempts}/{MAX_RESUME_ATTEMPTS})")
+                resume_start = last_id + 1
+                await asyncio.sleep(3.0)
+                continue
+            else:
+                logger.error(f"[poll_extract] Telethon error, resume o fail: {e}")
+                if all_polls:
+                    csv_bytes = build_csv(all_polls)
+                    ch_str = str(ch1).lstrip("@").replace("-100", "")
+                    filename = f"PARTIAL_polls_{ch_str}_{start_id}_{end_id}.csv"
+                    await send_document(
+                        chat_id, csv_bytes, filename,
+                        caption=f"⚠️ Auto-resume {resume_attempts} bar try kore o pura shesh hoyni।\n📋 Ei porjonto pawa poll: <b>{len(all_polls)}</b>\n\nবাকি অংশের জন্য নতুন range দিয়ে আবার /poll চালাও (শুরু: msg {resume_start})",
+                        parse_mode="HTML",
+                        mime_type="text/csv"
+                    )
+                else:
+                    await send_msg(chat_id, f"❌ Error: {e}")
+                return
+
+    polls = all_polls
 
     if not polls:
         await send_msg(chat_id,
@@ -797,7 +839,7 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
         quiz_messages.append(message)
 
     BATCH_SIZE = 15
-    MEMORY_LIMIT_MB = 400
+    MEMORY_LIMIT_MB = 10000  # 16GB RAM er beshirbhag, ei level cross korle checkpoint CSV pathabe (safety net)
     checkpoint_sent_for_level = 0
 
     try:
