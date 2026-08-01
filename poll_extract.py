@@ -113,34 +113,48 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
         # ── Step 1: শুধু quiz poll message গুলো collect করো (fast pass, no vote) ──
         quiz_messages = []
         checked = 0
-        async for message in client.iter_messages(
-            entity,
-            min_id=start_id - 1,
-            max_id=end_id + 1,
-            limit=end_id - start_id + 1,
-            reverse=True,
-        ):
-            checked += 1
+        collect_attempts = 0
+        while True:
+            try:
+                async for message in client.iter_messages(
+                    entity,
+                    min_id=start_id - 1,
+                    max_id=end_id + 1,
+                    limit=end_id - start_id + 1,
+                    reverse=True,
+                ):
+                    checked += 1
 
-            if topic_id and message.reply_to:
-                msg_topic = getattr(message.reply_to, "reply_to_top_id", None) or getattr(message.reply_to, "reply_to_msg_id", None)
-                if msg_topic != topic_id:
-                    if progress_cb:
-                        await progress_cb(checked, len(polls))
-                    continue
-            elif topic_id and not message.reply_to:
-                if progress_cb:
-                    await progress_cb(checked, len(polls))
-                continue
+                    if topic_id and message.reply_to:
+                        msg_topic = getattr(message.reply_to, "reply_to_top_id", None) or getattr(message.reply_to, "reply_to_msg_id", None)
+                        if msg_topic != topic_id:
+                            if progress_cb:
+                                await progress_cb(checked, len(polls))
+                            continue
+                    elif topic_id and not message.reply_to:
+                        if progress_cb:
+                            await progress_cb(checked, len(polls))
+                        continue
 
-            if not message.poll or not getattr(message.poll.poll, "quiz", False):
-                if progress_cb:
-                    await progress_cb(checked, len(polls))
-                continue
+                    if not message.poll or not getattr(message.poll.poll, "quiz", False):
+                        if progress_cb:
+                            await progress_cb(checked, len(polls))
+                        continue
 
-            quiz_messages.append(message)
+                    quiz_messages.append(message)
+                break  # scan সম্পূর্ণ হলে loop থেকে বের হও
+            except Exception as e:
+                collect_attempts += 1
+                logger.warning(f"[poll_extract] message scan error (attempt {collect_attempts}): {type(e).__name__}: {e} — retrying from scratch")
+                quiz_messages = []
+                checked = 0
+                await asyncio.sleep(2.0 * collect_attempts)
+                if collect_attempts >= 10:
+                    raise Exception(f"Message scan {collect_attempts} bar fail holo, network/API issue check koro: {e}")
 
         # ── Step 2: batch of 15 kore guaranteed vote+confirm process ──
+        import time as _time
+        extract_start = _time.monotonic()
         BATCH_SIZE = 15
         for batch_start in range(0, len(quiz_messages), BATCH_SIZE):
             batch = quiz_messages[batch_start:batch_start + BATCH_SIZE]
@@ -153,7 +167,8 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                     polls.append(entry)  # rakhbo, kintu MANUALLY VERIFY mark shoho
 
                 if progress_cb:
-                    await progress_cb(checked, len(polls))
+                    elapsed = _time.monotonic() - extract_start
+                    await progress_cb(checked, len(polls), elapsed)
                 await asyncio.sleep(0.15)
 
             # Batch er por ektu beshi break — rate-limit/timing safety
@@ -467,12 +482,23 @@ async def handle_poll_extract(msg: dict):
     status_id = r.get("result", {}).get("message_id")
 
     # Progress callback
-    async def progress(checked, found):
-        if status_id:
-            await edit_msg(chat_id, status_id,
-                f"⏳ চেক: {checked}/{total} — Poll পেয়েছি: {found}",
-                parse_mode="HTML"
-            )
+    import time as _time
+    _last_edit = {"t": 0.0}
+
+    async def progress(checked, found, elapsed=None):
+        if not status_id:
+            return
+        now = _time.monotonic()
+        # Throttle edits to once every ~2s to avoid Telegram rate-limit,
+        # but always allow first/last update
+        if now - _last_edit["t"] < 2.0 and checked < total:
+            return
+        _last_edit["t"] = now
+        time_str = f" — সময়: {int(elapsed)}s" if elapsed is not None else ""
+        await edit_msg(chat_id, status_id,
+            f"⏳ চেক: {checked}/{total} — Poll পেয়েছি: {found}{time_str}",
+            parse_mode="HTML"
+        )
 
     # Extract
     try:
@@ -1259,7 +1285,7 @@ async def handle_ok_command(msg: dict):
     r = await send_msg(chat_id, f"⏳ Scan করছি: {start_id} → {end_id} ({total} messages)...")
     status_id = r.get("result", {}).get("message_id")
 
-    async def progress(checked, found):
+    async def progress(checked, found, elapsed=None):
         if status_id:
             await edit_msg(chat_id, status_id, f"⏳ চেক: {checked}/{total} — Batch পেয়েছি: {found}")
 
