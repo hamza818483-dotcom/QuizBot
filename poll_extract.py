@@ -359,6 +359,7 @@ async def _process_single_poll(client, channel, message):
         # Strategy 2: message refetch kore poll.results check
         wait = min(1.0 + attempt * 0.5, max_wait)
         await asyncio.sleep(wait)
+        await _rate_limiter.wait_before_request()
         try:
             fetched = await client.get_messages(channel, ids=message.id)
             if not fetched:
@@ -378,6 +379,7 @@ async def _process_single_poll(client, channel, message):
         # Strategy 3 (every 5th attempt): entity/session re-resolve — kokhono
         # kokhono connection-level caching issue er jonno result na ashte pare
         if attempt % 5 == 0:
+            await _rate_limiter.wait_before_request()
             try:
                 fresh_entity = await client.get_entity(channel)
                 fetched = await client.get_messages(fresh_entity, ids=message.id)
