@@ -15,6 +15,7 @@ import asyncio
 import logging
 import time
 from io import StringIO
+from telethon.errors import FloodWaitError
 
 logger = logging.getLogger("atlas.poll_extract")
 
@@ -169,11 +170,11 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                 if progress_cb:
                     elapsed = _time.monotonic() - extract_start
                     await progress_cb(checked, len(polls), elapsed)
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.3)
 
             # Batch er por ektu beshi break — rate-limit/timing safety
             if batch_start + BATCH_SIZE < len(quiz_messages):
-                await asyncio.sleep(1.2)
+                await asyncio.sleep(2.0)
 
     finally:
         await client.disconnect()
@@ -235,6 +236,9 @@ async def _process_single_poll(client, channel, message):
             vote_poll_results = _extract_poll_results_from_updates(vote_res)
             if vote_poll_results:
                 correct_idx, explanation, found = _parse_results(vote_poll_results)
+        except FloodWaitError as fw:
+            logger.warning(f"[poll_extract] msg {message.id}: FloodWait {fw.seconds}s — Telegram er kotha moto wait kortesi")
+            await asyncio.sleep(fw.seconds + 1)
         except Exception:
             pass  # Already voted — ok, fallback to refetch below
 
@@ -746,10 +750,10 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
 
             if progress_cb:
                 await progress_cb(checked, len(polls))
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.3)
 
         if batch_start + BATCH_SIZE < len(quiz_messages):
-            await asyncio.sleep(1.2)
+            await asyncio.sleep(2.0)
 
     polls.skipped_ids = manual_review_ids
     return polls
