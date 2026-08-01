@@ -86,6 +86,27 @@ def _format_elapsed(seconds: float) -> str:
         return f"{s}s"
 
 
+class _AdaptiveRateLimiter:
+    """FloodWait hit hole global vabe shob vote-delay barano hoy — jate
+    barbar FloodWait/escalating penalty na hoy. Process-wide shared state,
+    kokhono nijer theke kome na (fresh restart chara)।"""
+    def __init__(self):
+        self.current_delay = 0.6  # base delay, seconds (conservative default)
+        self.flood_hits = 0
+
+    def register_flood_wait(self, wait_seconds: float):
+        self.flood_hits += 1
+        # Prottekbar flood hit hole base delay dOuble kore dei (max 10s cap)
+        self.current_delay = min(self.current_delay * 2.5, 10.0)
+        logger.warning(f"[poll_extract] FloodWait #{self.flood_hits} — delay {self.current_delay:.1f}s e barano holo")
+
+    def get_delay(self) -> float:
+        return self.current_delay
+
+
+_rate_limiter = _AdaptiveRateLimiter()
+
+
 def _get_process_memory_mb():
     """Current process-er RSS memory usage MB te return kore.
     psutil na thakle ba error hole None return kore (checkpoint trigger skip hoy)."""
@@ -202,7 +223,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                     if progress_cb:
                         elapsed = _time.monotonic() - extract_start
                         await progress_cb(checked, len(polls), elapsed)
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(_rate_limiter.get_delay())
 
                     if checkpoint_cb:
                         mem_mb = _get_process_memory_mb()
@@ -216,7 +237,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
 
                 # Batch er por ektu beshi break — rate-limit/timing safety
                 if batch_start + BATCH_SIZE < len(quiz_messages):
-                    await asyncio.sleep(2.0)
+                    await asyncio.sleep(max(2.0, _rate_limiter.get_delay() * 3))
         except Exception as e:
             # Bipod hole (crash/timeout) — jotukhon collect hoyeche oi porjonto
             # CSV pathiye dao, pura kaj shesh na hoyeo kichu na kichu hate thake
@@ -294,6 +315,7 @@ async def _process_single_poll(client, channel, message):
                 correct_idx, explanation, found = _parse_results(vote_poll_results)
         except FloodWaitError as fw:
             logger.warning(f"[poll_extract] msg {message.id}: FloodWait {fw.seconds}s — Telegram er kotha moto wait kortesi")
+            _rate_limiter.register_flood_wait(fw.seconds)
             await asyncio.sleep(fw.seconds + 1)
         except Exception:
             pass  # Already voted — ok, fallback to refetch below
@@ -563,6 +585,8 @@ async def handle_poll_extract(msg: dict):
         ]
         if time_str:
             lines.append(time_str)
+        if _rate_limiter.flood_hits > 0:
+            lines.append(f"🐢 FloodWait {_rate_limiter.flood_hits}x — delay {_rate_limiter.current_delay:.1f}s")
         await edit_msg(chat_id, status_id,
             "\n".join(lines),
             parse_mode="HTML"
@@ -878,7 +902,7 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
 
                 if progress_cb:
                     await progress_cb(checked, len(polls))
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(_rate_limiter.get_delay())
 
                 if checkpoint_cb:
                     mem_mb = _get_process_memory_mb()
@@ -891,7 +915,7 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
                             logger.warning(f"[poll_extract] checkpoint_cb error: {cb_err}")
 
             if batch_start + BATCH_SIZE < len(quiz_messages):
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(max(2.0, _rate_limiter.get_delay() * 3))
     except Exception as e:
         logger.error(f"[poll_extract] topic batch loop crashed mid-way at {len(polls)} polls: {type(e).__name__}: {e}")
         if checkpoint_cb and polls:
