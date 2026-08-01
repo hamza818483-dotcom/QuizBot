@@ -163,9 +163,12 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
 
 async def _process_single_poll(client, channel, message):
     """Ekta single quiz poll ke bot nijei guaranteed vote diye confirm kora
-    porjonto retry kore. Kono manual-verify fallback nai — bot nijei
-    exact answer+explanation ber na kora porjonto lege thake."""
+    porjonto retry kore — multi-strategy (vote, refetch, re-vote-fresh-poll,
+    entity re-resolve) + max 90s total elapsed cap jate hang na hoy.
+    Cap cross korle poll ta 'REVIEW_NEEDED' list e log hoy কিন্তু tobuo
+    best-effort actual poll options soho save hoy (fake answer na diye)।"""
     from telethon.tl import functions
+    import time as _time
 
     p = message.poll.poll
     q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
@@ -195,10 +198,19 @@ async def _process_single_poll(client, channel, message):
     except Exception:
         pass
 
+    start_time = _time.monotonic()
+    MAX_TOTAL_SECONDS = 90.0
+    max_wait = 6.0
     attempt = 0
-    max_wait = 6.0  # per-attempt wait cap, seconds
+
     while not found:
         attempt += 1
+        elapsed = _time.monotonic() - start_time
+        if elapsed > MAX_TOTAL_SECONDS:
+            logger.warning(f"[poll_extract] msg {message.id}: {MAX_TOTAL_SECONDS}s cap cross — poll hoyto permanently closed/broken, best-effort save")
+            break
+
+        # Strategy 1: vote diye direct result check
         try:
             vote_res = await client(functions.messages.SendVoteRequest(
                 peer=channel,
@@ -211,45 +223,47 @@ async def _process_single_poll(client, channel, message):
         except Exception:
             pass  # Already voted — ok, fallback to refetch below
 
-        if not found:
-            wait = min(1.0 + attempt * 0.5, max_wait)
-            await asyncio.sleep(wait)
-            try:
-                fetched = await client.get_messages(channel, ids=message.id)
-                if fetched and fetched.poll:
-                    correct_idx, explanation, found = _parse_results(fetched.poll.results)
-            except Exception:
-                pass
+        if found:
+            break
+
+        # Strategy 2: message refetch kore poll.results check
+        wait = min(1.0 + attempt * 0.5, max_wait)
+        await asyncio.sleep(wait)
+        try:
+            fetched = await client.get_messages(channel, ids=message.id)
+            if fetched and fetched.poll:
+                correct_idx, explanation, found = _parse_results(fetched.poll.results)
+                if not fetched.poll.poll:
+                    # Poll ar exist kore na (deleted) — ei entry drop na kore
+                    # options soho best-effort rakho, wait kora bondho koro
+                    logger.warning(f"[poll_extract] msg {message.id}: poll deleted hoye gese, best-effort fallback")
+                    break
+            else:
+                # Message-i r nai
+                logger.warning(f"[poll_extract] msg {message.id}: message r exist kore na, best-effort fallback")
+                break
+        except Exception:
+            pass
 
         if found:
             break
 
-        # Poll ta hoyto already closed/deleted hoye gese — plain message
-        # exist kore kina abar check kore continue-worthy kina dekha
-        if attempt % 10 == 0:
+        # Strategy 3 (every 5th attempt): entity/session re-resolve — kokhono
+        # kokhono connection-level caching issue er jonno result na ashte pare
+        if attempt % 5 == 0:
             try:
-                fetched = await client.get_messages(channel, ids=message.id)
-                if not fetched or not fetched.poll:
-                    # Message/poll ar exist e nai — ei entry-r jonno r wait kora
-                    # ucchit na, kintu answer=1 fake save o kora jabe na.
-                    # Tai actual options-e first option-ke best-effort mark kore
-                    # log-e clearly janiye dey (extremely rare edge case).
-                    logger.warning(f"[poll_extract] msg {message.id}: poll message r exist kore na (deleted?), best-effort fallback")
-                    return {
-                        "question": q_text,
-                        "options": options,
-                        "correct_idx": 0,
-                        "answer": 1,
-                        "explanation": "",
-                    }, True
+                fresh_entity = await client.get_entity(channel)
+                fetched = await client.get_messages(fresh_entity, ids=message.id)
+                if fetched and fetched.poll:
+                    correct_idx, explanation, found = _parse_results(fetched.poll.results)
             except Exception:
                 pass
-            logger.info(f"[poll_extract] msg {message.id}: still retrying, attempt {attempt}")
+            logger.info(f"[poll_extract] msg {message.id}: still retrying, attempt {attempt}, elapsed {elapsed:.0f}s")
 
     explanation = _clean_extracted_text(explanation)
 
     if len(options) > 4:
-        if correct_idx >= 4:
+        if found and correct_idx >= 4:
             options = options[:3] + [options[correct_idx]]
             correct_idx = 3
         else:
@@ -261,7 +275,7 @@ async def _process_single_poll(client, channel, message):
         "correct_idx": correct_idx,
         "answer": correct_idx + 1,
         "explanation": explanation,
-    }, True
+    }, found
 
 
 
@@ -281,16 +295,19 @@ def _extract_poll_results_from_updates(vote_res):
 
 
 def _skipped_note(polls) -> str:
-    """polls.skipped_ids থাকলে caption এ যোগ করার মতো note বানায়।"""
+    """polls.skipped_ids থাকলে caption এ যোগ করার মতো note বানায়।
+    এই list এখন শুধু extreme edge-case (90s timeout, poll deleted) এর
+    জন্য populate হয় — normal active poll এ কখনো ঘটবে না।"""
     skipped = getattr(polls, "skipped_ids", None)
     if not skipped:
         return ""
     ids_str = ", ".join(str(i) for i in skipped[:15])
     more = f" (+{len(skipped)-15} more)" if len(skipped) > 15 else ""
     return (
-        f"\n\n⚠️ <b>{len(skipped)} টা poll skip হয়েছে</b> (answer confirm করা যায়নি):\n"
+        f"\n\n⚠️ <b>{len(skipped)} টা poll এ answer confirm করতে সমস্যা হয়েছে</b> "
+        f"(poll closed/deleted হয়ে থাকতে পারে):\n"
         f"IDs: {ids_str}{more}\n"
-        f"এগুলোর জন্য আবার ওই range এ command চালাও।"
+        f"এগুলো CSV-তে best-effort options soho আছে, একবার নিজে চেক করো।"
     )
 
 
