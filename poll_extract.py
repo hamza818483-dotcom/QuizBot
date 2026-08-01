@@ -1155,6 +1155,12 @@ async def handle_ok_single_topic(msg: dict, topic_link: str):
     overall_start = _overall_time.monotonic()
 
     chat_id = msg["chat"]["id"]
+
+    if not SESSION_STR:
+        await send_msg(chat_id, "❌ SESSION_STRING set নেই। HF Space secrets এ add করো।")
+        return
+
+    ch, num, topic_from_parse = parse_tg_link(topic_link)
     if not ch or not num:
         await send_msg(chat_id, "❌ Link parse হয়নি। সঠিক topic link দাও (যেমন t.me/c/123/45)।")
         return
