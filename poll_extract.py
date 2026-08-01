@@ -73,6 +73,17 @@ def parse_tg_link(link: str):
 
 
 # ── Telethon extract ─────────────────────────────────────────
+def _get_process_memory_mb():
+    """Current process-er RSS memory usage MB te return kore.
+    psutil na thakle ba error hole None return kore (checkpoint trigger skip hoy)."""
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss / (1024 * 1024)
+    except Exception:
+        return None
+
+
 class PollList(list):
     """Plain list e attribute set kora jay na (AttributeError) — tai
     ei subclass use kore, jate polls.skipped_ids reliably kaj kore."""
@@ -159,8 +170,8 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
         import time as _time
         extract_start = _time.monotonic()
         BATCH_SIZE = 15
-        CHECKPOINT_EVERY = 300  # ei koyta poll shesh hole ekbar checkpoint CSV pathabe
-        last_checkpoint_count = 0
+        MEMORY_LIMIT_MB = 400  # ei level cross korle checkpoint CSV pathabe
+        checkpoint_sent_for_level = 0  # kotobar checkpoint hoyeche track kore, duplicate na hoy
 
         try:
             for batch_start in range(0, len(quiz_messages), BATCH_SIZE):
@@ -178,12 +189,15 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                         await progress_cb(checked, len(polls), elapsed)
                     await asyncio.sleep(0.3)
 
-                    if checkpoint_cb and (len(polls) - last_checkpoint_count) >= CHECKPOINT_EVERY:
-                        last_checkpoint_count = len(polls)
-                        try:
-                            await checkpoint_cb(list(polls), False)
-                        except Exception as cb_err:
-                            logger.warning(f"[poll_extract] checkpoint_cb error: {cb_err}")
+                    if checkpoint_cb:
+                        mem_mb = _get_process_memory_mb()
+                        if mem_mb and mem_mb >= MEMORY_LIMIT_MB * (checkpoint_sent_for_level + 1):
+                            checkpoint_sent_for_level += 1
+                            logger.warning(f"[poll_extract] memory {mem_mb:.0f}MB cross korlo — checkpoint CSV pathano hocche ({len(polls)} polls)")
+                            try:
+                                await checkpoint_cb(list(polls), False)
+                            except Exception as cb_err:
+                                logger.warning(f"[poll_extract] checkpoint_cb error: {cb_err}")
 
                 # Batch er por ektu beshi break — rate-limit/timing safety
                 if batch_start + BATCH_SIZE < len(quiz_messages):
@@ -783,8 +797,8 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
         quiz_messages.append(message)
 
     BATCH_SIZE = 15
-    CHECKPOINT_EVERY = 300
-    last_checkpoint_count = 0
+    MEMORY_LIMIT_MB = 400
+    checkpoint_sent_for_level = 0
 
     try:
         for batch_start in range(0, len(quiz_messages), BATCH_SIZE):
@@ -799,12 +813,15 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
                     await progress_cb(checked, len(polls))
                 await asyncio.sleep(0.3)
 
-                if checkpoint_cb and (len(polls) - last_checkpoint_count) >= CHECKPOINT_EVERY:
-                    last_checkpoint_count = len(polls)
-                    try:
-                        await checkpoint_cb(list(polls), False)
-                    except Exception as cb_err:
-                        logger.warning(f"[poll_extract] checkpoint_cb error: {cb_err}")
+                if checkpoint_cb:
+                    mem_mb = _get_process_memory_mb()
+                    if mem_mb and mem_mb >= MEMORY_LIMIT_MB * (checkpoint_sent_for_level + 1):
+                        checkpoint_sent_for_level += 1
+                        logger.warning(f"[poll_extract] memory {mem_mb:.0f}MB cross korlo — checkpoint CSV pathano hocche ({len(polls)} polls)")
+                        try:
+                            await checkpoint_cb(list(polls), False)
+                        except Exception as cb_err:
+                            logger.warning(f"[poll_extract] checkpoint_cb error: {cb_err}")
 
             if batch_start + BATCH_SIZE < len(quiz_messages):
                 await asyncio.sleep(2.0)
