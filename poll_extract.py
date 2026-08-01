@@ -73,6 +73,19 @@ def parse_tg_link(link: str):
 
 
 # ── Telethon extract ─────────────────────────────────────────
+def _format_elapsed(seconds: float) -> str:
+    """Second-ke human-readable format e convert kore: '2m 34s' ba '1h 5m 12s'"""
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}h {m}m {s}s"
+    elif m > 0:
+        return f"{m}m {s}s"
+    else:
+        return f"{s}s"
+
+
 def _get_process_memory_mb():
     """Current process-er RSS memory usage MB te return kore.
     psutil na thakle ba error hole None return kore (checkpoint trigger skip hoy)."""
@@ -473,6 +486,8 @@ async def handle_poll_extract(msg: dict):
     Extracts all quiz polls in range → sends CSV + permanent quiz link.
     """
     from core import send_msg, edit_msg, send_document, tg_post
+    import time as _overall_time
+    overall_start = _overall_time.monotonic()
 
     chat_id = msg["chat"]["id"]
     uid     = msg["from"]["id"]
@@ -541,7 +556,7 @@ async def handle_poll_extract(msg: dict):
         if now - _last_edit["t"] < 2.0 and checked < total:
             return
         _last_edit["t"] = now
-        time_str = f" — সময়: {int(elapsed)}s" if elapsed is not None else ""
+        time_str = f" — সময়: {_format_elapsed(elapsed)}" if elapsed is not None else ""
         await edit_msg(chat_id, status_id,
             f"⏳ চেক: {checked}/{total} — Poll পেয়েছি: {found}{time_str}",
             parse_mode="HTML"
@@ -631,10 +646,14 @@ async def handle_poll_extract(msg: dict):
     web_link = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={quiz_id}" if quiz_id else None
     bot_link = f"https://t.me/{bot_username}?start={quiz_id}" if quiz_id else None
 
+    total_elapsed = _overall_time.monotonic() - overall_start
+    time_display = _format_elapsed(total_elapsed)
+
     caption = (
         f"✅ <b>Poll Extract সম্পন্ন!</b>\n"
         f"📌 Range: {start_id} → {end_id}\n"
-        f"📋 Poll পেয়েছি: <b>{len(polls)}</b>\n\n"
+        f"📋 Poll পেয়েছি: <b>{len(polls)}</b>\n"
+        f"⏱️ মোট সময়: <b>{time_display}</b>\n\n"
     )
     if web_link:
         caption += f"🌐 <b>Web Quiz:</b>\n{web_link}\n\n"
@@ -1126,14 +1145,10 @@ async def handle_ok_single_topic(msg: dict, topic_link: str):
     ঠিক /ok N-M মোডে প্রতিটা topic এর জন্য যা হয় তারই single-topic version।
     """
     from core import send_msg, edit_msg, send_document, OWNER_ID
+    import time as _overall_time
+    overall_start = _overall_time.monotonic()
 
     chat_id = msg["chat"]["id"]
-
-    if not SESSION_STR:
-        await send_msg(chat_id, "❌ SESSION_STRING set নেই। HF Space secrets এ add করো।")
-        return
-
-    ch, num, topic_from_parse = parse_tg_link(topic_link)
     if not ch or not num:
         await send_msg(chat_id, "❌ Link parse হয়নি। সঠিক topic link দাও (যেমন t.me/c/123/45)।")
         return
@@ -1213,10 +1228,14 @@ async def handle_ok_single_topic(msg: dict, topic_link: str):
     filename = f"{safe_title}_{topic_id}.csv"
     built_link = build_topic_link(ch, topic_id)
 
+    total_elapsed = _overall_time.monotonic() - overall_start
+    time_display = _format_elapsed(total_elapsed)
+
     caption = (
         f"📌 <b>{topic_title}</b>\n"
         f"🔗 {built_link}\n"
-        f"📋 প্রশ্ন: {len(polls)}"
+        f"📋 প্রশ্ন: {len(polls)}\n"
+        f"⏱️ মোট সময়: {time_display}"
     )
     caption += _skipped_note(polls)
 
