@@ -169,12 +169,12 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
 
 async def _process_single_poll(client, channel, message):
     """Ekta single quiz poll ke bot nijei guaranteed vote diye confirm kora
-    porjonto retry kore — multi-strategy (vote, refetch, re-vote-fresh-poll,
-    entity re-resolve) + max 90s total elapsed cap jate hang na hoy.
-    Cap cross korle poll ta 'REVIEW_NEEDED' list e log hoy কিন্তু tobuo
-    best-effort actual poll options soho save hoy (fake answer na diye)।"""
+    porjonto retry kore — infinite retry, kono time cap nai. Poll ba
+    message-i deleted hoye gele shudhu tokhon best-effort fallback (karon
+    tokhon actual data-i r exist kore na, kono kichu extract kora impossible)।
+    Baki shob normal case e bot vote na dewa r result na paowa porjonto
+    lege thakbe।"""
     from telethon.tl import functions
-    import time as _time
 
     p = message.poll.poll
     q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
@@ -204,17 +204,11 @@ async def _process_single_poll(client, channel, message):
     except Exception:
         pass
 
-    start_time = _time.monotonic()
-    MAX_TOTAL_SECONDS = 90.0
     max_wait = 6.0
     attempt = 0
 
     while not found:
         attempt += 1
-        elapsed = _time.monotonic() - start_time
-        if elapsed > MAX_TOTAL_SECONDS:
-            logger.warning(f"[poll_extract] msg {message.id}: {MAX_TOTAL_SECONDS}s cap cross — poll hoyto permanently closed/broken, best-effort save")
-            break
 
         # Strategy 1: vote diye direct result check
         try:
@@ -237,17 +231,14 @@ async def _process_single_poll(client, channel, message):
         await asyncio.sleep(wait)
         try:
             fetched = await client.get_messages(channel, ids=message.id)
-            if fetched and fetched.poll:
-                correct_idx, explanation, found = _parse_results(fetched.poll.results)
-                if not fetched.poll.poll:
-                    # Poll ar exist kore na (deleted) — ei entry drop na kore
-                    # options soho best-effort rakho, wait kora bondho koro
-                    logger.warning(f"[poll_extract] msg {message.id}: poll deleted hoye gese, best-effort fallback")
-                    break
-            else:
-                # Message-i r nai
-                logger.warning(f"[poll_extract] msg {message.id}: message r exist kore na, best-effort fallback")
+            if not fetched:
+                # Message-i r exist kore na — data literally gone, extract impossible
+                logger.warning(f"[poll_extract] msg {message.id}: message delete hoye gese, actual data nai — best-effort fallback")
                 break
+            if not fetched.poll:
+                logger.warning(f"[poll_extract] msg {message.id}: ar poll na (edited/removed) — best-effort fallback")
+                break
+            correct_idx, explanation, found = _parse_results(fetched.poll.results)
         except Exception:
             pass
 
@@ -264,7 +255,7 @@ async def _process_single_poll(client, channel, message):
                     correct_idx, explanation, found = _parse_results(fetched.poll.results)
             except Exception:
                 pass
-            logger.info(f"[poll_extract] msg {message.id}: still retrying, attempt {attempt}, elapsed {elapsed:.0f}s")
+            logger.info(f"[poll_extract] msg {message.id}: still retrying, attempt {attempt}")
 
     explanation = _clean_extracted_text(explanation)
 
