@@ -1052,9 +1052,11 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
             polls = PollList()
             polls.skipped_ids = []
             last_partial = None
+            extraction_succeeded = False
             for attempt in range(5):
                 try:
                     polls = await extract_polls_by_topic(shared_client, shared_entity, channel, topic_id, progress_cb=_progress)
+                    extraction_succeeded = True
                     break
                 except Exception as e:
                     partial = getattr(e, "partial_polls", None)
@@ -1070,7 +1072,8 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
                             polls = PollList()
                             polls.extend(last_partial)
                             polls.skipped_ids = []
-            if not polls and not getattr(polls, "skipped_ids", None):
+                            extraction_succeeded = True  # partial data-o legitimate result, "no polls" na "error" hishebe treat na kore
+            if not extraction_succeeded:
                 await send_msg(chat_id, f"⚠️ Topic '{topic_title}' scan এ error (৫ বার চেষ্টার পরেও fail)। পরের topic এ যাচ্ছি।")
                 continue
 
@@ -1326,9 +1329,11 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
             polls = PollList()
             polls.skipped_ids = []
             last_partial = None
+            extraction_succeeded = False
             for attempt in range(5):
                 try:
                     polls = await extract_polls_by_topic(shared_client, shared_entity, channel, topic_id, progress_cb=_progress)
+                    extraction_succeeded = True
                     break
                 except Exception as e:
                     partial = getattr(e, "partial_polls", None)
@@ -1343,7 +1348,8 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
                             polls = PollList()
                             polls.extend(last_partial)
                             polls.skipped_ids = []
-            if not polls and not getattr(polls, "skipped_ids", None):
+                            extraction_succeeded = True
+            if not extraction_succeeded:
                 skipped += 1
                 await send_msg(chat_id, f"⚠️ Topic '{topic_title}' skip (৫ বার auto-retry এর পরেও fail)।")
                 continue
