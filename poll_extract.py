@@ -1259,29 +1259,17 @@ async def handle_ok_single_topic(msg: dict, topic_link: str):
     status = await send_msg(chat_id, f"⏳ Topic {topic_id} scan করছি...")
     status_id = status.get("result", {}).get("message_id")
 
-    try:
-        first_id, last_id = await get_topic_msg_range(ch, topic_id)
-    except Exception as e:
-        logger.error(f"[ok-single] topic {topic_id} range error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
-        return
-
-    if not last_id:
-        await send_msg(chat_id, "😕 এই topic এ কোনো message নাই।")
-        return
-
-    total_msgs = last_id - first_id + 1
     _last_edit_ts = [0.0]
 
     async def _progress(checked, found):
         now = time.time()
-        if now - _last_edit_ts[0] < 1.1 and checked < total_msgs:
+        if now - _last_edit_ts[0] < 1.1:
             return
         _last_edit_ts[0] = now
         if status_id:
             await edit_msg(chat_id, status_id,
                 f"⏳ Topic {topic_id}\n"
-                f"📨 চেক: {checked}/{total_msgs} messages\n"
+                f"📨 চেক: {checked} messages (topic-only)\n"
                 f"📋 Poll পেয়েছি: {found}")
 
     async def _checkpoint(polls_so_far, is_final):
@@ -1298,15 +1286,52 @@ async def handle_ok_single_topic(msg: dict, topic_link: str):
         except Exception as e:
             logger.error(f"[ok-single] checkpoint send failed: {e}")
 
+    # extract_polls_by_topic Telegram-er nijer server-side reply_to filter
+    # use kore — pura channel-er range scan kore na, shudhu ei topic-er
+    # message-i direct fetch kore. Onek beshi efficient boro channel-e।
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    tclient = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
+    await tclient.connect()
     try:
-        polls = await extract_polls_telethon(ch, first_id, last_id, progress_cb=_progress, topic_id=topic_id, checkpoint_cb=_checkpoint)
-    except Exception as e:
-        logger.error(f"[ok-single] topic {topic_id} extract error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}\n\n(উপরে checkpoint CSV থাকলে ওটা দিয়ে কাজ চালাও)")
+        try:
+            entity = await tclient.get_entity(ch)
+        except (ValueError, TypeError):
+            await tclient.get_dialogs(limit=200)
+            entity = await tclient.get_entity(ch)
+
+        last_partial = None
+        extraction_succeeded = False
+        polls = PollList()
+        for attempt in range(5):
+            try:
+                polls = await extract_polls_by_topic(tclient, entity, ch, topic_id, progress_cb=_progress, checkpoint_cb=_checkpoint)
+                extraction_succeeded = True
+                break
+            except Exception as e:
+                partial = getattr(e, "partial_polls", None)
+                if partial:
+                    last_partial = partial
+                logger.error(f"[ok-single] topic {topic_id} extract attempt {attempt+1} error: {e}")
+                if attempt < 4:
+                    await send_msg(chat_id, f"⚠️ সমস্যা হয়েছিল, auto-retry করছি ({attempt+2}/5)...")
+                    await asyncio.sleep(3 * (attempt + 1))
+                else:
+                    if last_partial:
+                        polls = PollList()
+                        polls.extend(last_partial)
+                        polls.skipped_ids = []
+                        extraction_succeeded = True
+    finally:
+        await tclient.disconnect()
+
+    if not extraction_succeeded:
+        await send_msg(chat_id, f"❌ Topic {topic_id} scan এ error (৫ বার চেষ্টার পরেও fail)।")
         return
 
     if not polls:
-        await send_msg(chat_id, f"😕 এই topic এ কোনো quiz poll পাওয়া যায়নি।\n({total_msgs} messages চেক হয়েছে)")
+        await send_msg(chat_id, f"😕 এই topic এ কোনো quiz poll পাওয়া যায়নি।")
         return
 
     # Try to get the actual topic title via forum topics list (falls back to
