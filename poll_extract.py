@@ -194,16 +194,18 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
         quiz_messages = []
         checked = 0
         collect_attempts = 0
+        scan_from_id = start_id - 1  # ei id-er porer message theke scan shuru hobe
         while True:
             try:
                 async for message in client.iter_messages(
                     entity,
-                    min_id=start_id - 1,
+                    min_id=scan_from_id,
                     max_id=end_id + 1,
-                    limit=end_id - start_id + 1,
+                    limit=end_id - scan_from_id,
                     reverse=True,
                 ):
                     checked += 1
+                    scan_from_id = message.id  # last-seen track koro, resume korার jonno
 
                     if topic_id and message.reply_to:
                         msg_topic = getattr(message.reply_to, "reply_to_top_id", None) or getattr(message.reply_to, "reply_to_msg_id", None)
@@ -223,11 +225,14 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
 
                     quiz_messages.append(message)
                 break  # scan সম্পূর্ণ হলে loop থেকে বের হও
+            except FloodWaitError as fw:
+                logger.warning(f"[poll_extract] Step1 scan FloodWait {fw.seconds}s — wait kore oi jaygay theke resume korbo (scan_from_id={scan_from_id})")
+                _rate_limiter.register_flood_wait(fw.seconds)
+                await asyncio.sleep(fw.seconds + 1)
+                # quiz_messages/checked reset kori NA — jekhane chilo shekhan thekei continue
             except Exception as e:
                 collect_attempts += 1
-                logger.warning(f"[poll_extract] message scan error (attempt {collect_attempts}): {type(e).__name__}: {e} — retrying from scratch")
-                quiz_messages = []
-                checked = 0
+                logger.warning(f"[poll_extract] message scan error (attempt {collect_attempts}): {type(e).__name__}: {e} — {scan_from_id} theke resume korbo")
                 await asyncio.sleep(2.0 * collect_attempts)
                 if collect_attempts >= 10:
                     raise Exception(f"Message scan {collect_attempts} bar fail holo, network/API issue check koro: {e}")
@@ -914,13 +919,36 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
     checked = 0
 
     quiz_messages = []
-    async for message in client.iter_messages(entity, reply_to=topic_id, reverse=True):
-        checked += 1
-        if not message.poll or not getattr(message.poll.poll, "quiz", False):
-            if progress_cb:
-                await progress_cb(checked, len(polls))
-            continue
-        quiz_messages.append(message)
+    seen_ids = set()  # duplicate-guard, jodi resume-e overlap hoy
+    collect_attempts = 0
+    resume_from_msg_id = None  # None mane shuru theke, offset_id set korle oi id-er por theke
+    while True:
+        try:
+            iter_kwargs = {"reply_to": topic_id, "reverse": True}
+            if resume_from_msg_id is not None:
+                iter_kwargs["min_id"] = resume_from_msg_id
+            async for message in client.iter_messages(entity, **iter_kwargs):
+                checked += 1
+                resume_from_msg_id = message.id
+                if message.id in seen_ids:
+                    continue
+                seen_ids.add(message.id)
+                if not message.poll or not getattr(message.poll.poll, "quiz", False):
+                    if progress_cb:
+                        await progress_cb(checked, len(polls))
+                    continue
+                quiz_messages.append(message)
+            break
+        except FloodWaitError as fw:
+            logger.warning(f"[poll_extract] topic-scan FloodWait {fw.seconds}s — wait kore resume korbo")
+            _rate_limiter.register_flood_wait(fw.seconds)
+            await asyncio.sleep(fw.seconds + 1)
+        except Exception as e:
+            collect_attempts += 1
+            logger.warning(f"[poll_extract] topic-scan error (attempt {collect_attempts}): {type(e).__name__}: {e} — resume korbo")
+            await asyncio.sleep(2.0 * collect_attempts)
+            if collect_attempts >= 10:
+                raise Exception(f"Topic message scan {collect_attempts} bar fail holo: {e}")
 
     BATCH_SIZE = 15
     MEMORY_LIMIT_MB = 10000  # 16GB RAM er beshirbhag, ei level cross korle checkpoint CSV pathabe (safety net)
