@@ -72,6 +72,12 @@ def parse_tg_link(link: str):
 
 
 # ── Telethon extract ─────────────────────────────────────────
+class PollList(list):
+    """Plain list e attribute set kora jay na (AttributeError) — tai
+    ei subclass use kore, jate polls.skipped_ids reliably kaj kore."""
+    skipped_ids: list = []
+
+
 async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_cb=None, topic_id=None) -> list:
     """
     Telethon দিয়ে channel থেকে start_id→end_id range এর
@@ -84,7 +90,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
     from telethon.sessions import StringSession
     from telethon.tl import functions
 
-    polls = []
+    polls = PollList()
     manual_review_ids = []
     client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
     await client.connect()
@@ -699,7 +705,7 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
     scan করে quiz polls বের করে। Batch of 15 kore guaranteed vote+confirm
     kore process kore — kono poll bot na-check kore skip hoy na.
     """
-    polls = []
+    polls = PollList()
     manual_review_ids = []
     checked = 0
 
