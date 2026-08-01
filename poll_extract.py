@@ -556,9 +556,15 @@ async def handle_poll_extract(msg: dict):
         if now - _last_edit["t"] < 2.0 and checked < total:
             return
         _last_edit["t"] = now
-        time_str = f" — সময়: {_format_elapsed(elapsed)}" if elapsed is not None else ""
+        time_str = f"⏱️ সময়: {_format_elapsed(elapsed)}" if elapsed is not None else ""
+        lines = [
+            f"⏳ চেক: {checked}/{total}",
+            f"📋 Poll পেয়েছি: {found}",
+        ]
+        if time_str:
+            lines.append(time_str)
         await edit_msg(chat_id, status_id,
-            f"⏳ চেক: {checked}/{total} — Poll পেয়েছি: {found}{time_str}",
+            "\n".join(lines),
             parse_mode="HTML"
         )
 
