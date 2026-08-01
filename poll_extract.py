@@ -177,7 +177,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                                 msg_id=message.id,
                                 options=[p.answers[0].option]
                             ))
-                            vote_poll_results = getattr(vote_res, "results", None) if vote_res else None
+                            vote_poll_results = _extract_poll_results_from_updates(vote_res)
                             if vote_poll_results:
                                 correct_idx, explanation, found = _parse_results(vote_poll_results)
                         except Exception:
@@ -185,18 +185,6 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
 
                         if not found:
                             await asyncio.sleep(0.6)
-                            try:
-                                gp_res = await client(functions.messages.GetPollResultsRequest(
-                                    peer=channel,
-                                    msg_id=message.id
-                                ))
-                                gp_poll_results = getattr(gp_res, "results", None)
-                                if gp_poll_results:
-                                    correct_idx, explanation, found = _parse_results(gp_poll_results)
-                            except Exception:
-                                pass
-
-                        if not found:
                             try:
                                 fetched = await client.get_messages(channel, ids=message.id)
                                 if fetched and fetched.poll:
@@ -305,7 +293,7 @@ async def _retry_skipped(channel, skipped_ids: list, polls: list, topic_id=None)
                         vote_res = await client(functions.messages.SendVoteRequest(
                             peer=channel, msg_id=msg_id, options=[p.answers[0].option]
                         ))
-                        vote_poll_results = getattr(vote_res, "results", None) if vote_res else None
+                        vote_poll_results = _extract_poll_results_from_updates(vote_res)
                         if vote_poll_results:
                             correct_idx, explanation, found = _parse_results(vote_poll_results)
                     except Exception:
@@ -314,10 +302,9 @@ async def _retry_skipped(channel, skipped_ids: list, polls: list, topic_id=None)
                 if not found:
                     await asyncio.sleep(0.8)
                     try:
-                        gp_res = await client(functions.messages.GetPollResultsRequest(peer=channel, msg_id=msg_id))
-                        gp_poll_results = getattr(gp_res, "results", None)
-                        if gp_poll_results:
-                            correct_idx, explanation, found = _parse_results(gp_poll_results)
+                        fetched = await client.get_messages(entity, ids=msg_id)
+                        if fetched and fetched.poll:
+                            correct_idx, explanation, found = _parse_results(fetched.poll.results)
                     except Exception:
                         pass
 
@@ -350,6 +337,19 @@ async def _retry_skipped(channel, skipped_ids: list, polls: list, topic_id=None)
 
 
 # ── CSV builder ──────────────────────────────────────────────
+def _extract_poll_results_from_updates(vote_res):
+    """SendVoteRequest returns an Updates object, NOT a Poll directly.
+    The actual poll results live inside vote_res.updates as an
+    UpdateMessagePoll entry. This pulls it out."""
+    if not vote_res:
+        return None
+    updates_list = getattr(vote_res, "updates", None) or []
+    for upd in updates_list:
+        if hasattr(upd, "results") and hasattr(upd, "poll_id"):
+            return upd.results
+    return None
+
+
 def _skipped_note(polls) -> str:
     """polls.skipped_ids থাকলে caption এ যোগ করার মতো note বানায়।"""
     skipped = getattr(polls, "skipped_ids", None)
@@ -811,7 +811,7 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
                             msg_id=message.id,
                             options=[p.answers[0].option]
                         ))
-                        vote_poll_results = getattr(vote_res, "results", None) if vote_res else None
+                        vote_poll_results = _extract_poll_results_from_updates(vote_res)
                         if vote_poll_results:
                             correct_idx, explanation, found = _parse_results(vote_poll_results)
                     except Exception:
@@ -819,18 +819,6 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
 
                     if not found:
                         await asyncio.sleep(0.6)
-                        try:
-                            gp_res = await client(functions.messages.GetPollResultsRequest(
-                                peer=channel,
-                                msg_id=message.id
-                            ))
-                            gp_poll_results = getattr(gp_res, "results", None)
-                            if gp_poll_results:
-                                correct_idx, explanation, found = _parse_results(gp_poll_results)
-                        except Exception:
-                            pass
-
-                    if not found:
                         try:
                             fetched = await client.get_messages(channel, ids=message.id)
                             if fetched and fetched.poll:
@@ -915,7 +903,7 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
                         vote_res = await client(functions.messages.SendVoteRequest(
                             peer=channel, msg_id=msg_id, options=[p.answers[0].option]
                         ))
-                        vote_poll_results = getattr(vote_res, "results", None) if vote_res else None
+                        vote_poll_results = _extract_poll_results_from_updates(vote_res)
                         if vote_poll_results:
                             correct_idx, explanation, found = _parse_results(vote_poll_results)
                     except Exception:
@@ -924,10 +912,9 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
                 if not found:
                     await asyncio.sleep(0.8)
                     try:
-                        gp_res = await client(functions.messages.GetPollResultsRequest(peer=channel, msg_id=msg_id))
-                        gp_poll_results = getattr(gp_res, "results", None)
-                        if gp_poll_results:
-                            correct_idx, explanation, found = _parse_results(gp_poll_results)
+                        fetched = await client.get_messages(entity, ids=msg_id)
+                        if fetched and fetched.poll:
+                            correct_idx, explanation, found = _parse_results(fetched.poll.results)
                     except Exception:
                         pass
 
