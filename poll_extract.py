@@ -874,6 +874,7 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
                 await checkpoint_cb(list(polls), True)
             except Exception:
                 pass
+        e.partial_polls = list(polls)
         raise
 
     polls.skipped_ids = manual_review_ids
@@ -1048,17 +1049,29 @@ async def handle_ok_topic_range(msg: dict, group_ref: str, start_n: int, end_n: 
                         f"📨 চেক: {checked} messages\n"
                         f"📋 Poll পেয়েছি: {found}")
 
-            polls = None
-            for attempt in range(3):
+            polls = PollList()
+            polls.skipped_ids = []
+            last_partial = None
+            for attempt in range(5):
                 try:
                     polls = await extract_polls_by_topic(shared_client, shared_entity, channel, topic_id, progress_cb=_progress)
                     break
                 except Exception as e:
+                    partial = getattr(e, "partial_polls", None)
+                    if partial:
+                        last_partial = partial  # last attempt-er partial-i rakhbo, prottekbar accumulate na kore (duplicate avoid)
                     logger.error(f"[ok-range] topic {topic_id} extract attempt {attempt+1} error: {e}")
-                    if attempt < 2:
-                        await asyncio.sleep(2 * (attempt + 1))
-            if polls is None:
-                await send_msg(chat_id, f"⚠️ Topic '{topic_title}' scan এ error (৩ বার চেষ্টার পরেও fail)।")
+                    if attempt < 4:
+                        await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এ সমস্যা হয়েছিল, auto-retry করছি ({attempt+2}/5)...")
+                        await asyncio.sleep(3 * (attempt + 1))
+                    else:
+                        # 5 bar-i fail — last partial-take best-effort hishebe use koro
+                        if last_partial:
+                            polls = PollList()
+                            polls.extend(last_partial)
+                            polls.skipped_ids = []
+            if not polls and not getattr(polls, "skipped_ids", None):
+                await send_msg(chat_id, f"⚠️ Topic '{topic_title}' scan এ error (৫ বার চেষ্টার পরেও fail)। পরের topic এ যাচ্ছি।")
                 continue
 
             if not polls:
@@ -1310,18 +1323,29 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
                         f"📨 চেক: {checked} messages\n"
                         f"📋 Poll পেয়েছি: {found}")
 
-            polls = None
-            for attempt in range(3):
+            polls = PollList()
+            polls.skipped_ids = []
+            last_partial = None
+            for attempt in range(5):
                 try:
                     polls = await extract_polls_by_topic(shared_client, shared_entity, channel, topic_id, progress_cb=_progress)
                     break
                 except Exception as e:
+                    partial = getattr(e, "partial_polls", None)
+                    if partial:
+                        last_partial = partial
                     logger.error(f"[ok-all] topic {topic_id} extract attempt {attempt+1} error: {e}")
-                    if attempt < 2:
-                        await asyncio.sleep(2 * (attempt + 1))
-            if polls is None:
+                    if attempt < 4:
+                        await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এ সমস্যা হয়েছিল, auto-retry করছি ({attempt+2}/5)...")
+                        await asyncio.sleep(3 * (attempt + 1))
+                    else:
+                        if last_partial:
+                            polls = PollList()
+                            polls.extend(last_partial)
+                            polls.skipped_ids = []
+            if not polls and not getattr(polls, "skipped_ids", None):
                 skipped += 1
-                await send_msg(chat_id, f"⚠️ Topic '{topic_title}' skip (scan ৩ বার fail হয়েছে)।")
+                await send_msg(chat_id, f"⚠️ Topic '{topic_title}' skip (৫ বার auto-retry এর পরেও fail)।")
                 continue
 
             if not polls:
