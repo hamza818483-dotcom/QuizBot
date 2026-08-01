@@ -87,18 +87,50 @@ def _format_elapsed(seconds: float) -> str:
 
 
 class _AdaptiveRateLimiter:
-    """FloodWait hit hole global vabe shob vote-delay barano hoy — jate
-    barbar FloodWait/escalating penalty na hoy. Process-wide shared state,
-    kokhono nijer theke kome na (fresh restart chara)।"""
+    """Proactive + reactive rate limiting:
+    1. Sliding-window request counter — proti 60s e max N-ta SendVoteRequest
+       call korte dey, limit-er kach e gele nijei slow hoye jay (FloodWait
+       howar AGE-i, reactive na hoye proactive).
+    2. FloodWait actually hit hole (safety-net hishebe) delay aro barায়,
+       r safe-per-minute limit-o kome jay — pura process-er baki shomoy-er
+       jonno aro conservative hoye jay।
+    """
     def __init__(self):
-        self.current_delay = 0.6  # base delay, seconds (conservative default)
+        self.current_delay = 0.8       # base delay per vote-request, seconds
         self.flood_hits = 0
+        self.max_per_minute = 20       # conservative safe limit — Telegram
+                                        # official client-o emon range-e thake
+        self.request_times = []        # sliding window er timestamps
 
     def register_flood_wait(self, wait_seconds: float):
         self.flood_hits += 1
-        # Prottekbar flood hit hole base delay dOuble kore dei (max 10s cap)
-        self.current_delay = min(self.current_delay * 2.5, 10.0)
-        logger.warning(f"[poll_extract] FloodWait #{self.flood_hits} — delay {self.current_delay:.1f}s e barano holo")
+        # FloodWait hit mane amader estimate bhul chilo — aro strict hote hobe
+        self.current_delay = min(self.current_delay * 2.5, 15.0)
+        self.max_per_minute = max(5, int(self.max_per_minute * 0.5))
+        logger.warning(
+            f"[poll_extract] FloodWait #{self.flood_hits} ({wait_seconds}s) — "
+            f"delay {self.current_delay:.1f}s, max/min {self.max_per_minute} e barano holo"
+        )
+
+    async def wait_before_request(self):
+        """Proactive check — proti request-er AGE call koro. Sliding window-e
+        max_per_minute cross korle nijei extra wait kore, FloodWait howar
+        age-i slow hoye jay."""
+        now = time.monotonic()
+        # 60s-er beshi purono timestamp shorie dao
+        self.request_times = [t for t in self.request_times if now - t < 60]
+
+        if len(self.request_times) >= self.max_per_minute:
+            # Window-er shobcheye purono request 60s hoye jawa porjonto wait koro
+            oldest = self.request_times[0]
+            wait_needed = 60 - (now - oldest) + 0.5
+            if wait_needed > 0:
+                logger.info(f"[poll_extract] proactive slowdown — {wait_needed:.1f}s wait ({len(self.request_times)}/{self.max_per_minute} per-min limit near)")
+                await asyncio.sleep(wait_needed)
+
+        # Base delay-o always maintain koro (per-request minimum gap)
+        await asyncio.sleep(self.current_delay)
+        self.request_times.append(time.monotonic())
 
     def get_delay(self) -> float:
         return self.current_delay
@@ -304,6 +336,7 @@ async def _process_single_poll(client, channel, message):
         attempt += 1
 
         # Strategy 1: vote diye direct result check
+        await _rate_limiter.wait_before_request()
         try:
             vote_res = await client(functions.messages.SendVoteRequest(
                 peer=channel,
