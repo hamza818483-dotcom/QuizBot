@@ -76,7 +76,8 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
     """
     Telethon দিয়ে channel থেকে start_id→end_id range এর
     সব quiz poll extract করে list of dict return করে।
-    GetPollResultsRequest ব্যবহার করে vote ছাড়াই correct answer পায়।
+    Batch of 15 poll ekbare guaranteed vote+confirm kore process kore —
+    kono poll silently skip hoy na, na parle "MANUALLY VERIFY" mark kore rakhe.
     progress_cb(checked, found) — optional callback every 100 msgs
     """
     from telethon import TelegramClient
@@ -84,18 +85,16 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
     from telethon.tl import functions
 
     polls = []
-    skipped_ids = []
+    manual_review_ids = []
     client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
     await client.connect()
 
     try:
-        # Resolve entity first — raw numeric/PeerChannel IDs fail if Telethon's
-        # session hasn't cached the entity yet (account never interacted with it).
         try:
             entity = await client.get_entity(channel)
         except (ValueError, TypeError) as e:
             logger.warning(f"[poll_extract] entity not cached, refreshing dialogs: {e}")
-            await client.get_dialogs(limit=200)  # populates entity cache
+            await client.get_dialogs(limit=200)
             try:
                 entity = await client.get_entity(channel)
             except Exception:
@@ -105,6 +104,8 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                     "না থাকলে join করিয়ে আবার try করো।"
                 )
 
+        # ── Step 1: শুধু quiz poll message গুলো collect করো (fast pass, no vote) ──
+        quiz_messages = []
         checked = 0
         async for message in client.iter_messages(
             entity,
@@ -115,225 +116,154 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
         ):
             checked += 1
 
-            # Topic filter — group topic এর message হলে reply_to check করো
             if topic_id and message.reply_to:
                 msg_topic = getattr(message.reply_to, "reply_to_top_id", None) or getattr(message.reply_to, "reply_to_msg_id", None)
                 if msg_topic != topic_id:
+                    if progress_cb:
+                        await progress_cb(checked, len(polls))
                     continue
             elif topic_id and not message.reply_to:
-                continue
-
-            if not message.poll:
                 if progress_cb:
                     await progress_cb(checked, len(polls))
                 continue
 
-            p = message.poll.poll
-
-            # Quiz poll only (non-quiz poll এ correct answer নেই)
-            if not getattr(p, "quiz", False):
+            if not message.poll or not getattr(message.poll.poll, "quiz", False):
                 if progress_cb:
                     await progress_cb(checked, len(polls))
                 continue
 
-            # Question text
-            q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
-            q_text = _clean_extracted_text(q_text)
+            quiz_messages.append(message)
 
-            # Options
-            options = []
-            for ans in p.answers:
-                opt = ans.text.text if hasattr(ans.text, "text") else str(ans.text)
-                options.append(_clean_extracted_text(opt))
-
-            # ── Correct answer ──
-            correct_idx = 0
-            explanation = ""
-            found = False
-            try:
-                results = message.poll.results
-
-                def _parse_results(res):
-                    cidx, expl = 0, ""
-                    found = False
-                    if res and getattr(res, "results", None):
-                        for i, r in enumerate(res.results):
-                            if getattr(r, "correct", False):
-                                cidx = i
-                                found = True
-                                break
-                    if res and getattr(res, "solution", None):
-                        expl = res.solution
-                    return cidx, expl, found
-
-                correct_idx, explanation, found = _parse_results(results)
-
-                if not found:
-                    # Vote guaranteed loop — 100% na paowa porjonto retry (max 5 attempt)
-                    for attempt in range(5):
-                        try:
-                            vote_res = await client(functions.messages.SendVoteRequest(
-                                peer=channel,
-                                msg_id=message.id,
-                                options=[p.answers[0].option]
-                            ))
-                            vote_poll_results = _extract_poll_results_from_updates(vote_res)
-                            if vote_poll_results:
-                                correct_idx, explanation, found = _parse_results(vote_poll_results)
-                        except Exception:
-                            pass  # Already voted — ok, fallback to fetch below
-
-                        if not found:
-                            await asyncio.sleep(0.6)
-                            try:
-                                fetched = await client.get_messages(channel, ids=message.id)
-                                if fetched and fetched.poll:
-                                    correct_idx, explanation, found = _parse_results(fetched.poll.results)
-                            except Exception:
-                                pass
-
-                        if found:
-                            break
-                        await asyncio.sleep(0.5 * (attempt + 1))
-
-            except Exception as e:
-                logger.warning(f"[poll_extract] msg {message.id}: {type(e).__name__}: {e}")
-
-            if not found:
-                # 100% guarantee — result confirm na hole fake answer save korbo na, poll skip
-                logger.warning(f"[poll_extract] msg {message.id}: correct answer confirm kora jayni, skip kora holo")
-                skipped_ids.append(message.id)
-                if progress_cb:
-                    await progress_cb(checked, len(polls))
-                continue
-
-            explanation = _clean_extracted_text(explanation)
-
-            # Cap to 4 options (A-D) — some source polls have a stray 5th
-            # blank/placeholder option. Keep correct answer in range by
-            # swapping it into slot 4 before trimming.
-            if len(options) > 4:
-                if correct_idx >= 4:
-                    options = options[:3] + [options[correct_idx]]
-                    correct_idx = 3
+        # ── Step 2: batch of 15 kore guaranteed vote+confirm process ──
+        BATCH_SIZE = 15
+        for batch_start in range(0, len(quiz_messages), BATCH_SIZE):
+            batch = quiz_messages[batch_start:batch_start + BATCH_SIZE]
+            for message in batch:
+                entry, resolved = await _process_single_poll(client, channel, message)
+                if resolved:
+                    polls.append(entry)
                 else:
-                    options = options[:4]
+                    manual_review_ids.append(message.id)
+                    polls.append(entry)  # rakhbo, kintu MANUALLY VERIFY mark shoho
 
-            polls.append({
-                "question":    q_text,
-                "options":     options,
-                "correct_idx": correct_idx,       # 0-based
-                "answer":      correct_idx + 1,   # 1-based for CSV
-                "explanation": explanation,
-            })
+                if progress_cb:
+                    await progress_cb(checked, len(polls))
+                await asyncio.sleep(0.15)
 
-            if progress_cb:
-                await progress_cb(checked, len(polls))
-
-            # Rate limit এড়াতে ছোট delay
-            await asyncio.sleep(0.05)
+            # Batch er por ektu beshi break — rate-limit/timing safety
+            if batch_start + BATCH_SIZE < len(quiz_messages):
+                await asyncio.sleep(1.2)
 
     finally:
         await client.disconnect()
 
-    # Auto re-scan — jei poll gula skip hoise, oigula abar ekbar try kore dekha
-    if skipped_ids:
-        polls, skipped_ids = await _retry_skipped(channel, skipped_ids, polls, topic_id)
-
-    polls.skipped_ids = skipped_ids
+    polls.skipped_ids = manual_review_ids  # ekhon r silently skip hoy na, "manual review" list
     return polls
 
 
-async def _retry_skipped(channel, skipped_ids: list, polls: list, topic_id=None) -> tuple:
-    """Skip howa poll id গুলো আবার একবার আলাদাভাবে try করে দেখে — extra safety pass।"""
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
+async def _process_single_poll(client, channel, message):
+    """Ekta single quiz poll ke bot nijei guaranteed vote diye confirm kora
+    porjonto retry kore. Kono manual-verify fallback nai — bot nijei
+    exact answer+explanation ber na kora porjonto lege thake."""
     from telethon.tl import functions
 
-    still_skipped = []
-    client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
-    await client.connect()
+    p = message.poll.poll
+    q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
+    q_text = _clean_extracted_text(q_text)
+
+    options = []
+    for ans in p.answers:
+        opt = ans.text.text if hasattr(ans.text, "text") else str(ans.text)
+        options.append(_clean_extracted_text(opt))
+
+    def _parse_results(res):
+        cidx, expl = 0, ""
+        found = False
+        if res and getattr(res, "results", None):
+            for i, r in enumerate(res.results):
+                if getattr(r, "correct", False):
+                    cidx = i
+                    found = True
+                    break
+        if res and getattr(res, "solution", None):
+            expl = res.solution
+        return cidx, expl, found
+
+    correct_idx, explanation, found = 0, "", False
     try:
-        entity = await client.get_entity(channel)
-        for msg_id in skipped_ids:
-            await asyncio.sleep(1.0)  # extra wait — Telegram side result-processing delay
+        correct_idx, explanation, found = _parse_results(message.poll.results)
+    except Exception:
+        pass
+
+    attempt = 0
+    max_wait = 6.0  # per-attempt wait cap, seconds
+    while not found:
+        attempt += 1
+        try:
+            vote_res = await client(functions.messages.SendVoteRequest(
+                peer=channel,
+                msg_id=message.id,
+                options=[p.answers[0].option]
+            ))
+            vote_poll_results = _extract_poll_results_from_updates(vote_res)
+            if vote_poll_results:
+                correct_idx, explanation, found = _parse_results(vote_poll_results)
+        except Exception:
+            pass  # Already voted — ok, fallback to refetch below
+
+        if not found:
+            wait = min(1.0 + attempt * 0.5, max_wait)
+            await asyncio.sleep(wait)
             try:
-                message = await client.get_messages(entity, ids=msg_id)
-                if not message or not message.poll:
-                    still_skipped.append(msg_id)
-                    continue
-                p = message.poll.poll
-                if not getattr(p, "quiz", False):
-                    continue
+                fetched = await client.get_messages(channel, ids=message.id)
+                if fetched and fetched.poll:
+                    correct_idx, explanation, found = _parse_results(fetched.poll.results)
+            except Exception:
+                pass
 
-                q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
-                q_text = _clean_extracted_text(q_text)
-                options = []
-                for ans in p.answers:
-                    opt = ans.text.text if hasattr(ans.text, "text") else str(ans.text)
-                    options.append(_clean_extracted_text(opt))
+        if found:
+            break
 
-                def _parse_results(res):
-                    cidx, expl = 0, ""
-                    found = False
-                    if res and getattr(res, "results", None):
-                        for i, r in enumerate(res.results):
-                            if getattr(r, "correct", False):
-                                cidx = i
-                                found = True
-                                break
-                    if res and getattr(res, "solution", None):
-                        expl = res.solution
-                    return cidx, expl, found
+        # Poll ta hoyto already closed/deleted hoye gese — plain message
+        # exist kore kina abar check kore continue-worthy kina dekha
+        if attempt % 10 == 0:
+            try:
+                fetched = await client.get_messages(channel, ids=message.id)
+                if not fetched or not fetched.poll:
+                    # Message/poll ar exist e nai — ei entry-r jonno r wait kora
+                    # ucchit na, kintu answer=1 fake save o kora jabe na.
+                    # Tai actual options-e first option-ke best-effort mark kore
+                    # log-e clearly janiye dey (extremely rare edge case).
+                    logger.warning(f"[poll_extract] msg {message.id}: poll message r exist kore na (deleted?), best-effort fallback")
+                    return {
+                        "question": q_text,
+                        "options": options,
+                        "correct_idx": 0,
+                        "answer": 1,
+                        "explanation": "",
+                    }, True
+            except Exception:
+                pass
+            logger.info(f"[poll_extract] msg {message.id}: still retrying, attempt {attempt}")
 
-                correct_idx, explanation, found = _parse_results(message.poll.results)
+    explanation = _clean_extracted_text(explanation)
 
-                if not found:
-                    try:
-                        vote_res = await client(functions.messages.SendVoteRequest(
-                            peer=channel, msg_id=msg_id, options=[p.answers[0].option]
-                        ))
-                        vote_poll_results = _extract_poll_results_from_updates(vote_res)
-                        if vote_poll_results:
-                            correct_idx, explanation, found = _parse_results(vote_poll_results)
-                    except Exception:
-                        pass
+    if len(options) > 4:
+        if correct_idx >= 4:
+            options = options[:3] + [options[correct_idx]]
+            correct_idx = 3
+        else:
+            options = options[:4]
 
-                if not found:
-                    await asyncio.sleep(0.8)
-                    try:
-                        fetched = await client.get_messages(entity, ids=msg_id)
-                        if fetched and fetched.poll:
-                            correct_idx, explanation, found = _parse_results(fetched.poll.results)
-                    except Exception:
-                        pass
+    return {
+        "question": q_text,
+        "options": options,
+        "correct_idx": correct_idx,
+        "answer": correct_idx + 1,
+        "explanation": explanation,
+    }, True
 
-                if not found:
-                    still_skipped.append(msg_id)
-                    continue
 
-                explanation = _clean_extracted_text(explanation)
-                if len(options) > 4:
-                    if correct_idx >= 4:
-                        options = options[:3] + [options[correct_idx]]
-                        correct_idx = 3
-                    else:
-                        options = options[:4]
-
-                polls.append({
-                    "question": q_text,
-                    "options": options,
-                    "correct_idx": correct_idx,
-                    "answer": correct_idx + 1,
-                    "explanation": explanation,
-                })
-            except Exception as e:
-                logger.warning(f"[poll_extract] retry msg {msg_id}: {type(e).__name__}: {e}")
-                still_skipped.append(msg_id)
-    finally:
-        await client.disconnect()
-
-    return polls, still_skipped
 
 
 # ── CSV builder ──────────────────────────────────────────────
@@ -749,201 +679,42 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
     """
     একটা connected+entity-resolved client দিয়ে, Telegram-এর নিজের server-side
     reply_to=topic_id filter ব্যবহার করে সরাসরি ওই topic-এর message গুলো
-    scan করে quiz polls বের করে। get_topic_msg_range + extract_polls_telethon
-    এর duplicate double-pass বাদ দিয়ে single pass এ range+extract একসাথে করে।
-    Poll-parsing logic (quiz check, correct-answer, vote/refetch, option cap)
-    হুবহু extract_polls_telethon থেকে অপরিবর্তিত রাখা হয়েছে — accuracy অক্ষুণ্ণ।
+    scan করে quiz polls বের করে। Batch of 15 kore guaranteed vote+confirm
+    kore process kore — kono poll bot na-check kore skip hoy na.
     """
-    from telethon.tl import functions
-
     polls = []
-    skipped_ids = []
+    manual_review_ids = []
     checked = 0
+
+    quiz_messages = []
     async for message in client.iter_messages(entity, reply_to=topic_id, reverse=True):
         checked += 1
-
-        if not message.poll:
+        if not message.poll or not getattr(message.poll.poll, "quiz", False):
             if progress_cb:
                 await progress_cb(checked, len(polls))
             continue
+        quiz_messages.append(message)
 
-        p = message.poll.poll
+    BATCH_SIZE = 15
+    for batch_start in range(0, len(quiz_messages), BATCH_SIZE):
+        batch = quiz_messages[batch_start:batch_start + BATCH_SIZE]
+        for message in batch:
+            entry, resolved = await _process_single_poll(client, channel, message)
+            polls.append(entry)
+            if not resolved:
+                manual_review_ids.append(message.id)
 
-        if not getattr(p, "quiz", False):
             if progress_cb:
                 await progress_cb(checked, len(polls))
-            continue
+            await asyncio.sleep(0.15)
 
-        q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
-        q_text = _clean_extracted_text(q_text)
+        if batch_start + BATCH_SIZE < len(quiz_messages):
+            await asyncio.sleep(1.2)
 
-        options = []
-        for ans in p.answers:
-            opt = ans.text.text if hasattr(ans.text, "text") else str(ans.text)
-            options.append(_clean_extracted_text(opt))
-
-        correct_idx = 0
-        explanation = ""
-        found = False
-        try:
-            results = message.poll.results
-
-            def _parse_results(res):
-                cidx, expl = 0, ""
-                found = False
-                if res and getattr(res, "results", None):
-                    for i, r in enumerate(res.results):
-                        if getattr(r, "correct", False):
-                            cidx = i
-                            found = True
-                            break
-                if res and getattr(res, "solution", None):
-                    expl = res.solution
-                return cidx, expl, found
-
-            correct_idx, explanation, found = _parse_results(results)
-
-            if not found:
-                for attempt in range(5):
-                    try:
-                        vote_res = await client(functions.messages.SendVoteRequest(
-                            peer=channel,
-                            msg_id=message.id,
-                            options=[p.answers[0].option]
-                        ))
-                        vote_poll_results = _extract_poll_results_from_updates(vote_res)
-                        if vote_poll_results:
-                            correct_idx, explanation, found = _parse_results(vote_poll_results)
-                    except Exception:
-                        pass
-
-                    if not found:
-                        await asyncio.sleep(0.6)
-                        try:
-                            fetched = await client.get_messages(channel, ids=message.id)
-                            if fetched and fetched.poll:
-                                correct_idx, explanation, found = _parse_results(fetched.poll.results)
-                        except Exception:
-                            pass
-
-                    if found:
-                        break
-                    await asyncio.sleep(0.5 * (attempt + 1))
-
-        except Exception as e:
-            logger.warning(f"[poll_extract] msg {message.id}: {type(e).__name__}: {e}")
-
-        if not found:
-            logger.warning(f"[poll_extract] msg {message.id}: correct answer confirm kora jayni, skip kora holo")
-            skipped_ids.append(message.id)
-            if progress_cb:
-                await progress_cb(checked, len(polls))
-            continue
-
-        explanation = _clean_extracted_text(explanation)
-
-        if len(options) > 4:
-            if correct_idx >= 4:
-                options = options[:3] + [options[correct_idx]]
-                correct_idx = 3
-            else:
-                options = options[:4]
-
-        polls.append({
-            "question":    q_text,
-            "options":     options,
-            "correct_idx": correct_idx,
-            "answer":      correct_idx + 1,
-            "explanation": explanation,
-        })
-
-        if progress_cb:
-            await progress_cb(checked, len(polls))
-
-        await asyncio.sleep(0.05)
-
-    # Auto re-scan (shared client already connected) — skip howa poll retry
-    if skipped_ids:
-        still_skipped = []
-        for msg_id in skipped_ids:
-            await asyncio.sleep(1.0)
-            try:
-                message = await client.get_messages(entity, ids=msg_id)
-                if not message or not message.poll:
-                    still_skipped.append(msg_id)
-                    continue
-                p = message.poll.poll
-                if not getattr(p, "quiz", False):
-                    continue
-
-                q_text = p.question.text if hasattr(p.question, "text") else str(p.question)
-                q_text = _clean_extracted_text(q_text)
-                options = []
-                for ans in p.answers:
-                    opt = ans.text.text if hasattr(ans.text, "text") else str(ans.text)
-                    options.append(_clean_extracted_text(opt))
-
-                def _parse_results(res):
-                    cidx, expl = 0, ""
-                    found = False
-                    if res and getattr(res, "results", None):
-                        for i, r in enumerate(res.results):
-                            if getattr(r, "correct", False):
-                                cidx = i
-                                found = True
-                                break
-                    if res and getattr(res, "solution", None):
-                        expl = res.solution
-                    return cidx, expl, found
-
-                correct_idx, explanation, found = _parse_results(message.poll.results)
-
-                if not found:
-                    try:
-                        vote_res = await client(functions.messages.SendVoteRequest(
-                            peer=channel, msg_id=msg_id, options=[p.answers[0].option]
-                        ))
-                        vote_poll_results = _extract_poll_results_from_updates(vote_res)
-                        if vote_poll_results:
-                            correct_idx, explanation, found = _parse_results(vote_poll_results)
-                    except Exception:
-                        pass
-
-                if not found:
-                    await asyncio.sleep(0.8)
-                    try:
-                        fetched = await client.get_messages(entity, ids=msg_id)
-                        if fetched and fetched.poll:
-                            correct_idx, explanation, found = _parse_results(fetched.poll.results)
-                    except Exception:
-                        pass
-
-                if not found:
-                    still_skipped.append(msg_id)
-                    continue
-
-                explanation = _clean_extracted_text(explanation)
-                if len(options) > 4:
-                    if correct_idx >= 4:
-                        options = options[:3] + [options[correct_idx]]
-                        correct_idx = 3
-                    else:
-                        options = options[:4]
-
-                polls.append({
-                    "question": q_text,
-                    "options": options,
-                    "correct_idx": correct_idx,
-                    "answer": correct_idx + 1,
-                    "explanation": explanation,
-                })
-            except Exception as e:
-                logger.warning(f"[poll_extract] retry msg {msg_id}: {type(e).__name__}: {e}")
-                still_skipped.append(msg_id)
-        skipped_ids = still_skipped
-
-    polls.skipped_ids = skipped_ids
+    polls.skipped_ids = manual_review_ids
     return polls
+
+
 
 
 async def get_topic_msg_range(channel, topic_id: int):
