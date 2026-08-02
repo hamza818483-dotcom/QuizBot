@@ -744,18 +744,19 @@ async def generate_mcq_from_image(
 
         except Exception as e:
             err_str = str(e)
+            err_label = f"{type(e).__name__}: {err_str}" if err_str else f"{type(e).__name__} (no message — likely timeout)"
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                 is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
                 if is_daily:
-                    logger.warning(f"[Gemini] Attempt {attempt+1}: daily quota exhausted — skipping this key for rest of BD-day: {e}")
+                    logger.warning(f"[Gemini] Attempt {attempt+1}: daily quota exhausted — skipping this key for rest of BD-day: {err_label}")
                 else:
-                    logger.warning(f"[Gemini] Attempt {attempt+1} rate-limited (429), cooling down key for {key_rotator.COOLDOWN_SECONDS}s: {e}")
+                    logger.warning(f"[Gemini] Attempt {attempt+1} rate-limited (429), cooling down key for {key_rotator.COOLDOWN_SECONDS}s: {err_label}")
                 key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
             elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
-                logger.error(f"[Gemini] Attempt {attempt+1}: key permanently banned (suspended/invalid): {e}")
+                logger.error(f"[Gemini] Attempt {attempt+1}: key permanently banned (suspended/invalid): {err_label}")
                 key_rotator.mark_banned(key)
             else:
-                logger.warning(f"[Gemini] Attempt {attempt+1} failed: {e}")
+                logger.warning(f"[Gemini] Attempt {attempt+1} failed: {err_label}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
