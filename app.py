@@ -652,7 +652,7 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             # Measured from the compacted static QBM_EXTRACT_PROMPT_DEFAULT
             # (~8k chars / 3.5) + margin. Only accurate for that fixed prompt.
             PROMPT_TOKENS = 2400
-        SAFETY_MARGIN = 3600  # was 1000 — that left requests targeting ~7000-7900/8000, so ANY leftover usage from a prior call on the same key within the same 60s window (e.g. "Used 4277") guaranteed a 429 collision. Bigger margin -> requests target ~4500-5000, leaving real headroom.
+        SAFETY_MARGIN = 4200  # was 1000 — that left requests targeting ~7000-7900/8000, so ANY leftover usage from a prior call on the same key within the same 60s window (e.g. "Used 4277") guaranteed a 429 collision. Bigger margin -> requests target ~4500-5000, leaving real headroom.
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
@@ -677,23 +677,24 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             (512, 45),
             (384, 40),
             (256, 35),
+            (192, 30),
         ]:
             w, h = orig_w, orig_h
             if max(w, h) > max_dim:
                 scale = max_dim / max(w, h)
                 w, h = max(1, int(w * scale)), max(1, int(h * scale))
-            est_tokens = int((w / 28) * (h / 28) * 1.45) + 300
-            is_last = (max_dim == 256)
+            est_tokens = int((w / 28) * (h / 28) * 1.6) + 300
+            is_last = (max_dim == 192)
             if est_tokens <= TOKEN_BUDGET or is_last:
                 resized = image.resize((w, h)) if (w, h) != (orig_w, orig_h) else image
                 buf = BytesIO()
                 resized.save(buf, format="JPEG", quality=quality)
                 return "data:image/jpeg;base64," + _b64_ai.b64encode(buf.getvalue()).decode()
-        # Fallback (shouldn't reach here given the 256 floor above)
+        # Fallback (shouldn't reach here given the 192 floor above)
         buf = BytesIO()
-        scale = 256 / max(orig_w, orig_h)
+        scale = 192 / max(orig_w, orig_h)
         w, h = max(1, int(orig_w * scale)), max(1, int(orig_h * scale))
-        image.resize((w, h)).save(buf, format="JPEG", quality=35)
+        image.resize((w, h)).save(buf, format="JPEG", quality=30)
         return "data:image/jpeg;base64," + _b64_ai.b64encode(buf.getvalue()).decode()
     except Exception as e:
         logger.warning(f"[img_to_data_url_groq] resize failed, falling back to full-size: {e}")
