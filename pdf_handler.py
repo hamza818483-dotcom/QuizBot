@@ -744,53 +744,72 @@ async def generate_mcq_from_image(
         return []
 
     max_retries = min(len(key_rotator.keys), 3) if key_rotator.keys else 3
+    # Model fallback chain: try the latest model first, and if the WHOLE
+    # Gemini backend for it is overloaded (503 UNAVAILABLE — this is a
+    # server-side capacity issue, not a per-key problem, so it hits every
+    # key the same way), drop to the older stable model on the same key
+    # before moving to the next key. New models get more 503s in their
+    # first weeks of traffic ramp-up.
+    _GEMINI_MODELS = ["gemini-3.6-flash", "gemini-2.5-flash"]
 
     for attempt in range(max_retries):
-        try:
-            key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
-            from google import genai as gai
-            from google.genai import types
-            client = gai.Client(api_key=key)
-            img_b64 = image_to_base64(img)
+        key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+        last_exc = None
+        for model_name in _GEMINI_MODELS:
+            try:
+                from google import genai as gai
+                from google.genai import types
+                client = gai.Client(api_key=key)
+                img_b64 = image_to_base64(img)
 
-            def _call_gemini():
-                return client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=[
-                        types.Part.from_text(text=prompt),
-                        types.Part.from_bytes(
-                            data=base64.b64decode(img_b64),
-                            mime_type="image/jpeg"
-                        )
-                    ]
-                )
+                def _call_gemini():
+                    return client.models.generate_content(
+                        model=model_name,
+                        contents=[
+                            types.Part.from_text(text=prompt),
+                            types.Part.from_bytes(
+                                data=base64.b64decode(img_b64),
+                                mime_type="image/jpeg"
+                            )
+                        ]
+                    )
 
-            _attempt_timeout = 30 if attempt == 0 else 15
-            response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
-            valid = _parse_mcq_json(response.text)
-            valid = await _attach_explanation_images(valid, img)
-            key_rotator.mark_healthy(key)
-            logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1})")
-            return valid
-
-        except Exception as e:
-            err_str = str(e)
-            err_label = f"{type(e).__name__}: {err_str}" if err_str else f"{type(e).__name__} (no message — likely timeout)"
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
-                is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
-                if is_daily:
-                    logger.warning(f"[Gemini] Attempt {attempt+1}: daily quota exhausted — skipping this key for rest of BD-day: {err_label}")
-                else:
-                    logger.warning(f"[Gemini] Attempt {attempt+1} rate-limited (429), cooling down key for {key_rotator.COOLDOWN_SECONDS}s: {err_label}")
-                key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
-            elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
-                logger.error(f"[Gemini] Attempt {attempt+1}: key permanently banned (suspended/invalid): {err_label}")
-                key_rotator.mark_banned(key)
+                _attempt_timeout = 30 if attempt == 0 else 15
+                response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
+                valid = _parse_mcq_json(response.text)
+                valid = await _attach_explanation_images(valid, img)
+                key_rotator.mark_healthy(key)
+                logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name})")
+                return valid
+            except Exception as e:
+                last_exc = e
+                err_str = str(e)
+                if "503" in err_str or "UNAVAILABLE" in err_str.upper():
+                    logger.warning(f"[Gemini] {model_name} overloaded (503) on attempt {attempt+1} — trying next model on same key")
+                    continue
+                # Not a 503 — no point trying the fallback model on this key,
+                # move straight to key-level handling below.
+                break
+        e = last_exc
+        if e is None:
+            continue  # shouldn't happen, but guard just in case
+        err_str = str(e)
+        err_label = f"{type(e).__name__}: {err_str}" if err_str else f"{type(e).__name__} (no message — likely timeout)"
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+            is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
+            if is_daily:
+                logger.warning(f"[Gemini] Attempt {attempt+1}: daily quota exhausted — skipping this key for rest of BD-day: {err_label}")
             else:
-                logger.warning(f"[Gemini] Attempt {attempt+1} failed: {err_label}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1)
-            continue
+                logger.warning(f"[Gemini] Attempt {attempt+1} rate-limited (429), cooling down key for {key_rotator.COOLDOWN_SECONDS}s: {err_label}")
+            key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
+        elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
+            logger.error(f"[Gemini] Attempt {attempt+1}: key permanently banned (suspended/invalid): {err_label}")
+            key_rotator.mark_banned(key)
+        else:
+            logger.warning(f"[Gemini] Attempt {attempt+1} failed (both models): {err_label}")
+        if attempt < max_retries - 1:
+            await asyncio.sleep(1)
+        continue
 
     logger.warning(f"[Gemini] All keys failed for page {page} — returning empty (caller will try Groq/other fallbacks)")
 
