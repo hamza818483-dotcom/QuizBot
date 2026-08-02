@@ -652,17 +652,21 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             # Measured from the compacted static QBM_EXTRACT_PROMPT_DEFAULT
             # (~8k chars / 3.5) + margin. Only accurate for that fixed prompt.
             PROMPT_TOKENS = 2400
-        SAFETY_MARGIN = 4200  # was 1000 — that left requests targeting ~7000-7900/8000, so ANY leftover usage from a prior call on the same key within the same 60s window (e.g. "Used 4277") guaranteed a 429 collision. Bigger margin -> requests target ~4500-5000, leaving real headroom.
+        SAFETY_MARGIN = 800  # was 1000 — that left requests targeting ~7000-7900/8000, so ANY leftover usage from a prior call on the same key within the same 60s window (e.g. "Used 4277") guaranteed a 429 collision. Bigger margin -> requests target ~4500-5000, leaving real headroom.
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
             est_count = mcq_count_hint
         else:
             est_count = 25  # default full-page mode target ceiling
-        # Output tokens per MCQ tightened (110 vs old 150) since JSON output
-        # is compact; still capped so very high counts don't blow the budget.
-        est_output_tokens = max(900, min(3800, int(est_count) * 110 + 300))
-        TOKEN_BUDGET = max(500, 8000 - PROMPT_TOKENS - est_output_tokens - SAFETY_MARGIN)
+        # Output tokens per MCQ — MUST match _post_openai_compat's
+        # dynamic_max_tokens formula exactly (max(1200, min(4500, count*150+400))),
+        # since that's the actual max_tokens value sent to Groq and counted
+        # against the 8000 TPM budget. A mismatch here means this sizer
+        # underestimates the real reserved output, silently overshooting
+        # the TPM limit regardless of how small the image gets.
+        est_output_tokens = max(1200, min(4500, int(est_count) * 150 + 400))
+        TOKEN_BUDGET = max(300, 8000 - PROMPT_TOKENS - est_output_tokens - SAFETY_MARGIN)
         # qwen3.6-27b vision tokenization is roughly proportional to
         # (width/28)*(height/28) patches + a fixed base overhead.
         # Use a conservative multiplier (1.15x) since observed 413s show
