@@ -941,9 +941,17 @@ async def _get_shared_http_client():
         _shared_http_client = httpx.AsyncClient(timeout=300, limits=limits)
     return _shared_http_client
 
+_pyro_flood_wait_until = 0.0  # unix timestamp; skip start() attempts until this passes
+
 async def _get_pyro_client():
-    global _pyro_client
+    global _pyro_client, _pyro_flood_wait_until
     if _pyro_client is None and TELEGRAM_API_ID and TELEGRAM_API_HASH:
+        # If we're inside a known FLOOD_WAIT window, don't even attempt
+        # start() -- every failed auth.ImportBotAuthorization call while
+        # flood-waited can extend/refresh the wait, so retrying blindly on
+        # every large-file download makes the situation worse, not better.
+        if time.time() < _pyro_flood_wait_until:
+            return None
         from pyrogram import Client
         client = Client(
             "atlas_pyrogram", api_id=int(TELEGRAM_API_ID),
@@ -958,7 +966,16 @@ async def _get_pyro_client():
             # never-started client here permanently breaks every future
             # private-invite-link resolve/large-file download until restart.
             # Keep it None so the NEXT call retries start() fresh.
-            logger.warning(f"[pyrogram] start() failed, will retry next call: {e}")
+            err_str = str(e)
+            wait_match = re.search(r"wait of (\d+) seconds", err_str, re.I) or re.search(r"FLOOD_WAIT_(\d+)", err_str)
+            if wait_match or "FLOOD_WAIT" in err_str.upper():
+                wait_s = int(wait_match.group(1)) if wait_match else 60
+                # Add a safety cushion so we don't re-hit right at expiry
+                # and get flood-waited again.
+                _pyro_flood_wait_until = time.time() + wait_s + 10
+                logger.warning(f"[pyrogram] FLOOD_WAIT — pausing all pyrogram start() attempts for {wait_s+10}s (falls back to Bot API getFile meanwhile): {e}")
+            else:
+                logger.warning(f"[pyrogram] start() failed, will retry next call: {e}")
             return None
         _pyro_client = client
     return _pyro_client
