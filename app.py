@@ -2274,7 +2274,7 @@ def _dedupe_mcqs(mcqs: list) -> list:
 
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     """
-    Smart wrapper: Groq first (primary), then Gemini (internal key rotation via pdf_handler).
+    Smart wrapper: Gemini first (primary), then Groq fallback (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
     Missing API keys are skipped silently. Never raises.
     Queued: only one MCQ-generation job runs at a time across the whole bot.
@@ -2687,26 +2687,14 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
 
 
 async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
-    # Groq is the TRUE primary now — tried first, alone. Gemini is only
-    # invoked if Groq fails or comes back empty (sequential, not raced),
-    # so Groq's result is used whenever Groq succeeds, with no latency
-    # penalty from waiting on Gemini in the common case.
+    # Gemini is the TRUE primary now — tried first, alone (no 8k token cap
+    # like Groq has). Groq is only invoked if Gemini fails or comes back
+    # empty (sequential, not raced), so Gemini's result is used whenever
+    # Gemini succeeds, with no latency penalty from waiting on Groq.
     _LAST_GROQ_ERROR["reason"] = ""
     _LAST_GEMINI_ERROR["reason"] = ""
     _LAST_FALLBACK_ERROR["reason"] = ""
 
-    try:
-        groq_out = await _gen_groq(img, topic, mcq_count)
-    except Exception as e:
-        _LAST_GROQ_ERROR["reason"] = f"{type(e).__name__}: {e}"
-        logger.warning(f"[AI-ROT] groq failed (page {page_num}): {e}")
-        groq_out = []
-
-    if groq_out:
-        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq (primary)")
-        return groq_out
-
-    logger.warning(f"[AI-ROT] groq empty (page {page_num}); trying gemini")
     try:
         gemini_out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
     except Exception as e:
@@ -2715,10 +2703,22 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
         gemini_out = []
 
     if gemini_out:
-        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=gemini (fallback)")
+        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=gemini (primary)")
         return gemini_out
 
-    logger.warning(f"[AI-ROT] groq+gemini both empty (page {page_num}); rotating to fallbacks")
+    logger.warning(f"[AI-ROT] gemini empty (page {page_num}); trying groq")
+    try:
+        groq_out = await _gen_groq(img, topic, mcq_count)
+    except Exception as e:
+        _LAST_GROQ_ERROR["reason"] = f"{type(e).__name__}: {e}"
+        logger.warning(f"[AI-ROT] groq failed (page {page_num}): {e}")
+        groq_out = []
+
+    if groq_out:
+        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq (fallback)")
+        return groq_out
+
+    logger.warning(f"[AI-ROT] gemini+groq both empty (page {page_num}); rotating to fallbacks")
 
     # 3) Fallback providers (skip silently if key missing / call fails)
     fallback_errors = []
