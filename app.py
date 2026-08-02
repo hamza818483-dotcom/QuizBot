@@ -1460,6 +1460,17 @@ _LAST_GROQ_ERROR = {"reason": ""}
 _LAST_GEMINI_ERROR = {"reason": ""}
 _LAST_FALLBACK_ERROR = {"reason": ""}
 
+# Provider usage counter — reset on process restart, checked via /status
+_PROVIDER_USE_COUNT = {"gemini": 0, "groq": 0, "fallback": 0}
+_PROVIDER_LAST_USED = {"provider": "", "page": 0, "time": ""}
+
+def _track_provider_use(provider: str, page_num: int):
+    from datetime import datetime as _dt
+    _PROVIDER_USE_COUNT[provider] = _PROVIDER_USE_COUNT.get(provider, 0) + 1
+    _PROVIDER_LAST_USED["provider"] = provider
+    _PROVIDER_LAST_USED["page"] = page_num
+    _PROVIDER_LAST_USED["time"] = _dt.now().strftime("%H:%M:%S")
+
 async def _gen_groq(img, topic, count):
     keys = groq_key_rotator.ordered_keys()
     if not keys:
@@ -2704,6 +2715,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
 
     if gemini_out:
         logger.info(f"[AI-ROT] page {page_num} satisfied by provider=gemini (primary)")
+        _track_provider_use("gemini", page_num)
         return gemini_out
 
     logger.warning(f"[AI-ROT] gemini empty (page {page_num}); trying groq")
@@ -2716,6 +2728,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
 
     if groq_out:
         logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq (fallback)")
+        _track_provider_use("groq", page_num)
         return groq_out
 
     logger.warning(f"[AI-ROT] gemini+groq both empty (page {page_num}); rotating to fallbacks")
@@ -2730,6 +2743,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
             out = await fn(img, topic, mcq_count)
             if out:
                 logger.info(f"[AI-ROT] page {page_num} satisfied by provider={prov}")
+                _track_provider_use(prov, page_num)
                 return out
             fallback_errors.append(f"{prov}: খালি ফলাফল")
         except Exception as e:
@@ -13470,6 +13484,24 @@ async def handle_message(msg: dict):
         return
     if text == "/help":
         await handle_start(msg)
+        return
+    if text == "/status":
+        g = _PROVIDER_USE_COUNT.get("gemini", 0)
+        q = _PROVIDER_USE_COUNT.get("groq", 0)
+        f = _PROVIDER_USE_COUNT.get("fallback", 0)
+        total = g + q + f
+        last = _PROVIDER_LAST_USED
+        status_lines = [
+            "📊 <b>AI Provider Status</b> (since last restart)",
+            f"🟢 Gemini (primary): {g} page",
+            f"🟡 Groq (fallback): {q} page",
+            f"🔴 Others (fallback): {f} page",
+        ]
+        if last["provider"]:
+            status_lines.append(f"\nসর্বশেষ ব্যবহৃত: <b>{last['provider']}</b> — page {last['page']} — {last['time']}")
+        if total == 0:
+            status_lines.append("\nএখনো কোনো PDF process হয়নি এই restart-এর পর।")
+        await send_msg(chat_id, "\n".join(status_lines))
         return
     if text.startswith("/start premium_"):
         cache_id = text.replace("/start premium_", "").strip()
