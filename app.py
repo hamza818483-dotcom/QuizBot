@@ -10504,6 +10504,296 @@ async def _handle_qbm_impl(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
+# ============================================================
+# /onu — same as /qbm (existing-MCQ extraction) but SKIPS:
+#   1) any MCQ that has an image attached to a question/option/explanation
+#      (opt_bboxes present, or an <img> tag already embedded)
+#   2) "roman/serial-combination" MCQs — i.e. উদ্দীপক-style questions where
+#      the options are combinations of numbered/roman statements, e.g.
+#      "A) i, ii  B) i, iii  C) ii, iii  D) i, ii, iii" or "A) I ও II" etc.
+#      These need the statement list to make sense and don't stand alone.
+# ============================================================
+
+_ROMAN_COMBO_OPTION_RE = re.compile(
+    r'^\s*(?:[iIvVxX]{1,4}\s*(?:[,ওoO&]|and)\s*)+[iIvVxX]{1,4}\s*$'
+    r'|^\s*(?:[১২৩৪]\s*(?:[,ওoO&]|and)\s*)+[১২৩৪]\s*$'
+    r'|^\s*[iIvVxX]{1,4}\s*(?:,\s*[iIvVxX]{1,4}\s*)+$'
+)
+
+def _onu_mcq_has_image(m: dict) -> bool:
+    """True if this MCQ has any image attached — option image (opt_bboxes),
+    or an <img> tag already embedded in explanation (question-image crops
+    get attached there in this codebase)."""
+    if m.get("opt_bboxes"):
+        return True
+    exp = m.get("explanation", "") or ""
+    if "<img" in exp.lower():
+        return True
+    return False
+
+def _onu_mcq_is_roman_combo(m: dict) -> bool:
+    """True if this MCQ's options look like i/ii/iii or ১/২/৩ style
+    roman-numeral / serial-number COMBINATIONS (a উদ্দীপক-dependent MCQ that
+    doesn't stand alone without the numbered statement list above it)."""
+    opts = m.get("options")
+    if isinstance(opts, dict):
+        opt_values = list(opts.values())
+    elif isinstance(opts, list):
+        opt_values = opts
+    else:
+        return False
+    if len(opt_values) < 2:
+        return False
+    hits = sum(1 for o in opt_values if _ROMAN_COMBO_OPTION_RE.match(str(o).strip()))
+    # If most/all options match the roman-combo pattern, treat as a
+    # উদ্দীপক-combination MCQ and skip it.
+    return hits >= max(2, len(opt_values) - 1)
+
+def _onu_filter_mcqs(mcqs: list) -> list:
+    kept = []
+    for m in mcqs:
+        if _onu_mcq_has_image(m):
+            continue
+        if _onu_mcq_is_roman_combo(m):
+            continue
+        kept.append(m)
+    return kept
+
+
+async def handle_onu(msg: dict):
+    """
+    /onu -p (pages) -c (channel) -m (topic) -t (thread_id)
+    /qbm-এর মতোই EXISTING MCQ extract করে, কিন্তু ছবিযুক্ত MCQ এবং
+    roman/সংখ্যাভিত্তিক combination-type (i,ii,iii / ১,২,৩) MCQ বাদ দিয়ে।
+    """
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _handle_onu_impl(msg)
+
+
+async def _handle_onu_impl(msg: dict):
+    """Identical to _handle_qbm_impl, except after extraction it filters out
+    image-attached and roman-combo MCQs before channel-select/CSV/posting."""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    uname = msg["from"].get("first_name", "User")
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not (reply.get("document") or reply.get("photo")):
+        await send_msg(chat_id,
+            "❌ PDF বা Image-এ reply করে /onu দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/onu -p 1-5 -c @channel -m \"Topic\" -t group_id</code>\n\n"
+            "📌 /qbm-এর মতোই existing MCQ extract করে (নতুন বানায় না)\n"
+            "📌 অতিরিক্ত: ছবিযুক্ত MCQ ও roman/সংখ্যা combination (i,ii,iii) MCQ স্বয়ংক্রিয়ভাবে বাদ যাবে\n"
+            "📌 -p = page range, PDF-only (না দিলে সব page)\n"
+            "📌 -c = channel id (না দিলে list দেখাবে)\n"
+            "📌 -m = topic name\n"
+            "📌 -t = topic/thread id (group হলে)"
+        )
+        return
+
+    is_image_reply = bool(reply.get("photo")) or (
+        reply.get("document") and not reply["document"].get("file_name", "").lower().endswith(".pdf")
+        and (reply["document"].get("mime_type", "").startswith("image/"))
+    )
+
+    if reply.get("document") and not is_image_reply and not reply["document"].get("file_name", "").lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF বা Image file support করে!")
+        return
+
+    params = _parse_pdfm_params(text)
+    topic = params["topic"] or "🌟ATLAS Question Bank"
+    page_range = params["page_range"]
+    channel_id = params["channel_id"]
+    thread_id = params["thread_id"]
+
+    if is_image_reply:
+        if reply.get("photo"):
+            file_id = reply["photo"][-1]["file_id"]
+            file_unique_id = reply["photo"][-1].get("file_unique_id")
+        else:
+            file_id = reply["document"]["file_id"]
+            file_unique_id = reply["document"].get("file_unique_id")
+        file_name = reply.get("document", {}).get("file_name", "image.jpg")
+    else:
+        file_id = reply["document"]["file_id"]
+        file_unique_id = reply["document"].get("file_unique_id")
+        file_name = reply["document"].get("file_name", "document.pdf")
+
+    status_r = await send_msg(chat_id, "⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    _last_pct = {"v": -1}
+    _dl_start = time.time()
+    def _dl_progress_pdf(done, total):
+        if not status_msg_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct["v"] < 10 and pct != 100:
+            return
+        _last_pct["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        label = "Image" if is_image_reply else "PDF"
+        elapsed = time.time() - _dl_start
+        eta_txt = ""
+        if pct > 0 and pct < 100:
+            eta_s = int(elapsed * (100 - pct) / pct)
+            eta_txt = f" | ETA {eta_s}s"
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n📄 {file_name}\n[{bar} {pct}%{eta_txt}]"))
+
+    try:
+        if is_image_reply:
+            img_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id, message_id=reply["message_id"])
+            from PIL import Image as PILImage
+            img = PILImage.open(BytesIO(img_bytes))
+            pages = [(1, img)]
+        else:
+            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id,
+                                                    message_id=reply["message_id"], file_unique_id=file_unique_id)
+            ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+            if not ok:
+                await send_msg(chat_id, pages)
+                return
+
+            if not pages:
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "🔍 OCR Scanning (scanned PDF detected)...")
+                try:
+                    from pdf2image import convert_from_bytes
+                    if page_range:
+                        parts = str(page_range).split("-")
+                        first = int(parts[0])
+                        last = int(parts[1]) if len(parts) > 1 else first
+                        ocr_images = await asyncio.to_thread(
+                            convert_from_bytes, pdf_bytes, dpi=150, first_page=first, last_page=last
+                        )
+                        pages = list(zip(range(first, last + 1), ocr_images))
+                    else:
+                        ocr_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+                        pages = list(enumerate(ocr_images, 1))
+                except Exception as e:
+                    logger.warning(f"[ONU] OCR fallback failed: {e}")
+
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে...")
+
+        extracted_pages = await qbm_extract_all_pages(
+            chat_id, pages, topic, file_name, status_msg_id
+        )
+
+        # ── /onu-specific step: filter out image-attached & roman-combo MCQs ──
+        filtered_pages = []
+        total_before = 0
+        total_after = 0
+        for page_num, img, mcqs in extracted_pages:
+            total_before += len(mcqs)
+            kept = _onu_filter_mcqs(mcqs)
+            total_after += len(kept)
+            filtered_pages.append((page_num, img, kept))
+        extracted_pages = filtered_pages
+        skipped_count = total_before - total_after
+        if status_msg_id and skipped_count:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ Extraction সম্পূর্ণ! {total_before} MCQ পাওয়া গেছে, "
+                f"{skipped_count}টি (ছবি/combination-type) বাদ দেওয়া হলো — বাকি {total_after}টি এগোচ্ছে...")
+
+        if not channel_id:
+            channels = await db_get_channels()
+            if not channels:
+                await process_qbm_pages(chat_id, uid, uname, extracted_pages, topic,
+                    channel_id, True, file_name, status_msg_id, thread_id, skip_extract=True)
+                return
+
+            app.state.qbm_cache = getattr(app.state, "qbm_cache", {})
+            app.state.qbm_cache[f"qbm_img_{uid}"] = extracted_pages
+            _cap_page_cache(app.state.qbm_cache)
+            await sb_exec(lambda: sb.table("quiz_sessions").upsert({
+                "key": f"qbm_pending_{uid}",
+                "data": json.dumps({
+                    "topic": topic, "file_name": file_name,
+                    "status_msg_id": status_msg_id, "thread_id": thread_id,
+                    "file_id": file_id, "page_range": page_range
+                }),
+                "updated_at": int(time.time())
+            }).execute())
+
+            total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+            page_breakdown = "\n".join(
+                f"✅ Page {fmt_page(p)}: {len(mcqs)} MCQ ✓" for p, _, mcqs in extracted_pages
+            )
+
+            if total_mcq_found:
+                import io as _io_onu, csv as _csv_mod_onu
+                _buf_onu = _io_onu.StringIO()
+                _w_onu = _csv_mod_onu.writer(_buf_onu)
+                _w_onu.writerow(["questions", "option1", "option2", "option3", "option4",
+                                  "answer", "explanation", "type", "section"])
+                _ans_map_onu = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                for _, _, mcqs in extracted_pages:
+                    for m in mcqs:
+                        opts = m.get("options", ["", "", "", ""])
+                        _w_onu.writerow([
+                            m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                            opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                            opts[3] if len(opts) > 3 else "",
+                            _ans_map_onu.get(m.get("answer", "A"), "1"),
+                            _strip_img_tag(m.get("explanation", "")), "1", "1"
+                        ])
+                await send_document(chat_id, _buf_onu.getvalue().encode("utf-8"),
+                    f"{topic}_ONU.csv",
+                    caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted, filtered)",
+                    mime_type="text/csv")
+
+            kb = {"inline_keyboard": []}
+            for ch in channels:
+                ch_id = ch.get("channel_id", "")
+                ch_name = ch.get("channel_name", ch_id)
+                kb["inline_keyboard"].append([{
+                    "text": f"📢 {ch_name}",
+                    "callback_data": f"qbmch_{ch_id}_{uid}"
+                }])
+            kb["inline_keyboard"].append([{
+                "text": "📄 CSV Only",
+                "callback_data": f"qbmch_csv_{uid}"
+            }])
+            await send_msg(chat_id,
+                "✅ <b>Extraction Complete!</b> (image/combination MCQ বাদ দেওয়া হয়েছে)\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📝 Total MCQ: {total_mcq_found}  |  📋 Pages: {len(pages)}  |  🚫 Skipped: {skipped_count}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{page_breakdown}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 Topic: {topic}\n\nChannel select করো:",
+                reply_markup=kb
+            )
+            return
+
+        await process_qbm_pages(chat_id, uid, uname, extracted_pages, topic,
+            channel_id, False, file_name, status_msg_id, thread_id, skip_extract=True)
+
+    except Exception as e:
+        logger.error(f"[ONU] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
 async def _qbm_scan_answer_key(img, unresolved_mcqs: list) -> dict:
     """
     Given a page image and a list of MCQs whose answer wasn't found on their
@@ -13661,6 +13951,10 @@ async def handle_message(msg: dict):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
         # 100% ported from AtlasMasterBot's qbm_handler
         _spawn_command_task(uid, handle_qbm(msg))
+    elif text.startswith("/onu"):
+        # /onu = same as /qbm but skips image-attached MCQs and roman/serial
+        # combination-type (i,ii,iii / ১,২,৩) MCQs that need a উদ্দীপক to make sense
+        _spawn_command_task(uid, handle_onu(msg))
     elif text.startswith("/auto"):
         # /auto = clicks through chorcha.net using user-given button-text
         # labels (one per line), screenshots the final page, runs it
