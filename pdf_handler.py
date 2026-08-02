@@ -724,7 +724,7 @@ async def generate_mcq_from_image(
 
             def _call_gemini():
                 return client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.6-flash",
                     contents=[
                         types.Part.from_text(text=prompt),
                         types.Part.from_bytes(
@@ -832,7 +832,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
 
             def _call_gemini():
                 return client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.6-flash",
                     contents=[types.Part.from_text(text=prompt)]
                 )
 
