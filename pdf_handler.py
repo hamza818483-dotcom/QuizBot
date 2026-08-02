@@ -740,8 +740,8 @@ async def generate_mcq_from_image(
     # entirely instead of burning 429 round-trips we already know will fail —
     # go straight to OpenRouter fallback.
     if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
-        logger.warning(f"[Gemini] All {len(key_rotator.keys)} keys already daily-exhausted for today — skipping straight to OpenRouter fallback")
-        return await _openrouter_fallback(img, prompt, page)
+        logger.warning(f"[Gemini] All {len(key_rotator.keys)} keys already daily-exhausted for today — returning empty (caller will try Groq/other fallbacks)")
+        return []
 
     max_retries = min(len(key_rotator.keys), 3) if key_rotator.keys else 3
 
@@ -792,10 +792,16 @@ async def generate_mcq_from_image(
                 await asyncio.sleep(1)
             continue
 
-    logger.warning(f"[Gemini] All keys failed for page {page} → trying OpenRouter fallback")
+    logger.warning(f"[Gemini] All keys failed for page {page} — returning empty (caller will try Groq/other fallbacks)")
 
-    # ── FALLBACK: OpenRouter Qwen2.5-VL ─────────────────────
-    return await _openrouter_fallback(img, prompt, page)
+    # NOTE: OpenRouter fallback removed from here (2026-08) — this function
+    # is called as the PRIMARY step from app.py's _generate_mcq_from_image_raw,
+    # which itself falls to Groq next, then to _AI_PROVIDERS_ORDER (nvidia/
+    # openrouter_qwen/nemotron/gemma/hf). Calling OpenRouter here too meant
+    # Groq was being skipped entirely whenever Gemini failed, since this
+    # function would already return a (possibly empty) OpenRouter result
+    # before app.py ever got a chance to try Groq.
+    return []
 
 
 async def generate_mcq_from_text(text: str, topic: str = "MCQ", count: int = 15) -> list:
