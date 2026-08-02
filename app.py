@@ -1394,6 +1394,23 @@ def _mark_groq_key_exhausted_today(key: str):
 def _mark_groq_key_healthy_today(key: str):
     _key_exhausted_flag[key] = False
 
+_GROQ_BANNED_KEYS_FILE = "/tmp/atlas_banned_groq_keys.json"
+
+def _load_groq_banned_keys() -> set:
+    try:
+        with open(_GROQ_BANNED_KEYS_FILE, "r") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+def _save_groq_banned_keys(banned: set):
+    try:
+        with open(_GROQ_BANNED_KEYS_FILE, "w") as f:
+            json.dump(list(banned), f)
+    except Exception as e:
+        logger.warning(f"[Groq] Failed to persist banned keys: {e}")
+
+
 class GroqKeyRotator:
     """Rotates across multiple Groq keys (GROQ_KEYS comma-separated, falls back
     to single GROQ_API_KEY). On quota/rate-limit (429) for one key, tries the
@@ -1401,32 +1418,40 @@ class GroqKeyRotator:
     A key that hits 429 is marked exhausted for the rest of the current BD-day
     (not just a short cooldown) so future calls skip straight past a
     known-dead key instead of wasting a round-trip re-confirming it's still
-    exhausted."""
+    exhausted. Keys that are invalid/suspended (401/403) are permanently
+    banned and persisted to disk so restarts don't retry a dead key."""
     COOLDOWN_SECONDS = 60
 
     def __init__(self):
         self.keys = []
         self.current = 0
         self._cooldown_until = {}  # key -> unix timestamp when it's usable again (short-term)
+        self._banned = _load_groq_banned_keys()
         self._load_keys()
 
     def _load_keys(self):
         raw = os.environ.get("GROQ_KEYS", "") or os.environ.get("GROQ_API_KEY", "")
         if raw:
-            self.keys = [k.strip() for k in raw.split(",") if k.strip()]
-        logger.info(f"[Groq] Loaded {len(self.keys)} keys")
+            all_keys = [k.strip() for k in raw.split(",") if k.strip()]
+        else:
+            all_keys = []
+        skipped = [k for k in all_keys if k in self._banned]
+        self.keys = [k for k in all_keys if k not in self._banned]
+        if skipped:
+            logger.warning(f"[Groq] Skipped {len(skipped)} previously-banned key(s) at startup")
+        logger.info(f"[Groq] Loaded {len(self.keys)} usable keys ({len(skipped)} auto-skipped as banned)")
 
     def all_keys(self):
-        if not self.keys:
+        if not self.keys and not self._banned:
             self._load_keys()
         return list(self.keys)
 
     def ordered_keys(self):
-        """All keys, healthy ones first: not exhausted-today AND not in short
-        cooldown, then short-cooldown keys, then today-exhausted keys last —
-        so a call never wastes its first attempt on a key we already know is
-        dead for the day. If every key is exhausted-today, all are returned
-        anyway (better to retry than return nothing)."""
+        """All non-banned keys, healthy ones first: not exhausted-today AND
+        not in short cooldown, then short-cooldown keys, then today-exhausted
+        keys last — so a call never wastes its first attempt on a key we
+        already know is dead for the day. If every key is exhausted-today,
+        all are returned anyway (better to retry than return nothing)."""
         keys = self.all_keys()
         now = time.time()
         not_exhausted = [k for k in keys if not _is_groq_key_exhausted_today(k)]
@@ -1445,6 +1470,15 @@ class GroqKeyRotator:
                 if other_org == org and other_key != key:
                     self._cooldown_until[other_key] = time.time() + self.COOLDOWN_SECONDS
                     _mark_groq_key_exhausted_today(other_key)
+
+    def mark_banned(self, key: str):
+        """Permanently skip this key (e.g. 401 invalid_api_key / 403 suspended)
+        — removed from the active pool immediately and persisted to disk."""
+        self._cooldown_until[key] = float("inf")
+        self._banned.add(key)
+        self.keys = [k for k in self.keys if k != key]
+        _save_groq_banned_keys(self._banned)
+        logger.error(f"[Groq] Key {key[:12]}... permanently banned and removed from rotation ({len(self.keys)} keys remain)")
 
     def mark_healthy(self, key: str):
         self._cooldown_until.pop(key, None)
@@ -1535,6 +1569,10 @@ async def _gen_groq(img, topic, count):
             logger.warning(f"[Groq] key #{i+1}/{len(keys)} quota exhausted (429), cooling down {groq_key_rotator.COOLDOWN_SECONDS}s, trying next key")
             groq_key_rotator.mark_rate_limited(key)
             key_errors.append(f"key#{i+1}: 429 quota exhausted")
+            continue
+        if status in (401, 403):
+            groq_key_rotator.mark_banned(key)
+            key_errors.append(f"key#{i+1}: {status} invalid/suspended — permanently banned")
             continue
         # Any other error (400/404/5xx/network/timeout) — log and still try
         # the next key instead of giving up immediately, since a single bad
@@ -13493,8 +13531,8 @@ async def handle_message(msg: dict):
         last = _PROVIDER_LAST_USED
         status_lines = [
             "📊 <b>AI Provider Status</b> (since last restart)",
-            f"🟢 Gemini (primary): {g} page",
-            f"🟡 Groq (fallback): {q} page",
+            f"🟢 Gemini (primary): {g} page — {len(key_rotator.keys)} live key(s), {len(key_rotator._banned)} banned",
+            f"🟡 Groq (fallback): {q} page — {len(groq_key_rotator.keys)} live key(s), {len(groq_key_rotator._banned)} banned",
             f"🔴 Others (fallback): {f} page",
         ]
         if last["provider"]:

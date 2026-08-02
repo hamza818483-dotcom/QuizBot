@@ -58,6 +58,23 @@ def _mark_gemini_key_healthy_today(key: str):
     _gemini_key_exhausted_flag[key] = False
 
 
+_BANNED_KEYS_FILE = "/tmp/atlas_banned_gemini_keys.json"
+
+def _load_banned_keys() -> set:
+    try:
+        with open(_BANNED_KEYS_FILE, "r") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+def _save_banned_keys(banned: set):
+    try:
+        with open(_BANNED_KEYS_FILE, "w") as f:
+            json.dump(list(banned), f)
+    except Exception as e:
+        logger.warning(f"[Gemini] Failed to persist banned keys: {e}")
+
+
 class GeminiKeyRotator:
     COOLDOWN_SECONDS = 60
 
@@ -65,13 +82,20 @@ class GeminiKeyRotator:
         self.keys = []
         self.current = 0
         self._cooldown_until = {}
+        self._banned = _load_banned_keys()
         self._load_keys()
 
     def _load_keys(self):
         raw = os.environ.get("GEMINI_KEYS", "")
         if raw:
-            self.keys = [k.strip() for k in raw.split(",") if k.strip()]
-        logger.info(f"[Gemini] Loaded {len(self.keys)} keys")
+            all_keys = [k.strip() for k in raw.split(",") if k.strip()]
+        else:
+            all_keys = []
+        skipped = [k for k in all_keys if k in self._banned]
+        self.keys = [k for k in all_keys if k not in self._banned]
+        if skipped:
+            logger.warning(f"[Gemini] Skipped {len(skipped)} previously-banned key(s) at startup: {[k[:12]+'...' for k in skipped]}")
+        logger.info(f"[Gemini] Loaded {len(self.keys)} usable keys ({len(skipped)} auto-skipped as banned)")
 
     def get_key(self):
         if not self.keys:
@@ -81,14 +105,16 @@ class GeminiKeyRotator:
         return key
 
     def ordered_keys(self):
-        """All keys, healthy ones first: not exhausted-today AND not in short
-        cooldown, then short-cooldown keys, then today-exhausted keys last —
-        so a call never wastes its first attempt on a key already known dead
-        for the day (daily quota resets at day boundary, not after 60s)."""
+        """Only non-banned keys, healthy ones first: not exhausted-today AND
+        not in short cooldown, then short-cooldown keys, then today-exhausted
+        keys last — so a call never wastes its first attempt on a key
+        already known dead for the day (daily quota resets at day boundary,
+        not after 60s). Permanently banned keys are excluded entirely."""
         now = time.time()
-        not_exhausted = [k for k in self.keys if not _is_gemini_key_exhausted_today(k)]
-        exhausted = [k for k in self.keys if _is_gemini_key_exhausted_today(k)]
-        pool = not_exhausted if not_exhausted else self.keys
+        live_keys = [k for k in self.keys if k not in self._banned]
+        not_exhausted = [k for k in live_keys if not _is_gemini_key_exhausted_today(k)]
+        exhausted = [k for k in live_keys if _is_gemini_key_exhausted_today(k)]
+        pool = not_exhausted if not_exhausted else live_keys
         healthy = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
         cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
         return healthy + cooling + (exhausted if not_exhausted else [])
@@ -100,9 +126,14 @@ class GeminiKeyRotator:
 
     def mark_banned(self, key: str):
         """Permanently skip this key (e.g. 403 CONSUMER_SUSPENDED / invalid key)
-        — a 60s cooldown is pointless for a dead key; it will keep failing
-        forever and wasting a full retry cycle every single request."""
+        — removed from the active pool immediately and persisted to disk so
+        restarts don't waste a retry cycle on a key that will keep failing
+        forever."""
         self._cooldown_until[key] = float("inf")
+        self._banned.add(key)
+        self.keys = [k for k in self.keys if k != key]
+        _save_banned_keys(self._banned)
+        logger.error(f"[Gemini] Key {key[:12]}... permanently banned and removed from rotation ({len(self.keys)} keys remain)")
 
     def mark_healthy(self, key: str):
         self._cooldown_until.pop(key, None)
