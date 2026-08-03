@@ -9322,16 +9322,16 @@ async def _qbm_call1_extract(img) -> list:
     CALL 1 — OWN OCR + strict-prompt MCQ extraction + inline dedup.
     Job: extract every existing MCQ on the page (option-serial strictly
     preserved per active prompt), while checking-as-it-goes so no duplicate
-    /ghost MCQ enters the list. Groq primary -> Gemini fallback.
+    /ghost MCQ enters the list. Gemini primary (much higher token limit) -> Groq fallback.
     """
     try:
         prompt = await qbm_get_active_prompt()
+        gem = await _qbm_gemini_extract(img, prompt)
+        if gem:
+            return _qbm_dedup_list(gem)
         txt = await _qbm_groq_call(img, prompt)
         result = _qbm_parse_json(txt) if txt else []
-        if result:
-            return _qbm_dedup_list(result)
-        gem = await _qbm_gemini_extract(img, prompt)
-        return _qbm_dedup_list(gem)
+        return _qbm_dedup_list(result)
     except Exception as e:
         logger.warning(f"[QBM Call1] failed: {e}")
         return []
@@ -9366,11 +9366,11 @@ TASK (fast audit, connected to Call 1 — do not redo full extraction):
 
 Output ONLY a JSON array of the MISSED MCQs (same schema as before):
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
-        txt = await _qbm_groq_call(img, prompt)
-        missed = _qbm_parse_json(txt) if txt else []
+        gem_txt = await _qbm_gemini_raw(img, prompt)
+        missed = _qbm_parse_json(gem_txt) if gem_txt else []
         if not missed:
-            gem_txt = await _qbm_gemini_raw(img, prompt)
-            missed = _qbm_parse_json(gem_txt) if gem_txt else []
+            txt = await _qbm_groq_call(img, prompt)
+            missed = _qbm_parse_json(txt) if txt else []
 
         combined = list(call1_mcqs) + missed
         # 2nd dedup pass (fast, since Call-1 already deduped once) — catches any
@@ -9410,11 +9410,11 @@ If the page genuinely has no MCQ at all, output exactly: []
 
 Output ONLY a JSON array:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]"""
-        txt = await _qbm_groq_call(img, prompt)
-        found = _qbm_parse_json(txt) if txt else []
+        gem_txt = await _qbm_gemini_raw(img, prompt)
+        found = _qbm_parse_json(gem_txt) if gem_txt else []
         if not found:
-            gem_txt = await _qbm_gemini_raw(img, prompt)
-            found = _qbm_parse_json(gem_txt) if gem_txt else []
+            txt = await _qbm_groq_call(img, prompt)
+            found = _qbm_parse_json(txt) if txt else []
         return _qbm_dedup_list(found) if found else []
     except Exception as e:
         logger.warning(f"[QBM Call3-empty] failed: {e}")
@@ -9477,8 +9477,11 @@ VERIFY each MCQ against the actual page image, in this exact order of checks:
 Output ONLY the corrected full JSON array (same length as input, same schema, all fixes applied):
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
 
-        txt = await _qbm_groq_call(img, prompt)
+        txt = await _qbm_gemini_raw(img, prompt)
         verified = _qbm_parse_json(txt) if txt else []
+        if not verified:
+            txt = await _qbm_groq_call(img, prompt)
+            verified = _qbm_parse_json(txt) if txt else []
         if verified and len(verified) >= len(mcqs) * 0.8:
             deduped_verified = _qbm_dedup_list(verified)
             # sanity: if dedup collapsed it down close to (or below) the pre-verify
