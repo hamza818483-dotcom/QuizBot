@@ -9372,10 +9372,16 @@ async def _qbm_call1_extract(img) -> list:
         prompt = await qbm_get_active_prompt()
         gem = await _qbm_gemini_extract(img, prompt)
         if gem:
-            return _qbm_dedup_list(gem)
+            out = _qbm_dedup_list(gem)
+            for m in out:
+                m["_provider"] = "Gemini"
+            return out
         txt = await _qbm_groq_call(img, prompt)
         result = _qbm_parse_json(txt) if txt else []
-        return _qbm_dedup_list(result)
+        out = _qbm_dedup_list(result)
+        for m in out:
+            m["_provider"] = "Groq"
+        return out
     except Exception as e:
         logger.warning(f"[QBM Call1] failed: {e}")
         return []
@@ -9456,10 +9462,15 @@ Output ONLY a JSON array:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]"""
         gem_txt = await _qbm_gemini_raw(img, prompt)
         found = _qbm_parse_json(gem_txt) if gem_txt else []
+        provider = "Gemini"
         if not found:
             txt = await _qbm_groq_call(img, prompt)
             found = _qbm_parse_json(txt) if txt else []
-        return _qbm_dedup_list(found) if found else []
+            provider = "Groq"
+        out = _qbm_dedup_list(found) if found else []
+        for m in out:
+            m.setdefault("_provider", provider)
+        return out
     except Exception as e:
         logger.warning(f"[QBM Call3-empty] failed: {e}")
         return []
@@ -11320,6 +11331,7 @@ async def process_qbm_pages(
     summary_pages = []
     all_mcqs_csv = []
     first_image_msg_id = None
+    page_provider_tally = {}  # page_num -> {"Gemini": n, "Groq": n} for final model-usage summary
     set_active_job(chat_id, f"QBM Poll posting ({file_name}, page-by-page)")
 
     iterable = page_tuples if skip_extract else [(p, img, None) for p, img in pages]
@@ -11370,6 +11382,12 @@ async def process_qbm_pages(
                             m["explanation"] = resolved["explanation"] or (m.get("explanation") or "").replace(
                                 "Answer not found in source", ""
                             ).strip()
+
+            _counts = {}
+            for _m in (mcqs or []):
+                _prov = _m.get("_provider", "Unknown")
+                _counts[_prov] = _counts.get(_prov, 0) + 1
+            page_provider_tally[page_num] = _counts
 
             img_bytes = image_to_bytes(img) if not isinstance(img, (bytes, bytearray)) else img
 
@@ -11514,9 +11532,20 @@ async def process_qbm_pages(
 
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
+    # Per-page model breakdown: which provider (Gemini/Groq) actually produced
+    # each page's MCQs, tallied from the _provider tag stamped on each MCQ
+    # during extraction (_qbm_call1_extract / _qbm_final_empty_page_scan).
+    page_model_map = page_provider_tally
     page_breakdown_final = "\n".join(
-        f"✅ Page {fmt_page(p)}: {ps['mcq']} MCQ ✓" for p, ps in zip([pp for pp, _ in display_pages], page_status)
+        f"✅ Page {fmt_page(p)}: {ps['mcq']} MCQ"
+        + (f" ({', '.join(f'{k}:{v}' for k, v in page_model_map.get(p, {}).items())})" if page_model_map.get(p) else "")
+        for p, ps in zip([pp for pp, _ in display_pages], page_status)
     )
+    model_totals = {}
+    for counts in page_model_map.values():
+        for k, v in counts.items():
+            model_totals[k] = model_totals.get(k, 0) + v
+    model_totals_line = ", ".join(f"{k}: {v}" for k, v in model_totals.items()) if model_totals else "N/A"
     await edit_msg(chat_id, status_msg_id,
         "✅ <b>QBM Extraction Complete!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -11525,6 +11554,7 @@ async def process_qbm_pages(
         f"{page_breakdown_final}\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📝 Total MCQ Extracted: {total_mcq}\n📋 Pages: {len(display_pages)}\n⏱️ {mins}:{secs:02d}\n"
+        f"🤖 Model Usage: {model_totals_line}\n"
         "━━━━━━━━━━━━━━━━━━━━━━")
 
 # ============================================================
