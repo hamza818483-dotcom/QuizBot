@@ -1554,12 +1554,22 @@ async def _gen_groq(img, topic, count):
             # before moving on, so a good key is never burned for a sizing
             # issue (mirrors the QBM fix in _qbm_groq_call).
             if shrunk_url is None:
-                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=40, prompt_len_hint=prompt)
+                # Use a REDUCED count (not the original) for both the image
+                # sizer AND the retry API call — using a smaller count here
+                # shrinks BOTH the image budget AND the reserved max_tokens
+                # sent to Groq, since max_tokens counts against the 8000 TPM
+                # limit just as much as the image does. Previously this used
+                # mcq_count_hint=40 for the image (bigger than original, made
+                # image budget worse) while the retry call still passed the
+                # ORIGINAL count (bigger max_tokens, no actual shrink) — the
+                # combination meant this retry could never succeed.
+                shrunk_count = max(8, min(int(count) if count else 25, 12))
+                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=shrunk_count, prompt_len_hint=prompt)
             if shrunk_url:
                 txt2, status2 = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
                     key, "qwen/qwen3.6-27b",
-                    shrunk_url, prompt, mcq_count_hint=count
+                    shrunk_url, prompt, mcq_count_hint=shrunk_count
                 )
                 if txt2:
                     parsed2 = _parse_mcq_json(txt2)
