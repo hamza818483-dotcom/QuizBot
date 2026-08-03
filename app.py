@@ -1540,7 +1540,11 @@ def classify_ai_error(e: Exception, provider: str, page_num: int = 0) -> str:
             category = "rate_limit_429"
     elif "SUSPENDED" in err_upper or "API_KEY_INVALID" in err_upper or "401" in err_str or "403" in err_str:
         category = "suspended_banned"
-    elif "CONNECTION" in err_upper or "NETWORK" in err_upper or "DNS" in err_upper or isinstance(e, (ConnectionError, OSError)):
+    elif ("CONNECTION" in err_upper or "NETWORK" in err_upper or "DNS" in err_upper
+          or "SSL" in err_upper or "RECORD LAYER" in err_upper or "READERROR" in type_name.upper()
+          or "WRITEERROR" in type_name.upper() or "TRANSPORT" in type_name.upper()
+          or "REMOTEPROTOCOLERROR" in type_name.upper() or "POOLTIMEOUT" in type_name.upper()
+          or isinstance(e, (ConnectionError, OSError))):
         category = "network"
     else:
         category = "other"
@@ -13378,6 +13382,20 @@ async def handle_error_command(msg: dict):
                 summary_lines.append(f"  • <b>{provider}</b> — {parts}")
     if summary_lines:
         await send_msg(chat_id, "\n".join(summary_lines))
+
+    # Per-call detailed reasons — these carry richer context (e.g. "all 5
+    # keys failed — [key#1: 413; key#2: SSL error; ...]") that the single
+    # most-recent-event classifier above doesn't capture, since a single
+    # page can hit several different keys/errors within one call.
+    extras = []
+    if _LAST_GEMINI_ERROR["reason"]:
+        extras.append(f"<b>Gemini (latest call):</b>\n<code>{_LAST_GEMINI_ERROR['reason'][:500]}</code>")
+    if _LAST_GROQ_ERROR["reason"]:
+        extras.append(f"<b>Groq (latest call):</b>\n<code>{_LAST_GROQ_ERROR['reason'][:500]}</code>")
+    if _LAST_FALLBACK_ERROR["reason"]:
+        extras.append(f"<b>Fallback providers (latest call):</b>\n<code>{_LAST_FALLBACK_ERROR['reason'][:500]}</code>")
+    if extras:
+        await send_msg(chat_id, "\n\n".join(extras))
 
     content = await get_recent_errors()
     if not content.strip():
