@@ -308,6 +308,20 @@ def aggressive_clean(text):
     text = re.sub(r'\\frac\s*\{([^}]+)\}\s*\{([^}]+)\}', r'\1/\2', text)
     text = re.sub(r'\\frac\s*(\S+)\s*(\S+)', r'\1/\2', text)
 
+    # \sqrt{...}: multi-term contents must keep grouping as √(...), since
+    # the generic '{}' strip further down would otherwise fuse a multi-term
+    # radicand into the surrounding expression with no boundary at all
+    # (e.g. "√{a+b}" -> "√a+b", silently changing what's under the root).
+    # Single-token contents (plain numbers/letters) don't need parens.
+    def _sqrt_repl(m):
+        inner = m.group(1).strip()
+        if re.fullmatch(r'[A-Za-z0-9]+', inner):
+            return '√' + inner
+        return '√(' + inner + ')'
+    text = re.sub(r'\\sqrt\s*\{([^{}]+)\}', _sqrt_repl, text)
+    # \sqrt without braces followed directly by a token, e.g. "\sqrt2", "\sqrt x"
+    text = re.sub(r'\\sqrt\s*([A-Za-z0-9]+)', r'√\1', text)
+
     for latex, uni in LATEX_SYMBOLS.items():
         text = text.replace(latex, uni)
 
