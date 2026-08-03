@@ -462,7 +462,13 @@ def format_content(element, img_map):
             mfrac.replace_with(f"{num}/{den}")
 
     for sub in element.find_all(['sub', 'msub']):
-        sub.replace_with(sub.get_text(strip=True).translate(SUB_MAP))
+        sub_text = sub.get_text(strip=True)
+        # Fraction inside a subscript -- unicode has no fraction-in-subscript,
+        # so emit LaTeX instead of mangling it.
+        if re.search(r'/', sub_text) and len(sub_text) > 2:
+            sub.replace_with(f"$_{{{sub_text}}}$")
+        else:
+            sub.replace_with(sub_text.translate(SUB_MAP))
     for sup in element.find_all(['sup', 'msup']):
         sup_text = sup.get_text(strip=True)
         # A <sup>/<msup> whose own text ends in "°", OR whose very next
@@ -475,6 +481,11 @@ def format_content(element, img_map):
         next_text = next_sib.strip() if isinstance(next_sib, str) else (next_sib.get_text() if next_sib else "")
         if sup_text.rstrip().endswith('°') or (next_text or "").lstrip().startswith('°'):
             sup.replace_with(sup_text)
+        elif re.search(r'/', sup_text) and len(sup_text) > 2:
+            # Fraction-in-superscript (e.g. "(1-γ)/γ") -- unicode superscript
+            # can't represent a fraction, so emit LaTeX instead of mangling
+            # it into broken/unreadable unicode chars.
+            sup.replace_with(f"$^{{{sup_text}}}$")
         else:
             sup.replace_with(sup_text.translate(SUP_MAP))
 
@@ -579,11 +590,23 @@ def format_content(element, img_map):
         return f" ZZZIMG{len(img_markers)-1}ZZZ "
 
     raw_text = re.sub(r'img_s.*?img_e', img_repl, raw_text)
+
+    # Protect fraction-in-sup/sub LaTeX spans (e.g. "$^{(1-γ)/γ}$") from
+    # aggressive_clean's own \^{...}/\_{...} stripping regexes below --
+    # otherwise it would immediately unpack what we just wrapped in LaTeX.
+    latex_markers = []
+    def _latex_repl(match):
+        latex_markers.append(match.group(0))
+        return f" ZZZLATEX{len(latex_markers)-1}ZZZ "
+    raw_text = re.sub(r'\$[\^_]\{[^}]+\}\$', _latex_repl, raw_text)
+
     cleaned_text = aggressive_clean(raw_text)
     cleaned_text = cleaned_text.replace("ZZZOLDOTZZZ", ".")
 
     for i, marker in enumerate(img_markers):
         cleaned_text = cleaned_text.replace(f"ZZZIMG{i}ZZZ", marker)
+    for i, marker in enumerate(latex_markers):
+        cleaned_text = cleaned_text.replace(f"ZZZLATEX{i}ZZZ", marker).replace(f"ZZZLATEX{i} ZZZ", marker)
 
     return re.sub(r'img_s(.*?)img_e', r'<img class="qimg" src="\1">', cleaned_text)
 
