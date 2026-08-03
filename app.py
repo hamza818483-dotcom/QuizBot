@@ -2864,6 +2864,8 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
     if gemini_out:
         logger.info(f"[AI-ROT] page {page_num} satisfied by provider=gemini (primary)")
         _track_provider_use("gemini", page_num)
+        for _m in gemini_out:
+            _m.setdefault("_provider", "Gemini")
         return gemini_out
 
     logger.warning(f"[AI-ROT] gemini empty (page {page_num}); trying groq")
@@ -2878,6 +2880,8 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
     if groq_out:
         logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq (fallback)")
         _track_provider_use("groq", page_num)
+        for _m in groq_out:
+            _m.setdefault("_provider", "Groq")
         return groq_out
 
     logger.warning(f"[AI-ROT] gemini+groq both empty (page {page_num}); rotating to fallbacks")
@@ -2893,6 +2897,8 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
             if out:
                 logger.info(f"[AI-ROT] page {page_num} satisfied by provider={prov}")
                 _track_provider_use(prov, page_num)
+                for _m in out:
+                    _m.setdefault("_provider", prov.title())
                 return out
             fallback_errors.append(f"{prov}: খালি ফলাফল")
             record_empty_parse("fallback")
@@ -8088,6 +8094,12 @@ async def pdf_generate_all_pages(
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
                 page_status[idx]["mcq"] = len(mcqs)
+                _model_counts = {}
+                for _m in (mcqs or []):
+                    _prov = _m.get("_provider", "Unknown")
+                    _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
+                if _model_counts:
+                    page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id,
                         _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0))
@@ -8495,6 +8507,12 @@ async def _process_pdf_pages_inner(
             page_status[idx]["done"] = True
             page_status[idx]["current"] = False
             page_status[idx]["mcq"] = len(mcqs)
+            _model_counts = {}
+            for _m in (mcqs or []):
+                _prov = _m.get("_provider", "Unknown")
+                _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
+            if _model_counts:
+                page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
             await sb_exec(lambda: sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute())
@@ -9033,6 +9051,12 @@ async def _process_pdfm_pages_impl(
             page_status[idx]["done"] = True
             page_status[idx]["current"] = False
             page_status[idx]["mcq"] = len(mcqs)
+            _model_counts = {}
+            for _m in (mcqs or []):
+                _prov = _m.get("_provider", "Unknown")
+                _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
+            if _model_counts:
+                page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
 
