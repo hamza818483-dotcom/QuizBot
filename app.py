@@ -9439,7 +9439,8 @@ async def _qbm_call3_verify(img, mcqs: list, page_confirmed_complete: bool) -> l
     try:
         mcq_json = json.dumps([
             {"question": m.get("question", ""), "options": m.get("options", []),
-             "answer": m.get("answer", "A"), "explanation": m.get("explanation", "")}
+             "answer": m.get("answer", "A"), "explanation": m.get("explanation", ""),
+             "qsn_bbox": m.get("qsn_bbox")}
             for m in mcqs
         ], ensure_ascii=False)
 
@@ -9468,14 +9469,19 @@ VERIFY each MCQ against the actual page image, in this exact order of checks:
    Na⁺ etc.) are correctly rendered everywhere.
 7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
    is prepended to the question (self-contained). Fix/add if missing.
-8) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
+8) QUESTION-DIAGRAM CHECK: if this MCQ's question genuinely has a diagram/figure/chart in the
+   source image needed to understand/answer it, confirm "qsn_bbox" is present and tightly boxes
+   ONLY that diagram (0-1000 scale). Add qsn_bbox if a real diagram was missed. If qsn_bbox was
+   given but the question has NO actual diagram, remove it (set to null). Never invent a bbox
+   for options — options never get any bbox/image.
+9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
    either "page" (the explanation is copied verbatim from text physically present on the page,
    e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
    page, so the explanation was built from AI knowledge). Be honest and precise about this —
    it is used for quality auditing, not shown to end users.
 
 Output ONLY the corrected full JSON array (same length as input, same schema, all fixes applied):
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated","qsn_bbox":[100,200,400,450]}}]"""
 
         txt = await _qbm_gemini_raw(img, prompt)
         verified = _qbm_parse_json(txt) if txt else []
