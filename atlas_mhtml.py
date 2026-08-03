@@ -293,6 +293,17 @@ def aggressive_clean(text):
     # letter, same reasoning as the vector-arrow fix above. Negative
     # lookahead avoids eating a real exponent caret ("x^2", "a^{b}").
     text = re.sub(r'([A-Za-z])\s*\^(?!\{|\w)', lambda m: m.group(1) + '\u0302', text)
+    # A number (coefficient) must sit directly against a following
+    # vector-marked letter (one carrying the arrow diacritic U+20D7 or the
+    # hat/circumflex U+0302 from the two fixes above) -- standard math
+    # notation never puts a space between a coefficient and its vector,
+    # e.g. "2 î" must become "2î", "2 3 ĵ" (a coefficient plus a
+    # mid-broken vector letter) becomes "23ĵ".
+    text = re.sub(
+        r'(\d(?:\s*\d)*)\s+([A-Za-z\u0980-\u09FF][\u0300-\u036F\u20D0-\u20FF])',
+        lambda m: re.sub(r'\s+', '', m.group(1)) + m.group(2),
+        text,
+    )
 
     text = re.sub(r'\\frac\s*\{([^}]+)\}\s*\{([^}]+)\}', r'\1/\2', text)
     text = re.sub(r'\\frac\s*(\S+)\s*(\S+)', r'\1/\2', text)
