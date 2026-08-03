@@ -9867,6 +9867,41 @@ async def _attach_option_images_if_missing(mcqs: list, img) -> list:
     return mcqs
 
 
+_FIGURE_CAPTION_RE = re.compile(
+    r'চিত্র\s*[:\-]?\s*\S+|figure\s*[:\-]?\s*\d+|diagram\s*[:\-]?\s*\S+', re.IGNORECASE
+)
+
+async def _qbm_recover_missed_diagram_bbox(img, question: str) -> list:
+    """Code-level fallback: question text has a figure caption (e.g. 'চিত্র: G')
+    but no qsn_bbox was ever produced by Call1/Call3 -- do one targeted, cheap
+    Gemini call asking ONLY for that diagram's box, instead of losing the
+    diagram silently."""
+    prompt = f"""This exact page image contains an MCQ whose question text includes a figure
+caption/label: "{question[:200]}"
+
+TASK: Find the actual diagram/figure/chart that this caption labels (the drawing itself, not
+the caption text) on this page image. Output ONLY a tight JSON bounding box (0-1000 scale) that
+fully contains that diagram including its labels/arrows, with a small margin. If you genuinely
+cannot find any diagram matching this caption, output exactly: null
+
+Output ONLY: [x1,y1,x2,y2] or null -- no other text."""
+    try:
+        txt = await _qbm_gemini_raw(img, prompt)
+        if not txt:
+            return None
+        t = txt.strip()
+        if t.lower() == "null" or not t:
+            return None
+        m = re.search(r'\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\]', t)
+        if m:
+            bbox = json.loads(m.group())
+            if len(bbox) == 4:
+                return bbox
+    except Exception as e:
+        logger.warning(f"[QBM] Diagram bbox recovery failed: {e}")
+    return None
+
+
 async def _qbm_final_safety_net(img, mcqs: list) -> list:
     """
     Last-line, zero-trust, CODE-LEVEL (not prompt-level) safety net applied to
@@ -9881,6 +9916,9 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
          reassigned to a real, non-blank option so answer/options stay
          consistent with each other.
       4) Explanation empty/missing -> build one now (4-option covering).
+      5) Question has a figure caption (e.g. "চিত্র: G") but no qsn_bbox was
+         ever attached -> one targeted recovery call to find that diagram's
+         box, so the caption never ships without its actual image.
     """
     if not mcqs:
         return mcqs
@@ -9915,6 +9953,13 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
                 idx = opt_letters.index(ans) if ans in opt_letters else 0
                 ans_text = opts[idx] if idx < len(opts) else ""
                 mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
+
+        if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
+            recovered_bbox = await _qbm_recover_missed_diagram_bbox(img, mc["question"])
+            if recovered_bbox:
+                mc["qsn_bbox"] = recovered_bbox
+                logger.info(f"[QBM safety-net] Recovered missed diagram bbox for: {mc['question'][:50]}")
+
         fixed.append(mc)
     fixed = await _attach_option_images_if_missing(fixed, img)
     return fixed
