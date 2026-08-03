@@ -277,6 +277,16 @@ def aggressive_clean(text):
         return ""
     text = convert_to_english_numbers(text)
 
+    # Vector arrow fix: get_text(separator=" ", ...) inserts a space at every
+    # inline-tag boundary, so a letter followed by a combining "arrow above"
+    # (U+20D7, e.g. rendering as V⃗ for vector V) ends up as "V ⃗" -- the
+    # arrow floats beside the letter instead of sitting directly above it,
+    # since a combining character must immediately follow its base letter
+    # with no space between them. Also handle the standalone (non-combining)
+    # right-arrow U+2192 used the same way in some source markup.
+    text = re.sub(r'([^\s\u0300-\u036F\u20D0-\u20FF])\s+([\u20D0-\u20FF])', r'\1\2', text)
+    text = re.sub(r'([A-Za-z\u0980-\u09FF])\s+(\u2192)(?!\w)', r'\1\u20D7', text)
+
     text = re.sub(r'\\frac\s*\{([^}]+)\}\s*\{([^}]+)\}', r'\1/\2', text)
     text = re.sub(r'\\frac\s*(\S+)\s*(\S+)', r'\1/\2', text)
 
