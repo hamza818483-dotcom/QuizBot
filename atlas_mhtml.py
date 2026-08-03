@@ -306,7 +306,19 @@ def aggressive_clean(text):
     text = re.sub(r'_([0-9a-zA-Z+\-]+)', lambda m: m.group(1).translate(SUB_MAP), text)
     text = re.sub(r'\^([0-9a-zA-Z+\-]+)', lambda m: m.group(1).translate(SUP_MAP), text)
 
-    text = re.sub(r'([⁰¹²³⁴⁵⁶⁷⁸⁹]+)°', lambda m: m.group(1).translate(SUP_TO_NORMAL) + '°', text)
+    # Universal degree-number fix: superscript digits right before "°" must
+    # become plain digits (e.g. "⁶⁷°" -> "67°"). The DOM-text extraction's
+    # get_text(separator=" ", ...) sometimes inserts a stray space between
+    # individual superscript digits themselves (not just around other tags),
+    # producing "⁶ ⁷°" or "⁶ ⁷ °" -- the non-spaced version below wouldn't
+    # match that. Strip any spaces within a run of superscript digits (and
+    # between the run and a following °) before doing the digit conversion,
+    # so it's covered regardless of where the stray space landed.
+    text = re.sub(
+        r'((?:[⁰¹²³⁴⁵⁶⁷⁸⁹]\s*)+)°',
+        lambda m: m.group(1).replace(' ', '').translate(SUP_TO_NORMAL) + '°',
+        text,
+    )
     text = text.replace('^\\circ', '°').replace('^{\\circ}', '°').replace('∘', '°')
     text = text.replace('° C', '°C').replace('^ C', '°C')
     text = re.sub(r'(\d)\s+°', r'\1°', text)
