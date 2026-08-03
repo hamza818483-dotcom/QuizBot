@@ -9095,6 +9095,7 @@ QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR — PERMANENT MODE. Extract
 
 FORBIDDEN (zero tolerance):
 - Never create a new MCQ from page text/facts; never add extra MCQs; never skip any — extract ALL, in exact page order
+- MULTI-COLUMN PAGE ORDER (strict, mandatory): if the page has 2+ columns, extract in COLUMN-MAJOR order — finish the ENTIRE left column top-to-bottom FIRST, then move to the next column top-to-bottom, and so on. NEVER interleave/zigzag between columns (e.g. left-Q1, right-Q1, left-Q2, right-Q2 is WRONG). Before finalizing, verify: every question number from the left column appears before any question number from the right column in your output list.
 - Never guess an answer without source proof; never modify question/option wording (only strip numbering like ১./1./Q1./ক.)
 - Never translate — keep source language exactly (Bengali stays Bengali, English stays English)
 - 0 MCQs on page → output exactly []. N MCQs → output exactly N, never more/fewer. No target count given/needed.
@@ -9496,6 +9497,9 @@ VERIFY each MCQ against the actual page image, in this exact order of checks:
    image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail).
 6) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
    Na⁺ etc.) are correctly rendered everywhere.
+6b) COLUMN-ORDER CHECK: if the source page has multiple columns, confirm the MCQ list follows
+   COLUMN-MAJOR order (entire left column top-to-bottom, then next column top-to-bottom) — never
+   zigzag/interleave between columns. Re-order the list if columns got mixed.
 7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
    is prepended to the question (self-contained), and that ONLY the specific navigation sentence
    naming which question numbers to answer (e.g. "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও")
