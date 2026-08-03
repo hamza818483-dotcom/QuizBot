@@ -788,6 +788,13 @@ async def generate_mcq_from_image(
                 _attempt_timeout = 60 if attempt == 0 else 45
                 response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 valid = _parse_mcq_json(response.text)
+                if not valid:
+                    try:
+                        from app import record_empty_parse
+                        record_empty_parse("gemini")
+                    except Exception:
+                        pass
+                    logger.warning(f"[Gemini] Page {page}: response OK but 0 valid MCQs parsed (attempt {attempt+1}, model={model_name}) — likely malformed/truncated JSON, not a real 'page has no content'")
                 valid = await _attach_explanation_images(valid, img)
                 key_rotator.mark_healthy(key)
                 logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name})")
@@ -796,6 +803,11 @@ async def generate_mcq_from_image(
                 last_exc = e
                 err_str = str(e)
                 if "503" in err_str or "UNAVAILABLE" in err_str.upper():
+                    try:
+                        from app import classify_ai_error
+                        classify_ai_error(e, "gemini")
+                    except Exception:
+                        pass
                     logger.warning(f"[Gemini] {model_name} overloaded (503) on attempt {attempt+1} — trying next model on same key")
                     continue
                 # Not a 503 — no point trying the fallback model on this key,
@@ -806,6 +818,11 @@ async def generate_mcq_from_image(
             continue  # shouldn't happen, but guard just in case
         err_str = str(e)
         err_label = f"{type(e).__name__}: {err_str}" if err_str else f"{type(e).__name__} (no message — likely timeout)"
+        try:
+            from app import classify_ai_error
+            classify_ai_error(e, "gemini")
+        except Exception:
+            pass  # classifier is best-effort visibility only, never blocks the real retry logic
         if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
             is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
             if is_daily:

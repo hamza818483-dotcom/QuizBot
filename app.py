@@ -1502,6 +1502,73 @@ _LAST_FALLBACK_ERROR = {"reason": ""}
 _PROVIDER_USE_COUNT = {"gemini": 0, "groq": 0, "fallback": 0}
 _PROVIDER_LAST_USED = {"provider": "", "page": 0, "time": ""}
 
+# Unified failure classification — every exception from ANY AI provider call
+# gets bucketed here so /status shows exactly what's actually going wrong,
+# instead of failures silently disappearing into a generic "failed" log line.
+_FAILURE_COUNTS = {
+    "gemini": {"timeout": 0, "rate_limit_429": 0, "daily_quota": 0, "suspended_banned": 0,
+               "overloaded_503": 0, "empty_parse": 0, "network": 0, "other": 0},
+    "groq":   {"timeout": 0, "rate_limit_429": 0, "daily_quota": 0, "suspended_banned": 0,
+               "payload_too_large_413": 0, "empty_parse": 0, "network": 0, "other": 0},
+    "fallback": {"timeout": 0, "rate_limit_429": 0, "suspended_banned": 0,
+                 "empty_parse": 0, "network": 0, "other": 0},
+}
+_LAST_FAILURE_DETAIL = {"provider": "", "category": "", "detail": "", "page": 0, "time": ""}
+
+def classify_ai_error(e: Exception, provider: str, page_num: int = 0) -> str:
+    """Single source of truth for turning any exception from any AI provider
+    into one of a fixed set of categories, so every failure path (Gemini,
+    Groq, and every fallback provider) is classified the SAME way instead of
+    each call site inventing its own ad-hoc string matching. Returns the
+    category name and also records it into _FAILURE_COUNTS/_LAST_FAILURE_DETAIL
+    as a side effect so /status always reflects the true failure breakdown."""
+    from datetime import datetime as _dt
+    err_str = str(e)
+    err_upper = err_str.upper()
+    type_name = type(e).__name__
+
+    if isinstance(e, (asyncio.TimeoutError,)) or "TIMEOUT" in type_name.upper() or (not err_str and "timeout" in type_name.lower()):
+        category = "timeout"
+    elif "503" in err_str or "UNAVAILABLE" in err_upper:
+        category = "overloaded_503"
+    elif "413" in err_str or "PAYLOAD" in err_upper and "LARGE" in err_upper:
+        category = "payload_too_large_413"
+    elif "429" in err_str or "RESOURCE_EXHAUSTED" in err_upper or "quota" in err_str.lower() or "rate limit" in err_str.lower():
+        if "PerDay" in err_str or "daily" in err_str.lower() or "generate_content_free_tier_requests" in err_str:
+            category = "daily_quota"
+        else:
+            category = "rate_limit_429"
+    elif "SUSPENDED" in err_upper or "API_KEY_INVALID" in err_upper or "401" in err_str or "403" in err_str:
+        category = "suspended_banned"
+    elif "CONNECTION" in err_upper or "NETWORK" in err_upper or "DNS" in err_upper or isinstance(e, (ConnectionError, OSError)):
+        category = "network"
+    else:
+        category = "other"
+
+    bucket = _FAILURE_COUNTS.get(provider)
+    if bucket is not None and category in bucket:
+        bucket[category] += 1
+    elif bucket is not None:
+        bucket["other"] += 1
+    _LAST_FAILURE_DETAIL.update({
+        "provider": provider, "category": category,
+        "detail": f"{type_name}: {err_str}"[:200] if err_str else f"{type_name} (no message)",
+        "page": page_num,
+        "time": _dt.now().strftime("%H:%M:%S"),
+    })
+    return category
+
+def record_empty_parse(provider: str):
+    """Call this when an AI call returns 200 OK but _parse_mcq_json finds
+    zero valid MCQs — this is a REAL failure mode (malformed/truncated JSON,
+    model refused, empty page) that was previously invisible since it's not
+    an exception at all, just an empty list silently treated the same as
+    'this page genuinely has 0 MCQs'."""
+    bucket = _FAILURE_COUNTS.get(provider)
+    if bucket is not None:
+        bucket["empty_parse"] += 1
+
+
 def _track_provider_use(provider: str, page_num: int):
     from datetime import datetime as _dt
     _PROVIDER_USE_COUNT[provider] = _PROVIDER_USE_COUNT.get(provider, 0) + 1
@@ -1544,6 +1611,7 @@ async def _gen_groq(img, topic, count):
             if parsed:
                 groq_key_rotator.mark_healthy(key)
                 return parsed
+            record_empty_parse("groq")
             key_errors.append(f"key#{i+1}: HTTP {status} but JSON parse যোগ্য কোনো MCQ পাওয়া যায়নি")
             continue
         if status == 413:
@@ -1575,18 +1643,23 @@ async def _gen_groq(img, topic, count):
                     if parsed2:
                         groq_key_rotator.mark_healthy(key)
                         return parsed2
+                    record_empty_parse("groq")
                 key_errors.append(f"key#{i+1}: 413 even after shrink (status={status2})")
+                _FAILURE_COUNTS["groq"]["payload_too_large_413"] += 1
                 continue
             key_errors.append(f"key#{i+1}: 413 payload too large")
+            _FAILURE_COUNTS["groq"]["payload_too_large_413"] += 1
             continue
         if status == 429:
             logger.warning(f"[Groq] key #{i+1}/{len(keys)} quota exhausted (429), cooling down {groq_key_rotator.COOLDOWN_SECONDS}s, trying next key")
             groq_key_rotator.mark_rate_limited(key)
             key_errors.append(f"key#{i+1}: 429 quota exhausted")
+            _FAILURE_COUNTS["groq"]["rate_limit_429"] += 1
             continue
         if status in (401, 403):
             groq_key_rotator.mark_banned(key)
             key_errors.append(f"key#{i+1}: {status} invalid/suspended — permanently banned")
+            _FAILURE_COUNTS["groq"]["suspended_banned"] += 1
             continue
         # Any other error (400/404/5xx/network/timeout) — log and still try
         # the next key instead of giving up immediately, since a single bad
@@ -1595,6 +1668,7 @@ async def _gen_groq(img, topic, count):
         reason = "network/timeout (no HTTP response)" if status == 0 else f"HTTP {status}"
         logger.warning(f"[Groq] key #{i+1}/{len(keys)} failed ({reason}), trying next key")
         key_errors.append(f"key#{i+1}: {reason}")
+        _FAILURE_COUNTS["groq"]["network" if status == 0 else "other"] += 1
     _LAST_GROQ_ERROR["reason"] = f"Groq সব {len(keys)}টি key-তেই fail করেছে — [" + "; ".join(key_errors) + "]"
     return []
 
@@ -2762,6 +2836,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
         gemini_out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
     except Exception as e:
         _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"
+        classify_ai_error(e, "gemini", page_num)
         logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {e}")
         gemini_out = []
 
@@ -2775,6 +2850,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
         groq_out = await _gen_groq(img, topic, mcq_count)
     except Exception as e:
         _LAST_GROQ_ERROR["reason"] = f"{type(e).__name__}: {e}"
+        classify_ai_error(e, "groq", page_num)
         logger.warning(f"[AI-ROT] groq failed (page {page_num}): {e}")
         groq_out = []
 
@@ -2798,9 +2874,11 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
                 _track_provider_use(prov, page_num)
                 return out
             fallback_errors.append(f"{prov}: খালি ফলাফল")
+            record_empty_parse("fallback")
         except Exception as e:
             logger.warning(f"[AI-ROT] provider {prov} crashed: {e}")
             fallback_errors.append(f"{prov}: {type(e).__name__}: {e}")
+            classify_ai_error(e, "fallback", page_num)
             continue
 
     _LAST_FALLBACK_ERROR["reason"] = "; ".join(fallback_errors) if fallback_errors else "কোনো fallback provider configure করা নেই"
@@ -13827,6 +13905,33 @@ async def handle_message(msg: dict):
     if text == "/help":
         await handle_start(msg)
         return
+    if text == "/error":
+        lf = _LAST_FAILURE_DETAIL
+        lines = ["🔍 <b>Latest Error — Exact Cause</b>\n"]
+        if not lf["provider"]:
+            lines.append("এখনো কোনো failure হয়নি এই restart-এর পর — সব ঠিক আছে।")
+        else:
+            lines.append(f"<b>Provider:</b> {lf['provider']}")
+            lines.append(f"<b>Category:</b> {lf['category']}")
+            lines.append(f"<b>Page:</b> {lf['page'] or 'N/A'}")
+            lines.append(f"<b>Time:</b> {lf['time']}")
+            lines.append(f"\n<b>Raw error:</b>\n<code>{lf['detail']}</code>")
+        # Also surface the three legacy per-call "last reason" trackers,
+        # since they sometimes capture context (e.g. "all N keys failed —
+        # [key#1: ...; key#2: ...]") that the single-event classifier above
+        # doesn't carry.
+        extras = []
+        if _LAST_GEMINI_ERROR["reason"]:
+            extras.append(f"<b>Gemini (latest call):</b>\n<code>{_LAST_GEMINI_ERROR['reason'][:300]}</code>")
+        if _LAST_GROQ_ERROR["reason"]:
+            extras.append(f"<b>Groq (latest call):</b>\n<code>{_LAST_GROQ_ERROR['reason'][:300]}</code>")
+        if _LAST_FALLBACK_ERROR["reason"]:
+            extras.append(f"<b>Fallback providers (latest call):</b>\n<code>{_LAST_FALLBACK_ERROR['reason'][:300]}</code>")
+        if extras:
+            lines.append("\n━━━━━━━━━━━━━━━━━━━━━━")
+            lines.extend(extras)
+        await send_msg(chat_id, "\n".join(lines))
+        return
     if text == "/status":
         g = _PROVIDER_USE_COUNT.get("gemini", 0)
         q = _PROVIDER_USE_COUNT.get("groq", 0)
@@ -13841,7 +13946,28 @@ async def handle_message(msg: dict):
         ]
         if last["provider"]:
             status_lines.append(f"\nসর্বশেষ ব্যবহৃত: <b>{last['provider']}</b> — page {last['page']} — {last['time']}")
-        if total == 0:
+
+        # Failure breakdown — shows EXACTLY what kind of error occurred for
+        # each provider, not just a generic "failed" count.
+        any_failures = any(any(v > 0 for v in cat.values()) for cat in _FAILURE_COUNTS.values())
+        if any_failures:
+            status_lines.append("\n⚠️ <b>Failure breakdown</b> (since last restart):")
+            _label_map = {
+                "timeout": "⏱️ Timeout", "rate_limit_429": "🚦 Rate-limit (429)",
+                "daily_quota": "📅 Daily quota exhausted", "suspended_banned": "🚫 Suspended/banned key",
+                "overloaded_503": "🔥 Server overloaded (503)", "payload_too_large_413": "📦 Payload too large (413)",
+                "empty_parse": "❔ Empty/malformed response", "network": "🌐 Network error", "other": "❓ Other",
+            }
+            for provider, cats in _FAILURE_COUNTS.items():
+                nonzero = {k: v for k, v in cats.items() if v > 0}
+                if nonzero:
+                    parts = ", ".join(f"{_label_map.get(k, k)}: {v}" for k, v in nonzero.items())
+                    status_lines.append(f"  • <b>{provider}</b> — {parts}")
+            if _LAST_FAILURE_DETAIL["provider"]:
+                lf = _LAST_FAILURE_DETAIL
+                status_lines.append(f"\nসর্বশেষ failure: <b>{lf['provider']}</b> [{lf['category']}] at {lf['time']}\n<code>{lf['detail']}</code>")
+
+        if total == 0 and not any_failures:
             status_lines.append("\nএখনো কোনো PDF process হয়নি এই restart-এর পর।")
         await send_msg(chat_id, "\n".join(status_lines))
         return
