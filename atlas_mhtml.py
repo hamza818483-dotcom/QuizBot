@@ -285,7 +285,14 @@ def aggressive_clean(text):
     # with no space between them. Also handle the standalone (non-combining)
     # right-arrow U+2192 used the same way in some source markup.
     text = re.sub(r'([^\s\u0300-\u036F\u20D0-\u20FF])\s+([\u20D0-\u20FF])', r'\1\2', text)
-    text = re.sub(r'([A-Za-z\u0980-\u09FF])\s+(\u2192)(?!\w)', r'\1\u20D7', text)
+    text = re.sub(r'([A-Za-z\u0980-\u09FF])\s+(\u2192)(?!\w)', lambda m: m.group(1) + '\u20D7', text)
+    # Unit-vector "hat" notation written as a literal ASCII caret after the
+    # letter with a space (e.g. "i ^", "j ^") -- not a Unicode combining
+    # character itself, so the arrow-diacritic regex above doesn't catch it.
+    # Convert to the proper combining circumflex (U+0302) directly on the
+    # letter, same reasoning as the vector-arrow fix above. Negative
+    # lookahead avoids eating a real exponent caret ("x^2", "a^{b}").
+    text = re.sub(r'([A-Za-z])\s+\^(?!\{|\w)', lambda m: m.group(1) + '\u0302', text)
 
     text = re.sub(r'\\frac\s*\{([^}]+)\}\s*\{([^}]+)\}', r'\1/\2', text)
     text = re.sub(r'\\frac\s*(\S+)\s*(\S+)', r'\1/\2', text)
