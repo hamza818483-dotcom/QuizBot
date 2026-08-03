@@ -7923,6 +7923,18 @@ async def handle_pdf(msg: dict):
             }).execute())
 
             total_mcq_found = sum(len(mcqs) for _, _, mcqs in generated_pages)
+
+            # ✅ CSV auto-send — channel-select button dekhanor age-i, kono
+            # click chara automatically CSV file pathiye dey.
+            try:
+                all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
+                if all_mcqs_flat:
+                    csv_bytes = _mcqs_to_csv_bytes(all_mcqs_flat)
+                    await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
+                        caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv")
+            except Exception as csv_err:
+                logger.warning(f"[PDF] CSV auto-send failed: {csv_err}")
+
             page_breakdown = "\n".join(
                 f"✅ Page {fmt_page(p)}: {len(mcqs)} MCQ ✓" for p, _, mcqs in generated_pages
             )
