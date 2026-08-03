@@ -9134,7 +9134,18 @@ OPTION ORDER (absolute, never reorder/shuffle):
 - If a passage/stimulus/scenario precedes a question or group of questions, identify it and prepend its full text to each linked MCQ's question (so each MCQ is self-contained, never incomplete without the passage)
 - If multiple MCQs share one উদ্দীপক, copy the same passage into each one individually
 - Don't confuse regular questions with passage-based ones — only actual passage/scenario/case-study content counts as উদ্দীপক
-- STRICTLY REMOVE any linking/instructional sentence like "উদ্দীপকের আলোকে ২১ ও ২২ নং প্রশ্নের উত্তর দাও" / "নিচের উদ্দীপকের ভিত্তিতে প্রশ্নের উত্তর দাও" / similar English equivalents — these are page-navigation instructions, never part of the actual question. Only keep: (a) the real passage content itself if one exists (prepend to question), (b) the actual question text. Never output the instructional/linking sentence itself.
+- STRICTLY REMOVE only the specific NAVIGATION/INSTRUCTION sentence that tells the reader WHICH
+  QUESTION NUMBERS to answer using the passage — e.g. "উদ্দীপকের আলোকে ২১ ও ২২ নং প্রশ্নের উত্তর
+  দাও", "নিচের উদ্দীপকের ভিত্তিতে ২৩-২৫ নং প্রশ্নের উত্তর দাও", or English equivalents like
+  "Answer questions 21 and 22 based on the stimulus above". This exact pattern — question-number(s)
+  + "প্রশ্নের উত্তর দাও"/"answer question(s)" — is a page-navigation instruction and is NEVER part
+  of the actual question, so always strip it out.
+  DO NOT strip any other sentence just because it contains the word "উদ্দীপক" — e.g. a real
+  question like "উদ্দীপকে প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" (asking about what the diagram/
+  passage shows) IS the actual question and must be kept in full, exactly as printed.
+  Only keep: (a) the real passage/stimulus content itself if one exists (prepend to question),
+  (b) the actual question text (which may itself reference "উদ্দীপক" naturally). Never output the
+  navigation/instruction sentence about which question numbers to answer.
 
 EXPLANATION RULES (strict priority order, always):
 1) TOP PRIORITY: if the page has ANY explanation/reasoning text attached to this specific MCQ, copy it 100% VERBATIM, byte-for-byte, exactly as written (same spelling/punctuation/wording) — no summarizing, shortening, paraphrasing, translating, or "improving." This overrides the 165-char limit below. Only skip to case 2 if truly no explanation exists near this MCQ.
@@ -9485,9 +9496,10 @@ VERIFY each MCQ against the actual page image, in this exact order of checks:
 6) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
    Na⁺ etc.) are correctly rendered everywhere.
 7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
-   is prepended to the question (self-contained), and that any linking/instructional sentence
-   like "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও" is REMOVED from the question (never part
-   of the actual question — only the real passage content + actual question text remain).
+   is prepended to the question (self-contained), and that ONLY the specific navigation sentence
+   naming which question numbers to answer (e.g. "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও")
+   is removed — never strip a real question just because it mentions "উদ্দীপক" (e.g. "উদ্দীপকে
+   প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" is a genuine question and must stay in full).
 8) QUESTION-DIAGRAM CHECK: if this MCQ's question genuinely has a diagram/figure/chart in the
    source image needed to understand/answer it, confirm "qsn_bbox" is present and FULLY contains
    the entire diagram (all labels/arrows/edges, small margin included — never a partial/cut-off
