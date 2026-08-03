@@ -7991,7 +7991,9 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 else:
                     lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ (content না পাওয়া গেছে)")
             else:
-                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ ✓")
+                model_tag = s.get("model", "")
+                model_str = f" ({model_tag})" if model_tag else ""
+                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str} ✓")
         elif s["current"]:
             lines.append(f"⏳ Page {fmt_page(s['page'])}: Processing...")
         else:
@@ -11241,6 +11243,12 @@ async def qbm_extract_all_pages(
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
         page_status[idx]["mcq"] = len(mcqs)
+        _counts = {}
+        for _m in (mcqs or []):
+            _prov = _m.get("_provider", "")
+            if _prov:
+                _counts[_prov] = _counts.get(_prov, 0) + 1
+        page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _counts.items())
         total_mcq += len(mcqs)
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
@@ -11484,6 +11492,7 @@ async def process_qbm_pages(
             page_status[idx]["done"] = True
             page_status[idx]["current"] = False
             page_status[idx]["mcq"] = len(mcqs)
+            page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in page_provider_tally.get(page_num, {}).items())
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
 
