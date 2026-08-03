@@ -9091,6 +9091,12 @@ def _get_bd_time() -> str:
 # Different from /pdfm: extracts MCQs that ALREADY EXIST in the PDF,
 # never generates new ones. OCR fallback for scanned PDFs. 3x retry per page.
 # ============================================================
+# Bump this ANY time QBM_EXTRACT_PROMPT_DEFAULT's text changes -- lets
+# qbm_get_active_prompt() auto-detect a stale DB-cached prompt from before
+# the code update and self-heal to the new default, without needing a manual
+# `DELETE FROM quiz_sessions WHERE key='qbm_active_prompt'` after every edit.
+QBM_PROMPT_VERSION = 2
+
 QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR — PERMANENT MODE. Extract ONLY MCQs that already exist on this page. Never invent new ones. Follow every rule below, always, every page.
 
 FORBIDDEN (zero tolerance):
@@ -9196,23 +9202,29 @@ async def qbm_get_active_prompt() -> str:
     try:
         r = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", "qbm_active_prompt").execute())
         if r.data:
-            p = json.loads(r.data[0]["data"]).get("prompt")
-            if p:
+            saved = json.loads(r.data[0]["data"])
+            p = saved.get("prompt")
+            saved_version = saved.get("version", 0)
+            # If this DB row predates a code prompt update (no manual edit since),
+            # auto-heal to the new default instead of silently running stale rules.
+            if p and saved_version >= QBM_PROMPT_VERSION:
                 _qbm_prompt_cache["prompt"] = p
                 return p
+            elif p:
+                logger.info(f"[QBM] DB-cached prompt is stale (v{saved_version} < v{QBM_PROMPT_VERSION}) — auto-healing to new code default")
     except Exception as e:
         logger.warning(f"[QBM] prompt memory load failed: {e}")
     _qbm_prompt_cache["prompt"] = QBM_EXTRACT_PROMPT_DEFAULT
     return QBM_EXTRACT_PROMPT_DEFAULT
 
-async def qbm_set_active_prompt(new_prompt: str):
+async def qbm_set_active_prompt(new_prompt: str, version: int = QBM_PROMPT_VERSION):
     """New prompt update এলে সেটাকে permanent করে save করে — পরের বার থেকে
     (নতুন update না আসা অবধি) এই prompt-ই সবসময় ব্যবহার হবে।"""
     _qbm_prompt_cache["prompt"] = new_prompt
     try:
         await sb_exec(lambda: sb.table("quiz_sessions").upsert({
             "key": "qbm_active_prompt",
-            "data": json.dumps({"prompt": new_prompt}),
+            "data": json.dumps({"prompt": new_prompt, "version": version}),
             "updated_at": int(time.time())
         }).execute())
     except Exception as e:
