@@ -9844,28 +9844,47 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
 
 
 async def _qbm_gemini_raw(img, prompt: str) -> str:
-    """Direct Gemini call with any given prompt -> raw text (caller parses)."""
+    """Direct Gemini call with any given prompt -> raw text (caller parses).
+    Tries up to 2 different keys (ordered healthiest-first) before giving up
+    -- a single 429 RESOURCE_EXHAUSTED (daily quota, only 20 RPD/key on free
+    tier) or per-key rate limit must not kill the whole call when other keys
+    are still usable."""
     try:
         from pdf_handler import key_rotator, image_to_base64
         if not key_rotator.keys:
             return ""
-        key = key_rotator.get_key()
         from google import genai as gai
         from google.genai import types
-        client = gai.Client(api_key=key)
         img_b64 = image_to_base64(img)
+        img_bytes = base64.b64decode(img_b64)
 
-        def _call():
+        def _call(key):
+            client = gai.Client(api_key=key)
             return client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
-                    types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                    types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
                 ],
                 config=types.GenerateContentConfig(temperature=0.1)
             )
-        response = await asyncio.to_thread(_call)
-        return response.text or ""
+
+        keys_to_try = key_rotator.ordered_keys()[:2] or [key_rotator.get_key()]
+        for key in keys_to_try:
+            try:
+                response = await asyncio.to_thread(_call, key)
+                key_rotator.mark_healthy(key)
+                return response.text or ""
+            except Exception as e:
+                msg = str(e)
+                if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                    daily = "generate_content_free_tier_requests" in msg or "PerDay" in msg
+                    key_rotator.mark_rate_limited(key, daily_exhausted=daily)
+                    logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key")
+                    continue
+                logger.warning(f"[QBM] Gemini raw call failed: {e}")
+                return ""
+        return ""
     except Exception as e:
         logger.warning(f"[QBM] Gemini raw call failed: {e}")
         return ""
