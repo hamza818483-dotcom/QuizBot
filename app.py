@@ -9325,26 +9325,32 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     keys = groq_key_rotator.all_keys()
     if not keys:
         return ""
-    data_url = _img_to_data_url_groq(img, mcq_count_hint=25, prompt_len_hint=prompt)
+    data_url = _img_to_data_url_groq(img, mcq_count_hint=10, prompt_len_hint=prompt)
     if not data_url:
         return ""
     shrunk_url = None
+    shrunk_prompt = None
     for key in keys:
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
             key, "qwen/qwen3.6-27b",
-            data_url, prompt
+            data_url, prompt, mcq_count_hint=10
         )
         if txt:
             return txt
         if status == 413:
             if shrunk_url is None:
-                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=10, prompt_len_hint=prompt)
+                # prompt itself (embedded MCQ JSON) can be the actual overflow
+                # cause on pages with many MCQs -- truncate it too, not just
+                # the image, since a big prompt alone can exceed 8000 TPM
+                # regardless of how small the image gets.
+                shrunk_prompt = prompt if len(prompt) < 3000 else prompt[:3000] + "\n...(truncated)"
+                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=5, prompt_len_hint=shrunk_prompt)
             if shrunk_url:
                 txt2, status2 = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
                     key, "qwen/qwen3.6-27b",
-                    shrunk_url, prompt
+                    shrunk_url, shrunk_prompt, mcq_count_hint=5
                 )
                 if txt2:
                     return txt2
