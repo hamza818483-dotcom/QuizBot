@@ -9473,6 +9473,11 @@ async def _qbm_call3_verify(img, mcqs: list, page_confirmed_complete: bool) -> l
         prompt = f"""Do a careful full verification pass on every MCQ below — never skip or
 shortcut this check, regardless of how confident earlier passes were.
 
+CRITICAL: OUTPUT LIST ORDER (mandatory) — the output array MUST have the exact same MCQ-to-MCQ
+order as the input list below, position by position, same length. Fixing/adding a field (like
+qsn_bbox) on an MCQ must NEVER change its position in the list. Never move an MCQ to the end or
+anywhere else just because it needed a fix — fix it in place, at its original index.
+
 Here is the current MCQ list extracted from this page image (Call 1 + Call 2 combined):
 {mcq_json}
 
@@ -9648,10 +9653,13 @@ async def _qbm_extract_from_image(img) -> list:
                         logger.warning(f"[QBM] Call1+final-scan both empty on attempt {_pipeline_attempt+1}/3 — retrying full pipeline before confirming empty page")
                         continue
                     return []  # both independent passes agree: genuinely no MCQ
-                recovered_mcqs = _cap_mcq_options(_qbm_restore_opt_bboxes(final_check, await _qbm_call3_verify(img, final_check, False)))
+                verified = await _qbm_call3_verify(img, final_check, False)
+                verified = _qbm_repair_order(final_check, verified)
+                recovered_mcqs = _cap_mcq_options(_qbm_restore_opt_bboxes(final_check, verified))
                 return await _qbm_final_safety_net(img, recovered_mcqs)
 
             call3 = await _qbm_call3_verify(img, call1, True)
+            call3 = _qbm_repair_order(call1, call3)
             call3 = _qbm_restore_opt_bboxes(call1, call3)
             final_mcqs = _cap_mcq_options(call3)
             return await _qbm_final_safety_net(img, final_mcqs)
@@ -9792,6 +9800,35 @@ def _qbm_restore_opt_bboxes(source_mcqs: list, verified_mcqs: list) -> list:
         if i < len(source_mcqs) and not mc.get("qsn_bbox"):
             mc["qsn_bbox"] = source_mcqs[i].get("qsn_bbox")
     return verified_mcqs
+
+
+def _qbm_repair_order(source_mcqs: list, verified_mcqs: list) -> list:
+    """CODE-LEVEL safety net: even with an explicit prompt instruction, a
+    model can still occasionally move an MCQ (typically one it had to fix,
+    e.g. adding qsn_bbox) to a different position in its output list. This
+    re-sorts verified_mcqs back to source_mcqs's original order by matching
+    normalized question text -- any MCQ that can't be matched (rare, e.g.
+    text changed too much) is kept in its verify-output position at the end,
+    never dropped."""
+    if not verified_mcqs or len(verified_mcqs) != len(source_mcqs):
+        return verified_mcqs  # length mismatch -> trust verify's own order, don't risk misalignment
+    source_order = [_qbm_normalize_q(mc.get("question", "")) for mc in source_mcqs]
+    by_key = {}
+    leftovers = []
+    for mc in verified_mcqs:
+        key = _qbm_normalize_q(mc.get("question", ""))
+        if key and key not in by_key:
+            by_key[key] = mc
+        else:
+            leftovers.append(mc)
+    ordered = []
+    used = set()
+    for key in source_order:
+        if key in by_key and key not in used:
+            ordered.append(by_key[key])
+            used.add(key)
+    ordered.extend(leftovers)
+    return ordered if len(ordered) == len(verified_mcqs) else verified_mcqs
 
 
 async def _attach_option_images_if_missing(mcqs: list, img) -> list:
