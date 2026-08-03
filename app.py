@@ -1302,6 +1302,8 @@ def _parse_mcq_json(text: str) -> list:
             })
     return out
 
+_key_429_is_tpm = {}  # key -> True if last 429 was TPM/per-request-too-large (not genuine quota exhaustion)
+
 async def _post_openai_compat(url: str, key: str, model: str, data_url: str, prompt: str, mcq_count_hint=None) -> tuple:
     """Returns (text, status_code). status_code=0 means network/exception (no HTTP response).
 
@@ -1357,8 +1359,11 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
                 body_preview = r.text[:300]
                 if r.status_code == 429 and re.search(r"tokens per minute|TPM", body_preview, re.I):
                     logger.warning(f"[AI-ROT] {model} HTTP 429 (TPM/per-request-too-large, NOT genuine quota exhaustion): {body_preview}")
+                    _key_429_is_tpm[key] = True
                 else:
                     logger.warning(f"[AI-ROT] {model} HTTP {r.status_code}: {body_preview}")
+                    if r.status_code == 429:
+                        _key_429_is_tpm[key] = False
                 org_match = re.search(r"org_[A-Za-z0-9]+", body_preview)
                 if org_match:
                     _key_org_map[key] = org_match.group(0)
@@ -1465,8 +1470,14 @@ class GroqKeyRotator:
         cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
         return healthy + cooling + (exhausted if not_exhausted else [])
 
-    def mark_rate_limited(self, key: str):
+    def mark_rate_limited(self, key: str, daily_exhausted: bool = True):
+        """daily_exhausted=False for TPM/per-request-too-large 429s (key itself
+        is fine, only that single request was oversized) — those should only
+        get a short cooldown, NOT burn the key for the rest of the BD-day.
+        Genuine quota/RPD 429s still mark the key exhausted-today as before."""
         self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
+        if not daily_exhausted:
+            return
         _mark_groq_key_exhausted_today(key)
         org = _key_org_map.get(key)
         if org:
@@ -1655,9 +1666,15 @@ async def _gen_groq(img, topic, count):
             _FAILURE_COUNTS["groq"]["payload_too_large_413"] += 1
             continue
         if status == 429:
-            logger.warning(f"[Groq] key #{i+1}/{len(keys)} quota exhausted (429), cooling down {groq_key_rotator.COOLDOWN_SECONDS}s, trying next key")
-            groq_key_rotator.mark_rate_limited(key)
-            key_errors.append(f"key#{i+1}: 429 quota exhausted")
+            is_tpm_only = _key_429_is_tpm.get(key) is True
+            if is_tpm_only:
+                logger.warning(f"[Groq] key #{i+1}/{len(keys)} 429 TPM/per-request-too-large (key still healthy), cooling down {groq_key_rotator.COOLDOWN_SECONDS}s, trying next key")
+                groq_key_rotator.mark_rate_limited(key, daily_exhausted=False)
+                key_errors.append(f"key#{i+1}: 429 TPM (request too large, not quota)")
+            else:
+                logger.warning(f"[Groq] key #{i+1}/{len(keys)} quota exhausted (429), cooling down {groq_key_rotator.COOLDOWN_SECONDS}s, trying next key")
+                groq_key_rotator.mark_rate_limited(key)
+                key_errors.append(f"key#{i+1}: 429 quota exhausted")
             _FAILURE_COUNTS["groq"]["rate_limit_429"] += 1
             continue
         if status in (401, 403):
