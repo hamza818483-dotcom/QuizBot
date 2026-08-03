@@ -9575,58 +9575,44 @@ async def _qbm_ram_aware_acquire():
 
 async def _qbm_extract_from_image(img) -> list:
     """
-    3-CALL CONNECTED PIPELINE (per page), replacing the old independent-pass
-    system. Each call has one distinct job and is connected to the others —
-    a call that already confirms something tells the next call to skip
-    redundant re-work instead of re-verifying everything from scratch.
+    2-CALL CONNECTED PIPELINE (per page) — max 2 Gemini requests/page (Groq
+    only as fallback if Gemini fails), replacing the old 3-call system.
 
-    Call 1 (extract): own-OCR + strict prompt MCQ extraction, inline dedup.
-    Call 2 (miss-check, MAIN job): confirms Call 1 caught every MCQ on the
-        page; adds any missed one; fast re-dedup on the combined list.
-    Call 3 (verify): if Call 1+2 found zero misses and zero duplicates, this
-        page is "confirmed complete" -> Call 3 only does one fast recheck
-        pass (option-serial + answer-source + spelling). Otherwise it does a
-        careful full verification pass.
-    Never fabricates new questions — only extracts/fixes what already exists.
+    Call 1 (extract): own-OCR + strict prompt MCQ extraction (question,
+        options in exact source serial, answer, explanation, qsn_bbox for
+        any question-diagram).
+    Call 3 (verify): full re-check pass against the page image — option-serial
+        integrity, answer-source match, spelling/completeness, uddipok
+        prepending, and qsn_bbox correctness (adds if missed, removes if
+        falsely present). Never fabricates new questions.
 
-    ZERO-SKIP GUARANTEE: a 0-MCQ result from a single pass is NEVER trusted
-    outright — it's indistinguishable from a technical failure (image failed
-    to encode, all Groq keys down/rate-limited, Gemini call errored) which
-    would silently look identical to "page genuinely has no MCQ". So the
-    entire pipeline is retried up to 2 more times (3 total attempts) before
-    a page is ever confirmed empty -- the image must actually be analyzed,
-    not skipped due to a transient technical hiccup.
+    ZERO-SKIP GUARANTEE: a 0-MCQ result from Call 1 is NEVER trusted outright
+    — it's indistinguishable from a technical failure (image encode issue,
+    Gemini/Groq call errored) which would silently look identical to "page
+    genuinely has no MCQ". So one independent final-scan call is run before
+    confirming empty, and the whole pipeline retries up to 2 more times (3
+    total attempts) before a page is ever confirmed empty.
     """
     await _qbm_ram_aware_acquire()
     try:
         for _pipeline_attempt in range(3):
             call1 = await _qbm_call1_extract(img)
 
-            # Even if Call 1 found nothing, Call 2 still re-checks the page for a
-            # missed MCQ before we declare it genuinely empty -- a single failed/
-            # empty Call 1 (e.g. transient parse issue) should never silently zero
-            # out a page that Call 2 could still catch.
-            before_call2 = len(call1)
-            call2 = await _qbm_call2_miss_check(img, call1)
-            page_confirmed_complete = (len(call2) == before_call2)  # no misses added, no dupes removed
-
-            if not call2:
-                # STRONG COMBINATION CHECK: Call 1 and Call 2 both say zero. Don't
-                # trust two-in-agreement alone -- run one final independent scan
-                # (Call 3's empty-page variant). Only if all THREE calls agree on
-                # zero is the page a *candidate* for truly empty.
+            if not call1:
+                # ZERO-SKIP GUARANTEE: a single empty Call 1 could be a technical
+                # failure (image encode issue, API error) rather than a genuinely
+                # empty page -- run one independent final scan before confirming.
                 final_check = await _qbm_final_empty_page_scan(img)
                 if not final_check:
                     if _pipeline_attempt < 2:
-                        logger.warning(f"[QBM] All 3 calls returned empty on attempt {_pipeline_attempt+1}/3 — could be technical failure, retrying full pipeline before confirming empty page")
+                        logger.warning(f"[QBM] Call1+final-scan both empty on attempt {_pipeline_attempt+1}/3 — retrying full pipeline before confirming empty page")
                         continue
-                    return []  # 3 full independent pipeline passes all agree: genuinely no MCQ
-                # Call 3 found something the first two missed -- verify it properly.
+                    return []  # both independent passes agree: genuinely no MCQ
                 recovered_mcqs = _cap_mcq_options(_qbm_restore_opt_bboxes(final_check, await _qbm_call3_verify(img, final_check, False)))
                 return await _qbm_final_safety_net(img, recovered_mcqs)
 
-            call3 = await _qbm_call3_verify(img, call2, page_confirmed_complete)
-            call3 = _qbm_restore_opt_bboxes(call2, call3)
+            call3 = await _qbm_call3_verify(img, call1, True)
+            call3 = _qbm_restore_opt_bboxes(call1, call3)
             final_mcqs = _cap_mcq_options(call3)
             return await _qbm_final_safety_net(img, final_mcqs)
         return []
