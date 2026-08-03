@@ -774,7 +774,13 @@ async def generate_mcq_from_image(
                         ]
                     )
 
-                _attempt_timeout = 30 if attempt == 0 else 15
+                # 30s/15s was too tight — a full page asking for 15-35 MCQs
+                # routinely takes 25-50s to generate even under NORMAL load
+                # (large JSON output + image processing), so the old timeout
+                # was killing successful-but-slow responses, not just genuinely
+                # stuck ones. 60s/45s gives real generations room to finish
+                # while still bounding worst-case wait per attempt.
+                _attempt_timeout = 60 if attempt == 0 else 45
                 response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 valid = _parse_mcq_json(response.text)
                 valid = await _attach_explanation_images(valid, img)
