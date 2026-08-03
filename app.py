@@ -9845,10 +9845,10 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
 
 async def _qbm_gemini_raw(img, prompt: str) -> str:
     """Direct Gemini call with any given prompt -> raw text (caller parses).
-    Tries up to 2 different keys (ordered healthiest-first) before giving up
-    -- a single 429 RESOURCE_EXHAUSTED (daily quota, only 20 RPD/key on free
-    tier) or per-key rate limit must not kill the whole call when other keys
-    are still usable."""
+    Tries keys in healthiest-first order, one after another, until one
+    succeeds -- a single key's 429 RESOURCE_EXHAUSTED (daily quota, only 20
+    RPD/key on free tier) or rate limit must never kill the whole call while
+    any other key in the pool is still usable."""
     try:
         from pdf_handler import key_rotator, image_to_base64
         if not key_rotator.keys:
@@ -9869,7 +9869,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                 config=types.GenerateContentConfig(temperature=0.1)
             )
 
-        keys_to_try = key_rotator.ordered_keys()[:2] or [key_rotator.get_key()]
+        keys_to_try = key_rotator.ordered_keys() or key_rotator.keys
         for key in keys_to_try:
             try:
                 response = await asyncio.to_thread(_call, key)
