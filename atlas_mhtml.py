@@ -292,7 +292,7 @@ def aggressive_clean(text):
     # Convert to the proper combining circumflex (U+0302) directly on the
     # letter, same reasoning as the vector-arrow fix above. Negative
     # lookahead avoids eating a real exponent caret ("x^2", "a^{b}").
-    text = re.sub(r'([A-Za-z])\s+\^(?!\{|\w)', lambda m: m.group(1) + '\u0302', text)
+    text = re.sub(r'([A-Za-z])\s*\^(?!\{|\w)', lambda m: m.group(1) + '\u0302', text)
 
     text = re.sub(r'\\frac\s*\{([^}]+)\}\s*\{([^}]+)\}', r'\1/\2', text)
     text = re.sub(r'\\frac\s*(\S+)\s*(\S+)', r'\1/\2', text)
