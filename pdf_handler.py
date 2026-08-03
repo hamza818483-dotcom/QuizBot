@@ -664,7 +664,6 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
             data = r.json()
             text = data["choices"][0]["message"]["content"]
             valid = _parse_mcq_json(text)
-            valid = await _attach_explanation_images(valid, img)
             openrouter_rotator.mark_healthy(key)
             logger.info(f"[OpenRouter] Page {page}: {len(valid)} MCQs via {model}")
             return valid
@@ -795,7 +794,6 @@ async def generate_mcq_from_image(
                     except Exception:
                         pass
                     logger.warning(f"[Gemini] Page {page}: response OK but 0 valid MCQs parsed (attempt {attempt+1}, model={model_name}) — likely malformed/truncated JSON, not a real 'page has no content'")
-                valid = await _attach_explanation_images(valid, img)
                 key_rotator.mark_healthy(key)
                 logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name})")
                 return valid
