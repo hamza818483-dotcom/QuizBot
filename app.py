@@ -13339,7 +13339,9 @@ async def handle_merge_command(msg: dict):
 
 async def handle_error_command(msg: dict):
     """Owner/Admin only — আজকের error log file-এর শেষ অংশ raw text হিসেবে
-    দেখায় (AtlasBot-style, simple file-based, কোনো DB/structured parsing ছাড়াই)."""
+    দেখায় (AtlasBot-style, simple file-based, কোনো DB/structured parsing ছাড়াই)।
+    উপরে classified failure summary (exact cause, category, provider) ও দেখায়
+    যদি এই restart-এ কোনো AI provider failure classify হয়ে থাকে।"""
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     text = msg.get("text", "").strip()
@@ -13353,9 +13355,34 @@ async def handle_error_command(msg: dict):
         await send_msg(chat_id, "✅ Error log clear করা হয়েছে!")
         return
 
+    # Classified summary first — exact provider/category/page for the most
+    # recent AI-provider failure, plus a full breakdown by category.
+    summary_lines = []
+    lf = _LAST_FAILURE_DETAIL
+    if lf["provider"]:
+        summary_lines.append(
+            f"🔍 <b>সর্বশেষ exact cause:</b> {lf['provider']} — {lf['category']}"
+            f" (page {lf['page'] or 'N/A'}, {lf['time']})\n<code>{lf['detail']}</code>"
+        )
+    any_failures = any(any(v > 0 for v in cat.values()) for cat in _FAILURE_COUNTS.values())
+    if any_failures:
+        _label_map = {
+            "timeout": "⏱️ Timeout", "rate_limit_429": "🚦 429", "daily_quota": "📅 Daily quota",
+            "suspended_banned": "🚫 Suspended", "overloaded_503": "🔥 503", "payload_too_large_413": "📦 413",
+            "empty_parse": "❔ Empty parse", "network": "🌐 Network", "other": "❓ Other",
+        }
+        for provider, cats in _FAILURE_COUNTS.items():
+            nonzero = {k: v for k, v in cats.items() if v > 0}
+            if nonzero:
+                parts = ", ".join(f"{_label_map.get(k, k)}: {v}" for k, v in nonzero.items())
+                summary_lines.append(f"  • <b>{provider}</b> — {parts}")
+    if summary_lines:
+        await send_msg(chat_id, "\n".join(summary_lines))
+
     content = await get_recent_errors()
     if not content.strip():
-        await send_msg(chat_id, "✅ আজ কোনো error নেই!")
+        if not summary_lines:
+            await send_msg(chat_id, "✅ আজ কোনো error নেই!")
         return
 
     tail = content[-3800:]
@@ -13622,7 +13649,7 @@ async def process_update(update: dict):
             # actual cause of "/csv stuck at 0%" / "/ping late" reports; the
             # underlying work was always fast, the command just hadn't
             # started yet.
-            if _txt_check.startswith("/csv") or _txt_check.startswith("/csvS") or _txt_check == "/ping" or _txt_check == "/error":
+            if _txt_check.startswith("/csv") or _txt_check.startswith("/csvS") or _txt_check == "/ping" or _txt_check == "/error" or _txt_check.startswith("/errors") or _txt_check == "/status" or _txt_check == "/stuck":
                 _spawn_task(handle_message(_msg))
                 return
             if uid is not None:
@@ -13904,33 +13931,6 @@ async def handle_message(msg: dict):
         return
     if text == "/help":
         await handle_start(msg)
-        return
-    if text == "/error":
-        lf = _LAST_FAILURE_DETAIL
-        lines = ["🔍 <b>Latest Error — Exact Cause</b>\n"]
-        if not lf["provider"]:
-            lines.append("এখনো কোনো failure হয়নি এই restart-এর পর — সব ঠিক আছে।")
-        else:
-            lines.append(f"<b>Provider:</b> {lf['provider']}")
-            lines.append(f"<b>Category:</b> {lf['category']}")
-            lines.append(f"<b>Page:</b> {lf['page'] or 'N/A'}")
-            lines.append(f"<b>Time:</b> {lf['time']}")
-            lines.append(f"\n<b>Raw error:</b>\n<code>{lf['detail']}</code>")
-        # Also surface the three legacy per-call "last reason" trackers,
-        # since they sometimes capture context (e.g. "all N keys failed —
-        # [key#1: ...; key#2: ...]") that the single-event classifier above
-        # doesn't carry.
-        extras = []
-        if _LAST_GEMINI_ERROR["reason"]:
-            extras.append(f"<b>Gemini (latest call):</b>\n<code>{_LAST_GEMINI_ERROR['reason'][:300]}</code>")
-        if _LAST_GROQ_ERROR["reason"]:
-            extras.append(f"<b>Groq (latest call):</b>\n<code>{_LAST_GROQ_ERROR['reason'][:300]}</code>")
-        if _LAST_FALLBACK_ERROR["reason"]:
-            extras.append(f"<b>Fallback providers (latest call):</b>\n<code>{_LAST_FALLBACK_ERROR['reason'][:300]}</code>")
-        if extras:
-            lines.append("\n━━━━━━━━━━━━━━━━━━━━━━")
-            lines.extend(extras)
-        await send_msg(chat_id, "\n".join(lines))
         return
     if text == "/status":
         g = _PROVIDER_USE_COUNT.get("gemini", 0)
@@ -14359,7 +14359,7 @@ async def handle_message(msg: dict):
         except Exception as e:
             logger.error(f"[Ping] error: {e}")
             await send_msg(chat_id, f"🏓 Pong! (stats error: {e})")
-    elif text == "/error":
+    elif text == "/stuck":
         # Pure status check, bypasses the per-user queue entirely (like
         # /ping) -- always answers instantly even if a long /auto (or
         # similar) run is currently in progress for this user, so the
