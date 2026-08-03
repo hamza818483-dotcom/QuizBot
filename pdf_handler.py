@@ -514,8 +514,8 @@ def crop_option_image(img: Image.Image, bbox: list) -> str:
         from atlas_mhtml import upload_to_imgbb
         w, h = img.size
         x_min, y_min, x_max, y_max = bbox
-        # small padding (1.5% of each dimension) so the crop isn't razor-tight
-        pad_x, pad_y = w * 0.015, h * 0.015
+        # padding (2.5% of each dimension) so diagram edges/labels never get cut
+        pad_x, pad_y = w * 0.025, h * 0.025
         left = max(0, int((x_min / 1000) * w - pad_x))
         top = max(0, int((y_min / 1000) * h - pad_y))
         right = min(w, int((x_max / 1000) * w + pad_x))

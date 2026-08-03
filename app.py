@@ -9134,6 +9134,7 @@ OPTION ORDER (absolute, never reorder/shuffle):
 - If a passage/stimulus/scenario precedes a question or group of questions, identify it and prepend its full text to each linked MCQ's question (so each MCQ is self-contained, never incomplete without the passage)
 - If multiple MCQs share one উদ্দীপক, copy the same passage into each one individually
 - Don't confuse regular questions with passage-based ones — only actual passage/scenario/case-study content counts as উদ্দীপক
+- STRICTLY REMOVE any linking/instructional sentence like "উদ্দীপকের আলোকে ২১ ও ২২ নং প্রশ্নের উত্তর দাও" / "নিচের উদ্দীপকের ভিত্তিতে প্রশ্নের উত্তর দাও" / similar English equivalents — these are page-navigation instructions, never part of the actual question. Only keep: (a) the real passage content itself if one exists (prepend to question), (b) the actual question text. Never output the instructional/linking sentence itself.
 
 EXPLANATION RULES (strict priority order, always):
 1) TOP PRIORITY: if the page has ANY explanation/reasoning text attached to this specific MCQ, copy it 100% VERBATIM, byte-for-byte, exactly as written (same spelling/punctuation/wording) — no summarizing, shortening, paraphrasing, translating, or "improving." This overrides the 165-char limit below. Only skip to case 2 if truly no explanation exists near this MCQ.
@@ -9163,7 +9164,7 @@ Never use phrases referring back to the source itself instead of stating facts d
 ❌ English equivalents: "as shown in the figure/box/table/diagram/passage", "mentioned in the text/page", "as given"
 Always state facts directly and plainly, as general knowledge — never imply it came from "the shown image/box/table."
 
-If the QUESTION part (not options) has a diagram/figure/chart/image needed to understand or answer it, add "qsn_bbox":[x1,y1,x2,y2] — tight box (0-1000 scale) around ONLY that diagram. Omit if question has no diagram. Options never get any image/bbox.
+If the QUESTION part (not options) has a diagram/figure/chart/image needed to understand or answer it, add "qsn_bbox":[x1,y1,x2,y2] — a box (0-1000 scale) that fully contains the ENTIRE diagram with all its labels/arrows/text, from its topmost/leftmost edge to its bottommost/rightmost edge. Never cut off any part of the diagram (a partial crop missing labels or edges is wrong) — include a small margin around the diagram's actual boundary rather than cutting exactly at its edge. Omit if question has no diagram. Options never get any image/bbox.
 
 OUTPUT FORMAT:
 Only a valid JSON array, no extra text, no markdown, no explanation outside JSON. No MCQ on page → return exactly [].
@@ -9473,19 +9474,26 @@ VERIFY each MCQ against the actual page image, in this exact order of checks:
 3) If an MCQ's answer is genuinely unclear from any source → try twice, reasoning it out from
    context, to determine the most likely correct answer. If STILL unclear after 2 tries, choose
    your own best answer, and base the explanation on that chosen answer.
-4) SPELLING CHECK: check question + all options + explanation for spelling mistakes (Bangla or
-   English) and correct them, without changing meaning.
+4) SPELLING + CONTEXT-WORD CHECK: check question + all options + explanation for (a) spelling
+   mistakes (Bangla or English), and (b) any word that is spelled fine but is CONTEXTUALLY WRONG
+   for this MCQ's subject/topic (e.g. an OCR/extraction slip that swapped in a similar-looking but
+   unrelated term that doesn't fit the science/subject context) — replace it with the word that
+   actually fits the MCQ's context and meaning, cross-checked against the source image. Never
+   change a word that is already correct and contextually fitting, even if unusual.
 5) COMPLETENESS CHECK: re-read the full question and every option word-by-word against the
    image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail).
 6) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
    Na⁺ etc.) are correctly rendered everywhere.
 7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
-   is prepended to the question (self-contained). Fix/add if missing.
+   is prepended to the question (self-contained), and that any linking/instructional sentence
+   like "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও" is REMOVED from the question (never part
+   of the actual question — only the real passage content + actual question text remain).
 8) QUESTION-DIAGRAM CHECK: if this MCQ's question genuinely has a diagram/figure/chart in the
-   source image needed to understand/answer it, confirm "qsn_bbox" is present and tightly boxes
-   ONLY that diagram (0-1000 scale). Add qsn_bbox if a real diagram was missed. If qsn_bbox was
-   given but the question has NO actual diagram, remove it (set to null). Never invent a bbox
-   for options — options never get any bbox/image.
+   source image needed to understand/answer it, confirm "qsn_bbox" is present and FULLY contains
+   the entire diagram (all labels/arrows/edges, small margin included — never a partial/cut-off
+   crop) on a 0-1000 scale. Add or widen qsn_bbox if the diagram was missed or cut off. If
+   qsn_bbox was given but the question has NO actual diagram, remove it (set to null). Never
+   invent a bbox for options — options never get any bbox/image.
 9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
    either "page" (the explanation is copied verbatim from text physically present on the page,
    e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
