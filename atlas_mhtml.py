@@ -305,8 +305,64 @@ def aggressive_clean(text):
         text,
     )
 
-    text = re.sub(r'\\frac\s*\{([^}]+)\}\s*\{([^}]+)\}', r'\1/\2', text)
-    text = re.sub(r'\\frac\s*(\S+)\s*(\S+)', r'\1/\2', text)
+    # \frac{num}{den} -> num/den, but a NESTED \frac inside num or den
+    # (fraction-of-a-fraction) can't be flattened to "a/b" without losing
+    # the grouping -- "[^}]+" only matches up to the first "}", so it was
+    # truncating at the inner fraction's closing brace and emitting garbage
+    # (e.g. "\frac{\frac{1}{2}}{3}" -> "1/23/"). Detect a nested \frac and
+    # keep the whole thing as LaTeX ($\frac{...}{...}$) instead.
+    def _frac_repl(text):
+        out = []
+        i = 0
+        pat = re.compile(r'\\frac\s*')
+        while i < len(text):
+            m = pat.match(text, i)
+            if not m:
+                out.append(text[i])
+                i += 1
+                continue
+
+            def _read_group(pos):
+                if pos >= len(text) or text[pos] != '{':
+                    m2 = re.match(r'\S+', text[pos:])
+                    return (m2.group(0), pos + len(m2.group(0))) if m2 else (None, pos)
+                depth = 0
+                start = pos
+                for j in range(pos, len(text)):
+                    if text[j] == '{':
+                        depth += 1
+                    elif text[j] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            return text[start+1:j], j + 1
+                return None, pos
+
+            p = m.end()
+            num, p = _read_group(p)
+            if num is None:
+                out.append(text[i]); i += 1; continue
+            while p < len(text) and text[p] == ' ':
+                p += 1
+            den, p2 = _read_group(p)
+            if den is None:
+                out.append(text[i]); i += 1; continue
+            if '\\frac' in num or '\\frac' in den:
+                out.append(f"$\\frac{{{num}}}{{{den}}}$")
+            else:
+                out.append(f"{num}/{den}")
+            i = p2
+        return ''.join(out)
+    text = _frac_repl(text)
+
+    # Protect nested-fraction LaTeX ($\frac{...}{...}$) just created above
+    # from this function's own later brace-stripping (r'[\{\}]') and
+    # backslash-command-stripping (r'\\[a-zA-Z]+...') regexes, which would
+    # otherwise destroy the LaTeX we deliberately kept.
+    _nfrac_markers = []
+    def _nfrac_protect(m):
+        _nfrac_markers.append(m.group(0))
+        return f"ZZZNFRACLATEX{len(_nfrac_markers)-1}ZZZ"
+    text = re.sub(r'\$\\frac\{.*?\}\{.*?\}\$', _nfrac_protect, text)
 
     # \sqrt{...}: multi-term contents must keep grouping as √(...), since
     # the generic '{}' strip further down would otherwise fuse a multi-term
@@ -442,6 +498,10 @@ def aggressive_clean(text):
     text = re.sub(r'[ \t]+', ' ', text)
     text = re.sub(r' *\n *', '\n', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
+
+    for _i, _marker in enumerate(_nfrac_markers):
+        text = text.replace(f"ZZZNFRACLATEX{_i}ZZZ", _marker)
+
     return text.strip()
 
 
