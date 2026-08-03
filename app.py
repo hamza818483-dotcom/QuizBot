@@ -13649,7 +13649,7 @@ async def process_update(update: dict):
             # actual cause of "/csv stuck at 0%" / "/ping late" reports; the
             # underlying work was always fast, the command just hadn't
             # started yet.
-            if _txt_check.startswith("/csv") or _txt_check.startswith("/csvS") or _txt_check == "/ping" or _txt_check == "/error" or _txt_check.startswith("/errors") or _txt_check == "/status" or _txt_check == "/stuck":
+            if _txt_check.startswith("/csv") or _txt_check.startswith("/csvS") or _txt_check == "/ping" or _txt_check == "/error" or _txt_check.startswith("/errors") or _txt_check == "/status":
                 _spawn_task(handle_message(_msg))
                 return
             if uid is not None:
@@ -14359,37 +14359,6 @@ async def handle_message(msg: dict):
         except Exception as e:
             logger.error(f"[Ping] error: {e}")
             await send_msg(chat_id, f"🏓 Pong! (stats error: {e})")
-    elif text == "/stuck":
-        # Pure status check, bypasses the per-user queue entirely (like
-        # /ping) -- always answers instantly even if a long /auto (or
-        # similar) run is currently in progress for this user, so the
-        # person can check "is it stuck or still working" without
-        # waiting behind the running command.
-        try:
-            uid_check = msg.get("from", {}).get("id")
-            info = _USER_LAST_STATUS.get(uid_check)
-            if not info:
-                await send_msg(chat_id, "✅ কোনো কাজ চলছে না এই মুহূর্তে — কিছুই আটকে নেই।")
-            else:
-                now_ts = time.time()
-                since_start = int(now_ts - info["started_at"])
-                since_update = int(now_ts - info["last_update_at"])
-                m2, s2 = divmod(since_start, 60)
-                mu, su = divmod(since_update, 60)
-                stuck_warning = ""
-                if since_update > 60:
-                    stuck_warning = (
-                        f"\n⚠️ শেষ update {mu}m {su}s আগে হয়েছিল — এতক্ষণ কোনো নতুন "
-                        f"progress না আসলে সন্দেহজনক (আটকে থাকতে পারে)।"
-                    )
-                await send_msg(chat_id,
-                    f"🔄 <b>চলমান কাজ:</b> {info['command']}\n"
-                    f"📍 বর্তমান ধাপ: {info['stage']}\n"
-                    f"⏱ শুরু হয়েছে: {m2}m {s2}s আগে\n"
-                    f"🕐 শেষ update: {mu}m {su}s আগে{stuck_warning}",
-                    parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"[/error] check failed: {e}")
             await send_msg(chat_id, f"❌ /error check failed: {e}")
 
 
