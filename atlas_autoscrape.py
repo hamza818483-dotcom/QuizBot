@@ -867,6 +867,100 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                     except Exception as e:
                         logger.warning(f"[/auto] saved link-map goto failed for {sub!r}: {e}")
 
+            if locator is None and element_handle is None and len(sub) >= 2:
+                # Fallback: fuzzy/near-match for minor spelling mistakes
+                # (e.g. "গতীবিদ্যা" typed instead of "গতিবিদ্যা"). Collects
+                # every clickable candidate's normalized text, then picks
+                # the one with the smallest Levenshtein edit-distance to
+                # the wanted label -- but only if it's a clear winner
+                # (closest match is unambiguously better than the next
+                # closest, and the distance is small relative to the
+                # label's length) to avoid accidentally clicking the wrong
+                # button on a genuinely-wrong or ambiguous label.
+                try:
+                    candidates = await page.evaluate(
+                        """() => {
+                            const norm = s => (s || '').normalize('NFC').replace(/\\s+/g, ' ').trim();
+                            const all = Array.from(document.querySelectorAll('button, a, [data-event], [role="button"], div, span, li'));
+                            const seen = new Set();
+                            const out = [];
+                            for (const el of all) {
+                                const t = norm(el.textContent);
+                                if (!t || t.length > 60 || seen.has(t)) continue;
+                                seen.add(t);
+                                out.push(t);
+                            }
+                            return out;
+                        }"""
+                    )
+                except Exception:
+                    candidates = []
+
+                def _lev(a, b):
+                    if a == b:
+                        return 0
+                    la, lb = len(a), len(b)
+                    if la == 0:
+                        return lb
+                    if lb == 0:
+                        return la
+                    prev = list(range(lb + 1))
+                    for ia in range(1, la + 1):
+                        cur = [ia] + [0] * lb
+                        for ib in range(1, lb + 1):
+                            cost = 0 if a[ia - 1] == b[ib - 1] else 1
+                            cur[ib] = min(prev[ib] + 1, cur[ib - 1] + 1, prev[ib - 1] + cost)
+                        prev = cur
+                    return prev[lb]
+
+                wanted_norm = unicodedata.normalize("NFC", sub).strip()
+                scored = sorted(
+                    ((c, _lev(wanted_norm, c)) for c in candidates),
+                    key=lambda x: x[1],
+                )
+                fuzzy_target = None
+                if scored:
+                    best_text, best_dist = scored[0]
+                    # Allow up to ~25% of label length as edit distance,
+                    # minimum tolerance of 1 char, and require the runner-up
+                    # (if any) to be clearly worse so an ambiguous near-tie
+                    # doesn't silently click the wrong card.
+                    max_allowed = max(1, len(wanted_norm) // 4)
+                    second_dist = scored[1][1] if len(scored) > 1 else None
+                    if best_dist <= max_allowed and best_dist > 0 and (
+                        second_dist is None or second_dist > best_dist
+                    ):
+                        fuzzy_target = best_text
+
+                if fuzzy_target:
+                    try:
+                        element_handle = await page.evaluate_handle(
+                            """(target) => {
+                                const norm = s => (s || '').normalize('NFC').replace(/\\s+/g, ' ').trim();
+                                const wanted = norm(target);
+                                const all = Array.from(document.querySelectorAll('button, a, [data-event], [role="button"], div, span, li'));
+                                let best = null, bestLen = Infinity;
+                                for (const el of all) {
+                                    if (norm(el.textContent) === wanted && el.textContent.length < bestLen) {
+                                        best = el; bestLen = el.textContent.length;
+                                    }
+                                }
+                                return best;
+                            }""",
+                            fuzzy_target,
+                        )
+                        is_null = await page.evaluate("(h) => h === null", element_handle)
+                        if is_null:
+                            element_handle = None
+                        else:
+                            match_method = "fuzzy-spelling"
+                            logger.info(
+                                f"[/auto] step {i}/{total} sub={sub!r}: no exact/partial match, "
+                                f"fuzzy-matched to {fuzzy_target!r}"
+                            )
+                    except Exception:
+                        element_handle = None
+
             if locator is None and element_handle is None:
                 logger.error(
                     f"[/auto] step {i}/{total} sub={sub!r} NOT FOUND. "
@@ -1185,40 +1279,22 @@ async def run_auto_click_sequence(
                         else:
                             break
 
-                if common_prefix > 0:
-                    # Reuse the shared prefix: navigate back exactly enough
-                    # steps to undo everything the previous run did AFTER
-                    # the divergence point, instead of restarting from the
-                    # homepage and re-clicking identical steps.
-                    steps_to_undo = len(prev_run_lines) - common_prefix
-                    logger.info(
-                        f"[/auto] run {run_no}/{run_total}: reusing {common_prefix} shared step(s) "
-                        f"with previous run, going back {steps_to_undo} step(s) instead of restarting"
-                    )
-                    ok = True
-                    for _ in range(steps_to_undo):
-                        try:
-                            await page.go_back(wait_until="networkidle", timeout=15000)
-                            await page.wait_for_timeout(300)
-                        except Exception as e:
-                            logger.warning(f"[/auto] go_back failed mid-way, falling back to full restart: {e}")
-                            ok = False
-                            break
-                    if not ok:
-                        common_prefix = 0  # fall through to full restart below
-
-                if common_prefix == 0:
-                    # Fresh start (first run, or previous run's steps
-                    # diverge immediately / back-navigation failed).
-                    await page.goto(CHORCHA_BASE_URL, wait_until="networkidle", timeout=30000)
-                    await page.wait_for_timeout(SETTLE_WAIT_MS)
-                    seed_subs = []
-                else:
-                    seed_subs = prev_processed_subs[:common_prefix]
+                # NOTE: previously this reused a shared prefix with
+                # go_back() instead of re-clicking from the homepage.
+                # go_back() replays browser history, which does not
+                # reliably restore in-page JS/DOM state on this SPA --
+                # divergent-step clicks after a go_back() chain could land
+                # on stale state and fail to find the target button even
+                # though the same label works fine as a fresh direct run.
+                # Always restart fresh from the homepage and re-click the
+                # full step sequence for every run; slower per-run but
+                # matches the reliability of a standalone /auto run.
+                await page.goto(CHORCHA_BASE_URL, wait_until="networkidle", timeout=30000)
+                await page.wait_for_timeout(SETTLE_WAIT_MS)
 
                 html, processed_subs_this_run = await _run_single_sequence(
                     page, run_lines, progress_cb, run_no, run_total,
-                    skip_from_line=common_prefix, seed_processed_subs=seed_subs,
+                    skip_from_line=0, seed_processed_subs=[],
                 )
                 html_results.append(html)
                 prev_run_lines = run_lines
