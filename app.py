@@ -9176,6 +9176,7 @@ Never use phrases referring back to the source itself instead of stating facts d
 Always state facts directly and plainly, as general knowledge — never imply it came from "the shown image/box/table."
 
 If the QUESTION part (not options) has a diagram/figure/chart/image needed to understand or answer it, add "qsn_bbox":[x1,y1,x2,y2] — a box (0-1000 scale) that fully contains the ENTIRE diagram with all its labels/arrows/text, from its topmost/leftmost edge to its bottommost/rightmost edge. Never cut off any part of the diagram (a partial crop missing labels or edges is wrong) — include a small margin around the diagram's actual boundary rather than cutting exactly at its edge. Omit if question has no diagram. Options never get any image/bbox.
+MANDATORY TRIGGER: if you see a figure caption/label near the question (e.g. "চিত্র: G", "চিত্র-১", "Figure 1", "diagram G") anywhere on the page linked to this MCQ, that is PROOF a diagram exists right there — you MUST add qsn_bbox covering that actual diagram (the drawing itself, not the caption text). Never output just the caption text alone without cropping and boxing the diagram it labels.
 
 OUTPUT FORMAT:
 Only a valid JSON array, no extra text, no markdown, no explanation outside JSON. No MCQ on page → return exactly [].
@@ -9503,7 +9504,10 @@ VERIFY each MCQ against the actual page image, in this exact order of checks:
 8) QUESTION-DIAGRAM CHECK: if this MCQ's question genuinely has a diagram/figure/chart in the
    source image needed to understand/answer it, confirm "qsn_bbox" is present and FULLY contains
    the entire diagram (all labels/arrows/edges, small margin included — never a partial/cut-off
-   crop) on a 0-1000 scale. Add or widen qsn_bbox if the diagram was missed or cut off. If
+   crop) on a 0-1000 scale. Add or widen qsn_bbox if the diagram was missed or cut off. SPECIAL
+   CHECK: if the question text contains a bare figure caption/label like "চিত্র: G", "চিত্র-১",
+   "Figure 1" with no qsn_bbox — that caption is proof a diagram exists nearby; you MUST add
+   qsn_bbox covering that actual diagram (never leave just the caption text uncropped). If
    qsn_bbox was given but the question has NO actual diagram, remove it (set to null). Never
    invent a bbox for options — options never get any bbox/image.
 9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
