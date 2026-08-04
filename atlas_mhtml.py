@@ -756,6 +756,15 @@ def aggressive_clean(text):
             break
         text = new_text
 
+    # Every remaining bare fraction "a/b" (not already inside brackets/LaTeX)
+    # must be wrapped in parens regardless of what's next to it -- not just
+    # when two fractions sit side by side. "x + a/b = 5" -> "x + (a/b) = 5",
+    # "ফলাফল a/b হবে" -> "ফলাফল (a/b) হবে". Runs after the adjacent-fraction
+    # pass above so "(1/x)×(1/y)" is untouched (already bracketed) and any
+    # single leftover fraction still gets wrapped.
+    _bare_frac = re.compile(r'(?<![/\w(])([A-Za-z0-9]+/[A-Za-z0-9]+)(?![/\w)])')
+    text = _bare_frac.sub(r'(\1)', text)
+
     return text.strip()
 
 
