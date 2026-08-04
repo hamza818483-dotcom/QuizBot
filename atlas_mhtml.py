@@ -353,11 +353,12 @@ def aggressive_clean(text):
             den, p2 = _read_group(p)
             if den is None:
                 out.append(text[i]); i += 1; continue
-            _multi_term = re.compile(r'[+\-*/]|_\{|\^\{|\s')
-            if '\\frac' in num or '\\frac' in den or _multi_term.search(num) or _multi_term.search(den):
-                out.append(f"$\\frac{{{num}}}{{{den}}}$")
-            else:
-                out.append(f"{num}/{den}")
+            # Every \frac now becomes real $\frac{}{}$ LaTeX, unconditionally
+            # (not just complex/multi-term ones) -- ensures consistent,
+            # properly-rendered fraction display everywhere once run through
+            # KaTeX/MathJax, instead of some fractions being plain "a/b" text
+            # and others being LaTeX depending on term complexity.
+            out.append(f"$\\frac{{{num}}}{{{den}}}$")
             i = p2
         return ''.join(out)
     text = _frac_repl(text)
