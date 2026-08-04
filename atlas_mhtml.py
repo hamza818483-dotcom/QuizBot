@@ -267,6 +267,13 @@ LATEX_SYMBOLS = {
     r'\forall': '∀', r'\exists': '∃',
 }
 
+# Reverse of LATEX_SYMBOLS, used to rebuild valid LaTeX source for an
+# exponent/subscript group that contains a symbol with no Unicode
+# superscript/subscript form (e.g. γ, θ) -- by this point in the pipeline
+# LATEX_SYMBOLS has already turned '\gamma' into 'γ', so this converts it
+# back inside the specific fallback branch that needs real LaTeX syntax.
+UNICODE_TO_LATEX = {v: k for k, v in LATEX_SYMBOLS.items() if len(v) == 1 or v.isalpha()}
+
 
 def convert_to_english_numbers(text):
     return text.translate(str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789"))
@@ -381,25 +388,26 @@ def aggressive_clean(text):
     for latex, uni in LATEX_SYMBOLS.items():
         text = text.replace(latex, uni)
 
-    # Characters with no Unicode sub/superscript equivalent (Greek letters,
-    # fraction slash, etc) -- if an exponent/subscript group contains any of
-    # these, silently per-character translating only the digits/operators
-    # while leaving the rest plain-sized loses the grouping and produces an
-    # ambiguous mashup (e.g. exponent "1-γ" -> "¹⁻γ", where it's no longer
-    # clear γ is part of the exponent). Fall back to explicit ^(...)/_(...)
-    # notation for any such group instead, so the exact expression survives.
     _UNSAFE_SCRIPT_CHARS = re.compile(r'[^0-9A-Za-z+\u2212\u2013\u2014\-=()aeoxhklmnpstn]')
+
+    def _to_latex_inner(inner: str) -> str:
+        # rebuild any bare Unicode symbol (γ, θ, ×, etc) back into its LaTeX
+        # command so the resulting $...$ is valid, render-able LaTeX source.
+        out = []
+        for ch in inner:
+            out.append(UNICODE_TO_LATEX.get(ch, ch))
+        return ''.join(out)
 
     def _sub_repl(m):
         inner = m.group(1).strip()
         if _UNSAFE_SCRIPT_CHARS.search(inner):
-            return '_(' + inner + ')'
+            return f"$_{{{_to_latex_inner(inner)}}}$"
         return inner.translate(SUB_MAP)
 
     def _sup_repl(m):
         inner = m.group(1).strip()
         if _UNSAFE_SCRIPT_CHARS.search(inner):
-            return '^(' + inner + ')'
+            return f"$^{{{_to_latex_inner(inner)}}}$"
         return inner.translate(SUP_MAP)
 
     text = re.sub(r'_\{\s*([^}]+)\s*\}', _sub_repl, text)
@@ -407,6 +415,15 @@ def aggressive_clean(text):
 
     text = re.sub(r'_([0-9a-zA-Z+\-]+)', _sub_repl, text)
     text = re.sub(r'\^([0-9a-zA-Z+\-]+)', _sup_repl, text)
+
+    # Protect the $^{...}$ / $_{...}$ LaTeX fallback just created above from
+    # this function's own later brace-stripping and backslash-command
+    # stripping regexes (same reasoning as the nested-\frac protection).
+    _script_latex_markers = []
+    def _script_latex_protect(m):
+        _script_latex_markers.append(m.group(0))
+        return f"ZZZSCRIPTLATEX{len(_script_latex_markers)-1}ZZZ"
+    text = re.sub(r'\$[_^]\{.*?\}\$', _script_latex_protect, text)
 
     # Universal degree-number fix: superscript digits right before "°" must
     # become plain digits (e.g. "⁶⁷°" -> "67°"). The DOM-text extraction's
@@ -522,6 +539,8 @@ def aggressive_clean(text):
 
     for _i, _marker in enumerate(_nfrac_markers):
         text = text.replace(f"ZZZNFRACLATEX{_i}ZZZ", _marker)
+    for _i, _marker in enumerate(_script_latex_markers):
+        text = text.replace(f"ZZZSCRIPTLATEX{_i}ZZZ", _marker)
 
     return text.strip()
 
