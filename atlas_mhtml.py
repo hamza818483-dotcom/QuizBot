@@ -391,6 +391,28 @@ def aggressive_clean(text):
         return f"ZZZNFRACLATEX{len(_nfrac_markers)-1}ZZZ"
     text = re.sub(r'\$\\d?frac\{.*?\}\{.*?\}\$', _nfrac_protect, text)
 
+    # \sqrt[n]{...} nth-root form was NOT handled at all here -- only plain
+    # \sqrt{...} was, so any literal "\sqrt[3]{x}" text (e.g. AI-generated
+    # explanation using LaTeX-ish syntax) fell through completely
+    # unconverted, leaving raw backslash-LaTeX visible to the user. Handle
+    # this BEFORE the plain \sqrt{...} regex so it isn't half-matched.
+    def _nroot_repl(m):
+        idx = m.group(1).strip()
+        inner = m.group(2).strip()
+        if re.fullmatch(r'[A-Za-z0-9]+', inner):
+            radicand = inner
+        else:
+            radicand = '(' + inner + ')'
+        # Small index -> unicode superscript prefix (²√, ³√, ...);
+        # anything else -> keep the index explicit so it's never silently
+        # dropped ("[n]" would otherwise just vanish).
+        if re.fullmatch(r'[0-9]+', idx):
+            sup_idx = idx.translate(SUP_MAP)
+        else:
+            sup_idx = f"({idx})"
+        return f"{sup_idx}√{radicand}"
+    text = re.sub(r'\\sqrt\s*\[([^\[\]]+)\]\s*\{([^{}]+)\}', _nroot_repl, text)
+
     # \sqrt{...}: multi-term contents must keep grouping as √(...), since
     # the generic '{}' strip further down would otherwise fuse a multi-term
     # radicand into the surrounding expression with no boundary at all
@@ -820,6 +842,35 @@ def _format_content_inner(element, img_map):
             msubsup.replace_with(base_t + sub_out + sup_out)
         else:
             msubsup.replace_with(msubsup.get_text(strip=True))
+
+    # <msqrt> (plain square root, MathML) and <mroot> (nth root, MathML)
+    # were NEVER handled anywhere in this function -- unlike mfrac/msub/
+    # msup/msubsup above, there was no branch for them at all, so a real √
+    # symbol in the source math silently VANISHED entirely during
+    # extraction (the radicand's plain text survived via the final
+    # get_text() flatten, but the √ sign itself, which lives only in the
+    # tag semantics, was lost with no trace). Handle both aggressively so
+    # a root is never dropped, only ever rendered.
+    for msqrt in element.find_all('msqrt'):
+        inner = msqrt.get_text(strip=True)
+        if re.fullmatch(r'[A-Za-z0-9]+', inner):
+            msqrt.replace_with('√' + inner)
+        else:
+            msqrt.replace_with('√(' + inner + ')')
+    for mroot in element.find_all('mroot'):
+        # <mroot> has exactly 2 children: [radicand, index] e.g.
+        # <mroot><mi>x</mi><mn>3</mn></mroot> = cube root of x.
+        kids = mroot.find_all(recursive=False)
+        if len(kids) == 2:
+            radicand = kids[0].get_text(strip=True)
+            idx = kids[1].get_text(strip=True)
+            rad_out = radicand if re.fullmatch(r'[A-Za-z0-9]+', radicand) else f"({radicand})"
+            idx_out = idx.translate(SUP_MAP) if re.fullmatch(r'[0-9]+', idx) else f"({idx})"
+            mroot.replace_with(f"{idx_out}√{rad_out}")
+        else:
+            # Malformed/unexpected structure -- still surface the raw text
+            # rather than silently dropping the whole root.
+            mroot.replace_with('√(' + mroot.get_text(strip=True) + ')')
 
     for sub in element.find_all(['sub', 'msub']):
         # A real HTML <sub> tag contains ONLY the subscript part, so
