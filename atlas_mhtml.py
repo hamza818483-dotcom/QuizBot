@@ -605,6 +605,18 @@ def aggressive_clean(text):
 
 
 def format_content(element, img_map):
+    text = _format_content_inner(element, img_map)
+    # Final safety-net: run the universal degree/superscript/spacing fixes
+    # from aggressive_clean() on every format_content() output too -- the
+    # per-<sup> sibling-based ° check above only catches the case where the
+    # ° sits in the immediate next sibling text node with no gap; if the
+    # source markup has any intervening whitespace-only node (or the ° is
+    # further down after other inline tags), that check misses it and a
+    # raw '⁴°C' style artifact would otherwise reach the user untouched.
+    return aggressive_clean(text) if text else text
+
+
+def _format_content_inner(element, img_map):
     if not element:
         return ""
 
