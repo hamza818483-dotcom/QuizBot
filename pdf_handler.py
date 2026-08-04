@@ -754,7 +754,7 @@ async def generate_mcq_from_image(
     # RESOURCE_EXHAUSTED quota error on one call while 2.5-flash had zero
     # issues across all tests. Swapping 2.5-flash back to primary; 3.6-flash
     # stays as fallback in case 2.5-flash itself gets deprecated/unavailable.
-    _GEMINI_MODELS = ["gemini-2.5-flash"]
+    _GEMINI_MODELS = ["gemini-3.6-flash"]
 
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
@@ -915,7 +915,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
 
             def _call_gemini():
                 return client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.6-flash",
                     contents=[types.Part.from_text(text=prompt)]
                 )
 

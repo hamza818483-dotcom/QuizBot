@@ -2005,7 +2005,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
 
         def _call():
             return client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.6-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
@@ -10125,7 +10125,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
         def _call(key):
             client = gai.Client(api_key=key)
             return client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.6-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
@@ -11389,7 +11389,7 @@ Return ONLY the JSON array, nothing else."""
 
                     def _call():
                         return client.models.generate_content(
-                            model="gemini-2.5-flash",
+                            model="gemini-3.6-flash",
                             contents=[
                                 types.Part.from_text(text=prompt),
                                 types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
