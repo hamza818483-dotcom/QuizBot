@@ -10142,7 +10142,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                 if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
                     daily = "generate_content_free_tier_requests" in msg or "PerDay" in msg
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily)
-                    logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={msg[:300]}")
+                    logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={msg[:1200]}")
                     continue
                 logger.warning(f"[QBM] Gemini raw call failed: {e}")
                 return ""
