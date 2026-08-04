@@ -10875,7 +10875,10 @@ async def _handle_qbm_impl(msg: dict):
 
 
 # ============================================================
-# /onu — same as /qbm (existing-MCQ extraction) but SKIPS:
+# /onu — same as /qbm (existing-MCQ extraction) but with STRICT inclusion:
+#   ONLY MCQs whose QUESTION text has a YELLOW HIGHLIGHT mark are kept — this
+#   is the sole indicator (checked via ONU_EXTRACT_PROMPT / yellow_highlight
+#   field). Additionally SKIPS (as before):
 #   1) any MCQ that has an image attached to a question/option/explanation
 #      (opt_bboxes present, or an <img> tag already embedded)
 #   2) "roman/serial-combination" MCQs — i.e. উদ্দীপক-style questions where
@@ -10924,6 +10927,8 @@ def _onu_mcq_is_roman_combo(m: dict) -> bool:
 def _onu_filter_mcqs(mcqs: list) -> list:
     kept = []
     for m in mcqs:
+        if not m.get("yellow_highlight"):
+            continue
         if _onu_mcq_has_image(m):
             continue
         if _onu_mcq_is_roman_combo(m):
@@ -10932,10 +10937,88 @@ def _onu_filter_mcqs(mcqs: list) -> list:
     return kept
 
 
+# ── /onu highlight-detection extraction prompt ──
+# Only MCQs whose QUESTION text has a yellow highlight marking are kept.
+# This is the SOLE indicator for /onu — no other rule decides inclusion.
+ONU_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT + """
+
+ADDITIONAL MANDATORY FIELD FOR THIS MODE:
+For EVERY extracted MCQ, check if the QUESTION text (the question itself, not options) has a
+YELLOW HIGHLIGHT marking/background behind it in the source image (a yellow marker/highlighter
+color visibly applied over the question text). Add a boolean field "yellow_highlight": true if the
+question text has this yellow highlight, or "yellow_highlight": false if it does not. This must be
+checked carefully and independently for every single MCQ — do not assume based on neighboring MCQs.
+Update OUTPUT FORMAT to include this field:
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","yellow_highlight":true,"qsn_bbox":[100,200,400,450]}]"""
+
+
+async def _onu_call1_extract(img) -> list:
+    """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field)."""
+    try:
+        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT)
+        if gem:
+            out = _qbm_dedup_list(gem)
+            for m in out:
+                m["_provider"] = "Gemini"
+            return out
+        txt = await _qbm_groq_call(img, ONU_EXTRACT_PROMPT)
+        result = _qbm_parse_json(txt) if txt else []
+        out = _qbm_dedup_list(result)
+        for m in out:
+            m["_provider"] = "Groq"
+        return out
+    except Exception as e:
+        logger.warning(f"[ONU Call1] failed: {e}")
+        return []
+
+
+async def _onu_extract_from_image(img) -> list:
+    """Same 2-call qbm pipeline (extract + verify) as _qbm_extract_from_image,
+    but Call 1 uses ONU_EXTRACT_PROMPT so every MCQ carries a yellow_highlight
+    flag. That flag is preserved through the verify/repair/restore/safety-net
+    steps (keyed by normalized question) since those steps don't know about it."""
+    await _qbm_ram_aware_acquire()
+    try:
+        for _pipeline_attempt in range(3):
+            call1 = await _onu_call1_extract(img)
+
+            if not call1:
+                final_check = await _qbm_final_empty_page_scan(img)
+                if not final_check:
+                    if _pipeline_attempt < 2:
+                        logger.warning(f"[ONU] Call1+final-scan both empty on attempt {_pipeline_attempt+1}/3 — retrying")
+                        continue
+                    return []
+                verified = await _qbm_call3_verify(img, final_check, False)
+                verified = _qbm_repair_order(final_check, verified)
+                recovered_mcqs = _cap_mcq_options(_qbm_restore_opt_bboxes(final_check, verified))
+                final_mcqs = await _qbm_final_safety_net(img, recovered_mcqs)
+                hl_map = {_qbm_normalize_q(mc.get("question", "")): mc.get("yellow_highlight", False) for mc in final_check}
+                for mc in final_mcqs:
+                    if "yellow_highlight" not in mc:
+                        mc["yellow_highlight"] = hl_map.get(_qbm_normalize_q(mc.get("question", "")), False)
+                return final_mcqs
+
+            call3 = await _qbm_call3_verify(img, call1, True)
+            call3 = _qbm_repair_order(call1, call3)
+            call3 = _qbm_restore_opt_bboxes(call1, call3)
+            final_mcqs = _cap_mcq_options(call3)
+            final_mcqs = await _qbm_final_safety_net(img, final_mcqs)
+            hl_map = {_qbm_normalize_q(mc.get("question", "")): mc.get("yellow_highlight", False) for mc in call1}
+            for mc in final_mcqs:
+                if "yellow_highlight" not in mc:
+                    mc["yellow_highlight"] = hl_map.get(_qbm_normalize_q(mc.get("question", "")), False)
+            return final_mcqs
+        return []
+    finally:
+        _QBM_EXTRACT_HARD_CAP.release()
+
+
 async def handle_onu(msg: dict):
     """
     /onu -p (pages) -c (channel) -m (topic) -t (thread_id)
-    /qbm-এর মতোই EXISTING MCQ extract করে, কিন্তু ছবিযুক্ত MCQ এবং
+    /qbm-এর মতোই EXISTING MCQ extract করে, কিন্তু শুধু সেগুলো রাখে যাদের
+    প্রশ্নে yellow highlight মার্ক আছে (একমাত্র শর্ত), এবং ছবিযুক্ত MCQ ও
     roman/সংখ্যাভিত্তিক combination-type (i,ii,iii / ১,২,৩) MCQ বাদ দিয়ে।
     """
     uid = msg["from"]["id"]
@@ -10954,8 +11037,10 @@ async def handle_onu(msg: dict):
 
 
 async def _handle_onu_impl(msg: dict):
-    """Identical to _handle_qbm_impl, except after extraction it filters out
-    image-attached and roman-combo MCQs before channel-select/CSV/posting."""
+    """Identical to _handle_qbm_impl, except extraction uses ONU_EXTRACT_PROMPT
+    (yellow_highlight detection) and after extraction it keeps ONLY MCQs with
+    yellow_highlight=true, also filtering out image-attached and roman-combo
+    MCQs, before channel-select/CSV/posting."""
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     uname = msg["from"].get("first_name", "User")
@@ -10968,7 +11053,8 @@ async def _handle_onu_impl(msg: dict):
             "<b>Format:</b>\n"
             "<code>/onu -p 1-5 -c @channel -m \"Topic\" -t group_id</code>\n\n"
             "📌 /qbm-এর মতোই existing MCQ extract করে (নতুন বানায় না)\n"
-            "📌 অতিরিক্ত: ছবিযুক্ত MCQ ও roman/সংখ্যা combination (i,ii,iii) MCQ স্বয়ংক্রিয়ভাবে বাদ যাবে\n"
+            "📌 শুধুমাত্র সেই MCQ নেবে যার প্রশ্নে yellow highlight মার্ক করা আছে\n"
+            "📌 বাকি সব বাদ: highlight নেই এমন MCQ, ছবিযুক্ত MCQ, roman/সংখ্যা combination (i,ii,iii) MCQ\n"
             "📌 -p = page range, PDF-only (না দিলে সব page)\n"
             "📌 -c = channel id (না দিলে list দেখাবে)\n"
             "📌 -m = topic name\n"
@@ -11068,10 +11154,12 @@ async def _handle_onu_impl(msg: dict):
                 f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে...")
 
         extracted_pages = await qbm_extract_all_pages(
-            chat_id, pages, topic, file_name, status_msg_id
+            chat_id, pages, topic, file_name, status_msg_id,
+            extractor=_onu_extract_from_image
         )
 
-        # ── /onu-specific step: filter out image-attached & roman-combo MCQs ──
+        # ── /onu-specific step: keep ONLY yellow-highlighted questions, ──
+        # ── also excluding image-attached & roman-combo MCQs ──
         filtered_pages = []
         total_before = 0
         total_after = 0
@@ -11085,7 +11173,7 @@ async def _handle_onu_impl(msg: dict):
         if status_msg_id and skipped_count:
             await edit_msg(chat_id, status_msg_id,
                 f"✅ Extraction সম্পূর্ণ! {total_before} MCQ পাওয়া গেছে, "
-                f"{skipped_count}টি (ছবি/combination-type) বাদ দেওয়া হলো — বাকি {total_after}টি এগোচ্ছে...")
+                f"{skipped_count}টি (yellow highlight নেই/ছবি/combination-type) বাদ দেওয়া হলো — বাকি {total_after}টি এগোচ্ছে...")
 
         if not channel_id:
             channels = await db_get_channels()
@@ -11259,7 +11347,8 @@ Return ONLY the JSON array, nothing else."""
 
 async def qbm_extract_all_pages(
     chat_id: int, pages: list, topic: str,
-    file_name: str, status_msg_id: int = None
+    file_name: str, status_msg_id: int = None,
+    extractor=None
 ) -> list:
     """
     Phase 1 -- runs the full 3-call connected extraction pipeline for every
@@ -11268,6 +11357,7 @@ async def qbm_extract_all_pages(
     time this returns, every page's MCQ list is fully final.
     Returns list of (page_num, img, mcqs) tuples.
     """
+    _extract_fn = extractor or _qbm_extract_from_image
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
     start_time = time.time()
     total_mcq = 0
@@ -11312,7 +11402,7 @@ async def qbm_extract_all_pages(
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
         mcqs = []
         try:
-            mcqs = await _qbm_extract_from_image(img)
+            mcqs = await _extract_fn(img)
 
             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
             if unresolved and idx + 1 < len(pages):
@@ -11350,7 +11440,7 @@ async def qbm_extract_all_pages(
         except Exception as e:
             logger.error(f"[QBM Extract] Page {page_num} error: {e} — retrying once before giving up (page must never be silently skipped)")
             try:
-                mcqs = await _qbm_extract_from_image(img)
+                mcqs = await _extract_fn(img)
             except Exception as e2:
                 logger.error(f"[QBM Extract] Page {page_num} retry also failed: {e2}")
                 mcqs = []
