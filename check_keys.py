@@ -36,7 +36,7 @@ for i, key in enumerate(keys):
         # Direct REST call to inspect rate-limit headers (SDK hides these)
         try:
             r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={key}",
                 json={"contents": [{"parts": [{"text": "hi"}]}]},
                 timeout=15
             )

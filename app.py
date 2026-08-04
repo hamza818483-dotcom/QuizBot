@@ -660,7 +660,7 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             # Measured from the compacted static QBM_EXTRACT_PROMPT_DEFAULT
             # (~8k chars / 3.5) + margin. Only accurate for that fixed prompt.
             PROMPT_TOKENS = 2400
-        SAFETY_MARGIN = 800  # was 1000 — that left requests targeting ~7000-7900/8000, so ANY leftover usage from a prior call on the same key within the same 60s window (e.g. "Used 4277") guaranteed a 429 collision. Bigger margin -> requests target ~4500-5000, leaving real headroom.
+        SAFETY_MARGIN = 2200  # was 800 — still saw live 413s (Requested 8590/8000) and 429 collisions with prior-call usage (Used 6051/7444 on the same key within the 60s window). Bigger margin -> requests target ~3500-4000/8000, leaving real headroom for rotator collisions.
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
@@ -2005,7 +2005,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
 
         def _call():
             return client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.6-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
@@ -10125,7 +10125,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
         def _call(key):
             client = gai.Client(api_key=key)
             return client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.6-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
@@ -11389,7 +11389,7 @@ Return ONLY the JSON array, nothing else."""
 
                     def _call():
                         return client.models.generate_content(
-                            model="gemini-2.5-flash",
+                            model="gemini-3.6-flash",
                             contents=[
                                 types.Part.from_text(text=prompt),
                                 types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
