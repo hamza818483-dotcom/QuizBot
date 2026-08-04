@@ -299,7 +299,7 @@ def aggressive_clean(text):
     # Convert to the proper combining circumflex (U+0302) directly on the
     # letter, same reasoning as the vector-arrow fix above. Negative
     # lookahead avoids eating a real exponent caret ("x^2", "a^{b}").
-    text = re.sub(r'([A-Za-z])\s*\^(?!\{|\w)', lambda m: m.group(1) + '\u0302', text)
+    text = re.sub(r'([A-Za-z])\s*\^(?!\{|\(|\w)', lambda m: m.group(1) + '\u0302', text)
     # A number (coefficient) must sit directly against a following
     # vector-marked letter (one carrying the arrow diacritic U+20D7 or the
     # hat/circumflex U+0302 from the two fixes above) -- standard math
@@ -412,9 +412,27 @@ def aggressive_clean(text):
                     return text[start+1:j], j + 1
         return None, pos
 
+    def _read_paren_group(text, pos):
+        """Depth-aware (...) reader, same logic as _read_braced_group but
+        for parenthesized exponents/subscripts (e.g. AI output 'P^(a/b)'
+        instead of 'P^{a/b}') -- both forms are common AI-generated syntax
+        and must be treated identically."""
+        if pos >= len(text) or text[pos] != '(':
+            return None, pos
+        depth = 0
+        start = pos
+        for j in range(pos, len(text)):
+            if text[j] == '(':
+                depth += 1
+            elif text[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    return text[start+1:j], j + 1
+        return None, pos
+
     def _script_repl_scan(text, marker_char, repl_fn):
-        """Scan for marker_char ('_' or '^') followed by a {..} group
-        (depth-aware) or a bare token, replacing each via repl_fn(inner)."""
+        """Scan for marker_char ('_' or '^') followed by a {..} or (..)
+        group (depth-aware) or a bare token, replacing each via repl_fn(inner)."""
         out = []
         i = 0
         while i < len(text):
@@ -424,9 +442,37 @@ def aggressive_clean(text):
                     out.append(repl_fn(inner))
                     i = p
                     continue
+            if text[i] == marker_char and i + 1 < len(text) and text[i+1] == '(':
+                inner, p = _read_paren_group(text, i + 1)
+                if inner is not None:
+                    out.append(repl_fn(inner))
+                    i = p
+                    continue
             out.append(text[i])
             i += 1
         return ''.join(out)
+
+    def _bare_frac_to_latex(inner):
+        """If inner contains a top-level bare '/' (division AI wrote as
+        plain text instead of \\frac{}{}, e.g. 'T\\gamma/1-\\gamma' or
+        'Tγ/1-γ'), rebuild it as a real \\frac{num}{den}. Only the FIRST
+        top-level '/' (outside any nested (), {}) is treated as the
+        fraction bar -- this matches how these expressions are always
+        written (single ratio, not nested divisions). Returns None if no
+        top-level '/' is found so the caller can fall back to its normal
+        handling."""
+        depth = 0
+        for idx, ch in enumerate(inner):
+            if ch in '({':
+                depth += 1
+            elif ch in ')}':
+                depth -= 1
+            elif ch == '/' and depth == 0:
+                num, den = inner[:idx].strip(), inner[idx+1:].strip()
+                if num and den:
+                    return f"\\frac{{{_to_latex_inner(num)}}}{{{_to_latex_inner(den)}}}"
+                return None
+        return None
 
     def _sub_repl_inner(inner):
         inner = inner.strip()
@@ -438,6 +484,9 @@ def aggressive_clean(text):
             # unbalanced-$ LaTeX once the marker gets restored later).
             _raw_frac = _nfrac_markers[int(_frac_marker_match.group(1))].strip('$')
             return f"$_{{{_raw_frac}}}$"
+        _bare_frac = _bare_frac_to_latex(inner)
+        if _bare_frac is not None:
+            return f"$_{{{_bare_frac}}}$"
         if _UNSAFE_SUB_CHARS.search(inner):
             return f"$_{{{_to_latex_inner(inner)}}}$"
         return inner.translate(SUB_MAP)
@@ -448,6 +497,9 @@ def aggressive_clean(text):
         if _frac_marker_match:
             _raw_frac = _nfrac_markers[int(_frac_marker_match.group(1))].strip('$')
             return f"$^{{{_raw_frac}}}$"
+        _bare_frac = _bare_frac_to_latex(inner)
+        if _bare_frac is not None:
+            return f"$^{{{_bare_frac}}}$"
         if _UNSAFE_SUP_CHARS.search(inner):
             return f"$^{{{_to_latex_inner(inner)}}}$"
         return inner.translate(SUP_MAP)
