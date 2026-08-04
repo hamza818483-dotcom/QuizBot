@@ -10139,10 +10139,21 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                 return response.text or ""
             except Exception as e:
                 msg = str(e)
+                # SDK's str(e) sometimes truncates the JSON body before the
+                # 'violations'/quota_id details that distinguish PerDay vs
+                # PerMinute — pull the raw response body too if available.
+                extra = ""
+                try:
+                    resp_obj = getattr(e, "response", None)
+                    if resp_obj is not None:
+                        extra = getattr(resp_obj, "text", "") or ""
+                except Exception:
+                    pass
+                full_msg = msg + " " + extra
                 if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
-                    daily = "generate_content_free_tier_requests" in msg or "PerDay" in msg
+                    daily = "PerDay" in full_msg
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily)
-                    logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={msg[:1200]}")
+                    logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
                 logger.warning(f"[QBM] Gemini raw call failed: {e}")
                 return ""
