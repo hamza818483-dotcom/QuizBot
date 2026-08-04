@@ -10110,11 +10110,13 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
     Tries keys in healthiest-first order, one after another, until one
     succeeds -- a single key's 429 RESOURCE_EXHAUSTED (daily quota, only 20
     RPD/key on free tier) or rate limit must never kill the whole call while
-    any other key in the pool is still usable."""
+    any other key in the pool is still usable. If every Gemini key is
+    exhausted/failing, falls back to Groq vision (qwen) so the caller still
+    gets a result instead of an empty string."""
     try:
         from pdf_handler import key_rotator, image_to_base64
         if not key_rotator.keys:
-            return ""
+            return await _gen_groq_raw_text(img, prompt)
         from google import genai as gai
         from google.genai import types
         img_b64 = image_to_base64(img)
@@ -10156,11 +10158,13 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                     logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
                 logger.warning(f"[QBM] Gemini raw call failed: {e}")
-                return ""
-        return ""
+                return await _gen_groq_raw_text(img, prompt)
+        # All Gemini keys exhausted/rate-limited — fall back to Groq vision
+        logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision")
+        return await _gen_groq_raw_text(img, prompt)
     except Exception as e:
         logger.warning(f"[QBM] Gemini raw call failed: {e}")
-        return ""
+        return await _gen_groq_raw_text(img, prompt)
 
 
 async def _qbm_gemini_extract(img, prompt: str = None) -> list:
