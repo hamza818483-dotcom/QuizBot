@@ -10205,7 +10205,14 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                 full_msg = msg + " " + extra
                 if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
                     daily = "PerDay" in full_msg
-                    key_rotator.mark_rate_limited(key, daily_exhausted=daily)
+                    retry_s = None
+                    try:
+                        rd_match = re.search(r"'retryDelay':\s*'(\d+)s'", full_msg)
+                        if rd_match:
+                            retry_s = int(rd_match.group(1))
+                    except Exception:
+                        pass
+                    key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
                 logger.warning(f"[QBM] Gemini raw call failed: {e}")
@@ -11094,8 +11101,13 @@ OUTPUT — ONLY a JSON array, one entry per item above IN ORDER, nothing else:
             for mc, is_hl in zip(to_check, pass1):
                 if is_hl:
                     mc["yellow_highlight"] = True
+        # pass2 only runs if pass1 actually succeeded (avoids doubling up
+        # Gemini calls when the key pool is already rate-limited/exhausted —
+        # gemini-3.6-flash free tier is only 5 RPM/key, so skipping a
+        # guaranteed-to-fail second call here matters for staying within
+        # budget on multi-page PDFs).
         still_unflagged = [mc for mc in to_check if not mc.get("yellow_highlight")]
-        if still_unflagged:
+        if pass1 is not None and still_unflagged:
             pass2 = await _one_pass(still_unflagged)
             if pass2:
                 for mc, is_hl in zip(still_unflagged, pass2):
