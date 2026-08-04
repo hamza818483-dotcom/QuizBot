@@ -14762,13 +14762,15 @@ async def handle_message(msg: dict):
                          f"  ✅ Healthy: {g_healthy} | ⏳ Cooldown: {g_cooling} | 🔴 আজকে exhausted: {g_exhausted}"
                          + (f"\n  🏢 Known orgs: {known_orgs}" if known_orgs else ""))
 
-            # Gemini — only short-cooldown/permanent-ban tracking (no daily counter kept locally)
+            # Gemini — daily-exhaustion + short-cooldown/permanent-ban tracking
+            from pdf_handler import _is_gemini_key_exhausted_today
             gemini_keys = key_rotator.keys
             gem_banned = sum(1 for k in gemini_keys if key_rotator._cooldown_until.get(k, 0) == float("inf"))
-            gem_cooling = sum(1 for k in gemini_keys if 0 < key_rotator._cooldown_until.get(k, 0) < float("inf") and key_rotator._cooldown_until.get(k, 0) > now)
-            gem_healthy = len(gemini_keys) - gem_banned - gem_cooling
+            gem_exhausted = sum(1 for k in gemini_keys if _is_gemini_key_exhausted_today(k))
+            gem_cooling = sum(1 for k in gemini_keys if 0 < key_rotator._cooldown_until.get(k, 0) < float("inf") and key_rotator._cooldown_until.get(k, 0) > now and not _is_gemini_key_exhausted_today(k))
+            gem_healthy = len(gemini_keys) - gem_banned - gem_cooling - gem_exhausted
             lines.append(f"\n🔵 <b>Gemini</b> (gemini-2.5-flash, free tier ~20 req/day/key): {len(gemini_keys)} key\n"
-                         f"  ✅ Healthy: {gem_healthy} | ⏳ Cooldown: {gem_cooling} | 🚫 Banned: {gem_banned}")
+                         f"  ✅ Healthy: {gem_healthy} | ⏳ Cooldown: {gem_cooling} | 🔴 আজকে exhausted: {gem_exhausted} | 🚫 Banned: {gem_banned}")
 
             # Generic rotators (NVIDIA, Nemotron, Gemma, OpenRouter-Qwen, HF)
             for rot in (nvidia_rotator, nemotron_rotator, gemma_rotator, or_qwen_rotator, hf_rotator):
