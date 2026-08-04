@@ -1167,6 +1167,7 @@ _SOURCE_REF_PATTERNS = [
 ]
 _SOURCE_REF_RE = re.compile('|'.join(_SOURCE_REF_PATTERNS))
 _SUPERSCRIPT_MAP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+_SUP_TO_NORMAL = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
 _BN_DIGITS_TO_EN = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 
 def _clean_mcq_text(text: str) -> str:
@@ -1184,6 +1185,17 @@ def _clean_mcq_text(text: str) -> str:
         return (sign + digits).translate(_SUPERSCRIPT_MAP).translate({ord('-'): '⁻'})
 
     t = re.sub(r'\^(-?)([\d০-৯]+)', _sup, t)
+    # Degree-number fix: AI vision models sometimes emit temperature/angle
+    # values with superscript digits directly before '°' (e.g. '³²°F' for
+    # 32°F, '²¹²°F' for 212°F) -- likely misreading a raised/small font in
+    # the source image as an exponent. °F/°C/° values are never actually
+    # exponents, so any run of superscript digits immediately before '°'
+    # must be converted back to plain digits.
+    t = re.sub(
+        r'((?:[⁰¹²³⁴⁵⁶⁷⁸⁹]\s*)+)°',
+        lambda m: m.group(1).replace(' ', '').translate(_SUP_TO_NORMAL) + '°',
+        t,
+    )
     t = re.sub(r'\s{2,}', ' ', t).strip(" ,।.")
     return t
 
