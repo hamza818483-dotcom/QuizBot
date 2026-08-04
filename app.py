@@ -10977,37 +10977,28 @@ def _onu_filter_mcqs(mcqs: list):
 # ── /onu highlight-detection extraction prompt ──
 # Only MCQs whose QUESTION text has a yellow highlight marking are kept.
 # This is the SOLE indicator for /onu — no other rule decides inclusion.
-ONU_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT + """
+# Kept intentionally SHORT (not built on QBM_EXTRACT_PROMPT_DEFAULT) so it
+# fits Groq's 8000 TPM budget alongside a full-quality image -- /onu only
+# needs: extract existing MCQs as-is, detect yellow highlight, detect the
+# marked answer (red circle/box around an option). No passage handling, no
+# math formatting, no explanation-generation rules -- those aren't part of
+# /onu's job and were only bloating the prompt for QBM's use case.
+ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page, exact order, exact wording (Bangla stays Bangla, English stays English). Never invent new MCQs. 0 MCQs → return [].
 
-ADDITIONAL MANDATORY FIELD FOR THIS MODE — YELLOW HIGHLIGHT DETECTION:
-On this page, SOME full MCQ blocks (the question sentence AND its A/B/C/D options
-together) are marked with a YELLOW HIGHLIGHTER color — a bright yellow marker-pen
-band drawn behind the text, covering the question line and all four options. Other
-MCQ blocks on the same page have NO color behind them (plain white background,
-normal black text).
+For EACH MCQ output 2 mandatory checks:
+1) yellow_highlight: true if a yellow highlighter/marker color band is behind the question+options block, false if plain background.
+2) answer: the option marked with a RED CIRCLE or RED BOX drawn around its letter/text — that IS the answer (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
 
-For EVERY extracted MCQ, look at the background behind its question line AND its
-options as a whole block:
-- If yellow highlighter color is visible behind the question and/or its options →
-  "yellow_highlight": true
-- If there is no yellow color anywhere in that MCQ's block (plain white/no
-  background) → "yellow_highlight": false
-
-Expect a MIX on each page — some MCQs highlighted, some not. Do not default every
-question to the same value; actually check each block's background color
-independently. A red circle/box drawn around a single option letter is NOT a yellow
-highlight — ignore red circles/boxes, only yellow marker coloring counts.
-Update OUTPUT FORMAT to include this field:
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","yellow_highlight":true,"qsn_bbox":[100,200,400,450]}]"""
+OUTPUT FORMAT — ONLY valid JSON array, nothing else:
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","yellow_highlight":true}]"""
 
 
 async def _onu_call1_extract(img) -> list:
     """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field).
-    NOTE: Groq fallback is intentionally SKIPPED for this mode — Groq's 8000 TPM
-    budget forces heavy image downscale/compression (down to 384px, quality 40)
-    on image-heavy pages, which washes out the subtle yellow highlighter color
-    and makes true highlight detection impossible. Gemini sends full-quality
-    images, so it's the only provider that can reliably see the highlight."""
+    ONU_EXTRACT_PROMPT is intentionally short (~200 tokens vs QBM's ~2400), which
+    leaves most of Groq's 8000 TPM budget for the image -- so Groq fallback now
+    keeps enough resolution to still see the yellow highlight, unlike before when
+    the full QBM prompt forced heavy downscale (384px/quality 40) that washed it out."""
     try:
         gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT)
         if gem:
@@ -11015,8 +11006,13 @@ async def _onu_call1_extract(img) -> list:
             for m in out:
                 m["_provider"] = "Gemini"
             return out
-        logger.warning("[ONU-DEBUG] Gemini returned empty — no Groq fallback for highlight detection (would lose highlight signal to compression)")
-        return []
+        logger.warning("[ONU-DEBUG] Gemini returned empty — trying Groq fallback")
+        txt = await _qbm_groq_call(img, ONU_EXTRACT_PROMPT)
+        result = _qbm_parse_json(txt) if txt else []
+        out = _qbm_dedup_list(result)
+        for m in out:
+            m["_provider"] = "Groq"
+        return out
     except Exception as e:
         logger.warning(f"[ONU Call1] failed: {e}")
         return []
