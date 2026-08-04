@@ -10971,7 +10971,12 @@ Update OUTPUT FORMAT to include this field:
 
 
 async def _onu_call1_extract(img) -> list:
-    """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field)."""
+    """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field).
+    NOTE: Groq fallback is intentionally SKIPPED for this mode — Groq's 8000 TPM
+    budget forces heavy image downscale/compression (down to 384px, quality 40)
+    on image-heavy pages, which washes out the subtle yellow highlighter color
+    and makes true highlight detection impossible. Gemini sends full-quality
+    images, so it's the only provider that can reliably see the highlight."""
     try:
         gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT)
         if gem:
@@ -10979,12 +10984,8 @@ async def _onu_call1_extract(img) -> list:
             for m in out:
                 m["_provider"] = "Gemini"
             return out
-        txt = await _qbm_groq_call(img, ONU_EXTRACT_PROMPT)
-        result = _qbm_parse_json(txt) if txt else []
-        out = _qbm_dedup_list(result)
-        for m in out:
-            m["_provider"] = "Groq"
-        return out
+        logger.warning("[ONU-DEBUG] Gemini returned empty — no Groq fallback for highlight detection (would lose highlight signal to compression)")
+        return []
     except Exception as e:
         logger.warning(f"[ONU Call1] failed: {e}")
         return []
