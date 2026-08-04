@@ -1565,7 +1565,7 @@ def classify_ai_error(e: Exception, provider: str, page_num: int = 0) -> str:
     elif "413" in err_str or "PAYLOAD" in err_upper and "LARGE" in err_upper:
         category = "payload_too_large_413"
     elif "429" in err_str or "RESOURCE_EXHAUSTED" in err_upper or "quota" in err_str.lower() or "rate limit" in err_str.lower():
-        if "PerDay" in err_str or "daily" in err_str.lower() or "generate_content_free_tier_requests" in err_str:
+        if "PerDay" in err_str or "daily" in err_str.lower():
             category = "daily_quota"
         else:
             category = "rate_limit_429"
