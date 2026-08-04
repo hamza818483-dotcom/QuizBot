@@ -134,8 +134,14 @@ def _latex_to_text(tex: str) -> str:
             if m:
                 i += len(m.group(0))
                 continue
-        if tex[i:i + 5] == r"\frac":
-            i += 5
+        if tex[i:i + 5] == r"\frac" or tex[i:i + 6] == r"\dfrac":
+            # KaTeX annotation source sometimes already contains literal
+            # \dfrac (not just \frac) -- previously only the 5-char \frac
+            # prefix was checked, so a real \dfrac{a}{b} in the source fell
+            # through to the generic unknown-command branch untouched,
+            # producing broken literal text like "\dfracq1q2r2" instead of
+            # a real rendered fraction. Both now take the same path.
+            i += 6 if tex[i:i + 6] == r"\dfrac" else 5
             num, i = _read_group(tex, i)
             den, i = _read_group(tex, i)
             # Always emit a REAL $\frac{num}{den}$ instead of flattening to
@@ -207,6 +213,19 @@ def _latex_to_text(tex: str) -> str:
             else:
                 sup_txt = _latex_to_text(sup_raw)
                 out.append(sup_txt.translate(SUP_MAP))
+            continue
+        if tex[i:i + 4] == r"\vec":
+            # \vec{X} was previously unhandled -- fell into the generic
+            # unknown-command branch below, which keeps "\vec" as literal
+            # text AND separately strips the {X} braces, producing broken
+            # output like "\vecF" instead of a real vector arrow. Convert
+            # to the same "letter + U+20D7 combining arrow above" form the
+            # rest of the pipeline (aggressive_clean, MathText.tsx on the
+            # website) already expects and renders correctly.
+            i += 4
+            inner, i = _read_group(tex, i)
+            inner_txt = _latex_to_text(inner).strip()
+            out.append(inner_txt + "\u20D7")
             continue
         if ch == "\\":
             m = re.match(r"\\[a-zA-Z]+", tex[i:])
