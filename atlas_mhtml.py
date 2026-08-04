@@ -238,7 +238,7 @@ def upload_to_imgbb(b64):
 # ============================================================
 SUB_MAP = str.maketrans("0123456789+\u2212\u2013\u2014-=()aeoxhklmnpst", "₀₁₂₃₄₅₆₇₈₉₊₋₋₋₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜ")
 SUP_MAP = str.maketrans("0123456789+\u2212\u2013\u2014-=()n", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁻⁻⁻₌⁽⁾ⁿ")
-SUP_TO_NORMAL = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
+SUP_TO_NORMAL = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺", "0123456789-+")
 
 LATEX_SYMBOLS = {
     r'\alpha': 'α', r'\beta': 'β', r'\gamma': 'γ', r'\delta': 'δ',
@@ -562,9 +562,13 @@ def aggressive_clean(text):
     # match that. Strip any spaces within a run of superscript digits (and
     # between the run and a following °) before doing the digit conversion,
     # so it's covered regardless of where the stray space landed.
+    # Also covers decimal points and superscript minus signs mixed into the
+    # run (e.g. "⁰.⁰³°" -> "0.03°", "⁻⁴¹⁹.⁴°" -> "-419.4°") -- previously
+    # only bare superscript digit runs matched, so any negative or decimal
+    # value before ° leaked through as raw superscript unicode.
     text = re.sub(
-        r'((?:[⁰¹²³⁴⁵⁶⁷⁸⁹]\s*)+)°',
-        lambda m: m.group(1).replace(' ', '').translate(SUP_TO_NORMAL) + '°',
+        r'((?:[⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺]|\.(?=[⁰¹²³⁴⁵⁶⁷⁸⁹]))\s*)+°',
+        lambda m: m.group(0)[:-1].replace(' ', '').translate(SUP_TO_NORMAL) + '°',
         text,
     )
     text = text.replace('^\\circ', '°').replace('^{\\circ}', '°').replace('∘', '°')
