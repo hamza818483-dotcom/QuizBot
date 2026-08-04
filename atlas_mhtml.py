@@ -779,6 +779,19 @@ def _format_content_inner(element, img_map):
         hidden.decompose()
     for hidden in element.find_all('span', class_=['katex-html', 'MJX_Assistive_MathML', 'MathJax_Preview']):
         hidden.decompose()
+    # Tailwind-style visually-hidden duplicate content -- e.g. an
+    # accessibility-only "sr-only"/"visually-hidden" span that repeats the
+    # SAME text as the visible element right next to it. If left in place,
+    # get_text() concatenates the visible copy + this hidden duplicate (and
+    # sometimes a third invisible katex-mathml copy already handled above),
+    # producing tripled option text like "0.2 A0.2 A0.2 A" instead of
+    # "0.2 A". These classes carry no visible content, only screen-reader
+    # duplicates, so they're always safe to drop entirely.
+    for hidden in element.find_all(class_=lambda c: c and any(
+        cls in ('sr-only', 'visually-hidden', 'visuallyhidden', 'screen-reader-only', 'hidden')
+        for cls in (c if isinstance(c, list) else c.split())
+    )):
+        hidden.decompose()
 
     for mfrac in element.find_all('mfrac'):
         contents = mfrac.find_all(recursive=False)
