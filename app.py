@@ -9539,7 +9539,7 @@ Output ONLY a JSON array of the MISSED MCQs (same schema as before):
         return call1_mcqs
 
 
-async def _qbm_final_empty_page_scan(img) -> list:
+async def _qbm_final_empty_page_scan(img, onu_mode: bool = False) -> list:
     """
     CALL 3 (empty-page variant) — used ONLY when Call 1 AND Call 2 BOTH
     returned zero MCQs. Two independent empty results is a strong signal but
@@ -9549,6 +9549,12 @@ async def _qbm_final_empty_page_scan(img) -> list:
     allowed to confirm "this page truly has 0 MCQ".
     Strong combination rule: only when ALL THREE calls (1, 2, and this final
     scan) agree on zero is the page marked confirmed-empty.
+
+    onu_mode=True adds the yellow_highlight field to the prompt/output --
+    without this, /onu calling into this fallback path would recover MCQs
+    with NO highlight info at all (field defaults to False for every MCQ,
+    silently discarding real highlighted questions whenever Call 1 was
+    empty/failed, e.g. Gemini quota exhausted).
     """
     try:
         prompt = """Two prior independent passes over this exact page image both concluded
@@ -9568,10 +9574,19 @@ If the page genuinely has no MCQ at all, output exactly: []
 
 Output ONLY a JSON array:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]"""
+        if onu_mode:
+            prompt += """
+
+ADDITIONALLY, for EVERY extracted MCQ, check if a YELLOW HIGHLIGHTER color
+band is visible behind the question line and/or its A/B/C/D options (some
+MCQs on the page are highlighted, some are not -- check each independently).
+Add "yellow_highlight": true if yellow highlighter color is present in that
+MCQ's block, or "yellow_highlight": false if not. Update the output format:
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","yellow_highlight":true}]"""
         gem_txt = await _qbm_gemini_raw(img, prompt)
         found = _qbm_parse_json(gem_txt) if gem_txt else []
         provider = "Gemini"
-        if not found:
+        if not found and not onu_mode:
             txt = await _qbm_groq_call(img, prompt)
             found = _qbm_parse_json(txt) if txt else []
             provider = "Groq"
@@ -11007,7 +11022,7 @@ async def _onu_extract_from_image(img) -> list:
                 pass
 
             if not call1:
-                final_check = await _qbm_final_empty_page_scan(img)
+                final_check = await _qbm_final_empty_page_scan(img, onu_mode=True)
                 if not final_check:
                     if _pipeline_attempt < 2:
                         logger.warning(f"[ONU] Call1+final-scan both empty on attempt {_pipeline_attempt+1}/3 — retrying")
