@@ -381,11 +381,32 @@ def aggressive_clean(text):
     for latex, uni in LATEX_SYMBOLS.items():
         text = text.replace(latex, uni)
 
-    text = re.sub(r'_\{\s*([^}]+)\s*\}', lambda m: m.group(1).translate(SUB_MAP), text)
-    text = re.sub(r'\^\{\s*([^}]+)\s*\}', lambda m: m.group(1).translate(SUP_MAP), text)
+    # Characters with no Unicode sub/superscript equivalent (Greek letters,
+    # fraction slash, etc) -- if an exponent/subscript group contains any of
+    # these, silently per-character translating only the digits/operators
+    # while leaving the rest plain-sized loses the grouping and produces an
+    # ambiguous mashup (e.g. exponent "1-γ" -> "¹⁻γ", where it's no longer
+    # clear γ is part of the exponent). Fall back to explicit ^(...)/_(...)
+    # notation for any such group instead, so the exact expression survives.
+    _UNSAFE_SCRIPT_CHARS = re.compile(r'[^0-9A-Za-z+\u2212\u2013\u2014\-=()aeoxhklmnpstn]')
 
-    text = re.sub(r'_([0-9a-zA-Z+\-]+)', lambda m: m.group(1).translate(SUB_MAP), text)
-    text = re.sub(r'\^([0-9a-zA-Z+\-]+)', lambda m: m.group(1).translate(SUP_MAP), text)
+    def _sub_repl(m):
+        inner = m.group(1).strip()
+        if _UNSAFE_SCRIPT_CHARS.search(inner):
+            return '_(' + inner + ')'
+        return inner.translate(SUB_MAP)
+
+    def _sup_repl(m):
+        inner = m.group(1).strip()
+        if _UNSAFE_SCRIPT_CHARS.search(inner):
+            return '^(' + inner + ')'
+        return inner.translate(SUP_MAP)
+
+    text = re.sub(r'_\{\s*([^}]+)\s*\}', _sub_repl, text)
+    text = re.sub(r'\^\{\s*([^}]+)\s*\}', _sup_repl, text)
+
+    text = re.sub(r'_([0-9a-zA-Z+\-]+)', _sub_repl, text)
+    text = re.sub(r'\^([0-9a-zA-Z+\-]+)', _sup_repl, text)
 
     # Universal degree-number fix: superscript digits right before "°" must
     # become plain digits (e.g. "⁶⁷°" -> "67°"). The DOM-text extraction's
