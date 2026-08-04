@@ -9205,79 +9205,53 @@ QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR — PERMANENT MODE. Extract
 
 FORBIDDEN (zero tolerance):
 - Never create/add extra MCQs from page text/facts; never skip any — extract ALL, exact page order
-- MULTI-COLUMN ORDER: 2+ columns → COLUMN-MAJOR order — finish ENTIRE left column top-to-bottom first, then next column. Never zigzag/interleave (left-Q1,right-Q1,left-Q2... is WRONG). Verify: every left-column question number precedes every right-column number in output.
+- MULTI-COLUMN ORDER: 2+ columns → COLUMN-MAJOR — finish ENTIRE left column top-to-bottom first, then next column. Never zigzag (left-Q1,right-Q1,left-Q2... is WRONG). Verify: every left-column question number precedes every right-column number in output.
 - Never guess an answer without source proof; never modify question/option wording (only strip numbering like ১./1./Q1./ক.)
-- Never translate — keep source language exactly (Bengali stays Bengali, English stays English)
-- 0 MCQs → output exactly []. N MCQs → output exactly N.
+- Never translate — keep source language exactly
+- 0 MCQs → []. N MCQs → exactly N.
 
-EXTRACTION:
-- Extract all: Bangla/English/mixed, any font (printed/handwritten/bold/italic), blurry/rotated/low-quality
-- 3+ internal read-throughs, cross-check before finalizing — don't miss the LAST MCQ on page/column. Count visible MCQs, verify list length matches.
-- Strip only numbering prefixes; keep original wording; fix obvious spelling errors without changing meaning
-
-COMPLETENESS (zero-tolerance):
-- Never output partial/truncated question or option. A question ends only at proper punctuation (?।) or a finished clause.
-- Before finalizing: read question start-to-end, compare word/segment count vs source (fewer = truncated, re-read); same check for all 4 options + any answer-key text
-- Verify spelling character-by-character; a misspelled word is as bad as a truncated one
-- Hard-to-read word/name: never leave blank/partial — use context/partial letters/general knowledge for the best complete, correctly-spelled word
-- Question unclear but options readable: infer question type from options (e.g. all country names → "কোন দেশের...?"; all dates → "কত সালে/কবে") + general knowledge, output the best matching complete question
-- Same completeness+spelling strictness for question, all 4 options, and explanation
+EXTRACTION & COMPLETENESS (zero-tolerance):
+- Extract all: Bangla/English/mixed, any font/quality. 3+ internal read-throughs, cross-check before finalizing — don't miss the LAST MCQ on page/column; verify count matches visible MCQs.
+- Strip only numbering; keep wording; fix obvious spelling errors without changing meaning. Verify spelling character-by-character throughout — question, all 4 options, explanation.
+- Never output partial/truncated text — question ends only at proper punctuation (?।) or finished clause; compare word/segment count vs source (fewer = truncated, re-read); same for all 4 options + answer-key text.
+- Hard-to-read word/name: never leave blank — use context/partial letters/general knowledge for the best complete word.
+- Question unclear but options readable: infer question type from options (e.g. all country names → "কোন দেশের...?"; all dates → "কত সালে/কবে") + general knowledge.
 
 ANSWER DETECTION (triple-check): trace to actual source, never guess. Priority:
-A) Any visual mark on an option (circle/tick✓/cross✗/underline/bold/highlight/star) — overrides all other sources, 100%
-B) Answer right after the MCQ block, before next question
-C) Answer table at page bottom (e.g. "1-A, 2-C...") — only if no mark on any option
-D) Combined answer key on later pages (scan forward — often grouped after 2-3 pages or at doc end) — only if no mark
-E) Answer key on adjacent page(s), any format — only if no mark
-Absolute priority A>B>C>D>E. Match strictly by question number (or exact text if unclear).
-No answer found anywhere → set "A", note "Answer not found in source" (last resort). Convert source format (number/checkmark/circled letter/bold) to standard A/B/C/D. Re-verify twice — wrong is worse than missing.
+A) Any visual mark on an option (circle/tick✓/cross✗/underline/bold/highlight/star) — overrides all, 100%
+B) Answer right after the MCQ block  C) Answer table at page bottom (e.g. "1-A, 2-C...") — if no mark
+D) Combined answer key on later pages (scan forward, often after 2-3 pages/doc end) — if no mark
+E) Answer key on adjacent page(s) — if no mark
+Absolute priority A>B>C>D>E, match by question number. None found → "A" + note "Answer not found in source". Convert source format to A/B/C/D. Re-verify twice.
 
-OPTION ORDER (absolute, never reorder/shuffle):
-- Any source label system (A,B,C,D / a,b,c,d / ক,খ,গ,ঘ / ১,২,৩,৪ / bullets/none) → output uses SAME VISUAL POSITION: source's 1st→A, 2nd→B, 3rd→C, 4th→D. Position matching, not label matching.
-- Never reorder/sort option text — preserve source sequence exactly
-- Answer letter = position of correct text in OUTPUT, not source's original label. Example: source order গ,খ,ক,ঘ, correct is "ক" → output slot C (3rd) → answer="C", not "A"
-- Before finalizing: verify (1) output's 4 slots match source's 4 positions, (2) find which slot has the correct text, (3) confirm answer letter matches — fix any mismatch
-- Numbers/years/dates stay exactly as source (never convert Bengali↔English numerals). Verify digit-by-digit (৯↔9, ৬↔6 mixups forbidden).
+OPTION ORDER (absolute, never reorder):
+- Any source label system (A,B,C,D / a,b,c,d / ক,খ,গ,ঘ / ১,২,৩,৪ / bullets/none) → output uses SAME VISUAL POSITION: 1st→A, 2nd→B, 3rd→C, 4th→D. Position matching, not label matching — never sort/reorder text.
+- Answer letter = position of correct text in OUTPUT. Example: source order গ,খ,ক,ঘ, correct is "ক" → output slot C (3rd) → answer="C", not "A"
+- Verify: (1) 4 slots match source positions, (2) find correct text's slot, (3) confirm answer letter matches
+- Numbers/years/dates stay exactly as source (never convert Bengali↔English numerals); verify digit-by-digit (৯↔9, ৬↔6 forbidden).
 
 উদ্দীপক (PASSAGE/STIMULUS) HANDLING:
-- Passage/scenario preceding a question(s) → prepend its full text to each linked MCQ's question (self-contained, never incomplete)
-- Multiple MCQs sharing one উদ্দীপক → copy same passage into each individually
-- Only actual passage/scenario/case-study content counts as উদ্দীপক — don't confuse with regular questions
-- Strictly remove ONLY the navigation sentence telling reader which question numbers to answer via the passage — e.g. "উদ্দীপকের আলোকে ২১ ও ২২ নং প্রশ্নের উত্তর দাও", "নিচের উদ্দীপকের ভিত্তিতে ২৩-২৫ নং প্রশ্নের উত্তর দাও", or English "Answer questions 21 and 22 based on the stimulus above". This exact pattern (question-number(s) + "প্রশ্নের উত্তর দাও"/"answer question(s)") is page-navigation, never part of the actual question.
-  Do NOT strip any other sentence just for containing "উদ্দীপক" — e.g. "উদ্দীপকে প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" IS the real question, keep it in full.
-  Keep only: (a) real passage/stimulus content (prepend to question), (b) actual question text (may naturally reference "উদ্দীপক"). Never output the navigation instruction itself.
+- Passage/scenario before question(s) → prepend full text to each linked MCQ (self-contained). Multiple MCQs sharing one উদ্দীপক → copy into each individually. Only real passage/scenario content counts.
+- Strictly remove ONLY the navigation sentence telling reader which question numbers to answer via the passage — e.g. "উদ্দীপকের আলোকে ২১ ও ২২ নং প্রশ্নের উত্তর দাও", "নিচের উদ্দীপকের ভিত্তিতে ২৩-২৫ নং প্রশ্নের উত্তর দাও", or English "Answer questions 21 and 22 based on the stimulus above" — this pattern (question-number(s) + "প্রশ্নের উত্তর দাও"/"answer question(s)") is page-navigation, never the actual question.
+  Do NOT strip any other sentence just for containing "উদ্দীপক" — e.g. "উদ্দীপকে প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" IS the real question, keep in full.
 
-EXPLANATION RULES (strict priority, always):
-1) TOP PRIORITY: page has explanation/reasoning text for this MCQ → copy 100% VERBATIM, byte-for-byte (same spelling/punctuation/wording), no summarizing/paraphrasing/translating/"improving." Overrides the 165-char limit. Skip to case 2 only if truly none exists.
-2) No direct explanation but other relevant info exists (paragraph/note/box/table/fact) → build explanation from it as direct fact (see forbidden phrases below). Max 165 chars, Bengali.
-3) Nothing relevant exists → generate best accurate explanation from own knowledge. Max 165 chars, Bengali.
-Convey why correct option is right + brief context on wrong ones — except case 1 (used as-is regardless of length/coverage). Case 1 always checked first.
+EXPLANATION RULES (strict priority, max 165 chars Bengali unless case 1):
+1) TOP PRIORITY: page has explanation/reasoning text for this MCQ → copy 100% VERBATIM, byte-for-byte, no summarizing/paraphrasing/translating/"improving" (overrides 165-char limit; never edited even if it doesn't cover all 4 options). Skip to case 2 only if truly none exists.
+2) No direct explanation but other relevant info exists (paragraph/note/box/table/fact) → build from it as direct fact (see forbidden phrases below), covering all 4 options: why correct is right + why each of the 3 wrong ones is incorrect.
+3) Nothing relevant exists → generate best accurate explanation from own knowledge, same all-4-options coverage.
+Case 1 always checked first; never mix (verbatim text never edited, self-written always covers all 4).
 
-ALL-4-OPTIONS COVERAGE (strict):
-- Case 1 (has explanation): copy 100% verbatim regardless of coverage, never edit/extend
-- Case 2/3 (no explanation): must write one covering all 4 options — why correct is right + why each of the 3 wrong ones is incorrect, within 165 Bengali chars
-- Never mix: verbatim text never edited for coverage; self-written always covers all 4
+MATH/CHEMISTRY FORMATTING (always, in question/options/explanation): proper Unicode subscript/superscript, never raw underscore/caret. H₂O, CO₂, NaHCO₃, H₂SO₄, Ca(OH)₂, Fe₂O₃, C₆H₁₂O₆ (never H2O style). Ionic: Na⁺, Ca²⁺, Fe³⁺, Cl⁻, SO₄²⁻, O²⁻. Exponents: x², 10³, a⁻¹, E=mc², 6.02×10²³, v₀, xₙ (never x^2, x_0). Units: °C, °F, m/s², cm³, kg·m/s², × not x. Apply consistently, never mix formats within one MCQ.
 
-MATH/CHEMISTRY FORMATTING (always, in question/options/explanation):
-- Proper Unicode subscript/superscript — never raw underscore/caret or plain digits where sub/superscript belongs
-- Chemical formulas: H₂O, CO₂, NaHCO₃, H₂SO₄, Ca(OH)₂, Fe₂O₃, C₆H₁₂O₆ (never H2O, CO2 style)
-- Ionic charges: Na⁺, Ca²⁺, Fe³⁺, Cl⁻, SO₄²⁻, O²⁻
-- Exponents: x², 10³, a⁻¹, E=mc², 6.02×10²³, v₀, xₙ (never x^2, 10^3, x_0)
-- Units/degrees/multiplication: °C, °F, m/s², cm³, kg·m/s², use × not x
-- Apply consistently across question/options/explanation — never mix formats within one MCQ
-- Double-check every number next to a letter/formula/exponent before finalizing
-
-FORBIDDEN SOURCE-REFERENCE PHRASES (question and explanation, always):
-Never reference the source itself instead of stating facts directly:
+FORBIDDEN SOURCE-REFERENCE PHRASES (question and explanation, always): never reference the source itself instead of stating facts directly.
 ❌ "উল্লেখিত চিত্রে"/"চিত্রে দেখা যাচ্ছে"/"বক্সে"/"ছকে"/"উদ্দীপকে"/"সারণিতে"/"টপিকে"/"পৃষ্ঠায়"/"প্যাসেজে"/"অনুচ্ছেদে"/"গ্রাফে"/"দেখা যাচ্ছে"/"বলা আছে"/"উল্লেখ করা আছে"/"লক্ষ করা যায়"/"দেখানো হয়েছে"/"দেওয়া আছে"/"প্রদত্ত"
 ❌ English: "as shown in the figure/box/table/diagram/passage", "mentioned in the text/page", "as given"
-Always state facts directly and plainly, as general knowledge — never imply it came from "the shown image/box/table."
+Always state facts directly and plainly, as general knowledge.
 
-QUESTION has a diagram/figure/chart needed to understand/answer it → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) fully containing the ENTIRE diagram + labels/arrows/text, topmost/leftmost to bottommost/rightmost edge, small margin, never cut off any part. Omit if no diagram. Options never get bbox.
-MANDATORY TRIGGER: figure caption/label near question (e.g. "চিত্র: G", "চিত্র-১", "Figure 1", "diagram G") = PROOF a diagram exists there — MUST add qsn_bbox covering the actual diagram (not the caption text). Never output just the caption alone uncropped.
+QUESTION has a diagram/figure/chart needed to understand/answer it → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) fully containing the ENTIRE diagram + labels/arrows/text, edge to edge with small margin, never cut off. Omit if no diagram. Options never get bbox.
+MANDATORY TRIGGER: figure caption/label near question (e.g. "চিত্র: G", "চিত্র-১", "Figure 1") = PROOF a diagram exists there — MUST add qsn_bbox covering the actual diagram (not the caption text).
 
-OUTPUT FORMAT:
-Only a valid JSON array, no extra text/markdown/explanation outside JSON. No MCQ → exactly [].
+OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450]}]"""
 
 
