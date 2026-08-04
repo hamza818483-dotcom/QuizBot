@@ -353,7 +353,8 @@ def aggressive_clean(text):
             den, p2 = _read_group(p)
             if den is None:
                 out.append(text[i]); i += 1; continue
-            if '\\frac' in num or '\\frac' in den:
+            _multi_term = re.compile(r'[+\-*/]|_\{|\^\{|\s')
+            if '\\frac' in num or '\\frac' in den or _multi_term.search(num) or _multi_term.search(den):
                 out.append(f"$\\frac{{{num}}}{{{den}}}$")
             else:
                 out.append(f"{num}/{den}")
