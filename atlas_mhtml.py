@@ -873,6 +873,8 @@ def _format_content_inner(element, img_map):
             mroot.replace_with('√(' + mroot.get_text(strip=True) + ')')
 
     for sub in element.find_all(['sub', 'msub']):
+        if sub.find('img'):
+            continue
         # A real HTML <sub> tag contains ONLY the subscript part, so
         # get_text() on the whole element is correct. But MathML <msub>
         # contains TWO children -- [base, subscript] (e.g.
@@ -897,6 +899,8 @@ def _format_content_inner(element, img_map):
         else:
             sub.replace_with(base_text + sub_text.translate(SUB_MAP))
     for sup in element.find_all(['sup', 'msup']):
+        if sup.find('img'):
+            continue
         # Same base-vs-script split as msub above -- an <msup> like
         # <msup><mn>10</mn><mn>16</mn></msup> ("10^16") must keep its base
         # "10" as plain text and only superscript the "16" exponent;
