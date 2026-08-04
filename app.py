@@ -725,6 +725,7 @@ async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
 
 import contextvars
 _CHOK_MODE = contextvars.ContextVar("chok_mode", default=False)
+_TF_MODE = contextvars.ContextVar("tf_mode", default=False)
 
 def _build_chok_prompt(topic: str) -> str:
     """
@@ -979,11 +980,85 @@ def _build_bangla_prompt(topic: str) -> str:
     )
 
 
+def _build_tf_prompt(topic: str) -> str:
+    """
+    /tf command prompt — same pipeline as /pdf (page range, channel, thread,
+    topic, watermark all inherited via handle_pdf reuse). Generates True/False
+    STYLE MCQs (4 factual options, question asks which is true/false), NOT a
+    2-option true/false quiz. Uses the shared pipeline's letter-answer schema
+    (A/B/C/D) instead of the raw 0-3 integer schema, since every downstream
+    parser for this prompt family expects letters.
+    """
+    return (
+        f"You are an expert True/False-style MCQ generator for Bengali/English "
+        f"academic textbook pages (medical/HSC/admission-standard quality).\n"
+        f"Topic: {topic}\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🔴 COUNT (most important): generate 10-20 MCQs based on how much "
+        f"information the source has. Less info → 10-12, more info → 15-20. "
+        f"NEVER stop at just 1-2 MCQs — rephrase/re-angle the same facts into "
+        f"different true/false framings if needed to reach the range.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 QUESTION TYPE — randomly mix these 4 patterns, don't repeat one "
+        f"pattern back to back. The correct answer mapping for each is EXACT, "
+        f"never map it wrong:\n"
+        f"- \"নিচের কোনটিকে সত্য বললে ভুল হবে না?\" → answer = the option that "
+        f"is ACTUALLY true/correct\n"
+        f"- \"নিচের কোনটিকে সত্য বললে ভুল হবে?\" → answer = the option that is "
+        f"ACTUALLY false/incorrect\n"
+        f"- \"নিচের কোনটিকে মিথ্যা বললে ভুল হবে?\" → answer = the option that "
+        f"is ACTUALLY true/correct\n"
+        f"- \"নিচের কোনটিকে মিথ্যা বললে ভুল হবে না?\" → answer = the option "
+        f"that is ACTUALLY false/incorrect\n"
+        f"Self-check after writing each MCQ: \"বললে ভুল হবে না\" means that "
+        f"claim IS truthful (so for a সত্য-claim, ভুল হবে না → the real-true "
+        f"option; for a মিথ্যা-claim, ভুল হবে না → the real-false option). "
+        f"\"বললে ভুল হবে\" means the opposite.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 OPTIONS — exactly 4\n"
+        f"═══════════════════════════════\n"
+        f"- Can be short or long, mixed naturally.\n"
+        f"- Not restricted to one topic/box — mix information from across the "
+        f"source for the option set.\n"
+        f"- Must match the question's polarity: if question asks for the "
+        f"true/correct/positive answer, exactly ONE option is true/correct, "
+        f"the rest are false. If it asks for the false/incorrect/negative "
+        f"answer, exactly ONE option is false/incorrect, the rest are true.\n"
+        f"- All info must come from the input image/text — never invented.\n"
+        f"- All 4 options MUST be filled with real factual content — never "
+        f"single-word filler like হ্যাঁ/না/সত্য/মিথ্যা/জ্বী as an option.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 ANSWER\n"
+        f"═══════════════════════════════\n"
+        f"- Exactly one of A/B/C/D per the shared schema below.\n"
+        f"- Only ONE option may correctly satisfy the question — double-check "
+        f"no second option could also be argued correct.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 EXPLANATION (STRICT)\n"
+        f"═══════════════════════════════\n"
+        f"- Cover all 4 options individually — state which are true/false and "
+        f"why for EACH one, not a single generic 1-line explanation.\n"
+        f"- 100% from the input source — never invent facts.\n"
+        f"- Bengali, max 165 chars.\n\n"
+
+        f"Return STRICT JSON array only, no prose, no markdown fences. Schema:\n"
+        f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
+        f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"exp_bbox\":[100,200,900,350]}}]"
+    )
+
+
 def _build_mcq_prompt(topic: str, count) -> str:
     if _CHOK_MODE.get():
         return _build_chok_prompt(topic)
     if _BANGLA_MODE.get():
         return _build_bangla_prompt(topic)
+    if _TF_MODE.get():
+        return _build_tf_prompt(topic)
     count_min = count_max = None
     full_coverage_rule = ""
     if isinstance(count, (tuple, list)) and len(count) == 2:
@@ -7851,6 +7926,16 @@ async def handle_pdf(msg: dict):
                 "<code>[N]</code> = প্রতি পেইজে কতগুলো MCQ বানাতে হবে (ঐচ্ছিক)\n"
                 "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
             )
+        elif _TF_MODE.get():
+            await send_msg(chat_id,
+                "❌ PDF ফাইলে reply করে <code>/tf</code> দাও!\n\n"
+                "<b>Example:</b>\n"
+                "<code>/tf -p 1-5 -c @channel -m \"Topic\"</code>\n"
+                "<code>/tf -p 2 -c -100xxx -t 447 -m \"Group Topic\"</code>\n\n"
+                "True/False style MCQ বানাবে (\"নিচের কোনটিকে সত্য/মিথ্যা বললে ভুল "
+                "হবে/হবে না\" প্যাটার্ন) — পেইজপ্রতি ১০-২০টি, content অনুযায়ী।\n"
+                "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
+            )
         else:
             await send_msg(chat_id,
                 "❌ PDF ফাইলে reply করে <code>/pdf</code> দাও!\n\n"
@@ -7878,6 +7963,10 @@ async def handle_pdf(msg: dict):
         # the user's explicit instruction. Any number typed after /chok is
         # ignored entirely so it can never cap or override the mandatory
         # 15+ per-box MCQ generation.
+        mcq_count = None
+    if _TF_MODE.get():
+        # /tf count is NEVER user-settable — the prompt itself mandates a
+        # content-driven 10-20 range, same reasoning as /chok above.
         mcq_count = None
     thread_id = params.get("thread_id")
     file_name = reply["document"].get("file_name", "document.pdf")
@@ -14538,6 +14627,18 @@ async def handle_message(msg: dict):
             await handle_pdf(msg)
         finally:
             _CHOK_MODE.reset(token)
+        return
+    if text.startswith("/tf"):
+        if not is_auth:
+            if is_private:
+                await send_msg(chat_id, UNAUTH_MSG)
+            return
+        clear_cancel(chat_id)
+        token = _TF_MODE.set(True)
+        try:
+            await handle_pdf(msg)
+        finally:
+            _TF_MODE.reset(token)
         return
     if text.startswith("/bangla"):
         if not is_auth:
