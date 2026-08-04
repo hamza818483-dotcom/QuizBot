@@ -1028,6 +1028,29 @@ def _format_content_inner(element, img_map):
         else:
             base_text = ""
             sup_text = sup.get_text(strip=True)
+        # Unit-vector "hat" notation on the exponent's trailing letter(s)
+        # (e.g. exponent node text "5j^" or "5jk^-1" from source markup that
+        # nests the hat-marked unit inside the same <msup> as the numeric
+        # exponent) must NOT be treated as part of the exponent -- it's a
+        # separate unit multiplied after 10^5, not "10 to the power of
+        # 5jk^-1". Split it off before the exponent is classified, so a
+        # purely-numeric exponent like "5" isn't wrongly routed into the
+        # LaTeX $^{...}$ fallback just because a trailing hat-unit was
+        # glued onto its text. The split-off tail is re-appended as plain
+        # text (aggressive_clean()'s hat/vector regexes convert it to a
+        # proper combining circumflex later) after the exponent itself has
+        # been rendered.
+        _hat_tail_m = re.match(r'^([0-9+\u2212\u2013\u2014\-=()n]*)([A-Za-z]\^?.*)$', sup_text) if sup_text else None
+        _hat_tail = ""
+        if _hat_tail_m and _hat_tail_m.group(1) and ('^' in _hat_tail_m.group(2) or _hat_tail_m.group(2)):
+            # Only split when there's a genuine numeric-exponent prefix
+            # followed by trailing unit letters -- avoids touching real
+            # letter-only exponents like x^n or x^m which must stay as-is.
+            _digits_prefix = _hat_tail_m.group(1)
+            _tail = _hat_tail_m.group(2)
+            if _digits_prefix and re.fullmatch(r'[0-9+\u2212\u2013\u2014\-=()n]+', _digits_prefix):
+                sup_text = _digits_prefix
+                _hat_tail = _tail
         # A <sup>/<msup> whose own text ends in "°", OR whose very next
         # sibling text starts with "°" (source markup sometimes wraps
         # just the number in <sup> right before a separate "°C"/"° C"
@@ -1048,12 +1071,12 @@ def _format_content_inner(element, img_map):
         # is already gone and the joined-text spacing can't be recovered.
         _is_deg = sup_text.rstrip().endswith(('°', '∘')) or (next_text or "").lstrip().startswith(('°', '∘'))
         if _is_deg:
-            sup.replace_with(base_text + sup_text.replace('∘', '°'))
+            sup.replace_with(base_text + sup_text.replace('∘', '°') + _hat_tail)
         elif re.search(r'/', sup_text) and len(sup_text) > 2:
             # Fraction-in-superscript (e.g. "(1-γ)/γ") -- unicode superscript
             # can't represent a fraction, so emit LaTeX instead of mangling
             # it into broken/unreadable unicode chars.
-            sup.replace_with(f"{base_text}$^{{{sup_text}}}$")
+            sup.replace_with(f"{base_text}$^{{{sup_text}}}${_hat_tail}")
         elif sup_text and not all(c in "0123456789+\u2212\u2013\u2014-=()n" for c in sup_text):
             # SUP_MAP only has glyphs for digits/+-=()n -- any other
             # character (e.g. m, x, γ, or any letter besides n) has no
@@ -1061,9 +1084,9 @@ def _format_content_inner(element, img_map):
             # silently leave it as plain text, indistinguishable from the
             # base ("a^n b^m" -> "aⁿbm", the second exponent invisible as
             # a power). Emit LaTeX ^{...} instead so it's unambiguous.
-            sup.replace_with(f"{base_text}$^{{{sup_text}}}$")
+            sup.replace_with(f"{base_text}$^{{{sup_text}}}${_hat_tail}")
         else:
-            sup.replace_with(base_text + sup_text.translate(SUP_MAP))
+            sup.replace_with(base_text + sup_text.translate(SUP_MAP) + _hat_tail)
 
     for img in element.find_all('img'):
         src = img.get('src', '') or img.get('data-src', '')
