@@ -391,6 +391,15 @@ def aggressive_clean(text):
         return f"ZZZNFRACLATEX{len(_nfrac_markers)-1}ZZZ"
     text = re.sub(r'\$\\d?frac\{.*?\}\{.*?\}\$', _nfrac_protect, text)
 
+    # Protect $\xrightarrow{...}$/$\xleftarrow{...}$ LaTeX (built above by
+    # the <mover> handler for an arrow with a label stacked over it) using
+    # the same marker technique as \frac just above -- without this, the
+    # generic backslash-command-stripping regex further down (r'\\[a-zA-Z]+
+    # \{?' -> ' ') would eat the "\xrightarrow{" literally, since it has no
+    # concept of this command and treats it like any other unknown one,
+    # leaving the label floating with no arrow and no visual link to it.
+    text = re.sub(r'\$\\x(?:right|left)arrow\{.*?\}\$', _nfrac_protect, text)
+
     # \sqrt[n]{...} nth-root form was NOT handled at all here -- only plain
     # \sqrt{...} was, so any literal "\sqrt[3]{x}" text (e.g. AI-generated
     # explanation using LaTeX-ish syntax) fell through completely
@@ -898,6 +907,35 @@ def _format_content_inner(element, img_map):
             # Malformed/unexpected structure -- still surface the raw text
             # rather than silently dropping the whole root.
             mroot.replace_with('√(' + mroot.get_text(strip=True) + ')')
+
+    # <mover> (base with a symbol stacked directly above it) was never
+    # handled -- most commonly this is an arrow with a condition/label
+    # above it, e.g. MathML <mover><mo>→</mo><mi>Z</mi></mover> for
+    # \xrightarrow{Z}. Left unhandled, get_text() flattens base+overlay
+    # as two space-separated tokens with no indication one sits above the
+    # other (e.g. "→ Z"), losing the stacked relationship entirely.
+    # Detect the arrow-with-label case specifically and emit real LaTeX
+    # \xrightarrow{...}/\xleftarrow{...} so it can be rendered back
+    # correctly later; any other <mover> combination still gets a safe
+    # fallback of "base(overlay)" rather than silently vanishing.
+    ARROW_MOVER_MAP = {
+        '→': r'\xrightarrow', '⟶': r'\xrightarrow',
+        '←': r'\xleftarrow', '⟵': r'\xleftarrow',
+    }
+    for mover in element.find_all('mover'):
+        kids = mover.find_all(recursive=False)
+        if len(kids) == 2:
+            base_t = kids[0].get_text(strip=True)
+            over_t = kids[1].get_text(strip=True)
+            if base_t in ARROW_MOVER_MAP:
+                if over_t:
+                    mover.replace_with(f"${ARROW_MOVER_MAP[base_t]}{{{over_t}}}$")
+                else:
+                    mover.replace_with(base_t)
+            else:
+                mover.replace_with(f"{base_t}({over_t})" if over_t else base_t)
+        else:
+            mover.replace_with(mover.get_text(strip=True))
 
     for sub in element.find_all(['sub', 'msub']):
         if sub.find('img'):
