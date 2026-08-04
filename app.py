@@ -10924,17 +10924,23 @@ def _onu_mcq_is_roman_combo(m: dict) -> bool:
     # উদ্দীপক-combination MCQ and skip it.
     return hits >= max(2, len(opt_values) - 1)
 
-def _onu_filter_mcqs(mcqs: list) -> list:
+def _onu_filter_mcqs(mcqs: list):
+    """Returns (kept_list, reason_counts dict) so callers can show the
+    exact root-cause breakdown of why MCQs were dropped."""
     kept = []
+    reasons = {"no_highlight": 0, "has_image": 0, "roman_combo": 0}
     for m in mcqs:
         if not m.get("yellow_highlight"):
+            reasons["no_highlight"] += 1
             continue
         if _onu_mcq_has_image(m):
+            reasons["has_image"] += 1
             continue
         if _onu_mcq_is_roman_combo(m):
+            reasons["roman_combo"] += 1
             continue
         kept.append(m)
-    return kept
+    return kept, reasons
 
 
 # ── /onu highlight-detection extraction prompt ──
@@ -10981,6 +10987,11 @@ async def _onu_extract_from_image(img) -> list:
     try:
         for _pipeline_attempt in range(3):
             call1 = await _onu_call1_extract(img)
+            try:
+                _hl_dbg = [mc.get("yellow_highlight", "MISSING") for mc in (call1 or [])]
+                logger.warning(f"[ONU-DEBUG] Call1 yellow_highlight values: {_hl_dbg}")
+            except Exception:
+                pass
 
             if not call1:
                 final_check = await _qbm_final_empty_page_scan(img)
@@ -11171,17 +11182,29 @@ async def _handle_onu_impl(msg: dict):
         filtered_pages = []
         total_before = 0
         total_after = 0
+        agg_reasons = {"no_highlight": 0, "has_image": 0, "roman_combo": 0}
         for page_num, img, mcqs in extracted_pages:
             total_before += len(mcqs)
-            kept = _onu_filter_mcqs(mcqs)
+            kept, reasons = _onu_filter_mcqs(mcqs)
+            for k in agg_reasons:
+                agg_reasons[k] += reasons[k]
             total_after += len(kept)
             filtered_pages.append((page_num, img, kept))
         extracted_pages = filtered_pages
         skipped_count = total_before - total_after
         if status_msg_id and skipped_count:
+            reason_lines = []
+            if agg_reasons["no_highlight"]:
+                reason_lines.append(f"🟡 Yellow highlight নেই: {agg_reasons['no_highlight']}টি")
+            if agg_reasons["has_image"]:
+                reason_lines.append(f"🖼 ছবিযুক্ত প্রশ্ন: {agg_reasons['has_image']}টি")
+            if agg_reasons["roman_combo"]:
+                reason_lines.append(f"🔢 Roman/combination-type: {agg_reasons['roman_combo']}টি")
+            reason_text = "\n".join(reason_lines)
             await edit_msg(chat_id, status_msg_id,
-                f"✅ Extraction সম্পূর্ণ! {total_before} MCQ পাওয়া গেছে, "
-                f"{skipped_count}টি (yellow highlight নেই/ছবি/combination-type) বাদ দেওয়া হলো — বাকি {total_after}টি এগোচ্ছে...")
+                f"✅ Extraction সম্পূর্ণ! {total_before} MCQ পাওয়া গেছে, {skipped_count}টি বাদ দেওয়া হলো:\n"
+                f"{reason_text}\n\n"
+                f"বাকি {total_after}টি এগোচ্ছে...")
 
         if not channel_id:
             channels = await db_get_channels()
