@@ -18,6 +18,15 @@ _SUB_SAFE_LETTERS = "aeoxhklmnpst"
 _SUP_SAFE_LETTERS = "n"
 
 
+def _upgrade_frac(tex: str) -> str:
+    """\\frac inside inline $...$ math renders in cramped 'textstyle' (small).
+    \\dfrac forces full-size 'displaystyle' stacking so it visually matches
+    the source page's fraction size exactly. Applied to any raw LaTeX kept
+    as-is (inside a preserved sqrt/sup/sub block) since that raw text still
+    has the original \\frac command untouched."""
+    return re.sub(r'\\frac(?!tion)\b', r'\\dfrac', tex)
+
+
 def _is_complex_script(raw: str, safe_letters: str) -> bool:
     """A sub/superscript group's raw LaTeX is 'simple' (safe to flatten to
     plain Unicode) only if it's a bare digit run, +/-/()/= punctuation, or
@@ -136,7 +145,7 @@ def _latex_to_text(tex: str) -> str:
             # always rendered this as a proper stacked fraction, so the
             # extracted CSV must preserve that exactly via real LaTeX,
             # which MathJax on the website renders back identically.
-            out.append(f"$\\frac{{{num.strip()}}}{{{den.strip()}}}$")
+            out.append(f"$\\dfrac{{{num.strip()}}}{{{den.strip()}}}$")
             continue
         if tex[i:i + 9] == r"\overline":
             i += 9
@@ -171,7 +180,7 @@ def _latex_to_text(tex: str) -> str:
             # bug). Keep the WHOLE \sqrt{...} as real LaTeX in that case so
             # MathJax draws one single, correctly-spanning root symbol.
             if "\\frac" in radicand or "_" in radicand or "^" in radicand:
-                out.append(f"$\\sqrt{{{radicand.strip()}}}$")
+                out.append(f"$\\sqrt{{{_upgrade_frac(radicand.strip())}}}$")
             else:
                 inner_txt = _latex_to_text(radicand).strip()
                 if re.fullmatch(r"[A-Za-z0-9]+", inner_txt):
@@ -183,7 +192,7 @@ def _latex_to_text(tex: str) -> str:
             i += 1
             sub_raw, i = _read_group(tex, i)
             if _is_complex_script(sub_raw, _SUB_SAFE_LETTERS):
-                out.append(f"$_{{{sub_raw.strip()}}}$")
+                out.append(f"$_{{{_upgrade_frac(sub_raw.strip())}}}$")
             else:
                 sub_txt = _latex_to_text(sub_raw)
                 out.append(sub_txt.translate(SUB_MAP))
@@ -194,7 +203,7 @@ def _latex_to_text(tex: str) -> str:
             if sup_raw.strip() == r"\circ":
                 out.append("°")
             elif _is_complex_script(sup_raw, _SUP_SAFE_LETTERS):
-                out.append(f"$^{{{sup_raw.strip()}}}$")
+                out.append(f"$^{{{_upgrade_frac(sup_raw.strip())}}}$")
             else:
                 sup_txt = _latex_to_text(sup_raw)
                 out.append(sup_txt.translate(SUP_MAP))
