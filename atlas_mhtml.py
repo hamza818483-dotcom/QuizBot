@@ -300,6 +300,7 @@ def aggressive_clean(text):
         return f"ZZZPREFINAL{len(_pre_final_markers)-1}ZZZ"
     text = re.sub(r'\$[_^]\{.*?\}\$', _pre_final_protect, text)
     text = re.sub(r'\$\\frac\{.*?\}\{.*?\}\$', _pre_final_protect, text)
+    text = re.sub(r'\$\\sqrt\{.*?\}\$', _pre_final_protect, text)
 
     # Vector arrow fix: get_text(separator=" ", ...) inserts a space at every
     # inline-tag boundary, so a letter followed by a combining "arrow above"
