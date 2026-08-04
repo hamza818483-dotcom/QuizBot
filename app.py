@@ -4321,6 +4321,9 @@ async def handle_txt_command(msg: dict):
         await send_msg(chat_id, "❌ কোনো text message-এ reply করে /txt দাও!")
         return
 
+    clear_cancel(chat_id)
+    set_active_job(chat_id, "/txt (text → MCQ)")
+
     text_content = reply["text"]
 
     loading = await send_msg(chat_id, "🔄 Text থেকে MCQ তৈরি হচ্ছে...\n⏱️ আনুমানিক সময়: 7 সেকেন্ড\n📊 Progress: ▱▱▱▱▱▱▱ 0%\n✅ তৈরি হয়েছে: 0 টি MCQ")
@@ -4356,12 +4359,46 @@ async def handle_txt_command(msg: dict):
                         pass
 
         progress_task = _spawn_task(_progress_updater())
+
+        # /cancel was never checked in /txt -- the single AI-generation
+        # call just ran to completion no matter what. Same watcher pattern
+        # already used for /pdf: spawn the real work as a task, poll the
+        # cancel flag alongside it, and actively cancel the task the
+        # moment /cancel fires instead of waiting for it to finish.
+        async def _watch_cancel(task):
+            while not task.done():
+                if is_cancelled(chat_id):
+                    task.cancel()
+                    return
+                await asyncio.sleep(0.3)
+
+        async def _generate():
+            try:
+                return await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count,
+                                                      on_progress=_on_mcq_done)
+            except TypeError:
+                # pdf_handler.generate_mcq_from_text doesn't support on_progress yet
+                return await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count)
+
+        gen_task = _spawn_task(_generate())
+        watcher = _spawn_task(_watch_cancel(gen_task))
         try:
-            mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count,
-                                                 on_progress=_on_mcq_done)
-        except TypeError:
-            # pdf_handler.generate_mcq_from_text doesn't support on_progress yet
-            mcqs = await generate_mcq_from_text(text_content, "ATLAS MCQ", count=auto_count)
+            mcqs = await gen_task
+        except asyncio.CancelledError:
+            progress_task.cancel()
+            watcher.cancel()
+            if loading_id:
+                try:
+                    await edit_msg(chat_id, loading_id, "🛑 /cancel দিয়ে বন্ধ করা হয়েছে।")
+                except Exception:
+                    pass
+            return
+        finally:
+            watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
         progress_task.cancel()
 
         if not mcqs:
@@ -4443,6 +4480,8 @@ async def handle_txt_command(msg: dict):
     except Exception as e:
         logger.error(f"[TXT] Error: {e}")
         await _safe_error_reply(chat_id, e)
+    finally:
+        clear_active_job(chat_id)
 
 async def process_txt_to_poll(channel_id: str, chat_id: int, uid: int, uname: str):
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
@@ -8062,6 +8101,7 @@ async def pdf_generate_all_pages(
     start_time = time.time()
     results_by_idx = [None] * len(pages)
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    clear_cancel(chat_id)
     set_active_job(chat_id, f"PDF MCQ generation ({file_name}, parallel)")
 
     # Sequential: one page fully completes before the next starts. Multiple
@@ -8903,6 +8943,7 @@ async def _process_pdfm_pages_impl(
     summary_pages = []
     all_mcqs_csv = []
     first_image_msg_id = None
+    clear_cancel(chat_id)
     set_active_job(chat_id, f"PDFM MCQ generation + Poll posting ({file_name}, page-by-page)")
 
     for idx, (page_num, img) in enumerate(pages):
@@ -10259,9 +10300,12 @@ async def handle_auto_command(msg: dict):
     its own CSV; multiple runs = multiple CSVs from one command. Requires
     CHORCHA_TOKEN env var to be set with a valid session token.
     """
+    from atlas_autoscrape import AutoScrapeError
     chat_id = msg["chat"]["id"]
     text = msg.get("text", "")
     _auto_uid = msg.get("from", {}).get("id")
+    clear_cancel(chat_id)
+    set_active_job(chat_id, "/auto (chorcha extraction)")
 
     lines = [l.rstrip() for l in text.split("\n")[1:] if l.strip() != ""]
 
@@ -10372,6 +10416,16 @@ async def handle_auto_command(msg: dict):
         return header + body + current_line
 
     async def _progress(i, total, label):
+        # /cancel didn't work for /auto -- CANCEL_FLAGS was never checked
+        # anywhere in this flow (only PDF/QBM MCQ generation wired it in).
+        # progress_cb is awaited on every single click step inside
+        # run_auto_click_sequence, so raising here is the one place that
+        # reaches every step without touching atlas_autoscrape.py's click
+        # loop / multi-line / vector-arrow logic at all -- the exception
+        # propagates straight up through the existing AutoScrapeError
+        # handler below, which already sends a clean message and returns.
+        if is_cancelled(chat_id):
+            raise AutoScrapeError("🛑 /cancel দিয়ে বন্ধ করা হয়েছে।")
         now_t = time.time()
         if _auto_uid is not None:
             _prev = _USER_LAST_STATUS.get(_auto_uid, {})
@@ -10428,6 +10482,8 @@ async def handle_auto_command(msg: dict):
         # Sends this run's CSV right away instead of waiting for every
         # run to finish first -- so a completed topic's file arrives
         # immediately while later runs are still processing.
+        if is_cancelled(chat_id):
+            raise AutoScrapeError("🛑 /cancel দিয়ে বন্ধ করা হয়েছে।")
         topic = run_line_groups[run_no - 1][-1].strip() if run_no - 1 < len(run_line_groups) else f"run{run_no}"
         run_tag = f"রান {run_no}/{run_total} · " if run_total > 1 else ""
 
@@ -10553,7 +10609,7 @@ async def handle_auto_command(msg: dict):
                         + (f"\n({run_no}/{run_total})" if run_total > 1 else "")
             )
 
-    from atlas_autoscrape import run_auto_click_sequence, AutoScrapeError
+    from atlas_autoscrape import run_auto_click_sequence
     run_count_for_timeout = sum(1 for l in lines if l.strip() in ("---", "***")) + 1
     # Hard ceiling for the WHOLE /auto flow (all runs combined), so any
     # unforeseen hang -- browser stuck, chorcha.net not responding, a
@@ -10578,13 +10634,18 @@ async def handle_auto_command(msg: dict):
                 f"যতগুলো run/CSV এর মধ্যে হয়ে গেছে ততগুলো ইতিমধ্যে পাঠানো হয়ে থাকতে পারে (উপরে দেখো)। আবার চেষ্টা করো।")
             return
         except AutoScrapeError as e:
-            await send_msg(chat_id, f"❌ {e}")
+            msg_text = str(e)
+            if msg_text.startswith("🛑"):
+                await send_msg(chat_id, msg_text)
+            else:
+                await send_msg(chat_id, f"❌ {e}")
             return
         except Exception as e:
             logger.error(f"[/auto] navigation failed: {e}")
             await send_msg(chat_id, f"❌ Navigation ব্যর্থ হয়েছে: {e}")
             return
     finally:
+        clear_active_job(chat_id)
         if _auto_uid is not None:
             _USER_LAST_STATUS.pop(_auto_uid, None)
 
@@ -11223,6 +11284,7 @@ async def qbm_extract_all_pages(
     start_time = time.time()
     total_mcq = 0
     results = [None] * len(pages)
+    clear_cancel(chat_id)
     set_active_job(chat_id, f"QBM extraction ({file_name}, page-by-page)")
 
     if status_msg_id:
