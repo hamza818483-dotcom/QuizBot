@@ -672,6 +672,22 @@ def aggressive_clean(text):
 
     text = _formula_run.sub(_squeeze_formula, text)
 
+    # Generic "( x )" -> "(x)" tightening for short parenthesized math
+    # terms -- source DOM often has each token (open-paren, letter,
+    # operator, close-paren) as a SEPARATE MathML node, and
+    # get_text(separator=" ") inserts a space at every one of those node
+    # boundaries, so a simple "(r-1)" comes out as "( r - 1 )". Scoped to
+    # parens whose entire inside is short math-only content (letters,
+    # digits, +-−=, no spaces-separated words) so real prose parentheticals
+    # like "(for example)" are never touched.
+    text = re.sub(
+        r'\(\s*([A-Za-z0-9+\u2212\u2013\u2014\-=\u00b1 ]{1,12}?)\s*\)',
+        lambda m: '(' + re.sub(r'\s+', '', m.group(1)) + ')'
+        if re.fullmatch(r'[A-Za-z0-9+\u2212\u2013\u2014\-=\u00b1\s]+', m.group(1)) and not re.search(r'[A-Za-z]{4,}', m.group(1))
+        else m.group(0),
+        text,
+    )
+
     # Collapse horizontal whitespace runs (spaces/tabs) but keep newlines
     # intact -- numbered/roman-numeral sub-point lists rely on them to
     # render as separate lines instead of one run-on line.
@@ -770,6 +786,27 @@ def _format_content_inner(element, img_map):
             num = contents[0].get_text(strip=True)
             den = contents[1].get_text(strip=True)
             mfrac.replace_with(f"{num}/{den}")
+
+    # <msubsup> (base with BOTH a subscript AND superscript at once, e.g.
+    # R with sub 1 and sup 2 -- MathML: <msubsup><mi>R</mi><mn>1</mn><mn>2</mn></msubsup>)
+    # was never handled at all -- it doesn't match 'sub'/'msub' OR
+    # 'sup'/'msup', so it fell all the way through to the final
+    # get_text(separator=" ") flatten untouched, producing broken output
+    # like "R 1 2" (base + sub + sup as three space-separated plain-text
+    # tokens) instead of "R₁²". Convert its 3 children (base, sub, sup)
+    # into text with SUB_MAP/SUP_MAP applied to the right piece, same
+    # unsafe-char LaTeX-fallback logic as the msub/msup blocks below.
+    for msubsup in element.find_all('msubsup'):
+        kids = msubsup.find_all(recursive=False)
+        if len(kids) == 3:
+            base_t = kids[0].get_text(strip=True)
+            sub_t = kids[1].get_text(strip=True)
+            sup_t = kids[2].get_text(strip=True)
+            sub_out = f"$_{{{sub_t}}}$" if re.search(r'[^0-9+\u2212\u2013\u2014\-=()aeoxhklmnpst]', sub_t) else sub_t.translate(SUB_MAP)
+            sup_out = f"$^{{{sup_t}}}$" if re.search(r'[^0-9+\u2212\u2013\u2014\-=()n]', sup_t) else sup_t.translate(SUP_MAP)
+            msubsup.replace_with(base_t + sub_out + sup_out)
+        else:
+            msubsup.replace_with(msubsup.get_text(strip=True))
 
     for sub in element.find_all(['sub', 'msub']):
         # A real HTML <sub> tag contains ONLY the subscript part, so
