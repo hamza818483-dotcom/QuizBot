@@ -658,8 +658,16 @@ def aggressive_clean(text):
     #    handles the case where a space sits between the digit and the
     #    minus (source often renders base/charge/sign as separate nodes,
     #    e.g. sup"2" + text"−" -> "² −" instead of "²⁻").
-    text = re.sub(r'([⁰¹²³⁴⁵⁶⁷⁸⁹])\s*[\u2212\u2013\u2014]', r'\1⁻', text)
-    text = re.sub(r'([₀₁₂₃₄₅₆₇₈₉])\s*[\u2212\u2013\u2014]', r'\1₋', text)
+    #    IMPORTANT: this must only fire for a TRAILING charge/exponent sign
+    #    (nothing after it, or immediately another sub/sup char/closing
+    #    bracket) -- NOT for ordinary subtraction that happens to follow a
+    #    subscripted variable, e.g. "T₂ - ln T₁" or "ms(ln T₂ - ln T₁)".
+    #    Without this guard, a real minus between two terms was wrongly
+    #    swallowed into a subscript minus (T₂ - -> T₂₋), corrupting the
+    #    arithmetic operator and losing the space that should stay before
+    #    the next term.
+    text = re.sub(r'([⁰¹²³⁴⁵⁶⁷⁸⁹])\s*[\u2212\u2013\u2014](?=\s*(?:[⁰¹²³⁴⁵⁶⁷⁸⁹]|[)\]]|$))', r'\1⁻', text)
+    text = re.sub(r'([₀₁₂₃₄₅₆₇₈₉])\s*[\u2212\u2013\u2014](?=\s*(?:[₀₁₂₃₄₅₆₇₈₉]|[)\]]|$))', r'\1₋', text)
     text = re.sub(r'[\u2212\u2013\u2014]\s*([⁰¹²³⁴⁵⁶⁷⁸⁹])', r'⁻\1', text)
     text = re.sub(r'[\u2212\u2013\u2014]\s*([₀₁₂₃₄₅₆₇₈₉])', r'₋\1', text)
 
