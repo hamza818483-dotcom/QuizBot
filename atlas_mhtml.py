@@ -542,8 +542,17 @@ def aggressive_clean(text):
 
     text = _script_repl_scan(text, '^', _sup_repl_inner)
     text = _script_repl_scan(text, '_', _sub_repl_inner)
-    text = re.sub(r'_([0-9a-zA-Z+\-]+)', _sub_repl, text)
-    text = re.sub(r'\^([0-9a-zA-Z+\-]+)', _sup_repl, text)
+    # Bare underscore/caret fallback (no {}/() group) must only grab the
+    # IMMEDIATE simple subscript/exponent token (digits and/or letters) --
+    # previously the char class also included '+'/'-', so a multi-term
+    # expression like "I_1-90I_g-32I_2=0" (no braces around each index)
+    # had its greedy match swallow "1-90I" as ONE subscript, corrupting
+    # the literal minus between terms into a subscript-minus glyph and
+    # eating the next term's base letter too. Real negative-subscript
+    # cases are rare and already handled via the braced/paren form
+    # (_{-1}), so bare form is restricted to plain alnum only.
+    text = re.sub(r'_([0-9a-zA-Z]+)', _sub_repl, text)
+    text = re.sub(r'\^([0-9a-zA-Z]+)', _sup_repl, text)
 
     # Protect the $^{...}$ / $_{...}$ LaTeX fallback just created above from
     # this function's own later brace-stripping and backslash-command
@@ -677,6 +686,38 @@ def aggressive_clean(text):
     for _i, _marker in enumerate(_pre_final_markers):
         text = text.replace(f"ZZZPREFINAL{_i}ZZZ", _marker)
 
+
+    # Two side-by-side fractions with nothing but whitespace between them
+    # (e.g. source math "1/x  1/y" meaning "(1/x) times (1/y)") must not be
+    # left as bare "1/x 1/y" -- that reads as two separate unrelated
+    # fractions sitting next to each other with no operator, ambiguous/
+    # wrong. Wrap each side in parens and make the implied multiplication
+    # explicit: "(1/x)×(1/y)". Runs while changes are found so a chain of
+    # 3+ adjacent fractions ("1/x 1/y 1/z") gets every gap fixed, not just
+    # the first pair.
+    _adj_plain_frac = re.compile(
+        r'(?<![/\w])([A-Za-z0-9]+/[A-Za-z0-9]+)[ \t]+([A-Za-z0-9]+/[A-Za-z0-9]+)(?![/\w(])'
+    )
+    while True:
+        new_text = _adj_plain_frac.sub(r'(\1)×(\2)', text)
+        if new_text == text:
+            break
+        text = new_text
+
+    # Same fix for two adjacent already-built $\dfrac{}{}$ LaTeX fractions
+    # (from real \frac source commands) sitting next to each other with
+    # only whitespace between -- same ambiguity, same implied-multiplication
+    # fix, just wrapping the LaTeX blocks in literal parens instead of
+    # rebuilding them as plain text.
+    _adj_latex_frac = re.compile(
+        r'(\$\\d?frac\{[^{}$]*\}\{[^{}$]*\}\$)[ \t]+(\$\\d?frac\{[^{}$]*\}\{[^{}$]*\}\$)'
+    )
+    while True:
+        new_text = _adj_latex_frac.sub(r'(\1)×(\2)', text)
+        if new_text == text:
+            break
+        text = new_text
+
     return text.strip()
 
 
@@ -731,15 +772,43 @@ def _format_content_inner(element, img_map):
             mfrac.replace_with(f"{num}/{den}")
 
     for sub in element.find_all(['sub', 'msub']):
-        sub_text = sub.get_text(strip=True)
+        # A real HTML <sub> tag contains ONLY the subscript part, so
+        # get_text() on the whole element is correct. But MathML <msub>
+        # contains TWO children -- [base, subscript] (e.g.
+        # <msub><mn>10</mn><mn>16</mn></msub> for "10 with subscript 16")
+        # -- so get_text() on the whole element wrongly concatenates base+
+        # script into one string (e.g. "1016") and translates BOTH through
+        # SUB_MAP, corrupting a numeric base like "10" into subscript
+        # digits too (e.g. "10¹⁶"-style bug but for subscripts: base "10"
+        # became "₁₀" instead of staying plain). Only the LAST child of an
+        # <msub> is the actual script; keep the base untouched.
+        if sub.name == 'msub':
+            kids = sub.find_all(recursive=False)
+            base_text = kids[0].get_text(strip=True) if len(kids) >= 2 else ""
+            sub_text = kids[-1].get_text(strip=True) if kids else sub.get_text(strip=True)
+        else:
+            base_text = ""
+            sub_text = sub.get_text(strip=True)
         # Fraction inside a subscript -- unicode has no fraction-in-subscript,
         # so emit LaTeX instead of mangling it.
         if re.search(r'/', sub_text) and len(sub_text) > 2:
-            sub.replace_with(f"$_{{{sub_text}}}$")
+            sub.replace_with(f"{base_text}$_{{{sub_text}}}$")
         else:
-            sub.replace_with(sub_text.translate(SUB_MAP))
+            sub.replace_with(base_text + sub_text.translate(SUB_MAP))
     for sup in element.find_all(['sup', 'msup']):
-        sup_text = sup.get_text(strip=True)
+        # Same base-vs-script split as msub above -- an <msup> like
+        # <msup><mn>10</mn><mn>16</mn></msup> ("10^16") must keep its base
+        # "10" as plain text and only superscript the "16" exponent;
+        # get_text() on the whole element previously concatenated both
+        # into "1016" and superscripted everything, producing the broken
+        # "¹⁰¹⁶" instead of the correct "10¹⁶".
+        if sup.name == 'msup':
+            kids = sup.find_all(recursive=False)
+            base_text = kids[0].get_text(strip=True) if len(kids) >= 2 else ""
+            sup_text = kids[-1].get_text(strip=True) if kids else sup.get_text(strip=True)
+        else:
+            base_text = ""
+            sup_text = sup.get_text(strip=True)
         # A <sup>/<msup> whose own text ends in "°", OR whose very next
         # sibling text starts with "°" (source markup sometimes wraps
         # just the number in <sup> right before a separate "°C"/"° C"
@@ -760,14 +829,14 @@ def _format_content_inner(element, img_map):
         # is already gone and the joined-text spacing can't be recovered.
         _is_deg = sup_text.rstrip().endswith(('°', '∘')) or (next_text or "").lstrip().startswith(('°', '∘'))
         if _is_deg:
-            sup.replace_with(sup_text.replace('∘', '°'))
+            sup.replace_with(base_text + sup_text.replace('∘', '°'))
         elif re.search(r'/', sup_text) and len(sup_text) > 2:
             # Fraction-in-superscript (e.g. "(1-γ)/γ") -- unicode superscript
             # can't represent a fraction, so emit LaTeX instead of mangling
             # it into broken/unreadable unicode chars.
-            sup.replace_with(f"$^{{{sup_text}}}$")
+            sup.replace_with(f"{base_text}$^{{{sup_text}}}$")
         else:
-            sup.replace_with(sup_text.translate(SUP_MAP))
+            sup.replace_with(base_text + sup_text.translate(SUP_MAP))
 
     for img in element.find_all('img'):
         src = img.get('src', '') or img.get('data-src', '')
