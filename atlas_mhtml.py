@@ -406,6 +406,7 @@ def aggressive_clean(text):
     # backslash-command-stripper below eats "\overline{" since it has no
     # special-case for it either, same failure mode as \xrightarrow above.
     text = re.sub(r'\$\\overline\{.*?\}\$', _nfrac_protect, text)
+    text = re.sub(r'\$\\bar\{.*?\}\$', _nfrac_protect, text)
 
     # \sqrt[n]{...} nth-root form was NOT handled at all here -- only plain
     # \sqrt{...} was, so any literal "\sqrt[3]{x}" text (e.g. AI-generated
@@ -950,12 +951,18 @@ def _format_content_inner(element, img_map):
                 else:
                     mover.replace_with(base_t)
             elif over_t in OVERLINE_CHARS and base_t:
-                # Multi-char base (e.g. "AB" with a bar over both, as in
-                # line-segment notation) can't carry a single combining
-                # mark meaningfully -- fall back to explicit LaTeX
-                # \overline{} for anything but a single letter/digit.
+                # A combining overline (U+0305) directly on the base
+                # letter was tried first, but that's inconsistent across
+                # fonts/devices (some Android/mobile fonts fail to shape
+                # it correctly) -- same class of problem as the vector
+                # arrow combining-mark issue this file already works
+                # around elsewhere. Use explicit LaTeX instead, which
+                # MathJax renders identically everywhere: \bar{} for a
+                # single letter/digit, \overline{} for a multi-character
+                # base (line-segment notation like AB, or any expression)
+                # since \bar only ever sits over one character in LaTeX.
                 if len(base_t) == 1:
-                    mover.replace_with(base_t + '\u0305')
+                    mover.replace_with(f"$\\bar{{{base_t}}}$")
                 else:
                     mover.replace_with(f"$\\overline{{{base_t}}}$")
             else:
