@@ -689,7 +689,29 @@ def format_content(element, img_map):
     # source markup has any intervening whitespace-only node (or the ° is
     # further down after other inline tags), that check misses it and a
     # raw '⁴°C' style artifact would otherwise reach the user untouched.
-    return aggressive_clean(text) if text else text
+    #
+    # BUT by this point _format_content_inner already returned a finished
+    # <img class="qimg" src="...URL..."> tag with the real image URL
+    # embedded verbatim and UNPROTECTED -- running aggressive_clean() a
+    # second time here has no img-marker protection, so any underscore in
+    # the URL's filename (chorcha's asset URLs commonly contain one, e.g.
+    # ".../rP7HceGc-bQaU_F3W0ozj.png") gets misread by aggressive_clean's
+    # bare "_word" subscript-rebuild regex and turned into broken LaTeX
+    # (".../rP7HceGc-bQaU$_{F3W0ozj}$.png"), corrupting the URL so the
+    # image can never load. Re-protect any <img ...> tag before this
+    # second pass, same marker technique already used inside
+    # _format_content_inner's own aggressive_clean call.
+    if not text:
+        return text
+    img_tag_markers = []
+    def _img_tag_repl(match):
+        img_tag_markers.append(match.group(0))
+        return f" ZZZIMGTAG{len(img_tag_markers)-1}ZZZ "
+    protected = re.sub(r'<img\b[^>]*>', _img_tag_repl, text)
+    cleaned = aggressive_clean(protected)
+    for i, marker in enumerate(img_tag_markers):
+        cleaned = cleaned.replace(f"ZZZIMGTAG{i}ZZZ", marker)
+    return cleaned
 
 
 def _format_content_inner(element, img_map):
@@ -726,8 +748,19 @@ def _format_content_inner(element, img_map):
         # becomes "²⁰°C".
         next_sib = sup.next_sibling
         next_text = next_sib.strip() if isinstance(next_sib, str) else (next_sib.get_text() if next_sib else "")
-        if sup_text.rstrip().endswith('°') or (next_text or "").lstrip().startswith('°'):
-            sup.replace_with(sup_text)
+        # KaTeX's invisible MathML tree (<msup><mn>98</mn><mo>∘</mo></msup>)
+        # uses U+2218 RING OPERATOR for the degree symbol, NOT U+00B0
+        # DEGREE SIGN -- this check only matched U+00B0, so a temperature
+        # like 98°C coming from the MathML branch never matched the
+        # degree-exception here, fell through to SUP_MAP translation (which
+        # doesn't cover U+2218 either, silently dropping it), and produced
+        # "৯৮" -> "⁹⁸" with the ° stripped entirely and the surrounding
+        # space lost -- e.g. "বিন্দু 98°C" became "বিন্দু98°C" with no gap.
+        # aggressive_clean() converts ∘->° later, but by then the sup tag
+        # is already gone and the joined-text spacing can't be recovered.
+        _is_deg = sup_text.rstrip().endswith(('°', '∘')) or (next_text or "").lstrip().startswith(('°', '∘'))
+        if _is_deg:
+            sup.replace_with(sup_text.replace('∘', '°'))
         elif re.search(r'/', sup_text) and len(sup_text) > 2:
             # Fraction-in-superscript (e.g. "(1-γ)/γ") -- unicode superscript
             # can't represent a fraction, so emit LaTeX instead of mangling
