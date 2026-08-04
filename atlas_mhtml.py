@@ -389,7 +389,10 @@ def aggressive_clean(text):
     for latex, uni in LATEX_SYMBOLS.items():
         text = text.replace(latex, uni)
 
-    _UNSAFE_SCRIPT_CHARS = re.compile(r'[^0-9A-Za-z+\u2212\u2013\u2014\-=()aeoxhklmnpstn]')
+    _SUB_SAFE_LETTERS = "aeoxhklmnpst"
+    _SUP_SAFE_LETTERS = "n"
+    _UNSAFE_SUB_CHARS = re.compile(r'[^0-9' + _SUB_SAFE_LETTERS + r'+\u2212\u2013\u2014\-=()]')
+    _UNSAFE_SUP_CHARS = re.compile(r'[^0-9' + _SUP_SAFE_LETTERS + r'+\u2212\u2013\u2014\-=()]')
 
     def _to_latex_inner(inner: str) -> str:
         # rebuild any bare Unicode symbol (γ, θ, ×, etc) back into its LaTeX
@@ -401,13 +404,13 @@ def aggressive_clean(text):
 
     def _sub_repl(m):
         inner = m.group(1).strip()
-        if _UNSAFE_SCRIPT_CHARS.search(inner):
+        if _UNSAFE_SUB_CHARS.search(inner):
             return f"$_{{{_to_latex_inner(inner)}}}$"
         return inner.translate(SUB_MAP)
 
     def _sup_repl(m):
         inner = m.group(1).strip()
-        if _UNSAFE_SCRIPT_CHARS.search(inner):
+        if _UNSAFE_SUP_CHARS.search(inner):
             return f"$^{{{_to_latex_inner(inner)}}}$"
         return inner.translate(SUP_MAP)
 
