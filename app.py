@@ -645,9 +645,17 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             image = image.convert("RGB")
         orig_w, orig_h = image.size
         if prompt_len_hint:
-            # ~3.5 chars/token is the same rough ratio used to measure the
-            # static prompt; +200 token cushion for JSON structural overhead.
-            PROMPT_TOKENS = max(400, int(len(prompt_len_hint) / 2.6) + 300)
+            # ~3.5 chars/token was the original ASCII-calibrated ratio, but
+            # Call 2/3 prompts embed Bangla question text (q_summary), and
+            # Bangla Unicode tokenizes far denser in BPE tokenizers (~1.3-1.8
+            # chars/token, not 2.6+) -- the old 2.6 ratio was still too
+            # generous for Bangla-heavy prompts and chronically underbudgeted
+            # them, causing the persistent 413/429 "Requested 8141/8691"
+            # errors on pages with many MCQs. Detect Bangla content (any char
+            # in the Bengali Unicode block) and use a much tighter ratio.
+            _has_bangla = any('\u0980' <= ch <= '\u09FF' for ch in prompt_len_hint[:500])
+            _chars_per_token = 1.6 if _has_bangla else 2.6
+            PROMPT_TOKENS = max(400, int(len(prompt_len_hint) / _chars_per_token) + 300)
         else:
             # Measured from the compacted static QBM_EXTRACT_PROMPT_DEFAULT
             # (~8k chars / 3.5) + margin. Only accurate for that fixed prompt.
@@ -9384,22 +9392,26 @@ async def _qbm_groq_call(img, prompt: str) -> str:
         if status == 413:
             if shrunk_url is None:
                 # prompt itself (embedded MCQ JSON) can be the actual overflow
-                # cause on pages with many MCQs -- truncate it too, not just
-                # the image, since a big prompt alone can exceed 8000 TPM
-                # regardless of how small the image gets.
-                shrunk_prompt = prompt if len(prompt) < 3000 else prompt[:3000] + "\n...(truncated)"
-                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=5, prompt_len_hint=shrunk_prompt)
+                # cause on pages with many MCQs -- truncate it harder (2000
+                # not 3000 chars) and use a smaller mcq_count_hint (3 not 5)
+                # since the original 3000/5 combo still 413'd in practice.
+                shrunk_prompt = prompt if len(prompt) < 2000 else prompt[:2000] + "\n...(truncated)"
+                shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=3, prompt_len_hint=shrunk_prompt)
             if shrunk_url:
                 txt2, status2 = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
                     key, "qwen/qwen3.6-27b",
-                    shrunk_url, shrunk_prompt, mcq_count_hint=5
+                    shrunk_url, shrunk_prompt, mcq_count_hint=3
                 )
                 if txt2:
                     return txt2
                 logger.warning(f"[Groq-QBM] key failed even after shrink (status={status2}), trying next key")
+                if status2 == 429:
+                    groq_key_rotator.mark_rate_limited(key, daily_exhausted=(_key_429_is_tpm.get(key) is not True))
                 continue
-        if status != 429:
+        if status == 429:
+            groq_key_rotator.mark_rate_limited(key, daily_exhausted=(_key_429_is_tpm.get(key) is not True))
+        elif status != 429:
             logger.warning(f"[Groq-QBM] key failed (status={status}), trying next key")
     return ""
 
