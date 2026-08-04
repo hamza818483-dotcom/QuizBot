@@ -10954,6 +10954,50 @@ OUTPUT FORMAT — ONLY valid JSON array, nothing else:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","yellow_highlight":true}]"""
 
 
+async def _onu_recheck_highlight(img, mcqs: list) -> list:
+    """Focused re-verification pass for yellow_highlight — only asked about the
+    specific MCQs Call1 marked as NOT highlighted (false), since a single
+    full-page pass tends to miss highlight on pages where only 1-2 MCQs out of
+    many are highlighted (easy to skim past). Sends back the exact question
+    texts and asks the model to look again at THOSE specific blocks only, not
+    re-extract from scratch -- cheap, targeted, and catches under-detection."""
+    if not mcqs:
+        return mcqs
+    to_check = [mc for mc in mcqs if not mc.get("yellow_highlight")]
+    if not to_check:
+        return mcqs
+    try:
+        q_list = "\n".join(f"{i+1}. {(mc.get('question') or '')[:120]}" for i, mc in enumerate(to_check))
+        prompt = f"""Look at this page image again, specifically at the background color behind these MCQ blocks (question + options) which were marked as NOT yellow-highlighted:
+{q_list}
+
+For EACH one, look VERY carefully at the actual background behind its question and options — a subtle/light yellow marker band still counts as highlighted, don't only look for bright yellow. Double-check even if it looks plain white; small or faint highlight marks are easy to miss on a first pass.
+
+OUTPUT — ONLY a JSON array, one entry per item above IN ORDER, nothing else:
+[{{"yellow_highlight":true}},{{"yellow_highlight":false}}]"""
+        gem_txt = await _qbm_gemini_raw(img, prompt)
+        if not gem_txt:
+            return mcqs
+        t = gem_txt.strip()
+        if "```" in t:
+            t = t.split("```")[1].replace("json", "", 1).strip() if t.count("```") >= 2 else t
+        m = re.search(r'\[.*\]', t, re.DOTALL)
+        raw = json.loads(m.group()) if m else json.loads(t)
+        if not isinstance(raw, list) or len(raw) != len(to_check):
+            return mcqs
+        check_idx = 0
+        for mc in mcqs:
+            if not mc.get("yellow_highlight"):
+                result = raw[check_idx]
+                if isinstance(result, dict) and result.get("yellow_highlight") is True:
+                    mc["yellow_highlight"] = True
+                check_idx += 1
+        return mcqs
+    except Exception as e:
+        logger.warning(f"[ONU-recheck] highlight recheck failed: {e}")
+        return mcqs
+
+
 async def _onu_call1_extract(img) -> list:
     """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field).
     ONU_EXTRACT_PROMPT is intentionally short (~200 tokens vs QBM's ~2400), which
@@ -10993,6 +11037,14 @@ async def _onu_extract_from_image(img) -> list:
                 logger.warning(f"[ONU-DEBUG] Call1 yellow_highlight values: {_hl_dbg}")
             except Exception:
                 pass
+
+            if call1:
+                call1 = await _onu_recheck_highlight(img, call1)
+                try:
+                    _hl_dbg2 = [mc.get("yellow_highlight", "MISSING") for mc in call1]
+                    logger.warning(f"[ONU-DEBUG] After recheck yellow_highlight values: {_hl_dbg2}")
+                except Exception:
+                    pass
 
             if not call1:
                 final_check = await _qbm_final_empty_page_scan(img, onu_mode=True)
