@@ -671,6 +671,13 @@ def aggressive_clean(text):
     # digit-to-digit space closed once the run above has been squeezed.
     text = re.sub(rf'(\d)\s+(?=[{supsub_chars}])', r'\1', text)
 
+    # A unicode superscript digit run directly followed (no gap) by a plain
+    # digit reads as one merged number -- "2³4" looks like the power is
+    # "34" when it's actually 2^3 followed by a separate "4". Insert a
+    # thin space (U+2009) so the superscript visually ends before the
+    # plain digit starts, without disturbing spacing anywhere else.
+    text = re.sub(r'([⁰¹²³⁴⁵⁶⁷⁸⁹])(?=\d)', '\\1\u2009', text)
+
     text = text.replace('\ufeff', '').replace('\u200b', '').replace('\u200c', '')
 
     # --- Universal bracket-spacing squeeze (chemical formulas ONLY) --
@@ -825,6 +832,17 @@ def _format_content_inner(element, img_map):
         hidden.decompose()
 
     for mfrac in element.find_all('mfrac'):
+        # An <mfrac> nested directly inside <msup>/<msub>/<msubsup> as the
+        # exponent/subscript (e.g. TP^((1-γ)/γ) written as
+        # <msup><mrow>TP</mrow><mfrac>...</mfrac></msup>) must NOT be
+        # flattened here -- doing so replaces it with a bare string, so
+        # msup.find_all(recursive=False) below sees only 1 remaining child
+        # instead of 2, base_text detection fails, and the base ("TP") gets
+        # silently swallowed into sup_text instead of kept separate,
+        # producing "$^{TP}$" with the fraction AND base both lost/merged.
+        # Let the msup/msub loops handle their own direct-child mfrac.
+        if mfrac.parent and mfrac.parent.name in ('msup', 'msub', 'msubsup'):
+            continue
         contents = mfrac.find_all(recursive=False)
         if len(contents) == 2:
             num = contents[0].get_text(strip=True)
@@ -919,7 +937,23 @@ def _format_content_inner(element, img_map):
         if sup.name == 'msup':
             kids = sup.find_all(recursive=False)
             base_text = kids[0].get_text(strip=True) if len(kids) >= 2 else ""
-            sup_text = kids[-1].get_text(strip=True) if kids else sup.get_text(strip=True)
+            if kids and kids[-1].name == 'mfrac':
+                # Exponent is itself a fraction (e.g. TP^((1-γ)/γ)) -- read
+                # it as num/den, not raw get_text() which would concatenate
+                # numerator+denominator with no "/" between them.
+                frac_kids = kids[-1].find_all(recursive=False)
+                if len(frac_kids) == 2:
+                    num_t = frac_kids[0].get_text(strip=True)
+                    den_t = frac_kids[1].get_text(strip=True)
+                    if re.search(r'[+\-−]', num_t):
+                        num_t = f"({num_t})"
+                    if re.search(r'[+\-−]', den_t):
+                        den_t = f"({den_t})"
+                    sup_text = f"{num_t}/{den_t}"
+                else:
+                    sup_text = kids[-1].get_text(strip=True)
+            else:
+                sup_text = kids[-1].get_text(strip=True) if kids else sup.get_text(strip=True)
         else:
             base_text = ""
             sup_text = sup.get_text(strip=True)
@@ -948,6 +982,14 @@ def _format_content_inner(element, img_map):
             # Fraction-in-superscript (e.g. "(1-γ)/γ") -- unicode superscript
             # can't represent a fraction, so emit LaTeX instead of mangling
             # it into broken/unreadable unicode chars.
+            sup.replace_with(f"{base_text}$^{{{sup_text}}}$")
+        elif sup_text and not all(c in "0123456789+\u2212\u2013\u2014-=()n" for c in sup_text):
+            # SUP_MAP only has glyphs for digits/+-=()n -- any other
+            # character (e.g. m, x, γ, or any letter besides n) has no
+            # unicode superscript equivalent, so .translate() below would
+            # silently leave it as plain text, indistinguishable from the
+            # base ("a^n b^m" -> "aⁿbm", the second exponent invisible as
+            # a power). Emit LaTeX ^{...} instead so it's unambiguous.
             sup.replace_with(f"{base_text}$^{{{sup_text}}}$")
         else:
             sup.replace_with(base_text + sup_text.translate(SUP_MAP))
