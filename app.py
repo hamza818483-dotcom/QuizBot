@@ -10947,7 +10947,7 @@ def _onu_filter_mcqs(mcqs: list):
 ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page, exact order, exact wording (Bangla stays Bangla, English stays English). Never invent new MCQs. 0 MCQs → return [].
 
 For EACH MCQ output 2 mandatory checks:
-1) yellow_highlight: true if a yellow highlighter/marker color band is behind the question+options block, false if plain background.
+1) yellow_highlight: true if a YELLOW or GREEN highlighter/marker color band is behind the question+options block (either color counts, look carefully for both), false if plain background.
 2) answer: the option marked with a RED CIRCLE or RED BOX drawn around its letter/text — that IS the answer (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
 
 OUTPUT FORMAT — ONLY valid JSON array, nothing else:
@@ -10955,12 +10955,13 @@ OUTPUT FORMAT — ONLY valid JSON array, nothing else:
 
 
 async def _onu_recheck_highlight(img, mcqs: list) -> list:
-    """Focused re-verification pass for yellow_highlight — only asked about the
-    specific MCQs Call1 marked as NOT highlighted (false), since a single
-    full-page pass tends to miss highlight on pages where only 1-2 MCQs out of
-    many are highlighted (easy to skim past). Sends back the exact question
-    texts and asks the model to look again at THOSE specific blocks only, not
-    re-extract from scratch -- cheap, targeted, and catches under-detection."""
+    """Focused re-verification pass for highlight (yellow OR green) — only asked
+    about the specific MCQs Call1 marked as NOT highlighted (false), since a
+    single full-page pass tends to miss highlight on pages where only 1-2 MCQs
+    out of many are highlighted (easy to skim past). Sends back the exact
+    question texts and asks the model to look again at THOSE specific blocks
+    only, not re-extract from scratch -- cheap, targeted, and catches
+    under-detection."""
     if not mcqs:
         return mcqs
     to_check = [mc for mc in mcqs if not mc.get("yellow_highlight")]
@@ -10968,10 +10969,10 @@ async def _onu_recheck_highlight(img, mcqs: list) -> list:
         return mcqs
     try:
         q_list = "\n".join(f"{i+1}. {(mc.get('question') or '')[:120]}" for i, mc in enumerate(to_check))
-        prompt = f"""Look at this page image again, specifically at the background color behind these MCQ blocks (question + options) which were marked as NOT yellow-highlighted:
+        prompt = f"""Look at this page image again, specifically at the background color behind these MCQ blocks (question + options) which were marked as NOT highlighted:
 {q_list}
 
-For EACH one, look VERY carefully at the actual background behind its question and options — a subtle/light yellow marker band still counts as highlighted, don't only look for bright yellow. Double-check even if it looks plain white; small or faint highlight marks are easy to miss on a first pass.
+For EACH one, look VERY carefully at the actual background behind its question and options — a subtle/light YELLOW or GREEN marker band still counts as highlighted (either color), don't only look for bright colors. Double-check even if it looks plain white; small or faint highlight marks are easy to miss on a first pass.
 
 OUTPUT — ONLY a JSON array, one entry per item above IN ORDER, nothing else:
 [{{"yellow_highlight":true}},{{"yellow_highlight":false}}]"""
@@ -10999,10 +11000,10 @@ OUTPUT — ONLY a JSON array, one entry per item above IN ORDER, nothing else:
 
 
 async def _onu_call1_extract(img) -> list:
-    """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field).
+    """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field, which covers yellow OR green marker color).
     ONU_EXTRACT_PROMPT is intentionally short (~200 tokens vs QBM's ~2400), which
     leaves most of Groq's 8000 TPM budget for the image -- so Groq fallback now
-    keeps enough resolution to still see the yellow highlight, unlike before when
+    keeps enough resolution to still see the highlight, unlike before when
     the full QBM prompt forced heavy downscale (384px/quality 40) that washed it out."""
     try:
         gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT)
