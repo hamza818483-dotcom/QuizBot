@@ -11004,10 +11004,18 @@ async def _onu_extract_from_image(img) -> list:
             call3 = _qbm_restore_opt_bboxes(call1, call3)
             final_mcqs = _cap_mcq_options(call3)
             final_mcqs = await _qbm_final_safety_net(img, final_mcqs)
-            hl_map = {_qbm_normalize_q(mc.get("question", "")): mc.get("yellow_highlight", False) for mc in call1}
-            for mc in final_mcqs:
-                if "yellow_highlight" not in mc:
-                    mc["yellow_highlight"] = hl_map.get(_qbm_normalize_q(mc.get("question", "")), False)
+            # Restore yellow_highlight: prefer index alignment (call1/call3 are
+            # same length after repair_order), fall back to normalized-text
+            # match only if lengths drifted (e.g. safety-net split/merged).
+            if len(final_mcqs) == len(call1):
+                for mc, src in zip(final_mcqs, call1):
+                    if "yellow_highlight" not in mc:
+                        mc["yellow_highlight"] = src.get("yellow_highlight", False)
+            else:
+                hl_map = {_qbm_normalize_q(mc.get("question", "")): mc.get("yellow_highlight", False) for mc in call1}
+                for mc in final_mcqs:
+                    if "yellow_highlight" not in mc:
+                        mc["yellow_highlight"] = hl_map.get(_qbm_normalize_q(mc.get("question", "")), False)
             return final_mcqs
         return []
     finally:
