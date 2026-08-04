@@ -299,7 +299,7 @@ def aggressive_clean(text):
         _pre_final_markers.append(m.group(0))
         return f"ZZZPREFINAL{len(_pre_final_markers)-1}ZZZ"
     text = re.sub(r'\$[_^]\{.*?\}\$', _pre_final_protect, text)
-    text = re.sub(r'\$\\frac\{.*?\}\{.*?\}\$', _pre_final_protect, text)
+    text = re.sub(r'\$\\d?frac\{.*?\}\{.*?\}\$', _pre_final_protect, text)
     text = re.sub(r'\$\\sqrt\{.*?\}\$', _pre_final_protect, text)
 
     # Vector arrow fix: get_text(separator=" ", ...) inserts a space at every
@@ -376,7 +376,7 @@ def aggressive_clean(text):
             # properly-rendered fraction display everywhere once run through
             # KaTeX/MathJax, instead of some fractions being plain "a/b" text
             # and others being LaTeX depending on term complexity.
-            out.append(f"$\\frac{{{num}}}{{{den}}}$")
+            out.append(f"$\\dfrac{{{num}}}{{{den}}}$")
             i = p2
         return ''.join(out)
     text = _frac_repl(text)
@@ -389,7 +389,7 @@ def aggressive_clean(text):
     def _nfrac_protect(m):
         _nfrac_markers.append(m.group(0))
         return f"ZZZNFRACLATEX{len(_nfrac_markers)-1}ZZZ"
-    text = re.sub(r'\$\\frac\{.*?\}\{.*?\}\$', _nfrac_protect, text)
+    text = re.sub(r'\$\\d?frac\{.*?\}\{.*?\}\$', _nfrac_protect, text)
 
     # \sqrt{...}: multi-term contents must keep grouping as √(...), since
     # the generic '{}' strip further down would otherwise fuse a multi-term
@@ -488,7 +488,7 @@ def aggressive_clean(text):
             elif ch == '/' and depth == 0:
                 num, den = inner[:idx].strip(), inner[idx+1:].strip()
                 if num and den:
-                    return f"\\frac{{{_to_latex_inner(num)}}}{{{_to_latex_inner(den)}}}"
+                    return f"\\dfrac{{{_to_latex_inner(num)}}}{{{_to_latex_inner(den)}}}"
                 return None
         return None
 
