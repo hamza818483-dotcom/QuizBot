@@ -404,12 +404,24 @@ def aggressive_clean(text):
 
     def _sub_repl(m):
         inner = m.group(1).strip()
+        _frac_marker_match = re.fullmatch(r'ZZZNFRACLATEX(\d+)ZZZ', inner)
+        if _frac_marker_match:
+            # inner is a placeholder for an already-built $\frac{...}{...}$ --
+            # combine into one valid $_{\frac{...}{...}}$ instead of nesting
+            # a second $...$ pair around the placeholder (which corrupts to
+            # unbalanced-$ LaTeX once the marker gets restored later).
+            _raw_frac = _nfrac_markers[int(_frac_marker_match.group(1))].strip('$')
+            return f"$_{{{_raw_frac}}}$"
         if _UNSAFE_SUB_CHARS.search(inner):
             return f"$_{{{_to_latex_inner(inner)}}}$"
         return inner.translate(SUB_MAP)
 
     def _sup_repl(m):
         inner = m.group(1).strip()
+        _frac_marker_match = re.fullmatch(r'ZZZNFRACLATEX(\d+)ZZZ', inner)
+        if _frac_marker_match:
+            _raw_frac = _nfrac_markers[int(_frac_marker_match.group(1))].strip('$')
+            return f"$^{{{_raw_frac}}}$"
         if _UNSAFE_SUP_CHARS.search(inner):
             return f"$^{{{_to_latex_inner(inner)}}}$"
         return inner.translate(SUP_MAP)
