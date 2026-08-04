@@ -528,8 +528,13 @@ PDF_AUTO_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB) — /pdf 
 # ============================================================
 CANCEL_FLAGS = {}  # chat_id -> bool, checked by long loops between steps
 ACTIVE_JOB_LABEL = {}  # chat_id -> human-readable label of the job currently running
+_current_job_chat_id_ctx = contextvars.ContextVar("_current_job_chat_id_ctx", default=None)
 
-def is_cancelled(chat_id):
+def is_cancelled(chat_id=None):
+    if chat_id is None:
+        chat_id = _current_job_chat_id_ctx.get()
+    if chat_id is None:
+        return False
     return CANCEL_FLAGS.get(chat_id, False)
 
 def clear_cancel(chat_id):
@@ -9486,6 +9491,8 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     shrunk_url = None
     shrunk_prompt = None
     for key in keys:
+        if is_cancelled():
+            return ""
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
             key, "qwen/qwen3.6-27b",
@@ -9520,6 +9527,49 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     return ""
 
 
+async def _qbm_openrouter_call(img, prompt: str) -> str:
+    """Third-tier QBM fallback -- OpenRouter (free Qwen/Gemma models) with the
+    same strict extraction prompt used for Gemini/Groq. Only reached when both
+    Gemini (all keys) and Groq (all keys) are exhausted/rate-limited, so pages
+    keep flowing instead of stalling on quota errors."""
+    data_url = _img_to_data_url(img)
+    if not data_url:
+        return ""
+    rotator = or_qwen_rotator
+    keys = rotator.all_keys() if rotator else []
+    if not keys:
+        return ""
+    for key in keys:
+        if is_cancelled():
+            return ""
+        try:
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            payload = {
+                "model": "qwen/qwen2.5-vl-32b-instruct:free",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}}
+                    ]
+                }],
+                "temperature": 0.1,
+                "max_tokens": 3000,
+            }
+            async with httpx.AsyncClient(timeout=45) as c:
+                r = await c.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+                if r.status_code >= 400:
+                    if r.status_code != 429:
+                        logger.warning(f"[QBM-OpenRouter] HTTP {r.status_code}")
+                    continue
+                j = r.json()
+                return j.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+        except Exception as e:
+            logger.warning(f"[QBM-OpenRouter] err: {e}")
+            continue
+    return ""
+
+
 async def _qbm_call1_extract(img) -> list:
     """
     CALL 1 — OWN OCR + strict-prompt MCQ extraction + inline dedup.
@@ -9537,9 +9587,16 @@ async def _qbm_call1_extract(img) -> list:
             return out
         txt = await _qbm_groq_call(img, prompt)
         result = _qbm_parse_json(txt) if txt else []
-        out = _qbm_dedup_list(result)
+        if result:
+            out = _qbm_dedup_list(result)
+            for m in out:
+                m["_provider"] = "Groq"
+            return out
+        txt3 = await _qbm_openrouter_call(img, prompt)
+        result3 = _qbm_parse_json(txt3) if txt3 else []
+        out = _qbm_dedup_list(result3)
         for m in out:
-            m["_provider"] = "Groq"
+            m["_provider"] = "OpenRouter"
         return out
     except Exception as e:
         logger.warning(f"[QBM Call1] failed: {e}")
@@ -9641,6 +9698,10 @@ MCQ's block, or "yellow_highlight": false if not. Update the output format:
             txt = await _qbm_groq_call(img, prompt)
             found = _qbm_parse_json(txt) if txt else []
             provider = "Groq"
+        if not found:
+            txt3 = await _qbm_openrouter_call(img, prompt)
+            found = _qbm_parse_json(txt3) if txt3 else []
+            provider = "OpenRouter"
         out = _qbm_dedup_list(found) if found else []
         for m in out:
             m.setdefault("_provider", provider)
@@ -10186,6 +10247,8 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
 
         keys_to_try = key_rotator.ordered_keys() or key_rotator.keys
         for key in keys_to_try:
+            if is_cancelled():
+                return ""
             try:
                 response = await asyncio.to_thread(_call, key)
                 key_rotator.mark_healthy(key)
@@ -11599,6 +11662,7 @@ async def qbm_extract_all_pages(
 
     async def _extract_one(idx, page_num, img):
         nonlocal total_mcq
+        _current_job_chat_id_ctx.set(chat_id)
         if is_cancelled(chat_id):
             return idx, page_num, img, []
         page_status[idx]["current"] = True
@@ -11755,6 +11819,7 @@ async def process_qbm_pages(
     iterable = page_tuples if skip_extract else [(p, img, None) for p, img in pages]
 
     for idx, (page_num, img, precomputed_mcqs) in enumerate(iterable):
+        _current_job_chat_id_ctx.set(chat_id)
         if is_cancelled(chat_id):
             clear_active_job(chat_id)
             break
