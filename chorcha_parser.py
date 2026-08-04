@@ -129,7 +129,14 @@ def _latex_to_text(tex: str) -> str:
             i += 5
             num, i = _read_group(tex, i)
             den, i = _read_group(tex, i)
-            out.append(f"{_latex_to_text(num)}/{_latex_to_text(den)}")
+            # Always emit a REAL $\frac{num}{den}$ instead of flattening to
+            # plain "num/den" text -- a flattened fraction loses its visual
+            # bar and grouping (e.g. "N/θ-θice" is ambiguous: is the whole
+            # "θ-θice" the denominator, or just "θ"?). The source page
+            # always rendered this as a proper stacked fraction, so the
+            # extracted CSV must preserve that exactly via real LaTeX,
+            # which MathJax on the website renders back identically.
+            out.append(f"$\\frac{{{num.strip()}}}{{{den.strip()}}}$")
             continue
         if tex[i:i + 9] == r"\overline":
             i += 9

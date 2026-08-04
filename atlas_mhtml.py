@@ -284,6 +284,23 @@ def aggressive_clean(text):
         return ""
     text = convert_to_english_numbers(text)
 
+    # Protect already-final $^{...}$ / $_{...}$ / $\frac{...}{...}$ LaTeX
+    # that callers such as chorcha_parser._latex_to_text() may have already
+    # built (e.g. from a KaTeX <annotation> source, where a fraction-in-
+    # exponent or word subscript was correctly preserved as real LaTeX).
+    # This MUST run before any other regex below -- including this
+    # function's own \frac-rebuilding step further down -- because that
+    # step would otherwise find the literal \frac{...}{...} INSIDE an
+    # already-final $^{...}$ block and wrap it in its own separate $...$,
+    # corrupting valid "$^{\frac{a}{b}}$" into broken nested
+    # "$^{$\frac{a}{b}$}$".
+    _pre_final_markers = []
+    def _pre_final_protect(m):
+        _pre_final_markers.append(m.group(0))
+        return f"ZZZPREFINAL{len(_pre_final_markers)-1}ZZZ"
+    text = re.sub(r'\$[_^]\{.*?\}\$', _pre_final_protect, text)
+    text = re.sub(r'\$\\frac\{.*?\}\{.*?\}\$', _pre_final_protect, text)
+
     # Vector arrow fix: get_text(separator=" ", ...) inserts a space at every
     # inline-tag boundary, so a letter followed by a combining "arrow above"
     # (U+20D7, e.g. rendering as V⃗ for vector V) ends up as "V ⃗" -- the
@@ -652,6 +669,8 @@ def aggressive_clean(text):
         text = text.replace(f"ZZZNFRACLATEX{_i}ZZZ", _marker)
     for _i, _marker in enumerate(_script_latex_markers):
         text = text.replace(f"ZZZSCRIPTLATEX{_i}ZZZ", _marker)
+    for _i, _marker in enumerate(_pre_final_markers):
+        text = text.replace(f"ZZZPREFINAL{_i}ZZZ", _marker)
 
     return text.strip()
 
