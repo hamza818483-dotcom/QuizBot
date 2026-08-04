@@ -10948,12 +10948,24 @@ def _onu_filter_mcqs(mcqs: list):
 # This is the SOLE indicator for /onu — no other rule decides inclusion.
 ONU_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT + """
 
-ADDITIONAL MANDATORY FIELD FOR THIS MODE:
-For EVERY extracted MCQ, check if the QUESTION text (the question itself, not options) has a
-YELLOW HIGHLIGHT marking/background behind it in the source image (a yellow marker/highlighter
-color visibly applied over the question text). Add a boolean field "yellow_highlight": true if the
-question text has this yellow highlight, or "yellow_highlight": false if it does not. This must be
-checked carefully and independently for every single MCQ — do not assume based on neighboring MCQs.
+ADDITIONAL MANDATORY FIELD FOR THIS MODE — YELLOW HIGHLIGHT DETECTION:
+On this page, SOME full MCQ blocks (the question sentence AND its A/B/C/D options
+together) are marked with a YELLOW HIGHLIGHTER color — a bright yellow marker-pen
+band drawn behind the text, covering the question line and all four options. Other
+MCQ blocks on the same page have NO color behind them (plain white background,
+normal black text).
+
+For EVERY extracted MCQ, look at the background behind its question line AND its
+options as a whole block:
+- If yellow highlighter color is visible behind the question and/or its options →
+  "yellow_highlight": true
+- If there is no yellow color anywhere in that MCQ's block (plain white/no
+  background) → "yellow_highlight": false
+
+Expect a MIX on each page — some MCQs highlighted, some not. Do not default every
+question to the same value; actually check each block's background color
+independently. A red circle/box drawn around a single option letter is NOT a yellow
+highlight — ignore red circles/boxes, only yellow marker coloring counts.
 Update OUTPUT FORMAT to include this field:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","yellow_highlight":true,"qsn_bbox":[100,200,400,450]}]"""
 
