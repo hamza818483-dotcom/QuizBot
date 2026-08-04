@@ -10947,7 +10947,7 @@ def _onu_filter_mcqs(mcqs: list):
 ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page, exact order, exact wording (Bangla stays Bangla, English stays English). Never invent new MCQs. 0 MCQs → return [].
 
 For EACH MCQ output 2 mandatory checks:
-1) yellow_highlight: true if a YELLOW or GREEN highlighter/marker color band is behind the question+options block (either color counts, look carefully for both), false if plain background.
+1) yellow_highlight: MANDATORY per-MCQ check — before writing this field, look specifically at the pixels directly behind this MCQ's question line AND its 4 options, block by block, one MCQ at a time. Set true if ANY yellow marker-pen color OR ANY green marker-pen color is visible there (either color counts equally — a light/pale/faint tint of either still counts, not just bright/saturated). Set false only after confirming the background is plain white/no-color for this specific block. Do not assume based on other MCQs on the page — each block gets its own independent check, since a page can mix highlighted and non-highlighted blocks.
 2) answer: the option marked with a RED CIRCLE or RED BOX drawn around its letter/text — that IS the answer (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
 
 OUTPUT FORMAT — ONLY valid JSON array, nothing else:
@@ -10961,38 +10961,57 @@ async def _onu_recheck_highlight(img, mcqs: list) -> list:
     out of many are highlighted (easy to skim past). Sends back the exact
     question texts and asks the model to look again at THOSE specific blocks
     only, not re-extract from scratch -- cheap, targeted, and catches
-    under-detection."""
+    under-detection. Runs the check TWICE (independent calls) and accepts
+    true from EITHER pass -- a single model call can still miss a faint
+    highlight, so this halves the false-negative rate for the cost of one
+    extra short call only on the still-unresolved items."""
     if not mcqs:
         return mcqs
-    to_check = [mc for mc in mcqs if not mc.get("yellow_highlight")]
-    if not to_check:
-        return mcqs
-    try:
-        q_list = "\n".join(f"{i+1}. {(mc.get('question') or '')[:120]}" for i, mc in enumerate(to_check))
-        prompt = f"""Look at this page image again, specifically at the background color behind these MCQ blocks (question + options) which were marked as NOT highlighted:
+
+    async def _one_pass(items: list) -> list:
+        """Returns list of True/False aligned with items, or None on failure."""
+        if not items:
+            return []
+        try:
+            q_list = "\n".join(f"{i+1}. {(mc.get('question') or '')[:120]}" for i, mc in enumerate(items))
+            prompt = f"""Look at this page image again, specifically at the background color behind these MCQ blocks (question + options) which were marked as NOT highlighted:
 {q_list}
 
 For EACH one, look VERY carefully at the actual background behind its question and options — a subtle/light YELLOW or GREEN marker band still counts as highlighted (either color), don't only look for bright colors. Double-check even if it looks plain white; small or faint highlight marks are easy to miss on a first pass.
 
 OUTPUT — ONLY a JSON array, one entry per item above IN ORDER, nothing else:
 [{{"yellow_highlight":true}},{{"yellow_highlight":false}}]"""
-        gem_txt = await _qbm_gemini_raw(img, prompt)
-        if not gem_txt:
+            gem_txt = await _qbm_gemini_raw(img, prompt)
+            if not gem_txt:
+                return None
+            t = gem_txt.strip()
+            if "```" in t:
+                t = t.split("```")[1].replace("json", "", 1).strip() if t.count("```") >= 2 else t
+            m = re.search(r'\[.*\]', t, re.DOTALL)
+            raw = json.loads(m.group()) if m else json.loads(t)
+            if not isinstance(raw, list) or len(raw) != len(items):
+                return None
+            return [isinstance(r, dict) and r.get("yellow_highlight") is True for r in raw]
+        except Exception as e:
+            logger.warning(f"[ONU-recheck] pass failed: {e}")
+            return None
+
+    try:
+        to_check = [mc for mc in mcqs if not mc.get("yellow_highlight")]
+        if not to_check:
             return mcqs
-        t = gem_txt.strip()
-        if "```" in t:
-            t = t.split("```")[1].replace("json", "", 1).strip() if t.count("```") >= 2 else t
-        m = re.search(r'\[.*\]', t, re.DOTALL)
-        raw = json.loads(m.group()) if m else json.loads(t)
-        if not isinstance(raw, list) or len(raw) != len(to_check):
-            return mcqs
-        check_idx = 0
-        for mc in mcqs:
-            if not mc.get("yellow_highlight"):
-                result = raw[check_idx]
-                if isinstance(result, dict) and result.get("yellow_highlight") is True:
+        pass1 = await _one_pass(to_check)
+        if pass1:
+            for mc, is_hl in zip(to_check, pass1):
+                if is_hl:
                     mc["yellow_highlight"] = True
-                check_idx += 1
+        still_unflagged = [mc for mc in to_check if not mc.get("yellow_highlight")]
+        if still_unflagged:
+            pass2 = await _one_pass(still_unflagged)
+            if pass2:
+                for mc, is_hl in zip(still_unflagged, pass2):
+                    if is_hl:
+                        mc["yellow_highlight"] = True
         return mcqs
     except Exception as e:
         logger.warning(f"[ONU-recheck] highlight recheck failed: {e}")
