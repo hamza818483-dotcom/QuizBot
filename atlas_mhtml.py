@@ -400,6 +400,13 @@ def aggressive_clean(text):
     # leaving the label floating with no arrow and no visual link to it.
     text = re.sub(r'\$\\x(?:right|left)arrow\{.*?\}\$', _nfrac_protect, text)
 
+    # Protect $\overline{...}$ LaTeX (built above by the <mover> handler
+    # for a bar spanning a multi-letter base, e.g. line-segment notation
+    # AB with a full overline) the same way -- otherwise the generic
+    # backslash-command-stripper below eats "\overline{" since it has no
+    # special-case for it either, same failure mode as \xrightarrow above.
+    text = re.sub(r'\$\\overline\{.*?\}\$', _nfrac_protect, text)
+
     # \sqrt[n]{...} nth-root form was NOT handled at all here -- only plain
     # \sqrt{...} was, so any literal "\sqrt[3]{x}" text (e.g. AI-generated
     # explanation using LaTeX-ish syntax) fell through completely
@@ -922,6 +929,16 @@ def _format_content_inner(element, img_map):
         '→': r'\xrightarrow', '⟶': r'\xrightarrow',
         '←': r'\xleftarrow', '⟵': r'\xleftarrow',
     }
+    # Overline bar over a letter/base (e.g. mean/average notation Ā, or a
+    # repeating-decimal vinculum) is ALSO a <mover>, with the overlay being
+    # a bar character ('‾' U+203E, '¯' U+00AF, or '-'/'−' used as a bar in
+    # some source markup) instead of an arrow. This must not fall into the
+    # generic "base(overlay)" fallback below (which would wrongly produce
+    # "A(‾)" -- a stray character in parentheses, not a bar over the
+    # letter). Emit the real combining overline U+0305 directly on the
+    # base so it sits properly stacked, same reasoning as the existing
+    # vector-arrow (U+20D7) combining-mark fix a few lines below.
+    OVERLINE_CHARS = {'‾', '¯', '-', '−', '—'}
     for mover in element.find_all('mover'):
         kids = mover.find_all(recursive=False)
         if len(kids) == 2:
@@ -932,6 +949,15 @@ def _format_content_inner(element, img_map):
                     mover.replace_with(f"${ARROW_MOVER_MAP[base_t]}{{{over_t}}}$")
                 else:
                     mover.replace_with(base_t)
+            elif over_t in OVERLINE_CHARS and base_t:
+                # Multi-char base (e.g. "AB" with a bar over both, as in
+                # line-segment notation) can't carry a single combining
+                # mark meaningfully -- fall back to explicit LaTeX
+                # \overline{} for anything but a single letter/digit.
+                if len(base_t) == 1:
+                    mover.replace_with(base_t + '\u0305')
+                else:
+                    mover.replace_with(f"$\\overline{{{base_t}}}$")
             else:
                 mover.replace_with(f"{base_t}({over_t})" if over_t else base_t)
         else:
