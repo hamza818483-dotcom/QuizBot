@@ -14,6 +14,31 @@ from atlas_mhtml import SUB_MAP, SUP_MAP, LATEX_SYMBOLS, aggressive_clean
 logger = logging.getLogger("atlas")
 
 
+_SUB_SAFE_LETTERS = "aeoxhklmnpst"
+_SUP_SAFE_LETTERS = "n"
+
+
+def _is_complex_script(raw: str, safe_letters: str) -> bool:
+    """A sub/superscript group's raw LaTeX is 'simple' (safe to flatten to
+    plain Unicode) only if it's a bare digit run, +/-/()/= punctuation, or
+    a SINGLE letter that has a real Unicode sub/superscript form. Anything
+    else -- \\frac, a bare '/', another nested _/^, a backslash command
+    (Greek letters etc. with no Unicode equivalent), or a multi-letter word
+    -- must stay as real LaTeX so it renders correctly (proper fraction bar,
+    correctly raised/lowered, not silently flattened into same-size,
+    ambiguous plain text)."""
+    s = raw.strip()
+    if not s:
+        return False
+    if "\\frac" in s or "/" in s or "_" in s or "^" in s or "\\" in s:
+        return True
+    if re.fullmatch(r"[0-9+\-=() ]+", s):
+        return False
+    if re.fullmatch(r"[a-zA-Z]", s):
+        return s not in safe_letters
+    return True
+
+
 def _find_matching_brace(s: str, start: int) -> int:
     """s[start] must be '{'. Returns the index of its matching '}'."""
     depth = 0
@@ -52,6 +77,17 @@ def _latex_to_text(tex: str) -> str:
     regex can't see inside its own {..} arguments for nested _{}/^{}).
     Falls back to leaving unrecognized commands as-is; final polish still
     goes through aggressive_clean() for spacing/notation cleanup.
+
+    IMPORTANT: a sub/superscript group is only flattened to plain Unicode
+    when it's "simple" (single digit/letter covered by SUB_MAP/SUP_MAP, or
+    a short run of digits/+-()). Anything more complex -- a \\frac inside
+    an exponent (e.g. TP^{\\frac{1-\\gamma}{\\gamma}}), a multi-letter word
+    subscript (e.g. X_{ice}), a bare '/' division, or a Greek-letter command
+    -- is kept as REAL LaTeX ($^{...}$/$_{...}$) instead, because Unicode
+    has no superscript-fraction glyphs and flattening destroys grouping
+    (e.g. "1-γ/γ" is ambiguous and no longer visually raised/separated from
+    the base at all -- this was producing garbled option text like
+    "P₁¹⁻γT₁γ" instead of a proper stacked-fraction rendering).
     """
     if not tex:
         return ""
@@ -112,17 +148,22 @@ def _latex_to_text(tex: str) -> str:
             continue
         if ch == "_":
             i += 1
-            sub, i = _read_group(tex, i)
-            sub_txt = _latex_to_text(sub)
-            out.append(sub_txt.translate(SUB_MAP))
+            sub_raw, i = _read_group(tex, i)
+            if _is_complex_script(sub_raw, _SUB_SAFE_LETTERS):
+                out.append(f"$_{{{sub_raw.strip()}}}$")
+            else:
+                sub_txt = _latex_to_text(sub_raw)
+                out.append(sub_txt.translate(SUB_MAP))
             continue
         if ch == "^":
             i += 1
-            sup, i = _read_group(tex, i)
-            sup_txt = _latex_to_text(sup)
-            if sup_txt == r"\circ":
+            sup_raw, i = _read_group(tex, i)
+            if sup_raw.strip() == r"\circ":
                 out.append("°")
+            elif _is_complex_script(sup_raw, _SUP_SAFE_LETTERS):
+                out.append(f"$^{{{sup_raw.strip()}}}$")
             else:
+                sup_txt = _latex_to_text(sup_raw)
                 out.append(sup_txt.translate(SUP_MAP))
             continue
         if ch == "\\":
