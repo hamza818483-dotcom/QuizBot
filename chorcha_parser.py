@@ -153,6 +153,32 @@ def _latex_to_text(tex: str) -> str:
             inner, i = _read_group(tex, i)
             out.append(_latex_to_text(inner))
             continue
+        if tex[i:i + 5] == r"\sqrt":
+            i += 5
+            # optional \sqrt[n]{...} root-index form -- skip the [n] index,
+            # rare enough here that dropping it (vs mis-rendering) is safe;
+            # only the {...} radicand matters for the common case.
+            if i < n and tex[i] == "[":
+                j = tex.find("]", i)
+                i = j + 1 if j != -1 else i
+            radicand, i = _read_group(tex, i)
+            # A radicand containing its own \frac (or nested _/^) can't be
+            # flattened to plain "√..." text -- Unicode has no way to draw
+            # a root sign that visually spans OVER a stacked fraction, so
+            # "√" + a separately-rendered "$\frac{a}{b}$" next to it just
+            # shows a plain root symbol floating beside the fraction, not
+            # actually covering it (exactly the "root sign looks broken"
+            # bug). Keep the WHOLE \sqrt{...} as real LaTeX in that case so
+            # MathJax draws one single, correctly-spanning root symbol.
+            if "\\frac" in radicand or "_" in radicand or "^" in radicand:
+                out.append(f"$\\sqrt{{{radicand.strip()}}}$")
+            else:
+                inner_txt = _latex_to_text(radicand).strip()
+                if re.fullmatch(r"[A-Za-z0-9]+", inner_txt):
+                    out.append("√" + inner_txt)
+                else:
+                    out.append("√(" + inner_txt + ")")
+            continue
         if ch == "_":
             i += 1
             sub_raw, i = _read_group(tex, i)
