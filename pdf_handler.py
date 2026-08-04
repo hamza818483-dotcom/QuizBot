@@ -119,8 +119,9 @@ class GeminiKeyRotator:
         cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
         return healthy + cooling + (exhausted if not_exhausted else [])
 
-    def mark_rate_limited(self, key: str, daily_exhausted: bool = False):
-        self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
+    def mark_rate_limited(self, key: str, daily_exhausted: bool = False, retry_after_seconds: int = None):
+        cooldown = retry_after_seconds if retry_after_seconds and retry_after_seconds > 0 else self.COOLDOWN_SECONDS
+        self._cooldown_until[key] = time.time() + cooldown
         if daily_exhausted:
             _mark_gemini_key_exhausted_today(key)
 
