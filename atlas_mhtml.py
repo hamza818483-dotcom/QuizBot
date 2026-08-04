@@ -394,16 +394,41 @@ def aggressive_clean(text):
     _UNSAFE_SUB_CHARS = re.compile(r'[^0-9' + _SUB_SAFE_LETTERS + r'+\u2212\u2013\u2014\-=()]')
     _UNSAFE_SUP_CHARS = re.compile(r'[^0-9' + _SUP_SAFE_LETTERS + r'+\u2212\u2013\u2014\-=()]')
 
-    def _to_latex_inner(inner: str) -> str:
-        # rebuild any bare Unicode symbol (γ, θ, ×, etc) back into its LaTeX
-        # command so the resulting $...$ is valid, render-able LaTeX source.
+    def _read_braced_group(text, pos):
+        """Depth-aware {...} reader -- handles nested braces correctly,
+        unlike a naive '[^}]+' regex which stops at the first '}' and
+        corrupts anything with a nested group inside (e.g. x^{y^{z}})."""
+        if pos >= len(text) or text[pos] != '{':
+            return None, pos
+        depth = 0
+        start = pos
+        for j in range(pos, len(text)):
+            if text[j] == '{':
+                depth += 1
+            elif text[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start+1:j], j + 1
+        return None, pos
+
+    def _script_repl_scan(text, marker_char, repl_fn):
+        """Scan for marker_char ('_' or '^') followed by a {..} group
+        (depth-aware) or a bare token, replacing each via repl_fn(inner)."""
         out = []
-        for ch in inner:
-            out.append(UNICODE_TO_LATEX.get(ch, ch))
+        i = 0
+        while i < len(text):
+            if text[i] == marker_char and i + 1 < len(text) and text[i+1] == '{':
+                inner, p = _read_braced_group(text, i + 1)
+                if inner is not None:
+                    out.append(repl_fn(inner))
+                    i = p
+                    continue
+            out.append(text[i])
+            i += 1
         return ''.join(out)
 
-    def _sub_repl(m):
-        inner = m.group(1).strip()
+    def _sub_repl_inner(inner):
+        inner = inner.strip()
         _frac_marker_match = re.fullmatch(r'ZZZNFRACLATEX(\d+)ZZZ', inner)
         if _frac_marker_match:
             # inner is a placeholder for an already-built $\frac{...}{...}$ --
@@ -416,8 +441,8 @@ def aggressive_clean(text):
             return f"$_{{{_to_latex_inner(inner)}}}$"
         return inner.translate(SUB_MAP)
 
-    def _sup_repl(m):
-        inner = m.group(1).strip()
+    def _sup_repl_inner(inner):
+        inner = inner.strip()
         _frac_marker_match = re.fullmatch(r'ZZZNFRACLATEX(\d+)ZZZ', inner)
         if _frac_marker_match:
             _raw_frac = _nfrac_markers[int(_frac_marker_match.group(1))].strip('$')
@@ -426,9 +451,26 @@ def aggressive_clean(text):
             return f"$^{{{_to_latex_inner(inner)}}}$"
         return inner.translate(SUP_MAP)
 
-    text = re.sub(r'_\{\s*([^}]+)\s*\}', _sub_repl, text)
-    text = re.sub(r'\^\{\s*([^}]+)\s*\}', _sup_repl, text)
+    def _to_latex_inner(inner: str) -> str:
+        # rebuild any bare Unicode symbol (γ, θ, ×, etc) back into its LaTeX
+        # command so the resulting $...$ is valid, render-able LaTeX source.
+        # If a nested _{...}/^{...} exists inside (e.g. x^{y^{z}}), don't
+        # attempt to recursively re-wrap it in its own $...$ (that produces
+        # unbalanced-$ output) -- just leave it as raw LaTeX, which is still
+        # valid once the whole thing gets one outer $...$ wrap by the caller.
+        out = []
+        for ch in inner:
+            out.append(UNICODE_TO_LATEX.get(ch, ch))
+        return ''.join(out)
 
+    def _sub_repl(m):
+        return _sub_repl_inner(m.group(1))
+
+    def _sup_repl(m):
+        return _sup_repl_inner(m.group(1))
+
+    text = _script_repl_scan(text, '^', _sup_repl_inner)
+    text = _script_repl_scan(text, '_', _sub_repl_inner)
     text = re.sub(r'_([0-9a-zA-Z+\-]+)', _sub_repl, text)
     text = re.sub(r'\^([0-9a-zA-Z+\-]+)', _sup_repl, text)
 
