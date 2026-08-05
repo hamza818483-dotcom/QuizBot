@@ -526,6 +526,7 @@ PDF_AUTO_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB) — /pdf 
 # ============================================================
 # /cancel — instantly stop any running activity for this chat (bot stays alive)
 # ============================================================
+import contextvars
 CANCEL_FLAGS = {}  # chat_id -> bool, checked by long loops between steps
 ACTIVE_JOB_LABEL = {}  # chat_id -> human-readable label of the job currently running
 _current_job_chat_id_ctx = contextvars.ContextVar("_current_job_chat_id_ctx", default=None)
