@@ -11145,6 +11145,8 @@ OUTPUT — ONLY a JSON array, one entry per item above IN ORDER, nothing else:
 [{{"yellow_highlight":true}},{{"yellow_highlight":false}}]"""
             gem_txt = await _qbm_gemini_raw(img, prompt)
             if not gem_txt:
+                gem_txt = await _qbm_groq_call(img, prompt)
+            if not gem_txt:
                 return None
             t = gem_txt.strip()
             if "```" in t:
@@ -11190,20 +11192,21 @@ async def _onu_call1_extract(img) -> list:
     ONU_EXTRACT_PROMPT is intentionally short (~200 tokens vs QBM's ~2400), which
     leaves most of Groq's 8000 TPM budget for the image -- so Groq fallback now
     keeps enough resolution to still see the highlight, unlike before when
-    the full QBM prompt forced heavy downscale (384px/quality 40) that washed it out."""
+    the full QBM prompt forced heavy downscale (384px/quality 40) that washed it out.
+    Groq primary / Gemini fallback (same reasoning as /qbm) -- Gemini free-tier's
+    20 req/day/key exhausts within a handful of pages on any real PDF."""
     try:
-        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT)
-        if gem:
-            out = _qbm_dedup_list(gem)
-            for m in out:
-                m["_provider"] = "Gemini"
-            return out
-        logger.warning("[ONU-DEBUG] Gemini returned empty — trying Groq fallback")
         txt = await _qbm_groq_call(img, ONU_EXTRACT_PROMPT)
         result = _qbm_parse_json(txt) if txt else []
-        out = _qbm_dedup_list(result)
+        if result:
+            out = _qbm_dedup_list(result)
+            for m in out:
+                m["_provider"] = "Groq"
+            return out
+        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT)
+        out = _qbm_dedup_list(gem) if gem else []
         for m in out:
-            m["_provider"] = "Groq"
+            m["_provider"] = "Gemini"
         return out
     except Exception as e:
         logger.warning(f"[ONU Call1] failed: {e}")
