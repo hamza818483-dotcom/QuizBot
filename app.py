@@ -2105,22 +2105,42 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
         return ""
 
 async def _gen_groq_raw_text(img, prompt: str) -> str:
-    keys = groq_key_rotator.all_keys()
-    if not keys:
-        return ""
-    data_url = _img_to_data_url_groq(img, prompt_len_hint=prompt)
-    if not data_url:
-        return ""
-    for key in keys:
-        txt, status = await _post_openai_compat(
-            "https://api.groq.com/openai/v1/chat/completions",
-            key, "qwen/qwen3.6-27b",
-            data_url, prompt
-        )
-        if txt:
-            return txt
-        if status != 429:
-            logger.warning(f"[GroqVerify] key failed (status={status}), trying next key")
+    keys = groq_key_rotator.ordered_keys()
+    data_url = _img_to_data_url_groq(img, prompt_len_hint=prompt) if keys else None
+    if keys and data_url:
+        for key in keys:
+            txt, status = await _post_openai_compat(
+                "https://api.groq.com/openai/v1/chat/completions",
+                key, "qwen/qwen3.6-27b",
+                data_url, prompt
+            )
+            if txt:
+                groq_key_rotator.mark_healthy(key)
+                return txt
+            if status == 429:
+                is_tpm_only = _key_429_is_tpm.get(key) is True
+                groq_key_rotator.mark_rate_limited(key, daily_exhausted=not is_tpm_only)
+            else:
+                logger.warning(f"[GroqVerify] key failed (status={status}), trying next key")
+    # All Groq keys exhausted/failing -- rotate through other vision providers
+    # instead of silently returning empty (previously killed the whole call).
+    for rotator, url, model in (
+        (nvidia_rotator, "https://integrate.api.nvidia.com/v1/chat/completions", "meta/llama-3.2-11b-vision-instruct"),
+        (or_qwen_rotator, "https://openrouter.ai/api/v1/chat/completions", "qwen/qwen2.5-vl-72b-instruct:free"),
+        (nemotron_rotator, "https://integrate.api.nvidia.com/v1/chat/completions", "nvidia/llama-3.1-nemotron-51b-instruct"),
+        (gemma_rotator, "https://api.groq.com/openai/v1/chat/completions", "gemma2-9b-it"),
+    ):
+        fb_data_url = data_url or _img_to_data_url_groq(img, prompt_len_hint=prompt)
+        if not fb_data_url:
+            break
+        for key in rotator.ordered_keys():
+            txt, status = await _post_openai_compat(url, key, model, fb_data_url, prompt)
+            if txt:
+                rotator.mark_healthy(key)
+                logger.info(f"[GroqVerify] fallback provider {rotator.label} succeeded")
+                return txt
+            if status == 429:
+                rotator.mark_rate_limited(key)
     return ""
 
 _TF_PATTERNS_BN = ("বললে ভুল হবে", "সত্য বললে", "মিথ্যা বললে")
