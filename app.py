@@ -1404,6 +1404,7 @@ def _parse_mcq_json(text: str) -> list:
     return out
 
 _key_429_is_tpm = {}  # key -> True if last 429 was TPM/per-request-too-large (not genuine quota exhaustion)
+_key_429_retry_after = {}  # key -> exact seconds to wait, parsed from Groq's 429 body (None if not found)
 
 async def _post_openai_compat(url: str, key: str, model: str, data_url: str, prompt: str, mcq_count_hint=None) -> tuple:
     """Returns (text, status_code). status_code=0 means network/exception (no HTTP response).
@@ -1461,10 +1462,20 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
                 if r.status_code == 429 and re.search(r"tokens per minute|TPM", body_preview, re.I):
                     logger.warning(f"[AI-ROT] {model} HTTP 429 (TPM/per-request-too-large, NOT genuine quota exhaustion): {body_preview}")
                     _key_429_is_tpm[key] = True
+                    # Groq's error body includes the EXACT wait time (e.g.
+                    # "Please try again in 8.3325s") -- parse it instead of
+                    # blanket-cooling for the fixed 60s COOLDOWN_SECONDS.
+                    # TPM is a rolling 60s window per-org, so the real wait is
+                    # almost always much shorter (we saw 8-18s in practice);
+                    # using the real value lets the rotator reuse a TPM-only
+                    # key far sooner instead of sitting idle for a minute.
+                    m = re.search(r"try again in ([\d.]+)\s*s", body_preview, re.I)
+                    _key_429_retry_after[key] = float(m.group(1)) if m else None
                 else:
                     logger.warning(f"[AI-ROT] {model} HTTP {r.status_code}: {body_preview}")
                     if r.status_code == 429:
                         _key_429_is_tpm[key] = False
+                        _key_429_retry_after[key] = None
                 org_match = re.search(r"org_[A-Za-z0-9]+", body_preview)
                 if org_match:
                     _key_org_map[key] = org_match.group(0)
@@ -1575,8 +1586,18 @@ class GroqKeyRotator:
         """daily_exhausted=False for TPM/per-request-too-large 429s (key itself
         is fine, only that single request was oversized) — those should only
         get a short cooldown, NOT burn the key for the rest of the BD-day.
-        Genuine quota/RPD 429s still mark the key exhausted-today as before."""
-        self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
+        Genuine quota/RPD 429s still mark the key exhausted-today as before.
+
+        For TPM cases, prefer the EXACT retry-after Groq gave us (parsed in
+        _post_openai_compat, usually 8-18s for a rolling 60s TPM window)
+        over the fixed COOLDOWN_SECONDS -- the key is back to genuinely
+        healthy well before 60s, so using the real value gets it back into
+        rotation sooner instead of sitting idle."""
+        retry_after = _key_429_retry_after.get(key)
+        if not daily_exhausted and retry_after:
+            self._cooldown_until[key] = time.time() + min(retry_after + 1, self.COOLDOWN_SECONDS)
+        else:
+            self._cooldown_until[key] = time.time() + self.COOLDOWN_SECONDS
         if not daily_exhausted:
             return
         _mark_groq_key_exhausted_today(key)
