@@ -27,30 +27,40 @@ try:
 except Exception:
     BD_TZ = None
 
+try:
+    from zoneinfo import ZoneInfo
+    GEMINI_QUOTA_TZ = ZoneInfo("America/Los_Angeles")  # Google free-tier quota resets at Pacific midnight
+except Exception:
+    GEMINI_QUOTA_TZ = None
+
 logger = logging.getLogger("atlas.pdf_handler")
 
 # ============================================================
 # GEMINI KEY ROTATION
 # ============================================================
-_gemini_key_exhausted_day: dict = {}   # key -> 'YYYY-MM-DD' (BD) it was marked exhausted
+_gemini_key_exhausted_day: dict = {}   # key -> 'YYYY-MM-DD' (Pacific) it was marked exhausted
 _gemini_key_exhausted_flag: dict = {}  # key -> True while exhausted-today
 
+def _gemini_quota_today_str() -> str:
+    from datetime import datetime
+    if GEMINI_QUOTA_TZ is not None:
+        return datetime.now(GEMINI_QUOTA_TZ).strftime('%Y-%m-%d')
+    return datetime.utcnow().strftime('%Y-%m-%d')
+
 def _is_gemini_key_exhausted_today(key: str) -> bool:
-    """Daily (BD-day) quota-exhaustion memory for Gemini free-tier keys
+    """Daily quota-exhaustion memory for Gemini free-tier keys
     (20 requests/day/model). A 60s cooldown is pointless for a daily quota —
     the key stays dead until the quota resets, so once it 429s with a
-    quota/RESOURCE_EXHAUSTED error, skip it for the rest of the BD-day
-    instead of re-trying it every call."""
-    from datetime import datetime
-    today = datetime.now(BD_TZ).strftime('%Y-%m-%d') if 'BD_TZ' in globals() else datetime.utcnow().strftime('%Y-%m-%d')
+    quota/RESOURCE_EXHAUSTED error, skip it until Google's actual reset
+    (Pacific midnight) instead of re-trying it every call."""
+    today = _gemini_quota_today_str()
     if _gemini_key_exhausted_day.get(key) != today:
         _gemini_key_exhausted_day[key] = today
         _gemini_key_exhausted_flag[key] = False
     return _gemini_key_exhausted_flag.get(key, False)
 
 def _mark_gemini_key_exhausted_today(key: str):
-    from datetime import datetime
-    today = datetime.now(BD_TZ).strftime('%Y-%m-%d') if 'BD_TZ' in globals() else datetime.utcnow().strftime('%Y-%m-%d')
+    today = _gemini_quota_today_str()
     _gemini_key_exhausted_day[key] = today
     _gemini_key_exhausted_flag[key] = True
 
@@ -108,7 +118,7 @@ class GeminiKeyRotator:
         """Only non-banned keys, healthy ones first: not exhausted-today AND
         not in short cooldown, then short-cooldown keys, then today-exhausted
         keys last — so a call never wastes its first attempt on a key
-        already known dead for the day (daily quota resets at day boundary,
+        already known dead for the day (daily quota resets at Pacific midnight,
         not after 60s). Permanently banned keys are excluded entirely."""
         now = time.time()
         live_keys = [k for k in self.keys if k not in self._banned]
@@ -736,7 +746,7 @@ async def generate_mcq_from_image(
     # shorter timeout on the 2nd/3rd attempt so a bad/slow key fails fast.
     _ordered = key_rotator.ordered_keys()
 
-    # If every key is already known daily-exhausted (BD-day), skip Gemini
+    # If every key is already known daily-exhausted (Pacific-day), skip Gemini
     # entirely instead of burning 429 round-trips we already know will fail —
     # go straight to OpenRouter fallback.
     if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
@@ -825,7 +835,7 @@ async def generate_mcq_from_image(
         if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
             is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
             if is_daily:
-                logger.warning(f"[Gemini] Attempt {attempt+1}: daily quota exhausted — skipping this key for rest of BD-day: {err_label}")
+                logger.warning(f"[Gemini] Attempt {attempt+1}: daily quota exhausted — skipping this key until Pacific-day quota reset: {err_label}")
             else:
                 logger.warning(f"[Gemini] Attempt {attempt+1} rate-limited (429), cooling down key for {key_rotator.COOLDOWN_SECONDS}s: {err_label}")
             key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
