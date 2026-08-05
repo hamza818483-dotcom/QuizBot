@@ -8327,7 +8327,7 @@ async def _pdf_relaxed_last_resort_extract(img, topic, page_num, mcq_count=None)
     genuine attempt at extraction leniency. NEVER raises; returns [] only if
     every key/provider is truly exhausted.
     """
-    keys = groq_key_rotator.all_keys()
+    keys = groq_key_rotator.ordered_keys()
     if not keys:
         return []
     data_url = _img_to_data_url_groq(img)
@@ -8350,10 +8350,12 @@ Output ONLY a valid JSON array, no extra text:
             data_url, relaxed_prompt
         )
         if txt:
+            groq_key_rotator.mark_healthy(key)
             parsed = _parse_mcq_json(txt)
             if parsed:
                 return _cap_mcq_options(_validate_mcq_structure(parsed), 4)
         if status == 429:
+            groq_key_rotator.mark_rate_limited(key, daily_exhausted=(_key_429_is_tpm.get(key) is not True))
             continue
     # Groq exhausted -> try Gemini once with the same relaxed prompt as a
     # final code-level fallback before truly conceding zero.
@@ -9503,7 +9505,7 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     already-extracted MCQ JSON) get correctly budgeted instead of assuming
     the fixed static-prompt size -- fixes the 429 TPM errors these calls hit
     on pages with many MCQs (large embedded JSON)."""
-    keys = groq_key_rotator.all_keys()
+    keys = groq_key_rotator.ordered_keys()
     if not keys:
         return ""
     data_url = _img_to_data_url_groq(img, mcq_count_hint=10, prompt_len_hint=prompt)
@@ -9557,7 +9559,7 @@ async def _qbm_openrouter_call(img, prompt: str) -> str:
     if not data_url:
         return ""
     rotator = or_qwen_rotator
-    keys = rotator.all_keys() if rotator else []
+    keys = rotator.ordered_keys() if rotator else []
     if not keys:
         return ""
     for key in keys:
@@ -9580,10 +9582,13 @@ async def _qbm_openrouter_call(img, prompt: str) -> str:
             async with httpx.AsyncClient(timeout=45) as c:
                 r = await c.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
                 if r.status_code >= 400:
-                    if r.status_code != 429:
+                    if r.status_code == 429:
+                        rotator.mark_rate_limited(key)
+                    else:
                         logger.warning(f"[QBM-OpenRouter] HTTP {r.status_code}")
                     continue
                 j = r.json()
+                rotator.mark_healthy(key)
                 return j.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
         except Exception as e:
             logger.warning(f"[QBM-OpenRouter] err: {e}")
@@ -10320,10 +10325,9 @@ async def _qbm_gemini_extract(img, prompt: str = None) -> list:
 async def _qbm_groq_text_call(prompt: str, model: str = "openai/gpt-oss-120b") -> str:
     """Text-only Groq call (no image) -- used for pure-reasoning tasks like
     last-resort answer resolution, where no image/page content is left to read."""
-    keys = groq_key_rotator.all_keys()
+    keys = groq_key_rotator.ordered_keys()
     if not keys:
         return ""
-    headers_key = None
     for key in keys:
         try:
             headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -10336,10 +10340,13 @@ async def _qbm_groq_text_call(prompt: str, model: str = "openai/gpt-oss-120b") -
             async with httpx.AsyncClient(timeout=30) as c:
                 r = await c.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
                 if r.status_code >= 400:
-                    if r.status_code != 429:
+                    if r.status_code == 429:
+                        groq_key_rotator.mark_rate_limited(key)
+                    else:
                         logger.warning(f"[Groq-text] {model} HTTP {r.status_code}")
                     continue
                 j = r.json()
+                groq_key_rotator.mark_healthy(key)
                 return j.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
         except Exception as e:
             logger.warning(f"[Groq-text] err: {e}")
@@ -11579,7 +11586,7 @@ If this page has no answer key at all, or no match for these specific questions,
 return exactly: []
 Return ONLY the JSON array, nothing else."""
 
-        keys = groq_key_rotator.all_keys()
+        keys = groq_key_rotator.ordered_keys()
         result_json = None
         if keys:
             data_url = _img_to_data_url_groq(img)
@@ -11591,17 +11598,21 @@ Return ONLY the JSON array, nothing else."""
                         data_url, prompt
                     )
                     if txt:
+                        groq_key_rotator.mark_healthy(key)
                         result_json = _qbm_parse_json(txt)
                         break
-                    if status != 429:
-                        logger.warning(f"[Groq-QBM2] key failed (status={status}), falling through to Gemini")
-                        break
+                    if status == 429:
+                        groq_key_rotator.mark_rate_limited(key, daily_exhausted=(_key_429_is_tpm.get(key) is not True))
+                        continue
+                    logger.warning(f"[Groq-QBM2] key failed (status={status}), falling through to Gemini")
+                    break
 
         if not result_json:
             try:
                 from pdf_handler import key_rotator, image_to_base64
-                if key_rotator.keys:
-                    gkey = key_rotator.get_key()
+                _gkeys = key_rotator.ordered_keys()
+                if _gkeys:
+                    gkey = _gkeys[0]
                     from google import genai as gai
                     from google.genai import types
                     client = gai.Client(api_key=gkey)
