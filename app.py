@@ -9977,13 +9977,14 @@ def _qbm_question_looks_truncated(q: str, opts: list) -> bool:
     return False
 
 
-async def _qbm_reextract_truncated_question(img, q: str, opts: list) -> str:
+async def _qbm_reextract_truncated_question_groq_only(img, q: str, opts: list) -> str:
     """
-    Targeted re-read: when a question looks truncated, ask the model to look
-    ONLY at the question-stem region of this exact page image and report the
-    REAL text — this is still EXTRACTION (reading what's actually printed),
-    never invention of new wording. Retries both providers before giving up,
-    since a bare bad first attempt should never be accepted as final.
+    Targeted re-read: when a question looks truncated, ask Groq (cheap, no
+    Gemini-key drain) to look ONLY at the question-stem region of this exact
+    page image and report the REAL text — this is still EXTRACTION (reading
+    what's actually printed), never invention of new wording. If Groq can't
+    recover it, caller queues it for ONE combined page-level Gemini call
+    (_qbm_batch_backfill_gemini) instead of spending a Gemini call per MCQ.
     """
     opts_str = ", ".join(o.strip() for o in opts if o and o.strip())
     prompt = f"""This MCQ's question text was cut off during OCR, only this fragment survived: "{q}"
@@ -10005,13 +10006,6 @@ locate any question text on this page at all, output exactly: NOT_FOUND"""
                 return txt
         except Exception as e:
             logger.warning(f"[QBM] Truncated-question re-extract (groq attempt {_attempt+1}) failed: {e}")
-    for _attempt in range(2):
-        try:
-            gem_txt = (await _qbm_gemini_raw(img, prompt)).strip()
-            if gem_txt and gem_txt != "NOT_FOUND" and len(gem_txt) > len(q.strip()):
-                return gem_txt
-        except Exception as e:
-            logger.warning(f"[QBM] Truncated-question re-extract (gemini attempt {_attempt+1}) failed: {e}")
     return ""
 
 
@@ -10182,6 +10176,49 @@ Output ONLY: [x1,y1,x2,y2] or null -- no other text."""
     return None
 
 
+async def _qbm_batch_backfill_gemini(img, items: list) -> dict:
+    """ONE Gemini call for an entire page's worth of flagged issues (truncated
+    questions that Groq couldn't recover + missing diagram bboxes), instead of
+    a separate Gemini call per MCQ. items: [{'idx':i,'type':'question','q':..,
+    'opts':[...]} , {'idx':i,'type':'bbox','question':...}]. Returns
+    {idx: result_str_or_bbox_list}. Empty dict on failure -> callers keep
+    their existing deterministic/no-op fallback."""
+    if not items:
+        return {}
+    parts = []
+    for it in items:
+        if it["type"] == "question":
+            opts_str = ", ".join(o.strip() for o in it["opts"] if o and o.strip())
+            parts.append(
+                f'{{"idx":{it["idx"]},"task":"question","fragment":{json.dumps(it["q"])},"options":{json.dumps(opts_str)}}}'
+            )
+        else:
+            parts.append(
+                f'{{"idx":{it["idx"]},"task":"bbox","caption":{json.dumps(it["question"][:200])}}}'
+            )
+    prompt = f"""This exact page image has {len(items)} unresolved issue(s) from earlier extraction. Fix ALL of them in one pass by looking at the page image:
+
+{chr(10).join(parts)}
+
+For each item with "task":"question" -> find the REAL complete question text as printed on the page for that fragment (read the actual line, do not invent wording). If not found output "NOT_FOUND".
+For each item with "task":"bbox" -> find the diagram/figure this caption labels and output a tight [x1,y1,x2,y2] box (0-1000 scale) including labels/arrows with small margin. If not found output null.
+
+Return ONLY a JSON array, same order as input, one object per item:
+[{{"idx":<idx>,"result":"<question text or NOT_FOUND>"}}, {{"idx":<idx>,"result":[x1,y1,x2,y2] or null}}]
+No markdown, no extra text."""
+    try:
+        txt = (await _qbm_gemini_raw(img, prompt)).strip()
+        if "```" in txt:
+            txt = txt.split("```")[1].split("```")[0].strip()
+            if txt.startswith("json"):
+                txt = txt[4:].strip()
+        arr = json.loads(txt)
+        return {int(o["idx"]): o.get("result") for o in arr if "idx" in o}
+    except Exception as e:
+        logger.warning(f"[QBM] Batch backfill call failed: {e}")
+        return {}
+
+
 async def _qbm_final_safety_net(img, mcqs: list) -> list:
     """
     Last-line, zero-trust, CODE-LEVEL (not prompt-level) safety net applied to
@@ -10203,13 +10240,23 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
     if not mcqs:
         return mcqs
     fixed = []
+    batch_items = []  # collected across the whole page -> ONE Gemini call at the end
+    pending_question_idx = {}  # idx in fixed -> (q, opts) for batch fallback
+    pending_bbox_idx = {}
+
     for mc in mcqs:
         q = (mc.get("question") or "").strip()
         opts = mc.get("options", [])
 
         if _qbm_question_looks_truncated(q, opts):
-            reread = await _qbm_reextract_truncated_question(img, q, opts)
-            mc["question"] = reread if reread else _qbm_reconstruct_question_from_options(q, opts)
+            # Cheap, non-Gemini attempt first (Groq only, no gemini fallback here
+            # -- gemini fallback now happens once for the whole page in the batch call below).
+            reread = await _qbm_reextract_truncated_question_groq_only(img, q, opts)
+            if reread:
+                mc["question"] = reread
+            else:
+                pending_question_idx[len(fixed)] = (q, opts)
+                batch_items.append({"idx": len(fixed), "type": "question", "q": q, "opts": opts})
 
         for i, o in enumerate(opts):
             if _qbm_option_looks_truncated(o, opts):
@@ -10235,12 +10282,24 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
                 mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
 
         if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
-            recovered_bbox = await _qbm_recover_missed_diagram_bbox(img, mc["question"])
-            if recovered_bbox:
-                mc["qsn_bbox"] = recovered_bbox
-                logger.info(f"[QBM safety-net] Recovered missed diagram bbox for: {mc['question'][:50]}")
+            pending_bbox_idx[len(fixed)] = mc["question"]
+            batch_items.append({"idx": len(fixed), "type": "bbox", "question": mc["question"]})
 
         fixed.append(mc)
+
+    # ── ONE combined Gemini call for the whole page instead of one per MCQ ──
+    if batch_items:
+        results = await _qbm_batch_backfill_gemini(img, batch_items)
+        for idx, (q, opts) in pending_question_idx.items():
+            r = results.get(idx)
+            reread = r if (isinstance(r, str) and r and r != "NOT_FOUND") else ""
+            fixed[idx]["question"] = reread if reread else _qbm_reconstruct_question_from_options(q, opts)
+        for idx, question in pending_bbox_idx.items():
+            r = results.get(idx)
+            if isinstance(r, list) and len(r) == 4:
+                fixed[idx]["qsn_bbox"] = r
+                logger.info(f"[QBM safety-net] Recovered missed diagram bbox for: {question[:50]}")
+
     fixed = await _attach_option_images_if_missing(fixed, img)
     return fixed
 
