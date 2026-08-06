@@ -1310,6 +1310,54 @@ def _is_mcq_text_sane(text: str) -> bool:
     return True
 
 
+_TF_QUESTION_PATTERNS = [
+    "সত্য বললে ভুল হবে না",
+    "সত্য বললে ভুল হবে",
+    "মিথ্যা বললে ভুল হবে না",
+    "মিথ্যা বললে ভুল হবে",
+]
+
+def _tf_validate_and_filter(mcqs: list) -> list:
+    """
+    /tf-only extra enforcement layer on top of _validate_mcq_structure.
+    Two things the base validator can't check but the /tf prompt mandates:
+
+    1. Question MUST literally use one of the 4 sanctioned patterns —
+       drops anything the model invented outside the prompt's exact wording,
+       since an off-pattern question means the model didn't follow the
+       polarity rules the prompt spent 4 bullet points defining.
+    2. Explanation MUST individually address all 4 options (prompt says
+       "Cover all 4 options individually... not a single generic 1-line
+       explanation") — a short/generic explanation is a strong signal the
+       model skipped the per-option true/false reasoning the prompt requires,
+       so those get dropped rather than silently accepted.
+
+    Best-effort: only drops individual MCQs that clearly violate the prompt,
+    never raises, never blocks the rest of the batch.
+    """
+    if not mcqs:
+        return mcqs
+    clean = []
+    for m in mcqs:
+        try:
+            q = m.get("question") or ""
+            if not any(pat in q for pat in _TF_QUESTION_PATTERNS):
+                continue
+            exp = m.get("explanation") or ""
+            # Prompt requires per-option coverage (4 options addressed) --
+            # a genuinely per-option explanation in Bengali/English is rarely
+            # under ~60 chars once it covers 4 items individually, so this
+            # catches the "single generic 1-line" failure mode the prompt
+            # explicitly forbids without being so strict it drops valid short
+            # per-option explanations.
+            if len(exp.strip()) < 60:
+                continue
+            clean.append(m)
+        except Exception:
+            continue
+    return clean
+
+
 def _validate_mcq_structure(mcqs: list) -> list:
     """
     Structural + sanity validation applied to any freshly-generated MCQ batch
@@ -2602,6 +2650,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=exclude_groq_keys)
         out = _cap_mcq_options(out, 4)
         out = _validate_mcq_structure(out)
+        if _TF_MODE.get():
+            out = _tf_validate_and_filter(out)
         out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
 
         if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
@@ -2626,6 +2676,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
             tried_groq_keys = tried_groq_keys | retry_tried
             retry_out = _cap_mcq_options(retry_out, 4)
             retry_out = _validate_mcq_structure(retry_out)
+            if _TF_MODE.get():
+                retry_out = _tf_validate_and_filter(retry_out)
             retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
             if len(retry_out) > len(out):
                 out = retry_out
