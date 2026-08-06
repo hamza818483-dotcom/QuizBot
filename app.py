@@ -1405,6 +1405,7 @@ def _parse_mcq_json(text: str) -> list:
 
 _key_429_is_tpm = {}  # key -> True if last 429 was TPM/per-request-too-large (not genuine quota exhaustion)
 _key_429_retry_after = {}  # key -> exact seconds to wait, parsed from Groq's 429 body (None if not found)
+_LAST_TRIED_GROQ_KEYS = {"keys": set()}  # side-channel: which Groq keys the most recent generate_mcq_from_image call touched
 
 async def _post_openai_compat(url: str, key: str, model: str, data_url: str, prompt: str, mcq_count_hint=None) -> tuple:
     """Returns (text, status_code). status_code=0 means network/exception (no HTTP response).
@@ -2583,7 +2584,7 @@ def _dedupe_mcqs(mcqs: list) -> list:
         out.append(m)
     return out
 
-async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
+async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None):
     """
     Smart wrapper: Gemini first (primary), then Groq fallback (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
@@ -2592,9 +2593,13 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     Always generates fresh — no same-image cache reuse.
     AtlasBot-style: single generation call, retry only if under MIN_MCQ
     (max 2 extra attempts) — no mandatory per-page verify/repair call.
+    Also accepts/exposes tried Groq keys via _LAST_TRIED_GROQ_KEYS (see below)
+    so an OUTER retry (e.g. pdf_generate_all_pages' one-more-try-on-empty-page)
+    can skip keys already burned in this call instead of getting a fresh
+    5-key budget as if nothing happened.
     """
     async with _MCQ_PROCESSING_QUEUE_LOCK:
-        out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
+        out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=exclude_groq_keys)
         out = _cap_mcq_options(out, 4)
         out = _validate_mcq_structure(out)
         out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
@@ -2637,6 +2642,12 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
             out = await _bangla_verify_and_enforce(out, img, topic, page_num)
 
         out = _validate_mcq_structure(out)
+        # Side-channel for outer retry callers (pdf_generate_all_pages'
+        # _run_one) so a fully-empty-page outer retry doesn't get a fresh
+        # 5-key Groq budget as if nothing happened -- see docstring above.
+        # Kept out of the return signature to avoid touching the ~10+
+        # existing call sites that unpack a single value.
+        _LAST_TRIED_GROQ_KEYS["keys"] = tried_groq_keys
         return out
 
 
@@ -8290,10 +8301,16 @@ async def pdf_generate_all_pages(
             # every provider returned nothing) gets ONE retry before being
             # accepted as genuinely empty — protects against a single
             # transient failure silently dropping a whole page's MCQs.
+            # Carries forward the Groq keys already tried in the first call
+            # (via _LAST_TRIED_GROQ_KEYS) so this retry doesn't get a fresh
+            # 5-key budget — without this, one fully-empty page could touch
+            # up to 6 generation cycles (inner 3-attempt loop x this outer
+            # retry), re-trying already-cooling keys each time.
             if not mcqs and not is_cancelled(chat_id):
+                first_call_tried = set(_LAST_TRIED_GROQ_KEYS.get("keys") or set())
                 try:
                     await asyncio.sleep(1)
-                    mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+                    mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count, exclude_groq_keys=first_call_tried)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
