@@ -8043,8 +8043,9 @@ body{{font-family:'Noto Sans Bengali',sans-serif;background:#fff;font-size:12.5p
 async def handle_tf(msg: dict):
     """/tf — ported 1:1 from AtlasBot's /tf: reply to a PDF, page-by-page
     generate True/False (সত্য-মিথ্যা) style MCQs using AtlasBot's exact
-    PROMPT_02, then send each page's set as photo+caption to the target
-    chat/channel/thread. Same -p/-c/-t/-m/[N] flags as AtlasBot."""
+    PROMPT_02, with a live-updating dashboard (per-page MCQ count + time
+    + elapsed), then send ONE final CSV of all pages' MCQs combined —
+    no per-page photo/quiz/poll. Same -p/-c/-t/-m/[N] flags as AtlasBot."""
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     text = msg.get("text", "")
@@ -8093,28 +8094,52 @@ async def handle_tf(msg: dict):
             return
 
         total_pages = len(pages)
-        if status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                f"✅ {total_pages} page-এর PDF। 🎯 Topic: {topic}\n⏳ Processing...")
 
         ok_count = 0
         fail_count = 0
+        all_mcqs_for_csv = []  # collect every page's MCQs to build one final CSV
+        page_stats = []  # (page_no, mcq_count_or_None, seconds_taken) — live dashboard rows
+        overall_start = time.monotonic()
+        _last_update = [0.0]
+
+        def _fmt_secs(s: float) -> str:
+            return f"{s:.1f}s" if s < 60 else f"{int(s // 60)}m {s % 60:.0f}s"
+
+        def _build_dashboard() -> str:
+            elapsed = time.monotonic() - overall_start
+            lines = [f"⏳ Processing... ({len(page_stats)}/{total_pages} page)",
+                      f"🎯 Topic: {topic}",
+                      f"⏱️ Elapsed: {_fmt_secs(elapsed)}", "",
+                      "📄 Page | MCQ | Time"]
+            for p_no, m_count, secs in page_stats[-15:]:
+                status_icon = "✅" if m_count is not None else "❌"
+                mcq_str = str(m_count) if m_count is not None else "fail"
+                lines.append(f"{status_icon} {p_no} | {mcq_str} | {_fmt_secs(secs)}")
+            if len(page_stats) > 15:
+                lines.insert(4, f"... ({len(page_stats) - 15} আগের row লুকানো)")
+            return "\n".join(lines)
+
         for idx, page_entry in enumerate(pages, 1):
             # pdf_to_images() returns a list of (page_number, PIL.Image)
             # tuples, not raw images — unpack to get the actual page number
-            # (for accurate captions) and the Image object.
+            # (for accurate dashboard rows) and the Image object.
             if isinstance(page_entry, tuple):
                 page_no, page_img = page_entry
             else:
                 page_no, page_img = idx, page_entry
             if is_cancelled(chat_id):
                 break
+
+            page_start = time.monotonic()
             if status_msg_id:
                 try:
-                    await edit_msg(chat_id, status_msg_id,
-                        f"⏳ Page {idx}/{total_pages} প্রসেসিং...")
+                    now = time.monotonic()
+                    if now - _last_update[0] >= 1.2 or idx == 1:
+                        await edit_msg(chat_id, status_msg_id, _build_dashboard())
+                        _last_update[0] = now
                 except Exception:
                     pass
+
             try:
                 mcqs = await _generate_tf_mcq_atlas(page_img, page_no)
                 mcqs = _cap_mcq_options(mcqs, 4)
@@ -8122,33 +8147,68 @@ async def handle_tf(msg: dict):
                 mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
                 if not mcqs:
                     fail_count += 1
+                    page_stats.append((page_no, None, time.monotonic() - page_start))
                     logger.warning(f"[/tf] page {page_no} produced no valid MCQs")
                     continue
 
                 if per_page_count and per_page_count > 0:
                     mcqs = mcqs[:per_page_count]
 
-                caption = (f"✅ {topic}\n"
-                           f"📌 Page: {page_no}\n"
-                           f"📝 মোট MCQ: {len(mcqs)}")
-                img_bytes = image_to_bytes(page_img)
-                send_kwargs = {"chat_id": target_chat_id, "photo_bytes": img_bytes, "caption": caption}
-                if thread_id:
-                    send_kwargs["message_thread_id"] = thread_id
-                await send_photo(**send_kwargs)
+                all_mcqs_for_csv.extend(mcqs)
                 ok_count += 1
+                page_stats.append((page_no, len(mcqs), time.monotonic() - page_start))
             except Exception as e:
                 fail_count += 1
+                page_stats.append((page_no, None, time.monotonic() - page_start))
                 logger.error(f"[/tf] page {page_no} error: {e}")
 
+        total_elapsed = time.monotonic() - overall_start
         if status_msg_id:
             try:
                 await edit_msg(chat_id, status_msg_id,
                     f"🏁 সম্পন্ন! ✅ {ok_count} page সফল"
                     + (f", ❌ {fail_count} page ব্যর্থ" if fail_count else "")
+                    + f"\n⏱️ মোট সময়: {_fmt_secs(total_elapsed)}"
+                    + f"\n📝 মোট MCQ: {len(all_mcqs_for_csv)}"
                 )
             except Exception:
                 pass
+
+        # Final CSV export — same format used across the bot's CSV pipeline
+        # (questions,option1,option2,option3,option4,answer,explanation;
+        # answer = 1/2/3/4 for A/B/C/D).
+        if all_mcqs_for_csv:
+            try:
+                import io as _io_tf, csv as _csv_tf
+                csv_buf = _io_tf.StringIO()
+                writer = _csv_tf.writer(csv_buf)
+                writer.writerow(["questions", "option1", "option2", "option3", "option4", "answer", "explanation"])
+                ans_map = {0: "1", 1: "2", 2: "3", 3: "4", "A": "1", "B": "2", "C": "3", "D": "4"}
+                for m in all_mcqs_for_csv:
+                    opts = (m.get('options', []) + ["", "", "", ""])[:4]
+                    ans = m.get('answer', 0)
+                    if isinstance(ans, str):
+                        ans_val = ans_map.get(ans.strip().upper(), "1")
+                    else:
+                        try:
+                            ans_val = ans_map.get(int(ans), "1")
+                        except (TypeError, ValueError):
+                            ans_val = "1"
+                    writer.writerow([
+                        m.get('question', ''), opts[0], opts[1], opts[2], opts[3],
+                        ans_val, m.get('explanation', '')
+                    ])
+                csv_bytes = csv_buf.getvalue().encode('utf-8-sig')
+                send_doc_kwargs = {
+                    "chat_id": target_chat_id, "file_bytes": csv_bytes,
+                    "filename": f"tf_{topic[:30]}.csv",
+                    "caption": f"📄 {topic}\n📝 মোট MCQ: {len(all_mcqs_for_csv)} ({ok_count} page)"
+                }
+                if thread_id:
+                    send_doc_kwargs["message_thread_id"] = thread_id
+                await send_document(**send_doc_kwargs)
+            except Exception as e:
+                logger.error(f"[/tf] CSV export error: {e}")
     except Exception as e:
         logger.error(f"[/tf] Error: {e}")
         await _safe_error_reply(chat_id, e)
