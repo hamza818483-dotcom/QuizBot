@@ -8099,7 +8099,14 @@ async def handle_tf(msg: dict):
 
         ok_count = 0
         fail_count = 0
-        for idx, page_img in enumerate(pages, 1):
+        for idx, page_entry in enumerate(pages, 1):
+            # pdf_to_images() returns a list of (page_number, PIL.Image)
+            # tuples, not raw images — unpack to get the actual page number
+            # (for accurate captions) and the Image object.
+            if isinstance(page_entry, tuple):
+                page_no, page_img = page_entry
+            else:
+                page_no, page_img = idx, page_entry
             if is_cancelled(chat_id):
                 break
             if status_msg_id:
@@ -8109,20 +8116,20 @@ async def handle_tf(msg: dict):
                 except Exception:
                     pass
             try:
-                mcqs = await _generate_tf_mcq_atlas(page_img, idx)
+                mcqs = await _generate_tf_mcq_atlas(page_img, page_no)
                 mcqs = _cap_mcq_options(mcqs, 4)
                 mcqs = _validate_mcq_structure(mcqs)
                 mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
                 if not mcqs:
                     fail_count += 1
-                    logger.warning(f"[/tf] page {idx} produced no valid MCQs")
+                    logger.warning(f"[/tf] page {page_no} produced no valid MCQs")
                     continue
 
                 if per_page_count and per_page_count > 0:
                     mcqs = mcqs[:per_page_count]
 
                 caption = (f"✅ {topic}\n"
-                           f"📌 Page: {idx}\n"
+                           f"📌 Page: {page_no}\n"
                            f"📝 মোট MCQ: {len(mcqs)}")
                 img_bytes = image_to_bytes(page_img)
                 send_kwargs = {"chat_id": target_chat_id, "photo_bytes": img_bytes, "caption": caption}
@@ -8132,7 +8139,7 @@ async def handle_tf(msg: dict):
                 ok_count += 1
             except Exception as e:
                 fail_count += 1
-                logger.error(f"[/tf] page {idx} error: {e}")
+                logger.error(f"[/tf] page {page_no} error: {e}")
 
         if status_msg_id:
             try:
