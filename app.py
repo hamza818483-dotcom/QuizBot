@@ -8081,11 +8081,11 @@ async def handle_tf(msg: dict):
     status_msg_id = status_r.get("result", {}).get("message_id")
 
     try:
-        pdf_bytes = await _download_pdf_cached(
-            file_id, chat_id=chat_id, message_id=reply["message_id"],
-            file_unique_id=file_unique_id
-        )
-        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        # /tf always downloads + renders fresh — no cache lookup, so a
+        # re-run on the same PDF always regenerates from the live file
+        # instead of reusing a previously cached render/MCQ result.
+        pdf_bytes = await download_tg_file(file_id)
+        ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
         if not ok:
             await send_msg(chat_id, pages)
             return
