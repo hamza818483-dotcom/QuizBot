@@ -3080,30 +3080,16 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
 
 
 async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None):
-    # Gemini is the TRUE primary now — tried first, alone (no 8k token cap
-    # like Groq has). Groq is only invoked if Gemini fails or comes back
-    # empty (sequential, not raced), so Gemini's result is used whenever
-    # Gemini succeeds, with no latency penalty from waiting on Groq.
+    # Groq is the TRUE primary now (2026-08-07: Gemini free-tier daily quota
+    # (20 req/day on gemini-3.6-flash) kept exhausting mid-run and killing
+    # pagewise generation). Groq is tried first, alone; Gemini is only
+    # invoked if Groq fails or comes back empty (sequential, not raced), so
+    # Groq's result is used whenever Groq succeeds, with no latency penalty
+    # from waiting on Gemini.
     _LAST_GROQ_ERROR["reason"] = ""
     _LAST_GEMINI_ERROR["reason"] = ""
     _LAST_FALLBACK_ERROR["reason"] = ""
 
-    try:
-        gemini_out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
-    except Exception as e:
-        _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"
-        classify_ai_error(e, "gemini", page_num)
-        logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {e}")
-        gemini_out = []
-
-    if gemini_out:
-        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=gemini (primary)")
-        _track_provider_use("gemini", page_num)
-        for _m in gemini_out:
-            _m.setdefault("_provider", "Gemini")
-        return gemini_out, set()
-
-    logger.warning(f"[AI-ROT] gemini empty (page {page_num}); trying groq")
     try:
         groq_out, groq_tried = await _gen_groq(img, topic, mcq_count, exclude_keys=exclude_groq_keys)
     except Exception as e:
@@ -3113,13 +3099,29 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
         groq_out, groq_tried = [], set()
 
     if groq_out:
-        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq (fallback)")
+        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq (primary)")
         _track_provider_use("groq", page_num)
         for _m in groq_out:
             _m.setdefault("_provider", "Groq")
         return groq_out, groq_tried
 
-    logger.warning(f"[AI-ROT] gemini+groq both empty (page {page_num}); rotating to fallbacks")
+    logger.warning(f"[AI-ROT] groq empty (page {page_num}); trying gemini")
+    try:
+        gemini_out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
+    except Exception as e:
+        _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"
+        classify_ai_error(e, "gemini", page_num)
+        logger.warning(f"[AI-ROT] gemini failed (page {page_num}): {e}")
+        gemini_out = []
+
+    if gemini_out:
+        logger.info(f"[AI-ROT] page {page_num} satisfied by provider=gemini (fallback)")
+        _track_provider_use("gemini", page_num)
+        for _m in gemini_out:
+            _m.setdefault("_provider", "Gemini")
+        return gemini_out, groq_tried
+
+    logger.warning(f"[AI-ROT] groq+gemini both empty (page {page_num}); rotating to fallbacks")
 
     # 3) Fallback providers (skip silently if key missing / call fails)
     fallback_errors = []
