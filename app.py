@@ -1338,10 +1338,13 @@ def _tf_validate_and_filter(mcqs: list) -> list:
     if not mcqs:
         return mcqs
     clean = []
+    dropped_pattern = 0
+    dropped_exp = 0
     for m in mcqs:
         try:
             q = m.get("question") or ""
             if not any(pat in q for pat in _TF_QUESTION_PATTERNS):
+                dropped_pattern += 1
                 continue
             exp = m.get("explanation") or ""
             # Prompt requires per-option coverage (4 options addressed) --
@@ -1351,10 +1354,15 @@ def _tf_validate_and_filter(mcqs: list) -> list:
             # explicitly forbids without being so strict it drops valid short
             # per-option explanations.
             if len(exp.strip()) < 60:
+                dropped_exp += 1
                 continue
             clean.append(m)
         except Exception:
             continue
+    if (dropped_pattern or dropped_exp) and not clean:
+        logger.warning(f"[TFValidate] entire batch of {len(mcqs)} MCQs dropped — off-pattern={dropped_pattern}, short-explanation={dropped_exp}")
+    elif dropped_pattern or dropped_exp:
+        logger.info(f"[TFValidate] dropped {dropped_pattern + dropped_exp}/{len(mcqs)} MCQs — off-pattern={dropped_pattern}, short-explanation={dropped_exp}")
     return clean
 
 
@@ -1375,33 +1383,51 @@ def _validate_mcq_structure(mcqs: list) -> list:
     if not mcqs:
         return mcqs
     clean = []
+    drop_reasons = {}
     for m in mcqs:
         try:
             q = _clean_mcq_text((m.get("question") or "").strip())
             opts = m.get("options") or []
             ans = str(m.get("answer", "A")).strip().upper()
             if not _is_mcq_text_sane(q):
+                drop_reasons["question_not_sane"] = drop_reasons.get("question_not_sane", 0) + 1
                 continue
             if not isinstance(opts, list) or len(opts) < 4:
+                drop_reasons["fewer_than_4_options"] = drop_reasons.get("fewer_than_4_options", 0) + 1
                 continue
             opts4 = [_clean_mcq_text(str(o).strip()) for o in opts[:4]]
             if any(not _is_mcq_text_sane(o) for o in opts4):
+                drop_reasons["option_not_sane"] = drop_reasons.get("option_not_sane", 0) + 1
                 continue
             # duplicate-option check (case-insensitive) — a real sign of
             # broken/repeated generation, not a legitimate MCQ
             if len({o.lower() for o in opts4}) < 4:
+                drop_reasons["duplicate_options"] = drop_reasons.get("duplicate_options", 0) + 1
                 continue
             if ans not in ("A", "B", "C", "D"):
+                drop_reasons["invalid_answer_letter"] = drop_reasons.get("invalid_answer_letter", 0) + 1
                 continue
             exp = _clean_mcq_text((m.get("explanation") or "").strip())
             if exp and not _is_mcq_text_sane(exp):
+                drop_reasons["explanation_not_sane"] = drop_reasons.get("explanation_not_sane", 0) + 1
                 continue
             m["question"] = q
             m["options"] = opts4
             m["explanation"] = exp
             clean.append(m)
         except Exception:
+            drop_reasons["exception"] = drop_reasons.get("exception", 0) + 1
             continue
+    if drop_reasons and not clean:
+        # Everything in the batch got dropped -- this is the case that
+        # previously silently produced an unexplained "0 MCQs" in
+        # [MCQGen] logs even when the provider (Gemini/Groq) had genuinely
+        # returned MCQs, wasting a full retry-loop cycle (extra provider
+        # call + wait) for no diagnosable reason. Logging the breakdown
+        # lets the actual cause be read straight from logs next time.
+        logger.warning(f"[MCQValidate] entire batch of {len(mcqs)} MCQs dropped — reasons: {drop_reasons}")
+    elif drop_reasons:
+        logger.info(f"[MCQValidate] dropped {sum(drop_reasons.values())}/{len(mcqs)} MCQs — reasons: {drop_reasons}")
     return clean
 
 
