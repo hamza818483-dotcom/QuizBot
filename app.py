@@ -8140,29 +8140,49 @@ async def handle_tf(msg: dict):
                 except Exception:
                     pass
 
-            try:
-                mcqs = await _generate_tf_mcq_atlas(page_img, page_no)
-                mcqs = _cap_mcq_options(mcqs, 4)
-                mcqs = _validate_mcq_structure(mcqs)
-                mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
-                if not mcqs:
-                    fail_count += 1
-                    page_stats.append((page_no, None, time.monotonic() - page_start))
-                    logger.warning(f"[/tf] page {page_no} produced no valid MCQs")
-                    continue
+            # Retry each page up to 3 times before giving up — a page should
+            # essentially never end up empty in the final CSV.
+            mcqs = []
+            last_err = None
+            for attempt in range(1, 4):
+                try:
+                    mcqs = await _generate_tf_mcq_atlas(page_img, page_no)
+                    mcqs = _cap_mcq_options(mcqs, 4)
+                    mcqs = _validate_mcq_structure(mcqs)
+                    mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
+                    if mcqs:
+                        break
+                    last_err = "empty result"
+                except Exception as e:
+                    last_err = str(e)
+                    logger.warning(f"[/tf] page {page_no} attempt {attempt} failed: {e}")
+                if attempt < 3:
+                    await asyncio.sleep(1.5 * attempt)  # small backoff between retries
 
-                if per_page_count and per_page_count > 0:
-                    mcqs = mcqs[:per_page_count]
-
-                all_mcqs_for_csv.extend(mcqs)
-                ok_count += 1
-                page_stats.append((page_no, len(mcqs), time.monotonic() - page_start))
-            except Exception as e:
+            if not mcqs:
                 fail_count += 1
                 page_stats.append((page_no, None, time.monotonic() - page_start))
-                logger.error(f"[/tf] page {page_no} error: {e}")
+                logger.error(f"[/tf] page {page_no} failed after 3 attempts: {last_err}")
+                continue
+
+            if per_page_count and per_page_count > 0:
+                mcqs = mcqs[:per_page_count]
+
+            all_mcqs_for_csv.extend(mcqs)
+            ok_count += 1
+            page_stats.append((page_no, len(mcqs), time.monotonic() - page_start))
 
         total_elapsed = time.monotonic() - overall_start
+
+        # Permanent per-page breakdown — every page's MCQ count, not just the
+        # last-15-rows live view, so it survives after processing finishes.
+        breakdown_lines = ["📋 Page-wise MCQ breakdown:"]
+        for p_no, m_count, secs in page_stats:
+            icon = "✅" if m_count is not None else "❌"
+            mcq_str = str(m_count) if m_count is not None else "fail"
+            breakdown_lines.append(f"{icon} Page {p_no}: {mcq_str} MCQ ({_fmt_secs(secs)})")
+        breakdown_text = "\n".join(breakdown_lines)
+
         if status_msg_id:
             try:
                 await edit_msg(chat_id, status_msg_id,
@@ -8173,6 +8193,19 @@ async def handle_tf(msg: dict):
                 )
             except Exception:
                 pass
+
+        # Send the permanent breakdown as its own message (survives even
+        # though the dashboard message above only shows a summary).
+        try:
+            if len(breakdown_text) > 4000:
+                # Telegram message length safety — split into chunks
+                for i in range(0, len(breakdown_lines), 40):
+                    chunk = "\n".join(breakdown_lines[i:i+40])
+                    await send_msg(chat_id, chunk)
+            else:
+                await send_msg(chat_id, breakdown_text)
+        except Exception as e:
+            logger.warning(f"[/tf] breakdown send failed: {e}")
 
         # Final CSV export — same format used across the bot's CSV pipeline
         # (questions,option1,option2,option3,option4,answer,explanation;
