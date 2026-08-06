@@ -986,53 +986,96 @@ def _build_bangla_prompt(topic: str) -> str:
     )
 
 
-def _build_tf_prompt(topic: str) -> str:
-    """
-    /tf command prompt — same pipeline as /pdf (page range, channel, thread,
-    topic, watermark all inherited via handle_pdf reuse). Generates True/False
-    STYLE MCQs (4 factual options, question asks which is true/false), NOT a
-    2-option true/false quiz. Uses the shared pipeline's letter-answer schema
-    (A/B/C/D) instead of the raw 0-3 integer schema, since every downstream
-    parser for this prompt family expects letters.
-    """
-    return (
-        f"তুমি একজন Bengali/English মেডিকেল-HSC মানের MCQ তৈরির বিশেষজ্ঞ।\n"
-        f"Topic: {topic}\n\n"
+# ============================================================
+# /tf — ported 1:1 from AtlasBot's PROMPT_02 ("সত্য-মিথ্যার প্রশ্ন").
+# Standalone: direct Gemini call with this exact prompt (not routed through
+# handle_pdf's topic-templated pipeline), same as AtlasBot's own
+# generate_mcq_from_image(image_bytes, 'prompt_2') path.
+# ============================================================
+ATLAS_PROMPT_02 = """MCQ TYPE: True/False Style
 
-        f"🚨 নিয়ম #১ (সবচেয়ে জরুরি): প্রতিটা প্রশ্ন অবশ্যই এই ৪টার একটা দিয়ে "
-        f"শুরু হতে হবে, অন্য কোনোভাবে না —\n"
-        f"১) নিচের কোনটিকে সত্য বললে ভুল হবে না?\n"
-        f"২) নিচের কোনটিকে সত্য বললে ভুল হবে?\n"
-        f"৩) নিচের কোনটিকে মিথ্যা বললে ভুল হবে?\n"
-        f"৪) নিচের কোনটিকে মিথ্যা বললে ভুল হবে না?\n\n"
-        f"❌ ভুল উদাহরণ: \"ইন্টারফেজ দশাকে প্রধানত কী দশা হিসেবে গণ্য করা হয়?\" "
-        f"(এটা normal MCQ, একদম করা যাবে না)\n"
-        f"✅ সঠিক উদাহরণ: \"নিচের কোনটিকে সত্য বললে ভুল হবে না? A) ইন্টারফেজ "
-        f"হলো প্রস্তুতি দশা B) ... C) ... D) ...\"\n\n"
+🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ): Source এ যত তথ্য আছে তার ভিত্তিতে গড়ে ১০ থেকে ২০ টি MCQ বানাতে হবে। কখনোই মাত্র ১-২টি MCQ বানিয়ে থামবে না। তথ্য কম থাকলে ১০-১২টি, তথ্য বেশি থাকলে ১৫-২০টি — একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করো।
 
-        f"🚨 নিয়ম #২ (answer ঠিকভাবে বসাও):\n"
-        f"সত্য বললে ভুল হবে না → answer = যেটা আসলেই সত্য\n"
-        f"সত্য বললে ভুল হবে → answer = যেটা আসলেই মিথ্যা\n"
-        f"মিথ্যা বললে ভুল হবে → answer = যেটা আসলেই সত্য\n"
-        f"মিথ্যা বললে ভুল হবে না → answer = যেটা আসলেই মিথ্যা\n\n"
+💥প্রশ্নের ধরন (randomly mix করো, একঘেয়ে নয়):
+🔴 প্রতিটা প্যাটার্নে answer কোনটা হবে তা নিচে EXACT বলা আছে — ভুল ম্যাপ করা যাবে না:
+- "নিচের কোনটিকে সত্য বললে ভুল হবে না?" → answer = যে option টা বাস্তবে সত্য/সঠিক তথ্য
+- "নিচের কোনটিকে সত্য বললে ভুল হবে?" → answer = যে option টা বাস্তবে মিথ্যা/ভুল তথ্য
+- "নিচের কোনটিকে মিথ্যা বললে ভুল হবে?" → answer = যে option টা বাস্তবে সত্য/সঠিক তথ্য
+- "নিচের কোনটিকে মিথ্যা বললে ভুল হবে না?" → answer = যে option টা বাস্তবে মিথ্যা/ভুল তথ্য
 
-        f"🚨 নিয়ম #৩: 10-20টা প্রশ্ন বানাও (তথ্য কম থাকলে 10-12, বেশি থাকলে "
-        f"15-20)। ৪টা প্যাটার্ন পালা করে ব্যবহার করো, একটানা একই প্যাটার্ন না।\n\n"
+⚠️ Self-check করো MCQ বানানোর পর: "বললে ভুল হবে না" মানে সেই দাবিটা সত্যি কথা বলছে (তাই সত্য-দাবিতে ভুল হবে না = আসল সত্য option; মিথ্যা-দাবিতে ভুল হবে না = আসল মিথ্যা option)। "বললে ভুল হবে" মানে উল্টোটা।
 
-        f"🚨 নিয়ম #৪ (options): প্রতিটা প্রশ্নে ৪টা option, সব image/text থেকে "
-        f"সত্য তথ্য, কখনো বানানো যাবে না। শুধু হ্যাঁ/না/সত্য/মিথ্যা লিখলে হবে "
-        f"না — প্রতিটা option-এ আসল তথ্য থাকতে হবে।\n\n"
+💥অপশন: 
+-ছোট বা বড় (২ টাইপই হতে পারে)
+-নির্দিষ্ট টপিক বা বক্স থেকে অপশন বানানো সীমাবদ্ধ থাকবে না,ইনপুট সোর্স থেকে মিক্সড তথ্যের অপশন থাকবে।
+-অবশ্যই প্রশ্ন অনুযায়ী সঠিক তথ্যের অপশন বানাতে হবে।
+-প্রশ্নে সঠিক/সত্য/পজিটিভ উত্তর বাছাই করতে বললে একটি অপশন সঠিক/সত্য/পজিটিভ হবে,বাকি গুলো ভুল।
+-প্রশ্নে ভুল/মিথ্যা/নেগেটিভ উত্তর বাছাই করতে বললে একটিই অপশনই ভুল/মিথ্যা/নেগেটিভ হবে,বাকিগুলো সঠিক।
+-অবশ্যই সকল তথ্য Input Image Or Text থেকেই নিতে হবে।
+-৪ টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে Must.অর্থাৎ অপশনে হ্যাঁ,না,সত্য,মিথ্যা,জ্বী,না এসব টাইপ কথা থাকবে না।
 
-        f"🚨 নিয়ম #৫ (explanation): প্রতিটা option (A,B,C,D) আলাদা করে কেন "
-        f"সত্য/মিথ্যা তা বাংলায় লিখো, সর্বোচ্চ ১৬৫ অক্ষর।\n\n"
+💥উত্তর:
+-A/B/C/D এর মধ্যে একটি (A/B/C/D format)
+-প্রশ্ন অনুযায়ী উত্তর অবশ্যই একটিই হবে।
+-একাধিক উত্তর যেনো সঠিক না হয় এই বিষয় সর্বাধিক গুরুত্ব দিতে হবে।
 
-        f"শেষবার check করো: প্রতিটা \"question\" কি উপরের ৪টা phrase-এর একটা "
-        f"দিয়ে শুরু হয়েছে? না হলে ঠিক করো।\n\n"
+💥ব্যাখ্যা (STRICT):
+-4টা Option A, B, C, D প্রতিটির তথ্য আলাদাভাবে থাকবে (কোনটা সত্য/মিথ্যা ও কেন) — শুধু 1 লাইনের সাধারণ ব্যাখ্যা নিষেধ।
+-সব তথ্য 100% Input Source থেকেই — নিজে থেকে তথ্য বানানো নিষেধ।
+-Bengali, max 165 chars
+-JSON output only (একটি বড় array, ১০-২০টি object). Format: [{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":"A","explanation":"..."}]
+-answer must be one of A/B/C/D (letter)"""
 
-        f"শুধু JSON array output দাও, কোনো লেখা বা markdown ছাড়া। Schema:\n"
-        f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
-        f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"exp_bbox\":[100,200,900,350]}}]"
-    )
+
+async def _generate_tf_mcq_atlas(img, page_num: int) -> list:
+    """Direct Gemini call using AtlasBot's exact PROMPT_02 — bypasses the
+    topic-templated pipeline entirely so the prompt's rules reach the model
+    unmodified, exactly like AtlasBot's own generate_mcq_from_image(img, 'prompt_2')."""
+    from pdf_handler import image_to_base64, key_rotator, _parse_mcq_json
+    from google import genai as gai
+    from google.genai import types as gtypes
+
+    _ordered = key_rotator.ordered_keys()
+    if not _ordered:
+        return []
+    img_b64 = image_to_base64(img)
+    max_retries = min(len(_ordered), 3)
+    for attempt in range(max_retries):
+        key = _ordered[attempt % len(_ordered)]
+        try:
+            client = gai.Client(api_key=key)
+
+            def _call():
+                return client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=[
+                        gtypes.Part.from_text(text=ATLAS_PROMPT_02),
+                        gtypes.Part.from_bytes(
+                            data=base64.b64decode(img_b64),
+                            mime_type="image/jpeg"
+                        )
+                    ]
+                )
+            resp = await asyncio.to_thread(_call)
+            text = (resp.text or "").strip()
+            if not text:
+                continue
+            try:
+                mcqs = _parse_mcq_json(text)
+            except Exception as e:
+                logger.warning(f"[/tf] page {page_num} JSON parse failed (attempt {attempt+1}): {e}")
+                continue
+            if mcqs:
+                key_rotator.mark_healthy(key)
+                return mcqs
+        except Exception as e:
+            logger.warning(f"[/tf] page {page_num} gen failed (attempt {attempt+1}, key {key[:12]}...): {e}")
+            try:
+                classify_ai_error(e, "gemini", page_num)
+            except Exception:
+                pass
+            continue
+    return []
 
 
 def _build_mcq_prompt(topic: str, count) -> str:
@@ -7995,6 +8038,116 @@ body{{font-family:'Noto Sans Bengali',sans-serif;background:#fff;font-size:12.5p
 </body></html>"""
 
 # ============================================================
+# FEATURE: /tf COMMAND (ported 1:1 from AtlasBot)
+# ============================================================
+async def handle_tf(msg: dict):
+    """/tf — ported 1:1 from AtlasBot's /tf: reply to a PDF, page-by-page
+    generate True/False (সত্য-মিথ্যা) style MCQs using AtlasBot's exact
+    PROMPT_02, then send each page's set as photo+caption to the target
+    chat/channel/thread. Same -p/-c/-t/-m/[N] flags as AtlasBot."""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF ফাইলে reply করে <code>/tf</code> দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/tf -p 1-5 -c @channel -m \"Topic Name\" [10]</code>\n"
+            "<code>/tf -p 2 -c -100xxx -t 447 -m \"Group Topic\" [10]</code>\n\n"
+            "📌 -p = page range (না দিলে সব page)\n"
+            "📌 -c = channel/group id (না দিলে এই চ্যাটেই পাঠাবে)\n"
+            "📌 -m = topic name\n"
+            "📌 -t = group topic/thread id (শুধু -c এ group id দিলে)\n"
+            "📌 [N] = প্রতি পেইজে কতগুলো MCQ (ঐচ্ছিক)"
+        )
+        return
+
+    params = parse_pdf_command(text)
+    topic = params["topic"] or "✅ সত্য-মিথ্যার প্রশ্ন"
+    page_range = params["page_range"]
+    target_chat_id = params["channel_id"] or chat_id
+    thread_id = params.get("thread_id")
+    per_page_count = params["mcq_count"]
+
+    document = reply["document"]
+    file_id = document["file_id"]
+    file_unique_id = document.get("file_unique_id")
+    file_size = document.get("file_size", 0)
+
+    status_r = await send_msg(chat_id, "⏳ PDF ডাউনলোড হচ্ছে...")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    try:
+        pdf_bytes = await _download_pdf_cached(
+            file_id, chat_id=chat_id, message_id=reply["message_id"],
+            file_unique_id=file_unique_id
+        )
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        total_pages = len(pages)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ {total_pages} page-এর PDF। 🎯 Topic: {topic}\n⏳ Processing...")
+
+        ok_count = 0
+        fail_count = 0
+        for idx, page_img in enumerate(pages, 1):
+            if is_cancelled(chat_id):
+                break
+            if status_msg_id:
+                try:
+                    await edit_msg(chat_id, status_msg_id,
+                        f"⏳ Page {idx}/{total_pages} প্রসেসিং...")
+                except Exception:
+                    pass
+            try:
+                mcqs = await _generate_tf_mcq_atlas(page_img, idx)
+                mcqs = _cap_mcq_options(mcqs, 4)
+                mcqs = _validate_mcq_structure(mcqs)
+                mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
+                if not mcqs:
+                    fail_count += 1
+                    logger.warning(f"[/tf] page {idx} produced no valid MCQs")
+                    continue
+
+                if per_page_count and per_page_count > 0:
+                    mcqs = mcqs[:per_page_count]
+
+                caption = (f"✅ {topic}\n"
+                           f"📌 Page: {idx}\n"
+                           f"📝 মোট MCQ: {len(mcqs)}")
+                img_bytes = image_to_bytes(page_img)
+                send_kwargs = {"chat_id": target_chat_id, "photo_bytes": img_bytes, "caption": caption}
+                if thread_id:
+                    send_kwargs["message_thread_id"] = thread_id
+                await send_photo(**send_kwargs)
+                ok_count += 1
+            except Exception as e:
+                fail_count += 1
+                logger.error(f"[/tf] page {idx} error: {e}")
+
+        if status_msg_id:
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                    f"🏁 সম্পন্ন! ✅ {ok_count} page সফল"
+                    + (f", ❌ {fail_count} page ব্যর্থ" if fail_count else "")
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"[/tf] Error: {e}")
+        await _safe_error_reply(chat_id, e)
+
+
+# ============================================================
 # FEATURE 8: /pdf COMMAND
 # ============================================================
 async def handle_pdf(msg: dict):
@@ -14888,11 +15041,7 @@ async def handle_message(msg: dict):
                 await send_msg(chat_id, UNAUTH_MSG)
             return
         clear_cancel(chat_id)
-        token = _TF_MODE.set(True)
-        try:
-            await handle_pdf(msg)
-        finally:
-            _TF_MODE.reset(token)
+        await handle_tf(msg)
         return
     if text.startswith("/bangla"):
         if not is_auth:
