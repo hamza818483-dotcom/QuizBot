@@ -1713,16 +1713,25 @@ def _track_provider_use(provider: str, page_num: int):
     _PROVIDER_LAST_USED["page"] = page_num
     _PROVIDER_LAST_USED["time"] = _dt.now().strftime("%H:%M:%S")
 
-async def _gen_groq(img, topic, count):
+async def _gen_groq(img, topic, count, exclude_keys: set = None):
     keys = groq_key_rotator.ordered_keys()
+    if exclude_keys:
+        # Retry-loop calls (page came back thin) pass in keys already tried
+        # in this SAME page's earlier attempt(s), so we don't re-burn them —
+        # without this, a 3-attempt page (original + 2 retries) could touch
+        # up to 15 key-slots even though there are only 12 keys total,
+        # meaning every single key gets tried at least once per page even
+        # when most are already known-cooling/exhausted from attempt 1.
+        fresh = [k for k in keys if k not in exclude_keys]
+        keys = fresh if fresh else keys  # if literally all keys tried, fall back to full pool
     if not keys:
         _LAST_GROQ_ERROR["reason"] = "কোনো GROQ_KEYS/GROQ_API_KEY সেট করা নেই"
-        return []
+        return [], set()
     prompt = _build_mcq_prompt(topic, count)
     data_url = _img_to_data_url_groq(img, count, prompt_len_hint=prompt)
     if not data_url:
         _LAST_GROQ_ERROR["reason"] = "Image কে data URL এ convert করতে ব্যর্থ হয়েছে"
-        return []
+        return [], set()
     # meta-llama/llama-4-scout-17b-16e-instruct was deprecated by Groq on
     # 2026-06-17 (see console.groq.com/docs/deprecations) — every call to it
     # now fails, which silently fell through to Gemini. qwen/qwen3.6-27b is
@@ -1733,11 +1742,13 @@ async def _gen_groq(img, topic, count):
     # keys (413 Payload Too Large), wasting ~11s before falling to Gemini.
     key_errors = []
     shrunk_url = None
+    tried_keys = set()
     # Cap at 5 keys instead of trying the full pool (up to 12) — ordered_keys()
     # already puts healthy keys first, so if the first 5 all fail (most
     # commonly today's-TPD-exhaustion, which no amount of retrying fixes),
     # continuing through the rest just burns minutes before Gemini fallback.
     for i, key in enumerate(keys[:5]):
+        tried_keys.add(key)
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
             key, "qwen/qwen3.6-27b",
@@ -1747,7 +1758,7 @@ async def _gen_groq(img, topic, count):
             parsed = _parse_mcq_json(txt)
             if parsed:
                 groq_key_rotator.mark_healthy(key)
-                return parsed
+                return parsed, tried_keys
             record_empty_parse("groq")
             key_errors.append(f"key#{i+1}: HTTP {status} but JSON parse যোগ্য কোনো MCQ পাওয়া যায়নি")
             continue
@@ -1779,7 +1790,7 @@ async def _gen_groq(img, topic, count):
                     parsed2 = _parse_mcq_json(txt2)
                     if parsed2:
                         groq_key_rotator.mark_healthy(key)
-                        return parsed2
+                        return parsed2, tried_keys
                     record_empty_parse("groq")
                 key_errors.append(f"key#{i+1}: 413 even after shrink (status={status2})")
                 _FAILURE_COUNTS["groq"]["payload_too_large_413"] += 1
@@ -1813,7 +1824,7 @@ async def _gen_groq(img, topic, count):
         key_errors.append(f"key#{i+1}: {reason}")
         _FAILURE_COUNTS["groq"]["network" if status == 0 else "other"] += 1
     _LAST_GROQ_ERROR["reason"] = f"Groq সব {len(keys)}টি key-তেই fail করেছে — [" + "; ".join(key_errors) + "]"
-    return []
+    return [], tried_keys
 
 _generic_exhausted_day: Dict[str, str] = {}   # "label:key" -> 'YYYY-MM-DD' (BD)
 _generic_exhausted_flag: Dict[str, bool] = {}
@@ -2583,7 +2594,7 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
     (max 2 extra attempts) — no mandatory per-page verify/repair call.
     """
     async with _MCQ_PROCESSING_QUEUE_LOCK:
-        out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
+        out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
         out = _cap_mcq_options(out, 4)
         out = _validate_mcq_structure(out)
         out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
@@ -2597,11 +2608,17 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None):
 
         # AtlasBot-style count-enforcement retry loop — up to 2 extra attempts
         # if the page came back thin, instead of a mandatory verify call.
+        # exclude_groq_keys accumulates across attempts so a thin-page retry
+        # never re-tries a Groq key already tried in an earlier attempt on
+        # this SAME page — without this, a 3-attempt page could touch up to
+        # 15 key-slots (3 attempts x 5-key cap) even though there are only
+        # 12 keys total, effectively burning every key at least once per page.
         attempts = 0
         while len(out) < _rng_min and attempts < 2:
             attempts += 1
             logger.info(f"[MCQGen] page {page_num}: only {len(out)} MCQs (attempt {attempts}) — retrying for more")
-            retry_out = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count)
+            retry_out, retry_tried = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=tried_groq_keys)
+            tried_groq_keys = tried_groq_keys | retry_tried
             retry_out = _cap_mcq_options(retry_out, 4)
             retry_out = _validate_mcq_structure(retry_out)
             retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
@@ -2986,7 +3003,7 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
     return mcqs
 
 
-async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
+async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None):
     # Gemini is the TRUE primary now — tried first, alone (no 8k token cap
     # like Groq has). Groq is only invoked if Gemini fails or comes back
     # empty (sequential, not raced), so Gemini's result is used whenever
@@ -3008,23 +3025,23 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
         _track_provider_use("gemini", page_num)
         for _m in gemini_out:
             _m.setdefault("_provider", "Gemini")
-        return gemini_out
+        return gemini_out, set()
 
     logger.warning(f"[AI-ROT] gemini empty (page {page_num}); trying groq")
     try:
-        groq_out = await _gen_groq(img, topic, mcq_count)
+        groq_out, groq_tried = await _gen_groq(img, topic, mcq_count, exclude_keys=exclude_groq_keys)
     except Exception as e:
         _LAST_GROQ_ERROR["reason"] = f"{type(e).__name__}: {e}"
         classify_ai_error(e, "groq", page_num)
         logger.warning(f"[AI-ROT] groq failed (page {page_num}): {e}")
-        groq_out = []
+        groq_out, groq_tried = [], set()
 
     if groq_out:
         logger.info(f"[AI-ROT] page {page_num} satisfied by provider=groq (fallback)")
         _track_provider_use("groq", page_num)
         for _m in groq_out:
             _m.setdefault("_provider", "Groq")
-        return groq_out
+        return groq_out, groq_tried
 
     logger.warning(f"[AI-ROT] gemini+groq both empty (page {page_num}); rotating to fallbacks")
 
@@ -3041,7 +3058,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
                 _track_provider_use(prov, page_num)
                 for _m in out:
                     _m.setdefault("_provider", prov.title())
-                return out
+                return out, groq_tried
             fallback_errors.append(f"{prov}: খালি ফলাফল")
             record_empty_parse("fallback")
         except Exception as e:
@@ -3052,7 +3069,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None):
 
     _LAST_FALLBACK_ERROR["reason"] = "; ".join(fallback_errors) if fallback_errors else "কোনো fallback provider configure করা নেই"
     logger.error(f"[AI-ROT] all providers exhausted for page {page_num}")
-    return []
+    return [], groq_tried
 
 
 def _get_last_generation_error() -> str:
