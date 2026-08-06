@@ -1345,6 +1345,12 @@ def _tf_validate_and_filter(mcqs: list) -> list:
             q = m.get("question") or ""
             if not any(pat in q for pat in _TF_QUESTION_PATTERNS):
                 dropped_pattern += 1
+                if dropped_pattern == 1:
+                    # Diagnostic: log one sample question verbatim so a
+                    # pattern-mismatch cause (spacing, punctuation, question
+                    # mark variant, markdown, etc.) is visible in logs
+                    # instead of just a silent drop count.
+                    logger.warning(f"[TFValidate] sample off-pattern question (repr): {q!r}")
                 continue
             exp = m.get("explanation") or ""
             # Prompt requires per-option coverage (4 options addressed) --
