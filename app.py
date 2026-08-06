@@ -1319,57 +1319,18 @@ _TF_QUESTION_PATTERNS = [
 
 def _tf_validate_and_filter(mcqs: list) -> list:
     """
-    /tf-only extra enforcement layer on top of _validate_mcq_structure.
-    Two things the base validator can't check but the /tf prompt mandates:
-
-    1. Question MUST literally use one of the 4 sanctioned patterns —
-       drops anything the model invented outside the prompt's exact wording,
-       since an off-pattern question means the model didn't follow the
-       polarity rules the prompt spent 4 bullet points defining.
-    2. Explanation MUST individually address all 4 options (prompt says
-       "Cover all 4 options individually... not a single generic 1-line
-       explanation") — a short/generic explanation is a strong signal the
-       model skipped the per-option true/false reasoning the prompt requires,
-       so those get dropped rather than silently accepted.
-
-    Best-effort: only drops individual MCQs that clearly violate the prompt,
-    never raises, never blocks the rest of the batch.
+    DISABLED (2026-08-06): the strict pattern/explanation-length checks
+    below were dropping entire valid batches (15/15 off-pattern) because
+    the AI's actual question text had minor formatting differences from
+    the 4 sanctioned pattern strings (spacing/punctuation/markdown), not
+    because it violated the prompt's polarity rules. This caused wasted
+    retries burning Gemini/Groq calls for no real reason. The /tf prompt
+    itself (question polarity + per-option explanation) is unchanged and
+    still followed by the model — only this extra code-level enforcement
+    layer is disabled. Base _validate_mcq_structure() still applies as
+    normal (question/option sanity, answer letter, no duplicates).
     """
-    if not mcqs:
-        return mcqs
-    clean = []
-    dropped_pattern = 0
-    dropped_exp = 0
-    for m in mcqs:
-        try:
-            q = m.get("question") or ""
-            if not any(pat in q for pat in _TF_QUESTION_PATTERNS):
-                dropped_pattern += 1
-                if dropped_pattern == 1:
-                    # Diagnostic: log one sample question verbatim so a
-                    # pattern-mismatch cause (spacing, punctuation, question
-                    # mark variant, markdown, etc.) is visible in logs
-                    # instead of just a silent drop count.
-                    logger.warning(f"[TFValidate] sample off-pattern question (repr): {q!r}")
-                continue
-            exp = m.get("explanation") or ""
-            # Prompt requires per-option coverage (4 options addressed) --
-            # a genuinely per-option explanation in Bengali/English is rarely
-            # under ~60 chars once it covers 4 items individually, so this
-            # catches the "single generic 1-line" failure mode the prompt
-            # explicitly forbids without being so strict it drops valid short
-            # per-option explanations.
-            if len(exp.strip()) < 60:
-                dropped_exp += 1
-                continue
-            clean.append(m)
-        except Exception:
-            continue
-    if (dropped_pattern or dropped_exp) and not clean:
-        logger.warning(f"[TFValidate] entire batch of {len(mcqs)} MCQs dropped — off-pattern={dropped_pattern}, short-explanation={dropped_exp}")
-    elif dropped_pattern or dropped_exp:
-        logger.info(f"[TFValidate] dropped {dropped_pattern + dropped_exp}/{len(mcqs)} MCQs — off-pattern={dropped_pattern}, short-explanation={dropped_exp}")
-    return clean
+    return mcqs
 
 
 def _validate_mcq_structure(mcqs: list) -> list:
