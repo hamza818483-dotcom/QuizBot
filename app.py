@@ -8558,8 +8558,6 @@ async def _process_pdf_pages_inner(
     all_mcqs_csv = []
     all_mcqs_raw = []
     first_image_msg_id = None
-    _prefetch_task = None
-    _prefetch_idx = None
 
     async def _gen_with_retry(img_, page_num_):
         """
@@ -8590,16 +8588,17 @@ async def _process_pdf_pages_inner(
         """
         last_mcqs = []
         last_error = ""
-        # NOTE: no exclude_groq_keys accumulation here (unlike the
-        # pdf_generate_all_pages -c-less path) — this path prefetches the
-        # NEXT page's _gen_with_retry concurrently with the current page's
-        # poll-sending (see _spawn_task below), so two _gen_with_retry calls
-        # can genuinely run in parallel. The tried-keys side-channel
-        # (_LAST_TRIED_GROQ_KEYS) is a single global and would race between
-        # the two concurrent calls, so it's intentionally not used here.
+        # Now safe to accumulate: prefetch/overlap was removed (pages are
+        # strictly serial in this function now), so this is never called
+        # concurrently with another _gen_with_retry — no race on the
+        # _LAST_TRIED_GROQ_KEYS side-channel. Carrying tried keys forward
+        # across all 4 Stage-1 attempts means a stubborn empty page doesn't
+        # get a fresh 5-key Groq budget every attempt.
+        accumulated_tried_keys = set()
         for _pg_attempt in range(4):
             try:
-                _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count)
+                _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count, exclude_groq_keys=accumulated_tried_keys)
+                accumulated_tried_keys = accumulated_tried_keys | set(_LAST_TRIED_GROQ_KEYS.get("keys") or set())
                 if _mcqs:
                     return _mcqs, None
                 last_mcqs = _mcqs
@@ -8632,14 +8631,12 @@ async def _process_pdf_pages_inner(
 
         try:
             if not skip_generate:
-                # Speed fix: if the next page's generation was already
-                # prefetched (started while this page's polls were being
-                # sent), use that result instead of generating again.
-                if _prefetch_task is not None and _prefetch_idx == idx:
-                    mcqs, gen_error = await _prefetch_task
-                else:
-                    mcqs, gen_error = await _gen_with_retry(img, page_num)
-                _prefetch_task = None
+                # Strictly serial by user request: each page's generation
+                # AND sending (polls or image+caption) must fully finish
+                # before the next page's generation even starts — no
+                # prefetch/overlap across pages, in ANY mode (/pdf, /qbm,
+                # /onu, /tf all funnel through this same function).
+                mcqs, gen_error = await _gen_with_retry(img, page_num)
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
@@ -8685,15 +8682,6 @@ async def _process_pdf_pages_inner(
 
                 # repair already ran inside generate_mcq_from_image() — a
                 # second call here was pure redundant duplicate work on every page
-
-                # Speed fix: start generating the NEXT page's MCQs now, in the
-                # background, while THIS page's polls are being sent below
-                # (poll-sending is rate-limited/slow — generation can overlap
-                # with it instead of waiting its turn after).
-                if not skip_generate and idx + 1 < len(pages):
-                    _next_page_num, _next_img = pages[idx + 1]
-                    _prefetch_task = _spawn_task(_gen_with_retry(_next_img, _next_page_num))
-                    _prefetch_idx = idx + 1
 
                 poll_links = []
                 first_poll_link = ""
