@@ -8578,9 +8578,25 @@ async def _process_pdf_pages_inner(
         even then it's clearly flagged (⚠️) and the owner is alerted with
         the EXACT reason (last exception / "all providers returned empty"),
         never a vague "failed" with no cause.
+
+        Groq-key economy: accumulated_tried_keys carries forward across all
+        4 Stage-1 attempts (via _LAST_TRIED_GROQ_KEYS side-channel) so a
+        thin/empty page doesn't get a fresh 5-key Groq budget on every
+        attempt — without this, one stubborn empty page could touch the
+        same handful of already-cooling keys up to ~60 times (4 outer
+        attempts x up to 3 inner retries x 5-key cap each) before falling
+        through to the relaxed pass, needlessly starving other pages/users
+        of those keys in the meantime.
         """
         last_mcqs = []
         last_error = ""
+        # NOTE: no exclude_groq_keys accumulation here (unlike the
+        # pdf_generate_all_pages -c-less path) — this path prefetches the
+        # NEXT page's _gen_with_retry concurrently with the current page's
+        # poll-sending (see _spawn_task below), so two _gen_with_retry calls
+        # can genuinely run in parallel. The tried-keys side-channel
+        # (_LAST_TRIED_GROQ_KEYS) is a single global and would race between
+        # the two concurrent calls, so it's intentionally not used here.
         for _pg_attempt in range(4):
             try:
                 _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count)
