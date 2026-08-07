@@ -1030,16 +1030,21 @@ ATLAS_PROMPT_02 = """MCQ TYPE: True/False Style
 async def _generate_tf_mcq_atlas(img, page_num: int) -> list:
     """Direct Gemini call using AtlasBot's exact PROMPT_02 — bypasses the
     topic-templated pipeline entirely so the prompt's rules reach the model
-    unmodified, exactly like AtlasBot's own generate_mcq_from_image(img, 'prompt_2')."""
+    unmodified, exactly like AtlasBot's own generate_mcq_from_image(img, 'prompt_2').
+
+    2026-08-07: gemini-2.5-flash started 404ing ("no longer available to new
+    users") on top of daily-quota 429s, silently killing every /tf page since
+    this function had no fallback. Switched primary model to gemini-3.6-flash
+    and added a Groq vision fallback (via _gen_groq, same one used by the
+    main pipeline) so a Gemini-side outage doesn't zero out the whole run.
+    """
     from pdf_handler import image_to_base64, key_rotator, _parse_mcq_json
     from google import genai as gai
     from google.genai import types as gtypes
 
     _ordered = key_rotator.ordered_keys()
-    if not _ordered:
-        return []
-    img_b64 = image_to_base64(img)
-    max_retries = min(len(_ordered), 3)
+    img_b64 = image_to_base64(img) if _ordered else None
+    max_retries = min(len(_ordered), 3) if _ordered else 0
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)]
         try:
@@ -1047,7 +1052,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int) -> list:
 
             def _call():
                 return client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.6-flash",
                     contents=[
                         gtypes.Part.from_text(text=ATLAS_PROMPT_02),
                         gtypes.Part.from_bytes(
@@ -1075,6 +1080,18 @@ async def _generate_tf_mcq_atlas(img, page_num: int) -> list:
             except Exception:
                 pass
             continue
+
+    logger.warning(f"[/tf] page {page_num} gemini exhausted; trying groq fallback")
+    try:
+        text = await _gen_groq_raw_text(img, ATLAS_PROMPT_02)
+        if text:
+            mcqs = _parse_mcq_json(text)
+            if mcqs:
+                logger.info(f"[/tf] page {page_num} satisfied by provider=groq (fallback)")
+                return mcqs
+    except Exception as e:
+        logger.warning(f"[/tf] page {page_num} groq fallback failed: {e}")
+
     return []
 
 
