@@ -994,7 +994,7 @@ def _build_bangla_prompt(topic: str) -> str:
 # ============================================================
 ATLAS_PROMPT_02 = """MCQ TYPE: True/False Style
 
-🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ): Source এ যত তথ্য আছে তার ভিত্তিতে গড়ে ১০ থেকে ২০ টি MCQ বানাতে হবে। কখনোই মাত্র ১-২টি MCQ বানিয়ে থামবে না। তথ্য কম থাকলে ১০-১২টি, তথ্য বেশি থাকলে ১৫-২০টি — একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করো।
+🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ, HARD RULE): কমপক্ষে ৮টি, সর্বোচ্চ ২০টি MCQ বানাতে হবে — ৮টির কমে কখনোই থামবে না। Source page-এ যত তথ্য/লাইন/পয়েন্ট আছে তার প্রতিটি অংশ ব্যবহার করে MCQ বানাও, কোনো তথ্য বাদ দেওয়া যাবে না। তথ্য কম মনে হলেও একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করে ৮-এর নিচে না যাওয়া নিশ্চিত করো। তথ্য বেশি থাকলে ১৫-২০টি পর্যন্ত বানাও।
 
 💥প্রশ্নের ধরন (randomly mix করো, একঘেয়ে নয়):
 🔴 প্রতিটা প্যাটার্নে answer কোনটা হবে তা নিচে EXACT বলা আছে — ভুল ম্যাপ করা যাবে না:
@@ -1027,16 +1027,17 @@ ATLAS_PROMPT_02 = """MCQ TYPE: True/False Style
 -answer must be one of A/B/C/D (letter)"""
 
 
-async def _generate_tf_mcq_atlas(img, page_num: int) -> list:
+async def _generate_tf_mcq_atlas(img, page_num: int) -> tuple:
     """Direct Gemini call using AtlasBot's exact PROMPT_02 — bypasses the
     topic-templated pipeline entirely so the prompt's rules reach the model
     unmodified, exactly like AtlasBot's own generate_mcq_from_image(img, 'prompt_2').
 
-    2026-08-07: gemini-2.5-flash started 404ing ("no longer available to new
-    users") on top of daily-quota 429s, silently killing every /tf page since
-    this function had no fallback. Switched primary model to gemini-3.6-flash
-    and added a Groq vision fallback (via _gen_groq, same one used by the
-    main pipeline) so a Gemini-side outage doesn't zero out the whole run.
+    Returns (mcqs, provider_name) so the caller can report which model
+    (Gemini/Groq) actually produced each page — 2026-08-07: gemini-2.5-flash
+    started 404ing ("no longer available to new users") on top of daily-quota
+    429s, silently killing every /tf page since this function had no fallback.
+    Switched primary model to gemini-3.6-flash and added a Groq vision
+    fallback so a Gemini-side outage doesn't zero out the whole run.
     """
     from pdf_handler import image_to_base64, key_rotator, _parse_mcq_json
     from google import genai as gai
@@ -1072,7 +1073,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int) -> list:
                 continue
             if mcqs:
                 key_rotator.mark_healthy(key)
-                return mcqs
+                return mcqs, "Gemini"
         except Exception as e:
             logger.warning(f"[/tf] page {page_num} gen failed (attempt {attempt+1}, key {key[:12]}...): {e}")
             try:
@@ -1088,9 +1089,11 @@ async def _generate_tf_mcq_atlas(img, page_num: int) -> list:
             mcqs = _parse_mcq_json(text)
             if mcqs:
                 logger.info(f"[/tf] page {page_num} satisfied by provider=groq (fallback)")
-                return mcqs
+                return mcqs, "Groq"
     except Exception as e:
         logger.warning(f"[/tf] page {page_num} groq fallback failed: {e}")
+
+    return [], None
 
     return []
 
@@ -8117,7 +8120,7 @@ async def handle_tf(msg: dict):
         ok_count = 0
         fail_count = 0
         all_mcqs_for_csv = []  # collect every page's MCQs to build one final CSV
-        page_stats = []  # (page_no, mcq_count_or_None, seconds_taken) — live dashboard rows
+        page_stats = []  # (page_no, mcq_count_or_None, seconds_taken, provider_or_None) — live dashboard rows
         overall_start = time.monotonic()
         _last_update = [0.0]
 
@@ -8129,11 +8132,12 @@ async def handle_tf(msg: dict):
             lines = [f"⏳ Processing... ({len(page_stats)}/{total_pages} page)",
                       f"🎯 Topic: {topic}",
                       f"⏱️ Elapsed: {_fmt_secs(elapsed)}", "",
-                      "📄 Page | MCQ | Time"]
-            for p_no, m_count, secs in page_stats[-15:]:
+                      "📄 Page | MCQ | Model | Time"]
+            for p_no, m_count, secs, prov in page_stats[-15:]:
                 status_icon = "✅" if m_count is not None else "❌"
                 mcq_str = str(m_count) if m_count is not None else "fail"
-                lines.append(f"{status_icon} {p_no} | {mcq_str} | {_fmt_secs(secs)}")
+                prov_str = prov if prov else "-"
+                lines.append(f"{status_icon} {p_no} | {mcq_str} | {prov_str} | {_fmt_secs(secs)}")
             if len(page_stats) > 15:
                 lines.insert(4, f"... ({len(page_stats) - 15} আগের row লুকানো)")
             return "\n".join(lines)
@@ -8162,10 +8166,11 @@ async def handle_tf(msg: dict):
             # Retry each page up to 3 times before giving up — a page should
             # essentially never end up empty in the final CSV.
             mcqs = []
+            provider_used = None
             last_err = None
             for attempt in range(1, 4):
                 try:
-                    mcqs = await _generate_tf_mcq_atlas(page_img, page_no)
+                    mcqs, provider_used = await _generate_tf_mcq_atlas(page_img, page_no)
                     mcqs = _cap_mcq_options(mcqs, 4)
                     mcqs = _validate_mcq_structure(mcqs)
                     mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
@@ -8180,7 +8185,7 @@ async def handle_tf(msg: dict):
 
             if not mcqs:
                 fail_count += 1
-                page_stats.append((page_no, None, time.monotonic() - page_start))
+                page_stats.append((page_no, None, time.monotonic() - page_start, None))
                 logger.error(f"[/tf] page {page_no} failed after 3 attempts: {last_err}")
                 continue
 
@@ -8189,17 +8194,19 @@ async def handle_tf(msg: dict):
 
             all_mcqs_for_csv.extend(mcqs)
             ok_count += 1
-            page_stats.append((page_no, len(mcqs), time.monotonic() - page_start))
+            page_stats.append((page_no, len(mcqs), time.monotonic() - page_start, provider_used))
 
         total_elapsed = time.monotonic() - overall_start
 
-        # Permanent per-page breakdown — every page's MCQ count, not just the
-        # last-15-rows live view, so it survives after processing finishes.
+        # Permanent per-page breakdown — every page's MCQ count and which AI
+        # provider (Gemini/Groq) generated it, not just the last-15-rows live
+        # view, so it survives after processing finishes.
         breakdown_lines = ["📋 Page-wise MCQ breakdown:"]
-        for p_no, m_count, secs in page_stats:
+        for p_no, m_count, secs, prov in page_stats:
             icon = "✅" if m_count is not None else "❌"
             mcq_str = str(m_count) if m_count is not None else "fail"
-            breakdown_lines.append(f"{icon} Page {p_no}: {mcq_str} MCQ ({_fmt_secs(secs)})")
+            prov_str = f" [{prov}]" if prov else ""
+            breakdown_lines.append(f"{icon} Page {p_no}: {mcq_str} MCQ{prov_str} ({_fmt_secs(secs)})")
         breakdown_text = "\n".join(breakdown_lines)
 
         if status_msg_id:
