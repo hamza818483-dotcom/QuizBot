@@ -674,12 +674,12 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
         else:
             est_count = 25  # default full-page mode target ceiling
         # Output tokens per MCQ — MUST match _post_openai_compat's
-        # dynamic_max_tokens formula exactly (max(1200, min(4500, count*150+400))),
+        # dynamic_max_tokens formula exactly (max(900, min(4500, count*180+300))),
         # since that's the actual max_tokens value sent to Groq and counted
         # against the 8000 TPM budget. A mismatch here means this sizer
         # underestimates the real reserved output, silently overshooting
         # the TPM limit regardless of how small the image gets.
-        est_output_tokens = max(900, min(3000, int(est_count) * 110 + 300))
+        est_output_tokens = max(900, min(4500, int(est_count) * 180 + 300))
         TOKEN_BUDGET = max(300, 8000 - PROMPT_TOKENS - est_output_tokens - SAFETY_MARGIN)
         # qwen3.6-27b vision tokenization is roughly proportional to
         # (width/28)*(height/28) patches + a fixed base overhead.
@@ -1099,7 +1099,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
 
     logger.warning(f"[/tf] page {page_num} gemini exhausted; trying groq fallback")
     try:
-        text = await _gen_groq_raw_text(img, prompt_text)
+        text = await _gen_groq_raw_text(img, prompt_text, mcq_count_hint=(count_max or 20))
         if text:
             mcqs = _parse_mcq_json(text)
             if mcqs:
@@ -1528,17 +1528,20 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
     if not key:
         return "", 0
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    # ekta MCQ (bangla question + 4 option + explanation) approx 120-180 token
-    # output-e lage. mcq_count_hint na dile (default full-page mode, upto 35 MCQ)
-    # safe-max dhore nেওয়া hoy. Minimum 1536, maximum 6000 (TPM 8000-er onek
-    # niche, image input-er jonno margin rekhe) — kono obosthaei flat 8192 na।
+    # ekta MCQ (bangla question + 4-5 option + explanation) approx 150-200
+    # token output-e lage — /tf-er STRICT explanation rule (4-option-er
+    # protita alada bhabe likhte hoy) normal MCQ-er tulonay onek beshi token
+    # kheye fele, tai 110/MCQ estimate onek kom chilo (Groq output truncate
+    # hoye "Unterminated string" JSON parse error dito 2026-08-07-e). Ekhon
+    # 180/MCQ + cap 4500 (age 3000 chilo)। mcq_count_hint na dile (default
+    # full-page mode, upto 35 MCQ) safe-max dhore neওয়া hoy. Minimum 900.
     if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
         est_count = mcq_count_hint[1]  # range hole upper-bound dhore safe thaka
     elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
         est_count = mcq_count_hint
     else:
         est_count = 25  # aligned with _img_to_data_url_groq's default
-    dynamic_max_tokens = max(900, min(3000, int(est_count) * 110 + 300))
+    dynamic_max_tokens = max(900, min(4500, int(est_count) * 180 + 300))
     payload = {
         "model": model,
         "messages": [{
@@ -2233,7 +2236,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
         logger.warning(f"[GeminiVerify] failed: {e}")
         return ""
 
-async def _gen_groq_raw_text(img, prompt: str) -> str:
+async def _gen_groq_raw_text(img, prompt: str, mcq_count_hint=None) -> str:
     keys = groq_key_rotator.ordered_keys()
     data_url = _img_to_data_url_groq(img, prompt_len_hint=prompt) if keys else None
     if not keys:
@@ -2245,7 +2248,7 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
             txt, status = await _post_openai_compat(
                 "https://api.groq.com/openai/v1/chat/completions",
                 key, "qwen/qwen3.6-27b",
-                data_url, prompt
+                data_url, prompt, mcq_count_hint=mcq_count_hint
             )
             if txt:
                 groq_key_rotator.mark_healthy(key)
@@ -2272,7 +2275,7 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
         if not fb_data_url:
             break
         for key in rotator.ordered_keys():
-            txt, status = await _post_openai_compat(url, key, model, fb_data_url, prompt)
+            txt, status = await _post_openai_compat(url, key, model, fb_data_url, prompt, mcq_count_hint=mcq_count_hint)
             if txt:
                 rotator.mark_healthy(key)
                 logger.info(f"[GroqVerify] fallback provider {rotator.label} succeeded")
