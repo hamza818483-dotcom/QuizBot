@@ -666,7 +666,14 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             # Measured from the compacted static QBM_EXTRACT_PROMPT_DEFAULT
             # (~8k chars / 3.5) + margin. Only accurate for that fixed prompt.
             PROMPT_TOKENS = 2400
-        SAFETY_MARGIN = 2200  # was 800 — still saw live 413s (Requested 8590/8000) and 429 collisions with prior-call usage (Used 6051/7444 on the same key within the 60s window). Bigger margin -> requests target ~3500-4000/8000, leaving real headroom for rotator collisions.
+        SAFETY_MARGIN = 1500  # 2026-08-07: 2200 + 4500-cap output left almost no
+        # image budget for /tf's long Bangla prompt (~1850 tokens with the
+        # min/max hint prefix) — reserved total hit 7943/8000, so the image
+        # got squeezed to the 300-token floor and requests still landed at
+        # ~7500+/8000, causing live 429 TPM errors. Lowered output cap
+        # (150/MCQ, max 3500) + this smaller margin restores real headroom
+        # (~1350 tokens for the image) while still leaving buffer for
+        # rotator-collision retries.
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
@@ -679,7 +686,7 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
         # against the 8000 TPM budget. A mismatch here means this sizer
         # underestimates the real reserved output, silently overshooting
         # the TPM limit regardless of how small the image gets.
-        est_output_tokens = max(900, min(4500, int(est_count) * 180 + 300))
+        est_output_tokens = max(900, min(3800, int(est_count) * 175 + 300))
         TOKEN_BUDGET = max(300, 8000 - PROMPT_TOKENS - est_output_tokens - SAFETY_MARGIN)
         # qwen3.6-27b vision tokenization is roughly proportional to
         # (width/28)*(height/28) patches + a fixed base overhead.
@@ -1050,13 +1057,19 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
     prompt_text = ATLAS_PROMPT_02
     if count_min:
         _max = count_max or 20
-        prompt_text = (
-            f"🔴 সংখ্যা (HARD RULE, সর্বোচ্চ গুরুত্বপূর্ণ): এই page থেকে অবশ্যই কমপক্ষে "
-            f"{count_min}টি, সর্বোচ্চ {_max}টি MCQ বানাতে হবে — {count_min}-এর কমে "
-            f"কখনোই থামবে না। Source-এর প্রতিটি তথ্য/লাইন ব্যবহার করো, দরকার হলে একই "
-            f"তথ্য ভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করে {count_min}-এ পৌঁছাও।\n\n"
-            + ATLAS_PROMPT_02
+        # Replace the prompt's own default count-rule line instead of
+        # prepending a whole new block — prepending added ~250 extra chars,
+        # which combined with the /tf prompt's already-long Bangla text
+        # pushed PROMPT_TOKENS + output-cap + safety-margin to ~7943/8000,
+        # leaving almost no room for the image and causing Groq 429s
+        # (TPM/per-request-too-large) on 2026-08-07. Replacing in place
+        # keeps total prompt length roughly unchanged.
+        _old_rule_line = ATLAS_PROMPT_02.split("\n\n")[0]
+        _new_rule_line = (
+            f"🔴 সংখ্যা (HARD RULE): কমপক্ষে {count_min}টি, সর্বোচ্চ {_max}টি MCQ — "
+            f"{count_min}-এর কমে থামবে না। Source-এর প্রতিটি তথ্য ব্যবহার করো।"
         )
+        prompt_text = ATLAS_PROMPT_02.replace(_old_rule_line, _new_rule_line, 1)
 
     _ordered = key_rotator.ordered_keys()
     img_b64 = image_to_base64(img) if _ordered else None
@@ -1541,7 +1554,7 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
         est_count = mcq_count_hint
     else:
         est_count = 25  # aligned with _img_to_data_url_groq's default
-    dynamic_max_tokens = max(900, min(4500, int(est_count) * 180 + 300))
+    dynamic_max_tokens = max(900, min(3800, int(est_count) * 175 + 300))
     payload = {
         "model": model,
         "messages": [{
