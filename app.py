@@ -994,7 +994,7 @@ def _build_bangla_prompt(topic: str) -> str:
 # ============================================================
 ATLAS_PROMPT_02 = """MCQ TYPE: True/False Style
 
-🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ, HARD RULE): কমপক্ষে ৮টি, সর্বোচ্চ ২০টি MCQ বানাতে হবে — ৮টির কমে কখনোই থামবে না। Source page-এ যত তথ্য/লাইন/পয়েন্ট আছে তার প্রতিটি অংশ ব্যবহার করে MCQ বানাও, কোনো তথ্য বাদ দেওয়া যাবে না। তথ্য কম মনে হলেও একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করে ৮-এর নিচে না যাওয়া নিশ্চিত করো। তথ্য বেশি থাকলে ১৫-২০টি পর্যন্ত বানাও।
+🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ, HARD RULE): কমপক্ষে ৭টি, সর্বোচ্চ ২০টি MCQ বানাতে হবে — ৭টির কমে কখনোই থামবে না। Source page-এ যত তথ্য/লাইন/পয়েন্ট আছে তার প্রতিটি অংশ ব্যবহার করে MCQ বানাও, কোনো তথ্য বাদ দেওয়া যাবে না। তথ্য কম মনে হলেও একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করে ৭-এর নিচে না যাওয়া নিশ্চিত করো। তথ্য বেশি থাকলে ১৫-২০টি পর্যন্ত বানাও।
 
 💥প্রশ্নের ধরন (randomly mix করো, একঘেয়ে নয়):
 🔴 প্রতিটা প্যাটার্নে answer কোনটা হবে তা নিচে EXACT বলা আছে — ভুল ম্যাপ করা যাবে না:
@@ -1027,7 +1027,7 @@ ATLAS_PROMPT_02 = """MCQ TYPE: True/False Style
 -answer must be one of A/B/C/D (letter)"""
 
 
-async def _generate_tf_mcq_atlas(img, page_num: int) -> tuple:
+async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, count_max: int = None) -> tuple:
     """Direct Gemini call using AtlasBot's exact PROMPT_02 — bypasses the
     topic-templated pipeline entirely so the prompt's rules reach the model
     unmodified, exactly like AtlasBot's own generate_mcq_from_image(img, 'prompt_2').
@@ -1038,10 +1038,25 @@ async def _generate_tf_mcq_atlas(img, page_num: int) -> tuple:
     429s, silently killing every /tf page since this function had no fallback.
     Switched primary model to gemini-3.6-flash and added a Groq vision
     fallback so a Gemini-side outage doesn't zero out the whole run.
+
+    count_min/count_max come from the user's [N-M] bracket (e.g. /tf [8-20]);
+    when given, they override the prompt's own default 8-20 line so the model
+    targets the exact range the user asked for instead of picking its own count.
     """
     from pdf_handler import image_to_base64, key_rotator, _parse_mcq_json
     from google import genai as gai
     from google.genai import types as gtypes
+
+    prompt_text = ATLAS_PROMPT_02
+    if count_min:
+        _max = count_max or 20
+        prompt_text = (
+            f"🔴 সংখ্যা (HARD RULE, সর্বোচ্চ গুরুত্বপূর্ণ): এই page থেকে অবশ্যই কমপক্ষে "
+            f"{count_min}টি, সর্বোচ্চ {_max}টি MCQ বানাতে হবে — {count_min}-এর কমে "
+            f"কখনোই থামবে না। Source-এর প্রতিটি তথ্য/লাইন ব্যবহার করো, দরকার হলে একই "
+            f"তথ্য ভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করে {count_min}-এ পৌঁছাও।\n\n"
+            + ATLAS_PROMPT_02
+        )
 
     _ordered = key_rotator.ordered_keys()
     img_b64 = image_to_base64(img) if _ordered else None
@@ -1055,7 +1070,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int) -> tuple:
                 return client.models.generate_content(
                     model="gemini-3.6-flash",
                     contents=[
-                        gtypes.Part.from_text(text=ATLAS_PROMPT_02),
+                        gtypes.Part.from_text(text=prompt_text),
                         gtypes.Part.from_bytes(
                             data=base64.b64decode(img_b64),
                             mime_type="image/jpeg"
@@ -1084,7 +1099,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int) -> tuple:
 
     logger.warning(f"[/tf] page {page_num} gemini exhausted; trying groq fallback")
     try:
-        text = await _gen_groq_raw_text(img, ATLAS_PROMPT_02)
+        text = await _gen_groq_raw_text(img, prompt_text)
         if text:
             mcqs = _parse_mcq_json(text)
             if mcqs:
@@ -8093,6 +8108,11 @@ async def handle_tf(msg: dict):
     target_chat_id = params["channel_id"] or chat_id
     thread_id = params.get("thread_id")
     per_page_count = params["mcq_count"]
+    # [N-M] রেঞ্জ ব্র্যাকেট এতদিন /tf-এ silently ignore হচ্ছিল (শুধু অন্য
+    # command handler-গুলোতে mcq_count_min/max ব্যবহার হতো) — এখন এখানেও min
+    # enforce করা হচ্ছে যাতে user একটা রেঞ্জ দিলে সেটা মানা হয়।
+    per_page_min = params.get("mcq_count_min") or 7
+    per_page_max = params.get("mcq_count_max")
 
     document = reply["document"]
     file_id = document["file_id"]
@@ -8164,16 +8184,23 @@ async def handle_tf(msg: dict):
                     pass
 
             # Retry each page up to 3 times before giving up — a page should
-            # essentially never end up empty in the final CSV.
+            # essentially never end up empty in the final CSV. If a
+            # [min-max] range was given, a result under the minimum also
+            # triggers a retry instead of being silently accepted.
             mcqs = []
             provider_used = None
             last_err = None
             for attempt in range(1, 4):
                 try:
-                    mcqs, provider_used = await _generate_tf_mcq_atlas(page_img, page_no)
+                    mcqs, provider_used = await _generate_tf_mcq_atlas(page_img, page_no, per_page_min, per_page_max)
                     mcqs = _cap_mcq_options(mcqs, 4)
                     mcqs = _validate_mcq_structure(mcqs)
                     mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
+                    if mcqs and per_page_min and len(mcqs) < per_page_min:
+                        last_err = f"only {len(mcqs)} MCQ, need >= {per_page_min}"
+                        logger.warning(f"[/tf] page {page_no} attempt {attempt}: {last_err}")
+                        if attempt < 3:
+                            continue
                     if mcqs:
                         break
                     last_err = "empty result"
@@ -8189,7 +8216,9 @@ async def handle_tf(msg: dict):
                 logger.error(f"[/tf] page {page_no} failed after 3 attempts: {last_err}")
                 continue
 
-            if per_page_count and per_page_count > 0:
+            if per_page_max and per_page_max > 0:
+                mcqs = mcqs[:per_page_max]
+            elif per_page_count and per_page_count > 0:
                 mcqs = mcqs[:per_page_count]
 
             all_mcqs_for_csv.extend(mcqs)
