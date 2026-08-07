@@ -1047,7 +1047,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int) -> list:
 
             def _call():
                 return client.models.generate_content(
-                    model="gemini-3.6-flash",
+                    model="gemini-2.5-flash",
                     contents=[
                         gtypes.Part.from_text(text=ATLAS_PROMPT_02),
                         gtypes.Part.from_bytes(
@@ -2180,7 +2180,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
 
         def _call():
             return client.models.generate_content(
-                model="gemini-3.6-flash",
+                model="gemini-2.5-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
@@ -3081,7 +3081,7 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
 
 async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None):
     # Groq is the TRUE primary now (2026-08-07: Gemini free-tier daily quota
-    # (20 req/day on gemini-3.6-flash) kept exhausting mid-run and killing
+    # (20 req/day on gemini-2.5-flash) kept exhausting mid-run and killing
     # pagewise generation). Groq is tried first, alone; Gemini is only
     # invoked if Groq fails or comes back empty (sequential, not raced), so
     # Groq's result is used whenever Groq succeeds, with no latency penalty
@@ -10660,7 +10660,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
         def _call(key):
             client = gai.Client(api_key=key)
             return client.models.generate_content(
-                model="gemini-3.6-flash",
+                model="gemini-2.5-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
@@ -11593,7 +11593,7 @@ OUTPUT — ONLY a JSON array, one entry per item above IN ORDER, nothing else:
                     mc["yellow_highlight"] = True
         # pass2 only runs if pass1 actually succeeded (avoids doubling up
         # Gemini calls when the key pool is already rate-limited/exhausted —
-        # gemini-3.6-flash free tier is only 5 RPM/key, so skipping a
+        # gemini-2.5-flash free tier is only 5 RPM/key, so skipping a
         # guaranteed-to-fail second call here matters for staying within
         # budget on multi-page PDFs).
         still_unflagged = [mc for mc in to_check if not mc.get("yellow_highlight")]
@@ -12015,7 +12015,7 @@ Return ONLY the JSON array, nothing else."""
 
                     def _call():
                         return client.models.generate_content(
-                            model="gemini-3.6-flash",
+                            model="gemini-2.5-flash",
                             contents=[
                                 types.Part.from_text(text=prompt),
                                 types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")

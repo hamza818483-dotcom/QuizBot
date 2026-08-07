@@ -760,12 +760,10 @@ async def generate_mcq_from_image(
     # key the same way), drop to the older stable model on the same key
     # before moving to the next key. New models get more 503s in their
     # first weeks of traffic ramp-up.
-    # 2026-08-03 diagnostic (diagnose_gemini.py) confirmed gemini-3.6-flash is
-    # currently ~2.5x slower than gemini-2.5-flash on average, and hit a 429
-    # RESOURCE_EXHAUSTED quota error on one call while 2.5-flash had zero
-    # issues across all tests. Swapping 2.5-flash back to primary; 3.6-flash
-    # stays as fallback in case 2.5-flash itself gets deprecated/unavailable.
-    _GEMINI_MODELS = ["gemini-3.6-flash"]
+    # 2026-08-07: switched to gemini-2.5-flash (from gemini-3.6-flash) per
+    # owner instruction — 2.5-flash has been the more stable/faster option
+    # in prior diagnostics.
+    _GEMINI_MODELS = ["gemini-2.5-flash"]
 
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
@@ -926,7 +924,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
 
             def _call_gemini():
                 return client.models.generate_content(
-                    model="gemini-3.6-flash",
+                    model="gemini-2.5-flash",
                     contents=[types.Part.from_text(text=prompt)]
                 )
 
