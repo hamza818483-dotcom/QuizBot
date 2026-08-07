@@ -2236,6 +2236,10 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
 async def _gen_groq_raw_text(img, prompt: str) -> str:
     keys = groq_key_rotator.ordered_keys()
     data_url = _img_to_data_url_groq(img, prompt_len_hint=prompt) if keys else None
+    if not keys:
+        logger.warning("[GroqVerify] no Groq keys available")
+    elif not data_url:
+        logger.warning("[GroqVerify] image-to-data-url conversion failed")
     if keys and data_url:
         for key in keys:
             txt, status = await _post_openai_compat(
@@ -2249,8 +2253,10 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
             if status == 429:
                 is_tpm_only = _key_429_is_tpm.get(key) is True
                 groq_key_rotator.mark_rate_limited(key, daily_exhausted=not is_tpm_only)
+                logger.warning(f"[GroqVerify] key {key[:12]}... rate-limited (429, daily_exhausted={not is_tpm_only}), trying next key")
             else:
-                logger.warning(f"[GroqVerify] key failed (status={status}), trying next key")
+                logger.warning(f"[GroqVerify] key {key[:12]}... failed (status={status}), trying next key")
+    logger.warning("[GroqVerify] all Groq keys exhausted; trying NVIDIA/OpenRouter/Nemotron/Gemma fallback")
     # All Groq keys exhausted/failing -- rotate through other vision providers
     # instead of silently returning empty (previously killed the whole call).
     for rotator, url, model in (
@@ -2259,6 +2265,9 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
         (nemotron_rotator, "https://integrate.api.nvidia.com/v1/chat/completions", "nvidia/llama-3.1-nemotron-51b-instruct"),
         (gemma_rotator, "https://api.groq.com/openai/v1/chat/completions", "gemma2-9b-it"),
     ):
+        if not rotator.ordered_keys():
+            logger.warning(f"[GroqVerify] {rotator.label} has no keys configured, skipping")
+            continue
         fb_data_url = data_url or _img_to_data_url_groq(img, prompt_len_hint=prompt)
         if not fb_data_url:
             break
@@ -2270,6 +2279,7 @@ async def _gen_groq_raw_text(img, prompt: str) -> str:
                 return txt
             if status == 429:
                 rotator.mark_rate_limited(key)
+    logger.error("[GroqVerify] every fallback provider exhausted, returning empty")
     return ""
 
 _TF_PATTERNS_BN = ("বললে ভুল হবে", "সত্য বললে", "মিথ্যা বললে")
@@ -8270,10 +8280,10 @@ async def handle_tf(msg: dict):
                 import io as _io_tf, csv as _csv_tf
                 csv_buf = _io_tf.StringIO()
                 writer = _csv_tf.writer(csv_buf)
-                writer.writerow(["questions", "option1", "option2", "option3", "option4", "answer", "explanation"])
+                writer.writerow(["questions", "option1", "option2", "option3", "option4", "option5", "answer", "explanation", "type", "section"])
                 ans_map = {0: "1", 1: "2", 2: "3", 3: "4", "A": "1", "B": "2", "C": "3", "D": "4"}
                 for m in all_mcqs_for_csv:
-                    opts = (m.get('options', []) + ["", "", "", ""])[:4]
+                    opts = (m.get('options', []) + ["", "", "", "", ""])[:5]
                     ans = m.get('answer', 0)
                     if isinstance(ans, str):
                         ans_val = ans_map.get(ans.strip().upper(), "1")
@@ -8283,8 +8293,8 @@ async def handle_tf(msg: dict):
                         except (TypeError, ValueError):
                             ans_val = "1"
                     writer.writerow([
-                        m.get('question', ''), opts[0], opts[1], opts[2], opts[3],
-                        ans_val, m.get('explanation', '')
+                        m.get('question', ''), opts[0], opts[1], opts[2], opts[3], opts[4],
+                        ans_val, m.get('explanation', ''), "1", "1"
                     ])
                 csv_bytes = csv_buf.getvalue().encode('utf-8-sig')
                 send_doc_kwargs = {
