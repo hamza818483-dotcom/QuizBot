@@ -2265,6 +2265,9 @@ async def _gen_groq_raw_text(img, prompt: str, mcq_count_hint=None) -> str:
         logger.warning("[GroqVerify] no Groq keys available")
     elif not data_url:
         logger.warning("[GroqVerify] image-to-data-url conversion failed")
+    best_invalid_txt = ""  # longest non-empty-but-unparseable response, kept as
+    # a last-resort fallback so a single key's truncated/malformed JSON
+    # doesn't waste the whole attempt if every other key also fails.
     if keys and data_url:
         for key in keys:
             txt, status = await _post_openai_compat(
@@ -2273,8 +2276,27 @@ async def _gen_groq_raw_text(img, prompt: str, mcq_count_hint=None) -> str:
                 data_url, prompt, mcq_count_hint=mcq_count_hint
             )
             if txt:
-                groq_key_rotator.mark_healthy(key)
-                return txt
+                # 2026-08-07 bug: a key returning HTTP 200 with a non-empty
+                # but truncated/malformed JSON body (e.g. Groq's dynamic
+                # output cap cutting a response mid-string) used to be
+                # treated as success here and returned immediately —
+                # skipping all remaining Groq keys (and the NVIDIA/
+                # OpenRouter/Nemotron/Gemma fallback below) even though 11
+                # of 12 keys were never touched. This burned through the
+                # daily TPD budget on just a handful of /tf pages. FIX:
+                # validate the JSON here before accepting it as a real
+                # success; on failure, keep trying the next key.
+                try:
+                    if _parse_mcq_json(txt):
+                        groq_key_rotator.mark_healthy(key)
+                        return txt
+                    else:
+                        logger.warning(f"[GroqVerify] key {key[:12]}... returned empty MCQ list, trying next key")
+                except Exception as e:
+                    logger.warning(f"[GroqVerify] key {key[:12]}... returned unparseable JSON ({e}), trying next key")
+                    if len(txt) > len(best_invalid_txt):
+                        best_invalid_txt = txt
+                continue
             if status == 429:
                 is_tpm_only = _key_429_is_tpm.get(key) is True
                 groq_key_rotator.mark_rate_limited(key, daily_exhausted=not is_tpm_only)
@@ -2299,11 +2321,23 @@ async def _gen_groq_raw_text(img, prompt: str, mcq_count_hint=None) -> str:
         for key in rotator.ordered_keys():
             txt, status = await _post_openai_compat(url, key, model, fb_data_url, prompt, mcq_count_hint=mcq_count_hint)
             if txt:
-                rotator.mark_healthy(key)
-                logger.info(f"[GroqVerify] fallback provider {rotator.label} succeeded")
-                return txt
+                try:
+                    if _parse_mcq_json(txt):
+                        rotator.mark_healthy(key)
+                        logger.info(f"[GroqVerify] fallback provider {rotator.label} succeeded")
+                        return txt
+                    else:
+                        logger.warning(f"[GroqVerify] {rotator.label} key returned empty MCQ list, trying next")
+                except Exception as e:
+                    logger.warning(f"[GroqVerify] {rotator.label} key returned unparseable JSON ({e}), trying next")
+                    if len(txt) > len(best_invalid_txt):
+                        best_invalid_txt = txt
+                continue
             if status == 429:
                 rotator.mark_rate_limited(key)
+    if best_invalid_txt:
+        logger.warning(f"[GroqVerify] every provider exhausted; returning longest unparseable response ({len(best_invalid_txt)} chars) as last resort")
+        return best_invalid_txt
     logger.error("[GroqVerify] every fallback provider exhausted, returning empty")
     return ""
 
