@@ -1113,11 +1113,15 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
     logger.warning(f"[/tf] page {page_num} gemini exhausted; trying groq fallback")
     try:
         text = await _gen_groq_raw_text(img, prompt_text, mcq_count_hint=(count_max or 20))
-        if text:
+        if not text:
+            logger.warning(f"[/tf] page {page_num} groq fallback returned empty text (see [AI-ROT]/[GroqVerify] logs above for cause)")
+        else:
             mcqs = _parse_mcq_json(text)
             if mcqs:
                 logger.info(f"[/tf] page {page_num} satisfied by provider=groq (fallback)")
                 return mcqs, "Groq"
+            else:
+                logger.warning(f"[/tf] page {page_num} groq returned text but 0 parsed MCQs, raw (first 300 chars): {text[:300]}")
     except Exception as e:
         logger.warning(f"[/tf] page {page_num} groq fallback failed: {e}")
 
@@ -1594,7 +1598,12 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
                     _key_org_map[key] = org_match.group(0)
                 return "", r.status_code
             j = r.json()
-            return j.get("choices", [{}])[0].get("message", {}).get("content", "") or "", r.status_code
+            choice = j.get("choices", [{}])[0]
+            content = choice.get("message", {}).get("content", "") or ""
+            if not content:
+                finish_reason = choice.get("finish_reason", "unknown")
+                logger.warning(f"[AI-ROT] {model} HTTP 200 but EMPTY content (finish_reason={finish_reason}): {json.dumps(j)[:300]}")
+            return content, r.status_code
     except Exception as e:
         logger.warning(f"[AI-ROT] {model} err: {e}")
         return "", 0
