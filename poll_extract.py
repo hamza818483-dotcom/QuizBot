@@ -1410,6 +1410,19 @@ async def _get_topic_pinned_texts(client, entity, topic_id: int) -> list:
 _SUMMARY_MARK = "🌟মোট প্রশ্ন"  # build_ok_summary always starts with this — pinned summary detect korar jonno
 
 
+def _bot_chat_id(channel):
+    """resolve_group_ref theke asha channel Telethon Channel/Chat object
+    hote pare (invite-link case), ba str/int (username/numeric id) hote
+    pare. tg_post (Bot API)-e always plain str/int chat_id lagbe — object
+    dile JSON serialize e crash kore, tai eikhane normalize kora hoy."""
+    if isinstance(channel, (str, int)):
+        return channel
+    ch_id = getattr(channel, "id", None)
+    if ch_id is not None:
+        return int(f"-100{ch_id}")
+    return channel
+
+
 async def handle_ok_all_topics(msg: dict, group_ref: str):
     """
     /ok
@@ -1457,6 +1470,7 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
 
     total_topics = len(all_topics)
     done_count = 0
+    bot_chat = _bot_chat_id(channel)
     # final master-DM er jonno: [(topic_title, topic_link, [batch_link, ...]), ...]
     results = []
 
@@ -1491,7 +1505,7 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
             # ── ১. প্রথম post pin (আগে না থাকলে) ──
             if not root_already_pinned:
                 r = await tg_post("pinChatMessage", {
-                    "chat_id": channel, "message_id": topic_id, "disable_notification": True
+                    "chat_id": bot_chat, "message_id": topic_id, "disable_notification": True
                 })
                 if not r or not r.get("ok"):
                     logger.warning(f"[ok-all] first-post pin failed topic {topic_id}: {(r or {}).get('description')}")
@@ -1518,14 +1532,14 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
                         batch_links = [ln for _, ln, _ in batches_with_links]
                         summary_text = build_ok_summary(total_polls, batches_with_links)
                         post_params = {
-                            "chat_id": channel, "text": summary_text, "parse_mode": "Markdown",
+                            "chat_id": bot_chat, "text": summary_text, "parse_mode": "Markdown",
                             "disable_web_page_preview": True, "message_thread_id": topic_id,
                         }
                         r = await tg_post("sendMessage", post_params)
                         if r and r.get("ok"):
                             sent_msg_id = r["result"]["message_id"]
                             await tg_post("pinChatMessage", {
-                                "chat_id": channel, "message_id": sent_msg_id, "disable_notification": True
+                                "chat_id": bot_chat, "message_id": sent_msg_id, "disable_notification": True
                             })
                         else:
                             logger.warning(f"[ok-all] summary post failed topic {topic_id}: {(r or {}).get('description')}")
