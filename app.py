@@ -8465,10 +8465,12 @@ async def handle_tf(msg: dict):
                         ans_val, m.get('explanation', ''), "1", "1"
                     ])
                 csv_bytes = csv_buf.getvalue().encode('utf-8-sig')
+                _pr_label = page_range if page_range else f"1-{total_pages}"
+                _pr_tag = _pr_label.replace(" ", "")
                 send_doc_kwargs = {
                     "chat_id": target_chat_id, "file_bytes": csv_bytes,
-                    "filename": f"tf_{topic[:30]}.csv",
-                    "caption": f"📄 {topic}\n📝 মোট MCQ: {len(all_mcqs_for_csv)} ({ok_count} page)"
+                    "filename": f"tf_{topic[:30]}_p{_pr_tag}.csv",
+                    "caption": f"📄 {topic}\n📃 Page: {_pr_label}\n📝 মোট MCQ: {len(all_mcqs_for_csv)} ({ok_count} page)"
                 }
                 if thread_id:
                     send_doc_kwargs["message_thread_id"] = thread_id
