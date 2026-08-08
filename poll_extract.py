@@ -1468,7 +1468,8 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
         await send_msg(chat_id, "❌ Topics list করা যায়নি (৩ বার চেষ্টার পরেও)।")
         return
 
-    total_topics = len(all_topics)
+    real_topics = [(tid, title) for tid, title in all_topics if not (tid == 1 or title.strip().lower() == "general")]
+    total_topics = len(real_topics)
     done_count = 0
     bot_chat = _bot_chat_id(channel)
     # final master-DM er jonno: [(topic_title, topic_link, [batch_link, ...]), ...]
@@ -1491,7 +1492,7 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
         return
 
     try:
-        for idx, (topic_id, topic_title) in enumerate(all_topics, start=1):
+        for idx, (topic_id, topic_title) in enumerate(real_topics, start=1):
             pct = int((idx - 1) / total_topics * 100)
             await send_msg(chat_id, f"⏳ ({pct}%) Topic {idx}/{total_topics}: {topic_title} — কাজ শুরু...")
 
