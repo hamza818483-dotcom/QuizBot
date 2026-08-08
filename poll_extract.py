@@ -822,7 +822,10 @@ def build_batch_link(channel, msg_id: int, topic_id=None) -> str:
     if isinstance(channel, str):
         base = f"https://t.me/{channel}"
     else:
-        ch_str = str(channel).replace("-100", "")
+        # channel Telethon entity object (Chat/Channel) hote pare — tar
+        # numeric .id ber korte hobe, str(obj) diye pura repr bosano jabe na.
+        ch_id = getattr(channel, "id", channel)
+        ch_str = str(ch_id).replace("-100", "")
         base = f"https://t.me/c/{ch_str}"
     if topic_id:
         return f"{base}/{topic_id}/{msg_id}"
