@@ -1063,7 +1063,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
     15-20+ wasted seconds per page for zero chance of success once quotas
     are confirmed dead for the day.
     """
-    from pdf_handler import image_to_base64, key_rotator, _parse_mcq_json
+    from pdf_handler import image_to_base64, key_rotator, _parse_mcq_json, _is_gemini_key_exhausted_today
 
     if skip_state is not None and skip_state.get("gemini_dead") and skip_state.get("groq_dead"):
         return [], "SKIPPED"
@@ -1088,7 +1088,21 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
         )
         prompt_text = ATLAS_PROMPT_02.replace(_old_rule_line, _new_rule_line, 1)
 
-    _ordered = key_rotator.ordered_keys()
+    # Same persistent, process-lifetime daily-exhaustion memory that /img's
+    # generate_mcq_from_image() already uses (pdf_handler._is_gemini_key_exhausted_today).
+    # Previously /tf tracked exhaustion only in a per-run skip_state dict, so
+    # every NEW /tf invocation re-learned "all keys are dead" from scratch by
+    # burning 3 fresh 429s per page before falling back — this check makes
+    # /tf skip Gemini immediately (same as /img already does) whenever every
+    # key was already marked exhausted-today by ANY earlier call in this
+    # process, /tf or /img alike.
+    if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
+        logger.warning(f"[/tf] page {page_num}: all Gemini keys already known daily-exhausted — skipping straight to Groq")
+        if skip_state is not None:
+            skip_state["gemini_dead"] = True
+        _ordered = []
+    else:
+        _ordered = key_rotator.ordered_keys()
     img_b64 = image_to_base64(img) if _ordered else None
     max_retries = min(len(_ordered), 3) if _ordered else 0
     gemini_quota_errors = 0
@@ -1124,6 +1138,11 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
             logger.warning(f"[/tf] page {page_num} gen failed (attempt {attempt+1}, key {key[:12]}...): {e}")
             if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
                 gemini_quota_errors += 1
+                # Populate the SAME persistent tracker /img's generate_mcq_from_image()
+                # reads, so a future /tf OR /img call in this same process
+                # immediately knows this key is dead-for-today instead of
+                # re-discovering it via another live 429.
+                key_rotator.mark_rate_limited(key, daily_exhausted=True)
             try:
                 classify_ai_error(e, "gemini", page_num)
             except Exception:
