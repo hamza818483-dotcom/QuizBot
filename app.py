@@ -1484,17 +1484,25 @@ def _parse_mcq_json(text: str) -> list:
         s = s[a:b+1]
     try:
         data = json.loads(s)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[_parse_mcq_json] JSON decode failed: {e} | raw (first 200 chars): {s[:200]!r}")
         return []
+    if not isinstance(data, list):
+        logger.warning(f"[_parse_mcq_json] top-level JSON is not a list (type={type(data).__name__}) | raw (first 200 chars): {s[:200]!r}")
+    elif not data:
+        logger.warning(f"[_parse_mcq_json] JSON parsed to an empty list []")
     out = []
+    _dropped = 0
     if isinstance(data, list):
         for it in data:
             if not isinstance(it, dict):
+                _dropped += 1
                 continue
             q = (it.get("question") or it.get("q") or "").strip()
             q = _strip_q_numbering(q)
             opts = it.get("options") or it.get("opts") or []
             if not q or not isinstance(opts, list) or len(opts) < 2:
+                _dropped += 1
                 continue
             opts = [str(o)[:300] for o in opts][:4]
             ans = str(it.get("answer", "A")).strip().upper()
@@ -1514,6 +1522,8 @@ def _parse_mcq_json(text: str) -> list:
                 "explanation": str(it.get("explanation",""))[:500],
                 "exp_bbox": bbox,
             })
+        if data and not out:
+            logger.warning(f"[_parse_mcq_json] all {len(data)} items dropped during validation (missing question/options) | first item raw: {str(data[0])[:300]!r}")
     return out
 
 _key_429_is_tpm = {}  # key -> True if last 429 was TPM/per-request-too-large (not genuine quota exhaustion)
@@ -15527,7 +15537,7 @@ async def handle_message(msg: dict):
             gem_exhausted = sum(1 for k in gemini_keys if _is_gemini_key_exhausted_today(k))
             gem_cooling = sum(1 for k in gemini_keys if 0 < key_rotator._cooldown_until.get(k, 0) < float("inf") and key_rotator._cooldown_until.get(k, 0) > now and not _is_gemini_key_exhausted_today(k))
             gem_healthy = len(gemini_keys) - gem_banned - gem_cooling - gem_exhausted
-            lines.append(f"\n🔵 <b>Gemini</b> (gemini-2.5-flash, free tier ~20 req/day/key): {len(gemini_keys)} key\n"
+            lines.append(f"\n🔵 <b>Gemini</b> (gemini-3.6-flash, free tier ~20 req/day/key): {len(gemini_keys)} key\n"
                          f"  ✅ Healthy: {gem_healthy} | ⏳ Cooldown: {gem_cooling} | 🔴 আজকে exhausted: {gem_exhausted} | 🚫 Banned: {gem_banned}")
 
             # Generic rotators (NVIDIA, Nemotron, Gemma, OpenRouter-Qwen, HF)
