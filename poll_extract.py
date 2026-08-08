@@ -1540,6 +1540,7 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
             # ── ২. Summary post (batch-scan) — আগে থেকে pinned না থাকলে বানাও ──
             batch_links = []
             summary_link = None
+            summary_post_failed = False
             if existing_summary_id:
                 # age theke summary ache — regenerate na kore purono link use korbo
                 batch_links = ["(আগে থেকেই pin করা আছে)"]
@@ -1623,9 +1624,9 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
                             # summary post-er link — protom chunk-er msg_id diye
                             summary_link = build_batch_link(channel, sent_msg_ids[0], topic_id)
                         else:
-                            batch_links = []
+                            summary_post_failed = True
 
-            results.append((topic_title, topic_link, summary_link))
+            results.append((topic_title, topic_link, summary_link, summary_post_failed))
             done_count += 1
             pct_now = int(done_count / total_topics * 100)
             await _edit_status(
@@ -1638,9 +1639,11 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
 
     # ── Master summary DM: প্রতি topic নাম + শুধু তার summary post-এর link ──
     lines = [f"🌟 সব topic শেষ! ({total_topics} টা)\n"]
-    for topic_title, topic_link, summary_link in results:
+    for topic_title, topic_link, summary_link, failed in results:
         if summary_link:
             lines.append(f"📌 <b>{topic_title}</b>\n🔗 {summary_link}")
+        elif failed:
+            lines.append(f"📌 <b>{topic_title}</b>\n⚠️ (summary পোস্ট করতে ব্যর্থ হয়েছে — manually check করো)")
         else:
             lines.append(f"📌 <b>{topic_title}</b>\n— (কোনো quiz poll পাওয়া যায়নি)")
         lines.append("")
