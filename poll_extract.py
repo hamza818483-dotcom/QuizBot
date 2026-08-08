@@ -1503,9 +1503,17 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
             existing_summary_id = next((pid for pid, txt in pinned if txt.startswith(_SUMMARY_MARK)), None)
 
             # ── ১. প্রথম post pin (আগে না থাকলে) ──
-            if not root_already_pinned:
+            # topic_id nijei "topic created" service message — Bot API
+            # service message pin korte dey na, tai actual first REAL
+            # message ber kore ta pin korbo (get_topic_msg_range diye)।
+            first_real_id, _last_id_unused = await get_topic_msg_range(channel, topic_id)
+            root_target_id = first_real_id if first_real_id and first_real_id != topic_id else None
+            root_already_pinned = root_already_pinned or (
+                root_target_id is not None and any(pid == root_target_id for pid, _ in pinned)
+            )
+            if not root_already_pinned and root_target_id:
                 r = await tg_post("pinChatMessage", {
-                    "chat_id": bot_chat, "message_id": topic_id, "disable_notification": True
+                    "chat_id": bot_chat, "message_id": root_target_id, "disable_notification": True
                 })
                 if not r or not r.get("ok"):
                     logger.warning(f"[ok-all] first-post pin failed topic {topic_id}: {(r or {}).get('description')}")
@@ -1516,7 +1524,7 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
                 # age theke summary ache — regenerate na kore purono link use korbo
                 batch_links = ["(আগে থেকেই pin করা আছে)"]
             else:
-                first_id, last_id = await get_topic_msg_range(channel, topic_id)
+                first_id, last_id = first_real_id, _last_id_unused
                 if first_id and last_id:
                     try:
                         batches = await scan_poll_batches_telethon(channel, first_id, last_id, topic_id=topic_id)
