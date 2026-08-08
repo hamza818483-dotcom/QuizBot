@@ -1555,18 +1555,67 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
                         ]
                         batch_links = [ln for _, ln, _ in batches_with_links]
                         summary_text = build_ok_summary(total_polls, batches_with_links)
-                        post_params = {
-                            "chat_id": bot_chat, "text": summary_text, "parse_mode": "Markdown",
-                            "disable_web_page_preview": True, "message_thread_id": topic_id,
-                        }
-                        r = await tg_post("sendMessage", post_params)
-                        if r and r.get("ok"):
-                            sent_msg_id = r["result"]["message_id"]
-                            await tg_post("pinChatMessage", {
-                                "chat_id": bot_chat, "message_id": sent_msg_id, "disable_notification": True
-                            })
+
+                        # Telegram single-message limit 4096 chars — onek
+                        # batch thakle summary boro hoye jete pare, tokhon
+                        # multiple message-e split kore pathabo. Prottekta
+                        # batch entry (Part-XX + link + count) kokhono majhe
+                        # theke split hobe na — pura entry-i ekta chunk-e thakbe.
+                        header, *entries_and_footer = summary_text.split("\n\n")
+                        # header = first line(s) before first blank-line-block;
+                        # last block = promo footer — otao alada rakhbo
+                        footer = entries_and_footer[-1] if entries_and_footer else ""
+                        entry_blocks = entries_and_footer[:-1] if len(entries_and_footer) > 1 else []
+
+                        CHUNK_LIMIT = 3800
+                        chunks = []
+                        current = header
+                        for block in entry_blocks:
+                            candidate = current + "\n\n" + block
+                            if len(candidate) > CHUNK_LIMIT:
+                                chunks.append(current)
+                                current = block
+                            else:
+                                current = candidate
+                        # footer jodi last chunk-e fit hoy, jog kore dao,
+                        # nahole alada chunk hishebe pathao
+                        if footer:
+                            candidate = current + "\n\n" + footer
+                            if len(candidate) > CHUNK_LIMIT:
+                                chunks.append(current)
+                                chunks.append(footer)
+                            else:
+                                current = candidate
+                                chunks.append(current)
                         else:
-                            logger.warning(f"[ok-all] summary post failed topic {topic_id}: {(r or {}).get('description')}")
+                            chunks.append(current)
+
+                        sent_msg_ids = []
+                        post_ok = True
+                        for chunk_text in chunks:
+                            post_params = {
+                                "chat_id": bot_chat, "text": chunk_text, "parse_mode": "Markdown",
+                                "disable_web_page_preview": True, "message_thread_id": topic_id,
+                            }
+                            r = await tg_post("sendMessage", post_params)
+                            if r and r.get("ok"):
+                                sent_msg_ids.append(r["result"]["message_id"])
+                            else:
+                                logger.warning(f"[ok-all] summary chunk post failed topic {topic_id}: {(r or {}).get('description')}")
+                                post_ok = False
+
+                        if post_ok and sent_msg_ids:
+                            # 2 chunk porjonto pin kora possible (protyekta
+                            # alada pin call) — tar beshi hole shudhu last
+                            # 2-ta pin kora hobe (Telegram-e onek pinned
+                            # message thakle purono gula auto-unpin hote pare,
+                            # tai sob na kore just last 2-i pin).
+                            to_pin = sent_msg_ids if len(sent_msg_ids) <= 2 else sent_msg_ids[-2:]
+                            for mid in to_pin:
+                                await tg_post("pinChatMessage", {
+                                    "chat_id": bot_chat, "message_id": mid, "disable_notification": True
+                                })
+                        else:
                             batch_links = []
 
             results.append((topic_title, topic_link, batch_links))
