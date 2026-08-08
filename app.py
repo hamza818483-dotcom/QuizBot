@@ -4185,7 +4185,7 @@ async def handle_gallery_command(msg: dict):
     loading_id = loading.get("result", {}).get("message_id")
 
     try:
-        pdf_bytes = await download_tg_file(doc["file_id"])
+        pdf_bytes = await download_tg_file(doc["file_id"], chat_id=chat_id, message_id=reply["message_id"])
     except Exception as e:
         await _safe_error_reply(chat_id, e)
         return
@@ -8282,7 +8282,7 @@ async def handle_tf(msg: dict):
         # /tf always downloads + renders fresh — no cache lookup, so a
         # re-run on the same PDF always regenerates from the live file
         # instead of reusing a previously cached render/MCQ result.
-        pdf_bytes = await download_tg_file(file_id)
+        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
         ok, pages = await asyncio.to_thread(pdf_to_images_safe, pdf_bytes, page_range)
         if not ok:
             await send_msg(chat_id, pages)
@@ -14757,7 +14757,7 @@ async def handle_watermark_document(msg: dict) -> bool:
             await send_msg(chat_id, "❌ দয়া করে একটি PDF file পাঠান।")
             return True
         try:
-            pdf_bytes = await download_tg_file(doc["file_id"])
+            pdf_bytes = await download_tg_file(doc["file_id"], chat_id=chat_id, message_id=msg["message_id"])
         except Exception as e:
             logger.error(f"[Watermark] download error: {e}")
             await send_msg(chat_id, f"❌ PDF download করতে সমস্যা হয়েছে: {e}")
