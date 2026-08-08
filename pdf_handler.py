@@ -463,6 +463,12 @@ def _strip_q_numbering(q: str) -> str:
 
 def _parse_mcq_json(text: str) -> list:
     text = text.strip()
+    # Reasoning models sometimes prefix output with <think>...</think> —
+    # strip it before markdown-fence handling / json.loads.
+    if "<think>" in text:
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        if not text or "<think>" in text:
+            raise ValueError("Unclosed <think> block, no usable JSON")
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
     elif "```" in text:
