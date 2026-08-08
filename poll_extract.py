@@ -1423,6 +1423,13 @@ def _bot_chat_id(channel):
     return channel
 
 
+def _progress_bar(pct: int, width: int = 12) -> str:
+    """% onujayi ekta text progress bar banay, e.g. [████████░░░░] 67%"""
+    pct = max(0, min(100, pct))
+    filled = round(width * pct / 100)
+    return f"[{'█' * filled}{'░' * (width - filled)}] {pct}%"
+
+
 async def handle_ok_all_topics(msg: dict, group_ref: str):
     """
     /ok
@@ -1454,6 +1461,13 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
 
     status = await send_msg(chat_id, "⏳ সব topics list করছি...")
     status_id = status.get("result", {}).get("message_id")
+
+    async def _edit_status(text):
+        if status_id:
+            try:
+                await edit_msg(chat_id, status_id, text)
+            except Exception as e:
+                logger.warning(f"[ok-all] status edit failed: {e}")
 
     all_topics = None
     for attempt in range(3):
@@ -1494,7 +1508,8 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
     try:
         for idx, (topic_id, topic_title) in enumerate(real_topics, start=1):
             pct = int((idx - 1) / total_topics * 100)
-            await send_msg(chat_id, f"⏳ ({pct}%) Topic {idx}/{total_topics}: {topic_title} — কাজ শুরু...")
+            await _edit_status(
+                f"{_progress_bar(pct)}\n⏳ Topic {idx}/{total_topics}: {topic_title} — কাজ শুরু...")
 
             topic_link = build_topic_link(channel, topic_id)
 
@@ -1557,12 +1572,13 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
             results.append((topic_title, topic_link, batch_links))
             done_count += 1
             pct_now = int(done_count / total_topics * 100)
-            await send_msg(chat_id, f"✅ ({pct_now}%) Topic '{topic_title}' শেষ। ({done_count}/{total_topics})")
+            await _edit_status(
+                f"{_progress_bar(pct_now)}\n✅ Topic '{topic_title}' শেষ। ({done_count}/{total_topics})")
     finally:
         await shared_client.disconnect()
 
     if status_id:
-        await edit_msg(chat_id, status_id, f"✅ সম্পন্ন! মোট {total_topics} টা topic প্রসেস হয়েছে।")
+        await _edit_status(f"{_progress_bar(100)}\n✅ সম্পন্ন! মোট {total_topics} টা topic প্রসেস হয়েছে।")
 
     # ── Master summary DM: প্রতি topic নাম + তার summary/batch link(s) ──
     lines = [f"🌟 সব topic শেষ! ({total_topics} টা)\n"]
