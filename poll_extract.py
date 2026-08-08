@@ -1386,18 +1386,44 @@ async def handle_ok_single_topic(msg: dict, topic_link: str):
         await edit_msg(chat_id, status_id, f"✅ সম্পন্ন! {len(polls)}টি প্রশ্ন DM এ পাঠানো হয়েছে।")
 
 
-# ── /ok <group link only> mode (ALL topics → CSV each → DM, auto-continue) ──
+# ── pinned-message helpers (topic root + summary already-done check) ──
+async def _get_topic_pinned_texts(client, entity, topic_id: int) -> list:
+    """Ei topic-e ekhon jotogulo pinned message ache, tader (msg_id, text) list dey.
+    top_msg_id diye search scope kora hoy, tai pura group na, ei topic-i check hoy."""
+    from telethon.tl.functions.messages import SearchRequest
+    from telethon.tl.types import InputMessagesFilterPinned
+    try:
+        res = await client(SearchRequest(
+            peer=entity, q="", filter=InputMessagesFilterPinned(),
+            min_date=None, max_date=None, offset_id=0, add_offset=0,
+            limit=100, max_id=0, min_id=0, hash=0, top_msg_id=topic_id,
+        ))
+        out = []
+        for m in getattr(res, "messages", []):
+            out.append((getattr(m, "id", None), getattr(m, "message", "") or ""))
+        return out
+    except Exception as e:
+        logger.warning(f"[ok-all] pinned-check failed for topic {topic_id}: {e}")
+        return []
+
+
+_SUMMARY_MARK = "🌟মোট প্রশ্ন"  # build_ok_summary always starts with this — pinned summary detect korar jonno
+
+
 async def handle_ok_all_topics(msg: dict, group_ref: str):
     """
     /ok
-    <group link>   (no range, no topic — just the group)
+    <group link>   (no range, no topic — just the group, bot admin ache emon)
 
-    Group এর সব topic auto scan করে, একটা শেষ হলে CSV DM এ পাঠিয়ে
-    পরের topic নিজে থেকেই ধরে নেয়। কোনো topic এ error/fail হলেও
-    থামবে না — retry করে (max 3 বার, backoff সহ) তারপর skip করে
-    পরেরটায় চলে যায়। শেষে সব topic প্রসেস হওয়া পর্যন্ত চলতেই থাকে।
+    Group-er প্রতিটা topic-e ঢুকে:
+      1. Topic-er first post pin kore (age theke pinned thakle skip)
+      2. Batch-scan diye summary post banay, group-e post kore pin kore
+         (age theke summary pin kora thakle notun kore banay na)
+    DM-e (owner) shudhu progress update jay: kon topic cholche, kotogulo
+    shesh, koto % holo. Shob topic shesh hole ekta master summary DM-e
+    jay — protyek topic-er naam + tar summary post-er (batch/part) link.
     """
-    from core import send_msg, edit_msg, send_document, OWNER_ID
+    from core import send_msg, edit_msg, OWNER_ID, tg_post
 
     chat_id = msg["chat"]["id"]
 
@@ -1430,11 +1456,10 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
         return
 
     total_topics = len(all_topics)
-    done, skipped = 0, 0
+    done_count = 0
+    # final master-DM er jonno: [(topic_title, topic_link, [batch_link, ...]), ...]
+    results = []
 
-    # একটাই client সব topic এর জন্য reuse করা হচ্ছে — আগে প্রতি topic এ
-    # ২টা আলাদা connect+entity-resolve হতো (range বের করতে + scan করতে),
-    # এখন single connect + single pass per topic। Poll parsing logic same।
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
@@ -1453,94 +1478,88 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
 
     try:
         for idx, (topic_id, topic_title) in enumerate(all_topics, start=1):
-            if status_id:
-                await edit_msg(chat_id, status_id, f"⏳ Topic {idx}/{total_topics}: {topic_title} — scan করছি...")
+            pct = int((idx - 1) / total_topics * 100)
+            await send_msg(chat_id, f"⏳ ({pct}%) Topic {idx}/{total_topics}: {topic_title} — কাজ শুরু...")
 
-            _last_edit_ts = [0.0]
-
-            async def _progress(checked, found, _idx=idx, _title=topic_title, _ts=_last_edit_ts):
-                now = time.time()
-                if now - _ts[0] < 1.1:
-                    return
-                _ts[0] = now
-                if status_id:
-                    await edit_msg(chat_id, status_id,
-                        f"⏳ Topic {_idx}/{total_topics}: {_title}\n"
-                        f"📨 চেক: {checked} messages\n"
-                        f"📋 Poll পেয়েছি: {found}")
-
-            polls = PollList()
-            polls.skipped_ids = []
-            last_partial = None
-            extraction_succeeded = False
-            for attempt in range(5):
-                try:
-                    polls = await extract_polls_by_topic(shared_client, shared_entity, channel, topic_id, progress_cb=_progress)
-                    extraction_succeeded = True
-                    break
-                except Exception as e:
-                    partial = getattr(e, "partial_polls", None)
-                    if partial:
-                        last_partial = partial
-                    logger.error(f"[ok-all] topic {topic_id} extract attempt {attempt+1} error: {e}")
-                    if attempt < 4:
-                        await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এ সমস্যা হয়েছিল, auto-retry করছি ({attempt+2}/5)...")
-                        await asyncio.sleep(3 * (attempt + 1))
-                    else:
-                        if last_partial:
-                            polls = PollList()
-                            polls.extend(last_partial)
-                            polls.skipped_ids = []
-                            extraction_succeeded = True
-            if not extraction_succeeded:
-                skipped += 1
-                await send_msg(chat_id, f"⚠️ Topic '{topic_title}' skip (৫ বার auto-retry এর পরেও fail)।")
-                continue
-
-            if not polls:
-                done += 1
-                continue  # no polls found, move on silently — don't stop
-
-            csv_bytes = build_csv(polls)
-            safe_title = re.sub(r"[^A-Za-z0-9\-]+", "_", topic_title.encode("ascii", "ignore").decode("ascii")) or "topic"
-            safe_title = safe_title[:50].strip("_") or "topic"
-            filename = f"{safe_title}_{topic_id}.csv"
             topic_link = build_topic_link(channel, topic_id)
 
-            caption = (
-                f"📌 <b>{topic_title}</b>\n"
-                f"🔗 {topic_link}\n"
-                f"📋 প্রশ্ন: {len(polls)}"
-            )
-            caption += _skipped_note(polls)
+            # ── ইতিমধ্যে কী কী pinned আছে চেক করো (duplicate pin/summary এড়াতে) ──
+            pinned = await _get_topic_pinned_texts(shared_client, shared_entity, topic_id)
+            root_already_pinned = any(pid == topic_id for pid, _ in pinned)
+            existing_summary_id = next((pid for pid, txt in pinned if txt.startswith(_SUMMARY_MARK)), None)
 
-            sent = False
-            for attempt in range(3):
-                try:
-                    doc_result = await send_document(OWNER_ID, csv_bytes, filename, caption=caption, mime_type="text/csv")
-                    if doc_result and doc_result.get("ok"):
-                        sent = True
-                        break
-                    logger.warning(f"[ok-all] send_document non-ok (attempt {attempt+1}) for topic {topic_id}: {doc_result}")
-                except Exception as e:
-                    logger.error(f"[ok-all] DM send attempt {attempt+1} error for topic {topic_id}: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(2 * (attempt + 1))
+            # ── ১. প্রথম post pin (আগে না থাকলে) ──
+            if not root_already_pinned:
+                r = await tg_post("pinChatMessage", {
+                    "chat_id": channel, "message_id": topic_id, "disable_notification": True
+                })
+                if not r or not r.get("ok"):
+                    logger.warning(f"[ok-all] first-post pin failed topic {topic_id}: {(r or {}).get('description')}")
 
-            if sent:
-                done += 1
+            # ── ২. Summary post (batch-scan) — আগে থেকে pinned না থাকলে বানাও ──
+            batch_links = []
+            if existing_summary_id:
+                # age theke summary ache — regenerate na kore purono link use korbo
+                batch_links = ["(আগে থেকেই pin করা আছে)"]
             else:
-                skipped += 1
-                await send_msg(chat_id, f"⚠️ Topic '{topic_title}' এর CSV পাঠানো যায়নি (৩ বার চেষ্টার পরেও)।")
+                first_id, last_id = await get_topic_msg_range(channel, topic_id)
+                if first_id and last_id:
+                    try:
+                        batches = await scan_poll_batches_telethon(channel, first_id, last_id, topic_id=topic_id)
+                    except Exception as e:
+                        logger.error(f"[ok-all] batch scan failed topic {topic_id}: {e}")
+                        batches = []
+                    if batches:
+                        total_polls = sum(c for _, c in batches)
+                        batches_with_links = [
+                            (i + 1, build_batch_link(channel, first_bid, topic_id), count)
+                            for i, (first_bid, count) in enumerate(batches)
+                        ]
+                        batch_links = [ln for _, ln, _ in batches_with_links]
+                        summary_text = build_ok_summary(total_polls, batches_with_links)
+                        post_params = {
+                            "chat_id": channel, "text": summary_text, "parse_mode": "Markdown",
+                            "disable_web_page_preview": True, "message_thread_id": topic_id,
+                        }
+                        r = await tg_post("sendMessage", post_params)
+                        if r and r.get("ok"):
+                            sent_msg_id = r["result"]["message_id"]
+                            await tg_post("pinChatMessage", {
+                                "chat_id": channel, "message_id": sent_msg_id, "disable_notification": True
+                            })
+                        else:
+                            logger.warning(f"[ok-all] summary post failed topic {topic_id}: {(r or {}).get('description')}")
+                            batch_links = []
 
-            # auto-continue to next topic regardless of outcome — never stop
+            results.append((topic_title, topic_link, batch_links))
+            done_count += 1
+            pct_now = int(done_count / total_topics * 100)
+            await send_msg(chat_id, f"✅ ({pct_now}%) Topic '{topic_title}' শেষ। ({done_count}/{total_topics})")
     finally:
         await shared_client.disconnect()
 
     if status_id:
-        await edit_msg(chat_id, status_id,
-            f"✅ সম্পন্ন! মোট {total_topics} টা topic এর মধ্যে {done} টা সফল"
-            f"{f', {skipped} টা skip হয়েছে' if skipped else ''}।")
+        await edit_msg(chat_id, status_id, f"✅ সম্পন্ন! মোট {total_topics} টা topic প্রসেস হয়েছে।")
+
+    # ── Master summary DM: প্রতি topic নাম + তার summary/batch link(s) ──
+    lines = [f"🌟 সব topic শেষ! ({total_topics} টা)\n"]
+    for topic_title, topic_link, batch_links in results:
+        lines.append(f"📌 <b>{topic_title}</b>\n🔗 {topic_link}")
+        if not batch_links:
+            lines.append("— (কোনো quiz poll পাওয়া যায়নি)")
+        elif len(batch_links) == 1:
+            lines.append(batch_links[0])
+        else:
+            for i, ln in enumerate(batch_links, start=1):
+                lines.append(f"Part-{i:02d}: {ln}")
+        lines.append("")
+
+    final_text = "\n".join(lines)
+    # Telegram single-message length limit — dorkar hole split kore পাঠাও
+    CHUNK = 3500
+    chunks = [final_text[i:i+CHUNK] for i in range(0, len(final_text), CHUNK)] or [final_text]
+    for chunk in chunks:
+        await send_msg(OWNER_ID, chunk, parse_mode="HTML")
 
 
 # ── /ok handler ───────────────────────────────────────────────
