@@ -830,7 +830,9 @@ def _build_chok_prompt(topic: str) -> str:
         f"═══════════════════════════════\n"
         f"🟩 OUTPUT\n"
         f"═══════════════════════════════\n"
-        f"JSON array only, no markdown fences, no preamble. Format:\n"
+        f"JSON array only, no markdown fences, no preamble. "
+        f"🚨 DO NOT include any <think>, reasoning, or explanation text before "
+        f"the JSON — output must start IMMEDIATELY with '['. Format:\n"
         f'[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],'
         f'"answer":0,"explanation":"..."}}]\n'
         f"answer is integer 0-3 (A=0,B=1,C=2,D=3). Answers must be spread across different "
@@ -987,7 +989,10 @@ def _build_bangla_prompt(topic: str) -> str:
         f"exactly on the specific line/paragraph/table this MCQ's answer came "
         f"from, normalized to 0-1000 scale ([x_min,y_min,x_max,y_max]). If "
         f"unsure, use null.\n\n"
-        f"Return STRICT JSON array only, no prose, no markdown fences. Schema:\n"
+        f"Return STRICT JSON array only, no prose, no markdown fences. "
+        f"🚨 DO NOT include any <think>, reasoning, chain-of-thought, or "
+        f"explanation text before the JSON — output must start IMMEDIATELY "
+        f"with '[' and contain nothing but the JSON array. Schema:\n"
         f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"exp_bbox\":[100,200,900,350]}}]"
     )
@@ -1279,7 +1284,10 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"line/paragraph/table the answer came from (minimal margin, no neighboring "
         f"unrelated content). Normalize to 0-1000 scale ([x_min,y_min,x_max,y_max], "
         f"top-left=[0,0], bottom-right=[1000,1000]). Use null if unsure.\n\n"
-        f"Return STRICT JSON array only, no prose, no markdown fences. Schema:\n"
+        f"Return STRICT JSON array only, no prose, no markdown fences. "
+        f"🚨 DO NOT include any <think>, reasoning, chain-of-thought, or "
+        f"explanation text before the JSON — output must start IMMEDIATELY "
+        f"with '[' and contain nothing but the JSON array. Schema:\n"
         f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"exp_bbox\":[100,200,900,350]}}]"
     )
@@ -1474,6 +1482,18 @@ def _parse_mcq_json(text: str) -> list:
     if not text:
         return []
     s = text.strip()
+    # Reasoning models (e.g. Groq's qwen/qwen3.6-27b) sometimes prefix output
+    # with a <think>...</think> block despite prompt instructions not to.
+    # Strip it explicitly rather than relying solely on find('[')/rfind(']'),
+    # since a closed think-block's content itself is fine to discard, and an
+    # UNCLOSED block (truncated by max_tokens mid-reasoning, before any JSON
+    # was ever emitted) must not be mistaken for a bracket search elsewhere.
+    if "<think>" in s:
+        s = re.sub(r"<think>.*?</think>", "", s, flags=re.DOTALL).strip()
+        if not s or "<think>" in s:
+            # Either nothing left, or an unclosed <think> (model got cut off
+            # mid-reasoning before producing any JSON) — no usable content.
+            return []
     if s.startswith("```"):
         s = re.sub(r"^```(?:json)?\s*", "", s)
         s = re.sub(r"\s*```$", "", s)
@@ -1581,6 +1601,14 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
         "temperature": 0.3,
         "max_tokens": dynamic_max_tokens,
     }
+    # qwen/qwen3.6-27b is a reasoning model — by default it prefixes output
+    # with a <think>...</think> block before the actual JSON, which burns
+    # into dynamic_max_tokens (often truncating before JSON even starts) and
+    # breaks _parse_mcq_json which expects the response to start with '['.
+    # reasoning_effort disables the thinking pass entirely on Groq's
+    # OpenAI-compatible endpoint for qwen models.
+    if "qwen" in model.lower():
+        payload["reasoning_effort"] = "none"
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.post(url, headers=headers, json=payload)
@@ -2200,7 +2228,8 @@ async def _repair_thin_explanations(mcqs: list, img, topic: str) -> list:
         f"it's incorrect — never leave any option unaddressed. Same language "
         f"as the source (Bengali or English). ~150-280 characters each.\n\n"
         f"{questions_block}\n\n"
-        f"Return STRICT JSON array only, same order, no prose: "
+        f"Return STRICT JSON array only, same order, no prose. "
+        f"🚨 No <think>/reasoning text before the JSON — start immediately with '[': "
         f'[{{"explanation":"..."}}, ...]'
     )
     try:
