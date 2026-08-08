@@ -1539,9 +1539,11 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
 
             # ── ২. Summary post (batch-scan) — আগে থেকে pinned না থাকলে বানাও ──
             batch_links = []
+            summary_link = None
             if existing_summary_id:
                 # age theke summary ache — regenerate na kore purono link use korbo
                 batch_links = ["(আগে থেকেই pin করা আছে)"]
+                summary_link = build_batch_link(channel, existing_summary_id, topic_id)
             else:
                 first_id, last_id = first_real_id, _last_id_unused
                 if first_id and last_id:
@@ -1618,10 +1620,12 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
                                 await tg_post("pinChatMessage", {
                                     "chat_id": bot_chat, "message_id": mid, "disable_notification": True
                                 })
+                            # summary post-er link — protom chunk-er msg_id diye
+                            summary_link = build_batch_link(channel, sent_msg_ids[0], topic_id)
                         else:
                             batch_links = []
 
-            results.append((topic_title, topic_link, batch_links))
+            results.append((topic_title, topic_link, summary_link))
             done_count += 1
             pct_now = int(done_count / total_topics * 100)
             await _edit_status(
@@ -1632,17 +1636,13 @@ async def handle_ok_all_topics(msg: dict, group_ref: str):
     if status_id:
         await _edit_status(f"{_progress_bar(100)}\n✅ সম্পন্ন! মোট {total_topics} টা topic প্রসেস হয়েছে।")
 
-    # ── Master summary DM: প্রতি topic নাম + তার summary/batch link(s) ──
+    # ── Master summary DM: প্রতি topic নাম + শুধু তার summary post-এর link ──
     lines = [f"🌟 সব topic শেষ! ({total_topics} টা)\n"]
-    for topic_title, topic_link, batch_links in results:
-        lines.append(f"📌 <b>{topic_title}</b>\n🔗 {topic_link}")
-        if not batch_links:
-            lines.append("— (কোনো quiz poll পাওয়া যায়নি)")
-        elif len(batch_links) == 1:
-            lines.append(batch_links[0])
+    for topic_title, topic_link, summary_link in results:
+        if summary_link:
+            lines.append(f"📌 <b>{topic_title}</b>\n🔗 {summary_link}")
         else:
-            for i, ln in enumerate(batch_links, start=1):
-                lines.append(f"Part-{i:02d}: {ln}")
+            lines.append(f"📌 <b>{topic_title}</b>\n— (কোনো quiz poll পাওয়া যায়নি)")
         lines.append("")
 
     final_text = "\n".join(lines)
