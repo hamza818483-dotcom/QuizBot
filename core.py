@@ -752,12 +752,12 @@ async def _send_document_multipart_rfc5987(client, chat_id, file_bytes: bytes, f
                                              caption: str, mime_type: str,
                                              reply_to_message_id: int, message_thread_id: int,
                                              parse_mode: str) -> dict:
-    """Manually-built multipart/form-data body with RFC 5987 filename*
-    encoding, for non-ASCII (e.g. Bengali) filenames. See send_document's
-    comment above for why this is needed instead of httpx's default files=."""
+    """Manually-built multipart/form-data body for non-ASCII (e.g. Bengali)
+    filenames. Telegram's Bot API does NOT honor RFC 5987 filename*=UTF-8''...
+    — it only reads the plain filename="..." field — so we put the raw UTF-8
+    filename directly there instead of an ASCII fallback + filename* param."""
     import uuid
     boundary = "----AtlasWM" + uuid.uuid4().hex
-    enc_filename_star = quote(filename)
     parts = []
 
     def push_field(name, value):
@@ -774,12 +774,9 @@ async def _send_document_multipart_rfc5987(client, chat_id, file_bytes: bytes, f
     if message_thread_id:
         push_field("message_thread_id", str(message_thread_id))
 
-    import re as _re_ext
-    _ext_match = _re_ext.search(r'\.([a-zA-Z0-9]+)$', filename)
-    safe_ext = _ext_match.group(1) if _ext_match else "bin"
     parts.append(
         (f'--{boundary}\r\nContent-Disposition: form-data; name="document"; '
-         f'filename="file.{safe_ext}"; filename*=UTF-8\'\'{enc_filename_star}\r\n'
+         f'filename="{filename}"\r\n'
          f'Content-Type: {mime_type}\r\n\r\n').encode("utf-8")
     )
     parts.append(file_bytes)
