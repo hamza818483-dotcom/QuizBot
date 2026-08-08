@@ -1039,7 +1039,7 @@ ATLAS_PROMPT_02 = """MCQ TYPE: True/False Style
 -answer must be one of A/B/C/D (letter)"""
 
 
-async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, count_max: int = None) -> tuple:
+async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, count_max: int = None, skip_state: dict = None) -> tuple:
     """Direct Gemini call using AtlasBot's exact PROMPT_02 — bypasses the
     topic-templated pipeline entirely so the prompt's rules reach the model
     unmodified, exactly like AtlasBot's own generate_mcq_from_image(img, 'prompt_2').
@@ -1054,8 +1054,20 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
     count_min/count_max come from the user's [N-M] bracket (e.g. /tf [8-20]);
     when given, they override the prompt's own default 8-20 line so the model
     targets the exact range the user asked for instead of picking its own count.
+
+    skip_state: a per-/tf-run dict shared across pages. Once BOTH Gemini and
+    Groq have been observed fully exhausted (every key 429'd) on one page,
+    this function stops even trying either provider for the rest of the run
+    — previously every subsequent page still burned ~3 Gemini calls + a full
+    12-key Groq rotation (each 429ing individually) before giving up, adding
+    15-20+ wasted seconds per page for zero chance of success once quotas
+    are confirmed dead for the day.
     """
     from pdf_handler import image_to_base64, key_rotator, _parse_mcq_json
+
+    if skip_state is not None and skip_state.get("gemini_dead") and skip_state.get("groq_dead"):
+        return [], "SKIPPED"
+
     from google import genai as gai
     from google.genai import types as gtypes
 
@@ -1079,6 +1091,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
     _ordered = key_rotator.ordered_keys()
     img_b64 = image_to_base64(img) if _ordered else None
     max_retries = min(len(_ordered), 3) if _ordered else 0
+    gemini_quota_errors = 0
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)]
         try:
@@ -1109,17 +1122,31 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
                 return mcqs, "Gemini"
         except Exception as e:
             logger.warning(f"[/tf] page {page_num} gen failed (attempt {attempt+1}, key {key[:12]}...): {e}")
+            if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
+                gemini_quota_errors += 1
             try:
                 classify_ai_error(e, "gemini", page_num)
             except Exception:
                 pass
             continue
 
+    # All attempted keys 429'd on quota (not some other transient error) —
+    # every key shares the same daily free-tier quota reset, so retrying
+    # more keys this run won't help. Mark Gemini dead for this /tf run.
+    if skip_state is not None and max_retries > 0 and gemini_quota_errors >= max_retries:
+        skip_state["gemini_dead"] = True
+
     logger.warning(f"[/tf] page {page_num} gemini exhausted; trying groq fallback")
     try:
         text = await _gen_groq_raw_text(img, prompt_text, mcq_count_hint=(count_max or 20))
         if not text:
             logger.warning(f"[/tf] page {page_num} groq fallback returned empty text (see [AI-ROT]/[GroqVerify] logs above for cause)")
+            if skip_state is not None:
+                # _gen_groq_raw_text already rotates through every configured
+                # key internally; an empty result here means the whole pool
+                # (Groq + any secondary fallbacks it tries) came back empty,
+                # which in practice only happens when every key is TPD-exhausted.
+                skip_state["groq_dead"] = True
         else:
             mcqs = _parse_mcq_json(text)
             if mcqs:
@@ -1129,9 +1156,10 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
                 logger.warning(f"[/tf] page {page_num} groq returned text but 0 parsed MCQs, raw (first 300 chars): {text[:300]}")
     except Exception as e:
         logger.warning(f"[/tf] page {page_num} groq fallback failed: {e}")
+        if skip_state is not None:
+            skip_state["groq_dead"] = True
 
     return [], None
-
     return []
 
 
@@ -8221,6 +8249,7 @@ async def handle_tf(msg: dict):
     # enforce করা হচ্ছে যাতে user একটা রেঞ্জ দিলে সেটা মানা হয়।
     per_page_min = params.get("mcq_count_min") or 7
     per_page_max = params.get("mcq_count_max")
+    _tf_skip_state = {"gemini_dead": False, "groq_dead": False}  # shared across pages this run
 
     document = reply["document"]
     file_id = document["file_id"]
@@ -8295,33 +8324,55 @@ async def handle_tf(msg: dict):
             # essentially never end up empty in the final CSV. If a
             # [min-max] range was given, a result under the minimum also
             # triggers a retry instead of being silently accepted.
+            # Exception: if both Gemini and Groq are confirmed exhausted for
+            # this run (all keys 429'd on quota), skip retrying entirely —
+            # further attempts cannot succeed until tomorrow's quota reset.
             mcqs = []
             provider_used = None
             last_err = None
-            for attempt in range(1, 4):
-                try:
-                    mcqs, provider_used = await _generate_tf_mcq_atlas(page_img, page_no, per_page_min, per_page_max)
-                    mcqs = _cap_mcq_options(mcqs, 4)
-                    mcqs = _validate_mcq_structure(mcqs)
-                    mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
-                    if mcqs and per_page_min and len(mcqs) < per_page_min:
-                        last_err = f"only {len(mcqs)} MCQ, need >= {per_page_min}"
-                        logger.warning(f"[/tf] page {page_no} attempt {attempt}: {last_err}")
-                        if attempt < 3:
-                            continue
-                    if mcqs:
+            if _tf_skip_state["gemini_dead"] and _tf_skip_state["groq_dead"]:
+                last_err = "all providers exhausted for today"
+            else:
+                for attempt in range(1, 4):
+                    if _tf_skip_state["gemini_dead"] and _tf_skip_state["groq_dead"]:
+                        last_err = "all providers exhausted for today"
                         break
-                    last_err = "empty result"
-                except Exception as e:
-                    last_err = str(e)
-                    logger.warning(f"[/tf] page {page_no} attempt {attempt} failed: {e}")
-                if attempt < 3:
-                    await asyncio.sleep(1.5 * attempt)  # small backoff between retries
+                    try:
+                        mcqs, provider_used = await _generate_tf_mcq_atlas(
+                            page_img, page_no, per_page_min, per_page_max, skip_state=_tf_skip_state
+                        )
+                        mcqs = _cap_mcq_options(mcqs, 4)
+                        mcqs = _validate_mcq_structure(mcqs)
+                        mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
+                        if mcqs and per_page_min and len(mcqs) < per_page_min:
+                            last_err = f"only {len(mcqs)} MCQ, need >= {per_page_min}"
+                            logger.warning(f"[/tf] page {page_no} attempt {attempt}: {last_err}")
+                            if attempt < 3:
+                                continue
+                        if mcqs:
+                            break
+                        last_err = "empty result"
+                    except Exception as e:
+                        last_err = str(e)
+                        logger.warning(f"[/tf] page {page_no} attempt {attempt} failed: {e}")
+                    if attempt < 3:
+                        await asyncio.sleep(1.5 * attempt)  # small backoff between retries
 
             if not mcqs:
                 fail_count += 1
                 page_stats.append((page_no, None, time.monotonic() - page_start, None))
                 logger.error(f"[/tf] page {page_no} failed after 3 attempts: {last_err}")
+                if _tf_skip_state["gemini_dead"] and _tf_skip_state["groq_dead"] and not _tf_skip_state.get("notified"):
+                    _tf_skip_state["notified"] = True
+                    try:
+                        await send_msg(chat_id,
+                            "⚠️ Gemini ও Groq — দুটোরই আজকের quota শেষ হয়ে গেছে "
+                            "(daily limit exhausted)। বাকি page-গুলো এখনই skip করা হচ্ছে, "
+                            "যা successful হয়েছে সেটার CSV নিচে পাঠানো হবে। আগামীকাল quota "
+                            "reset হলে বাকি page-গুলো আবার /tf দিয়ে চালান।"
+                        )
+                    except Exception:
+                        pass
                 continue
 
             if per_page_max and per_page_max > 0:
