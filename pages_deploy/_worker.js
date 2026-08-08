@@ -588,15 +588,16 @@ async function handleTgSendDoc(request) {
       if (body.message_thread_id) formData.append('message_thread_id', String(body.message_thread_id));
       resp = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: formData });
     } else {
-      // Non-ASCII filename (Bengali/etc) — Cloudflare Workers' built-in
-      // FormData serializes Content-Disposition's filename as a raw string
-      // without RFC 5987 (filename*=UTF-8''...) encoding, which corrupts
-      // multi-byte UTF-8 names (mojibake) once Telegram/intermediate proxies
-      // re-interpret the bytes as Latin-1. Build the multipart body by hand
-      // instead, with a properly percent-encoded filename* parameter so the
-      // original Bengali name survives intact.
+      // Non-ASCII filename (Bengali/etc) — Telegram's Bot API does NOT
+      // honor the RFC 5987 filename*=UTF-8''... parameter; it only reads
+      // the plain filename="..." field. Previously we sent an ASCII
+      // fallback ("file.ext") in that plain field with the real Bangla
+      // name only in filename*, so Telegram always displayed "file.ext"
+      // and effectively ignored the rename. Fix: put the raw UTF-8 bytes
+      // of the real filename directly in the plain filename="..." field
+      // (Telegram's API is UTF-8 native and handles this correctly),
+      // dropping the RFC5987 param entirely.
       const boundary = '----AtlasWM' + crypto.randomUUID().replace(/-/g, '');
-      const encFilenameStar = encodeURIComponent(filename).replace(/'/g, '%27');
       const enc = new TextEncoder();
       const parts = [];
       const pushField = (name, value) => {
@@ -609,17 +610,8 @@ async function handleTgSendDoc(request) {
       if (body.parse_mode) pushField('parse_mode', body.parse_mode);
       if (body.reply_to_message_id) pushField('reply_to_message_id', String(body.reply_to_message_id));
       if (body.message_thread_id) pushField('message_thread_id', String(body.message_thread_id));
-      // File part: include BOTH a plain ASCII-safe fallback name and the
-      // RFC 5987 filename* parameter (standard "belt and suspenders" pattern
-      // for non-ASCII filenames in multipart uploads). The ASCII fallback
-      // must preserve the REAL extension (.csv/.pdf/etc) — it used to be
-      // hardcoded to "file.pdf", which made every non-ASCII-named CSV
-      // export (e.g. a Bengali topic name) show up in Telegram as a .pdf
-      // file even though the actual content/mime_type was CSV.
-      const extMatch = filename.match(/\.([a-zA-Z0-9]+)$/);
-      const safeExt = extMatch ? extMatch[1] : 'bin';
       parts.push(enc.encode(
-        `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="file.${safeExt}"; filename*=UTF-8''${encFilenameStar}\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${filename}"\r\n` +
         `Content-Type: ${body.mime_type || 'application/octet-stream'}\r\n\r\n`
       ));
       parts.push(bytes);
