@@ -10202,11 +10202,41 @@ async def _qbm_call1_extract(img) -> list:
 
 async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
     """
-    CALL 2 — MERGED miss-check + full verification (single call, no separate
-    Call 3). Job:
-    1) MISS-CHECK: confirm Call-1 caught every existing MCQ on the page (checked
-       region-by-region, especially the last MCQ / bottom of page); add any
-       missed ones in the same strict format.
+    CALL 2 (dispatcher) — MERGED miss-check + full verification, split into
+    chunks of <=10 MCQs per Groq call. A single call covering a whole page's
+    MCQ list (can be 20-30+ on dense pages) was measured to push the prompt
+    well past Groq's 8000 TPM budget even with per-field truncation (prompt
+    tokens alone exceeding budget before output+image are even counted) --
+    chunking keeps each individual call safely inside the limit regardless
+    of how many MCQs are on the page. The miss-check (Step A) only makes
+    sense run once against the full page image with the full context of
+    what's already found, so it's still done once on the *first* chunk call
+    (findings get folded into that chunk's output); subsequent chunks only
+    do Step B (verify) on their slice.
+    """
+    if not call1_mcqs:
+        return []
+    CHUNK_SIZE = 5
+    if len(call1_mcqs) <= CHUNK_SIZE:
+        return await _qbm_call2_single(img, call1_mcqs, do_miss_check=True)
+
+    chunks = [call1_mcqs[i:i + CHUNK_SIZE] for i in range(0, len(call1_mcqs), CHUNK_SIZE)]
+    out = []
+    for i, chunk in enumerate(chunks):
+        # miss-check only makes sense once (needs the full existing list as
+        # context) -- run it on the first chunk only, plain verify on the rest
+        verified_chunk = await _qbm_call2_single(img, chunk, do_miss_check=(i == 0))
+        out.extend(verified_chunk)
+    return _qbm_dedup_list(out)
+
+
+async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True) -> list:
+    """
+    CALL 2 (single chunk) — MERGED miss-check + full verification (single call,
+    no separate Call 3). Job:
+    1) MISS-CHECK (only if do_miss_check=True): confirm Call-1 caught every
+       existing MCQ on the page (checked region-by-region, especially the last
+       MCQ / bottom of page); add any missed ones in the same strict format.
     2) FULL VERIFY on the combined list: option-serial integrity, answer
        matches what's actually marked/given on the source page (scanning other
        pages for an answer key if needed), spelling/context-word correctness
@@ -10217,20 +10247,31 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
     if not call1_mcqs:
         call1_mcqs = []
     try:
+        # explanation field is often the longest per-MCQ text and isn't needed
+        # for the verify checks (Groq re-derives/re-confirms explanation content
+        # live from the image per Step B) -- truncating it here, plus scaling
+        # down question/option length on pages with many MCQs, keeps the merged
+        # prompt inside Groq's 8000 TPM budget. Untruncated, a 20+ MCQ page's
+        # full question+options+explanation JSON alone can push PROMPT_TOKENS
+        # past 5000+, leaving no room for output tokens + the image within the
+        # 8000 TPM ceiling (confirmed by direct token-budget simulation).
+        _n = len(call1_mcqs) or 1
+        _q_cap = 180 if _n <= 5 else (140 if _n <= 10 else 90)
+        _opt_cap = 70 if _n <= 5 else (60 if _n <= 10 else 40)
+        def _trim_opts(opts):
+            if isinstance(opts, dict):
+                return {k: (v or "")[:_opt_cap] for k, v in opts.items()}
+            if isinstance(opts, list):
+                return [(v or "")[:_opt_cap] for v in opts]
+            return opts
         mcq_json = json.dumps([
-            {"question": m.get("question", ""), "options": m.get("options", []),
-             "answer": m.get("answer", "A"), "explanation": m.get("explanation", ""),
+            {"question": (m.get("question", "") or "")[:_q_cap], "options": _trim_opts(m.get("options", [])),
+             "answer": m.get("answer", "A"), "explanation": (m.get("explanation", "") or "")[:60],
              "qsn_bbox": m.get("qsn_bbox")}
             for m in call1_mcqs
         ], ensure_ascii=False)
 
-        prompt = f"""You already extracted these MCQs from this exact page image (Call 1 result):
-{mcq_json if call1_mcqs else "(none found)"}
-
-TASK — do BOTH steps below in this single pass, connected to Call 1 (do not redo
-full extraction from scratch):
-
-STEP A — MISS-CHECK:
+        step_a_text = """STEP A — MISS-CHECK:
 1) MANDATORY: mentally divide the page into regions (top/middle/bottom, left/right if
    multi-column) and check EACH region against the list above before answering —
    especially the LAST MCQ on the page and the BOTTOM of the page — most commonly missed.
@@ -10239,8 +10280,21 @@ STEP A — MISS-CHECK:
    never relabeled/sorted). If it belongs under a passage/উদ্দীপক, prepend that passage's
    full text to its question (self-contained), same as Call 1's rule.
 
-STEP B — FULL VERIFICATION on the combined list (Call 1 + any missed from Step A) — never
-skip or shortcut this, regardless of how confident Call 1 was:
+""" if do_miss_check else ""
+        task_line = ("do BOTH steps below in this single pass" if do_miss_check
+                     else "do STEP B below (this is a partial MCQ slice from a larger page, "
+                          "already miss-checked separately — skip STEP A, just verify this slice)")
+        prompt = f"""You already extracted these MCQs from this exact page image (Call 1 result):
+{mcq_json if call1_mcqs else "(none found)"}
+
+TASK — {task_line}, connected to Call 1 (do not redo
+full extraction from scratch):
+
+{step_a_text}STEP B — FULL VERIFICATION on the combined list (Call 1 + any missed from Step A) — never
+skip or shortcut this, regardless of how confident Call 1 was. NOTE: each MCQ's "question",
+"options", and "explanation" fields above are truncated to save space (just enough to identify
+which MCQ is which) — always re-read the FULL text from the actual page image and output the
+complete, untruncated, corrected question/options/explanation in your response:
 1) OPTION-SERIAL INTEGRITY: is the answer letter (A/B/C/D) pointing to the option that is
    actually in that position in THIS output list (not the source's original label)? If the
    correct option's text sits in position 2 of the output, answer must be "B", etc. Fix any
