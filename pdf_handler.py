@@ -119,7 +119,16 @@ class GeminiKeyRotator:
         not in short cooldown, then short-cooldown keys, then today-exhausted
         keys last — so a call never wastes its first attempt on a key
         already known dead for the day (daily quota resets at Pacific midnight,
-        not after 60s). Permanently banned keys are excluded entirely."""
+        not after 60s). Permanently banned keys are excluded entirely.
+
+        Within the healthy tier, starts from self.current (advanced by
+        get_key(), also nudged here) instead of always self.keys[0] --
+        without this, every single call started its search from the same
+        first key, so that key alone absorbed the first attempt of nearly
+        every request and burned through its daily quota far faster than
+        the other 35, even though total load was fairly distributed
+        overall. Round-robining the healthy tier spreads first-attempts
+        evenly across all live keys."""
         now = time.time()
         live_keys = [k for k in self.keys if k not in self._banned]
         not_exhausted = [k for k in live_keys if not _is_gemini_key_exhausted_today(k)]
@@ -127,6 +136,10 @@ class GeminiKeyRotator:
         pool = not_exhausted if not_exhausted else live_keys
         healthy = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
         cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
+        if healthy:
+            start = self.current % len(healthy)
+            healthy = healthy[start:] + healthy[:start]
+            self.current = (self.current + 1) % max(len(self.keys), 1)
         return healthy + cooling + (exhausted if not_exhausted else [])
 
     def mark_rate_limited(self, key: str, daily_exhausted: bool = False, retry_after_seconds: int = None):
