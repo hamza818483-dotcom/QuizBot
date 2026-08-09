@@ -10916,8 +10916,15 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
     exhausted/failing, falls back to Groq vision (qwen) so the caller still
     gets a result instead of an empty string."""
     try:
-        from pdf_handler import key_rotator, image_to_base64
+        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
+            return await _gen_groq_raw_text(img, prompt)
+        # Same persistent, process-lifetime exhaustion memory /tf and /img
+        # use -- if every key was already confirmed daily-exhausted by an
+        # earlier call in this process, skip straight to Groq instead of
+        # burning a fresh 429 per key on every single /qbm page.
+        if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
+            logger.warning("[QBM] all Gemini keys already known daily-exhausted — skipping straight to Groq")
             return await _gen_groq_raw_text(img, prompt)
         from google import genai as gai
         from google.genai import types
