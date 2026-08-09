@@ -10170,24 +10170,24 @@ async def _qbm_call1_extract(img) -> list:
     CALL 1 — OWN OCR + strict-prompt MCQ extraction + inline dedup.
     Job: extract every existing MCQ on the page (option-serial strictly
     preserved per active prompt), while checking-as-it-goes so no duplicate
-    /ghost MCQ enters the list. Groq primary (much higher daily budget than
-    Gemini free-tier's 20 req/day/key, which exhausts within a few pages on
-    any real multi-page PDF) -> Gemini fallback -> OpenRouter last resort.
+    /ghost MCQ enters the list. Gemini primary (better raw extraction
+    quality for the initial make) -> Groq fallback (higher daily budget,
+    used if Gemini quota is exhausted) -> OpenRouter last resort.
     """
     try:
         prompt = await qbm_get_active_prompt()
+        gem = await _qbm_gemini_extract(img, prompt)
+        if gem:
+            out = _qbm_dedup_list(gem)
+            for m in out:
+                m["_provider"] = "Gemini"
+            return out
         txt = await _qbm_groq_call(img, prompt)
         result = _qbm_parse_json(txt) if txt else []
         if result:
             out = _qbm_dedup_list(result)
             for m in out:
                 m["_provider"] = "Groq"
-            return out
-        gem = await _qbm_gemini_extract(img, prompt)
-        if gem:
-            out = _qbm_dedup_list(gem)
-            for m in out:
-                m["_provider"] = "Gemini"
             return out
         txt3 = await _qbm_openrouter_call(img, prompt)
         result3 = _qbm_parse_json(txt3) if txt3 else []
