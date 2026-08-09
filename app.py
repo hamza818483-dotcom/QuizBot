@@ -10956,6 +10956,14 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
             )
 
         keys_to_try = key_rotator.ordered_keys() or key_rotator.keys
+        # Skip keys already confirmed daily-exhausted (by an earlier call this
+        # process) when at least one non-exhausted key remains -- ordered_keys()
+        # sorts exhausted keys last but doesn't remove them, so without this
+        # filter every call still re-tries and re-429s each known-dead key
+        # before reaching a live one, wasting calls on a predictable outcome.
+        _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
+        if _live:
+            keys_to_try = _live
         for key in keys_to_try:
             if is_cancelled():
                 return ""
