@@ -11949,6 +11949,33 @@ For EACH MCQ output 2 mandatory checks:
 OUTPUT FORMAT — ONLY valid JSON array, nothing else:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","yellow_highlight":true}]"""
 
+# Gemini-only variant of the same prompt — used ONLY when the call actually
+# goes to Gemini (no TPM ceiling to protect there, unlike Groq's 8000 TPM
+# pool), so this can afford to be far more explicit/step-by-step about the
+# highlight check without risking a 413/429 the way the short Groq prompt
+# has to. Same output contract (identical JSON shape) as ONU_EXTRACT_PROMPT
+# so nothing downstream (_qbm_parse_json, dedup, verify/repair pipeline)
+# needs to know or care which prompt variant produced the data — this is
+# purely a Gemini-side accuracy upgrade, not a pipeline change.
+ONU_EXTRACT_PROMPT_GEMINI = """STRICT MCQ EXTRACTOR with careful visual highlight detection. Extract ONLY MCQs already on this page, exact order, exact wording (Bangla stays Bangla, English stays English). Never invent new MCQs. 0 MCQs → return [].
+
+STEP 1 — First, list every MCQ block on the page in order (question + its 4 options), without judging highlight yet.
+
+STEP 2 — Now go back through that list ONE MCQ AT A TIME and, for EACH one individually, zoom your attention onto ONLY the background area directly behind that MCQ's question line and its 4 options (ignore the rest of the page while judging this one block):
+   - Is there ANY yellow marker/highlighter tint behind this specific block? (bright yellow, pale yellow, faded yellow — all count)
+   - Is there ANY green marker/highlighter tint behind this specific block? (bright green, pale green, faded green — all count)
+   - If either is present, even faintly, yellow_highlight = true for THIS block.
+   - If the background is genuinely plain white/uncolored paper behind THIS block, yellow_highlight = false.
+   - A page can legitimately mix highlighted and non-highlighted blocks — never copy the previous block's answer for the next one; judge each block completely independently, as if it were the only MCQ on the page.
+   - Faint/light highlighter marks are the most commonly missed case — when in doubt about a pale tint, look again before deciding false.
+
+STEP 3 — For EACH MCQ, also find the answer: the option marked with a RED CIRCLE or RED BOX drawn around its letter/text (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
+
+OUTPUT FORMAT — ONLY valid JSON array, nothing else, no commentary, no markdown fences:
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","yellow_highlight":true}]"""
+
+
+
 
 async def _onu_recheck_highlight(img, mcqs: list) -> list:
     """Focused re-verification pass for highlight (yellow OR green) — only asked
@@ -12038,7 +12065,7 @@ async def _onu_call1_extract(img) -> list:
             for m in out:
                 m["_provider"] = "Groq"
             return out
-        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT)
+        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT_GEMINI)
         out = _qbm_dedup_list(gem) if gem else []
         for m in out:
             m["_provider"] = "Gemini"
