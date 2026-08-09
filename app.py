@@ -10380,9 +10380,18 @@ Output ONLY the full corrected JSON array (Call 1 + missed, all fixes applied):
                 # show both stages distinctly instead of Call2 silently
                 # overwriting Call1's Gemini/Groq attribution.
                 _c1_by_q = {(_c.get("question") or "").strip()[:80]: _c.get("_call1_provider", "?") for _c in call1_mcqs}
-                for m in deduped:
+                _same_len = len(deduped) == len(call1_mcqs)
+                for _idx, m in enumerate(deduped):
                     m["_call2_provider"] = call2_provider
-                    m["_call1_provider"] = _c1_by_q.get((m.get("question") or "").strip()[:80], m.get("_call1_provider", "?"))
+                    # Call2/Groq often rewrites the question text (fixing typos,
+                    # de-truncating) so the truncated-text match below can miss --
+                    # when the list length didn't change (common case, no
+                    # miss-check additions/removals), fall back to positional
+                    # match first since order is preserved through this point.
+                    _matched = _c1_by_q.get((m.get("question") or "").strip()[:80])
+                    if _matched is None and _same_len:
+                        _matched = call1_mcqs[_idx].get("_call1_provider")
+                    m["_call1_provider"] = _matched or m.get("_call1_provider", "?")
                     m["_provider"] = call2_provider
                 return _cap_mcq_options(deduped)
             return _cap_mcq_options(call1_mcqs)
