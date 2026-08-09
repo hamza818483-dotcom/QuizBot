@@ -10191,11 +10191,13 @@ async def _qbm_call1_extract(img) -> list:
         prompt = await qbm_get_active_prompt()
         gem = await _qbm_gemini_extract(img, prompt)
         if gem:
+            logger.info(f"[QBM Call1] Gemini succeeded, {len(gem)} MCQ")
             out = _qbm_dedup_list(gem)
             for m in out:
                 m["_provider"] = "Gemini"
                 m["_call1_provider"] = "Gemini"
             return out
+        logger.warning("[QBM Call1] Gemini returned empty/failed -> falling back to Groq for Call1")
         txt = await _qbm_groq_call(img, prompt)
         result = _qbm_parse_json(txt) if txt else []
         if result:
