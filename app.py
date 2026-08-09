@@ -12522,18 +12522,49 @@ async def qbm_extract_all_pages(
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0), reply_markup=_cancel_kb(chat_id))
         mcqs = []
-        try:
+
+        async def _run_extract():
             _ck = (file_id, page_num) if (file_id and extractor is None) else None
-            mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
+            return await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
+
+        async def _watch_cancel_inner(task):
+            # Call1/Call2 (এবং lookahead/web-resolve) মিলিয়ে একটা page
+            # 30-90s পর্যন্ত লাগতে পারে — আগে cancel চেক শুধু page শুরুর
+            # আগে হতো, তাই বাটনে চাপলেও চলমান page শেষ না হওয়া পর্যন্ত
+            # কিছু হতো না। এখন প্রতি 0.3s cancel flag পোল করে, flag উঠলে
+            # সাথে সাথে চলমান extract task cancel করে দেয়।
+            while not task.done():
+                if is_cancelled(chat_id):
+                    task.cancel()
+                    return
+                await asyncio.sleep(0.3)
+
+        try:
+            ex_task = _spawn_task(_run_extract())
+            watcher = _spawn_task(_watch_cancel_inner(ex_task))
+            try:
+                mcqs = await ex_task
+            except asyncio.CancelledError:
+                mcqs = []
+            finally:
+                watcher.cancel()
+                try:
+                    await watcher
+                except asyncio.CancelledError:
+                    pass
+
+            if is_cancelled(chat_id):
+                page_status[idx]["current"] = False
+                return idx, page_num, img, mcqs
 
             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
-            if unresolved and idx + 1 < len(pages):
+            if unresolved and idx + 1 < len(pages) and not is_cancelled(chat_id):
                 # Scan ALL remaining pages (not just the next 2) — an answer
                 # key/table can legitimately sit many pages later, and giving
                 # up early would mean falling back to an AI-guessed answer
                 # instead of the real one actually present in the source.
                 for lookahead_offset in range(1, len(pages) - idx):
-                    if not unresolved:
+                    if not unresolved or is_cancelled(chat_id):
                         break
                     _, lookahead_img = pages[idx + lookahead_offset]
                     found_map = await _qbm_scan_answer_key(lookahead_img, unresolved)
@@ -12551,8 +12582,10 @@ async def qbm_extract_all_pages(
 
             # Still unresolved after scanning nearby pages -> last-resort Groq
             # knowledge-based resolution, never a blind guess.
-            if unresolved:
+            if unresolved and not is_cancelled(chat_id):
                 for m in unresolved:
+                    if is_cancelled(chat_id):
+                        break
                     resolved = await _qbm_web_resolve_answer(m)
                     if resolved:
                         m["answer"] = resolved["answer"]
@@ -12561,12 +12594,13 @@ async def qbm_extract_all_pages(
                         ).strip()
         except Exception as e:
             logger.error(f"[QBM Extract] Page {page_num} error: {e} — retrying once before giving up (page must never be silently skipped)")
-            try:
-                _ck = (file_id, page_num) if (file_id and extractor is None) else None
-                mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
-            except Exception as e2:
-                logger.error(f"[QBM Extract] Page {page_num} retry also failed: {e2}")
-                mcqs = []
+            if not is_cancelled(chat_id):
+                try:
+                    _ck = (file_id, page_num) if (file_id and extractor is None) else None
+                    mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
+                except Exception as e2:
+                    logger.error(f"[QBM Extract] Page {page_num} retry also failed: {e2}")
+                    mcqs = []
 
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
