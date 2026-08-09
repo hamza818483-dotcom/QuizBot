@@ -12254,79 +12254,34 @@ async def _handle_onu_impl(msg: dict):
                 f"{reason_text}\n\n"
                 f"বাকি {total_after}টি এগোচ্ছে...")
 
-        if not channel_id:
-            channels = await db_get_channels()
-            if not channels:
-                await process_qbm_pages(chat_id, uid, uname, extracted_pages, topic,
-                    channel_id, True, file_name, status_msg_id, thread_id, skip_extract=True)
-                return
+        # ── /onu always ends with CSV-only output — no channel list/keyboard,
+        # no posting to any channel, regardless of -c flag or saved channels. ──
+        total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
 
-            app.state.qbm_cache = getattr(app.state, "qbm_cache", {})
-            app.state.qbm_cache[f"qbm_img_{uid}"] = extracted_pages
-            _cap_page_cache(app.state.qbm_cache)
-            await sb_exec(lambda: sb.table("quiz_sessions").upsert({
-                "key": f"qbm_pending_{uid}",
-                "data": json.dumps({
-                    "topic": topic, "file_name": file_name,
-                    "status_msg_id": status_msg_id, "thread_id": thread_id,
-                    "file_id": file_id, "page_range": page_range
-                }),
-                "updated_at": int(time.time())
-            }).execute())
-
-            total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
-            page_breakdown = "\n".join(
-                f"✅ Page {fmt_page(p)}: {len(mcqs)} MCQ ✓" for p, _, mcqs in extracted_pages
-            )
-
-            if total_mcq_found:
-                import io as _io_onu, csv as _csv_mod_onu
-                _buf_onu = _io_onu.StringIO()
-                _w_onu = _csv_mod_onu.writer(_buf_onu)
-                _w_onu.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
-                                  "answer", "explanation", "type", "section"])
-                _ans_map_onu = {"A": "1", "B": "2", "C": "3", "D": "4"}
-                for _, _, mcqs in extracted_pages:
-                    for m in mcqs:
-                        opts = m.get("options", ["", "", "", ""])
-                        _w_onu.writerow([
-                            m.get("question", ""), opts[0] if len(opts) > 0 else "",
-                            opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
-                            opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
-                            _ans_map_onu.get(m.get("answer", "A"), "1"),
-                            _strip_img_tag(m.get("explanation", "")), "1", "1"
-                        ])
-                await send_document(chat_id, _buf_onu.getvalue().encode("utf-8"),
-                    f"{topic}_ONU.csv",
-                    caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted, filtered)",
-                    mime_type="text/csv")
-
-            kb = {"inline_keyboard": []}
-            for ch in channels:
-                ch_id = ch.get("channel_id", "")
-                ch_name = ch.get("channel_name", ch_id)
-                kb["inline_keyboard"].append([{
-                    "text": f"📢 {ch_name}",
-                    "callback_data": f"qbmch_{ch_id}_{uid}"
-                }])
-            kb["inline_keyboard"].append([{
-                "text": "📄 CSV Only",
-                "callback_data": f"qbmch_csv_{uid}"
-            }])
-            await send_msg(chat_id,
-                "✅ <b>Extraction Complete!</b> (image/combination MCQ বাদ দেওয়া হয়েছে)\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📝 Total MCQ: {total_mcq_found}  |  📋 Pages: {len(pages)}  |  🚫 Skipped: {skipped_count}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"{page_breakdown}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎯 Topic: {topic}\n\nChannel select করো:",
-                reply_markup=kb
-            )
-            return
-
-        await process_qbm_pages(chat_id, uid, uname, extracted_pages, topic,
-            channel_id, False, file_name, status_msg_id, thread_id, skip_extract=True)
+        if total_mcq_found:
+            import io as _io_onu, csv as _csv_mod_onu
+            _buf_onu = _io_onu.StringIO()
+            _w_onu = _csv_mod_onu.writer(_buf_onu)
+            _w_onu.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                              "answer", "explanation", "type", "section"])
+            _ans_map_onu = {"A": "1", "B": "2", "C": "3", "D": "4"}
+            for _, _, mcqs in extracted_pages:
+                for m in mcqs:
+                    opts = m.get("options", ["", "", "", ""])
+                    _w_onu.writerow([
+                        m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                        opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                        opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                        _ans_map_onu.get(m.get("answer", "A"), "1"),
+                        _strip_img_tag(m.get("explanation", "")), "1", "1"
+                    ])
+            await send_document(chat_id, _buf_onu.getvalue().encode("utf-8"),
+                f"{topic}_ONU.csv",
+                caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted, filtered)",
+                mime_type="text/csv")
+        else:
+            await send_msg(chat_id, "❌ কোনো yellow-highlighted MCQ পাওয়া যায়নি।")
+        return
 
     except Exception as e:
         logger.error(f"[ONU] Error: {e}", exc_info=True)
