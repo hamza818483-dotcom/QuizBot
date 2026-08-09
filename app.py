@@ -12726,9 +12726,15 @@ async def process_qbm_pages(
             # Show Call1 (original extraction) and Call2 (verify) separately
             # when they differ, so it's clear e.g. Gemini extracted but Groq
             # verified -- a plain merged tally hid this distinction before.
+            # Always show Call1 (original extraction) alongside Verify (Call2)
+            # -- collapsing them into one string when they matched hid real
+            # attribution bugs (e.g. Call1 tag lost to text-mismatch during
+            # merge) behind what looked like "nothing to show separately".
+            # Showing both plainly, always, makes any future attribution loss
+            # immediately visible instead of silently indistinguishable.
             _c1_str = ", ".join(f"{k}:{v}" for k, v in page_call1_tally.get(page_num, {}).items())
             _c2_str = ", ".join(f"{k}:{v}" for k, v in page_provider_tally.get(page_num, {}).items())
-            page_status[idx]["model"] = _c1_str if _c1_str == _c2_str else f"Call1[{_c1_str}] Verify[{_c2_str}]"
+            page_status[idx]["model"] = f"Call1[{_c1_str}] Verify[{_c2_str}]"
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
 
