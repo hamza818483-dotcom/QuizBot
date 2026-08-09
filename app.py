@@ -11206,7 +11206,7 @@ async def _ai_generate_explanations_chunk(chunk: list) -> dict:
 
 কঠোর নিয়ম:
 - প্রতিটা explanation অবশ্যই সর্বোচ্চ ১৯০ ক্যারেক্টারের মধ্যে হতে হবে (Telegram poll explanation বক্সের ২০০ ক্যারেক্টার লিমিটের মধ্যে ফিট করাতে হবে) -- এর বেশি হলে চলবে না।
-- explanation-এ অবশ্যই বলতে হবে কোন option (A/B/C/D) সঠিক এবং কেন, প্রশ্নের বিষয় (topic) সংক্রান্ত প্রাসঙ্গিক তথ্য যোগ করতে হবে -- generic/এক-লাইনের ফাঁকা কথা লেখা যাবে না।
+- explanation সরাসরি তথ্য দিয়ে শুরু করবে -- "সঠিক উত্তর X।" জাতীয় কোনো লাইন/prefix লেখা যাবে না, answer letter (A/B/C/D) কোথাও mention করা যাবে না। শুধু কেন সেই option-টা সঠিক (topic-related তথ্য দিয়ে) এবং বাকি option গুলো সম্পর্কে প্রাসঙ্গিক তথ্য/ব্যাখ্যা দিতে হবে -- generic/এক-লাইনের ফাঁকা কথা লেখা যাবে না।
 - ভাষা: প্রশ্ন যে ভাষায় (বাংলা/ইংরেজি) সেই ভাষাতেই লিখতে হবে।
 - যদি input-এ আগে থেকেই কোনো explanation থাকে সেটা উপেক্ষা করে নতুন করে সঠিক ও তথ্যবহুল explanation বানাও।
 
@@ -11223,9 +11223,18 @@ OUTPUT — ONLY a valid JSON array, exactly {len(chunk)} items, same order, noth
     if not parsed:
         return {}
     out = {}
+    # Defensive cleanup: strip a leading "সঠিক উত্তর X।"/"Correct answer: X."
+    # style prefix if the model adds one anyway despite the prompt rule --
+    # this line adds no value (option letters aren't shown in the poll UI
+    # the same way) and eats into the 200-char budget.
+    _answer_prefix_re = re.compile(
+        r'^\s*(সঠিক\s*উত্তর|উত্তর)\s*[:\-]?\s*[A-Eক-ঙ১-৫][\)\.।]?\s*[।\.\-:]?\s*',
+        re.IGNORECASE
+    )
     for i, item in enumerate(parsed):
         exp = (item.get("explanation") or "").strip() if isinstance(item, dict) else ""
         if exp:
+            exp = _answer_prefix_re.sub("", exp).strip()
             out[i] = exp[:200]
     return out
 
