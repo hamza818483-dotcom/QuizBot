@@ -11210,30 +11210,37 @@ OUTPUT — ONLY a valid JSON array, exactly {len(chunk)} items, same order, noth
     return out
 
 
-async def _ai_generate_all_explanations(mcqs: list) -> None:
+async def _ai_generate_all_explanations(mcqs: list, progress_cb=None) -> None:
     """Fills mcqs[i]['explanation'] in-place. Tries the WHOLE file in a
     single Gemini call first (one key, one call) -- works fine for typical
     CSV sizes since Gemini has no small TPM ceiling like Groq. Only falls
     back to chunked (8/call, 3 concurrent) calls if the single-call attempt
     fails or Gemini's response gets truncated/malformed (large files can
-    still hit output-token limits)."""
+    still hit output-token limits). progress_cb(done_count) is called after
+    every completed chunk so the caller can show live %/elapsed status."""
     if not mcqs:
         return
     single = await _ai_generate_explanations_chunk(mcqs)
     if len(single) == len(mcqs):
         for idx, exp in single.items():
             mcqs[idx]["explanation"] = exp
+        if progress_cb:
+            progress_cb(len(mcqs))
         return
 
     logger.warning(f"[AI] single-call attempt covered {len(single)}/{len(mcqs)} -- falling back to chunked calls")
     chunks = [mcqs[i:i + _AI_EXPLAIN_CHUNK_SIZE] for i in range(0, len(mcqs), _AI_EXPLAIN_CHUNK_SIZE)]
     sem = asyncio.Semaphore(_AI_EXPLAIN_CONCURRENCY)
+    _done = {"n": 0}
 
     async def _run_chunk(chunk):
         async with sem:
             result = await _ai_generate_explanations_chunk(chunk)
             for idx, exp in result.items():
                 chunk[idx]["explanation"] = exp
+            _done["n"] += len(chunk)
+            if progress_cb:
+                progress_cb(_done["n"])
 
     await asyncio.gather(*[_run_chunk(c) for c in chunks])
 
@@ -11287,9 +11294,26 @@ async def handle_ai(msg: dict):
                          "explanation": row.get("explanation", "").strip(), "_row": row})
 
         if status_msg_id:
-            await edit_msg(chat_id, status_msg_id, f"⏳ {len(mcqs)}টা MCQ পাওয়া গেছে, Gemini দিয়ে explanation বসানো হচ্ছে...")
+            await edit_msg(chat_id, status_msg_id, f"⏳ {len(mcqs)}টা MCQ পাওয়া গেছে, Gemini দিয়ে explanation বসানো হচ্ছে...\n[░░░░░░░░░░ 0%] | 0/{len(mcqs)} | 0s")
 
-        await _ai_generate_all_explanations(mcqs)
+        _ai_start = time.time()
+        _total_mcqs = len(mcqs)
+        _last_shown = {"pct": -1}
+
+        def _ai_progress(done: int):
+            if not status_msg_id:
+                return
+            pct = int(done * 100 / _total_mcqs) if _total_mcqs else 100
+            if pct - _last_shown["pct"] < 10 and pct != 100:
+                return
+            _last_shown["pct"] = pct
+            bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+            elapsed = int(time.time() - _ai_start)
+            _spawn_task(edit_msg(chat_id, status_msg_id,
+                f"⏳ Explanation বসানো হচ্ছে...\n[{bar} {pct}%] | {done}/{_total_mcqs} | {elapsed}s"))
+
+        await _ai_generate_all_explanations(mcqs, progress_cb=_ai_progress)
+        _total_elapsed = int(time.time() - _ai_start)
 
         buf = _io_ai.StringIO()
         out_fields = fieldnames if fieldnames else ["questions", "option1", "option2", "option3", "option4", "option5", "answer", "explanation", "type", "section"]
@@ -11307,7 +11331,7 @@ async def handle_ai(msg: dict):
             caption=f"✅ {len(mcqs)}টা MCQ-তে explanation যোগ করা হয়েছে",
             mime_type="text/csv")
         if status_msg_id:
-            await edit_msg(chat_id, status_msg_id, f"✅ সম্পূর্ণ! {len(mcqs)}টা MCQ-তে explanation যোগ করা হয়েছে।")
+            await edit_msg(chat_id, status_msg_id, f"✅ সম্পূর্ণ! {len(mcqs)}টা MCQ-তে explanation যোগ করা হয়েছে।\n⏱ সময় লেগেছে: {_total_elapsed}s")
     except Exception as e:
         logger.error(f"[AI] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
