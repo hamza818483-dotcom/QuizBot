@@ -10512,45 +10512,6 @@ async def _qbm_ram_aware_acquire():
         return  # psutil unavailable -> fall back to hard cap only
 
 
-async def _qbm_detect_expected_count(img) -> int:
-    """
-    CODE-LEVEL enforcement (not prompt-level) — a cheap, dedicated call whose
-    ONLY job is to count how many MCQ blocks/serial numbers are visible on
-    this page image (e.g. "১।", "2.", "Q5", "প্রশ্ন-৩" etc, or just visually
-    counting distinct question blocks if no explicit numbering exists).
-    This gives a ground-truth expected count that the main pipeline's actual
-    extracted count is checked against below -- if extraction falls short,
-    the pipeline is FORCED to keep retrying (code-level loop), never trusting
-    the AI's own "I found everything" claim at face value.
-    Returns 0 if detection itself fails (caller then skips the count-check
-    gate rather than blocking on an unreliable number).
-    """
-    prompt = """Look at this exact page image and COUNT how many separate MCQ
-(multiple-choice question) blocks are visible on it -- do NOT extract their
-content, ONLY count them.
-
-If the questions have visible serial numbers/labels (e.g. "১।", "2.", "Q5",
-"প্রশ্ন-৩", "৭।" etc), use the highest one visible on this page as a strong
-signal, but also visually verify by counting distinct question blocks (a
-question with its A/B/C/D options is one block) since numbering can restart
-per page/section or be entirely absent.
-
-Output ONLY a single integer -- the total count of MCQ blocks on this page.
-If there are genuinely zero MCQs on the page, output: 0
-Output nothing else, just the number."""
-    try:
-        txt = await _qbm_groq_call(img, prompt)
-        if not txt:
-            txt = await _qbm_gemini_raw(img, prompt)
-        if not txt:
-            return 0
-        m = re.search(r'\d+', txt.strip())
-        return int(m.group()) if m else 0
-    except Exception as e:
-        logger.warning(f"[QBM] expected-count detection failed: {e}")
-        return 0
-
-
 async def _qbm_extract_from_image(img) -> list:
     """
     2-CALL CONNECTED PIPELINE (per page) — max 2 Gemini requests/page (Groq
@@ -10565,14 +10526,6 @@ async def _qbm_extract_from_image(img) -> list:
         prepending, and qsn_bbox correctness (adds if missed, removes if
         falsely present). Never fabricates new questions.
 
-    CODE-LEVEL MISS GUARANTEE (not prompt-level): after Call1+Call2, an
-    independent cheap call (_qbm_detect_expected_count) counts how many MCQ
-    blocks/serial-numbers are actually visible on the page. If the extracted
-    count comes up short, the pipeline does NOT trust the AI's own claim of
-    completeness -- it forces additional Call2 miss-check passes (up to 2
-    more) specifically targeting the gap, comparing counts in code each time,
-    before ever accepting a short result.
-
     ZERO-SKIP GUARANTEE: a 0-MCQ result from Call 1 is NEVER trusted outright
     — it's indistinguishable from a technical failure (image encode issue,
     Gemini/Groq call errored) which would silently look identical to "page
@@ -10582,7 +10535,6 @@ async def _qbm_extract_from_image(img) -> list:
     """
     await _qbm_ram_aware_acquire()
     try:
-        final_mcqs = None
         for _pipeline_attempt in range(3):
             call1 = await _qbm_call1_extract(img)
 
@@ -10599,50 +10551,14 @@ async def _qbm_extract_from_image(img) -> list:
                 verified = await _qbm_call2_miss_check(img, final_check)
                 verified = _qbm_repair_order(final_check, verified)
                 recovered_mcqs = _cap_mcq_options(_qbm_restore_opt_bboxes(final_check, verified))
-                final_mcqs = await _qbm_final_safety_net(img, recovered_mcqs)
-                break
+                return await _qbm_final_safety_net(img, recovered_mcqs)
 
             call2 = await _qbm_call2_miss_check(img, call1)
             call2 = _qbm_repair_order(call1, call2)
             call2 = _qbm_restore_opt_bboxes(call1, call2)
             final_mcqs = _cap_mcq_options(call2)
-            final_mcqs = await _qbm_final_safety_net(img, final_mcqs)
-            break
-
-        if final_mcqs is None:
-            return []
-
-        # ── CODE-LEVEL MISS GUARANTEE ──
-        try:
-            expected = await _qbm_detect_expected_count(img)
-        except Exception as e:
-            logger.warning(f"[QBM] expected-count check errored, skipping gate: {e}")
-            expected = 0
-
-        if expected and len(final_mcqs) < expected:
-            logger.warning(f"[QBM] Extracted {len(final_mcqs)} but expected-count detector says {expected} — forcing extra recovery pass(es)")
-            for _recovery_attempt in range(2):
-                if len(final_mcqs) >= expected:
-                    break
-                recovered = await _qbm_call2_miss_check(img, final_mcqs)
-                recovered = _qbm_repair_order(final_mcqs, recovered) if len(recovered) == len(final_mcqs) else recovered
-                if len(recovered) > len(final_mcqs):
-                    final_mcqs = _qbm_dedup_list(recovered)
-                    final_mcqs = _cap_mcq_options(final_mcqs)
-                    final_mcqs = await _qbm_final_safety_net(img, final_mcqs)
-                else:
-                    # no improvement this pass -- one more independent fresh-eyes
-                    # scan (same mechanism as the zero-skip empty-page path) as a
-                    # last attempt before accepting the count gap.
-                    fresh = await _qbm_final_empty_page_scan(img)
-                    if fresh:
-                        combined = _qbm_dedup_list(list(final_mcqs) + fresh)
-                        if len(combined) > len(final_mcqs):
-                            final_mcqs = _cap_mcq_options(await _qbm_final_safety_net(img, combined))
-            if len(final_mcqs) < expected:
-                logger.warning(f"[QBM] Still short after recovery passes: {len(final_mcqs)}/{expected} expected — accepting best-effort result (page never silently dropped, just may be short)")
-
-        return final_mcqs
+            return await _qbm_final_safety_net(img, final_mcqs)
+        return []
     finally:
         _QBM_EXTRACT_HARD_CAP.release()
 
