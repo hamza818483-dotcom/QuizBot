@@ -6098,7 +6098,7 @@ async def _resume_page_job(job_row: dict):
             r = await send_msg(chat_id, f"⏳ বাকি {len(remaining_pages)} page re-extract + post হচ্ছে...")
             new_status_msg_id = r.get("result", {}).get("message_id")
 
-            extracted = await qbm_extract_all_pages(chat_id, remaining_pages, topic, file_name, new_status_msg_id)
+            extracted = await qbm_extract_all_pages(chat_id, remaining_pages, topic, file_name, new_status_msg_id, file_id=file_id)
             await process_qbm_pages(
                 chat_id, uid, uname, extracted, topic, channel_id, False,
                 file_name, new_status_msg_id, thread_id, skip_extract=True,
@@ -10567,19 +10567,38 @@ async def _qbm_ram_aware_acquire():
         return  # psutil unavailable -> fall back to hard cap only
 
 
-async def _qbm_extract_from_image(img) -> list:
+# /qbm-ONLY page-level MCQ cache: keyed by (pdf_content_hash, page_num), so
+# re-running /qbm on the identical PDF+page skips Call1 (re-extraction) and
+# goes straight to Call2 (full verify), instead of paying for the extraction
+# call again. Call2 still runs in full -- cached MCQs are NEVER trusted
+# blindly, they're re-checked exactly like a fresh Call1 result would be,
+# catching anything that changed (prompt updates, a bad prior extraction).
+# Deliberately NOT wired into /onu or /pdf -- only handle_qbm populates/reads
+# this, per instruction that this caching is /qbm-specific.
+_QBM_MCQ_CACHE_MAX = 300
+_qbm_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict] (post-Call1, pre-Call2)
+
+def _cap_qbm_mcq_cache():
+    while len(_qbm_mcq_result_cache) > _QBM_MCQ_CACHE_MAX:
+        _qbm_mcq_result_cache.pop(next(iter(_qbm_mcq_result_cache)), None)
+
+
+async def _qbm_extract_from_image(img, cache_key: tuple = None) -> list:
     """
     2-CALL CONNECTED PIPELINE (per page) — max 2 Gemini requests/page (Groq
     only as fallback if Gemini fails), 2-call system:
 
     Call 1 (extract): own-OCR + strict prompt MCQ extraction (question,
         options in exact source serial, answer, explanation, qsn_bbox for
-        any question-diagram).
+        any question-diagram). SKIPPED on a cache hit (cache_key given and
+        found) -- the cached list is used as Call1's output directly.
     Call 2 (miss-check + verify): finds any MCQ Call 1 missed, then runs
         a full re-check pass against the page image — option-serial
         integrity, answer-source match, spelling/completeness, uddipok
         prepending, and qsn_bbox correctness (adds if missed, removes if
-        falsely present). Never fabricates new questions.
+        falsely present). Never fabricates new questions. ALWAYS runs in
+        full, even on a cache hit -- a cached Call1 result is never trusted
+        without this real re-check pass.
 
     ZERO-SKIP GUARANTEE: a 0-MCQ result from Call 1 is NEVER trusted outright
     — it's indistinguishable from a technical failure (image encode issue,
@@ -10591,7 +10610,15 @@ async def _qbm_extract_from_image(img) -> list:
     await _qbm_ram_aware_acquire()
     try:
         for _pipeline_attempt in range(3):
-            call1 = await _qbm_call1_extract(img)
+            cached_call1 = _qbm_mcq_result_cache.get(cache_key) if cache_key else None
+            if cached_call1:
+                logger.info(f"[QBM MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
+                call1 = cached_call1
+            else:
+                call1 = await _qbm_call1_extract(img)
+                if call1 and cache_key:
+                    _qbm_mcq_result_cache[cache_key] = call1
+                    _cap_qbm_mcq_cache()
 
             if not call1:
                 # ZERO-SKIP GUARANTEE: a single empty Call 1 could be a technical
@@ -11708,7 +11735,7 @@ async def _handle_qbm_impl(msg: dict):
         # is fully complete, so the person picks a channel already knowing
         # exactly how many MCQs were found.
         extracted_pages = await qbm_extract_all_pages(
-            chat_id, pages, topic, file_name, status_msg_id
+            chat_id, pages, topic, file_name, status_msg_id, file_id=file_id
         )
 
         if not channel_id:
@@ -12391,7 +12418,7 @@ Return ONLY the JSON array, nothing else."""
 async def qbm_extract_all_pages(
     chat_id: int, pages: list, topic: str,
     file_name: str, status_msg_id: int = None,
-    extractor=None
+    extractor=None, file_id: str = None
 ) -> list:
     """
     Phase 1 -- runs the full 3-call connected extraction pipeline for every
@@ -12399,6 +12426,12 @@ async def qbm_extract_all_pages(
     cross-page answer backfill lookahead here (same as before), so by the
     time this returns, every page's MCQ list is fully final.
     Returns list of (page_num, img, mcqs) tuples.
+
+    file_id (optional): when given, enables the /qbm-only page-level MCQ
+    cache -- re-running /qbm on the identical PDF+page skips re-extraction
+    (Call1) and goes straight to a full Call2 verify pass on the cached
+    result. Intentionally opt-in (only /qbm passes this) so /onu and other
+    callers of this same function are completely unaffected.
     """
     _extract_fn = extractor or _qbm_extract_from_image
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
@@ -12446,7 +12479,8 @@ async def qbm_extract_all_pages(
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
         mcqs = []
         try:
-            mcqs = await _extract_fn(img)
+            _ck = (file_id, page_num) if (file_id and extractor is None) else None
+            mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
 
             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
             if unresolved and idx + 1 < len(pages):
@@ -12484,7 +12518,8 @@ async def qbm_extract_all_pages(
         except Exception as e:
             logger.error(f"[QBM Extract] Page {page_num} error: {e} — retrying once before giving up (page must never be silently skipped)")
             try:
-                mcqs = await _extract_fn(img)
+                _ck = (file_id, page_num) if (file_id and extractor is None) else None
+                mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
             except Exception as e2:
                 logger.error(f"[QBM Extract] Page {page_num} retry also failed: {e2}")
                 mcqs = []
@@ -12603,7 +12638,10 @@ async def process_qbm_pages(
             _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
 
         try:
-            mcqs = precomputed_mcqs if skip_extract else await _qbm_extract_from_image(img)
+            _ck = (file_id, page_num) if file_id else None
+            mcqs = precomputed_mcqs if skip_extract else (
+                await _qbm_extract_from_image(img, cache_key=_ck) if _ck else await _qbm_extract_from_image(img)
+            )
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
@@ -16343,7 +16381,8 @@ async def handle_callback(query: dict):
                     extracted = await qbm_extract_all_pages(
                         chat_id, raw_pages, pending["topic"],
                         pending.get("file_name","document.pdf"),
-                        pending.get("status_msg_id")
+                        pending.get("status_msg_id"),
+                        file_id=saved_file_id
                     )
                     await process_qbm_pages(
                         chat_id, uid, user.get("first_name","User"), extracted,
