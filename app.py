@@ -10347,9 +10347,11 @@ Output ONLY the full corrected JSON array (Call 1 + missed, all fixes applied):
 
         txt = await _qbm_groq_call(img, prompt)
         result = _qbm_parse_json(txt) if txt else []
+        call2_provider = "Groq"
         if not result:
             gem_txt = await _qbm_gemini_raw(img, prompt)
             result = _qbm_parse_json(gem_txt) if gem_txt else []
+            call2_provider = "Gemini"
 
         if result and len(result) >= len(call1_mcqs) * 0.8:
             deduped = _qbm_dedup_list(result)
@@ -10357,6 +10359,8 @@ Output ONLY the full corrected JSON array (Call 1 + missed, all fixes applied):
             # count, trust the deduped version; if dedup removed almost everything
             # (parsing weirdness), fall back to the pre-check list instead.
             if deduped and len(deduped) >= len(call1_mcqs) * 0.8:
+                for m in deduped:
+                    m["_provider"] = call2_provider
                 return _cap_mcq_options(deduped)
             return _cap_mcq_options(call1_mcqs)
         return call1_mcqs  # call2 failed/degraded -> keep Call1 result, never lose data
@@ -12425,13 +12429,12 @@ async def qbm_extract_all_pages(
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
         return idx, page_num, img, mcqs
 
-    # Windowed concurrency: extract several pages in parallel instead of one at
-    # a time -- the RAM-aware semaphore (_QBM_EXTRACT_HARD_CAP) still throttles
-    # actual concurrent Gemini calls, this just stops needlessly serializing
-    # pages that don't depend on each other's extraction result. Each page now
-    # updates the live dashboard the moment IT finishes (not the whole window),
-    # so progress is visible page-by-page instead of jumping in blocks of 5.
-    WINDOW = 8
+    # Sequential: one page fully completes before the next starts. Parallel
+    # windows (previously WINDOW=8) meant multiple pages hitting Groq's shared
+    # 8000 TPM pool at once -- causing 429/413 TPM overflow errors -- and also
+    # finished out of page order (e.g. page 9/10 done before 6/7/8), which
+    # broke the requirement that pages complete strictly in order.
+    WINDOW = 1
     for start in range(0, len(pages), WINDOW):
         if is_cancelled(chat_id):
             break
