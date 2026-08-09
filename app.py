@@ -11117,6 +11117,187 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
         return await _gen_groq_raw_text(img, prompt)
 
 
+async def _ai_gemini_text_call(prompt: str) -> str:
+    """Text-only Gemini call (no image) for /ai's explanation generation.
+    Same key-rotation/exhaustion handling as _qbm_gemini_raw, minus the
+    image part -- tries every non-exhausted key in order before giving up."""
+    try:
+        from pdf_handler import key_rotator, _is_gemini_key_exhausted_today
+        if not key_rotator.keys:
+            return ""
+        from google import genai as gai
+        from google.genai import types
+
+        def _call(key):
+            client = gai.Client(api_key=key)
+            return client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=[types.Part.from_text(text=prompt)],
+                config=types.GenerateContentConfig(temperature=0.2)
+            )
+
+        keys_to_try = key_rotator.ordered_keys() or key_rotator.keys
+        _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
+        if _live:
+            keys_to_try = _live
+        for key in keys_to_try:
+            if is_cancelled():
+                return ""
+            try:
+                response = await asyncio.to_thread(_call, key)
+                key_rotator.mark_healthy(key)
+                return response.text or ""
+            except Exception as e:
+                msg = str(e)
+                if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                    daily = "PerDay" in msg
+                    key_rotator.mark_rate_limited(key, daily_exhausted=daily)
+                    logger.warning(f"[AI] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key")
+                    continue
+                logger.warning(f"[AI] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
+                continue
+        logger.warning("[AI] all Gemini keys exhausted/failed")
+        return ""
+    except Exception as e:
+        logger.warning(f"[AI] Gemini text call failed: {e}")
+        return ""
+
+
+_AI_EXPLAIN_CHUNK_SIZE = 8
+_AI_EXPLAIN_CONCURRENCY = 3
+
+
+async def _ai_generate_explanations_chunk(chunk: list) -> dict:
+    """Given a chunk of MCQ dicts (with 'question','options','answer'),
+    returns {index_in_chunk: explanation_text} for whichever ones Gemini
+    successfully answered. Explanation MUST fit Telegram's poll explanation
+    character limit (~200 chars) -- confirms which option is correct and
+    adds relevant topic/option-related info, never generic filler."""
+    if not chunk:
+        return {}
+    items_json = json.dumps([
+        {"question": c["question"], "options": c["options"], "answer": c["answer"]}
+        for c in chunk
+    ], ensure_ascii=False)
+    prompt = f"""তুমি একজন বিষয়বিশেষজ্ঞ শিক্ষক। নিচে কিছু MCQ (প্রশ্ন + অপশন + সঠিক উত্তর) দেওয়া আছে, প্রতিটার জন্য একটা explanation লিখতে হবে।
+
+কঠোর নিয়ম:
+- প্রতিটা explanation অবশ্যই সর্বোচ্চ ১৯০ ক্যারেক্টারের মধ্যে হতে হবে (Telegram poll explanation বক্সের ২০০ ক্যারেক্টার লিমিটের মধ্যে ফিট করাতে হবে) -- এর বেশি হলে চলবে না।
+- explanation-এ অবশ্যই বলতে হবে কোন option (A/B/C/D) সঠিক এবং কেন, প্রশ্নের বিষয় (topic) সংক্রান্ত প্রাসঙ্গিক তথ্য যোগ করতে হবে -- generic/এক-লাইনের ফাঁকা কথা লেখা যাবে না।
+- ভাষা: প্রশ্ন যে ভাষায় (বাংলা/ইংরেজি) সেই ভাষাতেই লিখতে হবে।
+- যদি input-এ আগে থেকেই কোনো explanation থাকে সেটা উপেক্ষা করে নতুন করে সঠিক ও তথ্যবহুল explanation বানাও।
+
+INPUT MCQs (in order):
+{items_json}
+
+OUTPUT — ONLY a valid JSON array, exactly {len(chunk)} items, same order, nothing else:
+[{{"explanation":"..."}}]"""
+
+    txt = await _ai_gemini_text_call(prompt)
+    if not txt:
+        return {}
+    parsed = _qbm_parse_json(txt)
+    if not parsed or len(parsed) != len(chunk):
+        return {}
+    out = {}
+    for i, item in enumerate(parsed):
+        exp = (item.get("explanation") or "").strip()
+        if exp:
+            out[i] = exp[:200]
+    return out
+
+
+async def _ai_generate_all_explanations(mcqs: list) -> None:
+    """Fills mcqs[i]['explanation'] in-place, chunked + concurrency-limited
+    Gemini calls. Any MCQ whose chunk fails keeps its original explanation
+    (if any) untouched rather than being blanked out."""
+    chunks = [mcqs[i:i + _AI_EXPLAIN_CHUNK_SIZE] for i in range(0, len(mcqs), _AI_EXPLAIN_CHUNK_SIZE)]
+    sem = asyncio.Semaphore(_AI_EXPLAIN_CONCURRENCY)
+
+    async def _run_chunk(chunk):
+        async with sem:
+            result = await _ai_generate_explanations_chunk(chunk)
+            for idx, exp in result.items():
+                chunk[idx]["explanation"] = exp
+
+    await asyncio.gather(*[_run_chunk(c) for c in chunks])
+
+
+async def handle_ai(msg: dict):
+    """
+    /ai — reply দাও একটা CSV ফাইলে (questions,option1-5,answer,explanation,
+    type,section format)। প্রতিটা MCQ-র question+options+answer বুঝে Gemini
+    দিয়ে relevant explanation বসায় explanation column-এ (Telegram poll
+    explanation-এর ~200 ক্যারেক্টার লিমিটের মধ্যে), বাকি সব column অপরিবর্তিত
+    রেখে নতুন CSV ফাইল রিটার্ন করে।
+    """
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+    doc = reply.get("document") if reply else None
+    if not doc or not doc.get("file_name", "").lower().endswith(".csv"):
+        await send_msg(chat_id,
+            "❌ একটা CSV ফাইলে reply করে /ai দাও!\n\n"
+            "📌 CSV format: questions, option1-5, answer, explanation, type, section\n"
+            "📌 প্রতিটা MCQ-র জন্য Gemini দিয়ে relevant explanation বসাবে (answer + topic info সহ, ~200 ক্যারেক্টারের মধ্যে)")
+        return
+
+    file_id = doc["file_id"]
+    status_r = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    try:
+        csv_bytes = await download_tg_file(file_id)
+        content = csv_bytes.decode("utf-8-sig")
+        import io as _io_ai, csv as _csv_mod_ai
+        reader = _csv_mod_ai.DictReader(_io_ai.StringIO(content))
+        fieldnames = reader.fieldnames or []
+        rows = list(reader)
+        if not rows:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ CSV-তে কোনো MCQ পাওয়া যায়নি!")
+            return
+
+        ans_map_to_letter = {"1": "A", "2": "B", "3": "C", "4": "D", "5": "E",
+                              "A": "A", "B": "B", "C": "C", "D": "D", "E": "E"}
+        mcqs = []
+        for row in rows:
+            q = (row.get("questions") or row.get("question") or "").strip()
+            opts = {}
+            for letter, col in zip("ABCDE", ["option1", "option2", "option3", "option4", "option5"]):
+                v = (row.get(col) or "").strip()
+                if v:
+                    opts[letter] = v
+            ans_letter = ans_map_to_letter.get(str(row.get("answer", "1")).strip().upper(), "A")
+            mcqs.append({"question": q, "options": opts, "answer": ans_letter,
+                         "explanation": row.get("explanation", "").strip(), "_row": row})
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"⏳ {len(mcqs)}টা MCQ পাওয়া গেছে, Gemini দিয়ে explanation বসানো হচ্ছে...")
+
+        await _ai_generate_all_explanations(mcqs)
+
+        buf = _io_ai.StringIO()
+        out_fields = fieldnames if fieldnames else ["questions", "option1", "option2", "option3", "option4", "option5", "answer", "explanation", "type", "section"]
+        writer = _csv_mod_ai.DictWriter(buf, fieldnames=out_fields)
+        writer.writeheader()
+        for m in mcqs:
+            row = dict(m["_row"])
+            if "explanation" in row or "explanation" in out_fields:
+                row["explanation"] = m["explanation"]
+            writer.writerow(row)
+
+        base_name = doc.get("file_name", "quiz.csv").rsplit(".", 1)[0]
+        await send_document(chat_id, buf.getvalue().encode("utf-8"),
+            f"{base_name}_AI.csv",
+            caption=f"✅ {len(mcqs)}টা MCQ-তে explanation যোগ করা হয়েছে",
+            mime_type="text/csv")
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ সম্পূর্ণ! {len(mcqs)}টা MCQ-তে explanation যোগ করা হয়েছে।")
+    except Exception as e:
+        logger.error(f"[AI] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
 async def _qbm_gemini_extract(img, prompt: str = None) -> list:
     """Direct Gemini call with the strict extraction prompt (fallback path)."""
     txt = await _qbm_gemini_raw(img, prompt or await qbm_get_active_prompt())
@@ -15621,6 +15802,11 @@ async def handle_message(msg: dict):
         # /onu = same as /qbm but skips image-attached MCQs and roman/serial
         # combination-type (i,ii,iii / ১,২,৩) MCQs that need a উদ্দীপক to make sense
         _spawn_command_task(uid, handle_onu(msg))
+    elif text.startswith("/ai"):
+        # /ai = reply to a CSV file -> Gemini fills the explanation column
+        # for every MCQ (answer confirmation + relevant topic/option info,
+        # kept within Telegram poll's ~200-char explanation limit) -> new CSV
+        _spawn_command_task(uid, handle_ai(msg))
     elif text.startswith("/auto"):
         # /auto = clicks through chorcha.net using user-given button-text
         # labels (one per line), screenshots the final page, runs it
