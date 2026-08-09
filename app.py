@@ -11940,13 +11940,11 @@ def _onu_filter_mcqs(mcqs: list):
 # marked answer (red circle/box around an option). No passage handling, no
 # math formatting, no explanation-generation rules -- those aren't part of
 # /onu's job and were only bloating the prompt for QBM's use case.
-ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page, exact order, exact wording (Bangla stays Bangla, English stays English). Never invent new MCQs. 0 MCQs → return [].
+ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY. Scan every MCQ block on this page (question + 4 options), one block at a time. For EACH block, look specifically at the pixels directly behind its question line AND its 4 options. If ANY yellow marker-pen color OR ANY green marker-pen color is visible there (a light/pale/faint tint of either still counts, not just bright/saturated), INCLUDE this MCQ in the output. If the background is plain white/no-color for this block, SKIP it entirely — do NOT include it in the output at all. Do not assume based on other MCQs on the page — each block gets its own independent check, since a page can mix highlighted and non-highlighted blocks. Never invent new MCQs, exact order, exact wording (Bangla stays Bangla, English stays English). 0 highlighted MCQs → return [].
 
-For EACH MCQ output 2 mandatory checks:
-1) yellow_highlight: MANDATORY per-MCQ check — before writing this field, look specifically at the pixels directly behind this MCQ's question line AND its 4 options, block by block, one MCQ at a time. Set true if ANY yellow marker-pen color OR ANY green marker-pen color is visible there (either color counts equally — a light/pale/faint tint of either still counts, not just bright/saturated). Set false only after confirming the background is plain white/no-color for this specific block. Do not assume based on other MCQs on the page — each block gets its own independent check, since a page can mix highlighted and non-highlighted blocks.
-2) answer: the option marked with a RED CIRCLE or RED BOX drawn around its letter/text — that IS the answer (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
+For each INCLUDED MCQ also find: answer — the option marked with a RED CIRCLE or RED BOX drawn around its letter/text — that IS the answer (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
 
-OUTPUT FORMAT — ONLY valid JSON array, nothing else:
+OUTPUT FORMAT — ONLY valid JSON array containing ONLY the highlighted MCQs, nothing else:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","yellow_highlight":true}]"""
 
 # Gemini-only variant of the same prompt — used ONLY when the call actually
@@ -11957,96 +11955,24 @@ OUTPUT FORMAT — ONLY valid JSON array, nothing else:
 # so nothing downstream (_qbm_parse_json, dedup, verify/repair pipeline)
 # needs to know or care which prompt variant produced the data — this is
 # purely a Gemini-side accuracy upgrade, not a pipeline change.
-ONU_EXTRACT_PROMPT_GEMINI = """STRICT MCQ EXTRACTOR with careful visual highlight detection. Extract ONLY MCQs already on this page, exact order, exact wording (Bangla stays Bangla, English stays English). Never invent new MCQs. 0 MCQs → return [].
+ONU_EXTRACT_PROMPT_GEMINI = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY, with careful visual highlight detection. Never invent new MCQs. 0 highlighted MCQs → return [].
 
 STEP 1 — First, list every MCQ block on the page in order (question + its 4 options), without judging highlight yet.
 
 STEP 2 — Now go back through that list ONE MCQ AT A TIME and, for EACH one individually, zoom your attention onto ONLY the background area directly behind that MCQ's question line and its 4 options (ignore the rest of the page while judging this one block):
    - Is there ANY yellow marker/highlighter tint behind this specific block? (bright yellow, pale yellow, faded yellow — all count)
    - Is there ANY green marker/highlighter tint behind this specific block? (bright green, pale green, faded green — all count)
-   - If either is present, even faintly, yellow_highlight = true for THIS block.
-   - If the background is genuinely plain white/uncolored paper behind THIS block, yellow_highlight = false.
-   - A page can legitimately mix highlighted and non-highlighted blocks — never copy the previous block's answer for the next one; judge each block completely independently, as if it were the only MCQ on the page.
-   - Faint/light highlighter marks are the most commonly missed case — when in doubt about a pale tint, look again before deciding false.
+   - If either is present, even faintly, this block IS highlighted — KEEP it for the output.
+   - If the background is genuinely plain white/uncolored paper behind THIS block, this block is NOT highlighted — DROP it, do not include it in the output at all.
+   - A page can legitimately mix highlighted and non-highlighted blocks — never copy the previous block's verdict for the next one; judge each block completely independently, as if it were the only MCQ on the page.
+   - Faint/light highlighter marks are the most commonly missed case — when in doubt about a pale tint, look again before deciding it's not highlighted.
 
-STEP 3 — For EACH MCQ, also find the answer: the option marked with a RED CIRCLE or RED BOX drawn around its letter/text (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
+STEP 3 — For each KEPT (highlighted) MCQ, also find the answer: the option marked with a RED CIRCLE or RED BOX drawn around its letter/text (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
 
-OUTPUT FORMAT — ONLY valid JSON array, nothing else, no commentary, no markdown fences:
+OUTPUT FORMAT — ONLY valid JSON array of the KEPT (highlighted) MCQs only, exact order, exact wording (Bangla stays Bangla, English stays English), nothing else, no commentary, no markdown fences:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","yellow_highlight":true}]"""
 
 
-
-
-async def _onu_recheck_highlight(img, mcqs: list) -> list:
-    """Focused re-verification pass for highlight (yellow OR green) — only asked
-    about the specific MCQs Call1 marked as NOT highlighted (false), since a
-    single full-page pass tends to miss highlight on pages where only 1-2 MCQs
-    out of many are highlighted (easy to skim past). Sends back the exact
-    question texts and asks the model to look again at THOSE specific blocks
-    only, not re-extract from scratch -- cheap, targeted, and catches
-    under-detection. Runs the check TWICE (independent calls) and accepts
-    true from EITHER pass -- a single model call can still miss a faint
-    highlight, so this halves the false-negative rate for the cost of one
-    extra short call only on the still-unresolved items."""
-    if not mcqs:
-        return mcqs
-
-    async def _one_pass(items: list) -> list:
-        """Returns list of True/False aligned with items, or None on failure."""
-        if not items:
-            return []
-        try:
-            q_list = "\n".join(f"{i+1}. {(mc.get('question') or '')[:120]}" for i, mc in enumerate(items))
-            prompt = f"""Look at this page image again, specifically at the background color behind these MCQ blocks (question + options) which were marked as NOT highlighted:
-{q_list}
-
-For EACH one, look VERY carefully at the actual background behind its question and options — a subtle/light YELLOW or GREEN marker band still counts as highlighted (either color), don't only look for bright colors. Double-check even if it looks plain white; small or faint highlight marks are easy to miss on a first pass.
-
-OUTPUT — ONLY a JSON array, one entry per item above IN ORDER, nothing else:
-[{{"yellow_highlight":true}},{{"yellow_highlight":false}}]"""
-            txt_hl = await _qbm_groq_call(img, prompt)
-            if not txt_hl:
-                txt_hl = await _qbm_gemini_raw(img, prompt)
-            gem_txt = txt_hl
-            if not gem_txt:
-                return None
-            t = gem_txt.strip()
-            if "```" in t:
-                t = t.split("```")[1].replace("json", "", 1).strip() if t.count("```") >= 2 else t
-            m = re.search(r'\[.*\]', t, re.DOTALL)
-            raw = json.loads(m.group()) if m else json.loads(t)
-            if not isinstance(raw, list) or len(raw) != len(items):
-                return None
-            return [isinstance(r, dict) and r.get("yellow_highlight") is True for r in raw]
-        except Exception as e:
-            logger.warning(f"[ONU-recheck] pass failed: {e}")
-            return None
-
-    try:
-        to_check = [mc for mc in mcqs if not mc.get("yellow_highlight")]
-        if not to_check:
-            return mcqs
-        pass1 = await _one_pass(to_check)
-        if pass1:
-            for mc, is_hl in zip(to_check, pass1):
-                if is_hl:
-                    mc["yellow_highlight"] = True
-        # pass2 only runs if pass1 actually succeeded (avoids doubling up
-        # Gemini calls when the key pool is already rate-limited/exhausted —
-        # gemini-3.6-flash free tier is only 5 RPM/key, so skipping a
-        # guaranteed-to-fail second call here matters for staying within
-        # budget on multi-page PDFs).
-        still_unflagged = [mc for mc in to_check if not mc.get("yellow_highlight")]
-        if pass1 is not None and still_unflagged:
-            pass2 = await _one_pass(still_unflagged)
-            if pass2:
-                for mc, is_hl in zip(still_unflagged, pass2):
-                    if is_hl:
-                        mc["yellow_highlight"] = True
-        return mcqs
-    except Exception as e:
-        logger.warning(f"[ONU-recheck] highlight recheck failed: {e}")
-        return mcqs
 
 
 async def _onu_call1_extract(img) -> list:
@@ -12127,32 +12053,6 @@ OUTPUT — ONLY a JSON array of exactly {len(mcqs)} items, same order, corrected
         return mcqs
 
 
-async def _onu_empty_page_scan(img) -> list:
-    """/onu-ONLY empty-page fallback — fully independent from
-    _qbm_final_empty_page_scan. Used only when Call1 returns zero MCQs, to
-    rule out a technical miss before confirming the page truly has no
-    highlighted MCQ. Gemini-only (no TPM budget to protect, and highlight
-    accuracy matters more here than speed)."""
-    try:
-        prompt = """A prior pass over this exact page image concluded there is NO existing MCQ (multiple-choice question) on this page. Do one final, completely fresh scan, ignoring that conclusion. Look at every part of the page including footnotes, margins, and faint/small text.
-
-If you find ANY existing MCQ, extract it in the strict format below (options in exact source position order, A/B/C/D by position). For EACH one, carefully check the background behind its question line and its 4 options for a YELLOW or GREEN highlighter tint (faint tints count too) -- set yellow_highlight true/false per MCQ independently. Also find the answer (RED CIRCLE/BOX around an option's letter, or other clear mark; default "A" if none).
-
-If the page genuinely has no MCQ, output exactly: []
-
-OUTPUT — ONLY a JSON array:
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","yellow_highlight":true}]"""
-        gem_txt = await _qbm_gemini_raw(img, prompt)
-        found = _qbm_parse_json(gem_txt) if gem_txt else []
-        out = _qbm_dedup_list(found) if found else []
-        for m in out:
-            m.setdefault("_provider", "Gemini")
-        return out
-    except Exception as e:
-        logger.warning(f"[ONU empty-page-scan] failed: {e}")
-        return []
-
-
 async def _onu_extract_from_image(img) -> list:
     """/onu's fully independent extraction pipeline — does NOT call into
     any QBM pipeline function (_qbm_call2_miss_check, _qbm_repair_order,
@@ -12164,34 +12064,19 @@ async def _onu_extract_from_image(img) -> list:
     just JSON/text/image helpers, so sharing them carries no cross-command
     behavior risk.
 
-    Steps: Call1 (extract + highlight) -> recheck (targeted re-check on
-    not-yet-highlighted items) -> lightweight verify (proofread only, never
-    adds/removes MCQs) -> _onu_filter_mcqs (caller-side) drops anything
-    without yellow_highlight=true. yellow_highlight is set once in Call1/
-    recheck and never needs restoring afterward, since no step in this path
-    can silently drop the field."""
+    Steps (exactly 2 API calls per page): Call1 (extract — highlighted MCQs
+    ONLY, non-highlighted blocks are skipped directly inside the extraction
+    prompt itself) -> Call2 (_onu_verify_pass — full proofread/verification
+    of exactly what Call1 found, never adds/removes MCQs). _onu_filter_mcqs
+    (caller-side, no API call) then drops anything without
+    yellow_highlight=true plus image-attached/roman-combo MCQs."""
     await _qbm_ram_aware_acquire()
     try:
-        for _pipeline_attempt in range(3):
-            call1 = await _onu_call1_extract(img)
-
-            if call1:
-                call1 = await _onu_recheck_highlight(img, call1)
-
-            if not call1:
-                recovered = await _onu_empty_page_scan(img)
-                if not recovered:
-                    if _pipeline_attempt < 2:
-                        logger.warning(f"[ONU] Call1+empty-scan both empty on attempt {_pipeline_attempt+1}/3 — retrying")
-                        continue
-                    return []
-                recovered = await _onu_recheck_highlight(img, recovered)
-                verified = await _onu_verify_pass(img, recovered)
-                return _cap_mcq_options(verified)
-
-            verified = await _onu_verify_pass(img, call1)
-            return _cap_mcq_options(verified)
-        return []
+        call1 = await _onu_call1_extract(img)
+        if not call1:
+            return []
+        verified = await _onu_verify_pass(img, call1)
+        return _cap_mcq_options(verified)
     finally:
         _QBM_EXTRACT_HARD_CAP.release()
 
