@@ -11667,7 +11667,7 @@ async def _handle_qbm_impl(msg: dict):
                 import io as _io_qbm, csv as _csv_mod_qbm
                 _buf_qbm = _io_qbm.StringIO()
                 _w_qbm = _csv_mod_qbm.writer(_buf_qbm)
-                _w_qbm.writerow(["questions", "option1", "option2", "option3", "option4",
+                _w_qbm.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                                   "answer", "explanation", "type", "section"])
                 _ans_map_qbm = {"A": "1", "B": "2", "C": "3", "D": "4"}
                 for _, _, mcqs in extracted_pages:
@@ -11676,7 +11676,7 @@ async def _handle_qbm_impl(msg: dict):
                         _w_qbm.writerow([
                             m.get("question", ""), opts[0] if len(opts) > 0 else "",
                             opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
-                            opts[3] if len(opts) > 3 else "",
+                            opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
                             _ans_map_qbm.get(m.get("answer", "A"), "1"),
                             _strip_img_tag(m.get("explanation", "")), "1", "1"
                         ])
@@ -12168,7 +12168,7 @@ async def _handle_onu_impl(msg: dict):
                 import io as _io_onu, csv as _csv_mod_onu
                 _buf_onu = _io_onu.StringIO()
                 _w_onu = _csv_mod_onu.writer(_buf_onu)
-                _w_onu.writerow(["questions", "option1", "option2", "option3", "option4",
+                _w_onu.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                                   "answer", "explanation", "type", "section"])
                 _ans_map_onu = {"A": "1", "B": "2", "C": "3", "D": "4"}
                 for _, _, mcqs in extracted_pages:
@@ -12177,7 +12177,7 @@ async def _handle_onu_impl(msg: dict):
                         _w_onu.writerow([
                             m.get("question", ""), opts[0] if len(opts) > 0 else "",
                             opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
-                            opts[3] if len(opts) > 3 else "",
+                            opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
                             _ans_map_onu.get(m.get("answer", "A"), "1"),
                             _strip_img_tag(m.get("explanation", "")), "1", "1"
                         ])
@@ -12582,6 +12582,7 @@ async def process_qbm_pages(
                         opts[1] if len(opts) > 1 else "",
                         opts[2] if len(opts) > 2 else "",
                         opts[3] if len(opts) > 3 else "",
+                        opts[4] if len(opts) > 4 else "",
                         ans_num, _strip_img_tag(m.get("explanation", "")), "1", "1"])
             else:
                 caption = ""
@@ -12660,6 +12661,7 @@ async def process_qbm_pages(
                         opts[1] if len(opts) > 1 else "",
                         opts[2] if len(opts) > 2 else "",
                         opts[3] if len(opts) > 3 else "",
+                        opts[4] if len(opts) > 4 else "",
                         ans_num, _strip_img_tag(m.get("explanation", "")), "1", "1"])
 
             total_mcq += len(mcqs)
@@ -12687,7 +12689,7 @@ async def process_qbm_pages(
         import io as _io, csv as _csv_mod
         buf = _io.StringIO()
         writer = _csv_mod.writer(buf)
-        writer.writerow(["questions", "option1", "option2", "option3", "option4",
+        writer.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                           "answer", "explanation", "type", "section"])
         for row in all_mcqs_csv:
             writer.writerow(row)
