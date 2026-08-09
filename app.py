@@ -10090,6 +10090,14 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     if _all_unusable:
         logger.warning("[QBM] all Groq keys daily-exhausted or cooling — skipping straight to Gemini")
         return ""
+    # Filter out individually-unusable keys (not just the all-unusable case
+    # above) -- without this, a call with e.g. 8 of 12 keys cooling still
+    # tried each of those 8 live and ate a fresh 429 for every one before
+    # reaching a healthy key, adding real wall-clock delay per call even
+    # though the outcome (skip to a live key) was predictable in advance.
+    live_keys = [k for k in keys if not _is_groq_key_exhausted_today(k) and groq_key_rotator._cooldown_until.get(k, 0) <= now]
+    if live_keys:
+        keys = live_keys
     data_url = _img_to_data_url_groq(img, mcq_count_hint=10, prompt_len_hint=prompt)
     if not data_url:
         return ""
