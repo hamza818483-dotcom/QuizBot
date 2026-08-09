@@ -541,6 +541,15 @@ def is_cancelled(chat_id=None):
 def clear_cancel(chat_id):
     CANCEL_FLAGS[chat_id] = False
 
+def _cancel_kb(chat_id) -> dict:
+    """Shared inline 'Cancel' button attached to every long-running job's
+    live status/dashboard message -- tapping it sets the same CANCEL_FLAGS
+    the /cancel command uses, so any in-progress job (checked via
+    is_cancelled() at its next loop iteration) stops the same way it would
+    if the person had typed /cancel."""
+    return {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": f"jobcancel_{chat_id}"}]]}
+
+
 def set_active_job(chat_id, label):
     ACTIVE_JOB_LABEL[chat_id] = label
 
@@ -8797,7 +8806,7 @@ async def pdf_generate_all_pages(
                 page_status[idx]["current"] = True
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0))
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
 
             mcqs = []
             try:
@@ -8842,7 +8851,7 @@ async def pdf_generate_all_pages(
                     page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0))
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
 
     async def _watch_cancel(tasks):
         # Polls the cancel flag while pages are in flight; the moment /cancel
@@ -8859,7 +8868,7 @@ async def pdf_generate_all_pages(
     try:
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
+                _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0), reply_markup=_cancel_kb(chat_id))
 
         tasks = [
             _spawn_task(_run_one(idx, page_num, img))
@@ -8985,7 +8994,7 @@ async def _process_pdf_pages_inner(
         status_msg_id = r.get("result", {}).get("message_id")
 
     await edit_msg(chat_id, status_msg_id,
-        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
 
     # PERMANENT FIX: dashboard previously only updated on page start/finish —
     # if one page's generation takes 30-90s, "Elapsed" looked frozen the
@@ -9007,7 +9016,7 @@ async def _process_pdf_pages_inner(
                 break
             try:
                 await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
             except Exception:
                 pass
     _dash_ticker_task = _spawn_task(_dashboard_ticker())
@@ -9085,7 +9094,7 @@ async def _process_pdf_pages_inner(
             page_num, img = page_tuple
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
 
         try:
             if not skip_generate:
@@ -9260,7 +9269,7 @@ async def _process_pdf_pages_inner(
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
             await sb_exec(lambda: sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute())
 
         except Exception as e:
@@ -9624,7 +9633,7 @@ async def _process_pdfm_pages_impl(
         status_msg_id = r.get("result",{}).get("message_id")
 
     await edit_msg(chat_id, status_msg_id,
-        _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
+        _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0), reply_markup=_cancel_kb(chat_id))
 
     summary_pages = []
     all_mcqs_csv = []
@@ -9638,7 +9647,7 @@ async def _process_pdfm_pages_impl(
             break
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
 
         try:
             mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
@@ -9805,7 +9814,7 @@ async def _process_pdfm_pages_impl(
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls))
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
 
             if job_id:
                 next_page = pages[idx + 1][0] if idx + 1 < len(pages) else -1
@@ -12443,7 +12452,7 @@ async def qbm_extract_all_pages(
 
     if status_msg_id:
         await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
+            _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0), reply_markup=_cancel_kb(chat_id))
 
     # Live ticker: QBM's 2-call pipeline (full Call1+Call2, no shortcuts)
     # can take 30-90s per page, and the dashboard previously only refreshed on
@@ -12463,7 +12472,7 @@ async def qbm_extract_all_pages(
             if status_msg_id:
                 try:
                     await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0), reply_markup=_cancel_kb(chat_id))
                 except Exception:
                     pass
     _qbm_ticker_task = _spawn_task(_qbm_dashboard_ticker())
@@ -12476,7 +12485,7 @@ async def qbm_extract_all_pages(
         page_status[idx]["current"] = True
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0), reply_markup=_cancel_kb(chat_id))
         mcqs = []
         try:
             _ck = (file_id, page_num) if (file_id and extractor is None) else None
@@ -12536,7 +12545,7 @@ async def qbm_extract_all_pages(
         total_mcq += len(mcqs)
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0))
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0), reply_markup=_cancel_kb(chat_id))
         return idx, page_num, img, mcqs
 
     # Sequential: one page fully completes before the next starts. Parallel
@@ -12617,7 +12626,7 @@ async def process_qbm_pages(
         status_msg_id = r.get("result", {}).get("message_id")
 
     await edit_msg(chat_id, status_msg_id,
-        _build_dashboard(file_name, topic, display_pages, page_status, start_time, 0, 0))
+        _build_dashboard(file_name, topic, display_pages, page_status, start_time, 0, 0), reply_markup=_cancel_kb(chat_id))
 
     summary_pages = []
     all_mcqs_csv = []
@@ -12635,7 +12644,7 @@ async def process_qbm_pages(
             break
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
+            _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
 
         try:
             _ck = (file_id, page_num) if file_id else None
@@ -12646,7 +12655,7 @@ async def process_qbm_pages(
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
                 await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
+                    _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
                 continue
 
             # ── Cross-page answer backfill — SKIPPED here if skip_extract=True
@@ -12802,7 +12811,7 @@ async def process_qbm_pages(
             _c2_str = ", ".join(f"{k}:{v}" for k, v in page_provider_tally.get(page_num, {}).items())
             page_status[idx]["model"] = f"Call1[{_c1_str}] Verify[{_c2_str}]"
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
+                _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
 
             if job_id:
                 next_page = display_pages[idx + 1][0] if idx + 1 < len(display_pages) else -1
@@ -15898,6 +15907,16 @@ async def handle_callback(query: dict):
     uname = user.get("username") or user.get("first_name", "User")
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
+        if data.startswith("jobcancel_"):
+            target_chat = int(data[len("jobcancel_"):])
+            if target_chat != chat_id:
+                return
+            if not await db_is_owner_or_admin(uid):
+                return
+            CANCEL_FLAGS[target_chat] = True
+            running_label = ACTIVE_JOB_LABEL.get(target_chat)
+            await send_msg(chat_id, "🛑 বন্ধ করা হলো।" + (f"\nযে কাজ থামলো: {running_label}" if running_label else ""))
+            return
         if data.startswith(("spch_", "spdm_", "spfl_", "spil_", "spgr_", "spgid_", "spmode_", "spwords_",
                              "spgadd_", "spgview_", "spgdel_", "spgback_", "spfltoggle_", "spflact_")) or data == "spback":
             if uid == OWNER_ID:

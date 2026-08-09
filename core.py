@@ -591,13 +591,16 @@ async def send_msg(chat_id, text: str, parse_mode: str = "HTML",
         data["reply_to_message_id"] = reply_to_message_id
     return await tg_post("sendMessage", data)
 
-async def edit_msg(chat_id, message_id: int, text: str, parse_mode: str = "HTML") -> dict:
-    return await tg_post("editMessageText", {
+async def edit_msg(chat_id, message_id: int, text: str, parse_mode: str = "HTML", reply_markup: dict = None) -> dict:
+    payload = {
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
         "parse_mode": parse_mode
-    })
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    return await tg_post("editMessageText", payload)
 
 async def edit_msg_caption(chat_id, message_id: int, caption: str, parse_mode: str = "HTML") -> dict:
     return await tg_post("editMessageCaption", {
