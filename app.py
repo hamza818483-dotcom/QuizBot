@@ -10245,8 +10245,9 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True) -
        pages for an answer key if needed), spelling/context-word correctness
        (Bangla/English), completeness (no truncated words), column-order,
        উদ্দীপক self-containment, diagram bbox, and explanation_source tagging.
-    Gemini primary (better verify quality, matches Call1's provider order) ->
-    Groq fallback (higher daily budget, used if Gemini quota is exhausted).
+    Groq primary (higher daily budget, this call runs multiple times per page
+    via chunking so Gemini's ~20/day/key quota drains fast if used here) ->
+    Gemini fallback only if Groq fails.
     """
     if not call1_mcqs:
         call1_mcqs = []
@@ -10349,13 +10350,13 @@ from Step A goes at the end, in the order found).
 Output ONLY the full corrected JSON array (Call 1 + missed, all fixes applied):
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated","qsn_bbox":[100,200,400,450]}}]"""
 
-        txt = await _qbm_gemini_raw(img, prompt)
+        txt = await _qbm_groq_call(img, prompt)
         result = _qbm_parse_json(txt) if txt else []
-        call2_provider = "Gemini"
+        call2_provider = "Groq"
         if not result:
-            txt = await _qbm_groq_call(img, prompt)
-            result = _qbm_parse_json(txt) if txt else []
-            call2_provider = "Groq"
+            gem_txt = await _qbm_gemini_raw(img, prompt)
+            result = _qbm_parse_json(gem_txt) if gem_txt else []
+            call2_provider = "Gemini"
 
         if result and len(result) >= len(call1_mcqs) * 0.8:
             deduped = _qbm_dedup_list(result)
@@ -10433,13 +10434,13 @@ MCQ's block, or "yellow_highlight": false if not. Update the output format:
             found = _qbm_parse_json(gem_txt) if gem_txt else []
             provider = "Gemini"
         else:
-            gem_txt = await _qbm_gemini_raw(img, prompt)
-            found = _qbm_parse_json(gem_txt) if gem_txt else []
-            provider = "Gemini"
+            txt = await _qbm_groq_call(img, prompt)
+            found = _qbm_parse_json(txt) if txt else []
+            provider = "Groq"
             if not found:
-                txt = await _qbm_groq_call(img, prompt)
-                found = _qbm_parse_json(txt) if txt else []
-                provider = "Groq"
+                gem_txt = await _qbm_gemini_raw(img, prompt)
+                found = _qbm_parse_json(gem_txt) if gem_txt else []
+                provider = "Gemini"
         if not found:
             txt3 = await _qbm_openrouter_call(img, prompt)
             found = _qbm_parse_json(txt3) if txt3 else []
