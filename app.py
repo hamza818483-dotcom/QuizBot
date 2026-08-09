@@ -10964,9 +10964,9 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
-                logger.warning(f"[QBM] Gemini raw call failed: {e}")
-                return await _gen_groq_raw_text(img, prompt)
-        # All Gemini keys exhausted/rate-limited — fall back to Groq vision
+                logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
+                continue
+        # All Gemini keys exhausted/rate-limited/errored — fall back to Groq vision
         logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision")
         return await _gen_groq_raw_text(img, prompt)
     except Exception as e:
