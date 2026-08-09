@@ -10077,6 +10077,19 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     keys = groq_key_rotator.ordered_keys()
     if not keys:
         return ""
+    # If every Groq key is either daily-exhausted or currently in a TPM/
+    # rate-limit cooldown, skip straight to "no result" (caller falls back
+    # to Gemini) instead of live-retrying keys already known unusable right
+    # now -- per Rafin's instruction: Call2 should fall back to Gemini once
+    # Groq is genuinely exhausted, not after wasting a full retry cycle.
+    now = time.time()
+    _all_unusable = all(
+        _is_groq_key_exhausted_today(k) or groq_key_rotator._cooldown_until.get(k, 0) > now
+        for k in keys
+    )
+    if _all_unusable:
+        logger.warning("[QBM] all Groq keys daily-exhausted or cooling — skipping straight to Gemini")
+        return ""
     data_url = _img_to_data_url_groq(img, mcq_count_hint=10, prompt_len_hint=prompt)
     if not data_url:
         return ""
