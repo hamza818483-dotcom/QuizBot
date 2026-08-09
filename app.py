@@ -1796,12 +1796,19 @@ class GroqKeyRotator:
             self._load_keys()
         return list(self.keys)
 
-    def ordered_keys(self):
+    def ordered_keys(self, offset: int = 0):
         """All non-banned keys, healthy ones first: not exhausted-today AND
         not in short cooldown, then short-cooldown keys, then today-exhausted
         keys last — so a call never wastes its first attempt on a key we
         already know is dead for the day. If every key is exhausted-today,
-        all are returned anyway (better to retry than return nothing)."""
+        all are returned anyway (better to retry than return nothing).
+
+        offset: rotates the HEALTHY portion of the list by this many slots.
+        Used when multiple pages run concurrently (e.g. 2 pages in parallel)
+        so each concurrent call starts from a different key instead of every
+        call hammering the same first key — avoids extra TPM collisions
+        without touching more keys per page (each call still only tries the
+        same-sized slice, just a different starting point in the healthy pool)."""
         keys = self.all_keys()
         now = time.time()
         not_exhausted = [k for k in keys if not _is_groq_key_exhausted_today(k)]
@@ -1809,6 +1816,9 @@ class GroqKeyRotator:
         pool = not_exhausted if not_exhausted else keys
         healthy = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
         cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
+        if offset and healthy:
+            off = offset % len(healthy)
+            healthy = healthy[off:] + healthy[:off]
         return healthy + cooling + (exhausted if not_exhausted else [])
 
     def mark_rate_limited(self, key: str, daily_exhausted: bool = True):
@@ -1942,8 +1952,8 @@ def _track_provider_use(provider: str, page_num: int):
     _PROVIDER_LAST_USED["page"] = page_num
     _PROVIDER_LAST_USED["time"] = _dt.now().strftime("%H:%M:%S")
 
-async def _gen_groq(img, topic, count, exclude_keys: set = None):
-    keys = groq_key_rotator.ordered_keys()
+async def _gen_groq(img, topic, count, exclude_keys: set = None, key_offset: int = 0):
+    keys = groq_key_rotator.ordered_keys(offset=key_offset)
     if exclude_keys:
         # Retry-loop calls (page came back thin) pass in keys already tried
         # in this SAME page's earlier attempt(s), so we don't re-burn them —
@@ -2857,7 +2867,7 @@ def _dedupe_mcqs(mcqs: list) -> list:
         out.append(m)
     return out
 
-async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None):
+async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0):
     """
     Smart wrapper: Gemini first (primary), then Groq fallback (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
@@ -3303,7 +3313,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
     _LAST_FALLBACK_ERROR["reason"] = ""
 
     try:
-        groq_out, groq_tried = await _gen_groq(img, topic, mcq_count, exclude_keys=exclude_groq_keys)
+        groq_out, groq_tried = await _gen_groq(img, topic, mcq_count, exclude_keys=exclude_groq_keys, key_offset=key_offset)
     except Exception as e:
         _LAST_GROQ_ERROR["reason"] = f"{type(e).__name__}: {e}"
         classify_ai_error(e, "groq", page_num)
@@ -8802,14 +8812,19 @@ async def pdf_generate_all_pages(
     new_job_id(chat_id)
     set_active_job(chat_id, f"PDF MCQ generation ({file_name}, parallel)")
 
-    # Sequential: one page fully completes before the next starts. Multiple
-    # pages in parallel meant N pages hitting Groq's shared 8000 TPM pool at
-    # once, increasing 429/413 collisions and retries -- net slower and less
-    # reliable than doing pages one at a time.
-    _PDF_PARALLEL_PAGES = 1
+    # 2 pages in parallel: each concurrent slot uses a key_offset so they
+    # start from different Groq keys (round-robin, see ordered_keys(offset=))
+    # instead of both hammering the same first key. This roughly halves
+    # wall-clock time per page-batch without increasing the number of keys
+    # tried per page (same 5-key cap each), so key spend stays the same
+    # while total throughput doubles. Previously this was strictly
+    # sequential (1 at a time) specifically to avoid same-key TPM collisions
+    # — the offset makes 2-way parallelism safe against that same collision.
+    _PDF_PARALLEL_PAGES = 2
     sem = asyncio.Semaphore(_PDF_PARALLEL_PAGES)
     lock = asyncio.Lock()
     total_mcq_box = {"n": 0}
+    _slot_counter = {"n": 0}
 
     async def _run_one(idx, page_num, img):
         if is_cancelled(chat_id):
@@ -8818,6 +8833,8 @@ async def pdf_generate_all_pages(
             if is_cancelled(chat_id):
                 return
             async with lock:
+                slot = _slot_counter["n"] % _PDF_PARALLEL_PAGES
+                _slot_counter["n"] += 1
                 page_status[idx]["current"] = True
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id,
@@ -8825,7 +8842,7 @@ async def pdf_generate_all_pages(
 
             mcqs = []
             try:
-                mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
+                mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=slot)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -8844,7 +8861,7 @@ async def pdf_generate_all_pages(
                 first_call_tried = set(_LAST_TRIED_GROQ_KEYS.get("keys") or set())
                 try:
                     await asyncio.sleep(1)
-                    mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count, exclude_groq_keys=first_call_tried)
+                    mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count, exclude_groq_keys=first_call_tried, key_offset=slot)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
