@@ -4432,8 +4432,8 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
         img = PILImage.open(BytesIO(img_bytes))
 
         if source == "existing":
-            # Existing MCQ mode: /qbm prompt logic, full 3-call connected pipeline
-            # (Call 1 extract + Call 2 miss-check + Call 3 verify) — never fabricates
+            # Existing MCQ mode: /qbm prompt logic, full 2-call connected pipeline
+            # (Call 1 extract + Call 2 miss-check+verify) — never fabricates
             # new questions, only extracts what's already in the image, per /qbm rules.
             mcqs = await _qbm_extract_from_image(img)
             mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
@@ -10202,43 +10202,110 @@ async def _qbm_call1_extract(img) -> list:
 
 async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
     """
-    CALL 2 — MAIN JOB: verify Call-1 caught every existing MCQ on the page;
-    if any were missed, add them (never remove valid ones). Then re-runs a
-    fast duplicate/ghost-MCQ check on the combined list.
-    Connected to Call-1: audits Call-1's specific output rather than
-    re-extracting independently from scratch.
+    CALL 2 — MERGED miss-check + full verification (single call, no separate
+    Call 3). Job:
+    1) MISS-CHECK: confirm Call-1 caught every existing MCQ on the page (checked
+       region-by-region, especially the last MCQ / bottom of page); add any
+       missed ones in the same strict format.
+    2) FULL VERIFY on the combined list: option-serial integrity, answer
+       matches what's actually marked/given on the source page (scanning other
+       pages for an answer key if needed), spelling/context-word correctness
+       (Bangla/English), completeness (no truncated words), column-order,
+       উদ্দীপক self-containment, diagram bbox, and explanation_source tagging.
+    Groq primary (higher daily budget) -> Gemini fallback.
     """
+    if not call1_mcqs:
+        call1_mcqs = []
     try:
-        q_summary = "\n".join(
-            f"{i+1}. {(m.get('question') or '')[:100]}" for i, m in enumerate(call1_mcqs)
-        )
-        prompt = f"""You already extracted these MCQs from this exact page image (Call 1 result):
-{q_summary if q_summary else "(none found)"}
+        mcq_json = json.dumps([
+            {"question": m.get("question", ""), "options": m.get("options", []),
+             "answer": m.get("answer", "A"), "explanation": m.get("explanation", ""),
+             "qsn_bbox": m.get("qsn_bbox")}
+            for m in call1_mcqs
+        ], ensure_ascii=False)
 
-TASK (fast audit, connected to Call 1 — do not redo full extraction):
+        prompt = f"""You already extracted these MCQs from this exact page image (Call 1 result):
+{mcq_json if call1_mcqs else "(none found)"}
+
+TASK — do BOTH steps below in this single pass, connected to Call 1 (do not redo
+full extraction from scratch):
+
+STEP A — MISS-CHECK:
 1) MANDATORY: mentally divide the page into regions (top/middle/bottom, left/right if
    multi-column) and check EACH region against the list above before answering —
    especially the LAST MCQ on the page and the BOTTOM of the page — most commonly missed.
-2) Check if ANY existing MCQ was MISSED by the list above.
-3) If you find missed MCQ(s), extract them in the SAME strict format (options in the exact
-   source position order, A/B/C/D slots by position — never relabeled/sorted).
-4) UDDIPOK CHECK: if a missed MCQ belongs under a passage/উদ্দীপক, prepend that passage's full
-   text to its question (self-contained), same as Call 1's rule.
-5) Do NOT re-list MCQs already shown above. Only output NEW ones that were missed.
-6) If nothing was missed, output exactly: []
+2) Check if ANY existing MCQ was MISSED by the list above. If found, add it in the SAME
+   strict format (options in the exact source position order, A/B/C/D slots by position —
+   never relabeled/sorted). If it belongs under a passage/উদ্দীপক, prepend that passage's
+   full text to its question (self-contained), same as Call 1's rule.
 
-Output ONLY a JSON array of the MISSED MCQs (same schema as before):
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
+STEP B — FULL VERIFICATION on the combined list (Call 1 + any missed from Step A) — never
+skip or shortcut this, regardless of how confident Call 1 was:
+1) OPTION-SERIAL INTEGRITY: is the answer letter (A/B/C/D) pointing to the option that is
+   actually in that position in THIS output list (not the source's original label)? If the
+   correct option's text sits in position 2 of the output, answer must be "B", etc. Fix any
+   mismatch.
+2) ANSWER SOURCE MATCH: does the answer actually match what is marked/given on the page
+   (marked option, inline answer, bottom-of-page answer box/table, or answer key found on
+   another page — scan forward/backward through all pages as needed)? Fix if wrong.
+3) If an MCQ's answer is genuinely unclear from any source → try twice, reasoning it out from
+   context, to determine the most likely correct answer. If STILL unclear after 2 tries, choose
+   your own best answer, and base the explanation on that chosen answer.
+4) SPELLING + CONTEXT-WORD CHECK: check question + all options + explanation for (a) spelling
+   mistakes (Bangla or English), and (b) any word that is spelled fine but is CONTEXTUALLY WRONG
+   for this MCQ's subject/topic (e.g. an OCR/extraction slip that swapped in a similar-looking but
+   unrelated term that doesn't fit the science/subject context) — replace it with the word that
+   actually fits the MCQ's context and meaning, cross-checked against the source image. Never
+   change a word that is already correct and contextually fitting, even if unusual.
+5) COMPLETENESS CHECK: re-read the full question and every option word-by-word against the
+   image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail).
+6) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
+   Na⁺ etc.) are correctly rendered everywhere.
+6b) COLUMN-ORDER CHECK: if the source page has multiple columns, confirm the MCQ list follows
+   COLUMN-MAJOR order (entire left column top-to-bottom, then next column top-to-bottom) — never
+   zigzag/interleave between columns. Re-order the list if columns got mixed.
+7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
+   is prepended to the question (self-contained), and that ONLY the specific navigation sentence
+   naming which question numbers to answer (e.g. "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও")
+   is removed — never strip a real question just because it mentions "উদ্দীপক" (e.g. "উদ্দীপকে
+   প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" is a genuine question and must stay in full).
+8) QUESTION-DIAGRAM CHECK: if this MCQ's question genuinely has a diagram/figure/chart in the
+   source image needed to understand/answer it, confirm "qsn_bbox" is present and FULLY contains
+   the entire diagram (all labels/arrows/edges, small margin included — never a partial/cut-off
+   crop) on a 0-1000 scale. Add or widen qsn_bbox if the diagram was missed or cut off. SPECIAL
+   CHECK: if the question text contains a bare figure caption/label like "চিত্র: G", "চিত্র-১",
+   "Figure 1" with no qsn_bbox — that caption is proof a diagram exists nearby; you MUST add
+   qsn_bbox covering that actual diagram (never leave just the caption text uncropped). If
+   qsn_bbox was given but the question has NO actual diagram, remove it (set to null). Never
+   invent a bbox for options — options never get any bbox/image.
+9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
+   either "page" (the explanation is copied verbatim from text physically present on the page,
+   e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
+   page, so the explanation was built from AI knowledge). Be honest and precise about this —
+   it is used for quality auditing, not shown to end users.
+
+CRITICAL: OUTPUT LIST ORDER (mandatory) — never move an MCQ to the end or anywhere else just
+because it needed a fix — fix it in place, at its original index (any newly-added missed MCQ
+from Step A goes at the end, in the order found).
+
+Output ONLY the full corrected JSON array (Call 1 + missed, all fixes applied):
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated","qsn_bbox":[100,200,400,450]}}]"""
+
         txt = await _qbm_groq_call(img, prompt)
-        missed = _qbm_parse_json(txt) if txt else []
-        if not missed:
+        result = _qbm_parse_json(txt) if txt else []
+        if not result:
             gem_txt = await _qbm_gemini_raw(img, prompt)
-            missed = _qbm_parse_json(gem_txt) if gem_txt else []
+            result = _qbm_parse_json(gem_txt) if gem_txt else []
 
-        combined = list(call1_mcqs) + missed
-        # 2nd dedup pass (fast, since Call-1 already deduped once) — catches any
-        # duplicate/ghost MCQ that slipped in via the miss-check addition.
-        return _qbm_dedup_list(combined)
+        if result and len(result) >= len(call1_mcqs) * 0.8:
+            deduped = _qbm_dedup_list(result)
+            # sanity: if dedup collapsed it down close to (or below) the pre-check
+            # count, trust the deduped version; if dedup removed almost everything
+            # (parsing weirdness), fall back to the pre-check list instead.
+            if deduped and len(deduped) >= len(call1_mcqs) * 0.8:
+                return _cap_mcq_options(deduped)
+            return _cap_mcq_options(call1_mcqs)
+        return call1_mcqs  # call2 failed/degraded -> keep Call1 result, never lose data
     except Exception as e:
         logger.warning(f"[QBM Call2] failed: {e}")
         return call1_mcqs
@@ -10315,105 +10382,6 @@ MCQ's block, or "yellow_highlight": false if not. Update the output format:
         return []
 
 
-async def _qbm_call3_verify(img, mcqs: list, page_confirmed_complete: bool) -> list:
-    """
-    CALL 3 — per-MCQ verification, connected to Call 1+2:
-    - If Call 1 & 2 already agree the page/MCQ set is 100% confirmed (no misses,
-      no duplicates), this call SKIPS the heavy re-extraction and only does one
-      fast recheck pass — it does not redundantly re-verify from scratch.
-    - Confirms for each MCQ: answer letter matches the correct option's actual
-      output position (option-serial integrity), the answer itself matches what
-      the source page shows, and no spelling mistakes (Bangla/English) remain.
-    - If any MCQ's answer is unclear from the page, tries twice to reason it out;
-      if still unclear, picks the AI's best answer (last resort) and builds the
-      explanation from that chosen answer.
-    """
-    if not mcqs:
-        return mcqs
-    try:
-        mcq_json = json.dumps([
-            {"question": m.get("question", ""), "options": m.get("options", []),
-             "answer": m.get("answer", "A"), "explanation": m.get("explanation", ""),
-             "qsn_bbox": m.get("qsn_bbox")}
-            for m in mcqs
-        ], ensure_ascii=False)
-
-        prompt = f"""Do a careful full verification pass on every MCQ below — never skip or
-shortcut this check, regardless of how confident earlier passes were.
-
-CRITICAL: OUTPUT LIST ORDER (mandatory) — the output array MUST have the exact same MCQ-to-MCQ
-order as the input list below, position by position, same length. Fixing/adding a field (like
-qsn_bbox) on an MCQ must NEVER change its position in the list. Never move an MCQ to the end or
-anywhere else just because it needed a fix — fix it in place, at its original index.
-
-Here is the current MCQ list extracted from this page image (Call 1 + Call 2 combined):
-{mcq_json}
-
-VERIFY each MCQ against the actual page image, in this exact order of checks:
-1) OPTION-SERIAL INTEGRITY: is the answer letter (A/B/C/D) pointing to the option that is
-   actually in that position in THIS output list (not the source's original label)? If the
-   correct option's text sits in position 2 of the output, answer must be "B", etc. Fix any
-   mismatch.
-2) ANSWER SOURCE MATCH: does the answer actually match what is marked/given on the page
-   (marked option, inline answer, bottom-of-page answer box/table, or answer key found on
-   another page — scan forward/backward through all pages as needed)? Fix if wrong.
-3) If an MCQ's answer is genuinely unclear from any source → try twice, reasoning it out from
-   context, to determine the most likely correct answer. If STILL unclear after 2 tries, choose
-   your own best answer, and base the explanation on that chosen answer.
-4) SPELLING + CONTEXT-WORD CHECK: check question + all options + explanation for (a) spelling
-   mistakes (Bangla or English), and (b) any word that is spelled fine but is CONTEXTUALLY WRONG
-   for this MCQ's subject/topic (e.g. an OCR/extraction slip that swapped in a similar-looking but
-   unrelated term that doesn't fit the science/subject context) — replace it with the word that
-   actually fits the MCQ's context and meaning, cross-checked against the source image. Never
-   change a word that is already correct and contextually fitting, even if unusual.
-5) COMPLETENESS CHECK: re-read the full question and every option word-by-word against the
-   image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail).
-6) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
-   Na⁺ etc.) are correctly rendered everywhere.
-6b) COLUMN-ORDER CHECK: if the source page has multiple columns, confirm the MCQ list follows
-   COLUMN-MAJOR order (entire left column top-to-bottom, then next column top-to-bottom) — never
-   zigzag/interleave between columns. Re-order the list if columns got mixed.
-7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
-   is prepended to the question (self-contained), and that ONLY the specific navigation sentence
-   naming which question numbers to answer (e.g. "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও")
-   is removed — never strip a real question just because it mentions "উদ্দীপক" (e.g. "উদ্দীপকে
-   প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" is a genuine question and must stay in full).
-8) QUESTION-DIAGRAM CHECK: if this MCQ's question genuinely has a diagram/figure/chart in the
-   source image needed to understand/answer it, confirm "qsn_bbox" is present and FULLY contains
-   the entire diagram (all labels/arrows/edges, small margin included — never a partial/cut-off
-   crop) on a 0-1000 scale. Add or widen qsn_bbox if the diagram was missed or cut off. SPECIAL
-   CHECK: if the question text contains a bare figure caption/label like "চিত্র: G", "চিত্র-১",
-   "Figure 1" with no qsn_bbox — that caption is proof a diagram exists nearby; you MUST add
-   qsn_bbox covering that actual diagram (never leave just the caption text uncropped). If
-   qsn_bbox was given but the question has NO actual diagram, remove it (set to null). Never
-   invent a bbox for options — options never get any bbox/image.
-9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
-   either "page" (the explanation is copied verbatim from text physically present on the page,
-   e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
-   page, so the explanation was built from AI knowledge). Be honest and precise about this —
-   it is used for quality auditing, not shown to end users.
-
-Output ONLY the corrected full JSON array (same length as input, same schema, all fixes applied):
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated","qsn_bbox":[100,200,400,450]}}]"""
-
-        txt = await _qbm_groq_call(img, prompt)
-        verified = _qbm_parse_json(txt) if txt else []
-        if not verified:
-            txt = await _qbm_gemini_raw(img, prompt)
-            verified = _qbm_parse_json(txt) if txt else []
-        if verified and len(verified) >= len(mcqs) * 0.8:
-            deduped_verified = _qbm_dedup_list(verified)
-            # sanity: if dedup collapsed it down close to (or below) the pre-verify
-            # count, trust the deduped version; if dedup removed almost everything
-            # (parsing weirdness), fall back to the pre-verify list instead.
-            if deduped_verified and len(deduped_verified) >= len(mcqs) * 0.8:
-                return _cap_mcq_options(deduped_verified)
-            return _cap_mcq_options(mcqs)
-        return mcqs  # verify failed/degraded -> keep Call1+2 result, never lose data
-    except Exception as e:
-        logger.warning(f"[QBM Call3] failed: {e}")
-        return mcqs
-
 
 def _qbm_normalize_q(question: str) -> str:
     """Whitespace/punctuation normalize করে দুইটা pass-এর একই MCQ-কে duplicate ধরার জন্য."""
@@ -10489,12 +10457,13 @@ async def _qbm_ram_aware_acquire():
 async def _qbm_extract_from_image(img) -> list:
     """
     2-CALL CONNECTED PIPELINE (per page) — max 2 Gemini requests/page (Groq
-    only as fallback if Gemini fails), replacing the old 3-call system.
+    only as fallback if Gemini fails), 2-call system:
 
     Call 1 (extract): own-OCR + strict prompt MCQ extraction (question,
         options in exact source serial, answer, explanation, qsn_bbox for
         any question-diagram).
-    Call 3 (verify): full re-check pass against the page image — option-serial
+    Call 2 (miss-check + verify): finds any MCQ Call 1 missed, then runs
+        a full re-check pass against the page image — option-serial
         integrity, answer-source match, spelling/completeness, uddipok
         prepending, and qsn_bbox correctness (adds if missed, removes if
         falsely present). Never fabricates new questions.
@@ -10521,15 +10490,15 @@ async def _qbm_extract_from_image(img) -> list:
                         logger.warning(f"[QBM] Call1+final-scan both empty on attempt {_pipeline_attempt+1}/3 — retrying full pipeline before confirming empty page")
                         continue
                     return []  # both independent passes agree: genuinely no MCQ
-                verified = await _qbm_call3_verify(img, final_check, False)
+                verified = await _qbm_call2_miss_check(img, final_check)
                 verified = _qbm_repair_order(final_check, verified)
                 recovered_mcqs = _cap_mcq_options(_qbm_restore_opt_bboxes(final_check, verified))
                 return await _qbm_final_safety_net(img, recovered_mcqs)
 
-            call3 = await _qbm_call3_verify(img, call1, True)
-            call3 = _qbm_repair_order(call1, call3)
-            call3 = _qbm_restore_opt_bboxes(call1, call3)
-            final_mcqs = _cap_mcq_options(call3)
+            call2 = await _qbm_call2_miss_check(img, call1)
+            call2 = _qbm_repair_order(call1, call2)
+            call2 = _qbm_restore_opt_bboxes(call1, call2)
+            final_mcqs = _cap_mcq_options(call2)
             return await _qbm_final_safety_net(img, final_mcqs)
         return []
     finally:
@@ -11906,7 +11875,7 @@ async def _onu_extract_from_image(img) -> list:
                         logger.warning(f"[ONU] Call1+final-scan both empty on attempt {_pipeline_attempt+1}/3 — retrying")
                         continue
                     return []
-                verified = await _qbm_call3_verify(img, final_check, False)
+                verified = await _qbm_call2_miss_check(img, final_check)
                 verified = _qbm_repair_order(final_check, verified)
                 recovered_mcqs = _cap_mcq_options(_qbm_restore_opt_bboxes(final_check, verified))
                 final_mcqs = await _qbm_final_safety_net(img, recovered_mcqs)
@@ -11916,10 +11885,10 @@ async def _onu_extract_from_image(img) -> list:
                         mc["yellow_highlight"] = hl_map.get(_qbm_normalize_q(mc.get("question", "")), False)
                 return final_mcqs
 
-            call3 = await _qbm_call3_verify(img, call1, True)
-            call3 = _qbm_repair_order(call1, call3)
-            call3 = _qbm_restore_opt_bboxes(call1, call3)
-            final_mcqs = _cap_mcq_options(call3)
+            call2 = await _qbm_call2_miss_check(img, call1)
+            call2 = _qbm_repair_order(call1, call2)
+            call2 = _qbm_restore_opt_bboxes(call1, call2)
+            final_mcqs = _cap_mcq_options(call2)
             final_mcqs = await _qbm_final_safety_net(img, final_mcqs)
             # Restore yellow_highlight: prefer index alignment (call1/call3 are
             # same length after repair_order), fall back to normalized-text
@@ -12310,7 +12279,7 @@ async def qbm_extract_all_pages(
         await edit_msg(chat_id, status_msg_id,
             _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0))
 
-    # Live ticker: QBM's 3-call pipeline (full Call1+Call2+Call3, no shortcuts)
+    # Live ticker: QBM's 2-call pipeline (full Call1+Call2, no shortcuts)
     # can take 30-90s per page, and the dashboard previously only refreshed on
     # page start/finish -- elapsed time looked frozen the whole time. This
     # refreshes the same message every few seconds purely for the live clock,
