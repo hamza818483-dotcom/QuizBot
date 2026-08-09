@@ -11170,6 +11170,29 @@ _AI_EXPLAIN_CHUNK_SIZE = 8
 _AI_EXPLAIN_CONCURRENCY = 3
 
 
+def _ai_parse_explanations_json(text: str, expected_len: int) -> list:
+    """Lightweight parser for /ai's explanation-only output
+    ([{"explanation":"..."}]) -- unlike _qbm_parse_json this does NOT
+    require 'question'/'options' fields (those aren't in this output shape),
+    so it must NOT reuse that MCQ-schema-specific parser. Returns [] if the
+    array can't be parsed or its length doesn't match expected_len."""
+    if not text:
+        return []
+    t = text.strip()
+    if "```json" in t:
+        t = t.split("```json")[1].split("```")[0].strip()
+    elif "```" in t:
+        t = t.split("```")[1].split("```")[0].strip()
+    try:
+        m = re.search(r'\[.*\]', t, re.DOTALL)
+        raw = json.loads(m.group()) if m else json.loads(t)
+    except Exception:
+        return []
+    if not isinstance(raw, list) or len(raw) != expected_len:
+        return []
+    return raw
+
+
 async def _ai_generate_explanations_chunk(chunk: list) -> dict:
     """Given a chunk of MCQ dicts (with 'question','options','answer'),
     returns {index_in_chunk: explanation_text} for whichever ones Gemini
@@ -11199,12 +11222,12 @@ OUTPUT — ONLY a valid JSON array, exactly {len(chunk)} items, same order, noth
     txt = await _ai_gemini_text_call(prompt)
     if not txt:
         return {}
-    parsed = _qbm_parse_json(txt)
-    if not parsed or len(parsed) != len(chunk):
+    parsed = _ai_parse_explanations_json(txt, len(chunk))
+    if not parsed:
         return {}
     out = {}
     for i, item in enumerate(parsed):
-        exp = (item.get("explanation") or "").strip()
+        exp = (item.get("explanation") or "").strip() if isinstance(item, dict) else ""
         if exp:
             out[i] = exp[:200]
     return out
@@ -11314,6 +11337,11 @@ async def handle_ai(msg: dict):
 
         await _ai_generate_all_explanations(mcqs, progress_cb=_ai_progress)
         _total_elapsed = int(time.time() - _ai_start)
+        _filled_count = sum(1 for m in mcqs if m["explanation"])
+        if _filled_count == 0:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Gemini থেকে কোনো explanation পাওয়া যায়নি (API/key সমস্যা)। আবার চেষ্টা করো।")
+            return
 
         buf = _io_ai.StringIO()
         out_fields = fieldnames if fieldnames else ["questions", "option1", "option2", "option3", "option4", "option5", "answer", "explanation", "type", "section"]
