@@ -11133,10 +11133,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
             return client.models.generate_content(
                 model="gemini-3.6-flash",
                 contents=[types.Part.from_text(text=prompt)],
-                config=types.GenerateContentConfig(
-                    temperature=0.2, max_output_tokens=65536,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0)
-                )
+                config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=65536)
             )
 
         keys_to_try = key_rotator.ordered_keys() or key_rotator.keys
@@ -11159,11 +11156,11 @@ async def _ai_gemini_text_call(prompt: str) -> str:
                     continue
                 logger.warning(f"[AI] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
-        logger.warning("[AI] all Gemini keys exhausted/failed")
-        return ""
+        logger.warning("[AI] all Gemini keys exhausted/failed -- falling back to Groq text")
+        return await _qbm_groq_text_call(prompt)
     except Exception as e:
         logger.warning(f"[AI] Gemini text call failed: {e}")
-        return ""
+        return await _qbm_groq_text_call(prompt)
 
 
 _AI_EXPLAIN_CHUNK_SIZE = 8
