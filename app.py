@@ -10229,11 +10229,11 @@ TASK (fast audit, connected to Call 1 — do not redo full extraction):
 
 Output ONLY a JSON array of the MISSED MCQs (same schema as before):
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
-        gem_txt = await _qbm_gemini_raw(img, prompt)
-        missed = _qbm_parse_json(gem_txt) if gem_txt else []
+        txt = await _qbm_groq_call(img, prompt)
+        missed = _qbm_parse_json(txt) if txt else []
         if not missed:
-            txt = await _qbm_groq_call(img, prompt)
-            missed = _qbm_parse_json(txt) if txt else []
+            gem_txt = await _qbm_gemini_raw(img, prompt)
+            missed = _qbm_parse_json(gem_txt) if gem_txt else []
 
         combined = list(call1_mcqs) + missed
         # 2nd dedup pass (fast, since Call-1 already deduped once) — catches any
@@ -10288,13 +10288,20 @@ MCQs on the page are highlighted, some are not -- check each independently).
 Add "yellow_highlight": true if yellow highlighter color is present in that
 MCQ's block, or "yellow_highlight": false if not. Update the output format:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","yellow_highlight":true}]"""
-        gem_txt = await _qbm_gemini_raw(img, prompt)
-        found = _qbm_parse_json(gem_txt) if gem_txt else []
-        provider = "Gemini"
-        if not found and not onu_mode:
+        if onu_mode:
+            # onu_mode-e age theke Groq fallback chilo na (highlight-detection
+            # accuracy-r jonno Gemini-only rakha hoyeche), tai order same rakhlam
+            gem_txt = await _qbm_gemini_raw(img, prompt)
+            found = _qbm_parse_json(gem_txt) if gem_txt else []
+            provider = "Gemini"
+        else:
             txt = await _qbm_groq_call(img, prompt)
             found = _qbm_parse_json(txt) if txt else []
             provider = "Groq"
+            if not found:
+                gem_txt = await _qbm_gemini_raw(img, prompt)
+                found = _qbm_parse_json(gem_txt) if gem_txt else []
+                provider = "Gemini"
         if not found:
             txt3 = await _qbm_openrouter_call(img, prompt)
             found = _qbm_parse_json(txt3) if txt3 else []
@@ -10389,10 +10396,10 @@ VERIFY each MCQ against the actual page image, in this exact order of checks:
 Output ONLY the corrected full JSON array (same length as input, same schema, all fixes applied):
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated","qsn_bbox":[100,200,400,450]}}]"""
 
-        txt = await _qbm_gemini_raw(img, prompt)
+        txt = await _qbm_groq_call(img, prompt)
         verified = _qbm_parse_json(txt) if txt else []
         if not verified:
-            txt = await _qbm_groq_call(img, prompt)
+            txt = await _qbm_gemini_raw(img, prompt)
             verified = _qbm_parse_json(txt) if txt else []
         if verified and len(verified) >= len(mcqs) * 0.8:
             deduped_verified = _qbm_dedup_list(verified)
@@ -11798,9 +11805,10 @@ For EACH one, look VERY carefully at the actual background behind its question a
 
 OUTPUT — ONLY a JSON array, one entry per item above IN ORDER, nothing else:
 [{{"yellow_highlight":true}},{{"yellow_highlight":false}}]"""
-            gem_txt = await _qbm_gemini_raw(img, prompt)
-            if not gem_txt:
-                gem_txt = await _qbm_groq_call(img, prompt)
+            txt_hl = await _qbm_groq_call(img, prompt)
+            if not txt_hl:
+                txt_hl = await _qbm_gemini_raw(img, prompt)
+            gem_txt = txt_hl
             if not gem_txt:
                 return None
             t = gem_txt.strip()
