@@ -11208,9 +11208,21 @@ OUTPUT — ONLY a valid JSON array, exactly {len(chunk)} items, same order, noth
 
 
 async def _ai_generate_all_explanations(mcqs: list) -> None:
-    """Fills mcqs[i]['explanation'] in-place, chunked + concurrency-limited
-    Gemini calls. Any MCQ whose chunk fails keeps its original explanation
-    (if any) untouched rather than being blanked out."""
+    """Fills mcqs[i]['explanation'] in-place. Tries the WHOLE file in a
+    single Gemini call first (one key, one call) -- works fine for typical
+    CSV sizes since Gemini has no small TPM ceiling like Groq. Only falls
+    back to chunked (8/call, 3 concurrent) calls if the single-call attempt
+    fails or Gemini's response gets truncated/malformed (large files can
+    still hit output-token limits)."""
+    if not mcqs:
+        return
+    single = await _ai_generate_explanations_chunk(mcqs)
+    if len(single) == len(mcqs):
+        for idx, exp in single.items():
+            mcqs[idx]["explanation"] = exp
+        return
+
+    logger.warning(f"[AI] single-call attempt covered {len(single)}/{len(mcqs)} -- falling back to chunked calls")
     chunks = [mcqs[i:i + _AI_EXPLAIN_CHUNK_SIZE] for i in range(0, len(mcqs), _AI_EXPLAIN_CHUNK_SIZE)]
     sem = asyncio.Semaphore(_AI_EXPLAIN_CONCURRENCY)
 
