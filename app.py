@@ -10181,6 +10181,7 @@ async def _qbm_call1_extract(img) -> list:
             out = _qbm_dedup_list(gem)
             for m in out:
                 m["_provider"] = "Gemini"
+                m["_call1_provider"] = "Gemini"
             return out
         txt = await _qbm_groq_call(img, prompt)
         result = _qbm_parse_json(txt) if txt else []
@@ -10188,12 +10189,14 @@ async def _qbm_call1_extract(img) -> list:
             out = _qbm_dedup_list(result)
             for m in out:
                 m["_provider"] = "Groq"
+                m["_call1_provider"] = "Groq"
             return out
         txt3 = await _qbm_openrouter_call(img, prompt)
         result3 = _qbm_parse_json(txt3) if txt3 else []
         out = _qbm_dedup_list(result3)
         for m in out:
             m["_provider"] = "OpenRouter"
+            m["_call1_provider"] = "OpenRouter"
         return out
     except Exception as e:
         logger.warning(f"[QBM Call1] failed: {e}")
@@ -10359,7 +10362,16 @@ Output ONLY the full corrected JSON array (Call 1 + missed, all fixes applied):
             # count, trust the deduped version; if dedup removed almost everything
             # (parsing weirdness), fall back to the pre-check list instead.
             if deduped and len(deduped) >= len(call1_mcqs) * 0.8:
+                # Match each verified MCQ back to its Call1 counterpart (by
+                # question text) so we can carry forward which provider did
+                # the ORIGINAL extraction, separate from _provider which now
+                # reflects Call2's verification pass -- lets the status line
+                # show both stages distinctly instead of Call2 silently
+                # overwriting Call1's Gemini/Groq attribution.
+                _c1_by_q = {(_c.get("question") or "").strip()[:80]: _c.get("_call1_provider", "?") for _c in call1_mcqs}
                 for m in deduped:
+                    m["_call2_provider"] = call2_provider
+                    m["_call1_provider"] = _c1_by_q.get((m.get("question") or "").strip()[:80], m.get("_call1_provider", "?"))
                     m["_provider"] = call2_provider
                 return _cap_mcq_options(deduped)
             return _cap_mcq_options(call1_mcqs)
@@ -12519,7 +12531,8 @@ async def process_qbm_pages(
     summary_pages = []
     all_mcqs_csv = []
     first_image_msg_id = None
-    page_provider_tally = {}  # page_num -> {"Gemini": n, "Groq": n} for final model-usage summary
+    page_provider_tally = {}  # page_num -> {"Gemini": n, "Groq": n} for final model-usage summary (post-verify)
+    page_call1_tally = {}  # page_num -> {"Gemini": n, "Groq": n} -- ORIGINAL Call1 extraction provider, before Call2 verify relabels it
     set_active_job(chat_id, f"QBM Poll posting ({file_name}, page-by-page)")
 
     iterable = page_tuples if skip_extract else [(p, img, None) for p, img in pages]
@@ -12572,10 +12585,17 @@ async def process_qbm_pages(
                                 "Answer not found in source", ""
                             ).strip()
 
+            # Two-stage tally: Call1 = who did the original extraction,
+            # Call2 = who verified/recovered it (only differs from Call1
+            # when a verify pass actually ran and changed provider).
             _counts = {}
+            _c1_counts = {}
             for _m in (mcqs or []):
                 _prov = _m.get("_provider", "Unknown")
                 _counts[_prov] = _counts.get(_prov, 0) + 1
+                _c1_prov = _m.get("_call1_provider", _prov)
+                _c1_counts[_c1_prov] = _c1_counts.get(_c1_prov, 0) + 1
+            page_call1_tally[page_num] = _c1_counts
             page_provider_tally[page_num] = _counts
 
             img_bytes = image_to_bytes(img) if not isinstance(img, (bytes, bytearray)) else img
@@ -12675,7 +12695,12 @@ async def process_qbm_pages(
             page_status[idx]["done"] = True
             page_status[idx]["current"] = False
             page_status[idx]["mcq"] = len(mcqs)
-            page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in page_provider_tally.get(page_num, {}).items())
+            # Show Call1 (original extraction) and Call2 (verify) separately
+            # when they differ, so it's clear e.g. Gemini extracted but Groq
+            # verified -- a plain merged tally hid this distinction before.
+            _c1_str = ", ".join(f"{k}:{v}" for k, v in page_call1_tally.get(page_num, {}).items())
+            _c2_str = ", ".join(f"{k}:{v}" for k, v in page_provider_tally.get(page_num, {}).items())
+            page_status[idx]["model"] = _c1_str if _c1_str == _c2_str else f"Call1[{_c1_str}] Verify[{_c2_str}]"
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls))
 
