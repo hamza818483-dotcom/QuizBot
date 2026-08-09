@@ -527,8 +527,11 @@ PDF_AUTO_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB) — /pdf 
 # /cancel — instantly stop any running activity for this chat (bot stays alive)
 # ============================================================
 import contextvars
+import itertools
 CANCEL_FLAGS = {}  # chat_id -> bool, checked by long loops between steps
 ACTIVE_JOB_LABEL = {}  # chat_id -> human-readable label of the job currently running
+CURRENT_JOB_ID = {}  # chat_id -> int, id of the job currently running in that chat
+_job_id_counter = itertools.count(1)
 _current_job_chat_id_ctx = contextvars.ContextVar("_current_job_chat_id_ctx", default=None)
 
 def is_cancelled(chat_id=None):
@@ -541,13 +544,23 @@ def is_cancelled(chat_id=None):
 def clear_cancel(chat_id):
     CANCEL_FLAGS[chat_id] = False
 
-def _cancel_kb(chat_id) -> dict:
-    """Shared inline 'Cancel' button attached to every long-running job's
-    live status/dashboard message -- tapping it sets the same CANCEL_FLAGS
-    the /cancel command uses, so any in-progress job (checked via
-    is_cancelled() at its next loop iteration) stops the same way it would
-    if the person had typed /cancel."""
-    return {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": f"jobcancel_{chat_id}"}]]}
+def new_job_id(chat_id) -> int:
+    """প্রতিটা নতুন job (/pdf, /qbm, /tf, /txt ...) শুরু হওয়ার সময় একটা
+    ইউনিক job_id নেয়। এই id-টা ওই job-এর নিজস্ব cancel button-এ বসানো থাকে,
+    তাই আগের কোনো (শেষ হয়ে যাওয়া) job-এর পুরনো button চাপলে কিছু হয় না —
+    শুধু বর্তমানে চলমান job-এর button-ই কাজ করে।"""
+    jid = next(_job_id_counter)
+    CURRENT_JOB_ID[chat_id] = jid
+    return jid
+
+def _cancel_kb(chat_id, job_id=None) -> dict:
+    """প্রতিটা কমান্ডের নিজস্ব (per-job) inline 'Cancel' বাটন — এই বাটনে
+    ওই job-এর job_id বসানো থাকে। ট্যাপ করলে শুধু ওই নির্দিষ্ট job-ই বন্ধ হয়;
+    যদি ইতিমধ্যে অন্য নতুন job শুরু হয়ে যায় (বা এটা আগেই শেষ হয়ে থাকে),
+    এই পুরনো বাটন আর কাজ করবে না।"""
+    if job_id is None:
+        job_id = CURRENT_JOB_ID.get(chat_id, 0)
+    return {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": f"jobcancel_{chat_id}_{job_id}"}]]}
 
 
 def set_active_job(chat_id, label):
@@ -4738,6 +4751,7 @@ async def handle_txt_command(msg: dict):
         return
 
     clear_cancel(chat_id)
+    new_job_id(chat_id)
     set_active_job(chat_id, "/txt (text → MCQ)")
 
     text_content = reply["text"]
@@ -8785,6 +8799,7 @@ async def pdf_generate_all_pages(
     results_by_idx = [None] * len(pages)
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
     clear_cancel(chat_id)
+    new_job_id(chat_id)
     set_active_job(chat_id, f"PDF MCQ generation ({file_name}, parallel)")
 
     # Sequential: one page fully completes before the next starts. Multiple
@@ -9639,6 +9654,7 @@ async def _process_pdfm_pages_impl(
     all_mcqs_csv = []
     first_image_msg_id = None
     clear_cancel(chat_id)
+    new_job_id(chat_id)
     set_active_job(chat_id, f"PDFM MCQ generation + Poll posting ({file_name}, page-by-page)")
 
     for idx, (page_num, img) in enumerate(pages):
@@ -11254,6 +11270,7 @@ async def handle_auto_command(msg: dict):
     text = msg.get("text", "")
     _auto_uid = msg.get("from", {}).get("id")
     clear_cancel(chat_id)
+    new_job_id(chat_id)
     set_active_job(chat_id, "/auto (chorcha extraction)")
 
     lines = [l.rstrip() for l in text.split("\n")[1:] if l.strip() != ""]
@@ -12448,6 +12465,7 @@ async def qbm_extract_all_pages(
     total_mcq = 0
     results = [None] * len(pages)
     clear_cancel(chat_id)
+    new_job_id(chat_id)
     set_active_job(chat_id, f"QBM extraction ({file_name}, page-by-page)")
 
     if status_msg_id:
@@ -12633,6 +12651,7 @@ async def process_qbm_pages(
     first_image_msg_id = None
     page_provider_tally = {}  # page_num -> {"Gemini": n, "Groq": n} for final model-usage summary (post-verify)
     page_call1_tally = {}  # page_num -> {"Gemini": n, "Groq": n} -- ORIGINAL Call1 extraction provider, before Call2 verify relabels it
+    new_job_id(chat_id)
     set_active_job(chat_id, f"QBM Poll posting ({file_name}, page-by-page)")
 
     iterable = page_tuples if skip_extract else [(p, img, None) for p, img in pages]
@@ -15908,10 +15927,25 @@ async def handle_callback(query: dict):
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
         if data.startswith("jobcancel_"):
-            target_chat = int(data[len("jobcancel_"):])
+            rest = data[len("jobcancel_"):]
+            # নতুন ফরম্যাট: jobcancel_{chat_id}_{job_id}  (per-job button)
+            # পুরনো ফরম্যাট (backward-compat): jobcancel_{chat_id}
+            parts = rest.rsplit("_", 1)
+            if len(parts) == 2 and parts[1].isdigit() and parts[0].lstrip("-").isdigit():
+                target_chat = int(parts[0])
+                button_job_id = int(parts[1])
+            else:
+                target_chat = int(rest)
+                button_job_id = None
             if target_chat != chat_id:
                 return
             if not await db_is_owner_or_admin(uid):
+                return
+            running_job_id = CURRENT_JOB_ID.get(target_chat)
+            if button_job_id is not None and button_job_id != running_job_id:
+                # এই বাটনটা আর সক্রিয় job-এর না (হয় আগেই শেষ হয়ে গেছে, নয়তো
+                # নতুন job শুরু হয়ে গেছে) — তাই এটা কিছু cancel করবে না।
+                await send_msg(chat_id, "ℹ️ এই কাজটি ইতিমধ্যে শেষ হয়ে গেছে, তাই এই বাটন আর কার্যকর নয়।")
                 return
             CANCEL_FLAGS[target_chat] = True
             running_label = ACTIVE_JOB_LABEL.get(target_chat)
