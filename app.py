@@ -10219,11 +10219,20 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
     """
     if not call1_mcqs:
         return []
-    CHUNK_SIZE = 5
-    if len(call1_mcqs) <= CHUNK_SIZE:
+    # First chunk (miss-check + verify) must stay small -- the miss-check
+    # step adds significant prompt weight, and CHUNK_SIZE=10 there was
+    # measured to overflow Groq's 8000 TPM budget. Later chunks (verify-only,
+    # no miss-check text) are lighter -- doubling their size to 10 halves the
+    # remaining call count without hitting the same overflow, cutting total
+    # Groq/Gemini calls per page roughly in half.
+    FIRST_CHUNK_SIZE = 5
+    REST_CHUNK_SIZE = 10
+    if len(call1_mcqs) <= FIRST_CHUNK_SIZE:
         return await _qbm_call2_single(img, call1_mcqs, do_miss_check=True)
 
-    chunks = [call1_mcqs[i:i + CHUNK_SIZE] for i in range(0, len(call1_mcqs), CHUNK_SIZE)]
+    first = call1_mcqs[:FIRST_CHUNK_SIZE]
+    rest = call1_mcqs[FIRST_CHUNK_SIZE:]
+    chunks = [first] + [rest[i:i + REST_CHUNK_SIZE] for i in range(0, len(rest), REST_CHUNK_SIZE)]
     out = []
     for i, chunk in enumerate(chunks):
         # miss-check only makes sense once (needs the full existing list as
