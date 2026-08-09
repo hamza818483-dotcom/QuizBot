@@ -12075,64 +12075,122 @@ async def _onu_call1_extract(img) -> list:
         return []
 
 
+async def _onu_verify_pass(img, mcqs: list) -> list:
+    """/onu-ONLY verify pass — fully independent from QBM's miss-check
+    pipeline (_qbm_call2_miss_check). /onu never needs QBM's "find MCQs
+    Call1 missed" logic, since a missed MCQ that also happens to be
+    highlighted would simply not exist in call1 to begin with, and /onu's
+    filter already drops anything without yellow_highlight -- so there's
+    nothing for a miss-check pass to usefully add here, only risk (it can
+    add/rewrite/split MCQs from a codepath that has no concept of the
+    yellow_highlight field).
+
+    This pass instead just re-confirms, for the SAME list Call1 already
+    found: option text accuracy, answer-letter correctness, and exact
+    source wording -- a light proofreading pass, never adding or removing
+    MCQs. yellow_highlight is carried through untouched (same list, same
+    order, same length always) so there is no restore/re-map step needed
+    anywhere in this path."""
+    if not mcqs:
+        return mcqs
+    try:
+        mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("question", "options", "answer")} for m in mcqs], ensure_ascii=False)
+        prompt = f"""Re-check this already-extracted MCQ list against the page image ONE more time. Do NOT add or remove any MCQ -- output exactly {len(mcqs)} items, same order.
+
+For each MCQ, verify against the image:
+- question and option text match the source exactly (fix only if you spot a typo/OCR error)
+- answer letter is correct (re-check the marked option: red circle/box, or other clear mark)
+
+EXISTING LIST:
+{mcq_json}
+
+OUTPUT — ONLY a JSON array of exactly {len(mcqs)} items, same order, corrected if needed:
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D"}}]"""
+        txt = await _qbm_groq_call(img, prompt)
+        if not txt:
+            txt = await _qbm_gemini_raw(img, prompt)
+        if not txt:
+            return mcqs  # verify failed entirely -- keep Call1's result as-is rather than losing highlighted MCQs
+        fixed = _qbm_parse_json(txt)
+        if not fixed or len(fixed) != len(mcqs):
+            return mcqs  # length mismatch -- untrustworthy, keep Call1's result
+        for orig, corrected in zip(mcqs, fixed):
+            if corrected.get("question"):
+                orig["question"] = corrected["question"]
+            if corrected.get("options"):
+                orig["options"] = corrected["options"]
+            if corrected.get("answer"):
+                orig["answer"] = corrected["answer"]
+        return mcqs
+    except Exception as e:
+        logger.warning(f"[ONU-verify] failed: {e} — keeping Call1 result unverified rather than dropping it")
+        return mcqs
+
+
+async def _onu_empty_page_scan(img) -> list:
+    """/onu-ONLY empty-page fallback — fully independent from
+    _qbm_final_empty_page_scan. Used only when Call1 returns zero MCQs, to
+    rule out a technical miss before confirming the page truly has no
+    highlighted MCQ. Gemini-only (no TPM budget to protect, and highlight
+    accuracy matters more here than speed)."""
+    try:
+        prompt = """A prior pass over this exact page image concluded there is NO existing MCQ (multiple-choice question) on this page. Do one final, completely fresh scan, ignoring that conclusion. Look at every part of the page including footnotes, margins, and faint/small text.
+
+If you find ANY existing MCQ, extract it in the strict format below (options in exact source position order, A/B/C/D by position). For EACH one, carefully check the background behind its question line and its 4 options for a YELLOW or GREEN highlighter tint (faint tints count too) -- set yellow_highlight true/false per MCQ independently. Also find the answer (RED CIRCLE/BOX around an option's letter, or other clear mark; default "A" if none).
+
+If the page genuinely has no MCQ, output exactly: []
+
+OUTPUT — ONLY a JSON array:
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","yellow_highlight":true}]"""
+        gem_txt = await _qbm_gemini_raw(img, prompt)
+        found = _qbm_parse_json(gem_txt) if gem_txt else []
+        out = _qbm_dedup_list(found) if found else []
+        for m in out:
+            m.setdefault("_provider", "Gemini")
+        return out
+    except Exception as e:
+        logger.warning(f"[ONU empty-page-scan] failed: {e}")
+        return []
+
+
 async def _onu_extract_from_image(img) -> list:
-    """Same 2-call qbm pipeline (extract + verify) as _qbm_extract_from_image,
-    but Call 1 uses ONU_EXTRACT_PROMPT so every MCQ carries a yellow_highlight
-    flag. That flag is preserved through the verify/repair/restore/safety-net
-    steps (keyed by normalized question) since those steps don't know about it."""
+    """/onu's fully independent extraction pipeline — does NOT call into
+    any QBM pipeline function (_qbm_call2_miss_check, _qbm_repair_order,
+    _qbm_restore_opt_bboxes, _qbm_final_safety_net, _qbm_final_empty_page_scan
+    are all QBM-only and never invoked from here). /onu only shares pure,
+    stateless utilities with QBM (_qbm_parse_json, _qbm_dedup_list,
+    _qbm_ram_aware_acquire, _cap_mcq_options, _qbm_groq_call, _qbm_gemini_raw)
+    -- none of these know or care about "MCQ pipeline" semantics, they're
+    just JSON/text/image helpers, so sharing them carries no cross-command
+    behavior risk.
+
+    Steps: Call1 (extract + highlight) -> recheck (targeted re-check on
+    not-yet-highlighted items) -> lightweight verify (proofread only, never
+    adds/removes MCQs) -> _onu_filter_mcqs (caller-side) drops anything
+    without yellow_highlight=true. yellow_highlight is set once in Call1/
+    recheck and never needs restoring afterward, since no step in this path
+    can silently drop the field."""
     await _qbm_ram_aware_acquire()
     try:
         for _pipeline_attempt in range(3):
             call1 = await _onu_call1_extract(img)
-            try:
-                _hl_dbg = [mc.get("yellow_highlight", "MISSING") for mc in (call1 or [])]
-                logger.warning(f"[ONU-DEBUG] Call1 yellow_highlight values: {_hl_dbg}")
-            except Exception:
-                pass
 
             if call1:
                 call1 = await _onu_recheck_highlight(img, call1)
-                try:
-                    _hl_dbg2 = [mc.get("yellow_highlight", "MISSING") for mc in call1]
-                    logger.warning(f"[ONU-DEBUG] After recheck yellow_highlight values: {_hl_dbg2}")
-                except Exception:
-                    pass
 
             if not call1:
-                final_check = await _qbm_final_empty_page_scan(img, onu_mode=True)
-                if not final_check:
+                recovered = await _onu_empty_page_scan(img)
+                if not recovered:
                     if _pipeline_attempt < 2:
-                        logger.warning(f"[ONU] Call1+final-scan both empty on attempt {_pipeline_attempt+1}/3 — retrying")
+                        logger.warning(f"[ONU] Call1+empty-scan both empty on attempt {_pipeline_attempt+1}/3 — retrying")
                         continue
                     return []
-                verified = await _qbm_call2_miss_check(img, final_check)
-                verified = _qbm_repair_order(final_check, verified)
-                recovered_mcqs = _cap_mcq_options(_qbm_restore_opt_bboxes(final_check, verified))
-                final_mcqs = await _qbm_final_safety_net(img, recovered_mcqs)
-                hl_map = {_qbm_normalize_q(mc.get("question", "")): mc.get("yellow_highlight", False) for mc in final_check}
-                for mc in final_mcqs:
-                    if "yellow_highlight" not in mc:
-                        mc["yellow_highlight"] = hl_map.get(_qbm_normalize_q(mc.get("question", "")), False)
-                return final_mcqs
+                recovered = await _onu_recheck_highlight(img, recovered)
+                verified = await _onu_verify_pass(img, recovered)
+                return _cap_mcq_options(verified)
 
-            call2 = await _qbm_call2_miss_check(img, call1)
-            call2 = _qbm_repair_order(call1, call2)
-            call2 = _qbm_restore_opt_bboxes(call1, call2)
-            final_mcqs = _cap_mcq_options(call2)
-            final_mcqs = await _qbm_final_safety_net(img, final_mcqs)
-            # Restore yellow_highlight: prefer index alignment (call1/call3 are
-            # same length after repair_order), fall back to normalized-text
-            # match only if lengths drifted (e.g. safety-net split/merged).
-            if len(final_mcqs) == len(call1):
-                for mc, src in zip(final_mcqs, call1):
-                    if "yellow_highlight" not in mc:
-                        mc["yellow_highlight"] = src.get("yellow_highlight", False)
-            else:
-                hl_map = {_qbm_normalize_q(mc.get("question", "")): mc.get("yellow_highlight", False) for mc in call1}
-                for mc in final_mcqs:
-                    if "yellow_highlight" not in mc:
-                        mc["yellow_highlight"] = hl_map.get(_qbm_normalize_q(mc.get("question", "")), False)
-            return final_mcqs
+            verified = await _onu_verify_pass(img, call1)
+            return _cap_mcq_options(verified)
         return []
     finally:
         _QBM_EXTRACT_HARD_CAP.release()
