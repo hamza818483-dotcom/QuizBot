@@ -10317,10 +10317,19 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
     rest = call1_mcqs[FIRST_CHUNK_SIZE:]
     chunks = [first] + [rest[i:i + REST_CHUNK_SIZE] for i in range(0, len(rest), REST_CHUNK_SIZE)]
     out = []
+    _extra_missed = []
     for i, chunk in enumerate(chunks):
-        # miss-check only makes sense once (needs the full existing list as
-        # context) -- run it on the first chunk only, plain verify on the rest
-        verified_chunk = await _qbm_call2_single(img, chunk, do_miss_check=(i == 0))
+        # BUGFIX: miss-check used to only run on the FIRST chunk (5 MCQs of
+        # context), meaning any MCQ missed by Call1 in a region NOT covered
+        # by those first 5 could never be recovered -- this was the direct
+        # cause of dense pages (e.g. 21 MCQ) losing 1-2 MCQs (e.g. ending up
+        # with only 19), since the miss-check pass never saw the full list or
+        # scanned every region against it. Now miss-check runs on EVERY
+        # chunk, but each call still only receives its own slice as context
+        # (keeping prompt size safe) -- newly found MCQs across all chunks
+        # get deduped together afterward, so the region actually containing
+        # a missed MCQ always gets its own dedicated miss-check pass.
+        verified_chunk = await _qbm_call2_single(img, chunk, do_miss_check=True)
         out.extend(verified_chunk)
     return _qbm_dedup_list(out)
 
@@ -10368,19 +10377,23 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True) -
             for m in call1_mcqs
         ], ensure_ascii=False)
 
-        step_a_text = """STEP A — MISS-CHECK:
-1) MANDATORY: mentally divide the page into regions (top/middle/bottom, left/right if
-   multi-column) and check EACH region against the list above before answering —
-   especially the LAST MCQ on the page and the BOTTOM of the page — most commonly missed.
-2) Check if ANY existing MCQ was MISSED by the list above. If found, add it in the SAME
-   strict format (options in the exact source position order, A/B/C/D slots by position —
-   never relabeled/sorted). If it belongs under a passage/উদ্দীপক, prepend that passage's
-   full text to its question (self-contained), same as Call 1's rule.
+        step_a_text = """STEP A — MISS-CHECK (mandatory, full-image scan every time):
+1) Look at the ENTIRE page image now, independent of the list below — mentally divide it into
+   regions (top/middle/bottom, left/right if multi-column) and scan EACH region for any MCQ
+   block that exists on the page. Do NOT limit your scan to areas "near" the MCQs already in the
+   list — a page can have missed MCQs anywhere, including entirely separate regions the list
+   below doesn't cover at all (this list is only PART of the page's MCQs when the page has more
+   MCQs than fit in one verification chunk).
+2) For every MCQ block you find on the page, check: is it already present in the list below
+   (same question)? If NOT present, it was MISSED — add it in the SAME strict format (options in
+   the exact source position order, A/B/C/D slots by position — never relabeled/sorted). If it
+   belongs under a passage/উদ্দীপক, prepend that passage's full text to its question
+   (self-contained), same as Call 1's rule.
+3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
+   missed — but this is in ADDITION to the full scan above, not instead of it.
 
 """ if do_miss_check else ""
-        task_line = ("do BOTH steps below in this single pass" if do_miss_check
-                     else "do STEP B below (this is a partial MCQ slice from a larger page, "
-                          "already miss-checked separately — skip STEP A, just verify this slice)")
+        task_line = "do BOTH steps below in this single pass"
         prompt = f"""You already extracted these MCQs from this exact page image (Call 1 result):
 {mcq_json if call1_mcqs else "(none found)"}
 
@@ -12841,18 +12854,20 @@ async def qbm_extract_all_pages(
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0), reply_markup=_cancel_kb(chat_id))
         return idx, page_num, img, mcqs
 
-    # Parallel window (WINDOW=1 was strict-sequential to avoid same-key TPM
-    # collisions, but that made total wall-clock time = sum of every page's
-    # time -- very slow on dense-MCQ PDFs). WINDOW=2 restores 2-way
-    # parallelism while avoiding the earlier TPM-collision problem: each
-    # concurrent slot sets _qbm_key_offset_ctx to a different starting Groq
-    # key (round-robin via ordered_keys(offset=)), so the two pages in a
-    # window pull from different keys first instead of both hammering the
-    # same one. Pages still complete in strict index order (gather waits for
-    # the whole window before moving to the next), so ordering guarantees
-    # and the cross-page answer-lookahead (which needs earlier pages already
-    # resolved) are unaffected.
-    WINDOW = 2
+    # Parallel window. WINDOW=1 was strict-sequential (avoided same-key TPM
+    # collisions, but wall-clock = sum of every page's time -- very slow on
+    # dense-MCQ PDFs). Each concurrent slot sets _qbm_key_offset_ctx to a
+    # different starting Groq key (round-robin via ordered_keys(offset=)),
+    # so pages in a window pull from different keys first instead of
+    # hammering the same one. With 12 Groq keys total, WINDOW=4 keeps every
+    # slot on its own starting key with headroom to spare (still leaves 8
+    # other keys as fallback per slot if its primary key is cooling), so
+    # accuracy/collision-safety is preserved while roughly halving wall-clock
+    # time again vs WINDOW=2. Pages still complete in strict index order
+    # (gather waits for the whole window before moving to the next), so
+    # ordering guarantees and the cross-page answer-lookahead (which needs
+    # earlier pages already resolved) are unaffected.
+    WINDOW = 4
 
     async def _extract_one_slotted(slot, idx, page_num, img):
         _qbm_key_offset_ctx.set(slot)
