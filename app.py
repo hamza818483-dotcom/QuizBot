@@ -2131,7 +2131,7 @@ class GenericKeyRotator:
 nvidia_rotator = GenericKeyRotator("NVIDIA_API_KEY", "NVIDIA")
 nemotron_rotator = GenericKeyRotator("NEMOTRON_API_KEY", "Nemotron")
 gemma_rotator = GenericKeyRotator("GEMMA_API_KEY", "Gemma")
-or_qwen_rotator = GenericKeyRotator("OPENROUTER_KEYS", "OpenRouter-Qwen")
+or_qwen_rotator = GenericKeyRotator("OPENROUTER_KEYS", "OpenRouter")
 hf_rotator = GenericKeyRotator("HF_API_KEY", "HF")
 
 
@@ -2426,7 +2426,7 @@ async def _gen_groq_raw_text(img, prompt: str, mcq_count_hint=None) -> str:
     # instead of silently returning empty (previously killed the whole call).
     for rotator, url, model in (
         (nvidia_rotator, "https://integrate.api.nvidia.com/v1/chat/completions", "meta/llama-3.2-11b-vision-instruct"),
-        (or_qwen_rotator, "https://openrouter.ai/api/v1/chat/completions", "qwen/qwen2.5-vl-72b-instruct:free"),
+        (or_qwen_rotator, "https://openrouter.ai/api/v1/chat/completions", "google/gemma-4-31b-it:free"),
         (nemotron_rotator, "https://integrate.api.nvidia.com/v1/chat/completions", "nvidia/llama-3.1-nemotron-51b-instruct"),
         (gemma_rotator, "https://api.groq.com/openai/v1/chat/completions", "gemma2-9b-it"),
     ):
@@ -10182,8 +10182,18 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     return ""
 
 
+_OPENROUTER_VISION_MODELS = [
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-nano-12b-2-vl:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "qwen/qwen2.5-vl-32b-instruct:free",
+]
+
+
 async def _qbm_openrouter_call(img, prompt: str) -> str:
-    """Third-tier QBM fallback -- OpenRouter (free Qwen/Gemma models) with the
+    """Third-tier QBM fallback -- OpenRouter (free vision-capable models,
+    tried in order -- OpenRouter's free-model lineup rotates/gets delisted
+    every few weeks, so this list needs occasional refreshing) with the
     same strict extraction prompt used for Gemini/Groq. Only reached when both
     Gemini (all keys) and Groq (all keys) are exhausted/rate-limited, so pages
     keep flowing instead of stalling on quota errors."""
@@ -10194,37 +10204,40 @@ async def _qbm_openrouter_call(img, prompt: str) -> str:
     keys = rotator.ordered_keys() if rotator else []
     if not keys:
         return ""
-    for key in keys:
-        if is_cancelled():
-            return ""
-        try:
-            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-            payload = {
-                "model": "qwen/qwen2.5-vl-32b-instruct:free",
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": data_url}}
-                    ]
-                }],
-                "temperature": 0.1,
-                "max_tokens": 3000,
-            }
-            async with httpx.AsyncClient(timeout=45) as c:
-                r = await c.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
-                if r.status_code >= 400:
-                    if r.status_code == 429:
-                        rotator.mark_rate_limited(key)
-                    else:
-                        logger.warning(f"[QBM-OpenRouter] HTTP {r.status_code}")
-                    continue
-                j = r.json()
-                rotator.mark_healthy(key)
-                return j.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-        except Exception as e:
-            logger.warning(f"[QBM-OpenRouter] err: {e}")
-            continue
+    for model in _OPENROUTER_VISION_MODELS:
+        for key in keys:
+            if is_cancelled():
+                return ""
+            try:
+                headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+                payload = {
+                    "model": model,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": data_url}}
+                        ]
+                    }],
+                    "temperature": 0.1,
+                    "max_tokens": 3000,
+                }
+                async with httpx.AsyncClient(timeout=45) as c:
+                    r = await c.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+                    if r.status_code >= 400:
+                        if r.status_code == 429:
+                            rotator.mark_rate_limited(key)
+                        else:
+                            logger.warning(f"[QBM-OpenRouter] {model} HTTP {r.status_code}")
+                        continue
+                    j = r.json()
+                    rotator.mark_healthy(key)
+                    content = j.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+                    if content:
+                        return content
+            except Exception as e:
+                logger.warning(f"[QBM-OpenRouter] {model} err: {e}")
+                continue
     return ""
 
 
