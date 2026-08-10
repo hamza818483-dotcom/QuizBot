@@ -10369,8 +10369,12 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
 
     # Gemini is now Call2's primary provider (no tight per-call TPM ceiling
     # like Groq's 8000 TPM, which is what chunking existed to protect) --
-    # always send the full page in ONE unchunked verify call.
-    return await _qbm_call2_single(img, combined, do_miss_check=False)
+    # always send the full page in ONE unchunked verify call. do_miss_check=
+    # True here too (on top of the dedicated lightweight miss-check above) --
+    # a second independent miss-scan inside the SAME call that also does
+    # full verification, so any MCQ the lightweight pass missed still has
+    # one more chance to be caught before this page's result is final.
+    return await _qbm_call2_single(img, combined, do_miss_check=True)
 
 
 async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True) -> list:
