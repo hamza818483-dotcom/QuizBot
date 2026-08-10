@@ -12253,6 +12253,13 @@ async def _onu_call1_extract(img) -> list:
         out = _qbm_dedup_list(gem) if gem else []
         for m in out:
             m["_provider"] = "Gemini"
+        if out:
+            return out
+        or_txt = await _qbm_openrouter_call(img, ONU_EXTRACT_PROMPT)
+        result3 = _qbm_parse_json(or_txt) if or_txt else []
+        out = _qbm_dedup_list(result3)
+        for m in out:
+            m["_provider"] = "OpenRouter"
         return out
     except Exception as e:
         logger.warning(f"[ONU Call1] failed: {e}")
@@ -12293,6 +12300,8 @@ OUTPUT — ONLY a JSON array of exactly {len(mcqs)} items, same order, corrected
         txt = await _qbm_groq_call(img, prompt)
         if not txt:
             txt = await _qbm_gemini_raw(img, prompt)
+        if not txt:
+            txt = await _qbm_openrouter_call(img, prompt)
         if not txt:
             return mcqs  # verify failed entirely -- keep Call1's result as-is rather than losing highlighted MCQs
         fixed = _qbm_parse_json(txt)
