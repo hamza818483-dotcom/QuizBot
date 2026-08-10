@@ -10281,74 +10281,108 @@ async def _qbm_call1_extract(img) -> list:
         return []
 
 
-async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
+async def _qbm_lightweight_miss_check(img, call1_mcqs: list) -> list:
     """
-    CALL 2 (dispatcher) — MERGED miss-check + full verification.
-    Chunks into <=16 MCQs per call ONLY when Groq has at least one usable
-    key right now (chunking exists purely to keep each Groq call inside its
-    8000 TPM ceiling). If Groq has zero usable keys (all daily-exhausted or
-    cooling), every chunk would fail Groq instantly and fall through to
-    Gemini anyway -- since Gemini has no comparable tight per-call ceiling,
-    chunking in that case only adds overhead (re-sending the whole page
-    image once per chunk for no reason), so the whole MCQ list is sent in
-    ONE unchunked call straight to Gemini-first instead. Every chunk (when
-    chunking does happen) runs its own full miss-check pass against the
-    full page image -- not just the first one -- so a missed MCQ anywhere
-    on the page can still be recovered regardless of which chunk's region
-    it falls in.
+    Dedicated MISS-CHECK ONLY call -- lightweight by design. Job is ONLY:
+    scan the full page image once, compare against the full existing MCQ
+    list (all of it, not chunked -- miss-check needs the complete picture to
+    know what's already found), and return ONLY the small number of MISSED
+    MCQs (if any). No spelling/answer-source/completeness/column-order
+    verification here -- that's Step B's job, done separately per-chunk on
+    the (Call1 + these newly-found) combined list. Splitting it out this way
+    means: (a) miss-check runs exactly ONCE per page instead of once per
+    verify-chunk, (b) its output is small (usually 0, rarely 1-5 new MCQs)
+    instead of re-emitting the whole list, so this call stays cheap even on
+    dense pages. Returns [] if nothing was missed (the common case).
     """
     if not call1_mcqs:
         return []
-    # First chunk (miss-check + verify) must stay small -- the miss-check
-    # step adds significant prompt weight, and CHUNK_SIZE=10 there was
-    # measured to overflow Groq's 8000 TPM budget. Later chunks (verify-only,
-    # no miss-check text) are lighter -- and _img_to_data_url_groq already
-    # dynamically shrinks the image to fit whatever prompt size it's given
-    # (prompt_len_hint), so a bigger REST_CHUNK_SIZE doesn't risk overflow --
-    # it just means the same page image gets RE-SENT fewer times across fewer
-    # chunk calls, which is the single biggest token cost driver on dense
-    # pages (repeating the whole-page image per chunk). Raised from 10->16 to
-    # meaningfully cut chunk count (and therefore total TPD burn per page)
-    # without touching image quality/accuracy.
+    try:
+        # Only question text needed here (just enough for the model to know
+        # what's already found) -- options/answer/explanation add nothing to
+        # a miss-check decision and would only bloat this call for no reason.
+        existing_qs = json.dumps(
+            [(m.get("question", "") or "")[:150] for m in call1_mcqs],
+            ensure_ascii=False
+        )
+        prompt = f"""You already extracted these MCQ questions from this exact page image:
+{existing_qs}
+
+TASK — MISS-CHECK ONLY (do not verify/correct the ones above, that happens separately):
+1) Look at the ENTIRE page image now and mentally divide it into regions (top/middle/bottom,
+   left/right if multi-column) — scan EACH region for any MCQ block (question + options) that
+   exists on the page.
+2) For every MCQ block you find, check: is its question already present in the list above (same
+   or very similar question)? If NOT present, it was MISSED.
+3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
+   missed — but this is in ADDITION to the full scan above, not instead of it.
+4) If NOTHING was missed (the common case), output an empty array: []
+5) If MCQs were missed, output ONLY those missed MCQs (do not repeat the ones already in the
+   list above) in the same strict format: options in the exact source position order, A/B/C/D
+   slots by position (never relabeled/sorted); if a missed MCQ belongs under a passage/উদ্দীপক,
+   prepend that passage's full text to its question (self-contained).
+
+OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), nothing else:
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
+
+        txt = await _qbm_groq_call(img, prompt)
+        result = _qbm_parse_json(txt) if txt else []
+        if not txt:
+            gem_txt = await _qbm_gemini_raw(img, prompt)
+            result = _qbm_parse_json(gem_txt) if gem_txt else []
+        if not result:
+            or_txt = await _qbm_openrouter_call(img, prompt)
+            result = _qbm_parse_json(or_txt) if or_txt else []
+        return result or []
+    except Exception as e:
+        logger.warning(f"[QBM Miss-Check] failed: {e}")
+        return []
+
+
+async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
+    """
+    CALL 2 (dispatcher) — miss-check (ONE lightweight call, always against
+    the FULL list regardless of page density) followed by full verification
+    (chunked into <=16 MCQs per call ONLY when Groq has at least one usable
+    key right now -- chunking exists purely to keep each Groq verify call
+    inside its 8000 TPM ceiling). If Groq has zero usable keys (all
+    daily-exhausted or cooling), every chunk would fail Groq instantly and
+    fall through to Gemini anyway -- since Gemini has no comparable tight
+    per-call ceiling, chunking in that case only adds overhead (re-sending
+    the whole page image once per chunk for no reason), so the whole MCQ
+    list is sent in ONE unchunked verify call straight to Gemini-first
+    instead. Miss-check is now genuinely lightweight (small output, one
+    call total) rather than a heavy Step-A-per-chunk pass -- verify chunks
+    only do Step B (no miss-check text at all), keeping their prompts
+    smaller too.
+    """
+    if not call1_mcqs:
+        return []
+    missed = await _qbm_lightweight_miss_check(img, call1_mcqs)
+    for m in (missed or []):
+        m.setdefault("_call1_provider", "MissCheck")
+    combined = call1_mcqs + (missed or [])
     FIRST_CHUNK_SIZE = 5
     REST_CHUNK_SIZE = 16
 
-    # If Groq has no usable key at all right now (every key daily-exhausted
-    # or in cooldown), Groq calls inside _qbm_call2_single will fail
-    # immediately and fall through to Gemini anyway on every single chunk --
-    # so chunking at all is pure overhead in that situation (Gemini has no
-    # tight 8000 TPM ceiling like Groq, it can safely take the whole MCQ list
-    # in one call). Skip straight to one unchunked call so the page image
-    # only gets sent once instead of once per chunk.
     _groq_keys_now = groq_key_rotator.ordered_keys()
     _groq_all_dead = bool(_groq_keys_now) and all(
         _is_groq_key_exhausted_today(k) or groq_key_rotator._cooldown_until.get(k, 0) > time.time()
         for k in _groq_keys_now
     )
     if _groq_all_dead or not _groq_keys_now:
-        logger.info(f"[QBM Call2] Groq fully unavailable -- skipping chunking, single Gemini-first call for all {len(call1_mcqs)} MCQs")
-        return await _qbm_call2_single(img, call1_mcqs, do_miss_check=True)
+        logger.info(f"[QBM Call2] Groq fully unavailable -- skipping chunking, single Gemini-first verify call for all {len(combined)} MCQs")
+        return await _qbm_call2_single(img, combined, do_miss_check=False)
 
-    if len(call1_mcqs) <= FIRST_CHUNK_SIZE:
-        return await _qbm_call2_single(img, call1_mcqs, do_miss_check=True)
+    if len(combined) <= FIRST_CHUNK_SIZE:
+        return await _qbm_call2_single(img, combined, do_miss_check=False)
 
-    first = call1_mcqs[:FIRST_CHUNK_SIZE]
-    rest = call1_mcqs[FIRST_CHUNK_SIZE:]
+    first = combined[:FIRST_CHUNK_SIZE]
+    rest = combined[FIRST_CHUNK_SIZE:]
     chunks = [first] + [rest[i:i + REST_CHUNK_SIZE] for i in range(0, len(rest), REST_CHUNK_SIZE)]
     out = []
-    _extra_missed = []
-    for i, chunk in enumerate(chunks):
-        # BUGFIX: miss-check used to only run on the FIRST chunk (5 MCQs of
-        # context), meaning any MCQ missed by Call1 in a region NOT covered
-        # by those first 5 could never be recovered -- this was the direct
-        # cause of dense pages (e.g. 21 MCQ) losing 1-2 MCQs (e.g. ending up
-        # with only 19), since the miss-check pass never saw the full list or
-        # scanned every region against it. Now miss-check runs on EVERY
-        # chunk, but each call still only receives its own slice as context
-        # (keeping prompt size safe) -- newly found MCQs across all chunks
-        # get deduped together afterward, so the region actually containing
-        # a missed MCQ always gets its own dedicated miss-check pass.
-        verified_chunk = await _qbm_call2_single(img, chunk, do_miss_check=True)
+    for chunk in chunks:
+        verified_chunk = await _qbm_call2_single(img, chunk, do_miss_check=False)
         out.extend(verified_chunk)
     return _qbm_dedup_list(out)
 
@@ -10412,14 +10446,16 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True) -
    missed — but this is in ADDITION to the full scan above, not instead of it.
 
 """ if do_miss_check else ""
-        task_line = "do BOTH steps below in this single pass"
+        task_line = ("do BOTH steps below in this single pass" if do_miss_check
+                     else "do STEP B below only (miss-check was already done separately -- "
+                          "this list is final, just verify/correct it)")
         prompt = f"""You already extracted these MCQs from this exact page image (Call 1 result):
 {mcq_json if call1_mcqs else "(none found)"}
 
 TASK — {task_line}, connected to Call 1 (do not redo
 full extraction from scratch):
 
-{step_a_text}STEP B — FULL VERIFICATION on the combined list (Call 1 + any missed from Step A) — never
+{step_a_text}STEP B — FULL VERIFICATION on this MCQ list — never
 skip or shortcut this, regardless of how confident Call 1 was. NOTE: each MCQ's "question",
 "options", and "explanation" fields above are truncated to save space (just enough to identify
 which MCQ is which) — always re-read the FULL text from the actual page image and output the
@@ -10476,10 +10512,9 @@ complete, untruncated, corrected question/options/explanation in your response:
    text past the limit.
 
 CRITICAL: OUTPUT LIST ORDER (mandatory) — never move an MCQ to the end or anywhere else just
-because it needed a fix — fix it in place, at its original index (any newly-added missed MCQ
-from Step A goes at the end, in the order found).
+because it needed a fix — fix it in place, at its original index.
 
-Output ONLY the full corrected JSON array (Call 1 + missed, all fixes applied):
+Output ONLY the full corrected JSON array, all fixes applied, same length/order as input:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated","qsn_bbox":[100,200,400,450]}}]"""
 
         txt = await _qbm_groq_call(img, prompt)
