@@ -10326,14 +10326,25 @@ OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), not
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
 
         txt = await _qbm_groq_call(img, prompt)
-        result = _qbm_parse_json(txt) if txt else []
-        if not txt:
-            gem_txt = await _qbm_gemini_raw(img, prompt)
-            result = _qbm_parse_json(gem_txt) if gem_txt else []
-        if not result:
+        groq_result = _qbm_parse_json(txt) if txt else []
+
+        # Independent Gemini full-page miss-check -- always run (not just on
+        # Groq failure/empty-string). Groq can return a confident but WRONG
+        # "[]" (false negative) on a full page it mis-scanned, silently
+        # dropping real MCQs with no error to fall back on. Running Gemini
+        # as a second independent scanner and UNIONing both results catches
+        # MCQs either provider alone would miss, at the cost of one extra
+        # lightweight call per page (small output, worth it for recall).
+        gem_txt = await _qbm_gemini_raw(img, prompt)
+        gemini_result = _qbm_parse_json(gem_txt) if gem_txt else []
+
+        if not groq_result and not gemini_result:
             or_txt = await _qbm_openrouter_call(img, prompt)
-            result = _qbm_parse_json(or_txt) if or_txt else []
-        return result or []
+            or_result = _qbm_parse_json(or_txt) if or_txt else []
+            return or_result or []
+
+        union = _qbm_dedup_list((groq_result or []) + (gemini_result or []))
+        return union or []
     except Exception as e:
         logger.warning(f"[QBM Miss-Check] failed: {e}")
         return []
