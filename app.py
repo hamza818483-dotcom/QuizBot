@@ -10300,11 +10300,16 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
     # First chunk (miss-check + verify) must stay small -- the miss-check
     # step adds significant prompt weight, and CHUNK_SIZE=10 there was
     # measured to overflow Groq's 8000 TPM budget. Later chunks (verify-only,
-    # no miss-check text) are lighter -- doubling their size to 10 halves the
-    # remaining call count without hitting the same overflow, cutting total
-    # Groq/Gemini calls per page roughly in half.
+    # no miss-check text) are lighter -- and _img_to_data_url_groq already
+    # dynamically shrinks the image to fit whatever prompt size it's given
+    # (prompt_len_hint), so a bigger REST_CHUNK_SIZE doesn't risk overflow --
+    # it just means the same page image gets RE-SENT fewer times across fewer
+    # chunk calls, which is the single biggest token cost driver on dense
+    # pages (repeating the whole-page image per chunk). Raised from 10->16 to
+    # meaningfully cut chunk count (and therefore total TPD burn per page)
+    # without touching image quality/accuracy.
     FIRST_CHUNK_SIZE = 5
-    REST_CHUNK_SIZE = 10
+    REST_CHUNK_SIZE = 16
     if len(call1_mcqs) <= FIRST_CHUNK_SIZE:
         return await _qbm_call2_single(img, call1_mcqs, do_miss_check=True)
 
@@ -10348,8 +10353,8 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True) -
         # past 5000+, leaving no room for output tokens + the image within the
         # 8000 TPM ceiling (confirmed by direct token-budget simulation).
         _n = len(call1_mcqs) or 1
-        _q_cap = 180 if _n <= 5 else (140 if _n <= 10 else 90)
-        _opt_cap = 70 if _n <= 5 else (60 if _n <= 10 else 40)
+        _q_cap = 180 if _n <= 5 else (140 if _n <= 10 else (90 if _n <= 16 else 70))
+        _opt_cap = 70 if _n <= 5 else (60 if _n <= 10 else (40 if _n <= 16 else 30))
         def _trim_opts(opts):
             if isinstance(opts, dict):
                 return {k: (v or "")[:_opt_cap] for k, v in opts.items()}
