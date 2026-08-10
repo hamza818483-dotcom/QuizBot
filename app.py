@@ -13181,8 +13181,17 @@ async def process_qbm_pages(
             # merge) behind what looked like "nothing to show separately".
             # Showing both plainly, always, makes any future attribution loss
             # immediately visible instead of silently indistinguishable.
-            _c1_str = ", ".join(f"{k}:{v}" for k, v in page_call1_tally.get(page_num, {}).items())
-            _c2_str = ", ".join(f"{k}:{v}" for k, v in page_provider_tally.get(page_num, {}).items())
+            # Order shown = actual try-order (Gemini tried first in Call1,
+            # then Groq, then OpenRouter last-resort) rather than dict/MCQ
+            # insertion order, which could show e.g. "Groq:5, Gemini:15" even
+            # though Gemini was the FIRST provider actually attempted --
+            # misleadingly implying Groq was primary when it wasn't.
+            _PROVIDER_TRY_ORDER = ["Gemini", "Groq", "OpenRouter", "MissCheck", "Unknown"]
+            def _ordered_tally_str(tally: dict) -> str:
+                items = sorted(tally.items(), key=lambda kv: _PROVIDER_TRY_ORDER.index(kv[0]) if kv[0] in _PROVIDER_TRY_ORDER else len(_PROVIDER_TRY_ORDER))
+                return ", ".join(f"{k}:{v}" for k, v in items)
+            _c1_str = _ordered_tally_str(page_call1_tally.get(page_num, {}))
+            _c2_str = _ordered_tally_str(page_provider_tally.get(page_num, {}))
             page_status[idx]["model"] = f"Call1[{_c1_str}] Verify[{_c2_str}]"
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
