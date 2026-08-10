@@ -10431,6 +10431,10 @@ Output ONLY the full corrected JSON array (Call 1 + missed, all fixes applied):
             gem_txt = await _qbm_gemini_raw(img, prompt)
             result = _qbm_parse_json(gem_txt) if gem_txt else []
             call2_provider = "Gemini"
+        if not result:
+            or_txt = await _qbm_openrouter_call(img, prompt)
+            result = _qbm_parse_json(or_txt) if or_txt else []
+            call2_provider = "OpenRouter"
 
         if result and len(result) >= len(call1_mcqs) * 0.8:
             deduped = _qbm_dedup_list(result)
