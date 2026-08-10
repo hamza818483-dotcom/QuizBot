@@ -10373,29 +10373,11 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
     for m in (missed or []):
         m.setdefault("_call1_provider", "MissCheck")
     combined = call1_mcqs + (missed or [])
-    FIRST_CHUNK_SIZE = 5
-    REST_CHUNK_SIZE = 16
 
-    _groq_keys_now = groq_key_rotator.ordered_keys()
-    _groq_all_dead = bool(_groq_keys_now) and all(
-        _is_groq_key_exhausted_today(k) or groq_key_rotator._cooldown_until.get(k, 0) > time.time()
-        for k in _groq_keys_now
-    )
-    if _groq_all_dead or not _groq_keys_now:
-        logger.info(f"[QBM Call2] Groq fully unavailable -- skipping chunking, single Gemini-first verify call for all {len(combined)} MCQs")
-        return await _qbm_call2_single(img, combined, do_miss_check=False)
-
-    if len(combined) <= FIRST_CHUNK_SIZE:
-        return await _qbm_call2_single(img, combined, do_miss_check=False)
-
-    first = combined[:FIRST_CHUNK_SIZE]
-    rest = combined[FIRST_CHUNK_SIZE:]
-    chunks = [first] + [rest[i:i + REST_CHUNK_SIZE] for i in range(0, len(rest), REST_CHUNK_SIZE)]
-    out = []
-    for chunk in chunks:
-        verified_chunk = await _qbm_call2_single(img, chunk, do_miss_check=False)
-        out.extend(verified_chunk)
-    return _qbm_dedup_list(out)
+    # Gemini is now Call2's primary provider (no tight per-call TPM ceiling
+    # like Groq's 8000 TPM, which is what chunking existed to protect) --
+    # always send the full page in ONE unchunked verify call.
+    return await _qbm_call2_single(img, combined, do_miss_check=False)
 
 
 async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True) -> list:
@@ -10410,9 +10392,8 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True) -
        pages for an answer key if needed), spelling/context-word correctness
        (Bangla/English), completeness (no truncated words), column-order,
        উদ্দীপক self-containment, diagram bbox, and explanation_source tagging.
-    Groq primary (higher daily budget, this call runs multiple times per page
-    via chunking so Gemini's ~20/day/key quota drains fast if used here) ->
-    Gemini fallback only if Groq fails.
+    Gemini primary (full-page single call, no chunking) -> Groq fallback ->
+    OpenRouter last resort, only if Gemini fails.
     """
     if not call1_mcqs:
         call1_mcqs = []
@@ -10528,13 +10509,13 @@ because it needed a fix — fix it in place, at its original index.
 Output ONLY the full corrected JSON array, all fixes applied, same length/order as input:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated","qsn_bbox":[100,200,400,450]}}]"""
 
-        txt = await _qbm_groq_call(img, prompt)
-        result = _qbm_parse_json(txt) if txt else []
-        call2_provider = "Groq"
+        gem_txt = await _qbm_gemini_raw(img, prompt)
+        result = _qbm_parse_json(gem_txt) if gem_txt else []
+        call2_provider = "Gemini"
         if not result:
-            gem_txt = await _qbm_gemini_raw(img, prompt)
-            result = _qbm_parse_json(gem_txt) if gem_txt else []
-            call2_provider = "Gemini"
+            txt = await _qbm_groq_call(img, prompt)
+            result = _qbm_parse_json(txt) if txt else []
+            call2_provider = "Groq"
         if not result:
             or_txt = await _qbm_openrouter_call(img, prompt)
             result = _qbm_parse_json(or_txt) if or_txt else []
