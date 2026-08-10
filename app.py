@@ -10283,17 +10283,19 @@ async def _qbm_call1_extract(img) -> list:
 
 async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
     """
-    CALL 2 (dispatcher) — MERGED miss-check + full verification, split into
-    chunks of <=10 MCQs per Groq call. A single call covering a whole page's
-    MCQ list (can be 20-30+ on dense pages) was measured to push the prompt
-    well past Groq's 8000 TPM budget even with per-field truncation (prompt
-    tokens alone exceeding budget before output+image are even counted) --
-    chunking keeps each individual call safely inside the limit regardless
-    of how many MCQs are on the page. The miss-check (Step A) only makes
-    sense run once against the full page image with the full context of
-    what's already found, so it's still done once on the *first* chunk call
-    (findings get folded into that chunk's output); subsequent chunks only
-    do Step B (verify) on their slice.
+    CALL 2 (dispatcher) — MERGED miss-check + full verification.
+    Chunks into <=16 MCQs per call ONLY when Groq has at least one usable
+    key right now (chunking exists purely to keep each Groq call inside its
+    8000 TPM ceiling). If Groq has zero usable keys (all daily-exhausted or
+    cooling), every chunk would fail Groq instantly and fall through to
+    Gemini anyway -- since Gemini has no comparable tight per-call ceiling,
+    chunking in that case only adds overhead (re-sending the whole page
+    image once per chunk for no reason), so the whole MCQ list is sent in
+    ONE unchunked call straight to Gemini-first instead. Every chunk (when
+    chunking does happen) runs its own full miss-check pass against the
+    full page image -- not just the first one -- so a missed MCQ anywhere
+    on the page can still be recovered regardless of which chunk's region
+    it falls in.
     """
     if not call1_mcqs:
         return []
@@ -10310,6 +10312,23 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
     # without touching image quality/accuracy.
     FIRST_CHUNK_SIZE = 5
     REST_CHUNK_SIZE = 16
+
+    # If Groq has no usable key at all right now (every key daily-exhausted
+    # or in cooldown), Groq calls inside _qbm_call2_single will fail
+    # immediately and fall through to Gemini anyway on every single chunk --
+    # so chunking at all is pure overhead in that situation (Gemini has no
+    # tight 8000 TPM ceiling like Groq, it can safely take the whole MCQ list
+    # in one call). Skip straight to one unchunked call so the page image
+    # only gets sent once instead of once per chunk.
+    _groq_keys_now = groq_key_rotator.ordered_keys()
+    _groq_all_dead = bool(_groq_keys_now) and all(
+        _is_groq_key_exhausted_today(k) or groq_key_rotator._cooldown_until.get(k, 0) > time.time()
+        for k in _groq_keys_now
+    )
+    if _groq_all_dead or not _groq_keys_now:
+        logger.info(f"[QBM Call2] Groq fully unavailable -- skipping chunking, single Gemini-first call for all {len(call1_mcqs)} MCQs")
+        return await _qbm_call2_single(img, call1_mcqs, do_miss_check=True)
+
     if len(call1_mcqs) <= FIRST_CHUNK_SIZE:
         return await _qbm_call2_single(img, call1_mcqs, do_miss_check=True)
 
