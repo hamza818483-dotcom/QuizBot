@@ -10629,9 +10629,13 @@ def _qbm_normalize_q(question: str) -> str:
     return q
 
 
-def _qbm_is_duplicate(norm_q: str, existing_keys: list, threshold: float = 0.85) -> bool:
-    """Exact match না থাকলেও near-identical প্রশ্ন (pass ভেদে সামান্য spelling/space
-    difference) কে duplicate হিসেবে ধরার জন্য fuzzy match।"""
+def _qbm_is_duplicate(norm_q: str, existing_keys: list, threshold: float = 0.93) -> bool:
+    """Exact match না থাকলেও near-identical প্রশ্ন (একই MCQ দুইবার extract হলে, শুধু
+    সামান্য spelling/space difference) কে duplicate হিসেবে ধরার জন্য fuzzy match।
+    Threshold রাখা হয়েছে খুব high (0.93) এবং substring-containment rule সরিয়ে
+    ফেলা হয়েছে -- আগের 0.85 + 70%-substring rule ভিন্ন ভিন্ন MCQ-কে (একই subject/
+    chapter-এর কারণে similar wording বা length থাকলে) ভুলবশত duplicate ধরে ফেলে
+    দিচ্ছিল, real MCQ silently miss হওয়ার একটা কারণ ছিল এটা।"""
     if not norm_q:
         return True
     if norm_q in existing_keys:
@@ -10639,9 +10643,6 @@ def _qbm_is_duplicate(norm_q: str, existing_keys: list, threshold: float = 0.85)
     for k in existing_keys:
         if not k:
             continue
-        shorter, longer = (k, norm_q) if len(k) <= len(norm_q) else (norm_q, k)
-        if shorter and shorter in longer and len(shorter) >= 0.7 * len(longer):
-            return True
         if difflib.SequenceMatcher(None, norm_q, k).ratio() >= threshold:
             return True
     return False
