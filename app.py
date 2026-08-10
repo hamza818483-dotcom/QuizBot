@@ -10542,7 +10542,26 @@ Output ONLY the full corrected JSON array, all fixes applied, same length/order 
                     # Telegram's poll-explanation box limit downstream.
                     if m.get("explanation") and len(m["explanation"]) > 265:
                         m["explanation"] = m["explanation"][:265].rstrip()
-                return _cap_mcq_options(deduped)
+
+                # NEVER-LOSE-AN-MCQ BACKFILL: even after passing the 80% floor,
+                # verify can still drop a handful of individual MCQs (Gemini
+                # skips/merges one while fixing others) with nothing catching
+                # it -- the 80% check only guards against MASS loss, not a few
+                # silently missing items. Explicitly diff deduped against
+                # call1_mcqs by normalized question text and re-append any
+                # call1/miss-check MCQ that has NO match in verify's output,
+                # so a partial verify degradation can never make a real MCQ
+                # disappear from the final result.
+                _deduped_norm_qs = {_qbm_normalize_q(m.get("question", "")) for m in deduped}
+                _backfilled = list(deduped)
+                for _c1 in call1_mcqs:
+                    _c1_norm = _qbm_normalize_q(_c1.get("question", ""))
+                    if _c1_norm and not _qbm_is_duplicate(_c1_norm, list(_deduped_norm_qs)):
+                        _c1.setdefault("_call2_provider", "backfill-call1")
+                        _c1.setdefault("_provider", _c1.get("_call1_provider", "?"))
+                        _backfilled.append(_c1)
+                        _deduped_norm_qs.add(_c1_norm)
+                return _cap_mcq_options(_backfilled)
             return _cap_mcq_options(call1_mcqs)
         return call1_mcqs  # call2 failed/degraded -> keep Call1 result, never lose data
     except Exception as e:
