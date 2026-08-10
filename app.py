@@ -10728,6 +10728,17 @@ async def _qbm_ram_aware_acquire():
 _QBM_MCQ_CACHE_MAX = 300
 _qbm_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict] (post-Call1, pre-Call2)
 
+def _qbm_page_content_hash(img) -> str:
+    """Hash the actual rendered page image bytes (not file_id) so the QBM
+    per-page MCQ cache hits correctly regardless of Telegram file_id changing
+    across re-uploads/forwards of the identical PDF -- file_id is NOT stable
+    content identity, only the pixels are. Short hex digest is enough since
+    this only needs to distinguish pages within the small in-memory cache."""
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return hashlib.sha256(buf.getvalue()).hexdigest()[:24]
+
+
 def _cap_qbm_mcq_cache():
     while len(_qbm_mcq_result_cache) > _QBM_MCQ_CACHE_MAX:
         _qbm_mcq_result_cache.pop(next(iter(_qbm_mcq_result_cache)), None)
@@ -12822,7 +12833,7 @@ async def qbm_extract_all_pages(
         mcqs = []
 
         async def _run_extract():
-            _ck = (file_id, page_num) if (file_id and extractor is None) else None
+            _ck = (_qbm_page_content_hash(img), page_num) if (file_id and extractor is None) else None
             return await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
 
         async def _watch_cancel_inner(task):
@@ -12894,7 +12905,7 @@ async def qbm_extract_all_pages(
             logger.error(f"[QBM Extract] Page {page_num} error: {e} — retrying once before giving up (page must never be silently skipped)")
             if not is_cancelled(chat_id):
                 try:
-                    _ck = (file_id, page_num) if (file_id and extractor is None) else None
+                    _ck = (_qbm_page_content_hash(img), page_num) if (file_id and extractor is None) else None
                     mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
                 except Exception as e2:
                     logger.error(f"[QBM Extract] Page {page_num} retry also failed: {e2}")
@@ -13028,7 +13039,7 @@ async def process_qbm_pages(
             _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
 
         try:
-            _ck = (file_id, page_num) if file_id else None
+            _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
             mcqs = precomputed_mcqs if skip_extract else (
                 await _qbm_extract_from_image(img, cache_key=_ck) if _ck else await _qbm_extract_from_image(img)
             )
@@ -15552,17 +15563,21 @@ async def process_update(update: dict):
             uid = update["message"].get("from", {}).get("id")
             _msg = update.get("message", {})
             _txt_check = (_msg.get("text") or "").strip()
-            # /csv, /csvS, /ping bypass the per-user serialize queue entirely.
-            # /csv and /csvS reply to an already-uploaded document with an
-            # independent cache_id, so they never share mutable state with
-            # other running commands (unlike /txt, /pdf which mutate shared
-            # per-user progress state). /ping is a pure status check with no
-            # shared state at all. Previously these silently waited behind
-            # any earlier still-running command for the same uid — the
-            # actual cause of "/csv stuck at 0%" / "/ping late" reports; the
-            # underlying work was always fast, the command just hadn't
-            # started yet.
-            if _txt_check.startswith("/csv") or _txt_check.startswith("/csvS") or _txt_check == "/ping" or _txt_check == "/error" or _txt_check.startswith("/errors") or _txt_check == "/status":
+            # /csv, /csvS, /ping, /cancel bypass the per-user serialize queue
+            # entirely. /csv and /csvS reply to an already-uploaded document
+            # with an independent cache_id, so they never share mutable state
+            # with other running commands (unlike /txt, /pdf which mutate
+            # shared per-user progress state). /ping is a pure status check
+            # with no shared state at all. /cancel MUST always run instantly
+            # regardless of what's running -- its entire purpose is to stop a
+            # stuck/long job, so it can never be allowed to sit queued behind
+            # the very job it's meant to cancel (that made /cancel useless
+            # for its main use case: a runaway /qbm or /auto job). Previously
+            # these silently waited behind any earlier still-running command
+            # for the same uid — the actual cause of "/csv stuck at 0%" /
+            # "/ping late" / "/cancel doesn't work" reports; the underlying
+            # work was always fast, the command just hadn't started yet.
+            if _txt_check.startswith("/csv") or _txt_check.startswith("/csvS") or _txt_check == "/ping" or _txt_check == "/error" or _txt_check.startswith("/errors") or _txt_check == "/status" or _txt_check.startswith("/cancel"):
                 _spawn_task(handle_message(_msg))
                 return
             if uid is not None:
