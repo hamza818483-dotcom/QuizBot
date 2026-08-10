@@ -10325,26 +10325,19 @@ TASK — MISS-CHECK ONLY (do not verify/correct the ones above, that happens sep
 OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), nothing else:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
 
-        txt = await _qbm_groq_call(img, prompt)
-        groq_result = _qbm_parse_json(txt) if txt else []
-
-        # Independent Gemini full-page miss-check -- always run (not just on
-        # Groq failure/empty-string). Groq can return a confident but WRONG
-        # "[]" (false negative) on a full page it mis-scanned, silently
-        # dropping real MCQs with no error to fall back on. Running Gemini
-        # as a second independent scanner and UNIONing both results catches
-        # MCQs either provider alone would miss, at the cost of one extra
-        # lightweight call per page (small output, worth it for recall).
+        # Gemini-primary miss-check (Call2 verify is now Gemini-primary too,
+        # so it already re-scans the full page -- no need to double-spend a
+        # Gemini call here on top of it). Groq fallback only if Gemini fails
+        # or returns nothing.
         gem_txt = await _qbm_gemini_raw(img, prompt)
-        gemini_result = _qbm_parse_json(gem_txt) if gem_txt else []
-
-        if not groq_result and not gemini_result:
+        result = _qbm_parse_json(gem_txt) if gem_txt else []
+        if not result:
+            txt = await _qbm_groq_call(img, prompt)
+            result = _qbm_parse_json(txt) if txt else []
+        if not result:
             or_txt = await _qbm_openrouter_call(img, prompt)
-            or_result = _qbm_parse_json(or_txt) if or_txt else []
-            return or_result or []
-
-        union = _qbm_dedup_list((groq_result or []) + (gemini_result or []))
-        return union or []
+            result = _qbm_parse_json(or_txt) if or_txt else []
+        return result or []
     except Exception as e:
         logger.warning(f"[QBM Miss-Check] failed: {e}")
         return []
@@ -10398,17 +10391,13 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True) -
     if not call1_mcqs:
         call1_mcqs = []
     try:
-        # explanation field is often the longest per-MCQ text and isn't needed
-        # for the verify checks (Groq re-derives/re-confirms explanation content
-        # live from the image per Step B) -- truncating it here, plus scaling
-        # down question/option length on pages with many MCQs, keeps the merged
-        # prompt inside Groq's 8000 TPM budget. Untruncated, a 20+ MCQ page's
-        # full question+options+explanation JSON alone can push PROMPT_TOKENS
-        # past 5000+, leaving no room for output tokens + the image within the
-        # 8000 TPM ceiling (confirmed by direct token-budget simulation).
+        # Gemini is primary here (no tight per-call TPM ceiling like Groq's
+        # 8000), so these caps only need to guard the Groq/OpenRouter
+        # fallback path -- relaxed well above the old Groq-tuned values to
+        # avoid losing question/option detail on Gemini's primary pass.
         _n = len(call1_mcqs) or 1
-        _q_cap = 180 if _n <= 5 else (140 if _n <= 10 else (90 if _n <= 16 else 70))
-        _opt_cap = 70 if _n <= 5 else (60 if _n <= 10 else (40 if _n <= 16 else 30))
+        _q_cap = 400 if _n <= 5 else (320 if _n <= 10 else (240 if _n <= 16 else 180))
+        _opt_cap = 160 if _n <= 5 else (130 if _n <= 10 else (100 if _n <= 16 else 80))
         def _trim_opts(opts):
             if isinstance(opts, dict):
                 return {k: (v or "")[:_opt_cap] for k, v in opts.items()}
