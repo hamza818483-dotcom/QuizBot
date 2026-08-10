@@ -10731,8 +10731,10 @@ def _cap_qbm_mcq_cache():
 
 async def _qbm_extract_from_image(img, cache_key: tuple = None) -> list:
     """
-    2-CALL CONNECTED PIPELINE (per page) — max 2 Gemini requests/page (Groq
-    only as fallback if Gemini fails), 2-call system:
+    2-STAGE CONNECTED PIPELINE (per page) — Call1 extract + Call2 (which
+    itself makes 2 sub-calls: miss-check, then verify), so up to 3 Gemini
+    requests/page total when all 3 land on Gemini (Groq/OpenRouter fallback
+    only if a given sub-call's Gemini attempt fails):
 
     Call 1 (extract): own-OCR + strict prompt MCQ extraction (question,
         options in exact source serial, answer, explanation, qsn_bbox for
