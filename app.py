@@ -533,6 +533,7 @@ ACTIVE_JOB_LABEL = {}  # chat_id -> human-readable label of the job currently ru
 CURRENT_JOB_ID = {}  # chat_id -> int, id of the job currently running in that chat
 _job_id_counter = itertools.count(1)
 _current_job_chat_id_ctx = contextvars.ContextVar("_current_job_chat_id_ctx", default=None)
+_qbm_key_offset_ctx = contextvars.ContextVar("_qbm_key_offset_ctx", default=0)
 
 def is_cancelled(chat_id=None):
     if chat_id is None:
@@ -10116,7 +10117,7 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     already-extracted MCQ JSON) get correctly budgeted instead of assuming
     the fixed static-prompt size -- fixes the 429 TPM errors these calls hit
     on pages with many MCQs (large embedded JSON)."""
-    keys = groq_key_rotator.ordered_keys()
+    keys = groq_key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
     if not keys:
         return ""
     # If every Groq key is either daily-exhausted or currently in a TPM/
@@ -10184,9 +10185,8 @@ async def _qbm_groq_call(img, prompt: str) -> str:
 
 _OPENROUTER_VISION_MODELS = [
     "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-nano-12b-2-vl:free",
     "google/gemma-4-26b-a4b-it:free",
-    "qwen/qwen2.5-vl-32b-instruct:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 ]
 
 
@@ -10434,6 +10434,14 @@ complete, untruncated, corrected question/options/explanation in your response:
    e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
    page, so the explanation was built from AI knowledge). Be honest and precise about this —
    it is used for quality auditing, not shown to end users.
+10) EXPLANATION LENGTH (mandatory) — this MUST fit Telegram's poll-explanation box, hard cap
+   ~265 characters. If explanation_source="page" (text is physically on the page): use it as-is
+   if it already fits within ~265 characters; if the on-page text is longer than that, trim it
+   down to the most essential 2-3 sentences (still page-sourced, just condensed) rather than
+   discarding it for a generated one. If explanation_source="generated" (nothing on the page):
+   write a fresh 2-3 sentence explanation (why the answer is correct + one relevant fact) that
+   stays within ~265 characters — never a single one-line answer restatement, never a wall of
+   text past the limit.
 
 CRITICAL: OUTPUT LIST ORDER (mandatory) — never move an MCQ to the end or anywhere else just
 because it needed a fix — fix it in place, at its original index (any newly-added missed MCQ
@@ -10480,6 +10488,12 @@ Output ONLY the full corrected JSON array (Call 1 + missed, all fixes applied):
                         _matched = call1_mcqs[_idx].get("_call1_provider")
                     m["_call1_provider"] = _matched or m.get("_call1_provider", "?")
                     m["_provider"] = call2_provider
+                    # Defensive code-level cap -- prompt asks for ~265 chars
+                    # but never trust model output blindly; hard-truncate so
+                    # a page-sourced explanation that ran long never breaks
+                    # Telegram's poll-explanation box limit downstream.
+                    if m.get("explanation") and len(m["explanation"]) > 265:
+                        m["explanation"] = m["explanation"][:265].rstrip()
                 return _cap_mcq_options(deduped)
             return _cap_mcq_options(call1_mcqs)
         return call1_mcqs  # call2 failed/degraded -> keep Call1 result, never lose data
@@ -12827,18 +12841,29 @@ async def qbm_extract_all_pages(
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0), reply_markup=_cancel_kb(chat_id))
         return idx, page_num, img, mcqs
 
-    # Sequential: one page fully completes before the next starts. Parallel
-    # windows (previously WINDOW=8) meant multiple pages hitting Groq's shared
-    # 8000 TPM pool at once -- causing 429/413 TPM overflow errors -- and also
-    # finished out of page order (e.g. page 9/10 done before 6/7/8), which
-    # broke the requirement that pages complete strictly in order.
-    WINDOW = 1
+    # Parallel window (WINDOW=1 was strict-sequential to avoid same-key TPM
+    # collisions, but that made total wall-clock time = sum of every page's
+    # time -- very slow on dense-MCQ PDFs). WINDOW=2 restores 2-way
+    # parallelism while avoiding the earlier TPM-collision problem: each
+    # concurrent slot sets _qbm_key_offset_ctx to a different starting Groq
+    # key (round-robin via ordered_keys(offset=)), so the two pages in a
+    # window pull from different keys first instead of both hammering the
+    # same one. Pages still complete in strict index order (gather waits for
+    # the whole window before moving to the next), so ordering guarantees
+    # and the cross-page answer-lookahead (which needs earlier pages already
+    # resolved) are unaffected.
+    WINDOW = 2
+
+    async def _extract_one_slotted(slot, idx, page_num, img):
+        _qbm_key_offset_ctx.set(slot)
+        return await _extract_one(idx, page_num, img)
+
     for start in range(0, len(pages), WINDOW):
         if is_cancelled(chat_id):
             break
         chunk = pages[start:start + WINDOW]
         tasks = [
-            _extract_one(start + i, page_num, img)
+            _extract_one_slotted(i, start + i, page_num, img)
             for i, (page_num, img) in enumerate(chunk)
         ]
         chunk_results = await asyncio.gather(*tasks)
