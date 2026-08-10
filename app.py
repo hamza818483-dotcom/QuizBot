@@ -5894,6 +5894,18 @@ async def _send_csv_polls_to_channel(
             # আগের run-এ ইতিমধ্যে পাঠানো হয়ে গেছে (resume path) — আবার
             # পাঠালে duplicate poll হয়ে যাবে চ্যানেলে, তাই skip।
             continue
+
+        if is_cancelled(chat_id):
+            # ইউজার DM এর live status message-এর Cancel বাটন চাপলে এখানেই
+            # loop থেমে যায় — বাকি poll আর পাঠানো হবে না।
+            if job_id:
+                await db_update_csv_job_progress(job_id, sent, first_poll_link or None)
+            if loading_id:
+                pct = int(sent * 100 / total) if total else 0
+                fname_line = f"📄 {csv_fname}\n" if csv_fname else ""
+                await edit_msg(chat_id, loading_id,
+                    f"{fname_line}🛑 বন্ধ করা হয়েছে — {sent}/{total} poll পাঠানো হয়েছিল ({pct}%)")
+            break
         opts = mcq.get("options", [])[:4]
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
 
@@ -5964,7 +5976,8 @@ async def _send_csv_polls_to_channel(
             bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
             fname_line = f"📄 {csv_fname}\n" if csv_fname else ""
             _spawn_task(edit_msg(chat_id, loading_id,
-                f"{fname_line}📤 poll পাঠানো হচ্ছে... {sent}/{total} [{bar} {pct}%]"))
+                f"{fname_line}📤 poll পাঠানো হচ্ছে... {sent}/{total} [{bar} {pct}%]",
+                reply_markup=_cancel_kb(chat_id)))
 
         _send_times.append(time.time())
         # Telegram allows roughly 1 message/sec to the same chat, with a
@@ -6202,11 +6215,17 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
     mcqs = cache["mcq_data"]
     total = len(mcqs)
 
+    new_job_id(chat_id)
+    clear_cancel(chat_id)
+    set_active_job(chat_id, f"/csv poll পাঠানো ({csv_fname or topic})")
+
     if existing_loading_id:
         loading_id = existing_loading_id
-        await edit_msg(chat_id, loading_id, f"📄 {csv_fname}\n📤 {total} টি poll পাঠানো হচ্ছে...\n[{'░'*10} 0%]")
+        await edit_msg(chat_id, loading_id, f"📄 {csv_fname}\n📤 {total} টি poll পাঠানো হচ্ছে...\n[{'░'*10} 0%]",
+                        reply_markup=_cancel_kb(chat_id))
     else:
-        loading = await send_msg(chat_id, f"📄 {csv_fname}\n📤 {total} টি poll পাঠানো হচ্ছে...\n[{'░'*10} 0%]")
+        loading = await send_msg(chat_id, f"📄 {csv_fname}\n📤 {total} টি poll পাঠানো হচ্ছে...\n[{'░'*10} 0%]",
+                                  reply_markup=_cancel_kb(chat_id))
         loading_id = loading.get("result", {}).get("message_id")
 
     if mode == "csvs":
@@ -6243,6 +6262,12 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             )
 
         for b_idx, batch in enumerate(batches, 1):
+            if is_cancelled(chat_id):
+                if loading_id:
+                    await edit_msg(chat_id, loading_id,
+                        f"📄 {csv_fname}\n🛑 বন্ধ করা হয়েছে — {b_idx-1}/{total_batches} batch শেষ হয়েছিল")
+                await db_finish_csv_job(job_id)
+                return
             if b_idx <= resume_from_batch:
                 # আগের run-এ ইতিমধ্যে সম্পূর্ণ হয়ে গেছে এই batch — skip, তবে
                 # PDF/summary এর জন্য mcq list-এ যোগ করতে হবে (সংখ্যা ঠিক রাখতে)।
@@ -6419,6 +6444,11 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             job_id=job_id, start_index=resume_from, first_poll_link_so_far=resume_link
         )
         await db_finish_csv_job(job_id)
+        if is_cancelled(chat_id):
+            # ইউজার Cancel চেপেছে — বাকি PDF/end-message আর পাঠানো হবে না,
+            # loading_id message ইতিমধ্যে _send_csv_polls_to_channel-এই
+            # "বন্ধ করা হয়েছে" স্ট্যাটাসে আপডেট হয়ে গেছে।
+            return
         if loading_id:
             await edit_msg(chat_id, loading_id,
                 f"📄 {csv_fname}\n✅ {sent}/{total} poll পাঠানো শেষ!\n⏳ PDF বানানো হচ্ছে...")
