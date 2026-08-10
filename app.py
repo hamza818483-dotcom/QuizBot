@@ -11170,7 +11170,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                 config=types.GenerateContentConfig(temperature=0.1)
             )
 
-        keys_to_try = key_rotator.ordered_keys() or key_rotator.keys
+        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
         # Skip keys already confirmed daily-exhausted (by an earlier call this
         # process) when at least one non-exhausted key remains -- ordered_keys()
         # sorts exhausted keys last but doesn't remove them, so without this

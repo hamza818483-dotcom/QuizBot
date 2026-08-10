@@ -114,7 +114,7 @@ class GeminiKeyRotator:
         self.current = (self.current + 1) % len(self.keys)
         return key
 
-    def ordered_keys(self):
+    def ordered_keys(self, offset: int = 0):
         """Only non-banned keys, healthy ones first: not exhausted-today AND
         not in short cooldown, then short-cooldown keys, then today-exhausted
         keys last — so a call never wastes its first attempt on a key
@@ -128,7 +128,16 @@ class GeminiKeyRotator:
         every request and burned through its daily quota far faster than
         the other 35, even though total load was fairly distributed
         overall. Round-robining the healthy tier spreads first-attempts
-        evenly across all live keys."""
+        evenly across all live keys.
+
+        `offset` lets QBM's parallel page-window give each concurrent slot
+        its own starting key (same pattern as Groq's ordered_keys(offset=))
+        -- without it, N pages running concurrently all read the same
+        self.current snapshot before any of their awaits land, so they'd
+        all pick the SAME "healthiest" key and hammer it at once instead of
+        spreading across the pool, causing avoidable 429s mid-page for
+        Gemini specifically (which now runs Call1 + miss-check + verify,
+        3x the Gemini load per page QBM had before)."""
         now = time.time()
         live_keys = [k for k in self.keys if k not in self._banned]
         not_exhausted = [k for k in live_keys if not _is_gemini_key_exhausted_today(k)]
@@ -137,7 +146,7 @@ class GeminiKeyRotator:
         healthy = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
         cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
         if healthy:
-            start = self.current % len(healthy)
+            start = (self.current + offset) % len(healthy)
             healthy = healthy[start:] + healthy[:start]
             self.current = (self.current + 1) % max(len(self.keys), 1)
         return healthy + cooling + (exhausted if not_exhausted else [])
