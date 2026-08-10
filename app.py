@@ -2131,7 +2131,7 @@ class GenericKeyRotator:
 nvidia_rotator = GenericKeyRotator("NVIDIA_API_KEY", "NVIDIA")
 nemotron_rotator = GenericKeyRotator("NEMOTRON_API_KEY", "Nemotron")
 gemma_rotator = GenericKeyRotator("GEMMA_API_KEY", "Gemma")
-or_qwen_rotator = GenericKeyRotator("OPENROUTER_API_KEY", "OpenRouter-Qwen")
+or_qwen_rotator = GenericKeyRotator("OPENROUTER_KEYS", "OpenRouter-Qwen")
 hf_rotator = GenericKeyRotator("HF_API_KEY", "HF")
 
 
