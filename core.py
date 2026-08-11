@@ -695,24 +695,44 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
     if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
     if message_thread_id: data["message_thread_id"] = message_thread_id
 
+    def _parse_cf_resp(r, tag):
+        """CF Worker/edge can return an EMPTY or non-JSON body (edge timeout,
+        CPU/memory limit kill, 5xx html page) — plain r.json() then raises
+        the opaque 'Expecting value: line 1 column 1' error with zero info.
+        Parse defensively and log status + raw body so real cause is visible."""
+        try:
+            return r.json()
+        except Exception:
+            body_preview = (r.text or "")[:200]
+            logger.warning(f"[sendDoc] {tag} bad response status={r.status_code} body={body_preview!r}")
+            return {"ok": False, "error": f"non-json response (status {r.status_code})"}
+
+    # Large files risk CF Worker CPU/memory limits (base64 decode doubles
+    # payload in-memory) → skip straight to direct upload for big docs.
+    SKIP_CF_THRESHOLD = 18 * 1024 * 1024  # ~18MB raw
+    skip_cf = len(file_bytes) > SKIP_CF_THRESHOLD
+    if skip_cf:
+        logger.warning(f"[sendDoc] file {len(file_bytes)}B exceeds CF threshold, skipping CF Worker paths")
+
     # ── Primary: CF Worker (b64 proxy, shared client) ──
-    try:
-        c = await _get_shared_http_client()
-        r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=60)
-        result = r.json()
-        if result.get("ok"): return result
-        logger.warning(f"[sendDoc] CF primary non-ok: {result.get('description') or result.get('error')}")
-    except Exception as e:
-        logger.warning(f"[sendDoc] CF failed: {e}")
+    if not skip_cf:
+        try:
+            c = await _get_shared_http_client()
+            r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=60)
+            result = _parse_cf_resp(r, "CF primary")
+            if result.get("ok"): return result
+            logger.warning(f"[sendDoc] CF primary non-ok: {result.get('description') or result.get('error')}")
+        except Exception as e:
+            logger.warning(f"[sendDoc] CF failed: {e}")
 
     # ── Secondary: alt CF Worker domain (HF blocks direct api.telegram.org
     #    outbound, so on that platform this is the ONLY real fallback —
     #    without it, any primary-CF blip becomes a guaranteed failure). ──
-    if CF_WORKER_URL_2:
+    if CF_WORKER_URL_2 and not skip_cf:
         try:
             c = await _get_shared_http_client()
             r = await c.post(f"{CF_WORKER_URL_2}/tg-senddoc", json=data, timeout=60)
-            result = r.json()
+            result = _parse_cf_resp(r, "CF secondary")
             if result.get("ok"): return result
             logger.warning(f"[sendDoc] CF secondary non-ok: {result.get('description') or result.get('error')}")
         except Exception as e:
@@ -721,34 +741,40 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
     # ── Last resort: direct TG API multipart (works on Render; on HF this
     #    will also fail since outbound api.telegram.org is blocked there,
     #    but costs little to try after both CF paths are exhausted). ──
-    try:
-        fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode}
-        if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
-        if message_thread_id: fields["message_thread_id"] = str(message_thread_id)
-        c = await _get_shared_http_client()
-        if filename.isascii():
-            # Plain ASCII filename — httpx's built-in multipart handling is fine.
-            files = {"document": (filename, file_bytes, mime_type)}
-            r = await c.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                data=fields, files=files, timeout=120)
-            return r.json()
-        else:
-            # Non-ASCII filename (Bengali/etc) — httpx writes the raw UTF-8
-            # bytes directly into the quoted filename="..." parameter with no
-            # RFC 5987 encoding, which Telegram/intermediate proxies can
-            # mis-interpret as Latin-1 and corrupt (mojibake). Build the
-            # multipart body by hand with a proper filename*=UTF-8''...
-            # parameter (RFC 5987) alongside an ASCII-safe fallback name.
-            r = await _send_document_multipart_rfc5987(
-                c, chat_id, file_bytes, filename, caption, mime_type,
-                reply_to_message_id, message_thread_id, parse_mode
-            )
-            return r
-    except Exception as e:
-        err_detail = f"{type(e).__name__}: {e}" if str(e) else f"{type(e).__name__} (no message)"
-        logger.error(f"[sendDoc] direct failed: {err_detail}")
-        return {"ok": False, "error": err_detail}
+    last_err = None
+    for attempt in range(2):  # one retry — ConnectError is often a transient blip
+        try:
+            fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode}
+            if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
+            if message_thread_id: fields["message_thread_id"] = str(message_thread_id)
+            c = await _get_shared_http_client()
+            if filename.isascii():
+                # Plain ASCII filename — httpx's built-in multipart handling is fine.
+                files = {"document": (filename, file_bytes, mime_type)}
+                r = await c.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                    data=fields, files=files, timeout=120)
+                return r.json()
+            else:
+                # Non-ASCII filename (Bengali/etc) — httpx writes the raw UTF-8
+                # bytes directly into the quoted filename="..." parameter with no
+                # RFC 5987 encoding, which Telegram/intermediate proxies can
+                # mis-interpret as Latin-1 and corrupt (mojibake). Build the
+                # multipart body by hand with a proper filename*=UTF-8''...
+                # parameter (RFC 5987) alongside an ASCII-safe fallback name.
+                r = await _send_document_multipart_rfc5987(
+                    c, chat_id, file_bytes, filename, caption, mime_type,
+                    reply_to_message_id, message_thread_id, parse_mode
+                )
+                return r
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}" if str(e) else f"{type(e).__name__} (no message)"
+            logger.warning(f"[sendDoc] direct attempt {attempt+1} failed: {last_err}")
+            if attempt == 0:
+                await asyncio.sleep(1.5)
+
+    logger.error(f"[sendDoc] direct failed after retries: {last_err}")
+    return {"ok": False, "error": last_err}
 
 
 async def _send_document_multipart_rfc5987(client, chat_id, file_bytes: bytes, filename: str,
