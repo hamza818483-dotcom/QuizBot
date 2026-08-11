@@ -681,6 +681,63 @@ async def send_media_group(chat_id, photos: list, reply_to_message_id: int = Non
         logger.error(f"[sendMediaGroup] failed: {e}")
         return {"ok": False, "error": str(e)}
 
+def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 1024) -> bytes:
+    """Downsample + re-encode embedded raster images in a PDF until it fits
+    under target_bytes (default 48MB, safely under Telegram's 50MB bot
+    upload cap). Text/vector content stays lossless — only images degrade.
+    Tries progressively harsher settings; returns the smallest result
+    achieved even if the target isn't reached (original as last resort)."""
+    import fitz  # PyMuPDF
+    from io import BytesIO
+    from PIL import Image
+
+    # (max_dimension_px, jpeg_quality) tried in order, mildest first
+    STEPS = [(2000, 70), (1500, 55), (1100, 42), (900, 32)]
+    best = file_bytes
+    for max_dim, quality in STEPS:
+        try:
+            src = fitz.open(stream=file_bytes, filetype="pdf")
+            for page in src:
+                for img in page.get_images(full=True):
+                    xref = img[0]
+                    try:
+                        base = src.extract_image(xref)
+                        pil_img = Image.open(BytesIO(base["image"]))
+                        if pil_img.mode not in ("RGB", "L"):
+                            pil_img = pil_img.convert("RGB")
+                        w, h = pil_img.size
+                        if max(w, h) > max_dim:
+                            scale = max_dim / max(w, h)
+                            pil_img = pil_img.resize(
+                                (max(1, int(w * scale)), max(1, int(h * scale))),
+                                Image.LANCZOS)
+                        buf = BytesIO()
+                        pil_img.save(buf, format="JPEG", quality=quality, optimize=True)
+                        src.update_stream(xref, buf.getvalue(), compress=0)
+                        # Ensure the image XObject is flagged as DCTDecode/JPEG
+                        # so viewers decode it correctly after the swap.
+                        src.xref_set_key(xref, "Filter", "/DCTDecode")
+                        src.xref_set_key(xref, "ColorSpace",
+                                          "/DeviceGray" if pil_img.mode == "L" else "/DeviceRGB")
+                        src.xref_set_key(xref, "Width", str(pil_img.width))
+                        src.xref_set_key(xref, "Height", str(pil_img.height))
+                        src.xref_set_key(xref, "BitsPerComponent", "8")
+                    except Exception:
+                        continue
+            out_buf = BytesIO()
+            src.save(out_buf, garbage=4, deflate=True, clean=True)
+            src.close()
+            out = out_buf.getvalue()
+            if len(out) < len(best):
+                best = out
+            if len(out) <= target_bytes:
+                return out
+        except Exception as e:
+            logger.warning(f"[compress_pdf] step maxdim={max_dim} failed: {e}")
+            continue
+    return best
+
+
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",

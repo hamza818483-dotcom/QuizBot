@@ -27,3 +27,4 @@ psutil
 numpy
 opencv-python-headless
 telegramify-markdown
+PyMuPDF

@@ -52,6 +52,7 @@ from core import (
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, send_rich_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
     send_document, send_media_group, send_poll, notify_owner, notify_owner_edit, clear_owner_job, download_tg_file,
+    compress_pdf_to_target,
     db_get_settings, db_save_settings, db_save_settings_field, db_is_owner_or_admin, db_track_user, db_save_session,
     db_save_mcq_cache, db_update_cache, db_get_mcq_cache,
     db_get_new_gen_count, db_increment_gen_count, db_save_leaderboard,
@@ -3834,12 +3835,37 @@ async def handle_rename(msg: dict):
             await send_msg(chat_id, f"❌ Download failed: {e}")
         return
 
+    # Telegram bots can only upload up to 50MB. If it's a PDF over that,
+    # auto-compress (downsample+re-encode embedded images) before upload
+    # instead of failing outright.
+    TG_MAX_UPLOAD = 50 * 1024 * 1024
+    compressed = False
+    if len(file_bytes) > TG_MAX_UPLOAD and mime == "application/pdf":
+        if status_id:
+            await edit_msg(chat_id, status_id, "🗜️ File 50MB er beshi — compress kora hocche...")
+        try:
+            file_bytes = await asyncio.to_thread(compress_pdf_to_target, file_bytes)
+            compressed = True
+        except Exception as e:
+            logger.warning(f"[rename] compression failed: {e}")
+        if len(file_bytes) > TG_MAX_UPLOAD:
+            size_mb = len(file_bytes) / 1024 / 1024
+            msg_text = (f"❌ Compress korar porew file {size_mb:.1f}MB — 50MB limit paar hocche. "
+                        f"Ei PDF-e onek high-res image ache, aro kombe na without visible quality loss.")
+            if status_id:
+                await edit_msg(chat_id, status_id, msg_text)
+            else:
+                await send_msg(chat_id, msg_text)
+            return
+
     if status_id:
-        await edit_msg(chat_id, status_id, f"📤 '{new_name}' name e upload hocche...")
+        note = " (compress kora hoyeche, image quality kichuta kome geche)" if compressed else ""
+        await edit_msg(chat_id, status_id, f"📤 '{new_name}' name e upload hocche...{note}")
 
     result = await send_document(
         chat_id, file_bytes, new_name,
-        caption=f"✅ Renamed: {new_name}", mime_type=mime,
+        caption=f"✅ Renamed: {new_name}" + (" (compressed)" if compressed else ""),
+        mime_type=mime,
         reply_to_message_id=msg.get("message_id")
     )
     if result.get("ok"):
