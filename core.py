@@ -687,6 +687,18 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
                         message_thread_id: int = None) -> dict:
     if caption and len(caption) > 1024:
         caption = caption[:1021] + "..."
+
+    # Telegram Bot API hard limit: bots can upload max 50MB per file
+    # (2GB only via a self-hosted local Bot API server, which we don't run).
+    # Above this, every path (CF Worker, direct) will fail — CF Worker also
+    # has its own smaller request-body ceiling. Fail fast with a clear reason
+    # instead of burning 3 retries/timeouts to arrive at "ConnectError".
+    TG_MAX_UPLOAD = 50 * 1024 * 1024
+    if len(file_bytes) > TG_MAX_UPLOAD:
+        size_mb = len(file_bytes) / 1024 / 1024
+        logger.error(f"[sendDoc] file {size_mb:.1f}MB exceeds Telegram's 50MB bot upload limit")
+        return {"ok": False, "error": f"File is {size_mb:.1f}MB — Telegram bots can only upload files up to 50MB."}
+
     data = {
         "chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode,
         "filename": filename, "mime_type": mime_type,
