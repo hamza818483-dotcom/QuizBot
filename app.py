@@ -1436,54 +1436,115 @@ def _clean_mcq_text(text: str) -> str:
 _LATEX_SUB_MAP = {
     '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄',
     '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
-    '+': '₊', '-': '₋', '(': '₍', ')': '₎',
+    '+': '₊', '-': '₋', '(': '₍', ')': '₎', '=': '₌',
+    'a': 'ₐ', 'e': 'ₑ', 'i': 'ᵢ', 'o': 'ₒ', 'u': 'ᵤ',
+    'x': 'ₓ', 'n': 'ₙ', 'm': 'ₘ', 'k': 'ₖ', 'p': 'ₚ',
+    's': 'ₛ', 't': 'ₜ', 'j': 'ⱼ', 'r': 'ᵣ', 'v': 'ᵥ',
 }
 _LATEX_SUP_MAP = {
     '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
     '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
-    '+': '⁺', '-': '⁻', '(': '⁽', ')': '⁾',
+    '+': '⁺', '-': '⁻', '(': '⁽', ')': '⁾', '=': '⁼',
+    'n': 'ⁿ', 'i': 'ⁱ', 'x': 'ˣ', 'y': 'ʸ', 'a': 'ᵃ',
+    'b': 'ᵇ', 'c': 'ᶜ', 'd': 'ᵈ', 'e': 'ᵉ', 'f': 'ᶠ',
+    'g': 'ᵍ', 'h': 'ʰ', 'k': 'ᵏ', 'l': 'ˡ', 'm': 'ᵐ',
+    'o': 'ᵒ', 'p': 'ᵖ', 'r': 'ʳ', 's': 'ˢ', 't': 'ᵗ',
+    'u': 'ᵘ', 'v': 'ᵛ', 'w': 'ʷ', 'z': 'ᶻ',
 }
 
 def _latex_to_unicode(text: str) -> str:
     """Safety-net conversion for leftover raw LaTeX the model occasionally
-    still emits despite prompt instructions (\\vec, \\hat, \\frac, \\sqrt,
-    ^{..}, _{..}) -- converts common patterns to proper Unicode so nothing
-    reaches CSV/polls as raw LaTeX syntax. Best-effort only; genuinely
-    complex expressions (matrices, nested integrals) are left as-is rather
-    than risk mangling them."""
-    if not text or '\\' not in text and '^{' not in text and '_{' not in text:
+    still emits despite prompt instructions -- converts a broad set of
+    common physics/math/chemistry LaTeX commands to proper Unicode so
+    nothing reaches CSV/polls as raw LaTeX syntax. Best-effort only;
+    genuinely complex expressions (matrices, nested integrals, piecewise
+    functions) are left as-is rather than risk mangling them."""
+    if not text or ('\\' not in text and '^{' not in text and '_{' not in text
+                     and '^' not in text and '_' not in text):
         return text
     t = text
 
-    # \vec{X} or \vec X -> X⃗ (combining right arrow above)
+    # \vec{X} or \vec X -> X⃗ ,  \overrightarrow{X} -> X⃗  (combining right arrow above)
+    t = re.sub(r'\\overrightarrow\{([^{}]+)\}', lambda m: m.group(1) + '\u20D7', t)
     t = re.sub(r'\\vec\{([^{}]+)\}', lambda m: m.group(1) + '\u20D7', t)
     t = re.sub(r'\\vec\s+([A-Za-z])', lambda m: m.group(1) + '\u20D7', t)
 
-    # \hat{X} or \hat X -> X̂ (combining circumflex)
+    # \hat{X} or \hat X -> X̂ (combining circumflex, unit-vector notation)
     t = re.sub(r'\\hat\{([^{}]+)\}', lambda m: m.group(1) + '\u0302', t)
     t = re.sub(r'\\hat\s+([A-Za-z])', lambda m: m.group(1) + '\u0302', t)
+
+    # \bar{X} / \overline{X} -> X̄ (combining macron, e.g. mean/average notation)
+    t = re.sub(r'\\overline\{([^{}]+)\}', lambda m: m.group(1) + '\u0304', t)
+    t = re.sub(r'\\bar\{([^{}]+)\}', lambda m: m.group(1) + '\u0304', t)
+    t = re.sub(r'\\bar\s+([A-Za-z])', lambda m: m.group(1) + '\u0304', t)
+
+    # \dot{X} -> Ẋ (combining dot above, e.g. time-derivative notation)
+    t = re.sub(r'\\dot\{([^{}]+)\}', lambda m: m.group(1) + '\u0307', t)
+    t = re.sub(r'\\ddot\{([^{}]+)\}', lambda m: m.group(1) + '\u0308', t)
 
     # \sqrt{X} -> √X ,  \sqrt[3]{X} -> ∛X ,  \sqrt[4]{X} -> ∜X
     t = re.sub(r'\\sqrt\[3\]\{([^{}]+)\}', lambda m: '∛' + m.group(1), t)
     t = re.sub(r'\\sqrt\[4\]\{([^{}]+)\}', lambda m: '∜' + m.group(1), t)
     t = re.sub(r'\\sqrt\{([^{}]+)\}', lambda m: '√' + m.group(1), t)
 
-    # \frac{a}{b} -> a/b
-    t = re.sub(r'\\frac\{([^{}]+)\}\{([^{}]+)\}', lambda m: f'{m.group(1)}/{m.group(2)}', t)
+    # \frac{a}{b} -> a/b  (also handles \dfrac, \tfrac -- same meaning)
+    t = re.sub(r'\\d?t?frac\{([^{}]+)\}\{([^{}]+)\}', lambda m: f'{m.group(1)}/{m.group(2)}', t)
+    # \binom{n}{k} -> (n choose k) shorthand: nCk
+    t = re.sub(r'\\binom\{([^{}]+)\}\{([^{}]+)\}', lambda m: f'{m.group(1)}C{m.group(2)}', t)
 
-    # Common symbol commands -> Unicode
+    # Strip pure-formatting wrappers that add no meaning once unwrapped --
+    # \text{X}, \mathrm{X}, \mathbf{X}, \mathit{X}, \operatorname{X} -> X
+    for wrapper in ('text', 'mathrm', 'mathbf', 'mathit', 'mathnormal', 'operatorname', 'boldsymbol'):
+        t = re.sub(r'\\' + wrapper + r'\{([^{}]*)\}', lambda m: m.group(1), t)
+
+    # \left( \right) \left[ \right] \left\{ \right\} \left| \right| -> plain brackets
+    t = re.sub(r'\\left([\(\[\{\|])', lambda m: m.group(1), t)
+    t = re.sub(r'\\right([\)\]\}\|])', lambda m: m.group(1), t)
+    t = t.replace(r'\left.', '').replace(r'\right.', '')
+
+    # Common symbol commands -> Unicode (operators, relations, arrows,
+    # Greek letters -- lowercase + uppercase where they visually differ
+    # from Latin, set-theory, calculus, misc physics/chem symbols).
     _SYMS = {
-        r'\times': '×', r'\cdot': '·', r'\pm': '±', r'\mp': '∓',
-        r'\leq': '≤', r'\geq': '≥', r'\neq': '≠', r'\approx': '≈',
-        r'\propto': '∝', r'\infty': '∞', r'\partial': '∂',
-        r'\sum': '∑', r'\int': '∫', r'\Delta': 'Δ', r'\delta': 'δ',
-        r'\pi': 'π', r'\theta': 'θ', r'\alpha': 'α', r'\beta': 'β',
-        r'\gamma': 'γ', r'\lambda': 'λ', r'\mu': 'μ', r'\Omega': 'Ω',
-        r'\omega': 'ω', r'\sigma': 'σ', r'\phi': 'φ', r'\rightarrow': '→',
-        r'\leftarrow': '←', r'\degree': '°',
+        # operators / relations
+        r'\times': '×', r'\div': '÷', r'\cdot': '·', r'\ast': '∗',
+        r'\pm': '±', r'\mp': '∓',
+        r'\leq': '≤', r'\le': '≤', r'\geq': '≥', r'\ge': '≥',
+        r'\neq': '≠', r'\ne': '≠', r'\approx': '≈', r'\equiv': '≡',
+        r'\propto': '∝', r'\sim': '∼', r'\cong': '≅',
+        # calculus / analysis
+        r'\infty': '∞', r'\partial': '∂', r'\nabla': '∇',
+        r'\sum': '∑', r'\prod': '∏', r'\int': '∫', r'\oint': '∮',
+        r'\iint': '∬', r'\iiint': '∭',
+        # set theory / logic
+        r'\in': '∈', r'\notin': '∉', r'\subset': '⊂', r'\subseteq': '⊆',
+        r'\cup': '∪', r'\cap': '∩', r'\emptyset': '∅', r'\varnothing': '∅',
+        r'\forall': '∀', r'\exists': '∃', r'\therefore': '∴', r'\because': '∵',
+        r'\land': '∧', r'\lor': '∨', r'\lnot': '¬',
+        # arrows
+        r'\rightarrow': '→', r'\to': '→', r'\leftarrow': '←',
+        r'\leftrightarrow': '↔', r'\Rightarrow': '⇒', r'\Leftarrow': '⇐',
+        r'\Leftrightarrow': '⇔', r'\uparrow': '↑', r'\downarrow': '↓',
+        # Greek lowercase
+        r'\alpha': 'α', r'\beta': 'β', r'\gamma': 'γ', r'\delta': 'δ',
+        r'\epsilon': 'ε', r'\varepsilon': 'ε', r'\zeta': 'ζ', r'\eta': 'η',
+        r'\theta': 'θ', r'\vartheta': 'ϑ', r'\iota': 'ι', r'\kappa': 'κ',
+        r'\lambda': 'λ', r'\mu': 'μ', r'\nu': 'ν', r'\xi': 'ξ',
+        r'\pi': 'π', r'\varpi': 'ϖ', r'\rho': 'ρ', r'\varrho': 'ϱ',
+        r'\sigma': 'σ', r'\varsigma': 'ς', r'\tau': 'τ', r'\upsilon': 'υ',
+        r'\phi': 'φ', r'\varphi': 'φ', r'\chi': 'χ', r'\psi': 'ψ', r'\omega': 'ω',
+        # Greek uppercase (only ones visually distinct from Latin)
+        r'\Gamma': 'Γ', r'\Delta': 'Δ', r'\Theta': 'Θ', r'\Lambda': 'Λ',
+        r'\Xi': 'Ξ', r'\Pi': 'Π', r'\Sigma': 'Σ', r'\Upsilon': 'Υ',
+        r'\Phi': 'Φ', r'\Psi': 'Ψ', r'\Omega': 'Ω',
+        # misc physics/chem/units
+        r'\degree': '°', r'\angle': '∠', r'\perp': '⊥', r'\parallel': '∥',
+        r'\prime': '′', r'\dprime': '″',
+        r'\hbar': 'ℏ',
     }
-    for cmd, uni in _SYMS.items():
-        t = t.replace(cmd, uni)
+    # Sort by command length descending so e.g. \leq matches before \le
+    for cmd in sorted(_SYMS, key=len, reverse=True):
+        t = t.replace(cmd, _SYMS[cmd])
 
     # ^{digits/sign} and _{digits/sign} -> real super/subscript chars
     # (only when every char inside {} is mappable -- otherwise leave as-is
@@ -1502,9 +1563,9 @@ def _latex_to_unicode(text: str) -> str:
 
     t = re.sub(r'\^\{([^{}]+)\}', _sup_braced, t)
     t = re.sub(r'_\{([^{}]+)\}', _sub_braced, t)
-    # single-char (no braces) forms: ^2 , _0
-    t = re.sub(r'\^([0-9+\-()])', lambda m: _LATEX_SUP_MAP.get(m.group(1), m.group(0)), t)
-    t = re.sub(r'_([0-9+\-()])', lambda m: _LATEX_SUB_MAP.get(m.group(1), m.group(0)), t)
+    # single-char (no braces) forms: ^2 , _0 , ^n , _i
+    t = re.sub(r'\^([0-9A-Za-z+\-()=])', lambda m: _LATEX_SUP_MAP.get(m.group(1), m.group(0)), t)
+    t = re.sub(r'_([0-9A-Za-z+\-()=])', lambda m: _LATEX_SUB_MAP.get(m.group(1), m.group(0)), t)
 
     return t
 
