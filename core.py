@@ -681,18 +681,23 @@ async def send_media_group(chat_id, photos: list, reply_to_message_id: int = Non
         logger.error(f"[sendMediaGroup] failed: {e}")
         return {"ok": False, "error": str(e)}
 
-def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 1024) -> bytes:
+def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 1024,
+                            quality_first: bool = False) -> bytes:
     """Downsample + re-encode embedded raster images in a PDF until it fits
     under target_bytes (default 48MB, safely under Telegram's 50MB bot
     upload cap). Text/vector content stays lossless — only images degrade.
     Tries progressively harsher settings; returns the smallest result
-    achieved even if the target isn't reached (original as last resort)."""
+    achieved even if the target isn't reached (original as last resort).
+
+    quality_first=True stops as soon as the FIRST (mildest) step reduces
+    the file at all — used by /compress where the goal is "shrink size,
+    keep quality high", not "squeeze under a hard limit"."""
     import fitz  # PyMuPDF
     from io import BytesIO
     from PIL import Image
 
     # (max_dimension_px, jpeg_quality) tried in order, mildest first
-    STEPS = [(2000, 70), (1500, 55), (1100, 42), (900, 32)]
+    STEPS = [(2200, 82)] if quality_first else [(2000, 70), (1500, 55), (1100, 42), (900, 32)]
     best = file_bytes
     for max_dim, quality in STEPS:
         try:
@@ -730,6 +735,8 @@ def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 10
             out = out_buf.getvalue()
             if len(out) < len(best):
                 best = out
+            if quality_first and len(out) < len(file_bytes):
+                return out
             if len(out) <= target_bytes:
                 return out
         except Exception as e:

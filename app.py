@@ -3760,7 +3760,79 @@ async def handle_remove(msg: dict):
 # ============================================================
 # FEATURE 4: /tagQ + /expQ
 # ============================================================
-async def handle_rename(msg: dict):
+async def handle_compress(msg: dict):
+    """PDF-e reply kore /compress dile — image quality bhalo rekhe (mildest
+    downsample+re-encode pass) file size kombe. Hard target nei, /rename-er
+    50MB-limit compression theke alada: eta shudhu size kombe, quality
+    priority."""
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+    if not reply:
+        await send_msg(chat_id, "❌ Kono PDF file e reply kore likho:\n<code>/compress</code>")
+        return
+    doc = reply.get("document")
+    if not doc or doc.get("mime_type") != "application/pdf":
+        await send_msg(chat_id, "❌ Ei command khali PDF file-e reply kore use kora jay।")
+        return
+
+    file_id = doc["file_id"]
+    filename = doc.get("file_name") or "document.pdf"
+
+    status = await send_msg(chat_id, "⏳ PDF download hocche...")
+    status_id = status.get("result", {}).get("message_id") if status.get("ok") else None
+
+    try:
+        file_bytes = await download_tg_file(
+            file_id, chat_id=reply["chat"]["id"], message_id=reply["message_id"]
+        )
+    except Exception as e:
+        text = f"❌ Download failed: {e}"
+        if status_id: await edit_msg(chat_id, status_id, text)
+        else: await send_msg(chat_id, text)
+        return
+
+    orig_size = len(file_bytes)
+    if status_id:
+        await edit_msg(chat_id, status_id, "🗜️ Compress kora hocche (quality bhalo rekhe)...")
+
+    try:
+        out_bytes = await asyncio.to_thread(compress_pdf_to_target, file_bytes, quality_first=True)
+    except Exception as e:
+        text = f"❌ Compress failed: {e}"
+        if status_id: await edit_msg(chat_id, status_id, text)
+        else: await send_msg(chat_id, text)
+        return
+
+    new_size = len(out_bytes)
+    saved_pct = round((1 - new_size / orig_size) * 100, 1) if orig_size else 0
+
+    if new_size >= orig_size:
+        text = "ℹ️ Ei PDF-e compress korar moto beshi kichu nei (image kom / already optimized)।"
+        if status_id: await edit_msg(chat_id, status_id, text)
+        else: await send_msg(chat_id, text)
+        return
+
+    if status_id:
+        await edit_msg(chat_id, status_id, f"📤 Upload hocche... ({saved_pct}% size kombeche)")
+
+    if not filename.lower().endswith(".pdf"):
+        filename += ".pdf"
+    new_filename = filename[:-4] + "_compressed.pdf" if filename.lower().endswith(".pdf") else filename + "_compressed"
+
+    result = await send_document(
+        chat_id, out_bytes, new_filename,
+        caption=(f"✅ Compressed: {orig_size/1024/1024:.1f}MB → {new_size/1024/1024:.1f}MB "
+                 f"({saved_pct}% kombeche)"),
+        mime_type="application/pdf",
+        reply_to_message_id=msg.get("message_id")
+    )
+    if not result.get("ok"):
+        text = f"❌ Upload failed: {result.get('error') or result.get('description')}"
+        if status_id: await edit_msg(chat_id, status_id, text)
+        else: await send_msg(chat_id, text)
+
+
+
     """Kono file (document/video/audio/photo) e reply kore /rename NewName
     dile - Telegram e already-uploaded file "rename" kora jay na (API-tei
     support nei), tai file ta re-download kore notun filename diye
@@ -15716,6 +15788,7 @@ async def set_bot_commands(notify_chat_id: int = None):
         {"command": "channel", "description": "Channel/Group add করো (custom name সহ)"},
         {"command": "channelist", "description": "Channel list দেখো"},
         {"command": "rename", "description": "File reply kore rename koro"},
+        {"command": "compress", "description": "PDF reply kore size compress koro (quality bhalo rekhe)"},
         {"command": "tagq", "description": "Poll-এ tag set করো (tagQ)"},
         {"command": "expq", "description": "Explanation footer set করো (expQ)"},
         {"command": "bm", "description": "Bookmark PDF বানাও"},
@@ -16047,6 +16120,8 @@ async def handle_message(msg: dict):
         await handle_remove(msg)
     elif text.lower().startswith("/rename"):
         _spawn_command_task(uid, handle_rename(msg))
+    elif text.lower().startswith("/compress"):
+        _spawn_command_task(uid, handle_compress(msg))
     elif text.lower().startswith("/tagq"):
         await handle_tagQ(msg)
     elif text.lower().startswith("/expq"):
