@@ -13091,7 +13091,31 @@ async def qbm_extract_all_pages(
     except Exception:
         pass
     clear_active_job(chat_id)
-    return [r for r in results if r is not None]
+
+    # Cross-page dedup: each page is extracted independently (no shared
+    # context between pages), so an MCQ whose question/answer block visually
+    # straddles a page boundary (or simply repeats — e.g. a reprinted MCQ,
+    # or the SAME physical page rendered twice due to a PDF split overlap)
+    # can get pulled out by both pages' Call1/Call2 passes, producing an
+    # extra duplicate poll on posting. Dedup runs across the FULL combined
+    # list (not just within one page) using the same fuzzy-match logic
+    # already used per-page, keeping the first (earlier-page) occurrence.
+    final_results = [r for r in results if r is not None]
+    combined_mcqs = []
+    for page_num, img, mcqs in final_results:
+        combined_mcqs.extend(mcqs or [])
+    deduped_mcqs = _qbm_dedup_list(combined_mcqs)
+    if len(deduped_mcqs) < len(combined_mcqs):
+        dropped = len(combined_mcqs) - len(deduped_mcqs)
+        logger.info(f"[QBM Cross-Page Dedup] dropped {dropped} duplicate MCQ(s) across pages")
+        deduped_ids = {id(m) for m in deduped_mcqs}
+        rebuilt = []
+        for page_num, img, mcqs in final_results:
+            kept = [m for m in (mcqs or []) if id(m) in deduped_ids]
+            rebuilt.append((page_num, img, kept))
+        final_results = rebuilt
+
+    return final_results
 
 
 async def process_qbm_pages(
@@ -13156,6 +13180,12 @@ async def process_qbm_pages(
     set_active_job(chat_id, f"QBM Poll posting ({file_name}, page-by-page)")
 
     iterable = page_tuples if skip_extract else [(p, img, None) for p, img in pages]
+    # Running set of already-seen question keys across ALL pages processed
+    # so far in this loop — catches an MCQ that visually straddles a page
+    # boundary (or a duplicated/overlapping source page) and got extracted
+    # on more than one page, before it gets posted twice. skip_extract=True
+    # doesn't need this (qbm_extract_all_pages already deduped globally).
+    _qbm_seen_q_keys: list = [] if not skip_extract else None
 
     for idx, (page_num, img, precomputed_mcqs) in enumerate(iterable):
         _current_job_chat_id_ctx.set(chat_id)
@@ -13177,6 +13207,25 @@ async def process_qbm_pages(
                 await edit_msg(chat_id, status_msg_id,
                     _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
                 continue
+
+            if _qbm_seen_q_keys is not None:
+                _kept = []
+                for m in mcqs:
+                    _key = _qbm_normalize_q(m.get("question", ""))
+                    if _key and _qbm_is_duplicate(_key, _qbm_seen_q_keys):
+                        continue
+                    if _key:
+                        _qbm_seen_q_keys.append(_key)
+                    _kept.append(m)
+                if len(_kept) < len(mcqs):
+                    logger.info(f"[QBM Cross-Page Dedup] page {page_num}: dropped {len(mcqs) - len(_kept)} duplicate MCQ(s) already seen on an earlier page")
+                mcqs = _kept
+                if not mcqs:
+                    page_status[idx]["current"] = False
+                    page_status[idx]["done"] = True
+                    await edit_msg(chat_id, status_msg_id,
+                        _build_dashboard(file_name, topic, display_pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+                    continue
 
             # ── Cross-page answer backfill — SKIPPED here if skip_extract=True
             # (Phase 1 / qbm_extract_all_pages already ran this lookahead) ──
