@@ -12447,8 +12447,10 @@ ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY. Scan every MC
 
 For each INCLUDED MCQ also find: answer — the option marked with a RED CIRCLE or RED BOX drawn around its letter/text — that IS the answer (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
 
+Also write a short explanation (1-2 sentences, Bangla if the MCQ is in Bangla) for why that answer is correct — from any ব্যাখ্যা text physically printed on the page near this MCQ if present, otherwise from your own knowledge of the subject.
+
 OUTPUT FORMAT — ONLY valid JSON array containing ONLY the highlighted MCQs, nothing else:
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","yellow_highlight":true}]"""
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","yellow_highlight":true}]"""
 
 # Gemini-only variant of the same prompt — used ONLY when the call actually
 # goes to Gemini (no TPM ceiling to protect there, unlike Groq's 8000 TPM
@@ -12472,8 +12474,10 @@ STEP 2 — Now go back through that list ONE MCQ AT A TIME and, for EACH one ind
 
 STEP 3 — For each KEPT (highlighted) MCQ, also find the answer: the option marked with a RED CIRCLE or RED BOX drawn around its letter/text (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
 
+STEP 4 — For each KEPT MCQ, write a short explanation (1-2 sentences, Bangla if the MCQ is in Bangla) for why that answer is correct — use any ব্যাখ্যা text physically printed on the page near this MCQ if present, otherwise use your own knowledge of the subject.
+
 OUTPUT FORMAT — ONLY valid JSON array of the KEPT (highlighted) MCQs only, exact order, exact wording (Bangla stays Bangla, English stays English), nothing else, no commentary, no markdown fences:
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","yellow_highlight":true}]"""
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","yellow_highlight":true}]"""
 
 
 
@@ -12528,18 +12532,19 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
     if not mcqs:
         return mcqs
     try:
-        mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("question", "options", "answer")} for m in mcqs], ensure_ascii=False)
+        mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("question", "options", "answer", "explanation")} for m in mcqs], ensure_ascii=False)
         prompt = f"""Re-check this already-extracted MCQ list against the page image ONE more time. Do NOT add or remove any MCQ -- output exactly {len(mcqs)} items, same order.
 
 For each MCQ, verify against the image:
 - question and option text match the source exactly (fix only if you spot a typo/OCR error)
 - answer letter is correct (re-check the marked option: red circle/box, or other clear mark)
+- explanation is a short, correct 1-2 sentence reason for the answer (fix if wrong/missing; keep Bangla if the MCQ is Bangla)
 
 EXISTING LIST:
 {mcq_json}
 
 OUTPUT — ONLY a JSON array of exactly {len(mcqs)} items, same order, corrected if needed:
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D"}}]"""
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
         txt = await _qbm_gemini_raw(img, prompt)
         if not txt:
             txt = await _qbm_groq_call(img, prompt)
@@ -12557,6 +12562,8 @@ OUTPUT — ONLY a JSON array of exactly {len(mcqs)} items, same order, corrected
                 orig["options"] = corrected["options"]
             if corrected.get("answer"):
                 orig["answer"] = corrected["answer"]
+            if corrected.get("explanation"):
+                orig["explanation"] = corrected["explanation"]
         return mcqs
     except Exception as e:
         logger.warning(f"[ONU-verify] failed: {e} — keeping Call1 result unverified rather than dropping it")
@@ -12586,7 +12593,17 @@ async def _onu_extract_from_image(img) -> list:
         if not call1:
             return []
         verified = await _onu_verify_pass(img, call1)
-        return _cap_mcq_options(verified)
+        verified = _cap_mcq_options(verified)
+        # Safety net: if either call still left explanation empty (model
+        # skipped the field despite the prompt asking for it), never post an
+        # MCQ with a blank explanation — build one from the known answer.
+        for m in verified:
+            if not (m.get("explanation") or "").strip():
+                try:
+                    m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m.get("answer", "A"))
+                except Exception as e:
+                    logger.warning(f"[ONU] explanation fallback failed: {e}")
+        return verified
     finally:
         _QBM_EXTRACT_HARD_CAP.release()
 
