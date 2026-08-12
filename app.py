@@ -1428,7 +1428,84 @@ def _clean_mcq_text(text: str) -> str:
         lambda m: m.group(1).replace(' ', '').translate(_SUP_TO_NORMAL) + '°',
         t,
     )
+    t = _latex_to_unicode(t)
     t = re.sub(r'\s{2,}', ' ', t).strip(" ,।.")
+    return t
+
+
+_LATEX_SUB_MAP = {
+    '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄',
+    '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
+    '+': '₊', '-': '₋', '(': '₍', ')': '₎',
+}
+_LATEX_SUP_MAP = {
+    '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
+    '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+    '+': '⁺', '-': '⁻', '(': '⁽', ')': '⁾',
+}
+
+def _latex_to_unicode(text: str) -> str:
+    """Safety-net conversion for leftover raw LaTeX the model occasionally
+    still emits despite prompt instructions (\\vec, \\hat, \\frac, \\sqrt,
+    ^{..}, _{..}) -- converts common patterns to proper Unicode so nothing
+    reaches CSV/polls as raw LaTeX syntax. Best-effort only; genuinely
+    complex expressions (matrices, nested integrals) are left as-is rather
+    than risk mangling them."""
+    if not text or '\\' not in text and '^{' not in text and '_{' not in text:
+        return text
+    t = text
+
+    # \vec{X} or \vec X -> X⃗ (combining right arrow above)
+    t = re.sub(r'\\vec\{([^{}]+)\}', lambda m: m.group(1) + '\u20D7', t)
+    t = re.sub(r'\\vec\s+([A-Za-z])', lambda m: m.group(1) + '\u20D7', t)
+
+    # \hat{X} or \hat X -> X̂ (combining circumflex)
+    t = re.sub(r'\\hat\{([^{}]+)\}', lambda m: m.group(1) + '\u0302', t)
+    t = re.sub(r'\\hat\s+([A-Za-z])', lambda m: m.group(1) + '\u0302', t)
+
+    # \sqrt{X} -> √X ,  \sqrt[3]{X} -> ∛X ,  \sqrt[4]{X} -> ∜X
+    t = re.sub(r'\\sqrt\[3\]\{([^{}]+)\}', lambda m: '∛' + m.group(1), t)
+    t = re.sub(r'\\sqrt\[4\]\{([^{}]+)\}', lambda m: '∜' + m.group(1), t)
+    t = re.sub(r'\\sqrt\{([^{}]+)\}', lambda m: '√' + m.group(1), t)
+
+    # \frac{a}{b} -> a/b
+    t = re.sub(r'\\frac\{([^{}]+)\}\{([^{}]+)\}', lambda m: f'{m.group(1)}/{m.group(2)}', t)
+
+    # Common symbol commands -> Unicode
+    _SYMS = {
+        r'\times': '×', r'\cdot': '·', r'\pm': '±', r'\mp': '∓',
+        r'\leq': '≤', r'\geq': '≥', r'\neq': '≠', r'\approx': '≈',
+        r'\propto': '∝', r'\infty': '∞', r'\partial': '∂',
+        r'\sum': '∑', r'\int': '∫', r'\Delta': 'Δ', r'\delta': 'δ',
+        r'\pi': 'π', r'\theta': 'θ', r'\alpha': 'α', r'\beta': 'β',
+        r'\gamma': 'γ', r'\lambda': 'λ', r'\mu': 'μ', r'\Omega': 'Ω',
+        r'\omega': 'ω', r'\sigma': 'σ', r'\phi': 'φ', r'\rightarrow': '→',
+        r'\leftarrow': '←', r'\degree': '°',
+    }
+    for cmd, uni in _SYMS.items():
+        t = t.replace(cmd, uni)
+
+    # ^{digits/sign} and _{digits/sign} -> real super/subscript chars
+    # (only when every char inside {} is mappable -- otherwise leave as-is
+    # rather than silently drop content the map can't represent).
+    def _sup_braced(m):
+        inner = m.group(1)
+        if all(c in _LATEX_SUP_MAP for c in inner):
+            return ''.join(_LATEX_SUP_MAP[c] for c in inner)
+        return m.group(0)
+
+    def _sub_braced(m):
+        inner = m.group(1)
+        if all(c in _LATEX_SUB_MAP for c in inner):
+            return ''.join(_LATEX_SUB_MAP[c] for c in inner)
+        return m.group(0)
+
+    t = re.sub(r'\^\{([^{}]+)\}', _sup_braced, t)
+    t = re.sub(r'_\{([^{}]+)\}', _sub_braced, t)
+    # single-char (no braces) forms: ^2 , _0
+    t = re.sub(r'\^([0-9+\-()])', lambda m: _LATEX_SUP_MAP.get(m.group(1), m.group(0)), t)
+    t = re.sub(r'_([0-9+\-()])', lambda m: _LATEX_SUB_MAP.get(m.group(1), m.group(0)), t)
+
     return t
 
 
@@ -10098,7 +10175,13 @@ EXPLANATION RULES (strict priority, max 165 chars Bengali unless case 1):
 3) Nothing relevant exists → generate best accurate explanation from own knowledge, same all-4-options coverage.
 Case 1 always checked first; never mix (verbatim text never edited, self-written always covers all 4).
 
-MATH/CHEMISTRY FORMATTING (always, in question/options/explanation): proper Unicode subscript/superscript, never raw underscore/caret. H₂O, CO₂, NaHCO₃, H₂SO₄, Ca(OH)₂, Fe₂O₃, C₆H₁₂O₆ (never H2O style). Ionic: Na⁺, Ca²⁺, Fe³⁺, Cl⁻, SO₄²⁻, O²⁻. Exponents: x², 10³, a⁻¹, E=mc², 6.02×10²³, v₀, xₙ (never x^2, x_0). Units: °C, °F, m/s², cm³, kg·m/s², × not x. Apply consistently, never mix formats within one MCQ.
+MATH/CHEMISTRY FORMATTING (always, in question/options/explanation): NEVER output raw LaTeX commands (no \vec, \hat, \frac, \sqrt, \sum, \int, ^, _, {, } used as LaTeX syntax) — always convert to proper Unicode instead:
+- Vectors: \vec{A} → A⃗ (or bold+arrow style like **A**⃗), \hat{i} → î, \hat{j} → ĵ, \hat{k} → k̂
+- Fractions: \frac{a}{b} → a/b (simple inline) or a⁄b (Unicode fraction slash) — never leave \frac{}{} literally
+- Roots: \sqrt{x} → √x, \sqrt[3]{x} → ∛x
+- Subscript/superscript: H₂O, CO₂, NaHCO₃, H₂SO₄, Ca(OH)₂, Fe₂O₃, C₆H₁₂O₆ (never H2O style). Ionic: Na⁺, Ca²⁺, Fe³⁺, Cl⁻, SO₄²⁻, O²⁻. Exponents: x², 10³, a⁻¹, E=mc², 6.02×10²³, v₀, xₙ (never x^2, x_0, x{2}).
+- Units: °C, °F, m/s², cm³, kg·m/s², × not x, · for dot product/multiplication, ∑ ∫ ∞ ∂ √ ± ≤ ≥ ≠ ≈ ∝ ∆ π θ α β γ λ μ Ω directly as Unicode symbols.
+Apply consistently, never mix LaTeX and Unicode within one MCQ. RARE EXCEPTION: only if a specific expression is genuinely impossible to represent in Unicode/plain text with reasonable clarity (e.g. a complex multi-line matrix or nested integral), keep that ONE expression in minimal LaTeX — everything else in the same MCQ still uses Unicode.
 
 FORBIDDEN SOURCE-REFERENCE PHRASES (question and explanation, always): never reference the source itself instead of stating facts directly.
 ❌ "উল্লেখিত চিত্রে"/"চিত্রে দেখা যাচ্ছে"/"বক্সে"/"ছকে"/"উদ্দীপকে"/"সারণিতে"/"টপিকে"/"পৃষ্ঠায়"/"প্যাসেজে"/"অনুচ্ছেদে"/"গ্রাফে"/"দেখা যাচ্ছে"/"বলা আছে"/"উল্লেখ করা আছে"/"লক্ষ করা যায়"/"দেখানো হয়েছে"/"দেওয়া আছে"/"প্রদত্ত"
@@ -10212,8 +10295,10 @@ def _qbm_parse_json(text: str) -> list:
             # Clean numbering prefix + trailing bracket artifacts
             q = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q)
             q = _strip_q_numbering(q)
-            opts_list = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
-            expl = mc.get("explanation", "")
+            q = _clean_mcq_text(q)
+            opts_list = [_clean_mcq_text(opts.get("A", "")), _clean_mcq_text(opts.get("B", "")),
+                         _clean_mcq_text(opts.get("C", "")), _clean_mcq_text(opts.get("D", ""))]
+            expl = _clean_mcq_text(mc.get("explanation", ""))
             expl_source = mc.get("explanation_source", "")
             raw_qbbox = mc.get("qsn_bbox")
             qsn_bbox = raw_qbbox if (isinstance(raw_qbbox, list) and len(raw_qbbox) == 4) else None
@@ -10593,6 +10678,12 @@ complete, untruncated, corrected question/options/explanation in your response:
    image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail).
 6) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
    Na⁺ etc.) are correctly rendered everywhere.
+6c) LATEX CHECK: scan question/options/explanation for any raw LaTeX left over from extraction
+   (backslash-vec, backslash-hat, backslash-frac, backslash-sqrt, caret, underscore, curly braces
+   used as LaTeX syntax) — convert every one to proper Unicode
+   (vectors: A⃗, î, ĵ, k̂; fractions: a/b; roots: √x; sub/superscripts as actual Unicode chars).
+   Only leave LaTeX if that ONE specific expression is genuinely impossible to represent clearly
+   in Unicode/plain text (rare — e.g. a multi-line matrix) — never leave LaTeX out of laziness.
 6b) COLUMN-ORDER CHECK: if the source page has multiple columns, confirm the MCQ list follows
    COLUMN-MAJOR order (entire left column top-to-bottom, then next column top-to-bottom) — never
    zigzag/interleave between columns. Re-order the list if columns got mixed.
