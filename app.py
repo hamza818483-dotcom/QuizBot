@@ -12480,25 +12480,23 @@ OUTPUT FORMAT — ONLY valid JSON array of the KEPT (highlighted) MCQs only, exa
 
 async def _onu_call1_extract(img) -> list:
     """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field, which covers yellow OR green marker color).
-    ONU_EXTRACT_PROMPT is intentionally short (~200 tokens vs QBM's ~2400), which
-    leaves most of Groq's 8000 TPM budget for the image -- so Groq fallback now
-    keeps enough resolution to still see the highlight, unlike before when
-    the full QBM prompt forced heavy downscale (384px/quality 40) that washed it out.
-    Groq primary / Gemini fallback (same reasoning as /qbm) -- Gemini free-tier's
-    20 req/day/key exhausts within a handful of pages on any real PDF."""
+    Gemini primary / Groq fallback (matches /qbm's provider order) -- Gemini
+    generally reads highlight color/marks more reliably than Groq's vision
+    model, so it's tried first; Groq only kicks in if Gemini fails/is
+    exhausted, same fallback order as the rest of the pipeline."""
     try:
+        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT_GEMINI)
+        out = _qbm_dedup_list(gem) if gem else []
+        for m in out:
+            m["_provider"] = "Gemini"
+        if out:
+            return out
         txt = await _qbm_groq_call(img, ONU_EXTRACT_PROMPT)
         result = _qbm_parse_json(txt) if txt else []
         if result:
             out = _qbm_dedup_list(result)
             for m in out:
                 m["_provider"] = "Groq"
-            return out
-        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT_GEMINI)
-        out = _qbm_dedup_list(gem) if gem else []
-        for m in out:
-            m["_provider"] = "Gemini"
-        if out:
             return out
         or_txt = await _qbm_openrouter_call(img, ONU_EXTRACT_PROMPT)
         result3 = _qbm_parse_json(or_txt) if or_txt else []
@@ -12542,9 +12540,9 @@ EXISTING LIST:
 
 OUTPUT — ONLY a JSON array of exactly {len(mcqs)} items, same order, corrected if needed:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D"}}]"""
-        txt = await _qbm_groq_call(img, prompt)
+        txt = await _qbm_gemini_raw(img, prompt)
         if not txt:
-            txt = await _qbm_gemini_raw(img, prompt)
+            txt = await _qbm_groq_call(img, prompt)
         if not txt:
             txt = await _qbm_openrouter_call(img, prompt)
         if not txt:
