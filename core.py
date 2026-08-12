@@ -697,7 +697,7 @@ def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 10
     from PIL import Image
 
     # (max_dimension_px, jpeg_quality) tried in order, mildest first
-    STEPS = [(2200, 82)] if quality_first else [(2000, 70), (1500, 55), (1100, 42), (900, 32)]
+    STEPS = [(2200, 82)] if quality_first else [(2000, 70), (1500, 55), (1100, 42), (900, 32), (700, 25)]
     best = file_bytes
     for max_dim, quality in STEPS:
         try:
@@ -727,7 +727,8 @@ def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 10
                         src.xref_set_key(xref, "Width", str(pil_img.width))
                         src.xref_set_key(xref, "Height", str(pil_img.height))
                         src.xref_set_key(xref, "BitsPerComponent", "8")
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(f"[compress_pdf] xref={xref} image swap failed: {e}")
                         continue
             out_buf = BytesIO()
             src.save(out_buf, garbage=4, deflate=True, clean=True)
