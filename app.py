@@ -12464,6 +12464,12 @@ async def _handle_qbm_impl(msg: dict):
             # Extraction শেষ হওয়ার সাথে সাথেই CSV auto-send — channel select
             # এর জন্য অপেক্ষা করতে হবে না, সব MCQ সাথে সাথেই CSV আকারে হাতে পেয়ে যাবে
             if total_mcq_found:
+                _missing_exp_qbm = [m for _, _, mcqs in extracted_pages for m in mcqs if not (m.get("explanation") or "").strip()]
+                if _missing_exp_qbm:
+                    try:
+                        await _ai_generate_all_explanations(_missing_exp_qbm)
+                    except Exception as e:
+                        logger.warning(f"[QBM] fallback explanation fill failed: {e}")
                 import io as _io_qbm, csv as _csv_mod_qbm
                 _buf_qbm = _io_qbm.StringIO()
                 _w_qbm = _csv_mod_qbm.writer(_buf_qbm)
@@ -12595,14 +12601,17 @@ def _onu_filter_mcqs(mcqs: list):
 # marked answer (red circle/box around an option). No passage handling, no
 # math formatting, no explanation-generation rules -- those aren't part of
 # /onu's job and were only bloating the prompt for QBM's use case.
-ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY. Scan every MCQ block on this page (question + 4 options), one block at a time. For EACH block, look specifically at the pixels directly behind its question line AND its 4 options. If ANY yellow marker-pen color OR ANY green marker-pen color is visible there (a light/pale/faint tint of either still counts, not just bright/saturated), INCLUDE this MCQ in the output. If the background is plain white/no-color for this block, SKIP it entirely — do NOT include it in the output at all. Do not assume based on other MCQs on the page — each block gets its own independent check, since a page can mix highlighted and non-highlighted blocks. Never invent new MCQs, exact order, exact wording (Bangla stays Bangla, English stays English). 0 highlighted MCQs → return [].
+ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY. Scan every MCQ block on this page (question + 4 options), one block at a time. For EACH block, look specifically at the pixels directly behind its question line AND its 4 options. If ANY yellow marker-pen color OR ANY green marker-pen color is visible there (a light/pale/faint tint of either still counts, not just bright/saturated), INCLUDE this MCQ in the output — this is a MUST-TAKE rule, never miss a highlighted MCQ even if faint. If the background is plain white/no-color for this block, SKIP it entirely — do NOT include it in the output at all. Do not assume based on other MCQs on the page — each block gets its own independent check, since a page can mix highlighted and non-highlighted blocks. Never invent new MCQs, exact order, exact wording (Bangla stays Bangla, English stays English). 0 highlighted MCQs → return [].
 
-For each INCLUDED MCQ also find: answer — the option marked with a RED CIRCLE or RED BOX drawn around its letter/text — that IS the answer (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
+For each INCLUDED MCQ, find the RED-MARKED option: the option with a RED CIRCLE or RED BOX drawn around its letter/text (A/B/C/D by position, 1st option=A...4th=D). This red mark is ONLY a visual pointer to what someone marked — it is NOT automatically correct. You must INDEPENDENTLY VERIFY using your own subject knowledge which option is actually, factually correct:
+- If the red-marked option IS the factually correct answer → output that as "answer", set "marked_answer_wrong":false.
+- If the red-marked option is NOT the factually correct answer (the mark is wrong) → output the ACTUALLY CORRECT option as "answer" (not the red-marked one), set "marked_answer_wrong":true, and in the explanation clearly state the red-marked option was wrong and give the correct one.
+- If no red mark is visible at all, determine the correct answer purely from subject knowledge, set "marked_answer_wrong":false.
 
-Also write a short explanation (1-2 sentences, Bangla if the MCQ is in Bangla) for why that answer is correct — from any ব্যাখ্যা text physically printed on the page near this MCQ if present, otherwise from your own knowledge of the subject.
+Also write a short explanation (1-2 sentences, Bangla if the MCQ is in Bangla) for why the correct answer is correct — from any ব্যাখ্যা text physically printed on the page near this MCQ if present, otherwise from your own knowledge of the subject. If marked_answer_wrong is true, the explanation MUST also mention the marked option was incorrect and state the correct one.
 
 OUTPUT FORMAT — ONLY valid JSON array containing ONLY the highlighted MCQs, nothing else:
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","yellow_highlight":true}]"""
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"explanation":"...","yellow_highlight":true}]"""
 
 # Gemini-only variant of the same prompt — used ONLY when the call actually
 # goes to Gemini (no TPM ceiling to protect there, unlike Groq's 8000 TPM
@@ -12619,17 +12628,20 @@ STEP 1 — First, list every MCQ block on the page in order (question + its 4 op
 STEP 2 — Now go back through that list ONE MCQ AT A TIME and, for EACH one individually, zoom your attention onto ONLY the background area directly behind that MCQ's question line and its 4 options (ignore the rest of the page while judging this one block):
    - Is there ANY yellow marker/highlighter tint behind this specific block? (bright yellow, pale yellow, faded yellow — all count)
    - Is there ANY green marker/highlighter tint behind this specific block? (bright green, pale green, faded green — all count)
-   - If either is present, even faintly, this block IS highlighted — KEEP it for the output.
+   - If either is present, even faintly, this block IS highlighted — KEEP it for the output. This is a MUST-TAKE rule — never skip a highlighted MCQ even by mistake.
    - If the background is genuinely plain white/uncolored paper behind THIS block, this block is NOT highlighted — DROP it, do not include it in the output at all.
    - A page can legitimately mix highlighted and non-highlighted blocks — never copy the previous block's verdict for the next one; judge each block completely independently, as if it were the only MCQ on the page.
    - Faint/light highlighter marks are the most commonly missed case — when in doubt about a pale tint, look again before deciding it's not highlighted.
 
-STEP 3 — For each KEPT (highlighted) MCQ, also find the answer: the option marked with a RED CIRCLE or RED BOX drawn around its letter/text (A/B/C/D by position, 1st option=A...4th=D). If no red mark visible, use any other clear mark (tick/underline/bold). If truly no mark anywhere, use "A".
+STEP 3 — For each KEPT (highlighted) MCQ, find the RED-MARKED option: the option with a RED CIRCLE or RED BOX drawn around its letter/text (A/B/C/D by position, 1st option=A...4th=D). This red mark only shows what someone marked — it can be WRONG. Independently verify with your own subject knowledge which option is actually, factually correct:
+   - Red-marked option IS factually correct → "answer" = that option, "marked_answer_wrong":false.
+   - Red-marked option is NOT factually correct → "answer" = the ACTUALLY correct option (ignore the wrong red mark), "marked_answer_wrong":true.
+   - No red mark visible at all → determine correct answer from subject knowledge, "marked_answer_wrong":false.
 
-STEP 4 — For each KEPT MCQ, write a short explanation (1-2 sentences, Bangla if the MCQ is in Bangla) for why that answer is correct — use any ব্যাখ্যা text physically printed on the page near this MCQ if present, otherwise use your own knowledge of the subject.
+STEP 4 — For each KEPT MCQ, write a short explanation (1-2 sentences, Bangla if the MCQ is in Bangla) for why the correct answer is correct — use any ব্যাখ্যা text physically printed on the page near this MCQ if present, otherwise use your own knowledge of the subject. If marked_answer_wrong is true, the explanation MUST also state the red-marked option was wrong and give the correct one.
 
 OUTPUT FORMAT — ONLY valid JSON array of the KEPT (highlighted) MCQs only, exact order, exact wording (Bangla stays Bangla, English stays English), nothing else, no commentary, no markdown fences:
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","yellow_highlight":true}]"""
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"explanation":"...","yellow_highlight":true}]"""
 
 
 
@@ -12936,6 +12948,18 @@ async def _handle_onu_impl(msg: dict):
         # ── /onu always ends with CSV-only output — no channel list/keyboard,
         # no posting to any channel, regardless of -c flag or saved channels. ──
         total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+
+        # ── Fallback explanation fill: ONU_EXTRACT_PROMPT already asks the
+        # model to write an explanation per MCQ, so this only fires for the
+        # rare MCQ that came back with an empty explanation (model skipped
+        # it) -- avoids a separate /ai run being needed after the fact. ──
+        if total_mcq_found:
+            _missing_exp = [m for _, _, mcqs in extracted_pages for m in mcqs if not (m.get("explanation") or "").strip()]
+            if _missing_exp:
+                try:
+                    await _ai_generate_all_explanations(_missing_exp)
+                except Exception as e:
+                    logger.warning(f"[ONU] fallback explanation fill failed: {e}")
 
         if total_mcq_found:
             import io as _io_onu, csv as _csv_mod_onu
