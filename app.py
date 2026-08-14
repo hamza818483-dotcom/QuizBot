@@ -3971,6 +3971,7 @@ async def handle_compress(msg: dict):
 
 
 
+async def handle_rename(msg: dict):
     """Kono file (document/video/audio/photo) e reply kore /rename NewName
     dile - Telegram e already-uploaded file "rename" kora jay na (API-tei
     support nei), tai file ta re-download kore notun filename diye
