@@ -8097,12 +8097,12 @@ PRINT_STYLE_NAMES = {
 # ATLASMASTERBOT /sheet SYSTEM — 100% PORTED (5 Reading formats)
 # ============================================================
 _AM_COLORS = {
-    "header_bg": "#1B4F72", "header_text": "#FFFFFF",
+    "header_bg": "#166534", "header_text": "#FFFFFF",
     "question_bg": "#FFFBF0", "question_border": "#FBBF24",
     "qnum_bg": "#FEF3C7", "qnum_text": "#92400E",
     "option_bg": "#FFFFFF", "option_border": "#D1D5DB", "option_text": "#1F2937",
     "correct_bg": "#DCFCE7", "correct_border": "#4ADE80", "correct_text": "#14532D",
-    "explanation_bg": "#EFF6FF", "explanation_border": "#4299E1", "explanation_text": "#1E40AF",
+    "explanation_bg": "#F0FDF4", "explanation_border": "#16a34a", "explanation_text": "#166534",
     "footer_text": "#6B7280",
 }
 
@@ -8183,7 +8183,7 @@ table.at th{{background:#f0f0f0}}
 .answer-sidebar{{position:fixed;right:2mm;top:14mm;width:28mm;border:1px solid #333;padding:2px;font-size:5pt;background:#fff;z-index:10;max-height:80%;overflow-y:auto;box-shadow:0 2px 8px rgba(0,0,0,0.15);}}
 .exp-table{{width:100%;border-collapse:collapse;margin-top:8px;font-size:6.5pt;page-break-before:always;}}
 .exp-table th,.exp-table td{{border:1px solid #555;padding:2px;text-align:center;}}
-.exp-table th{{background:#EFF6FF;}}
+.exp-table th{{background:#F0FDF4;}}
 sub,sup{{font-size:0.65em}}
 img{{max-width:80px;height:auto;display:block;margin:1px 0}}
 {wm}
@@ -8316,7 +8316,7 @@ def _am_build_html(data, heading, fmt, hdr_txt="", ftr_txt=""):
                     body += f'<span class="opt">({BN[oi]}) {d["opts"][oi]}{d["oimgs"][oi]}</span> '
             body += '</div>'
         body += '</div>'
-        tbl = '<div style="border:2px solid #1B4F72;padding:8px;margin-top:10px"><h3>📋 Answer Key</h3>'
+        tbl = '<div style="border:2px solid #16a34a;padding:8px;margin-top:10px"><h3>📋 Answer Key</h3>'
         tbl += '<table class="at"><tr><th>Q.No</th><th>Ans</th><th>ব্যাখ্যা</th></tr>'
         for d in data:
             tbl += f'<tr><td>{d["n"]}</td><td><b>{d["al"]}</b></td><td>{d["exp"]}{d["ei"]}</td></tr>'
