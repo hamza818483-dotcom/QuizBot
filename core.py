@@ -1804,12 +1804,44 @@ def source_msg_id(cache: dict):
 # WATERMARK (ported from AtlasMasterBot's services.py)
 # ============================================================
 def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
-    """Add a diagonal, semi-transparent text watermark to every page of a PDF."""
+    """Add a diagonal, semi-transparent text watermark to every page of a PDF,
+    plus a small top-right 'ATLAS' tag and a red-box white-text footer."""
     try:
         import io as _io
+        import base64 as _b64_wm
         from pypdf import PdfReader, PdfWriter
         from reportlab.pdfgen import canvas
         from reportlab.lib.colors import Color
+
+        # Footer text needs proper Bengali conjunct shaping (raqm) — reportlab's
+        # native text drawing can't do this, so render it as a PIL image instead
+        # (same technique used for slide generation elsewhere in this codebase).
+        footer_text = "সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস(Whatsapp:01999681290)"
+
+        def _render_footer_image(px_width: int, px_height: int) -> bytes:
+            from PIL import Image as _PILImage, ImageDraw as _PILImageDraw, ImageFont as _PILImageFont, features as _PILFeatures
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            bold_path = os.path.join(base_dir, "fonts", "NotoSansBengali-Bold.ttf.b64")
+            with open(bold_path, "r") as f:
+                font_bytes = _b64_wm.b64decode(f.read())
+            layout = _PILImageFont.Layout.RAQM if _PILFeatures.check("raqm") else _PILImageFont.Layout.BASIC
+            img = _PILImage.new("RGBA", (px_width, px_height), (191, 15, 15, 255))
+            draw = _PILImageDraw.Draw(img)
+            font_size = int(px_height * 0.55)
+            font = _PILImageFont.truetype(_io.BytesIO(font_bytes), font_size, layout_engine=layout)
+            bbox = draw.textbbox((0, 0), footer_text, font=font)
+            text_w = bbox[2] - bbox[0]
+            while text_w > px_width * 0.96 and font_size > 6:
+                font_size -= 1
+                font = _PILImageFont.truetype(_io.BytesIO(font_bytes), font_size, layout_engine=layout)
+                bbox = draw.textbbox((0, 0), footer_text, font=font)
+                text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+            draw.text(((px_width - text_w) / 2 - bbox[0], (px_height - text_h) / 2 - bbox[1]),
+                       footer_text, font=font, fill=(255, 255, 255, 255))
+            out = _io.BytesIO()
+            img.save(out, format="PNG")
+            return out.getvalue()
 
         reader = PdfReader(_io.BytesIO(pdf_bytes))
         writer = PdfWriter()
@@ -1836,6 +1868,19 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
             c.setFillColor(Color(0, 0, 0, alpha=0.35))
             margin = min(page_width, page_height) * 0.03
             c.drawRightString(page_width - margin, page_height - margin - corner_font_size, "ATLAS")
+
+            # Footer: red bg box with white bold Bengali text, bottom of page
+            footer_box_h = min(page_width, page_height) * 0.035
+            try:
+                px_scale = 4  # render at higher res for crisp text
+                footer_png = _render_footer_image(int(page_width * px_scale), int(footer_box_h * px_scale))
+                from reportlab.lib.utils import ImageReader
+                c.drawImage(ImageReader(_io.BytesIO(footer_png)), 0, 0,
+                            width=page_width, height=footer_box_h, mask=None)
+            except Exception as fe:
+                logger.warning(f"[Watermark] footer image render failed, falling back to plain box: {fe}")
+                c.setFillColor(Color(0.75, 0.06, 0.06, alpha=1.0))
+                c.rect(0, 0, page_width, footer_box_h, fill=1, stroke=0)
 
             c.save()
             packet.seek(0)
