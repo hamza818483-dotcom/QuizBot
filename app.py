@@ -7102,9 +7102,11 @@ async def _get_pw_browser():
         if _PW_BROWSER["browser"] is None:
             from playwright.async_api import async_playwright
             _PW_BROWSER["playwright"] = await async_playwright().start()
-            _PW_BROWSER["browser"] = await _PW_BROWSER["playwright"].chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
+            _PW_BROWSER["browser"] = await asyncio.wait_for(
+                _PW_BROWSER["playwright"].chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
+                ), timeout=30
             )
         return _PW_BROWSER["browser"]
 
@@ -7164,7 +7166,7 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
             for attempt in range(3):
                 try:
                     browser = await _get_pw_browser()
-                    page = await browser.new_page()
+                    page = await asyncio.wait_for(browser.new_page(), timeout=15)
                     break
                 except Exception as e:
                     last_err = e
@@ -7187,14 +7189,14 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
                 f.write(html)
                 temp_path = f.name
 
-            await page.goto(f"file://{os.path.abspath(temp_path)}", wait_until="networkidle")
-            await page.evaluate("document.fonts.ready")
+            await page.goto(f"file://{os.path.abspath(temp_path)}", wait_until="networkidle", timeout=20000)
+            await asyncio.wait_for(page.evaluate("document.fonts.ready"), timeout=10)
             # আগে blind 1.5s wait ছিল "just in case" রেন্ডার সম্পূর্ণ হওয়ার জন্য —
             # তার বদলে সরাসরি সব <img> element load হয়েছে কিনা targeted check করা
             # হচ্ছে (দ্রুত হলে আগেই এগোবে, ধীর হলে যথেষ্ট অপেক্ষা করবে — blind
             # fixed-delay এর চেয়ে দ্রুত + নির্ভরযোগ্য দুটোই)
             try:
-                await page.evaluate("""
+                await asyncio.wait_for(page.evaluate("""
                     () => Promise.all(
                         Array.from(document.images)
                             .filter(img => !img.complete)
@@ -7202,7 +7204,7 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
                                 img.onload = img.onerror = res;
                             }))
                     )
-                """)
+                """), timeout=10)
             except Exception:
                 pass
             await asyncio.sleep(0.4)  # ছোট safety margin, layout settle-এর জন্য
@@ -7212,11 +7214,11 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as pf:
                 output_path = pf.name
 
-            await page.pdf(
+            await asyncio.wait_for(page.pdf(
                 path=output_path, format="A4",
                 margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"},
                 print_background=True
-            )
+            ), timeout=20)
             if progress_cb:
                 await progress_cb(95)
 
