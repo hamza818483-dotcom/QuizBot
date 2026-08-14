@@ -5238,11 +5238,22 @@ async def _process_txt_to_poll_inner(channel_id: str, chat_id: int, uid: int, un
 # ============================================================
 # HELPER FUNCTIONS — CSV pre/end/summary messages
 # ============================================================
-def csv_get_pre_message(topic: str, count: int) -> str:
+def csv_get_pre_message(topic: str, count: int, first_link: str = "") -> str:
+    topic_text = topic or "Special MCQ By ATLAS"
+    text = (
+        f"🌟Topic:{topic_text}\n"
+        f"⚡MCQ:{count}\n"
+    )
+    if first_link:
+        text += f"\n✅পোল যেখান থেকে শুরু হয়েছে:\n{first_link}"
+    else:
+        text += f"\n✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো"
+    return text
+
+def csv_get_pdf_caption(topic: str) -> str:
     topic_text = topic or "Special MCQ By ATLAS"
     return (
-        f"🌟Topic:{topic_text}\n"
-        f"⚡MCQ:{count}\n\n"
+        f"📌Topic:{topic_text}\n"
         f"✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো"
     )
 
@@ -6558,17 +6569,37 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname
             )
 
-            # Button-msg (channel + group উভয়ে): pre-msg টেক্সট + 4 button, pre-msg কে reply
-            btn_kb = await _csv_pre_buttons(batch_cache_id)
-            btn_send_data = {"chat_id": channel_id, "text": pre_text, "reply_markup": btn_kb}
-            if pre_msg_id:
-                btn_send_data["reply_to_message_id"] = pre_msg_id
-            if thread_id:
-                btn_send_data["message_thread_id"] = thread_id
-            await tg_post("sendMessage", btn_send_data)
+            # Pre-message edit করে first poll link বসানো হচ্ছে (practice line-এর জায়গায়)
+            if pre_msg_id and first_link:
+                try:
+                    await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(batch_topic, len(batch), first_link))
+                except Exception as e:
+                    logger.warning(f"[CSVS] pre-msg link edit failed: {e}")
 
-            # Score-ask End-msg (channel only, no button, pre-msg কে reply) |
-            # Group: plain thank-you end-msg, score-ask/button নাই
+            # Style1 PDF (এই batch) — short caption + 4 button, pre-msg কে reply
+            batch_pdf_bytes = await _generate_style1_pdf_guaranteed(batch, batch_topic, chat_id)
+            if batch_pdf_bytes:
+                safe_btitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", batch_topic)[:50] or "ATLAS_Sheet"
+                btn_kb = await _csv_pre_buttons(batch_cache_id)
+                pdf_doc_r = await send_document(
+                    channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
+                    caption=csv_get_pdf_caption(batch_topic),
+                    message_thread_id=thread_id,
+                    reply_to_message_id=pre_msg_id
+                )
+                if pdf_doc_r and pdf_doc_r.get("ok"):
+                    pdf_msg_id = pdf_doc_r.get("result", {}).get("message_id")
+                    if pdf_msg_id:
+                        try:
+                            await tg_post("editMessageReplyMarkup", {
+                                "chat_id": channel_id, "message_id": pdf_msg_id,
+                                "reply_markup": btn_kb
+                            })
+                        except Exception as e:
+                            logger.warning(f"[CSVS] PDF button attach failed: {e}")
+
+            # Score-ask End-msg (channel only) | Group: plain thank-you end-msg —
+            # সম্পূর্ণ আলাদা message, pre-msg কে reply
             ending = csv_get_ending_message(batch_topic, sent, first_link, ask_score=ask_score)
             end_send_data2 = {
                 "chat_id": channel_id,
@@ -6707,15 +6738,22 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             await edit_msg(chat_id, loading_id,
                 f"📄 {csv_fname}\n✅ {sent}/{total} poll পাঠানো শেষ!\n⏳ PDF বানানো হচ্ছে...")
 
-        # Style1 PDF (সব poll মিলিয়ে) — pre-msg কে reply, auto-pin, polls শেষে
-        # end-msg-এর আগে পাঠানো হয়। Guaranteed: 3 বার retry না হওয়া পর্যন্ত
-        # PDF miss হবে না।
+        # Pre-message edit করে first poll link বসানো হচ্ছে (practice line-এর জায়গায়)
+        if pre_msg_id and first_link:
+            try:
+                await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(topic, total, first_link))
+            except Exception as e:
+                logger.warning(f"[CSV] pre-msg link edit failed: {e}")
+
+        # Style1 PDF (সব poll মিলিয়ে) — short caption + 4 button, pre-msg কে reply,
+        # auto-pin, polls শেষে end-msg-এর আগে পাঠানো হয়। Guaranteed: 3 বার retry
+        # না হওয়া পর্যন্ত PDF miss হবে না।
         pdf_bytes = await _generate_style1_pdf_guaranteed(mcqs, topic, chat_id)
         if pdf_bytes:
             safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
             doc_r = await send_document(
                 channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
-                caption=f"📖 ATLAS Practice Sheet\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 Visit: Atlascourses.com",
+                caption=csv_get_pdf_caption(topic),
                 message_thread_id=thread_id,
                 reply_to_message_id=pre_msg_id
             )
@@ -6723,19 +6761,26 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 doc_msg_id = doc_r.get("result", {}).get("message_id")
                 if doc_msg_id:
                     await try_pin_message(channel_id, doc_msg_id)
+                    try:
+                        pdf_btn_kb = await _csv_pre_buttons(cache_id)
+                        await tg_post("editMessageReplyMarkup", {
+                            "chat_id": channel_id, "message_id": doc_msg_id,
+                            "reply_markup": pdf_btn_kb
+                        })
+                    except Exception as e:
+                        logger.warning(f"[CSV] PDF button attach failed: {e}")
             if loading_id:
                 await edit_msg(chat_id, loading_id,
                     f"📄 {csv_fname}\n✅ PDF পাঠানো হয়েছে!\n⏳ End message পাঠানো হচ্ছে...")
 
-        # End-msg (topic + mcq count + first poll link + 4 button) — PDF-এর পরে,
-        # সবার শেষে। Channel-এ score-ask সহ, group-এ score-ask ছাড়া।
+        # End-msg (topic + mcq count + first poll link) — সম্পূর্ণ আলাদা message,
+        # PDF/button-msg এর বাইরে, pre-msg কে reply। Channel-এ score-ask সহ,
+        # group-এ score-ask ছাড়া।
         ending = csv_get_ending_message(topic, sent, first_link, ask_score=ask_score)
-        end_kb = await _csv_pre_buttons(cache_id)
         end_send_data = {
             "chat_id": channel_id,
             "text": ending,
-            "disable_web_page_preview": True,
-            "reply_markup": end_kb
+            "disable_web_page_preview": True
         }
         if pre_msg_id:
             end_send_data["reply_to_message_id"] = pre_msg_id
