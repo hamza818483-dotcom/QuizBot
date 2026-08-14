@@ -3987,10 +3987,10 @@ async def handle_compress(msg: dict):
     wm_text = wm_split[1].strip() if len(wm_split) > 1 else ""
 
     if not reply:
-        await send_msg(chat_id, "❌ Kono file (document/video/audio/photo) e reply kore likho:\n<code>/rename NewName.ext /wm WatermarkText</code>")
+        await send_msg(chat_id, "❌ Kono file (document/video/audio/photo) e reply kore likho:\n<code>/rename NewName.ext\n/wm WatermarkText</code>")
         return
     if not new_name:
-        await send_msg(chat_id, "❌ Notun name dao:\n<code>/rename NewName.ext /wm WatermarkText</code>")
+        await send_msg(chat_id, "❌ Notun name dao:\n<code>/rename NewName.ext\n/wm WatermarkText</code>")
         return
     # Telegram filenames don't allow these - strip to be safe
     new_name = re.sub(r'[\\/:*?"<>|]', '_', new_name)
