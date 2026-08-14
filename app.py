@@ -16073,7 +16073,6 @@ async def set_bot_commands(notify_chat_id: int = None):
         {"command": "watermark", "description": "PDF-এ watermark বসাও"},
         {"command": "convert", "description": "Quiz → CSV export করো"},
         {"command": "error", "description": "সাম্প্রতিক bot error দেখো"},
-        {"command": "setcommand", "description": "Bot commands register করো (Owner)"},
     ]
 
     # ---- USER command list (everything a regular user can actually use) ----
@@ -16552,11 +16551,6 @@ async def handle_message(msg: dict):
             return
         _spawn_command_task(uid, handle_poll_extract(msg))
 
-    elif text == "/setcommand":
-        if uid != OWNER_ID:
-            await send_msg(chat_id, "❌ Owner only!")
-            return
-        await set_bot_commands(notify_chat_id=chat_id)
     elif text.startswith("/livetime"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
