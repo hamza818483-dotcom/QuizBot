@@ -3980,11 +3980,16 @@ async def handle_compress(msg: dict):
     text = msg.get("text", "")
     rest = re.sub(r'(?i)^/rename', '', text).strip()
 
-    # /rename NewName.ext [watermark text] — first token is filename,
-    # baki shob (thakle) watermark text hishebe treat hobe
-    rest_parts = rest.split(None, 1)
-    new_name = rest_parts[0] if rest_parts else ""
-    wm_text = rest_parts[1].strip() if len(rest_parts) > 1 else ""
+    # /rename NewName.ext [watermark text] — filename ends at the extension
+    # (so Bangla/multi-word names with spaces work), baki shob watermark text
+    m = re.match(r'^(.*?\.\w+)(?:\s+(.*))?$', rest, re.DOTALL)
+    if m:
+        new_name = m.group(1).strip()
+        wm_text = (m.group(2) or "").strip()
+    else:
+        # no extension given at all — fallback: whole thing is filename, no watermark
+        new_name = rest.strip()
+        wm_text = ""
 
     if not reply:
         await send_msg(chat_id, "❌ Kono file (document/video/audio/photo) e reply kore likho:\n<code>/rename NewName.ext [watermark text]</code>")
