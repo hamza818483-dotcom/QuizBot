@@ -3978,13 +3978,19 @@ async def handle_compress(msg: dict):
     chat_id = msg["chat"]["id"]
     reply = msg.get("reply_to_message")
     text = msg.get("text", "")
-    new_name = re.sub(r'(?i)^/rename', '', text).strip()
+    rest = re.sub(r'(?i)^/rename', '', text).strip()
+
+    # /rename NewName.ext [watermark text] — first token is filename,
+    # baki shob (thakle) watermark text hishebe treat hobe
+    rest_parts = rest.split(None, 1)
+    new_name = rest_parts[0] if rest_parts else ""
+    wm_text = rest_parts[1].strip() if len(rest_parts) > 1 else ""
 
     if not reply:
-        await send_msg(chat_id, "❌ Kono file (document/video/audio/photo) e reply kore likho:\n<code>/rename NewName.ext</code>")
+        await send_msg(chat_id, "❌ Kono file (document/video/audio/photo) e reply kore likho:\n<code>/rename NewName.ext [watermark text]</code>")
         return
     if not new_name:
-        await send_msg(chat_id, "❌ Notun name dao:\n<code>/rename NewName.ext</code>")
+        await send_msg(chat_id, "❌ Notun name dao:\n<code>/rename NewName.ext [watermark text]</code>")
         return
     # Telegram filenames don't allow these - strip to be safe
     new_name = re.sub(r'[\\/:*?"<>|]', '_', new_name)
@@ -4068,13 +4074,27 @@ async def handle_compress(msg: dict):
                 await send_msg(chat_id, msg_text)
             return
 
+    watermarked = False
+    if wm_text and mime == "application/pdf":
+        if status_id:
+            await edit_msg(chat_id, status_id, f"🖋️ Watermark apply hocche: {wm_text}...")
+        try:
+            file_bytes = add_watermark_to_pdf(file_bytes, wm_text)
+            watermarked = True
+        except Exception as e:
+            logger.warning(f"[rename] watermark failed: {e}")
+
     if status_id:
         note = " (compress kora hoyeche, image quality kichuta kome geche)" if compressed else ""
+        note += f" | watermark: {wm_text}" if watermarked else ""
         await edit_msg(chat_id, status_id, f"📤 '{new_name}' name e upload hocche...{note}")
 
+    caption = f"✅ Renamed: {new_name}" + (" (compressed)" if compressed else "")
+    if watermarked:
+        caption += f"\n🖋️ Watermark: {wm_text}"
     result = await send_document(
         chat_id, file_bytes, new_name,
-        caption=f"✅ Renamed: {new_name}" + (" (compressed)" if compressed else ""),
+        caption=caption,
         mime_type=mime,
         reply_to_message_id=msg.get("message_id")
     )
