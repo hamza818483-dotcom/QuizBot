@@ -1815,17 +1815,28 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
         writer = PdfWriter()
 
         for page in reader.pages:
-            packet = _io.BytesIO()
-            c = canvas.Canvas(packet, pagesize=(float(page.mediabox.width), float(page.mediabox.height)))
-            c.setFont("Helvetica-Bold", 60)
-            c.setFillColor(Color(0, 0, 0, alpha=0.10))
             page_width = float(page.mediabox.width)
             page_height = float(page.mediabox.height)
+            packet = _io.BytesIO()
+            c = canvas.Canvas(packet, pagesize=(page_width, page_height))
+
+            # Center diagonal watermark (bigger, scales a bit with page size)
+            center_font_size = max(60, min(page_width, page_height) * 0.12)
+            c.setFont("Helvetica-Bold", center_font_size)
+            c.setFillColor(Color(0, 0, 0, alpha=0.10))
             c.saveState()
             c.translate(page_width / 2, page_height / 2)
             c.rotate(45)
             c.drawCentredString(0, 0, watermark_text)
             c.restoreState()
+
+            # Small "ATLAS" tag, top-right corner, scales with page size
+            corner_font_size = max(8, min(page_width, page_height) * 0.018)
+            c.setFont("Helvetica-Bold", corner_font_size)
+            c.setFillColor(Color(0, 0, 0, alpha=0.35))
+            margin = min(page_width, page_height) * 0.03
+            c.drawRightString(page_width - margin, page_height - margin - corner_font_size, "ATLAS")
+
             c.save()
             packet.seek(0)
             overlay = PdfReader(packet)
