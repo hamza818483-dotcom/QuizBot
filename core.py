@@ -1825,7 +1825,7 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
             with open(bold_path, "r") as f:
                 font_bytes = _b64_wm.b64decode(f.read())
             layout = _PILImageFont.Layout.RAQM if _PILFeatures.check("raqm") else _PILImageFont.Layout.BASIC
-            img = _PILImage.new("RGBA", (px_width, px_height), (191, 15, 15, 255))
+            img = _PILImage.new("RGBA", (px_width, px_height), (255, 0, 0, 255))
             draw = _PILImageDraw.Draw(img)
             font_size = int(px_height * 0.55)
             font = _PILImageFont.truetype(_io.BytesIO(font_bytes), font_size, layout_engine=layout)
