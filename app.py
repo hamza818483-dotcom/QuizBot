@@ -6614,9 +6614,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
                 doc_r = await send_document(
                     channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
-                    caption=f"📖 Practice Sheet (Style 1)\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 ATLAS APP",
-                    message_thread_id=thread_id,
-                    reply_to_message_id=first_pre_msg_id
+                    caption=f"📖 ATLAS Practice Sheet\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 Visit: Atlascourses.com",
                 )
                 if doc_r and doc_r.get("ok"):
                     doc_msg_id = doc_r.get("result", {}).get("message_id")
@@ -6717,7 +6715,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
             doc_r = await send_document(
                 channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
-                caption=f"📖 Practice Sheet (Style 1)\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 ATLAS APP",
+                caption=f"📖 ATLAS Practice Sheet\n🎯 Topic: {topic}\n📝 মোট MCQ: {total}\n🚀 Visit: Atlascourses.com",
                 message_thread_id=thread_id,
                 reply_to_message_id=pre_msg_id
             )
