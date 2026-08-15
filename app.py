@@ -15704,6 +15704,7 @@ async def handle_autolms_command(msg: dict):
       start=    -> ISO datetime (e.g. 2026-08-15T00:00:00) when the exam
                     becomes accessible; blank = accessible now. No
                     end-time limit is ever set -- access never expires.
+      title=    -> custom exam title; blank = last click-step's label
       free=yes/no -> visible on Free exams tab (default no)
       restrict_solution=yes/no -> hide solutions after submit (default no)
       only_live=yes/no -> only accessible during a live window (default no)
@@ -15780,6 +15781,7 @@ async def handle_autolms_command(msg: dict):
             "<code>marks=</code> — মোট নম্বর, খালি রাখলে ১ নম্বর/প্রশ্ন\n"
             "<code>negative=</code> — ভুল উত্তরে কাটা নম্বর, খালি রাখলে নেই\n"
             "<code>start=</code> — কবে থেকে চালু (যেমন: 2026-08-15T00:00:00), খালি রাখলে এখনই। কোনো শেষ সময়সীমা থাকবে না — আনলিমিটেড চলবে।\n"
+            "<code>title=</code> — Exam-এর নাম নিজে থেকে দাও, খালি রাখলে সবচেয়ে শেষ ক্লিক-স্টেপের নাম ব্যবহার হবে।\n"
             "<code>free=yes/no</code> — Free exam ট্যাবে দেখাবে কিনা (default: no)\n"
             "<code>restrict_solution=yes/no</code> — সাবমিটের পর সমাধান লুকানো (default: no)\n"
             "<code>only_live=yes/no</code> — শুধু লাইভ উইন্ডোতে চলবে কিনা (default: no)\n"
@@ -15843,6 +15845,7 @@ async def handle_autolms_command(msg: dict):
     total_marks = _num("marks")
     negative_mark = _num("negative")
     time_window_start = fields.get("start", "").strip() or None
+    custom_title = fields.get("title", "").strip() or None
     is_visible_on_free = _yn(fields.get("free", ""), False)
     restrict_solution = _yn(fields.get("restrict_solution", ""), False)
     is_only_live = _yn(fields.get("only_live", ""), False)
@@ -15856,7 +15859,7 @@ async def handle_autolms_command(msg: dict):
         await send_msg(chat_id, "❌ CHORCHA_TOKEN সেট করা নেই — আগে login session token env var-এ সেভ করতে হবে।")
         return
 
-    topic = step_lines[-1].split(">")[-1].strip()
+    topic = custom_title or step_lines[-1].split(">")[-1].strip()
     status = await send_msg(chat_id, f"⏳ চর্চা.নেট থেকে '{topic}' স্ক্র্যাপ করা হচ্ছে...")
     status_msg_id = status.get("result", {}).get("message_id") if isinstance(status, dict) else None
 
