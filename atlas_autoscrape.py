@@ -379,6 +379,41 @@ async def _expand_all_ai_explanations(page, per_click_wait_ms: int = 300, max_wa
                 logger.info(f"[/auto] long-wait final attempt resolved all remaining AI ব্যাখ্যা")
 
 
+async def _click_eye_icon_reveal(page, progress_cb=None, run_no: int = 1, run_total: int = 1):
+    """
+    কিছু chorcha.net পেজে (যেমন /read/... রিভিউ পেজ) সব প্রশ্নের উত্তর/ব্যাখ্যা
+    সেকশন page-level "eye" টগল বাটন (data-event="eye_icon_review") ক্লিক না
+    করা পর্যন্ত DOM-এ style="display: none;" অবস্থায় লুকানো থাকে -- prefix
+    টা page-wide, প্রতিটা MCQ card-এর ভেতরের আলাদা "ব্যাখ্যা" বাটনের থেকে
+    সম্পূর্ণ ভিন্ন লেয়ার। এটা ক্লিক না করলে _expand_all_ai_explanations
+    কোনো ব্যাখ্যা বাটনই খুঁজে পাবে না কারণ সেগুলো hidden wrapper-এর ভেতরে।
+
+    বাটনটা ঐচ্ছিক (সব পেজে থাকে না), তাই না পাওয়া গেলে চুপচাপ skip করে।
+    """
+    try:
+        eye_btn = page.locator('button[data-event="eye_icon_review"]')
+        count = await eye_btn.count()
+    except Exception:
+        return
+    if count == 0:
+        return  # এই পেজে eye-toggle নেই, স্বাভাবিক -- আগে থেকেই visible হতে পারে
+
+    try:
+        btn = eye_btn.first
+        await btn.scroll_into_view_if_needed(timeout=5000)
+        await btn.click(timeout=5000)
+        # ক্লিকের পর reveal হওয়া হিডেন সেকশনগুলো DOM-এ বসতে সামান্য সময় লাগে
+        await page.wait_for_timeout(600)
+        if progress_cb:
+            try:
+                await progress_cb(0, 0, f"[run {run_no}/{run_total}] eye আইকন ক্লিক করে উত্তর/ব্যাখ্যা reveal করা হলো")
+            except Exception:
+                pass
+        logger.info("[/auto] eye_icon_review button clicked -- answers/explanations revealed")
+    except Exception as e:
+        logger.warning(f"[/auto] eye_icon_review click failed (non-fatal, continuing): {e}")
+
+
 async def _wait_for_mcq_count_stable(page, progress_cb=None, run_no=1, run_total=1, poll_ms: int = 1000, max_wait_ms: int = 240000):
     """
     Some pages (e.g. প্রশ্নব্যাংক browse) lazy-load MCQ cards only as the
@@ -1042,6 +1077,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
     # Wait for MCQ cards to finish loading (slow pages keep adding cards
     # after navigation "settles"), then expand AI ব্যাখ্যা before grabbing HTML.
     await _wait_for_mcq_count_stable(page, progress_cb=progress_cb, run_no=run_no, run_total=run_total)
+    await _click_eye_icon_reveal(page, progress_cb=progress_cb, run_no=run_no, run_total=run_total)
     _diag_card_selector = "div.border.rounded-xl"
     try:
         pre_expand_count = await page.locator(_diag_card_selector).count()
