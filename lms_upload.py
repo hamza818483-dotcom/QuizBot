@@ -54,6 +54,7 @@ async def upload_mcqs_to_lms(
     total_marks: float | None = None,
     negative_mark_per_question: float | None = None,
     instructions: str | None = None,
+    time_window_start: str | None = None,
     is_visible_on_free: bool = False,
     is_published: bool = True,
     restrict_solution: bool = False,
@@ -119,6 +120,10 @@ async def upload_mcqs_to_lms(
             exam_payload["negative_mark_per_question"] = negative_mark_per_question
         if instructions:
             exam_payload["instructions"] = instructions
+        if time_window_start:
+            exam_payload["time_window_start"] = time_window_start
+            # Readymade exams: no end-time limit once a start time is set --
+            # leave time_window_end unset (NULL) so access never expires.
         if course_id:
             exam_payload["course_id"] = course_id
 

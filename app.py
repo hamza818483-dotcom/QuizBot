@@ -15556,6 +15556,10 @@ async def handle_autolms_command(msg: dict):
       duration=       -> minutes; blank = auto (1 min/question)
       marks=          -> total marks; blank = auto (1 mark/question)
       negative=       -> negative marks per wrong answer; blank = none
+      start=          -> ISO datetime (e.g. 2026-08-15T00:00:00) when the
+                          exam becomes accessible; blank = accessible now.
+                          Readymade exams have NO end-time limit once a
+                          start is set -- access never expires.
       free=yes/no     -> visible on Free exams tab (default no)
       published=yes/no -> visible to students immediately (default yes)
       restrict_solution=yes/no -> hide solutions after submit (default no)
@@ -15603,6 +15607,7 @@ async def handle_autolms_command(msg: dict):
             "<code>duration=</code> — মিনিট, খালি রাখলে ১ মিনিট/প্রশ্ন\n"
             "<code>marks=</code> — মোট নম্বর, খালি রাখলে ১ নম্বর/প্রশ্ন\n"
             "<code>negative=</code> — ভুল উত্তরে কাটা নম্বর\n"
+            "<code>start=</code> — কবে থেকে exam-টা চালু হবে (ISO ফরম্যাট, যেমন 2026-08-15T00:00:00), খালি রাখলে এখনই চালু। Readymade exam-এর কোনো শেষ সময়সীমা থাকবে না — একবার চালু হলে আনলিমিটেড চলবে।\n"
             "<code>free=yes/no</code> — Free exam ট্যাবে দেখাবে কিনা (default: no)\n"
             "<code>published=yes/no</code> — এখনই ছাত্রদের জন্য visible কিনা (default: yes)\n"
             "<code>restrict_solution=yes/no</code> — সাবমিটের পর সমাধান লুকানো (default: no)\n"
@@ -15648,6 +15653,7 @@ async def handle_autolms_command(msg: dict):
     duration_minutes = _num("duration")
     total_marks = _num("marks")
     negative_mark = _num("negative")
+    time_window_start = fields.get("start", "").strip() or None
     is_visible_on_free = _yn(fields.get("free", ""), False)
     is_published = _yn(fields.get("published", ""), True)
     restrict_solution = _yn(fields.get("restrict_solution", ""), False)
@@ -15730,6 +15736,7 @@ async def handle_autolms_command(msg: dict):
             duration_minutes=duration_minutes,
             total_marks=total_marks,
             negative_mark_per_question=negative_mark,
+            time_window_start=time_window_start,
             is_visible_on_free=is_visible_on_free,
             is_published=is_published,
             restrict_solution=restrict_solution,
