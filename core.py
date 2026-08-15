@@ -1276,18 +1276,19 @@ async def auto_link_map_get_all() -> dict:
 
 async def db_get_settings() -> dict:
     try:
-        r = await sb_exec(lambda: sb.table("quiz_settings").select("tag,exp_footer,watermark").eq("id", 1).execute())
+        r = await sb_exec(lambda: sb.table("quiz_settings").select("tag,exp_footer,watermark,footer_text").eq("id", 1).execute())
         if r.data:
             return r.data[0]
     except Exception as e:
-        # watermark column ekhono Supabase e add kora hoy nai (migration pending) —
-        # purono columns diye retry kore crash bachai, watermark khali thakbe
-        if "watermark" in str(e):
+        # watermark/footer_text column ekhono Supabase e add kora hoy nai (migration pending) —
+        # purono columns diye retry kore crash bachai, missing field khali thakbe
+        if "watermark" in str(e) or "footer_text" in str(e):
             try:
                 r = await sb_exec(lambda: sb.table("quiz_settings").select("tag,exp_footer").eq("id", 1).execute())
                 if r.data:
                     row = r.data[0]
-                    row["watermark"] = ""
+                    row.setdefault("watermark", "")
+                    row.setdefault("footer_text", "")
                     return row
             except Exception as e2:
                 logger.error(f"[DB] get_settings retry error: {e2}")
@@ -1295,18 +1296,18 @@ async def db_get_settings() -> dict:
             logger.error(f"[DB] get_settings error: {e}")
     try:
         await _ensure_d1_table("quiz_settings",
-            "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT, watermark TEXT)")
-        rows = await d1_select("SELECT tag, exp_footer, watermark FROM quiz_settings WHERE id=1")
+            "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT, watermark TEXT, footer_text TEXT)")
+        rows = await d1_select("SELECT tag, exp_footer, watermark, footer_text FROM quiz_settings WHERE id=1")
         if rows:
             return rows[0]
     except Exception as e:
         logger.warning(f"[D1] get_settings fallback warn: {e}")
-    return {"tag": "", "exp_footer": "", "watermark": ""}
+    return {"tag": "", "exp_footer": "", "watermark": "", "footer_text": ""}
 
 async def db_save_settings_field(field: str, value: str):
     try:
         await _ensure_d1_table("quiz_settings",
-            "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT, watermark TEXT)")
+            "CREATE TABLE IF NOT EXISTS quiz_settings (id INTEGER PRIMARY KEY, tag TEXT, exp_footer TEXT, watermark TEXT, footer_text TEXT)")
         await d1_run(
             f"INSERT INTO quiz_settings (id, {field}) VALUES (1, ?1) "
             f"ON CONFLICT(id) DO UPDATE SET {field}=excluded.{field}",
@@ -1321,19 +1322,19 @@ async def db_save_settings(settings: dict):
     try:
         await sb_exec(lambda: sb.table("quiz_settings").upsert({"id": 1, **settings}).execute())
     except Exception as e:
-        # watermark column ekhono Supabase e add kora hoy nai (migration pending) —
-        # oi field bad diye baki shob field diye retry koro, jate watermark chara
-        # baki settings (tag, exp_footer etc) silently lost na hoy. D1 mirror e
-        # watermark thik e save hobe (D1 table te column already ache).
-        if "watermark" in str(e) and "watermark" in settings:
+        # watermark/footer_text column ekhono Supabase e add kora hoy nai (migration pending) —
+        # oi field bad diye baki shob field diye retry koro, jate baki settings
+        # (tag, exp_footer etc) silently lost na hoy. D1 mirror e thik e save hobe.
+        missing_fields = [f for f in ("watermark", "footer_text") if f in str(e) and f in settings]
+        if missing_fields:
             try:
-                fallback = {k: v for k, v in settings.items() if k != "watermark"}
+                fallback = {k: v for k, v in settings.items() if k not in missing_fields}
                 if fallback:
                     await sb_exec(lambda: sb.table("quiz_settings").upsert({"id": 1, **fallback}).execute())
-                logger.warning("[DB] save_settings: 'watermark' column missing in Supabase schema — "
-                               "saved other fields, watermark mirrored to D1 only until migration runs")
+                logger.warning(f"[DB] save_settings: {missing_fields} column missing in Supabase schema — "
+                               "saved other fields, mirrored to D1 only until migration runs")
             except Exception as e2:
-                logger.error(f"[DB] save_settings retry (without watermark) error: {e2}")
+                logger.error(f"[DB] save_settings retry (without missing fields) error: {e2}")
         else:
             logger.error(f"[DB] save_settings error: {e}")
     for field, value in settings.items():
@@ -1818,9 +1819,62 @@ def source_msg_id(cache: dict):
 # ============================================================
 # WATERMARK (ported from AtlasMasterBot's services.py)
 # ============================================================
-def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
+# ============================================================
+# FOOTER TEXT (active + history) — /wm command diye set/switch hoy
+# ============================================================
+_ACTIVE_FOOTER_TEXT_CACHE: dict = {}
+
+async def footer_text_get_active() -> str:
+    """Active footer text return kore (cache prefer, na thakle DB theke load)."""
+    if _ACTIVE_FOOTER_TEXT_CACHE.get("text"):
+        return _ACTIVE_FOOTER_TEXT_CACHE["text"]
+    settings = await db_get_settings()
+    txt = settings.get("footer_text") or "সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস(Whatsapp:01999681290)"
+    _ACTIVE_FOOTER_TEXT_CACHE["text"] = txt
+    return txt
+
+async def footer_text_set_active(text: str):
+    """Notun footer text active kore: settings e save + history e add + cache update."""
+    _ACTIVE_FOOTER_TEXT_CACHE["text"] = text
+    settings = await db_get_settings()
+    settings["footer_text"] = text
+    await db_save_settings(settings)
+    await footer_history_add(text)
+
+async def footer_history_add(text: str):
+    """Footer history table e text add kore (duplicate hole just updated_at bump hoy)."""
+    try:
+        await _ensure_d1_table(
+            "footer_history",
+            "CREATE TABLE IF NOT EXISTS footer_history (text TEXT PRIMARY KEY, used_at INTEGER)"
+        )
+        import time as _time
+        await d1_run(
+            "INSERT INTO footer_history (text, used_at) VALUES (?1, ?2) "
+            "ON CONFLICT(text) DO UPDATE SET used_at=excluded.used_at",
+            [text, int(_time.time())]
+        )
+    except Exception as e:
+        logger.warning(f"[FooterHistory] add warn: {e}")
+
+async def footer_history_list(limit: int = 10) -> list:
+    """Sob theke recent use kora footer text-gulor list dey (most recent first)."""
+    try:
+        await _ensure_d1_table(
+            "footer_history",
+            "CREATE TABLE IF NOT EXISTS footer_history (text TEXT PRIMARY KEY, used_at INTEGER)"
+        )
+        rows = await d1_select(f"SELECT text FROM footer_history ORDER BY used_at DESC LIMIT {int(limit)}")
+        return [r["text"] for r in rows]
+    except Exception as e:
+        logger.warning(f"[FooterHistory] list warn: {e}")
+        return []
+
+
+def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str = None) -> bytes:
     """Add a diagonal, semi-transparent text watermark to every page of a PDF,
-    plus a small top-right 'ATLAS' tag and a red-box white-text footer."""
+    plus a small top-right 'ATLAS' tag and a red-box white-text footer.
+    footer_text: jodi None hoy, active/default footer text (settings theke) use hoy."""
     try:
         import io as _io
         import base64 as _b64_wm
@@ -1831,7 +1885,9 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
         # Footer text needs proper Bengali conjunct shaping (raqm) — reportlab's
         # native text drawing can't do this, so render it as a PIL image instead
         # (same technique used for slide generation elsewhere in this codebase).
-        footer_text = "সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস(Whatsapp:01999681290)"
+        if not footer_text:
+            footer_text = _ACTIVE_FOOTER_TEXT_CACHE.get("text") or \
+                "সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস(Whatsapp:01999681290)"
 
         def _render_footer_image(px_width: int, px_height: int) -> bytes:
             from PIL import Image as _PILImage, ImageDraw as _PILImageDraw, ImageFont as _PILImageFont, features as _PILFeatures

@@ -6856,7 +6856,10 @@ async def handle_premium_pdf_start(msg: dict, cache_id: str):
 
 
 async def handle_wm_command(msg: dict):
-    """/wm (watermark text) — apply watermark to replied PDF or set default"""
+    """/wm (footer text) — reply kore je PDF-e dile setar footer set hoy,
+    r sathe sathe eta default/active footer hoye jay (porborti shob PDF-e apply hobe).
+    Reply chara dile shudhu active footer set hoy + history theke pick korar
+    jonno inline button list dekhay."""
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     text = msg.get("text", "").strip()
@@ -6864,20 +6867,29 @@ async def handle_wm_command(msg: dict):
     reply = msg.get("reply_to_message")
 
     if not wm_text:
+        history = await footer_history_list(10)
+        kb = None
+        if history:
+            kb = {"inline_keyboard": [
+                [{"text": (t[:40] + "…") if len(t) > 40 else t, "callback_data": f"fwm_{i}"}]
+                for i, t in enumerate(history)
+            ]}
+            _FOOTER_HISTORY_CACHE[chat_id] = history
         await send_msg(chat_id,
             "📌 Usage:\n"
-            "<code>/wm YourName</code> — reply করো যেকোনো PDF এ\n"
-            "অথবা default watermark set করতে reply ছাড়াই দাও",
-            parse_mode="HTML"
+            "<code>/wm Your Footer Text</code> — PDF-e reply করে দিলে সেটার footer set হবে "
+            "এবং default/active footer ও হয়ে যাবে\n"
+            "অথবা reply ছাড়া দিলে শুধু active footer set হবে\n\n"
+            "নিচে আগে ব্যবহৃত footer গুলো থেকে click করে যেকোনোটা আবার active করতে পারো 👇",
+            parse_mode="HTML",
+            reply_markup=kb
         )
         return
 
-    # Default watermark save করো
-    settings = await db_get_settings()
-    settings["watermark"] = wm_text
-    await db_save_settings(settings)
+    # Notun footer text-ke active kore + history-te save kore
+    await footer_text_set_active(wm_text)
 
-    # Reply PDF থাকলে সেটায় apply করো
+    # Reply PDF thakle sheta-y sathe sathe footer apply kore pathiye dao
     if reply and (reply.get("document") or reply.get("photo")):
         file_id = None
         orig_filename = None
@@ -6885,31 +6897,36 @@ async def handle_wm_command(msg: dict):
             file_id = reply["document"]["file_id"]
             orig_filename = reply["document"].get("file_name")
         if file_id:
-            await send_msg(chat_id, f"⏳ Watermark apply হচ্ছে: <b>{wm_text}</b>", parse_mode="HTML")
-            _spawn_task(_apply_watermark_to_pdf(chat_id, file_id, wm_text, reply["message_id"], orig_filename))
+            await send_msg(chat_id, f"⏳ Footer apply হচ্ছে: <b>{wm_text}</b>", parse_mode="HTML")
+            _spawn_task(_apply_watermark_to_pdf(chat_id, file_id, wm_text, reply["message_id"], orig_filename, footer_text=wm_text))
             return
 
     await send_msg(chat_id,
-        f"✅ Default watermark set: <b>{wm_text}</b>\n\n"
-        f"এখন থেকে সব PDF এ এই watermark apply হবে।\n"
-        f"যেকোনো পুরনো PDF এ reply করে <code>/wm {wm_text}</code> দিলে সেটায় apply হবে।",
+        f"✅ Active footer set হলো: <b>{wm_text}</b>\n\n"
+        f"এখন থেকে সব নতুন PDF-এ এই footer বসবে।\n"
+        f"পুরনো PDF-এ reply করে <code>/wm {wm_text}</code> দিলে সেটাতেও বসবে।",
         parse_mode="HTML"
     )
 
 
-async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str, message_id: int = None, orig_filename: str = None):
+# chat_id -> most recently shown footer history list (fwm_{idx} callback resolve korar jonno)
+_FOOTER_HISTORY_CACHE: dict = {}
+
+
+async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str, message_id: int = None,
+                                    orig_filename: str = None, footer_text: str = None):
     """Download PDF, apply watermark using existing add_watermark_to_pdf, resend
     with the ORIGINAL filename preserved (not a generic 'watermarked.pdf') so the
     user still recognizes which PDF this was."""
     try:
         pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
-        wm_bytes = add_watermark_to_pdf(pdf_bytes, wm_text)
+        wm_bytes = add_watermark_to_pdf(pdf_bytes, wm_text, footer_text=footer_text)
         out_name = orig_filename or "watermarked.pdf"
         if not out_name.lower().endswith(".pdf"):
             out_name += ".pdf"
         await send_document(chat_id, wm_bytes,
             out_name,
-            caption=f"✅ Watermark applied: <b>{wm_text}</b>",
+            caption=f"✅ Footer applied: <b>{footer_text or wm_text}</b>",
             mime_type="application/pdf"
         )
     except Exception as e:
@@ -17185,6 +17202,14 @@ async def handle_callback(query: dict):
     uname = user.get("username") or user.get("first_name", "User")
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
+        if data.startswith("fwm_"):
+            idx = int(data[len("fwm_"):])
+            history = _FOOTER_HISTORY_CACHE.get(chat_id) or await footer_history_list(10)
+            if 0 <= idx < len(history):
+                chosen = history[idx]
+                await footer_text_set_active(chosen)
+                await send_msg(chat_id, f"✅ Active footer set হলো: <b>{chosen}</b>", parse_mode="HTML")
+            return
         if data.startswith("jobcancel_"):
             rest = data[len("jobcancel_"):]
             # নতুন ফরম্যাট: jobcancel_{chat_id}_{job_id}  (per-job button)
