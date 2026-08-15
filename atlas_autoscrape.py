@@ -890,6 +890,42 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                     element_handle = None
 
             if locator is None and element_handle is None and len(sub) >= 2:
+                # Fallback: filter/tag-chip buttons often render as
+                # "লেবেল<count>" combined in one clickable element (e.g.
+                # "গদ্য 1526" as seen in a subject-filter bar) -- an exact
+                # match on the bare label never succeeds because the
+                # element's real text includes a trailing number. Try a
+                # regex match: label followed by optional whitespace and
+                # a number, anchored at the start of the element's text.
+                try:
+                    element_handle = await page.evaluate_handle(
+                        """(target) => {
+                            const norm = s => (s || '').normalize('NFC').replace(/\\s+/g, ' ').trim();
+                            const wanted = norm(target);
+                            const re = new RegExp('^' + wanted.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '\\\\s*[0-9০-৯]*$');
+                            const all = Array.from(document.querySelectorAll('button, a, [data-event], [role="button"], div, span, li'));
+                            let best = null, bestLen = Infinity;
+                            for (const el of all) {
+                                if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+                                const txt = norm(el.textContent);
+                                if (re.test(txt) && txt.length < bestLen) {
+                                    best = el; bestLen = txt.length;
+                                }
+                            }
+                            return best;
+                        }""",
+                        sub,
+                    )
+                    is_null = await page.evaluate("(h) => h === null", element_handle)
+                    if is_null:
+                        element_handle = None
+                    else:
+                        match_method = "label-plus-count-chip"
+                        logger.info(f"[/auto] step {i}/{total} sub={sub!r}: matched via label+count chip pattern")
+                except Exception:
+                    element_handle = None
+
+            if locator is None and element_handle is None and len(sub) >= 2:
                 # Fallback: partial/keyword match. Only used as a last
                 # resort when nothing matched exactly -- picks the
                 # SMALLEST element (by text length) whose normalized text
