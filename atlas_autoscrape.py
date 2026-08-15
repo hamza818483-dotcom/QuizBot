@@ -724,6 +724,31 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                             f"ধাপ {i}/{total}: link \"{_url_part}\"-এ যাওয়া যায়নি।"
                         )
 
+            # Permanent from-page+label -> target-URL cache, populated
+            # automatically after any successful match (see below). Check
+            # this BEFORE any DOM matching -- if a previous run (even
+            # before a bot restart) already resolved this exact button on
+            # this exact page, skip straight to navigating there instead
+            # of re-running the whole exact/JS/partial/fuzzy chain.
+            _cache_from_url = page.url
+            try:
+                from core import auto_click_cache_get
+                _cached_target = await auto_click_cache_get(_cache_from_url, sub)
+            except Exception:
+                _cached_target = None
+            if _cached_target:
+                try:
+                    await page.goto(_cached_target, wait_until="networkidle", timeout=30000)
+                    await page.wait_for_timeout(300)
+                    processed_subs.append(sub)
+                    logger.info(f"[/auto] step {i}/{total} sub={sub!r}: matched via click-cache -> {_cached_target}")
+                    continue
+                except Exception as e:
+                    logger.warning(f"[/auto] click-cache goto failed for {sub!r}, falling back to normal matching: {e}")
+                    # fall through to normal matching below -- cache entry
+                    # might be stale (page structure changed); don't trust
+                    # it blindly if navigating there actually fails.
+
             match_method = None
             locator = page.get_by_text(sub, exact=True).first
             try:
@@ -997,6 +1022,16 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 await element_handle.as_element().click(timeout=CLICK_TIMEOUT_MS)
             await page.wait_for_timeout(400)  # small gap between multi-selects
             processed_subs.append(sub)
+
+            # Save this successful (from-page, label) -> target-url match
+            # to the permanent click-cache so future runs skip matching
+            # entirely for this exact button. Best-effort -- never let a
+            # cache-write failure interrupt the actual scrape.
+            try:
+                from core import auto_click_cache_set
+                await auto_click_cache_set(_cache_from_url, sub, page.url)
+            except Exception as e:
+                logger.warning(f"[/auto] auto_click_cache_set failed for {sub!r}: {e}")
 
         await page.wait_for_timeout(SETTLE_WAIT_MS)
         try:

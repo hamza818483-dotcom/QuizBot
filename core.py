@@ -1274,6 +1274,39 @@ async def auto_link_map_get_all() -> dict:
     rows = await d1_select("SELECT label, url FROM auto_link_map", [])
     return {r["label"]: r["url"] for r in rows}
 
+
+async def auto_click_cache_set(from_url: str, label: str, target_url: str):
+    """Permanent (survives restart) cache of "clicking button <label> on
+    page <from_url> lands on <target_url>". Populated automatically after
+    ANY successful match (exact/JS-normalized/partial/fuzzy) so a repeat
+    click on the same button, from the same page, on a LATER run/restart
+    skips all matching entirely and goes straight there."""
+    await _ensure_d1_table(
+        "auto_click_cache",
+        "CREATE TABLE IF NOT EXISTS auto_click_cache "
+        "(cache_key TEXT PRIMARY KEY, target_url TEXT NOT NULL, updated_at INTEGER)",
+    )
+    import time as _t
+    cache_key = f"{from_url}|||{label}"
+    await d1_run(
+        "INSERT INTO auto_click_cache (cache_key, target_url, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(cache_key) DO UPDATE SET target_url=excluded.target_url, updated_at=excluded.updated_at",
+        [cache_key, target_url, int(_t.time())],
+    )
+
+
+async def auto_click_cache_get(from_url: str, label: str) -> str | None:
+    await _ensure_d1_table(
+        "auto_click_cache",
+        "CREATE TABLE IF NOT EXISTS auto_click_cache "
+        "(cache_key TEXT PRIMARY KEY, target_url TEXT NOT NULL, updated_at INTEGER)",
+    )
+    cache_key = f"{from_url}|||{label}"
+    rows = await d1_select("SELECT target_url FROM auto_click_cache WHERE cache_key = ?", [cache_key])
+    if rows:
+        return rows[0].get("target_url")
+    return None
+
 async def db_get_settings() -> dict:
     try:
         r = await sb_exec(lambda: sb.table("quiz_settings").select("tag,exp_footer,watermark,footer_text").eq("id", 1).execute())
