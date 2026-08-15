@@ -15530,6 +15530,166 @@ async def handle_collect_command(msg: dict):
         return
 
 
+async def handle_autolms_command(msg: dict):
+    """
+    /autolms
+    বাংলা
+    প্রথম পত্র
+    অধ্যায় ১
+    টপিক ১
+    subject=বাংলা | chapter=অধ্যায় ১ | course=
+
+    Same chorcha.net click-sequence scrape as /auto (single run only --
+    no "---" multi-run support here, keep it simple), but instead of
+    sending a CSV file back, uploads the extracted MCQs directly into
+    the LMS (atlascourses.com) Supabase as a new Readymade exam. The
+    LMS website reads straight from that Supabase project, so once the
+    insert succeeds the exam is already live on the site -- no separate
+    "upload to website" step.
+
+    Last line must be `subject=... | chapter=... | course=...` (course
+    is optional -- leave blank for a global Readymade exam not tied to
+    one course). Exam title = the LAST click-step label (deepest topic
+    name), matching how /auto derives its `topic` for the CSV filename.
+    """
+    from atlas_autoscrape import AutoScrapeError, run_auto_click_sequence
+    from atlas_mhtml import parse_mhtml_to_mcqs
+    from lms_upload import upload_mcqs_to_lms, LmsUploadError
+
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    clear_cancel(chat_id)
+    new_job_id(chat_id)
+    set_active_job(chat_id, "/autolms (chorcha -> LMS)")
+
+    raw_lines = [l.rstrip() for l in text.split("\n")[1:] if l.strip() != ""]
+
+    meta_line = None
+    step_lines = []
+    for l in raw_lines:
+        if l.strip().lower().startswith("subject="):
+            meta_line = l.strip()
+        else:
+            step_lines.append(l)
+
+    if not step_lines or not meta_line:
+        await send_msg(chat_id,
+            "❌ Format:\n\n"
+            "<code>/autolms\n"
+            "বাংলা\n"
+            "প্রথম পত্র\n"
+            "অধ্যায় ১\n"
+            "টপিক ১\n"
+            "subject=বাংলা | chapter=অধ্যায় ১ | course=</code>\n\n"
+            "📌 প্রথম কয়েক লাইনে chorcha.net-এ ক্লিক করার button/link নাম, ক্রমানুসারে (একদম /auto-এর মতো)।\n"
+            "📌 শেষ লাইনে অবশ্যই <code>subject=... | chapter=... | course=...</code> দিতে হবে — এই তিনটা LMS-এ exam-এর সাথে সেভ হবে। "
+            "<code>course=</code> খালি রাখলে exam-টা কোনো নির্দিষ্ট কোর্সে যুক্ত না হয়ে সবার জন্য Readymade-এ থাকবে।\n"
+            "📌 Exam-এর title হবে সবচেয়ে শেষ ক্লিক-স্টেপের নাম (সবচেয়ে গভীর টপিক)।\n"
+            "📌 একই নামে exam আগে থেকে থাকলে নতুনটার পাশে <code>(New)</code> যোগ হবে, পুরনোটা অক্ষত থাকবে।",
+            parse_mode="HTML")
+        return
+
+    subject = chapter = course_id = ""
+    for part in meta_line.split("|"):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        k, v = k.strip().lower(), v.strip()
+        if k == "subject":
+            subject = v
+        elif k == "chapter":
+            chapter = v
+        elif k == "course":
+            course_id = v
+
+    if not subject:
+        await send_msg(chat_id, "❌ subject= খালি রাখা যাবে না।")
+        return
+
+    if not os.environ.get("CHORCHA_TOKEN", "").strip():
+        await send_msg(chat_id, "❌ CHORCHA_TOKEN সেট করা নেই — আগে login session token env var-এ সেভ করতে হবে।")
+        return
+
+    topic = step_lines[-1].split(">")[-1].strip()
+    status = await send_msg(chat_id, f"⏳ চর্চা.নেট থেকে '{topic}' স্ক্র্যাপ করা হচ্ছে...")
+    status_msg_id = status.get("result", {}).get("message_id") if isinstance(status, dict) else None
+
+    async def _progress(step_index, total_steps, label):
+        if status_msg_id:
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                    f"⏳ ধাপ {step_index}/{total_steps}: {label}")
+            except Exception:
+                pass
+
+    try:
+        html_results = await asyncio.wait_for(
+            run_auto_click_sequence(step_lines, progress_cb=_progress),
+            timeout=2700,
+        )
+    except asyncio.TimeoutError:
+        await send_msg(chat_id, "❌ স্ক্র্যাপিং সময়সীমা পার হয়ে গেছে, বন্ধ করে দেওয়া হলো।")
+        return
+    except AutoScrapeError as e:
+        await send_msg(chat_id, f"❌ স্ক্র্যাপ ব্যর্থ: {e}")
+        return
+    except Exception as e:
+        logger.error(f"[/autolms] scrape failed: {e}")
+        await send_msg(chat_id, f"❌ অপ্রত্যাশিত ত্রুটি: {e}")
+        return
+
+    if not html_results:
+        await send_msg(chat_id, "❌ কোনো পেজ পাওয়া যায়নি।")
+        return
+    html_bytes = html_results[0]
+
+    if status_msg_id:
+        try:
+            await edit_msg(chat_id, status_msg_id, "📄 HTML থেকে MCQ বের করা হচ্ছে...")
+        except Exception:
+            pass
+
+    try:
+        parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, html_bytes, "autolms-scrape.html")
+        results = parsed["results"]
+    except Exception as e:
+        logger.error(f"[/autolms] parse failed: {e}")
+        await send_msg(chat_id, f"❌ MCQ extract ব্যর্থ হয়েছে: {e}")
+        return
+
+    if not results:
+        await send_msg(chat_id, f"❌ '{topic}' পেজে কোনো MCQ পাওয়া যায়নি।")
+        return
+
+    if status_msg_id:
+        try:
+            await edit_msg(chat_id, status_msg_id, f"📤 LMS-এ আপলোড করা হচ্ছে... ({len(results)}টা MCQ)")
+        except Exception:
+            pass
+
+    try:
+        upload_result = await upload_mcqs_to_lms(
+            results=results,
+            title=topic,
+            subject=subject,
+            chapter=chapter,
+            course_id=course_id or None,
+        )
+    except LmsUploadError as e:
+        await send_msg(chat_id, f"❌ LMS আপলোড ব্যর্থ: {e}")
+        return
+    except Exception as e:
+        logger.error(f"[/autolms] upload failed: {e}")
+        await send_msg(chat_id, f"❌ অপ্রত্যাশিত আপলোড ত্রুটি: {e}")
+        return
+
+    await send_msg(chat_id,
+        f"✅ Exam তৈরি হয়েছে: {upload_result['title']}\n"
+        f"📝 মোট MCQ: {upload_result['count']}\n"
+        f"🌐 LMS-এ এখনই দেখা যাবে (atlascourses.com)")
+
+
 async def handle_poll_auto_collect(msg: dict):
     """Auto-collect forwarded polls"""
     poll = msg.get("poll")
@@ -16480,6 +16640,14 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         _spawn_command_task(uid, handle_auto_command(msg))
+    elif text.startswith("/autolms"):
+        # /autolms = same chorcha.net scrape as /auto, but instead of
+        # sending back a CSV, uploads the extracted MCQs directly into
+        # the LMS (atlascourses.com) Supabase as a new Readymade exam.
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        _spawn_command_task(uid, handle_autolms_command(msg))
     elif text.startswith("/pdfm"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
