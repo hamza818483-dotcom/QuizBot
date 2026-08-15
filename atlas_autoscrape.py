@@ -819,6 +819,32 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                     except Exception:
                         locator = None
 
+            # First-attempt-vs-retake label alias: chorcha.net swaps a
+            # button's own label depending on exam state -- e.g. an exam
+            # never attempted before shows "পরীক্ষা দাও", but the SAME
+            # button/position shows "পুনরায় পরীক্ষা দাও" only AFTER at
+            # least one attempt exists. If the user wrote the "পুনরায়"
+            # variant but this run is hitting the exam for the first
+            # time (or vice versa), the exact-text search above
+            # legitimately finds nothing -- the literal label just isn't
+            # on the page. Strip a leading "পুনরায় " and retry once with
+            # the bare label before falling through to the generic
+            # JS/partial fallbacks.
+            if locator is None and sub.startswith("পুনরায় "):
+                alias = sub[len("পুনরায় "):].strip()
+                if alias:
+                    alias_locator = page.get_by_text(alias, exact=True).first
+                    try:
+                        await alias_locator.wait_for(state="visible", timeout=3000)
+                        locator = alias_locator
+                        match_method = f"exact-text (পুনরায়-alias -> {alias!r})"
+                        logger.info(
+                            f"[/auto] step {i}/{total} sub={sub!r}: literal label not found "
+                            f"(likely first-attempt state), matched first-attempt alias {alias!r} instead"
+                        )
+                    except Exception:
+                        locator = None
+
             element_handle = None  # used for the JS-normalized fallback (bypasses locator)
             if locator is None:
                 # Fallback A+B combined, JS-side: Bengali text can be
