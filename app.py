@@ -15537,7 +15537,7 @@ async def handle_autolms_command(msg: dict):
     প্রথম পত্র
     অধ্যায় ১
     টপিক ১
-    subject=বাংলা | chapter=অধ্যায় ১ | course= | category= | duration= | marks= | negative= | free=no | published=yes | restrict_solution=no
+    sub=বাংলা | chap=অধ্যায় ১ | pt= | b/c= | s/sc= | rfc= | marks= | negative= | start= | free=no | restrict_solution=no | only_live=no | no_timer_deduct=no
 
     Same chorcha.net click-sequence scrape as /auto (single run only --
     no "---" multi-run support here, keep it simple), but instead of
@@ -15547,24 +15547,33 @@ async def handle_autolms_command(msg: dict):
     insert succeeds the exam is already live on the site -- no separate
     "upload to website" step.
 
-    Last line is `key=value | key=value | ...` covering (mirrors the
-    Exam Form's Readymade-relevant fields; all optional except subject):
-      subject=       -> Subject + readymade_topic (required)
-      chapter=        -> Chapter + readymade_sub_chapter
-      course=         -> course UUID; blank = global Readymade
-      category=       -> readymade_category (freeform grouping label)
-      duration=       -> minutes; blank = auto (1 min/question)
-      marks=          -> total marks; blank = auto (1 mark/question)
-      negative=       -> negative marks per wrong answer; blank = none
-      start=          -> ISO datetime (e.g. 2026-08-15T00:00:00) when the
-                          exam becomes accessible; blank = accessible now.
-                          Readymade exams have NO end-time limit once a
-                          start is set -- access never expires.
-      free=yes/no     -> visible on Free exams tab (default no)
-      published=yes/no -> visible to students immediately (default yes)
+    Last line is `key=value | key=value | ...` (all short aliases,
+    matching the Exam Form's Readymade fields; all optional except sub):
+      sub=      -> Subject (required)
+      chap=     -> Chapter
+      pt=       -> Parent Topic (readymade_topic)
+      b/c=      -> Board/Category (readymade_category)
+      s/sc=     -> Session/Sub-Chapter (readymade_sub_chapter)
+      rfc=      -> Readymade For Courses -- comma-separated course IDs
+                    (readymade_course_ids); blank = not tied to any course
+      marks=    -> total marks; blank = auto (1 mark/question)
+      negative= -> negative marks per wrong answer; blank = 0 (none)
+      start=    -> ISO datetime (e.g. 2026-08-15T00:00:00) when the exam
+                    becomes accessible; blank = accessible now. No
+                    end-time limit is ever set -- access never expires.
+      free=yes/no -> visible on Free exams tab (default no)
       restrict_solution=yes/no -> hide solutions after submit (default no)
       only_live=yes/no -> only accessible during a live window (default no)
       no_timer_deduct=yes/no -> disable per-second timer deduction (default no)
+
+    Duration is ALWAYS auto-calculated as 35 seconds per MCQ -- not
+    configurable. Exam is always is_readymade=True, is_published=True,
+    exam_type="practice".
+
+    For sub/chap/pt/b/c/s/sc -- if the value you type already exists in
+    the Exam Form's dropdown it's reused as-is; if it's new, it gets
+    added to that dropdown too (exactly like typing a new value in the
+    Exam Form would).
 
     Exam title = the LAST click-step label (deepest topic name), matching
     how /auto derives its `topic` for the CSV filename.
@@ -15584,7 +15593,7 @@ async def handle_autolms_command(msg: dict):
     meta_line = None
     step_lines = []
     for l in raw_lines:
-        if l.strip().lower().startswith("subject="):
+        if re.match(r"^\s*(sub|subject)\s*=", l.strip(), re.IGNORECASE):
             meta_line = l.strip()
         else:
             step_lines.append(l)
@@ -15597,22 +15606,25 @@ async def handle_autolms_command(msg: dict):
             "প্রথম পত্র\n"
             "অধ্যায় ১\n"
             "টপিক ১\n"
-            "subject=বাংলা | chapter=অধ্যায় ১ | course=</code>\n\n"
+            "sub=বাংলা | chap=অধ্যায় ১ | pt= | b/c= | s/sc= | rfc=</code>\n\n"
             "📌 প্রথম কয়েক লাইনে chorcha.net-এ ক্লিক করার button/link নাম, ক্রমানুসারে (একদম /auto-এর মতো)।\n"
-            "📌 শেষ লাইনে <code>key=value</code> গুলো <code>|</code> দিয়ে ভাগ করে দাও — শুধু <code>subject=</code> লাগবেই, বাকিগুলো ঐচ্ছিক:\n\n"
-            "<code>subject=</code> — বিষয় (আবশ্যক)\n"
-            "<code>chapter=</code> — অধ্যায়\n"
-            "<code>course=</code> — course ID, খালি রাখলে সবার জন্য Readymade\n"
-            "<code>category=</code> — Readymade ক্যাটেগরি\n"
-            "<code>duration=</code> — মিনিট, খালি রাখলে ১ মিনিট/প্রশ্ন\n"
+            "📌 শেষ লাইনে <code>key=value</code> গুলো <code>|</code> দিয়ে ভাগ করে দাও — শুধু <code>sub=</code> লাগবেই, বাকিগুলো ঐচ্ছিক:\n\n"
+            "<code>sub=</code> — Subject (আবশ্যক)\n"
+            "<code>chap=</code> — Chapter\n"
+            "<code>pt=</code> — Parent Topic\n"
+            "<code>b/c=</code> — Board/Category\n"
+            "<code>s/sc=</code> — Session/Sub-Chapter\n"
+            "<code>rfc=</code> — Readymade For Courses (একাধিক course ID কমা দিয়ে)\n"
             "<code>marks=</code> — মোট নম্বর, খালি রাখলে ১ নম্বর/প্রশ্ন\n"
-            "<code>negative=</code> — ভুল উত্তরে কাটা নম্বর\n"
-            "<code>start=</code> — কবে থেকে exam-টা চালু হবে (ISO ফরম্যাট, যেমন 2026-08-15T00:00:00), খালি রাখলে এখনই চালু। Readymade exam-এর কোনো শেষ সময়সীমা থাকবে না — একবার চালু হলে আনলিমিটেড চলবে।\n"
+            "<code>negative=</code> — ভুল উত্তরে কাটা নম্বর, খালি রাখলে নেই\n"
+            "<code>start=</code> — কবে থেকে চালু (ISO ফরম্যাট), খালি রাখলে এখনই। কোনো শেষ সময়সীমা থাকবে না — আনলিমিটেড চলবে।\n"
             "<code>free=yes/no</code> — Free exam ট্যাবে দেখাবে কিনা (default: no)\n"
-            "<code>published=yes/no</code> — এখনই ছাত্রদের জন্য visible কিনা (default: yes)\n"
             "<code>restrict_solution=yes/no</code> — সাবমিটের পর সমাধান লুকানো (default: no)\n"
             "<code>only_live=yes/no</code> — শুধু লাইভ উইন্ডোতে চলবে কিনা (default: no)\n"
             "<code>no_timer_deduct=yes/no</code> — সেকেন্ড-ভিত্তিক টাইমার কর্তন বন্ধ (default: no)\n\n"
+            "⏱️ Duration সবসময় অটো: প্রতি MCQ-তে ৩৫ সেকেন্ড হিসেবে।\n"
+            "✅ Exam সবসময় Readymade + Published থাকবে।\n"
+            "📌 sub/chap/pt/b·c/s·sc-এ যা লিখবে, আগে থেকে dropdown-এ থাকলে সেটাই ব্যবহার হবে, না থাকলে নতুন যোগ হয়ে যাবে (dropdown-এও পরে দেখা যাবে)।\n"
             "📌 Exam-এর title হবে সবচেয়ে শেষ ক্লিক-স্টেপের নাম। একই নামে exam আগে থেকে থাকলে <code>(New)</code> যোগ হবে, পুরনোটা অক্ষত থাকবে।"
         )
 
@@ -15628,6 +15640,8 @@ async def handle_autolms_command(msg: dict):
             return False
         return default
 
+    # Parse "key=value | key=value | ..." where key may itself contain
+    # "/" (b/c, s/sc) -- split only on the FIRST "=" per segment.
     fields = {}
     for part in meta_line.split("|"):
         part = part.strip()
@@ -15636,10 +15650,13 @@ async def handle_autolms_command(msg: dict):
         k, v = part.split("=", 1)
         fields[k.strip().lower()] = v.strip()
 
-    subject = fields.get("subject", "")
-    chapter = fields.get("chapter", "")
-    course_id = fields.get("course", "")
-    category = fields.get("category", "")
+    subject = fields.get("sub") or fields.get("subject") or ""
+    chapter = fields.get("chap") or fields.get("chapter") or ""
+    parent_topic = fields.get("pt") or ""
+    board_category = fields.get("b/c") or ""
+    session_subchapter = fields.get("s/sc") or ""
+    rfc_raw = fields.get("rfc") or ""
+    readymade_course_ids = [c.strip() for c in rfc_raw.split(",") if c.strip()] or None
 
     def _num(key):
         v = fields.get(key, "")
@@ -15650,18 +15667,16 @@ async def handle_autolms_command(msg: dict):
         except ValueError:
             return None
 
-    duration_minutes = _num("duration")
     total_marks = _num("marks")
     negative_mark = _num("negative")
     time_window_start = fields.get("start", "").strip() or None
     is_visible_on_free = _yn(fields.get("free", ""), False)
-    is_published = _yn(fields.get("published", ""), True)
     restrict_solution = _yn(fields.get("restrict_solution", ""), False)
     is_only_live = _yn(fields.get("only_live", ""), False)
     no_timer_deduct = _yn(fields.get("no_timer_deduct", ""), False)
 
     if not subject:
-        await send_msg(chat_id, "❌ subject= খালি রাখা যাবে না।")
+        await send_msg(chat_id, "❌ sub= খালি রাখা যাবে না।")
         return
 
     if not os.environ.get("CHORCHA_TOKEN", "").strip():
@@ -15731,14 +15746,14 @@ async def handle_autolms_command(msg: dict):
             title=topic,
             subject=subject,
             chapter=chapter,
-            course_id=course_id or None,
-            readymade_category=category or None,
-            duration_minutes=duration_minutes,
+            readymade_topic=parent_topic or None,
+            readymade_category=board_category or None,
+            readymade_sub_chapter=session_subchapter or None,
+            readymade_course_ids=readymade_course_ids,
             total_marks=total_marks,
             negative_mark_per_question=negative_mark,
             time_window_start=time_window_start,
             is_visible_on_free=is_visible_on_free,
-            is_published=is_published,
             restrict_solution=restrict_solution,
             disable_second_timer_deduction=no_timer_deduct,
             is_only_live=is_only_live,

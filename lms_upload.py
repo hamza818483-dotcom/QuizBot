@@ -31,6 +31,29 @@ def _headers():
     }
 
 
+async def _ensure_global_metadata(client: httpx.AsyncClient, meta_type: str, value: str):
+    """Mirror the Exam Form's CreatableSelect behavior: if `value` isn't
+    already in global_metadata for this type, insert it so it shows up
+    in the admin dropdown next time (instead of only existing silently
+    on this one exam row)."""
+    if not value:
+        return
+    r = await client.get(
+        f"{LMS_SUPABASE_URL}/rest/v1/global_metadata",
+        headers=_headers(),
+        params={"type": f"eq.{meta_type}", "value": f"eq.{value}", "select": "id", "limit": "1"},
+    )
+    if r.status_code == 200 and not r.json():
+        try:
+            await client.post(
+                f"{LMS_SUPABASE_URL}/rest/v1/global_metadata",
+                headers=_headers(),
+                json={"type": meta_type, "value": value},
+            )
+        except Exception as e:
+            logger.warning(f"[lms_upload] global_metadata insert failed for {meta_type}={value}: {e}")
+
+
 async def _title_exists(client: httpx.AsyncClient, title: str) -> bool:
     r = await client.get(
         f"{LMS_SUPABASE_URL}/rest/v1/exams",
@@ -50,13 +73,12 @@ async def upload_mcqs_to_lms(
     readymade_topic: str | None = None,
     readymade_sub_chapter: str | None = None,
     readymade_category: str | None = None,
-    duration_minutes: int | None = None,
+    readymade_course_ids: list[str] | None = None,
     total_marks: float | None = None,
     negative_mark_per_question: float | None = None,
     instructions: str | None = None,
     time_window_start: str | None = None,
     is_visible_on_free: bool = False,
-    is_published: bool = True,
     restrict_solution: bool = False,
     disable_second_timer_deduction: bool = False,
     is_only_live: bool = False,
@@ -69,11 +91,23 @@ async def upload_mcqs_to_lms(
                        readymade_topic/readymade_sub_chapter if those aren't
                        given separately -- covers the common case where
                        they're the same value).
-    course_id: optional -- leave None for global Readymade (not tied to one course)
-    duration_minutes: defaults to len(results) minutes if not given
+    course_id: optional single course to attach the exam to
+    readymade_course_ids: optional list of course UUIDs this readymade exam
+                           is offered under (separate from course_id)
+    duration: ALWAYS auto-calculated as 35 seconds per MCQ (not
+              configurable) -- matches how a human admin would size a
+              quick readymade practice set.
     total_marks: defaults to len(results) if not given
-    is_published: defaults True so it's visible immediately (matches how
-                   a manually-created Readymade exam behaves by default)
+    negative_mark_per_question: defaults to 0 (no negative marking) if
+                                 not given -- readymade practice exams
+                                 never have negative marking unless told to.
+    is_readymade / is_published / exam_type: ALWAYS True / True / "practice"
+                                              for every /autolms exam.
+
+    Any of subject/chapter/readymade_topic/readymade_category/
+    readymade_sub_chapter that doesn't already exist in global_metadata
+    gets added there too, so it shows up in the Exam Form's dropdown next
+    time -- exactly like a human admin typing a new value in would.
 
     Returns {"exam_id": ..., "title": ..., "count": N}
     Raises LmsUploadError on any failure -- no partial state is left behind
@@ -87,7 +121,21 @@ async def upload_mcqs_to_lms(
         raise LmsUploadError("কোনো MCQ নেই, আপলোড করার কিছু নেই।")
 
     n = len(results)
+    duration_minutes = max(1, round(n * 35 / 60))
+    final_readymade_topic = readymade_topic or subject or None
+    final_readymade_category = readymade_category or None
+    final_readymade_sub_chapter = readymade_sub_chapter or chapter or None
+
     async with httpx.AsyncClient(timeout=30) as client:
+        for meta_type, val in (
+            ("subject", subject),
+            ("chapter", chapter),
+            ("readymade_topic", final_readymade_topic),
+            ("readymade_category", final_readymade_category),
+            ("readymade_sub_chapter", final_readymade_sub_chapter),
+        ):
+            await _ensure_global_metadata(client, meta_type, val or "")
+
         final_title = title
         if await _title_exists(client, title):
             final_title = f"{title} (New)"
@@ -101,23 +149,23 @@ async def upload_mcqs_to_lms(
             "title": final_title,
             "is_readymade": True,
             "exam_type": "practice",
-            "duration_minutes": duration_minutes if duration_minutes is not None else max(n, 1),
+            "duration_minutes": duration_minutes,
             "subject": [subject] if subject else [],
             "chapter": chapter or None,
-            "readymade_topic": readymade_topic or subject or None,
-            "readymade_sub_chapter": readymade_sub_chapter or chapter or None,
-            "readymade_category": readymade_category or None,
+            "readymade_topic": final_readymade_topic,
+            "readymade_sub_chapter": final_readymade_sub_chapter,
+            "readymade_category": final_readymade_category,
             "category": [],
-            "is_published": is_published,
+            "is_published": True,
             "is_visible_on_free": is_visible_on_free,
             "restrict_solution": restrict_solution,
             "disable_second_timer_deduction": disable_second_timer_deduction,
             "is_only_live": is_only_live,
         }
-        if total_marks is not None:
-            exam_payload["total_marks"] = total_marks
-        if negative_mark_per_question is not None:
-            exam_payload["negative_mark_per_question"] = negative_mark_per_question
+        exam_payload["total_marks"] = total_marks if total_marks is not None else n
+        exam_payload["negative_mark_per_question"] = (
+            negative_mark_per_question if negative_mark_per_question is not None else 0
+        )
         if instructions:
             exam_payload["instructions"] = instructions
         if time_window_start:
@@ -126,6 +174,8 @@ async def upload_mcqs_to_lms(
             # leave time_window_end unset (NULL) so access never expires.
         if course_id:
             exam_payload["course_id"] = course_id
+        if readymade_course_ids:
+            exam_payload["readymade_course_ids"] = readymade_course_ids
 
         r = await client.post(
             f"{LMS_SUPABASE_URL}/rest/v1/exams", headers=_headers(), json=exam_payload
