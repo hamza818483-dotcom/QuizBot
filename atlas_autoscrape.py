@@ -791,23 +791,33 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 match_method = "exact-text"
             except Exception:
                 locator = None
-                # Result/CTA pages (e.g. a "retake exam" button) sometimes
-                # finish their score-calculation animation and inject the
-                # button into the DOM slightly AFTER networkidle already
-                # fired -- a single extra settle + one more exact-text
-                # attempt catches that race without slowing down the
-                # common case where the element was already there.
-                await page.wait_for_timeout(2000)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    pass
-                locator = page.get_by_text(sub, exact=True).first
-                try:
-                    await locator.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
-                    match_method = "exact-text (after extra wait)"
-                except Exception:
-                    locator = None
+                # Result/CTA pages (e.g. a "retake exam" button after
+                # submit) sometimes finish their score-calculation
+                # animation and inject the button into the DOM well AFTER
+                # networkidle already fired -- a single extra settle
+                # wasn't always enough (observed real-world timeouts on
+                # "পুনরায় পরীক্ষা দাও"). Poll repeatedly instead of one
+                # extra attempt: up to ~25s total, re-checking every 2s,
+                # so slow post-submit animations are caught without
+                # slowing down the common case where the element was
+                # already there (loop exits immediately on first match).
+                poll_elapsed_ms = 0
+                poll_max_ms = 25000
+                poll_step_ms = 2000
+                while poll_elapsed_ms < poll_max_ms:
+                    await page.wait_for_timeout(poll_step_ms)
+                    poll_elapsed_ms += poll_step_ms
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=3000)
+                    except Exception:
+                        pass
+                    locator = page.get_by_text(sub, exact=True).first
+                    try:
+                        await locator.wait_for(state="visible", timeout=3000)
+                        match_method = "exact-text (after poll wait)"
+                        break
+                    except Exception:
+                        locator = None
 
             element_handle = None  # used for the JS-normalized fallback (bypasses locator)
             if locator is None:
