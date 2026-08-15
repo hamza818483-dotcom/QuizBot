@@ -12030,6 +12030,24 @@ async def handle_auto_command(msg: dict):
 
     lines = [l.rstrip() for l in text.split("\n")[1:] if l.strip() != ""]
 
+    # Save-only shortcut: if the ENTIRE command is exactly one
+    # "লেখা=link" line (no other steps, no "---" runs), just persist the
+    # label->URL mapping to D1 and reply -- do NOT launch a browser or
+    # scrape. Lets the user pre-teach unmatchable (image-only) card links
+    # ahead of time, then later run a normal text-button /auto using just
+    # the label, which will resolve via this saved mapping.
+    if len(lines) == 1 and "=" in lines[0] and not lines[0].lower().startswith(("input:", "goto:")):
+        _label_part, _url_part = lines[0].split("=", 1)
+        _label_part, _url_part = _label_part.strip(), _url_part.strip()
+        if _url_part.startswith("http"):
+            try:
+                from core import auto_link_map_set
+                await auto_link_map_set(_label_part, _url_part)
+                await send_msg(chat_id, f"✅ সেভ হয়েছে:\n\"{_label_part}\" → {_url_part}\n\nপরে শুধু \"{_label_part}\" লিখলেই bot এই লিংকে যাবে।")
+            except Exception as e:
+                await send_msg(chat_id, f"❌ সেভ করা যায়নি: {e}")
+            return
+
     # Shorthand runs: a run consisting of a single "OldName>NewName" line
     # reuses the FIRST run's steps verbatim, replacing every occurrence of
     # OldName with NewName. "(new)" suffix on NewName is cosmetic and
