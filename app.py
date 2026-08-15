@@ -15550,31 +15550,21 @@ async def _label_index_remove(name: str):
 
 async def _resolve_click_steps(chat_id: int, step_lines: list) -> list | None:
     """
-    Shared step-line resolver used by both /auto and /autolms:
-
-    - "use:<name>"  -> expands to a previously /savelabel-saved sequence
-                       (in-place, works anywhere in the list)
-    - "<text>=<link>" -> a text-labeled shortcut defined INLINE, right in
-                       this command. Auto-saved under <text> the first
-                       time you write it (so the click actually happens
-                       via goto:<link> this run too), and from then on
-                       you can just write "<text>" alone -- as a normal
-                       step OR as another inline "<text>=" with the link
-                       omitted -- and it resolves from what was saved
-                       last time. This is for buttons that show no
-                       clickable text (icons/images) where you already
-                       know the underlying URL.
-    - anything else -> a normal chorcha.net click-by-text step, unchanged
+    /autolms-only resolver for "use:<name>" (a /savelabel-saved
+    multi-step sequence, expanded in-place). The "text=link" inline
+    shortcut and its plain-text lookup are NOT handled here -- that's
+    already built into atlas_autoscrape.py itself (via
+    core.auto_link_map_set/get), shared with /auto, so passing those
+    lines through unchanged lets the existing, working implementation
+    handle them exactly as it already does for /auto.
 
     Returns the resolved list, or None (after sending an error message)
-    if a referenced name/shortcut can't be found.
+    if a referenced "use:" name can't be found.
     """
     resolved = []
     for l in step_lines:
         raw = l.strip()
-        low = raw.lower()
-
-        if low.startswith("use:"):
+        if raw.lower().startswith("use:"):
             label_name = raw[len("use:"):].strip()
             saved = await d1_get(f"{_LABEL_KV_PREFIX}{label_name}")
             if not saved or not saved.get("steps"):
@@ -15582,29 +15572,6 @@ async def _resolve_click_steps(chat_id: int, step_lines: list) -> list | None:
                 return None
             resolved.extend(saved["steps"])
             continue
-
-        if low.startswith("goto:"):
-            resolved.append(l)
-            continue
-
-        if "=" in raw:
-            text_key, _, link_val = raw.partition("=")
-            text_key = text_key.strip()
-            link_val = link_val.strip()
-            if link_val:
-                # "text=link" -> save it under text_key, use it now.
-                await d1_set(f"{_LABEL_KV_PREFIX}{text_key}", {"steps": [f"goto:{link_val}"]}, ttl=3153600000)
-                await _label_index_add(text_key)
-                resolved.append(f"goto:{link_val}")
-            else:
-                # "text=" (empty) -> look up what was saved for text_key before.
-                saved = await d1_get(f"{_LABEL_KV_PREFIX}{text_key}")
-                if not saved or not saved.get("steps"):
-                    await send_msg(chat_id, f"❌ '{text_key}'-এর জন্য আগে কোনো লিংক সেভ করা নেই। প্রথমবার '{text_key}=লিংক' এভাবে দাও।")
-                    return None
-                resolved.extend(saved["steps"])
-            continue
-
         resolved.append(l)
     return resolved
 
