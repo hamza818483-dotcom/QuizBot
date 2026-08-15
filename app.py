@@ -15530,6 +15530,89 @@ async def handle_collect_command(msg: dict):
         return
 
 
+_LABEL_KV_PREFIX = "autolms_label:"
+_LABEL_INDEX_KEY = "autolms_label_index"
+
+
+async def _label_index_add(name: str):
+    idx = await d1_get(_LABEL_INDEX_KEY) or {}
+    names = set(idx.get("names", []))
+    names.add(name)
+    await d1_set(_LABEL_INDEX_KEY, {"names": sorted(names)}, ttl=3153600000)
+
+
+async def _label_index_remove(name: str):
+    idx = await d1_get(_LABEL_INDEX_KEY) or {}
+    names = set(idx.get("names", []))
+    names.discard(name)
+    await d1_set(_LABEL_INDEX_KEY, {"names": sorted(names)}, ttl=3153600000)
+
+
+async def handle_savelabel_command(msg: dict):
+    """
+    /savelabel <name>
+    বাংলা
+    প্রথম পত্র
+    অধ্যায় ১
+    টপিক ১
+
+    Saves the click-step lines (everything after the first line) under
+    <name> so future /autolms runs can reuse them with "use:<name>"
+    instead of retyping the whole path every time.
+    """
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    lines = text.split("\n")
+    first = lines[0].strip()
+    name = first[len("/savelabel"):].strip()
+    step_lines = [l.rstrip() for l in lines[1:] if l.strip() != ""]
+
+    if not name or not step_lines:
+        await send_msg(chat_id,
+            "❌ Format:\n\n"
+            "<code>/savelabel টপিক১নাম\n"
+            "বাংলা\n"
+            "প্রথম পত্র\n"
+            "অধ্যায় ১\n"
+            "টপিক ১</code>\n\n"
+            "প্রথম লাইনে <code>/savelabel</code>-এর পর একটা নাম দাও, তারপর প্রতি লাইনে chorcha.net-এর ক্লিক-স্টেপ। "
+            "পরে <code>/autolms</code>-এ <code>use:টপিক১নাম</code> লিখলেই এই স্টেপগুলো আবার লিখতে হবে না।",
+            parse_mode="HTML")
+        return
+
+    await d1_set(f"{_LABEL_KV_PREFIX}{name}", {"steps": step_lines}, ttl=3153600000)  # ~100 years, effectively permanent
+    await _label_index_add(name)
+    await send_msg(chat_id,
+        f"✅ সেভ হয়েছে: <b>{name}</b> ({len(step_lines)} ধাপ)\n"
+        f"পরে ব্যবহার করতে: <code>/autolms\\nuse:{name}\\n---\\nsub=...</code>",
+        parse_mode="HTML")
+
+
+async def handle_list_labels_command(msg: dict):
+    """/labels -- lists all saved shortcut names from /savelabel."""
+    chat_id = msg["chat"]["id"]
+    idx = await d1_get(_LABEL_INDEX_KEY) or {}
+    names = sorted(idx.get("names", []))
+    if not names:
+        await send_msg(chat_id, "কোনো সেভ করা label নেই। /savelabel দিয়ে একটা বানাও।")
+        return
+    listing = "\n".join(f"• {n}" for n in names)
+    await send_msg(chat_id, f"📌 সেভ করা label গুলো:\n\n{listing}")
+
+
+async def handle_dellabel_command(msg: dict):
+    """/dellabel <name> -- deletes a saved shortcut."""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    name = text[len("/dellabel"):].strip()
+    if not name:
+        await send_msg(chat_id, "❌ Format: <code>/dellabel টপিক১নাম</code>", parse_mode="HTML")
+        return
+    await d1_del(f"{_LABEL_KV_PREFIX}{name}")
+    await _label_index_remove(name)
+    await send_msg(chat_id, f"🗑️ মুছে ফেলা হয়েছে: {name}")
+
+
 async def handle_autolms_command(msg: dict):
     """
     /autolms
@@ -15652,12 +15735,25 @@ async def handle_autolms_command(msg: dict):
             "⏱️ Duration সবসময় অটো: প্রতি MCQ-তে ৩৫ সেকেন্ড হিসেবে।\n"
             "✅ Exam সবসময় Readymade + Published থাকবে।\n"
             "📌 sub/chap/pt/b·c/s·sc-এ যা লিখবে, আগে থেকে dropdown-এ থাকলে সেটাই ব্যবহার হবে, না থাকলে নতুন যোগ হয়ে যাবে (dropdown-এও পরে দেখা যাবে)।\n"
-            "📌 Exam-এর title হবে সবচেয়ে শেষ ক্লিক-স্টেপের নাম। একই নামে exam আগে থেকে থাকলে <code>(New)</code> যোগ হবে, পুরনোটা অক্ষত থাকবে।"
+            "📌 Exam-এর title হবে সবচেয়ে শেষ ক্লিক-স্টেপের নাম। একই নামে exam আগে থেকে থাকলে <code>(New)</code> যোগ হবে, পুরনোটা অক্ষত থাকবে।\n\n"
+            "🔖 বারবার একই path না লিখতে চাইলে: <code>/savelabel নাম</code> দিয়ে একবার সেভ করে রাখো, "
+            "পরে ক্লিক-স্টেপের জায়গায় শুধু <code>use:নাম</code> লিখলেই চলবে। "
+            "<code>/labels</code> দিয়ে তালিকা, <code>/dellabel নাম</code> দিয়ে মুছে ফেলা যায়।"
         )
 
     if not step_lines or not meta_lines:
         await send_msg(chat_id, _fmt_help(), parse_mode="HTML")
         return
+
+    # "use:<name>" as the (only) step line -> load a /savelabel shortcut
+    # instead of typing out the click-steps again.
+    if len(step_lines) == 1 and step_lines[0].strip().lower().startswith("use:"):
+        label_name = step_lines[0].strip()[len("use:"):].strip()
+        saved = await d1_get(f"{_LABEL_KV_PREFIX}{label_name}")
+        if not saved or not saved.get("steps"):
+            await send_msg(chat_id, f"❌ এই নামে কোনো সেভ করা label পাওয়া যায়নি: {label_name}\n/labels দিয়ে তালিকা দেখো।")
+            return
+        step_lines = saved["steps"]
 
     def _yn(v: str, default: bool) -> bool:
         v = v.strip().lower()
@@ -16757,6 +16853,27 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, UNAUTH_MSG)
             return
         _spawn_command_task(uid, handle_autolms_command(msg))
+    elif text.startswith("/savelabel"):
+        # /savelabel <name>
+        # (click-step lines, one per line, same as /auto/autolms)
+        # Saves the click-step lines under <name> so future /autolms
+        # runs can just do "use:<name>" instead of retyping them.
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        _spawn_command_task(uid, handle_savelabel_command(msg))
+    elif text.startswith("/labels"):
+        # /labels = list all saved shortcut names from /savelabel
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        _spawn_command_task(uid, handle_list_labels_command(msg))
+    elif text.startswith("/dellabel"):
+        # /dellabel <name> = delete a saved shortcut
+        if not is_auth:
+            await send_msg(chat_id, UNAUTH_MSG)
+            return
+        _spawn_command_task(uid, handle_dellabel_command(msg))
     elif text.startswith("/pdfm"):
         if not is_auth:
             await send_msg(chat_id, UNAUTH_MSG)
