@@ -1264,6 +1264,21 @@ async def auto_link_map_get(label: str) -> str | None:
     rows = await d1_select("SELECT url FROM auto_link_map WHERE label = ?", [label])
     if rows:
         return rows[0].get("url")
+    # Fuzzy fallback: match ignoring whitespace differences (e.g. saved as
+    # "টপিক ভিত্তিক প্রশ্ন" but later typed as "টপিকভিত্তিক প্রশ্ন", or vice
+    # versa) -- normalize both sides by stripping all whitespace before
+    # comparing, so minor spacing mismatches still resolve to the same
+    # saved link instead of falling through to click-matching (which would
+    # fail identically for an image-only card).
+    def _squash(s: str) -> str:
+        return re.sub(r"\s+", "", s or "")
+    wanted = _squash(label)
+    if not wanted:
+        return None
+    all_rows = await d1_select("SELECT label, url FROM auto_link_map", [])
+    for r in all_rows:
+        if _squash(r.get("label", "")) == wanted:
+            return r.get("url")
     return None
 
 async def auto_link_map_get_all() -> dict:
