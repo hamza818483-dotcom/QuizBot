@@ -19,6 +19,43 @@ from telethon.errors import FloodWaitError
 
 logger = logging.getLogger("atlas.poll_extract")
 
+# Tracks every FloodWaitError hit during /poll runs (this process's
+# lifetime) so /error can show the exact root cause -- which message,
+# how long Telegram made us wait, and where in the pipeline it happened
+# -- instead of only the aggregate "flood_hits" counter shown live in
+# the progress message.
+_FLOODWAIT_LOG = []  # list of dicts, most recent last; capped at 50
+_FLOODWAIT_LOG_MAX = 50
+
+
+def _record_floodwait(stage: str, wait_seconds: float, message_id: int | None = None):
+    from datetime import datetime
+    _FLOODWAIT_LOG.append({
+        "stage": stage,
+        "wait_seconds": wait_seconds,
+        "message_id": message_id,
+        "time": datetime.now().strftime("%I:%M:%S %p"),
+    })
+    if len(_FLOODWAIT_LOG) > _FLOODWAIT_LOG_MAX:
+        del _FLOODWAIT_LOG[0]
+
+
+def get_floodwait_summary(limit: int = 10) -> str:
+    """Human-readable root-cause breakdown for /error. Empty string if
+    no FloodWait has happened this run."""
+    if not _FLOODWAIT_LOG:
+        return ""
+    recent = _FLOODWAIT_LOG[-limit:]
+    total_wait = sum(e["wait_seconds"] for e in _FLOODWAIT_LOG)
+    lines = [
+        f"🐢 <b>/poll FloodWait — মোট {len(_FLOODWAIT_LOG)}বার, "
+        f"সাকুল্যে {int(total_wait)}s অপেক্ষা করানো হয়েছে</b>"
+    ]
+    for e in recent:
+        msg_part = f" (msg #{e['message_id']})" if e['message_id'] else ""
+        lines.append(f"  • {e['time']} — {e['stage']}{msg_part}: {e['wait_seconds']}s wait")
+    return "\n".join(lines)
+
 API_ID       = int(os.environ.get("API_ID", "33312774"))
 API_HASH     = os.environ.get("API_HASH", "883db3366f8759d1d14c861c0d628232")
 SESSION_STR  = os.environ.get("SESSION_STRING", "")
@@ -232,6 +269,7 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
             except FloodWaitError as fw:
                 logger.warning(f"[poll_extract] Step1 scan FloodWait {fw.seconds}s — wait kore oi jaygay theke resume korbo (scan_from_id={scan_from_id})")
                 _rate_limiter.register_flood_wait(fw.seconds)
+                _record_floodwait("channel scan (step 1)", fw.seconds, scan_from_id)
                 await asyncio.sleep(fw.seconds + 1)
                 # quiz_messages/checked reset kori NA — jekhane chilo shekhan thekei continue
             except Exception as e:
@@ -362,6 +400,7 @@ async def _process_single_poll(client, channel, message):
         except FloodWaitError as fw:
             logger.warning(f"[poll_extract] msg {message.id}: FloodWait {fw.seconds}s — Telegram er kotha moto wait kortesi")
             _rate_limiter.register_flood_wait(fw.seconds)
+            _record_floodwait("poll vote/extract", fw.seconds, message.id)
             await asyncio.sleep(fw.seconds + 1)
         except Exception:
             pass  # Already voted — ok, fallback to refetch below
@@ -953,6 +992,7 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
         except FloodWaitError as fw:
             logger.warning(f"[poll_extract] topic-scan FloodWait {fw.seconds}s — wait kore resume korbo")
             _rate_limiter.register_flood_wait(fw.seconds)
+            _record_floodwait("topic scan", fw.seconds)
             await asyncio.sleep(fw.seconds + 1)
         except Exception as e:
             collect_attempts += 1

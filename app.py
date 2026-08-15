@@ -16135,6 +16135,16 @@ async def handle_error_command(msg: dict):
     if extras:
         await send_msg(chat_id, "\n\n".join(extras))
 
+    # /poll FloodWait root-cause breakdown -- exact stage, message ID,
+    # wait duration, and time for every FloodWait hit this process's run.
+    try:
+        from poll_extract import get_floodwait_summary
+        fw_summary = get_floodwait_summary()
+        if fw_summary:
+            await send_msg(chat_id, fw_summary, parse_mode="HTML")
+    except Exception:
+        pass
+
     content = await get_recent_errors()
     if not content.strip():
         if not summary_lines:
