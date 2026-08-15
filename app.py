@@ -12037,8 +12037,9 @@ async def handle_auto_command(msg: dict):
     # ahead of time, then later run a normal text-button /auto using just
     # the label, which will resolve via this saved mapping.
     if len(lines) == 1 and "=" in lines[0] and not lines[0].lower().startswith(("input:", "goto:")):
+        import unicodedata as _ud
         _label_part, _url_part = lines[0].split("=", 1)
-        _label_part, _url_part = _label_part.strip(), _url_part.strip()
+        _label_part, _url_part = _ud.normalize("NFC", _label_part.strip()), _url_part.strip()
         if _url_part.startswith("http"):
             try:
                 from core import auto_link_map_set
