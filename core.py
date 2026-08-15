@@ -1877,8 +1877,11 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
                 px_scale = 4  # render at higher res for crisp text
                 footer_png = _render_footer_image(int(page_width * px_scale), int(footer_box_h * px_scale))
                 from reportlab.lib.utils import ImageReader
+                c.setFillColorRGB(1, 0, 0)
+                c.rect(0, 0, page_width, footer_box_h, fill=1, stroke=0)
                 c.drawImage(ImageReader(_io.BytesIO(footer_png)), 0, 0,
-                            width=page_width, height=footer_box_h, mask=None)
+                            width=page_width, height=footer_box_h, mask=None,
+                            preserveAspectRatio=False)
             except Exception as fe:
                 logger.warning(f"[Watermark] footer image render failed, falling back to plain box: {fe}")
                 c.setFillColor(Color(1, 0, 0, alpha=1.0))
