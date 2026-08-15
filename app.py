@@ -15548,6 +15548,67 @@ async def _label_index_remove(name: str):
     await d1_set(_LABEL_INDEX_KEY, {"names": sorted(names)}, ttl=3153600000)
 
 
+async def _resolve_click_steps(chat_id: int, step_lines: list) -> list | None:
+    """
+    Shared step-line resolver used by both /auto and /autolms:
+
+    - "use:<name>"  -> expands to a previously /savelabel-saved sequence
+                       (in-place, works anywhere in the list)
+    - "<text>=<link>" -> a text-labeled shortcut defined INLINE, right in
+                       this command. Auto-saved under <text> the first
+                       time you write it (so the click actually happens
+                       via goto:<link> this run too), and from then on
+                       you can just write "<text>" alone -- as a normal
+                       step OR as another inline "<text>=" with the link
+                       omitted -- and it resolves from what was saved
+                       last time. This is for buttons that show no
+                       clickable text (icons/images) where you already
+                       know the underlying URL.
+    - anything else -> a normal chorcha.net click-by-text step, unchanged
+
+    Returns the resolved list, or None (after sending an error message)
+    if a referenced name/shortcut can't be found.
+    """
+    resolved = []
+    for l in step_lines:
+        raw = l.strip()
+        low = raw.lower()
+
+        if low.startswith("use:"):
+            label_name = raw[len("use:"):].strip()
+            saved = await d1_get(f"{_LABEL_KV_PREFIX}{label_name}")
+            if not saved or not saved.get("steps"):
+                await send_msg(chat_id, f"❌ এই নামে কোনো সেভ করা label পাওয়া যায়নি: {label_name}\n/labels দিয়ে তালিকা দেখো।")
+                return None
+            resolved.extend(saved["steps"])
+            continue
+
+        if low.startswith("goto:"):
+            resolved.append(l)
+            continue
+
+        if "=" in raw:
+            text_key, _, link_val = raw.partition("=")
+            text_key = text_key.strip()
+            link_val = link_val.strip()
+            if link_val:
+                # "text=link" -> save it under text_key, use it now.
+                await d1_set(f"{_LABEL_KV_PREFIX}{text_key}", {"steps": [f"goto:{link_val}"]}, ttl=3153600000)
+                await _label_index_add(text_key)
+                resolved.append(f"goto:{link_val}")
+            else:
+                # "text=" (empty) -> look up what was saved for text_key before.
+                saved = await d1_get(f"{_LABEL_KV_PREFIX}{text_key}")
+                if not saved or not saved.get("steps"):
+                    await send_msg(chat_id, f"❌ '{text_key}'-এর জন্য আগে কোনো লিংক সেভ করা নেই। প্রথমবার '{text_key}=লিংক' এভাবে দাও।")
+                    return None
+                resolved.extend(saved["steps"])
+            continue
+
+        resolved.append(l)
+    return resolved
+
+
 async def handle_savelabel_command(msg: dict):
     """
     /savelabel <name>
@@ -15745,31 +15806,20 @@ async def handle_autolms_command(msg: dict):
             "📌 Exam-এর title হবে সবচেয়ে শেষ ক্লিক-স্টেপের নাম। একই নামে exam আগে থেকে থাকলে <code>(New)</code> যোগ হবে, পুরনোটা অক্ষত থাকবে।\n\n"
             "🔖 বারবার একই path না লিখতে চাইলে: <code>/savelabel নাম</code> দিয়ে একবার সেভ করে রাখো, "
             "পরে ক্লিক-স্টেপের জায়গায় শুধু <code>use:নাম</code> লিখলেই চলবে। "
-            "<code>/labels</code> দিয়ে তালিকা, <code>/dellabel নাম</code> দিয়ে মুছে ফেলা যায়।"
+            "<code>/labels</code> দিয়ে তালিকা, <code>/dellabel নাম</code> দিয়ে মুছে ফেলা যায়।\n\n"
+            "🖼️ Text নেই এমন image/icon button-এর জন্য: ক্লিক-স্টেপের জায়গায় সরাসরি <code>নাম=লিংক</code> লিখে দাও — "
+            "প্রথমবার এই লিংকটাই সেভ হয়ে যাবে ও ব্যবহার হবে। পরের বার শুধু <code>নাম</code> (বা <code>নাম=</code>) লিখলেই আগের সেভ করা লিংকে চলে যাবে, বারবার পুরো লিংক লেখা লাগবে না।"
         )
 
     if not step_lines or not meta_lines:
         await send_msg(chat_id, _fmt_help(), parse_mode="HTML")
         return
 
-    # "use:<name>" resolves to a /savelabel-saved shortcut. Works both as
-    # the ONLY step line (loads the whole saved sequence) and as ONE step
-    # among several (expands in-place -- handy for a single image/icon
-    # button that has no matchable text, where you've separately saved
-    # its "goto:<url>" under a name and just drop that name into the
-    # middle of an otherwise normal text-label sequence).
-    resolved_lines = []
-    for l in step_lines:
-        if l.strip().lower().startswith("use:"):
-            label_name = l.strip()[len("use:"):].strip()
-            saved = await d1_get(f"{_LABEL_KV_PREFIX}{label_name}")
-            if not saved or not saved.get("steps"):
-                await send_msg(chat_id, f"❌ এই নামে কোনো সেভ করা label পাওয়া যায়নি: {label_name}\n/labels দিয়ে তালিকা দেখো।")
-                return
-            resolved_lines.extend(saved["steps"])
-        else:
-            resolved_lines.append(l)
-    step_lines = resolved_lines
+    # Resolve "use:<name>" and inline "text=link" shortcuts (see
+    # _resolve_click_steps docstring).
+    step_lines = await _resolve_click_steps(chat_id, step_lines)
+    if step_lines is None:
+        return
 
     def _yn(v: str, default: bool) -> bool:
         v = v.strip().lower()
