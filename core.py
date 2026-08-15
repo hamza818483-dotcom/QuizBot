@@ -1871,6 +1871,8 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
 
             # Footer: red bg box with white bold Bengali text, bottom of page
             footer_box_h = min(page_width, page_height) * 0.035
+            c.setFillAlpha(1.0)
+            c.setStrokeAlpha(1.0)
             try:
                 px_scale = 4  # render at higher res for crisp text
                 footer_png = _render_footer_image(int(page_width * px_scale), int(footer_box_h * px_scale))
