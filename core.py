@@ -1359,6 +1359,15 @@ async def db_is_owner_or_admin(uid: int) -> bool:
         return result
     except Exception as e:
         logger.warning(f"[db_is_owner_or_admin] check failed for uid={uid}: {e}")
+        # Fail-safe, not fail-closed: a transient Supabase timeout/network
+        # error (more likely mid-/poll, when the process is busy scanning)
+        # must not silently deny a real admin. If we have ANY previous
+        # cached result for this uid (even expired), trust it over a
+        # blank "not admin" -- that cached value only exists because a
+        # successful DB check once said so.
+        stale = _admin_check_cache.get(uid)
+        if stale:
+            return stale[0]
         return False
 
 async def db_track_user(uid: int, uname: str):
