@@ -15537,7 +15537,13 @@ async def handle_autolms_command(msg: dict):
     প্রথম পত্র
     অধ্যায় ১
     টপিক ১
-    sub=বাংলা | chap=অধ্যায় ১ | pt= | b/c= | s/sc= | rfc= | marks= | negative= | start= | free=no | restrict_solution=no | only_live=no | no_timer_deduct=no
+    ---
+    sub=বাংলা
+    chap=অধ্যায় ১
+    pt=
+    b/c=
+    s/sc=
+    rfc=
 
     Same chorcha.net click-sequence scrape as /auto (single run only --
     no "---" multi-run support here, keep it simple), but instead of
@@ -15547,8 +15553,10 @@ async def handle_autolms_command(msg: dict):
     insert succeeds the exam is already live on the site -- no separate
     "upload to website" step.
 
-    Last line is `key=value | key=value | ...` (all short aliases,
-    matching the Exam Form's Readymade fields; all optional except sub):
+    Everything after a line containing exactly "---" is metadata (one
+    key=value per line, matching the Exam Form's Readymade fields; all
+    optional except sub). Everything before "---" is chorcha.net click
+    steps, one label per line, exactly like /auto.
       sub=      -> Subject (required)
       chap=     -> Chapter
       pt=       -> Parent Topic (readymade_topic)
@@ -15590,34 +15598,53 @@ async def handle_autolms_command(msg: dict):
 
     raw_lines = [l.rstrip() for l in text.split("\n")[1:] if l.strip() != ""]
 
-    meta_line = None
+    # Everything after a line that is exactly "---" is metadata (one
+    # key=value per line). Everything before it is chorcha.net click steps.
     step_lines = []
+    meta_lines = []
+    in_meta = False
     for l in raw_lines:
-        if re.match(r"^\s*(sub|subject)\s*=", l.strip(), re.IGNORECASE):
-            meta_line = l.strip()
+        if l.strip() == "---":
+            in_meta = True
+            continue
+        if in_meta:
+            meta_lines.append(l.strip())
         else:
             step_lines.append(l)
 
     def _fmt_help():
         return (
-            "❌ Format:\n\n"
+            "❌ Format (প্রতিটা তথ্য আলাদা লাইনে লেখো, একসাথে গুলিয়ে ফেলো না):\n\n"
             "<code>/autolms\n"
             "বাংলা\n"
             "প্রথম পত্র\n"
             "অধ্যায় ১\n"
             "টপিক ১\n"
-            "sub=বাংলা | chap=অধ্যায় ১ | pt= | b/c= | s/sc= | rfc=</code>\n\n"
-            "📌 প্রথম কয়েক লাইনে chorcha.net-এ ক্লিক করার button/link নাম, ক্রমানুসারে (একদম /auto-এর মতো)।\n"
-            "📌 শেষ লাইনে <code>key=value</code> গুলো <code>|</code> দিয়ে ভাগ করে দাও — শুধু <code>sub=</code> লাগবেই, বাকিগুলো ঐচ্ছিক:\n\n"
-            "<code>sub=</code> — Subject (আবশ্যক)\n"
-            "<code>chap=</code> — Chapter\n"
+            "---\n"
+            "sub=বাংলা\n"
+            "chap=অধ্যায় ১\n"
+            "pt=\n"
+            "b/c=\n"
+            "s/sc=\n"
+            "rfc=\n"
+            "marks=\n"
+            "negative=\n"
+            "start=\n"
+            "free=no\n"
+            "restrict_solution=no\n"
+            "only_live=no\n"
+            "no_timer_deduct=no</code>\n\n"
+            "📌 <code>---</code> এর <b>উপরে</b>: chorcha.net-এ ক্লিক করার button/link নাম, একটা লাইনে একটা, ক্রমানুসারে (একদম /auto-এর মতো)।\n"
+            "📌 <code>---</code> এর <b>নিচে</b>: প্রতিটা তথ্য এক লাইনে — শুধু <code>sub=</code> লাগবেই, বাকিগুলো ঐচ্ছিক (খালি রাখলেও চলবে, লাইনটা মুছে দিলেও চলবে):\n\n"
+            "<code>sub=</code> — Subject / বিষয় (আবশ্যক)\n"
+            "<code>chap=</code> — Chapter / অধ্যায়\n"
             "<code>pt=</code> — Parent Topic\n"
             "<code>b/c=</code> — Board/Category\n"
             "<code>s/sc=</code> — Session/Sub-Chapter\n"
             "<code>rfc=</code> — Readymade For Courses (একাধিক course ID কমা দিয়ে)\n"
             "<code>marks=</code> — মোট নম্বর, খালি রাখলে ১ নম্বর/প্রশ্ন\n"
             "<code>negative=</code> — ভুল উত্তরে কাটা নম্বর, খালি রাখলে নেই\n"
-            "<code>start=</code> — কবে থেকে চালু (ISO ফরম্যাট), খালি রাখলে এখনই। কোনো শেষ সময়সীমা থাকবে না — আনলিমিটেড চলবে।\n"
+            "<code>start=</code> — কবে থেকে চালু (যেমন: 2026-08-15T00:00:00), খালি রাখলে এখনই। কোনো শেষ সময়সীমা থাকবে না — আনলিমিটেড চলবে।\n"
             "<code>free=yes/no</code> — Free exam ট্যাবে দেখাবে কিনা (default: no)\n"
             "<code>restrict_solution=yes/no</code> — সাবমিটের পর সমাধান লুকানো (default: no)\n"
             "<code>only_live=yes/no</code> — শুধু লাইভ উইন্ডোতে চলবে কিনা (default: no)\n"
@@ -15628,7 +15655,7 @@ async def handle_autolms_command(msg: dict):
             "📌 Exam-এর title হবে সবচেয়ে শেষ ক্লিক-স্টেপের নাম। একই নামে exam আগে থেকে থাকলে <code>(New)</code> যোগ হবে, পুরনোটা অক্ষত থাকবে।"
         )
 
-    if not step_lines or not meta_line:
+    if not step_lines or not meta_lines:
         await send_msg(chat_id, _fmt_help(), parse_mode="HTML")
         return
 
@@ -15640,10 +15667,10 @@ async def handle_autolms_command(msg: dict):
             return False
         return default
 
-    # Parse "key=value | key=value | ..." where key may itself contain
-    # "/" (b/c, s/sc) -- split only on the FIRST "=" per segment.
+    # Parse "key=value" lines where key may itself contain "/" (b/c, s/sc)
+    # -- split only on the FIRST "=" per line.
     fields = {}
-    for part in meta_line.split("|"):
+    for part in meta_lines:
         part = part.strip()
         if "=" not in part:
             continue
