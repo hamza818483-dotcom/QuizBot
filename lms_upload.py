@@ -47,13 +47,32 @@ async def upload_mcqs_to_lms(
     subject: str,
     chapter: str,
     course_id: str | None = None,
+    readymade_topic: str | None = None,
+    readymade_sub_chapter: str | None = None,
+    readymade_category: str | None = None,
+    duration_minutes: int | None = None,
+    total_marks: float | None = None,
+    negative_mark_per_question: float | None = None,
+    instructions: str | None = None,
+    is_visible_on_free: bool = False,
+    is_published: bool = True,
+    restrict_solution: bool = False,
+    disable_second_timer_deduction: bool = False,
+    is_only_live: bool = False,
 ) -> dict:
     """
     results: list of dicts shaped like chorcha_parser/atlas_mhtml output --
              {"questions","option1..4","option5","answer","explanation","type","section"}
     title: exam title (chapter/topic name as given in the /autolms command)
-    subject, chapter: from user-provided command args
-    course_id: optional — leave None for global Readymade (not tied to one course)
+    subject, chapter: from user-provided command args (also mirrored onto
+                       readymade_topic/readymade_sub_chapter if those aren't
+                       given separately -- covers the common case where
+                       they're the same value).
+    course_id: optional -- leave None for global Readymade (not tied to one course)
+    duration_minutes: defaults to len(results) minutes if not given
+    total_marks: defaults to len(results) if not given
+    is_published: defaults True so it's visible immediately (matches how
+                   a manually-created Readymade exam behaves by default)
 
     Returns {"exam_id": ..., "title": ..., "count": N}
     Raises LmsUploadError on any failure -- no partial state is left behind
@@ -66,27 +85,40 @@ async def upload_mcqs_to_lms(
     if not results:
         raise LmsUploadError("কোনো MCQ নেই, আপলোড করার কিছু নেই।")
 
+    n = len(results)
     async with httpx.AsyncClient(timeout=30) as client:
         final_title = title
         if await _title_exists(client, title):
             final_title = f"{title} (New)"
             # extremely unlikely, but guard against "(New)" itself colliding
-            n = 2
+            k = 2
             while await _title_exists(client, final_title):
-                final_title = f"{title} (New {n})"
-                n += 1
+                final_title = f"{title} (New {k})"
+                k += 1
 
         exam_payload = {
             "title": final_title,
             "is_readymade": True,
             "exam_type": "practice",
-            "duration_minutes": max(len(results), 1) * 1,
+            "duration_minutes": duration_minutes if duration_minutes is not None else max(n, 1),
             "subject": [subject] if subject else [],
             "chapter": chapter or None,
-            "readymade_topic": subject or None,
-            "readymade_sub_chapter": chapter or None,
+            "readymade_topic": readymade_topic or subject or None,
+            "readymade_sub_chapter": readymade_sub_chapter or chapter or None,
+            "readymade_category": readymade_category or None,
             "category": [],
+            "is_published": is_published,
+            "is_visible_on_free": is_visible_on_free,
+            "restrict_solution": restrict_solution,
+            "disable_second_timer_deduction": disable_second_timer_deduction,
+            "is_only_live": is_only_live,
         }
+        if total_marks is not None:
+            exam_payload["total_marks"] = total_marks
+        if negative_mark_per_question is not None:
+            exam_payload["negative_mark_per_question"] = negative_mark_per_question
+        if instructions:
+            exam_payload["instructions"] = instructions
         if course_id:
             exam_payload["course_id"] = course_id
 

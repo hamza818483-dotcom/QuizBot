@@ -15537,7 +15537,7 @@ async def handle_autolms_command(msg: dict):
     প্রথম পত্র
     অধ্যায় ১
     টপিক ১
-    subject=বাংলা | chapter=অধ্যায় ১ | course=
+    subject=বাংলা | chapter=অধ্যায় ১ | course= | category= | duration= | marks= | negative= | free=no | published=yes | restrict_solution=no
 
     Same chorcha.net click-sequence scrape as /auto (single run only --
     no "---" multi-run support here, keep it simple), but instead of
@@ -15547,10 +15547,23 @@ async def handle_autolms_command(msg: dict):
     insert succeeds the exam is already live on the site -- no separate
     "upload to website" step.
 
-    Last line must be `subject=... | chapter=... | course=...` (course
-    is optional -- leave blank for a global Readymade exam not tied to
-    one course). Exam title = the LAST click-step label (deepest topic
-    name), matching how /auto derives its `topic` for the CSV filename.
+    Last line is `key=value | key=value | ...` covering (mirrors the
+    Exam Form's Readymade-relevant fields; all optional except subject):
+      subject=       -> Subject + readymade_topic (required)
+      chapter=        -> Chapter + readymade_sub_chapter
+      course=         -> course UUID; blank = global Readymade
+      category=       -> readymade_category (freeform grouping label)
+      duration=       -> minutes; blank = auto (1 min/question)
+      marks=          -> total marks; blank = auto (1 mark/question)
+      negative=       -> negative marks per wrong answer; blank = none
+      free=yes/no     -> visible on Free exams tab (default no)
+      published=yes/no -> visible to students immediately (default yes)
+      restrict_solution=yes/no -> hide solutions after submit (default no)
+      only_live=yes/no -> only accessible during a live window (default no)
+      no_timer_deduct=yes/no -> disable per-second timer deduction (default no)
+
+    Exam title = the LAST click-step label (deepest topic name), matching
+    how /auto derives its `topic` for the CSV filename.
     """
     from atlas_autoscrape import AutoScrapeError, run_auto_click_sequence
     from atlas_mhtml import parse_mhtml_to_mcqs
@@ -15572,8 +15585,8 @@ async def handle_autolms_command(msg: dict):
         else:
             step_lines.append(l)
 
-    if not step_lines or not meta_line:
-        await send_msg(chat_id,
+    def _fmt_help():
+        return (
             "❌ Format:\n\n"
             "<code>/autolms\n"
             "বাংলা\n"
@@ -15582,26 +15595,64 @@ async def handle_autolms_command(msg: dict):
             "টপিক ১\n"
             "subject=বাংলা | chapter=অধ্যায় ১ | course=</code>\n\n"
             "📌 প্রথম কয়েক লাইনে chorcha.net-এ ক্লিক করার button/link নাম, ক্রমানুসারে (একদম /auto-এর মতো)।\n"
-            "📌 শেষ লাইনে অবশ্যই <code>subject=... | chapter=... | course=...</code> দিতে হবে — এই তিনটা LMS-এ exam-এর সাথে সেভ হবে। "
-            "<code>course=</code> খালি রাখলে exam-টা কোনো নির্দিষ্ট কোর্সে যুক্ত না হয়ে সবার জন্য Readymade-এ থাকবে।\n"
-            "📌 Exam-এর title হবে সবচেয়ে শেষ ক্লিক-স্টেপের নাম (সবচেয়ে গভীর টপিক)।\n"
-            "📌 একই নামে exam আগে থেকে থাকলে নতুনটার পাশে <code>(New)</code> যোগ হবে, পুরনোটা অক্ষত থাকবে।",
-            parse_mode="HTML")
+            "📌 শেষ লাইনে <code>key=value</code> গুলো <code>|</code> দিয়ে ভাগ করে দাও — শুধু <code>subject=</code> লাগবেই, বাকিগুলো ঐচ্ছিক:\n\n"
+            "<code>subject=</code> — বিষয় (আবশ্যক)\n"
+            "<code>chapter=</code> — অধ্যায়\n"
+            "<code>course=</code> — course ID, খালি রাখলে সবার জন্য Readymade\n"
+            "<code>category=</code> — Readymade ক্যাটেগরি\n"
+            "<code>duration=</code> — মিনিট, খালি রাখলে ১ মিনিট/প্রশ্ন\n"
+            "<code>marks=</code> — মোট নম্বর, খালি রাখলে ১ নম্বর/প্রশ্ন\n"
+            "<code>negative=</code> — ভুল উত্তরে কাটা নম্বর\n"
+            "<code>free=yes/no</code> — Free exam ট্যাবে দেখাবে কিনা (default: no)\n"
+            "<code>published=yes/no</code> — এখনই ছাত্রদের জন্য visible কিনা (default: yes)\n"
+            "<code>restrict_solution=yes/no</code> — সাবমিটের পর সমাধান লুকানো (default: no)\n"
+            "<code>only_live=yes/no</code> — শুধু লাইভ উইন্ডোতে চলবে কিনা (default: no)\n"
+            "<code>no_timer_deduct=yes/no</code> — সেকেন্ড-ভিত্তিক টাইমার কর্তন বন্ধ (default: no)\n\n"
+            "📌 Exam-এর title হবে সবচেয়ে শেষ ক্লিক-স্টেপের নাম। একই নামে exam আগে থেকে থাকলে <code>(New)</code> যোগ হবে, পুরনোটা অক্ষত থাকবে।"
+        )
+
+    if not step_lines or not meta_line:
+        await send_msg(chat_id, _fmt_help(), parse_mode="HTML")
         return
 
-    subject = chapter = course_id = ""
+    def _yn(v: str, default: bool) -> bool:
+        v = v.strip().lower()
+        if v in ("yes", "y", "true", "1"):
+            return True
+        if v in ("no", "n", "false", "0"):
+            return False
+        return default
+
+    fields = {}
     for part in meta_line.split("|"):
         part = part.strip()
         if "=" not in part:
             continue
         k, v = part.split("=", 1)
-        k, v = k.strip().lower(), v.strip()
-        if k == "subject":
-            subject = v
-        elif k == "chapter":
-            chapter = v
-        elif k == "course":
-            course_id = v
+        fields[k.strip().lower()] = v.strip()
+
+    subject = fields.get("subject", "")
+    chapter = fields.get("chapter", "")
+    course_id = fields.get("course", "")
+    category = fields.get("category", "")
+
+    def _num(key):
+        v = fields.get(key, "")
+        if not v:
+            return None
+        try:
+            return float(v) if "." in v else int(v)
+        except ValueError:
+            return None
+
+    duration_minutes = _num("duration")
+    total_marks = _num("marks")
+    negative_mark = _num("negative")
+    is_visible_on_free = _yn(fields.get("free", ""), False)
+    is_published = _yn(fields.get("published", ""), True)
+    restrict_solution = _yn(fields.get("restrict_solution", ""), False)
+    is_only_live = _yn(fields.get("only_live", ""), False)
+    no_timer_deduct = _yn(fields.get("no_timer_deduct", ""), False)
 
     if not subject:
         await send_msg(chat_id, "❌ subject= খালি রাখা যাবে না।")
@@ -15675,6 +15726,15 @@ async def handle_autolms_command(msg: dict):
             subject=subject,
             chapter=chapter,
             course_id=course_id or None,
+            readymade_category=category or None,
+            duration_minutes=duration_minutes,
+            total_marks=total_marks,
+            negative_mark_per_question=negative_mark,
+            is_visible_on_free=is_visible_on_free,
+            is_published=is_published,
+            restrict_solution=restrict_solution,
+            disable_second_timer_deduction=no_timer_deduct,
+            is_only_live=is_only_live,
         )
     except LmsUploadError as e:
         await send_msg(chat_id, f"❌ LMS আপলোড ব্যর্থ: {e}")
