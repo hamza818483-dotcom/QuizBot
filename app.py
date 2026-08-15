@@ -15559,6 +15559,11 @@ async def handle_savelabel_command(msg: dict):
     Saves the click-step lines (everything after the first line) under
     <name> so future /autolms runs can reuse them with "use:<name>"
     instead of retyping the whole path every time.
+
+    Special case: a single raw URL line (starts with http) is treated as
+    a direct-navigate shortcut, useful for saving the link behind a
+    text-less image/icon button on chorcha.net so you can drop "use:name"
+    into any click-sequence in place of that one un-clickable step.
     """
     chat_id = msg["chat"]["id"]
     text = msg.get("text", "")
@@ -15566,6 +15571,8 @@ async def handle_savelabel_command(msg: dict):
     first = lines[0].strip()
     name = first[len("/savelabel"):].strip()
     step_lines = [l.rstrip() for l in lines[1:] if l.strip() != ""]
+    if len(step_lines) == 1 and step_lines[0].strip().lower().startswith("http"):
+        step_lines = [f"goto:{step_lines[0].strip()}"]
 
     if not name or not step_lines:
         await send_msg(chat_id,
@@ -15745,15 +15752,24 @@ async def handle_autolms_command(msg: dict):
         await send_msg(chat_id, _fmt_help(), parse_mode="HTML")
         return
 
-    # "use:<name>" as the (only) step line -> load a /savelabel shortcut
-    # instead of typing out the click-steps again.
-    if len(step_lines) == 1 and step_lines[0].strip().lower().startswith("use:"):
-        label_name = step_lines[0].strip()[len("use:"):].strip()
-        saved = await d1_get(f"{_LABEL_KV_PREFIX}{label_name}")
-        if not saved or not saved.get("steps"):
-            await send_msg(chat_id, f"❌ এই নামে কোনো সেভ করা label পাওয়া যায়নি: {label_name}\n/labels দিয়ে তালিকা দেখো।")
-            return
-        step_lines = saved["steps"]
+    # "use:<name>" resolves to a /savelabel-saved shortcut. Works both as
+    # the ONLY step line (loads the whole saved sequence) and as ONE step
+    # among several (expands in-place -- handy for a single image/icon
+    # button that has no matchable text, where you've separately saved
+    # its "goto:<url>" under a name and just drop that name into the
+    # middle of an otherwise normal text-label sequence).
+    resolved_lines = []
+    for l in step_lines:
+        if l.strip().lower().startswith("use:"):
+            label_name = l.strip()[len("use:"):].strip()
+            saved = await d1_get(f"{_LABEL_KV_PREFIX}{label_name}")
+            if not saved or not saved.get("steps"):
+                await send_msg(chat_id, f"❌ এই নামে কোনো সেভ করা label পাওয়া যায়নি: {label_name}\n/labels দিয়ে তালিকা দেখো।")
+                return
+            resolved_lines.extend(saved["steps"])
+        else:
+            resolved_lines.append(l)
+    step_lines = resolved_lines
 
     def _yn(v: str, default: bool) -> bool:
         v = v.strip().lower()
