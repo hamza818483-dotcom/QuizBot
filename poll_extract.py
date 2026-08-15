@@ -96,10 +96,14 @@ class _AdaptiveRateLimiter:
        jonno aro conservative hoye jay।
     """
     def __init__(self):
-        self.current_delay = 0.8       # base delay per vote-request, seconds
+        self.current_delay = 0.6       # base delay per vote-request, seconds
         self.flood_hits = 0
-        self.max_per_minute = 20       # conservative safe limit — Telegram
-                                        # official client-o emon range-e thake
+        self.max_per_minute = 25       # safe-but-faster limit — proactive
+                                        # sliding window still throttles
+                                        # before any FloodWait would hit,
+                                        # and register_flood_wait() below
+                                        # clamps back down hard the moment
+                                        # a real FloodWait does occur
         self.request_times = []        # sliding window er timestamps
 
     def register_flood_wait(self, wait_seconds: float):
@@ -272,9 +276,13 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
                             except Exception as cb_err:
                                 logger.warning(f"[poll_extract] checkpoint_cb error: {cb_err}")
 
-                # Batch er por ektu beshi break — rate-limit/timing safety
+                # Batch er por ektu beshi break — rate-limit/timing safety.
+                # Sliding-window proactive limiter (wait_before_request)
+                # already caps total throughput safely per-minute, so this
+                # extra batch-gap only needs to be a small buffer on top,
+                # not a full extra multiple of the per-request delay.
                 if batch_start + BATCH_SIZE < len(quiz_messages):
-                    await asyncio.sleep(max(2.0, _rate_limiter.get_delay() * 3))
+                    await asyncio.sleep(max(1.0, _rate_limiter.get_delay() * 1.2))
         except Exception as e:
             # Bipod hole (crash/timeout) — jotukhon collect hoyeche oi porjonto
             # CSV pathiye dao, pura kaj shesh na hoyeo kichu na kichu hate thake
@@ -981,7 +989,7 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
                             logger.warning(f"[poll_extract] checkpoint_cb error: {cb_err}")
 
             if batch_start + BATCH_SIZE < len(quiz_messages):
-                await asyncio.sleep(max(2.0, _rate_limiter.get_delay() * 3))
+                await asyncio.sleep(max(1.0, _rate_limiter.get_delay() * 1.2))
     except Exception as e:
         logger.error(f"[poll_extract] topic batch loop crashed mid-way at {len(polls)} polls: {type(e).__name__}: {e}")
         if checkpoint_cb and polls:
