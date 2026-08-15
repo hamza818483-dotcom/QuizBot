@@ -1879,7 +1879,7 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str) -> bytes:
                             width=page_width, height=footer_box_h, mask=None)
             except Exception as fe:
                 logger.warning(f"[Watermark] footer image render failed, falling back to plain box: {fe}")
-                c.setFillColor(Color(0.75, 0.06, 0.06, alpha=1.0))
+                c.setFillColor(Color(1, 0, 0, alpha=1.0))
                 c.rect(0, 0, page_width, footer_box_h, fill=1, stroke=0)
 
             c.save()
