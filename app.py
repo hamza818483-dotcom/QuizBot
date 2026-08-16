@@ -11013,11 +11013,11 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
                 starts_new = True
             elif no == 1 and seen_any_no and prev_no is not None and prev_no != 1:
                 starts_new = True
-            elif hint and prev_hint and hint != prev_hint:
-                # Fallback safety net: if qsn_no==1 wasn't caught (extraction
-                # missed the number) but the topic banner text clearly changed,
-                # still split rather than silently merging two real topics.
-                starts_new = True
+            # NOTE: topic_hint is intentionally NOT used to trigger a split.
+            # University/organization names sometimes leak into topic_hint
+            # despite prompt instructions, which was causing the same real
+            # topic to be wrongly split every time the university changed.
+            # qsn_no resetting to 1 is the only reliable, confirmed signal.
             if starts_new:
                 group_seq += 1
                 name = hint if hint else f"Topic {group_seq}"
