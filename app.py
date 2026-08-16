@@ -10976,22 +10976,35 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
     IMPORTANT: extraction runs column-major per page (whole left column top-
     to-bottom, then right column), but the right column's MCQs are usually
     still the SAME topic continuing from the left column, just printed in a
-    different visual position. So within EACH page, MCQs are first re-sorted
-    by their printed qsn_no (ascending) before boundary-checking — this
-    restores true reading/serial order and stops the left/right column split
-    from being misread as a topic change. MCQs with no qsn_no keep their
-    original relative order and are placed after all numbered ones on that
-    page (rare fallback).
+    different visual position. So within EACH page, numbered MCQs are first
+    re-sorted by their printed qsn_no (ascending) before boundary-checking —
+    this restores true reading/serial order and stops the left/right column
+    split from being misread as a topic change. Any MCQ with no qsn_no is
+    NOT pushed to the end (that previously merged a trailing topic's
+    unnumbered MCQs into the wrong/previous group) — instead it's kept
+    immediately after the last numbered MCQ that preceded it in the original
+    extraction order, so it stays attached to its real neighboring topic.
     Returns list of (topic_name, [mcq, ...]) in first-seen order."""
     groups = []  # list of [topic_name, [mcqs]]
     prev_no = None
+    prev_hint = None
     seen_any_no = False
     group_seq = 0
     for _, _, mcqs in extracted_pages:
-        numbered = [m for m in mcqs if m.get("qsn_no") is not None]
-        unnumbered = [m for m in mcqs if m.get("qsn_no") is None]
-        numbered.sort(key=lambda m: m["qsn_no"])
-        page_mcqs = numbered + unnumbered
+        numbered = [(i, m) for i, m in enumerate(mcqs) if m.get("qsn_no") is not None]
+        numbered_sorted = sorted(numbered, key=lambda pair: pair[1]["qsn_no"])
+        # Rebuild page order: walk original list; whenever we hit a numbered
+        # MCQ, emit the next one from the sorted-by-serial sequence instead
+        # (restores true serial order) but unnumbered MCQs stay exactly where
+        # they were relative to their real original neighbors.
+        sorted_iter = iter(numbered_sorted)
+        page_mcqs = []
+        for i, m in enumerate(mcqs):
+            if m.get("qsn_no") is not None:
+                _, sm = next(sorted_iter)
+                page_mcqs.append(sm)
+            else:
+                page_mcqs.append(m)
         for m in page_mcqs:
             no = m.get("qsn_no")
             hint = (m.get("topic_hint") or "").strip()
@@ -11000,11 +11013,18 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
                 starts_new = True
             elif no == 1 and seen_any_no and prev_no is not None and prev_no != 1:
                 starts_new = True
+            elif hint and prev_hint and hint != prev_hint:
+                # Fallback safety net: if qsn_no==1 wasn't caught (extraction
+                # missed the number) but the topic banner text clearly changed,
+                # still split rather than silently merging two real topics.
+                starts_new = True
             if starts_new:
                 group_seq += 1
                 name = hint if hint else f"Topic {group_seq}"
                 groups.append([name, []])
             groups[-1][1].append(m)
+            if hint:
+                prev_hint = hint
             if no is not None:
                 prev_no = no
                 seen_any_no = True
