@@ -9245,6 +9245,33 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
     ]
     return "\n".join(lines)
 
+def _pair_pages_for_extra(pages: list) -> list:
+    """Combine consecutive pages 2-at-a-time into a single vertically-
+    stacked composite image, for /extra mode's low-yield-per-page case.
+    Odd page out (if any) at the end is left unpaired. Returns a new
+    list of (label, composite_img) in the same shape pdf_generate_all_pages
+    already expects, so no other code needs to change."""
+    from PIL import Image as _PILImg
+    paired = []
+    i = 0
+    while i < len(pages):
+        if i + 1 < len(pages):
+            (p1, img1), (p2, img2) = pages[i], pages[i + 1]
+            w = max(img1.width, img2.width)
+            gap = 12
+            h = img1.height + gap + img2.height
+            composite = _PILImg.new("RGB", (w, h), (255, 255, 255))
+            composite.paste(img1, (0, 0))
+            composite.paste(img2, (0, img1.height + gap))
+            paired.append((f"{p1}-{p2}", composite))
+            i += 2
+        else:
+            p1, img1 = pages[i]
+            paired.append((str(p1), img1))
+            i += 1
+    return paired
+
+
 async def pdf_generate_all_pages(
     chat_id: int, pages: list, topic: str, mcq_count: int,
     file_name: str, status_msg_id: int = None
@@ -9253,6 +9280,16 @@ async def pdf_generate_all_pages(
     /qbm-এর মতোই Phase 1 -- channel select/posting-এর আগে সব page-এর MCQ
     generate করে ফেলে। Returns list of (page_num, img, mcqs) tuples.
     """
+    if _EXTRA_MODE.get() and len(pages) > 1:
+        # /extra pages usually have very few (or zero) marked lines each --
+        # one full AI call per page would waste most of the call's budget
+        # on empty output. Combine 2 consecutive pages into a single
+        # stacked composite image and process them together in ONE call,
+        # roughly halving total API calls for this mode. Page numbers are
+        # kept as "N-M" labels so results/dashboard/CSV still show which
+        # original pages contributed each MCQ batch.
+        pages = _pair_pages_for_extra(pages)
+
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
     start_time = time.time()
     results_by_idx = [None] * len(pages)
