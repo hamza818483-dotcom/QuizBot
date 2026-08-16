@@ -10940,7 +10940,7 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, Q5 → 5). If truly no visible number, use null.\n'
-    '- "topic_hint": the nearest topic/heading/chapter-section text printed on the page directly above/around this MCQ (e.g. a bold heading line like "টপিক: কোষ বিভাজন" or "অধ্যায়-২: বংশগতি"). Copy the heading text exactly as printed. If no heading is visible near this MCQ, reuse the same topic_hint as the previous MCQ on this page silently (do not leave blank unless this is the very first MCQ on the very first page with zero heading anywhere).\n\n'
+    '- "topic_hint": the nearest topic/heading/chapter-section text printed on the page directly above/around this MCQ (e.g. a bold heading line like "টপিক: কোষ বিভাজন" or "অধ্যায়-২: বংশগতি"). Copy the heading text exactly as printed. If no heading is visible anywhere near this MCQ, use "" (empty string) — do NOT guess or reuse a heading from elsewhere.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
 )
@@ -10968,13 +10968,14 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
 
 def _topic_group_mcqs(extracted_pages: list) -> list:
     """Walks all MCQs in page order and splits into topic groups: whenever
-    qsn_no resets to 1 (or drops compared to the previous MCQ's qsn_no) AND/OR
+    qsn_no resets to 1 (after having seen a higher number already) AND/OR
     topic_hint text changes, a new topic group starts. Falls back to
     topic_hint-only grouping if qsn_no is missing/null throughout.
     Returns list of (topic_name, [mcq, ...]) in first-seen order."""
     groups = []  # list of [topic_name, [mcqs]]
     prev_no = None
     prev_hint = None
+    seen_any_no = False
     group_seq = 0
     for _, _, mcqs in extracted_pages:
         for m in mcqs:
@@ -10986,7 +10987,7 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             else:
                 if hint and hint != prev_hint:
                     starts_new = True
-                elif no is not None and prev_no is not None and no <= prev_no and no == 1:
+                elif no == 1 and seen_any_no and prev_no is not None and prev_no != 1:
                     starts_new = True
                 elif no is not None and prev_no is not None and no < prev_no:
                     starts_new = True
@@ -10997,6 +10998,7 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             groups[-1][1].append(m)
             if no is not None:
                 prev_no = no
+                seen_any_no = True
             if hint:
                 prev_hint = hint
     return [(name, mcqs) for name, mcqs in groups]
