@@ -10946,6 +10946,10 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '  b) If a new black-bg banner appears anywhere on THIS page (even partway down, even if a different banner was active at the top of the page), every MCQ from that point onward gets the NEW banner text; MCQs above it on the same page keep the banner that was already active for them.\n'
     '  c) If this specific page has genuinely no black-bg banner visible anywhere on it (pure continuation page, no new banner printed), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
     '  d) Every MCQ under the same visible banner on this page must get the EXACT SAME topic_hint string, character-for-character.\n\n'
+    'MULTI-COLUMN PAGES (CRITICAL — do not skip or merge any MCQ):\n'
+    '  a) If the page has 2 columns, read the ENTIRE left column top-to-bottom FIRST (every single MCQ in it), THEN the entire right column top-to-bottom. Never interleave/zigzag between columns.\n'
+    '  b) A banner change often happens mid-page at a column boundary (e.g. left column still under the old topic while the right column already starts a new banner) — check each column independently for its own banner, do not assume both columns share one banner just because they are on the same page.\n'
+    '  c) Before finalizing output, recount: every MCQ visible on the page (both columns, top to bottom) MUST appear exactly once in the JSON array — zero skipped, zero duplicated. Double-check page edges/corners and column-boundary MCQs specifically, they are the most commonly missed.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
 )
@@ -11030,6 +11034,15 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
         return (0, v) if isinstance(v, int) else (1, 0)
     for _, mcqs in groups:
         mcqs.sort(key=_qsn_key)
+    # Gap check: within each group, if qsn_no sequence has a gap (e.g. 5,6,8 —
+    # missing 7), log it so silent extraction misses (column-boundary MCQs
+    # dropped by the vision model) are visible instead of unnoticed.
+    for name, mcqs in groups:
+        nums = sorted(m.get("qsn_no") for m in mcqs if isinstance(m.get("qsn_no"), int))
+        if len(nums) >= 2:
+            missing = [n for n in range(nums[0], nums[-1] + 1) if n not in nums]
+            if missing:
+                logger.warning(f"[TOPIC gap] '{name[:40]}' missing qsn_no: {missing}")
     return [(name, mcqs) for name, mcqs in groups]
 
 
