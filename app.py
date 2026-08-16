@@ -10959,38 +10959,52 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 def _build_topic_verify_prompt(mcqs: list) -> str:
     """Call 2 audit prompt: gives the model its own Call1 output back alongside
     the image, and asks it to independently re-check the page against that
-    output on 2 axes — count/missing MCQs, and word-accuracy of extracted
-    text — then return only the corrections needed (not a full
-    re-extraction, keeps Call2 cheap). Deliberately does NOT touch
-    topic_hint/topic grouping — Call1's qsn_no==1-reset boundary logic
-    already gets topic splitting right; a prior version had Call2 also
-    auditing topic_hint and that introduced topic-mismatch regressions
-    (sub-headers like চাকরি/BUP wrongly promoted to topic names), so that
-    check was removed entirely rather than patched further."""
+    output on 4 axes — (1) left-column count, (2) right-column count,
+    (3) serial-number correctness, (4) word-accuracy — then return only the
+    corrections needed (not a full re-extraction, keeps Call2 cheap).
+    Left/right are checked SEPARATELY (not just a combined page total) so a
+    miss confined to one column doesn't get averaged away.
+    Deliberately does NOT let Call2 change topic_hint/topic grouping —
+    Call1's topic_hint-change boundary logic already gets topic splitting
+    right; a prior version let Call2 also rewrite topic_hint and that
+    introduced topic-mismatch regressions (sub-headers like চাকরি/BUP wrongly
+    promoted to topic names), so Call2 may only FLAG a suspected topic-leak
+    for logging, never change it."""
     compact = [
         {"qsn_no": m.get("qsn_no"), "question": m.get("question", ""),
-         "options": m.get("options", [])}
+         "options": m.get("options", []), "topic_hint": m.get("topic_hint", "")}
         for m in mcqs
     ]
     return (
         "You are auditing a previous extraction of this page against the actual image. "
         "Below is what was already extracted:\n"
         f"{json.dumps(compact, ensure_ascii=False)}\n\n"
-        "Re-check the page carefully (both columns if present, left column fully "
-        "top-to-bottom then right column fully) and verify TWO things:\n"
-        "1) COUNT: is every MCQ visible on the page present in the list above? "
-        "List any qsn_no visible on the page but MISSING from the list.\n"
-        "2) SERIAL: for each qsn_no in the list, does it match the actual printed "
+        "Re-check the page carefully and verify FOUR things:\n"
+        "1) LEFT COLUMN COUNT: if the page has 2 columns, look ONLY at the left column, "
+        "top to bottom. Is every MCQ visible in the left column present in the list above? "
+        "List any left-column qsn_no that is visible on the page but MISSING from the list.\n"
+        "2) RIGHT COLUMN COUNT: same check, but ONLY for the right column, top to bottom. "
+        "List any right-column qsn_no that is visible on the page but MISSING from the list. "
+        "(If the page is single-column, just do one full top-to-bottom count and skip step 2.)\n"
+        "3) SERIAL: for each qsn_no in the list, does it match the actual printed "
         "serial number on the page? List any that are WRONG as {\"qsn_no_wrong\": printed_value, \"was\": extracted_value}.\n"
-        "3) WORD ACCURACY: for each entry, does the extracted question/option text exactly "
+        "4) WORD ACCURACY: for each entry, does the extracted question/option text exactly "
         "match the words printed on the page (no substituted/misread words, no altered "
         "meaning)? List any with a mismatch as {\"qsn_no\": N, \"field\": \"question\"/\"optionA\"/\"optionB\"/\"optionC\"/\"optionD\", "
         "\"correct_text\": \"<the actual text exactly as printed on the page>\"}. "
-        "Only flag genuine misreads — do not flag stylistic differences.\n\n"
+        "Only flag genuine misreads — do not flag stylistic differences.\n"
+        "5) TOPIC LEAK (flag only, do not fix): does any MCQ's topic_hint in the list "
+        "above NOT match the actual full-page-width BLACK/DARK BACKGROUND banner text that "
+        "is really above it on the page? (Remember: university/organization names, চাকরি/চাকুরি, "
+        "BUP, unit labels like বি ইউনিট are sub-headers, NEVER real topic banners — do not "
+        "flag topic_hint as wrong just because a sub-header appears near it.) "
+        "List any genuine mismatch as {\"qsn_no\": N, \"extracted_hint\": \"...\", \"actual_banner\": \"...\"} "
+        "for review only — this will be logged, not auto-applied.\n\n"
         "Output ONLY this JSON object, nothing else:\n"
-        '{"missing_qsn_no": [<integers>], '
+        '{"missing_qsn_no": [<integers, left+right column misses combined>], '
         '"wrong_serials": [{"qsn_no_wrong": <int>, "was": <int>}], '
-        '"word_fixes": [{"qsn_no": <int>, "field": "question", "correct_text": "..."}]}\n'
+        '"word_fixes": [{"qsn_no": <int>, "field": "question", "correct_text": "..."}], '
+        '"topic_leaks": [{"qsn_no": <int>, "extracted_hint": "...", "actual_banner": "..."}]}\n'
         "If everything is correct, output all empty arrays."
     )
 
@@ -11052,6 +11066,7 @@ async def _topic_extract_from_image(img) -> list:
         missing_nums = set(n for n in (check.get("missing_qsn_no") or []) if isinstance(n, int))
         wrong_serials = check.get("wrong_serials") or []
         word_fixes = check.get("word_fixes") or []
+        topic_leaks = check.get("topic_leaks") or []
 
         by_qsn = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
 
@@ -11087,6 +11102,24 @@ async def _topic_extract_from_image(img) -> list:
             elif field in _OPT_FIELD_IDX and isinstance(m.get("options"), list) and len(m["options"]) == 4:
                 m["options"][_OPT_FIELD_IDX[field]] = text
                 logger.warning(f"[TOPIC verify] word fix qsn {n} {field}")
+
+        # 4) Log-only: suspected topic leaks (never auto-applied — this is
+        # exactly what caused the earlier topic-mismatch regression when
+        # Call2 was allowed to rewrite topic_hint directly).
+        _SUBHEADER_BLOCKLIST = (
+            "বিশ্ববিদ্যালয়", "চাকরি", "চাকুরি", "bup", "fass", "fsss",
+            "ইউনিট", "unit",
+        )
+        for leak in topic_leaks:
+            n = leak.get("qsn_no")
+            actual = (leak.get("actual_banner") or "").strip()
+            if any(bad in actual.lower() for bad in _SUBHEADER_BLOCKLIST):
+                continue  # Call2 misjudged a sub-header as a banner — ignore
+            logger.warning(
+                f"[TOPIC verify] possible topic leak qsn {n}: "
+                f"extracted='{(leak.get('extracted_hint') or '')[:30]}' "
+                f"actual='{actual[:30]}' (not auto-fixed)"
+            )
 
         mcqs = _qbm_dedup_list(mcqs)
     except Exception as e:
