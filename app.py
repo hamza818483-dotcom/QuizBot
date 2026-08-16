@@ -11023,6 +11023,12 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             groups[idx][1].append(m)
             if hint:
                 prev_hint = hint
+    # Sort each group's MCQs by qsn_no (missing/non-numeric sorts last, stable).
+    def _qsn_key(m):
+        v = m.get("qsn_no")
+        return (0, v) if isinstance(v, int) else (1, 0)
+    for _, mcqs in groups:
+        mcqs.sort(key=_qsn_key)
     return [(name, mcqs) for name, mcqs in groups]
 
 
