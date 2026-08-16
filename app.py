@@ -10474,6 +10474,73 @@ OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exact
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450]}]"""
 
 
+TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
+    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
+    '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, Q5 → 5). If truly no visible number, use null.\n'
+    '- "topic_hint": the nearest topic/heading/chapter-section text printed on the page directly above/around this MCQ (e.g. a bold heading line like "টপিক: কোষ বিভাজন" or "অধ্যায়-২: বংশগতি"). Copy the heading text exactly as printed. If no heading is visible near this MCQ, reuse the same topic_hint as the previous MCQ on this page silently (do not leave blank unless this is the very first MCQ on the very first page with zero heading anywhere).\n\n'
+    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
+)
+
+
+async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
+    """Topic-aware single-pass extractor: same strict extraction rules as QBM
+    but the prompt also asks for each MCQ's printed serial number (qsn_no)
+    and nearest topic heading (topic_hint), used by /topic to detect topic
+    boundaries (serial resetting to 1 under a new heading) and split into
+    separate per-topic CSVs. Single Gemini->Groq->OpenRouter call (no
+    multi-stage verify pass) to keep this fast/cheap — /topic is a grouping
+    utility on top of extraction, not a replacement for /qbm's full pipeline."""
+    gem = await _qbm_gemini_extract(img, TOPIC_EXTRACT_PROMPT)
+    if gem:
+        return _qbm_dedup_list(gem)
+    txt = await _qbm_groq_call(img, TOPIC_EXTRACT_PROMPT)
+    result = _qbm_parse_json(txt) if txt else []
+    if result:
+        return _qbm_dedup_list(result)
+    txt3 = await _qbm_openrouter_call(img, TOPIC_EXTRACT_PROMPT)
+    result3 = _qbm_parse_json(txt3) if txt3 else []
+    return _qbm_dedup_list(result3)
+
+
+def _topic_group_mcqs(extracted_pages: list) -> list:
+    """Walks all MCQs in page order and splits into topic groups: whenever
+    qsn_no resets to 1 (or drops compared to the previous MCQ's qsn_no) AND/OR
+    topic_hint text changes, a new topic group starts. Falls back to
+    topic_hint-only grouping if qsn_no is missing/null throughout.
+    Returns list of (topic_name, [mcq, ...]) in first-seen order."""
+    groups = []  # list of [topic_name, [mcqs]]
+    prev_no = None
+    prev_hint = None
+    group_seq = 0
+    for _, _, mcqs in extracted_pages:
+        for m in mcqs:
+            no = m.get("qsn_no")
+            hint = (m.get("topic_hint") or "").strip()
+            starts_new = False
+            if not groups:
+                starts_new = True
+            else:
+                if hint and hint != prev_hint:
+                    starts_new = True
+                elif no is not None and prev_no is not None and no <= prev_no and no == 1:
+                    starts_new = True
+                elif no is not None and prev_no is not None and no < prev_no:
+                    starts_new = True
+            if starts_new:
+                group_seq += 1
+                name = hint if hint else f"Topic {group_seq}"
+                groups.append([name, []])
+            groups[-1][1].append(m)
+            if no is not None:
+                prev_no = no
+            if hint:
+                prev_hint = hint
+    return [(name, mcqs) for name, mcqs in groups]
+
+
 # ── QBM PERMANENT PROMPT MEMORY ──
 # Active prompt cached in-process; persisted in Supabase (quiz_sessions,
 # key="qbm_active_prompt") so it survives restarts. New page-এ গেলে DB আবার
@@ -12768,6 +12835,127 @@ async def _handle_qbm_impl(msg: dict):
 
     except Exception as e:
         logger.error(f"[QBM] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
+async def handle_topic(msg: dict):
+    """/topic -p (pages) — same arg style as /pdf/qbm. Extracts existing MCQ
+    like /qbm, but ALSO detects topic boundaries via each MCQ's printed
+    serial number resetting to 1 (or dropping) and/or a changed topic
+    heading. Sends ONE separate CSV per detected topic, named after the
+    topic heading text."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _handle_topic_impl(msg)
+
+
+async def _handle_topic_impl(msg: dict):
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF-এ reply করে /topic দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/topic -p 1-10</code>\n\n"
+            "📌 Page-এ থাকা MCQ extract করে (নতুন বানায় না), কিন্তু serial number/topic heading "
+            "দেখে আলাদা টপিক ধরে প্রতিটার জন্য আলাদা CSV পাঠায়।\n"
+            "📌 -p = page range (না দিলে সব page)"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+    params = _parse_pdfm_params(text)
+    page_range = params["page_range"]
+
+    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
+    status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (topic detect সহ)...")
+
+        extracted_pages = await qbm_extract_all_pages(
+            chat_id, pages, "Topic Extract", file_name, status_msg_id,
+            extractor=_topic_extract_from_image
+        )
+
+        total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+        if not total_mcq_found:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ পাওয়া যায়নি!")
+            return
+
+        topic_groups = _topic_group_mcqs(extracted_pages)
+
+        _missing_exp = [m for _, mcqs in topic_groups for m in mcqs if not (m.get("explanation") or "").strip()]
+        if _missing_exp:
+            try:
+                await _ai_generate_all_explanations(_missing_exp)
+            except Exception as e:
+                logger.warning(f"[TOPIC] explanation fill failed: {e}")
+
+        if status_msg_id:
+            breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ CSV পাঠানো হচ্ছে...")
+
+        _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+        import io as _io_topic, csv as _csv_topic
+        for name, mcqs in topic_groups:
+            buf = _io_topic.StringIO()
+            w = _csv_topic.writer(buf)
+            w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                        "answer", "explanation", "type", "section"])
+            for m in mcqs:
+                opts = m.get("options", ["", "", "", ""])
+                w.writerow([
+                    m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                    opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                    opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                    _ans_map.get(m.get("answer", "A"), "1"),
+                    _strip_img_tag(m.get("explanation", "")), "1", "1"
+                ])
+            safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip() or "Topic"
+            await send_document(chat_id, buf.getvalue().encode("utf-8"),
+                f"{safe_name}.csv",
+                caption=f"📂 {name} — {len(mcqs)} MCQ",
+                mime_type="text/csv")
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
+
+    except Exception as e:
+        logger.error(f"[TOPIC] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
 
 
@@ -17086,6 +17274,10 @@ async def handle_message(msg: dict):
         else:
             await qbm_set_active_prompt(new_prompt)
             await send_msg(chat_id, "✅ QBM prompt permanently update হয়ে গেছে। এখন থেকে সব page-এ এই prompt-ই ব্যবহার হবে।")
+    elif text.startswith("/topic"):
+        # /topic = same extraction as /qbm but groups MCQs into separate
+        # CSVs per detected topic (serial-number reset / heading change)
+        _spawn_command_task(uid, handle_topic(msg))
     elif text.startswith("/qbm"):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
         # 100% ported from AtlasMasterBot's qbm_handler
