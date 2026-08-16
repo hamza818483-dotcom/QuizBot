@@ -2796,6 +2796,68 @@ def _chok_box_coverage_note(img, mcqs: list) -> str:
     )
 
 
+async def _extra_marking_audit(mcqs: list, img, topic: str, page_num) -> list:
+    """
+    Final code-level safety net for /extra. The Call-1 prompt already says
+    "only hand-marked lines", but a vision model can occasionally slip and
+    pull a fact from plain/unmarked text nearby. This is a strict SECOND
+    pass: shows the same image + the exact MCQs already generated, and
+    asks the model to independently verify each one's source line was
+    genuinely hand-marked (highlighter/pen underline/circle/box/star) --
+    any MCQ traced to unmarked text is dropped. Runs once, bounded.
+    """
+    if not mcqs:
+        return mcqs
+    try:
+        numbered = "\n".join(f"{idx+1}. {m.get('question','')[:150]}" for idx, m in enumerate(mcqs))
+        audit_prompt = (
+            f"You are STRICTLY auditing whether each MCQ below was really "
+            f"sourced from a HAND-MARKED line on this page (Topic: {topic}) -- "
+            f"marked = highlighter color, pen underline, hand-drawn circle/box/"
+            f"bracket, or star/tick pointing to it, added ON TOP of the book's "
+            f"original printing. Plain/unmarked text (even if bold/italic in "
+            f"the original printing, or definitions/important-looking facts) "
+            f"does NOT count as marked.\n\n"
+            f"MCQs to audit:\n{numbered}\n\n"
+            f"For EACH numbered MCQ, check: can you find the exact source line/"
+            f"phrase on the page THIS MCQ is based on, AND is that specific "
+            f"line/phrase visibly hand-marked (not just plain text)?\n\n"
+            f"Return a STRICT JSON array of the numbers (1-indexed, matching "
+            f"the list above) that FAILED this check -- i.e. MCQs whose "
+            f"source line is NOT actually hand-marked and should be removed. "
+            f"Format: [2, 5] (just the numbers, or [] if every MCQ above is "
+            f"correctly sourced from marked content). No prose, JSON only."
+        )
+        txt = await _gen_groq_raw_text(img, audit_prompt)
+        if not txt:
+            return mcqs
+        import json as _json
+        cleaned = txt.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+        try:
+            bad_indices = _json.loads(cleaned)
+        except Exception:
+            m = re.search(r'\[[\d,\s]*\]', cleaned)
+            bad_indices = _json.loads(m.group(0)) if m else []
+        if not isinstance(bad_indices, list) or not bad_indices:
+            return mcqs
+        bad_set = {int(x) for x in bad_indices if isinstance(x, (int, float)) or (isinstance(x, str) and x.strip().isdigit())}
+        if not bad_set:
+            return mcqs
+        kept = [m for idx, m in enumerate(mcqs) if (idx + 1) not in bad_set]
+        removed = len(mcqs) - len(kept)
+        if removed:
+            logger.info(f"[ExtraMarkingAudit] page {page_num}: removed {removed} MCQ(s) traced to unmarked text")
+        return kept
+    except Exception as e:
+        logger.warning(f"[ExtraMarkingAudit] page {page_num} skipped: {e}")
+        return mcqs
+
+
 async def _chok_final_cv_enforcement(mcqs: list, img, topic: str, page_num) -> list:
     """
     Final code-level safety net for /chok, run AFTER the normal verify pass.
@@ -3150,6 +3212,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
             out = await _chok_final_cv_enforcement(out, img, topic, page_num)
         if _BANGLA_MODE.get():
             out = await _bangla_verify_and_enforce(out, img, topic, page_num)
+        if _EXTRA_MODE.get():
+            out = await _extra_marking_audit(out, img, topic, page_num)
 
         out = _validate_mcq_structure(out)
         # Side-channel for outer retry callers (pdf_generate_all_pages'
