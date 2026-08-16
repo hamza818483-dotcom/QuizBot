@@ -746,7 +746,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 if _url_part.startswith("http"):
                     try:
                         from core import auto_link_map_set
-                        await auto_link_map_set(_label_part, _url_part)
+                        await auto_link_map_set(_label_part, _url_part, context=current_subject or "")
                     except Exception as e:
                         logger.warning(f"[/auto] auto_link_map_set failed for {_label_part!r}: {e}")
                     try:
@@ -1001,7 +1001,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 # user-taught mappings extend it without a code change.
                 try:
                     from core import auto_link_map_get
-                    saved_url = await auto_link_map_get(sub)
+                    saved_url = await auto_link_map_get(sub, context=current_subject or "")
                 except Exception:
                     saved_url = None
                 if saved_url:

@@ -1242,26 +1242,42 @@ async def _ensure_d1_table(name: str, create_sql: str):
     except Exception as e:
         logger.warning(f"[D1] ensure {name} table warn: {e}")
 
-async def auto_link_map_set(label: str, url: str):
+async def auto_link_map_set(label: str, url: str, context: str = ""):
     """Persist a /auto label->link mapping (survives bot restart) so image-only
-    or unmatchable-text cards can be goto:'d directly instead of clicked."""
+    or unmatchable-text cards can be goto:'d directly instead of clicked.
+
+    `context` (usually the current subject, e.g. "রসায়ন ১ম পত্র") lets the
+    SAME label (e.g. "MCQ") map to a DIFFERENT link per subject -- the
+    cache_key combines context+label so entries never collide across
+    subjects. context="" is the old/global entry (backward compatible with
+    links saved before this was added)."""
     await _ensure_d1_table(
         "auto_link_map",
-        "CREATE TABLE IF NOT EXISTS auto_link_map (label TEXT PRIMARY KEY, url TEXT NOT NULL, updated_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS auto_link_map (cache_key TEXT PRIMARY KEY, label TEXT NOT NULL, context TEXT NOT NULL DEFAULT '', url TEXT NOT NULL, updated_at INTEGER)",
     )
     import time as _t
+    cache_key = f"{context}||{label}"
     await d1_run(
-        "INSERT INTO auto_link_map (label, url, updated_at) VALUES (?, ?, ?) "
-        "ON CONFLICT(label) DO UPDATE SET url=excluded.url, updated_at=excluded.updated_at",
-        [label, url, int(_t.time())],
+        "INSERT INTO auto_link_map (cache_key, label, context, url, updated_at) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(cache_key) DO UPDATE SET url=excluded.url, updated_at=excluded.updated_at",
+        [cache_key, label, context, url, int(_t.time())],
     )
 
-async def auto_link_map_get(label: str) -> str | None:
+async def auto_link_map_get(label: str, context: str = "") -> str | None:
     await _ensure_d1_table(
         "auto_link_map",
-        "CREATE TABLE IF NOT EXISTS auto_link_map (label TEXT PRIMARY KEY, url TEXT NOT NULL, updated_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS auto_link_map (cache_key TEXT PRIMARY KEY, label TEXT NOT NULL, context TEXT NOT NULL DEFAULT '', url TEXT NOT NULL, updated_at INTEGER)",
     )
-    rows = await d1_select("SELECT url FROM auto_link_map WHERE label = ?", [label])
+    # 1) Exact context+label match (subject-specific link for this label).
+    if context:
+        rows = await d1_select(
+            "SELECT url FROM auto_link_map WHERE context = ? AND label = ?", [context, label]
+        )
+        if rows:
+            return rows[0].get("url")
+    # 2) Bare/global entry (context="" -- old saves, or labels saved
+    # without a subject context).
+    rows = await d1_select("SELECT url FROM auto_link_map WHERE context = '' AND label = ?", [label])
     if rows:
         return rows[0].get("url")
     # Fuzzy fallback: match ignoring whitespace differences (e.g. saved as
@@ -1269,22 +1285,28 @@ async def auto_link_map_get(label: str) -> str | None:
     # versa) -- normalize both sides by stripping all whitespace before
     # comparing, so minor spacing mismatches still resolve to the same
     # saved link instead of falling through to click-matching (which would
-    # fail identically for an image-only card).
+    # fail identically for an image-only card). Prefers a match within the
+    # given context first, then any match.
     def _squash(s: str) -> str:
         return re.sub(r"\s+", "", s or "")
     wanted = _squash(label)
     if not wanted:
         return None
-    all_rows = await d1_select("SELECT label, url FROM auto_link_map", [])
+    all_rows = await d1_select("SELECT label, context, url FROM auto_link_map", [])
+    context_match, any_match = None, None
     for r in all_rows:
         if _squash(r.get("label", "")) == wanted:
-            return r.get("url")
-    return None
+            if context and r.get("context") == context:
+                context_match = r.get("url")
+                break
+            if any_match is None:
+                any_match = r.get("url")
+    return context_match or any_match
 
 async def auto_link_map_get_all() -> dict:
     await _ensure_d1_table(
         "auto_link_map",
-        "CREATE TABLE IF NOT EXISTS auto_link_map (label TEXT PRIMARY KEY, url TEXT NOT NULL, updated_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS auto_link_map (cache_key TEXT PRIMARY KEY, label TEXT NOT NULL, context TEXT NOT NULL DEFAULT '', url TEXT NOT NULL, updated_at INTEGER)",
     )
     rows = await d1_select("SELECT label, url FROM auto_link_map", [])
     return {r["label"]: r["url"] for r in rows}
