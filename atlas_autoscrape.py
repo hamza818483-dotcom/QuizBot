@@ -728,7 +728,8 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 if not url.startswith("http"):
                     url = CHORCHA_BASE_URL.rstrip("/") + "/" + url.lstrip("/")
                 try:
-                    await page.goto(url, wait_until="networkidle", timeout=30000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    await page.wait_for_timeout(1200)
                 except Exception:
                     raise AutoScrapeError(
                         f"রান {run_no}/{run_total}, ধাপ {i}/{total}: URL \"{url}\"-এ যাওয়া যায়নি।"
@@ -750,8 +751,8 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                     except Exception as e:
                         logger.warning(f"[/auto] auto_link_map_set failed for {_label_part!r}: {e}")
                     try:
-                        await page.goto(_url_part, wait_until="networkidle", timeout=30000)
-                        await page.wait_for_timeout(300)
+                        await page.goto(_url_part, wait_until="domcontentloaded", timeout=20000)
+                        await page.wait_for_timeout(1200)
                         processed_subs.append(_label_part)
                         continue
                     except Exception:
@@ -773,8 +774,8 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 _cached_target = None
             if _cached_target:
                 try:
-                    await page.goto(_cached_target, wait_until="networkidle", timeout=30000)
-                    await page.wait_for_timeout(300)
+                    await page.goto(_cached_target, wait_until="domcontentloaded", timeout=20000)
+                    await page.wait_for_timeout(1200)
                     # Sanity-check: confirm the cached target actually
                     # looks like a valid landing (not an error/blank page
                     # from a stale entry saved during an earlier broken
@@ -1029,8 +1030,17 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                         logger.info(
                             f"[/auto] step {i}/{total} sub={sub!r}: matched via saved link-map -> {saved_url}"
                         )
-                        await page.goto(saved_url, wait_until="networkidle", timeout=30000)
-                        await page.wait_for_timeout(300)
+                        # domcontentloaded instead of networkidle: chorcha.net
+                        # sometimes keeps a background connection open
+                        # (analytics/polling) that never lets networkidle
+                        # fire, causing spurious 30s timeouts even though
+                        # the page itself finished loading. Extra settle
+                        # wait covers the gap instead.
+                        try:
+                            await page.goto(saved_url, wait_until="domcontentloaded", timeout=20000)
+                        except Exception:
+                            await page.goto(saved_url, wait_until="domcontentloaded", timeout=20000)
+                        await page.wait_for_timeout(1500)
                         processed_subs.append(sub)
                         continue
                     except Exception as e:
@@ -1566,7 +1576,10 @@ async def run_auto_click_sequence(
                 # Always restart fresh from the homepage and re-click the
                 # full step sequence for every run; slower per-run but
                 # matches the reliability of a standalone /auto run.
-                await page.goto(CHORCHA_BASE_URL, wait_until="networkidle", timeout=30000)
+                try:
+                    await page.goto(CHORCHA_BASE_URL, wait_until="domcontentloaded", timeout=20000)
+                except Exception:
+                    await page.goto(CHORCHA_BASE_URL, wait_until="domcontentloaded", timeout=20000)
                 await page.wait_for_timeout(SETTLE_WAIT_MS)
 
                 html, processed_subs_this_run = await _run_single_sequence(
