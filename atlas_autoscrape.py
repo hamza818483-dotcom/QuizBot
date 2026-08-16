@@ -1190,12 +1190,39 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                     )
                 except Exception:
                     _candidates_dump = []
+                try:
+                    # Targeted probe: search the WHOLE document (any tag,
+                    # no length/count cap) for any element whose own text
+                    # contains a fragment of the wanted label -- catches
+                    # cases where the real button got cut off the capped
+                    # general dump above (e.g. buried among 50+ board-list
+                    # cards that sort earlier in DOM order).
+                    _fragment = sub[:4] if len(sub) >= 4 else sub
+                    _targeted_probe = await page.evaluate(
+                        """(frag) => {
+                            const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+                            const all = Array.from(document.querySelectorAll('*'));
+                            const out = [];
+                            for (const el of all) {
+                                if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+                                const own = norm(Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent).join(''));
+                                if (own.includes(frag)) {
+                                    out.push({tag: el.tagName, text: norm(el.textContent).slice(0, 60), cls: (el.className || '').toString().slice(0, 80)});
+                                }
+                            }
+                            return out.slice(0, 10);
+                        }""",
+                        _fragment,
+                    )
+                except Exception:
+                    _targeted_probe = []
                 logger.error(
                     f"[/auto] step {i}/{total} sub={sub!r} NOT FOUND. "
                     f"subject_context={current_subject!r}, "
                     f"processed_so_far={processed_subs}, "
                     f"known_subjects_in_map={list(KNOWN_CATEGORY_CARD_URLS.keys())}, "
-                    f"visible_candidates={_candidates_dump}"
+                    f"visible_candidates={_candidates_dump}, "
+                    f"targeted_probe={_targeted_probe}"
                 )
                 raise AutoScrapeError(
                     f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
