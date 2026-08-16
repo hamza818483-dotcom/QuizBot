@@ -10939,7 +10939,7 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
-    '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, Q5 → 5). If truly no visible number, use null.\n'
+    '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": the nearest SECTION HEADER text this MCQ falls under — typically a bold/highlighted bar or banner line spanning the page/column width (e.g. a university/organization/subject name like "জগন্নাথ বিশ্ববিদ্যালয়", "রাজশাহী বিশ্ববিদ্যালয়", "চাকুরি", "বাংলাদেশের অবস্থান, আয়তন ও সীমানা"). This is the MAIN section grouping, NOT a smaller sub-label like "বি ইউনিট"/"এ ইউনিট"/"সি ইউনিট" — ignore those sub-unit labels for topic_hint and use the larger bold bar heading above them instead. Copy the heading text exactly as printed (Bangla as-is). If truly no such bold section-bar heading exists anywhere on the page, use "" (empty string) — do NOT guess.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
@@ -10968,13 +10968,13 @@ async def _topic_extract_from_image(img) -> list:
 
 def _topic_group_mcqs(extracted_pages: list) -> list:
     """Walks all MCQs in page order and splits into topic groups.
-    PRIMARY signal: topic_hint (heading) text changes -> new topic.
-    FALLBACK signal (only used while topic_hint is empty for a stretch):
-    qsn_no resets to 1 after having seen a higher number -> new topic.
+    SOLE boundary signal: qsn_no resets to 1 after having already seen a
+    higher number -> that MCQ starts a new topic group. topic_hint (heading
+    text nearest to the group's first MCQ) is used ONLY to name the group,
+    never to trigger a split by itself.
     Returns list of (topic_name, [mcq, ...]) in first-seen order."""
     groups = []  # list of [topic_name, [mcqs]]
     prev_no = None
-    prev_hint = None
     seen_any_no = False
     group_seq = 0
     for _, _, mcqs in extracted_pages:
@@ -10984,12 +10984,7 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             starts_new = False
             if not groups:
                 starts_new = True
-            elif hint:
-                if hint != prev_hint:
-                    starts_new = True
             elif no == 1 and seen_any_no and prev_no is not None and prev_no != 1:
-                starts_new = True
-            elif no is not None and prev_no is not None and no < prev_no:
                 starts_new = True
             if starts_new:
                 group_seq += 1
@@ -10999,10 +10994,6 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             if no is not None:
                 prev_no = no
                 seen_any_no = True
-            # hint only updates prev_hint when non-empty, so a temporary gap
-            # in heading detection doesn't wrongly trigger a fallback split
-            if hint:
-                prev_hint = hint
     return [(name, mcqs) for name, mcqs in groups]
 
 
