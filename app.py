@@ -10967,18 +10967,32 @@ async def _topic_extract_from_image(img) -> list:
 
 
 def _topic_group_mcqs(extracted_pages: list) -> list:
-    """Walks all MCQs in page order and splits into topic groups.
+    """Walks all MCQs in serial (qsn_no) order and splits into topic groups.
     SOLE boundary signal: qsn_no resets to 1 after having already seen a
     higher number -> that MCQ starts a new topic group. topic_hint (heading
     text nearest to the group's first MCQ) is used ONLY to name the group,
     never to trigger a split by itself.
+
+    IMPORTANT: extraction runs column-major per page (whole left column top-
+    to-bottom, then right column), but the right column's MCQs are usually
+    still the SAME topic continuing from the left column, just printed in a
+    different visual position. So within EACH page, MCQs are first re-sorted
+    by their printed qsn_no (ascending) before boundary-checking — this
+    restores true reading/serial order and stops the left/right column split
+    from being misread as a topic change. MCQs with no qsn_no keep their
+    original relative order and are placed after all numbered ones on that
+    page (rare fallback).
     Returns list of (topic_name, [mcq, ...]) in first-seen order."""
     groups = []  # list of [topic_name, [mcqs]]
     prev_no = None
     seen_any_no = False
     group_seq = 0
     for _, _, mcqs in extracted_pages:
-        for m in mcqs:
+        numbered = [m for m in mcqs if m.get("qsn_no") is not None]
+        unnumbered = [m for m in mcqs if m.get("qsn_no") is None]
+        numbered.sort(key=lambda m: m["qsn_no"])
+        page_mcqs = numbered + unnumbered
+        for m in page_mcqs:
             no = m.get("qsn_no")
             hint = (m.get("topic_hint") or "").strip()
             starts_new = False
