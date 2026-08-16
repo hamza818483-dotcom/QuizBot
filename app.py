@@ -10958,12 +10958,17 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 def _build_topic_verify_prompt(mcqs: list) -> str:
     """Call 2 audit prompt: gives the model its own Call1 output back alongside
     the image, and asks it to independently re-check the page against that
-    output on 4 axes — count, missing serials, word-accuracy of extracted
-    text, and topic_hint correctness/completeness — then return only the
-    corrections needed (not a full re-extraction, keeps Call2 cheap)."""
+    output on 2 axes — count/missing MCQs, and word-accuracy of extracted
+    text — then return only the corrections needed (not a full
+    re-extraction, keeps Call2 cheap). Deliberately does NOT touch
+    topic_hint/topic grouping — Call1's qsn_no==1-reset boundary logic
+    already gets topic splitting right; a prior version had Call2 also
+    auditing topic_hint and that introduced topic-mismatch regressions
+    (sub-headers like চাকরি/BUP wrongly promoted to topic names), so that
+    check was removed entirely rather than patched further."""
     compact = [
         {"qsn_no": m.get("qsn_no"), "question": m.get("question", ""),
-         "options": m.get("options", []), "topic_hint": m.get("topic_hint", "")}
+         "options": m.get("options", [])}
         for m in mcqs
     ]
     return (
@@ -10971,7 +10976,7 @@ def _build_topic_verify_prompt(mcqs: list) -> str:
         "Below is what was already extracted:\n"
         f"{json.dumps(compact, ensure_ascii=False)}\n\n"
         "Re-check the page carefully (both columns if present, left column fully "
-        "top-to-bottom then right column fully) and verify FOUR things:\n"
+        "top-to-bottom then right column fully) and verify TWO things:\n"
         "1) COUNT: is every MCQ visible on the page present in the list above? "
         "List any qsn_no visible on the page but MISSING from the list.\n"
         "2) SERIAL: for each qsn_no in the list, does it match the actual printed "
@@ -10980,24 +10985,12 @@ def _build_topic_verify_prompt(mcqs: list) -> str:
         "match the words printed on the page (no substituted/misread words, no altered "
         "meaning)? List any with a mismatch as {\"qsn_no\": N, \"field\": \"question\"/\"optionA\"/\"optionB\"/\"optionC\"/\"optionD\", "
         "\"correct_text\": \"<the actual text exactly as printed on the page>\"}. "
-        "Only flag genuine misreads — do not flag stylistic differences.\n"
-        "4) TOPIC COMPLETENESS: does every MCQ under the SAME topic banner on this page "
-        "have the same topic_hint value in the list? "
-        "CRITICAL RULE — topic_hint must ONLY be the text inside the widest, full-page-width "
-        "BLACK/DARK BACKGROUND banner bar (e.g. \"বাংলাদেশ পরিচিতি\", \"বাংলাদেশের অবস্থান, আয়তন ও সীমানা\"). "
-        "NEVER use smaller sub-headers as topic_hint — university/organization names "
-        "(জাহাঙ্গীরনগর বিশ্ববিদ্যালয়, রাজশাহী বিশ্ববিদ্যালয়, জগন্নাথ বিশ্ববিদ্যালয়, চাকরি/চাকুরি, BUP, "
-        "FASS, FSSS) and unit labels (বি ইউনিট, এ ইউনিট, এফ ইউনিট) are SUB-SECTIONS inside one topic, "
-        "never the topic itself — do not suggest these as correct_topic_hint under any circumstance. "
-        "Only flag a fix if the MCQ's topic_hint is missing or does not match the real black-bg banner "
-        "text that other MCQs on the same page/topic already correctly have. "
-        "List any needing a fix as {\"qsn_no\": N, \"correct_topic_hint\": \"<the real black-bg banner text>\"}.\n\n"
+        "Only flag genuine misreads — do not flag stylistic differences.\n\n"
         "Output ONLY this JSON object, nothing else:\n"
         '{"missing_qsn_no": [<integers>], '
         '"wrong_serials": [{"qsn_no_wrong": <int>, "was": <int>}], '
-        '"word_fixes": [{"qsn_no": <int>, "field": "question", "correct_text": "..."}], '
-        '"topic_fixes": [{"qsn_no": <int>, "correct_topic_hint": "..."}]}\n'
-        "If everything is correct on all 4 checks, output all empty arrays."
+        '"word_fixes": [{"qsn_no": <int>, "field": "question", "correct_text": "..."}]}\n'
+        "If everything is correct, output all empty arrays."
     )
 
 
@@ -11058,7 +11051,6 @@ async def _topic_extract_from_image(img) -> list:
         missing_nums = set(n for n in (check.get("missing_qsn_no") or []) if isinstance(n, int))
         wrong_serials = check.get("wrong_serials") or []
         word_fixes = check.get("word_fixes") or []
-        topic_fixes = check.get("topic_fixes") or []
 
         by_qsn = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
 
@@ -11094,30 +11086,6 @@ async def _topic_extract_from_image(img) -> list:
             elif field in _OPT_FIELD_IDX and isinstance(m.get("options"), list) and len(m["options"]) == 4:
                 m["options"][_OPT_FIELD_IDX[field]] = text
                 logger.warning(f"[TOPIC verify] word fix qsn {n} {field}")
-
-        # 4) Apply topic_hint corrections — but ONLY if qsn_no resets to 1
-        # (new topic start signal) AND the suggested hint doesn't match known
-        # sub-header patterns (university names, চাকরি/চাকুরি, BUP, unit
-        # labels) — those are never real topic banners, hard-blocked here
-        # regardless of what Call2 suggests, since Call2 itself can misjudge
-        # a sub-header as a black-bg banner.
-        _SUBHEADER_BLOCKLIST = (
-            "বিশ্ববিদ্যালয়", "চাকরি", "চাকুরি", "bup", "fass", "fsss",
-            "ইউনিট", "unit",
-        )
-        for fix in topic_fixes:
-            n = fix.get("qsn_no")
-            hint = (fix.get("correct_topic_hint") or "").strip()
-            if not (isinstance(n, int) and hint and n in by_qsn):
-                continue
-            if any(bad in hint.lower() for bad in _SUBHEADER_BLOCKLIST):
-                logger.warning(f"[TOPIC verify] rejected sub-header as topic_hint (qsn {n}): {hint[:40]}")
-                continue
-            if by_qsn[n].get("qsn_no") != 1:
-                logger.warning(f"[TOPIC verify] rejected topic_hint change on non-reset qsn {n}: {hint[:40]}")
-                continue
-            by_qsn[n]["topic_hint"] = hint
-            logger.warning(f"[TOPIC verify] topic_hint fixed qsn {n} -> {hint[:40]}")
 
         mcqs = _qbm_dedup_list(mcqs)
     except Exception as e:
