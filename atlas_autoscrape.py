@@ -1214,11 +1214,21 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
             # to the permanent click-cache so future runs skip matching
             # entirely for this exact button. Best-effort -- never let a
             # cache-write failure interrupt the actual scrape.
-            try:
-                from core import auto_click_cache_set
-                await auto_click_cache_set(_cache_from_url, sub, page.url)
-            except Exception as e:
-                logger.warning(f"[/auto] auto_click_cache_set failed for {sub!r}: {e}")
+            #
+            # Skip saving if page.url is identical to the page we clicked
+            # from: this happens when the click was a same-page filter/tab
+            # toggle (no real navigation) or fired before navigation had
+            # actually started -- caching it would create a useless
+            # self-loop entry that later gets served instead of doing real
+            # navigation, silently stranding future runs on the wrong page.
+            if page.url != _cache_from_url:
+                try:
+                    from core import auto_click_cache_set
+                    await auto_click_cache_set(_cache_from_url, sub, page.url)
+                except Exception as e:
+                    logger.warning(f"[/auto] auto_click_cache_set failed for {sub!r}: {e}")
+            else:
+                logger.info(f"[/auto] step {i}/{total} sub={sub!r}: URL unchanged after click, skipping cache save (avoids self-loop)")
 
         await page.wait_for_timeout(SETTLE_WAIT_MS)
         try:
