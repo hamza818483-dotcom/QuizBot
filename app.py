@@ -10955,12 +10955,42 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 )
 
 
-_TOPIC_COUNT_CHECK_PROMPT = (
-    "Count every single MCQ visible on this page (both columns if present, "
-    "top to bottom, left column fully then right column fully). "
-    "Output ONLY a JSON object, nothing else: "
-    '{"total_mcq_count": <integer>, "qsn_numbers": [<every printed serial number you see, in reading order, integers only, omit if truly unnumbered>]}'
-)
+def _build_topic_verify_prompt(mcqs: list) -> str:
+    """Call 2 audit prompt: gives the model its own Call1 output back alongside
+    the image, and asks it to independently re-check the page against that
+    output on 4 axes — count, missing serials, word-accuracy of extracted
+    text, and topic_hint correctness/completeness — then return only the
+    corrections needed (not a full re-extraction, keeps Call2 cheap)."""
+    compact = [
+        {"qsn_no": m.get("qsn_no"), "question": m.get("question", ""),
+         "options": m.get("options", []), "topic_hint": m.get("topic_hint", "")}
+        for m in mcqs
+    ]
+    return (
+        "You are auditing a previous extraction of this page against the actual image. "
+        "Below is what was already extracted:\n"
+        f"{json.dumps(compact, ensure_ascii=False)}\n\n"
+        "Re-check the page carefully (both columns if present, left column fully "
+        "top-to-bottom then right column fully) and verify FOUR things:\n"
+        "1) COUNT: is every MCQ visible on the page present in the list above? "
+        "List any qsn_no visible on the page but MISSING from the list.\n"
+        "2) SERIAL: for each qsn_no in the list, does it match the actual printed "
+        "serial number on the page? List any that are WRONG as {\"qsn_no_wrong\": printed_value, \"was\": extracted_value}.\n"
+        "3) WORD ACCURACY: for each entry, does the extracted question/option text exactly "
+        "match the words printed on the page (no substituted/misread words, no altered "
+        "meaning)? List any with a mismatch as {\"qsn_no\": N, \"field\": \"question\"/\"optionA\"/\"optionB\"/\"optionC\"/\"optionD\", "
+        "\"correct_text\": \"<the actual text exactly as printed on the page>\"}. "
+        "Only flag genuine misreads — do not flag stylistic differences.\n"
+        "4) TOPIC COMPLETENESS: does every MCQ under the SAME topic banner on this page "
+        "have the same topic_hint value in the list? List any with a wrong/missing topic_hint "
+        "as {\"qsn_no\": N, \"correct_topic_hint\": \"<actual banner text>\"}.\n\n"
+        "Output ONLY this JSON object, nothing else:\n"
+        '{"missing_qsn_no": [<integers>], '
+        '"wrong_serials": [{"qsn_no_wrong": <int>, "was": <int>}], '
+        '"word_fixes": [{"qsn_no": <int>, "field": "question", "correct_text": "..."}], '
+        '"topic_fixes": [{"qsn_no": <int>, "correct_topic_hint": "..."}]}\n'
+        "If everything is correct on all 4 checks, output all empty arrays."
+    )
 
 
 def _parse_count_check_json(text: str) -> dict:
@@ -10978,6 +11008,9 @@ def _parse_count_check_json(text: str) -> dict:
         return {}
 
 
+_OPT_FIELD_IDX = {"optiona": 0, "optionb": 1, "optionc": 2, "optiond": 3}
+
+
 async def _topic_extract_from_image(img) -> list:
     """Topic-aware extractor: same strict extraction rules as QBM but the
     prompt also asks for each MCQ's printed serial number (qsn_no) and
@@ -10985,13 +11018,13 @@ async def _topic_extract_from_image(img) -> list:
     boundaries and split into separate per-topic CSVs.
 
     Call 1: Gemini->Groq->OpenRouter full extraction (as before).
-    Call 2 (verify): lightweight independent count-check on the same image —
-    asks only "how many MCQs / which serial numbers are visible", compares
-    against what Call 1 actually extracted. If Call 1 missed any qsn_no
-    that Call 2 says exists, re-runs Call 1's full extraction ONCE more and
-    merges in whatever new qsn_no it recovers. This catches the multi-column
-    boundary MCQs that silently got dropped, without doubling the cost of
-    every call (Call 2 is a tiny/cheap count-only prompt, not a full re-extract)."""
+    Call 2 (audit): feeds Call1's own output back to the model alongside the
+    image and asks it to independently re-check 4 things — (1) count/missing
+    MCQs, (2) wrong serial numbers, (3) word-level accuracy of question/option
+    text against the page, (4) topic_hint correctness/completeness. Only the
+    flagged corrections are applied — cheaper than a full blind re-extraction
+    while still catching column-boundary misses, misread words, and
+    mis-tagged topics."""
     async def _run_extract_call():
         gem = await _qbm_gemini_extract(img, TOPIC_EXTRACT_PROMPT)
         if gem:
@@ -11005,24 +11038,66 @@ async def _topic_extract_from_image(img) -> list:
         return _qbm_dedup_list(result3)
 
     mcqs = await _run_extract_call()
+    if not mcqs:
+        return mcqs
 
-    # Call 2: cheap independent count-check to catch silent misses.
+    # Call 2: audit pass against Call1's own output.
     try:
-        check_txt = await _qbm_gemini_raw(img, _TOPIC_COUNT_CHECK_PROMPT)
+        verify_prompt = _build_topic_verify_prompt(mcqs)
+        check_txt = await _qbm_gemini_raw(img, verify_prompt)
         check = _parse_count_check_json(check_txt)
-        expected_nums = set(n for n in (check.get("qsn_numbers") or []) if isinstance(n, int))
-        got_nums = set(m.get("qsn_no") for m in mcqs if isinstance(m.get("qsn_no"), int))
-        missing_nums = expected_nums - got_nums
+
+        missing_nums = set(n for n in (check.get("missing_qsn_no") or []) if isinstance(n, int))
+        wrong_serials = check.get("wrong_serials") or []
+        word_fixes = check.get("word_fixes") or []
+        topic_fixes = check.get("topic_fixes") or []
+
+        by_qsn = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
+
+        # 1) Recover missing MCQs via a single full re-extraction pass.
         if missing_nums:
-            logger.warning(f"[TOPIC verify] Call1 missed qsn_no {sorted(missing_nums)} — re-extracting page")
+            logger.warning(f"[TOPIC verify] missing qsn_no {sorted(missing_nums)} — re-extracting page")
             retry_mcqs = await _run_extract_call()
             retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
             for n in missing_nums:
                 if n in retry_got:
                     mcqs.append(retry_got[n])
-            mcqs = _qbm_dedup_list(mcqs)
+                    by_qsn[n] = retry_got[n]
+
+        # 2) Fix wrong serial numbers.
+        for fix in wrong_serials:
+            was = fix.get("was")
+            correct = fix.get("qsn_no_wrong")
+            if isinstance(was, int) and isinstance(correct, int) and was in by_qsn:
+                by_qsn[was]["qsn_no"] = correct
+                logger.warning(f"[TOPIC verify] serial fixed: {was} -> {correct}")
+
+        # 3) Apply word-accuracy fixes.
+        for fix in word_fixes:
+            n = fix.get("qsn_no")
+            field = (fix.get("field") or "").strip().lower().replace(" ", "").replace("_", "")
+            text = fix.get("correct_text")
+            if not (isinstance(n, int) and text and n in by_qsn):
+                continue
+            m = by_qsn[n]
+            if field == "question":
+                m["question"] = text
+                logger.warning(f"[TOPIC verify] word fix qsn {n} question")
+            elif field in _OPT_FIELD_IDX and isinstance(m.get("options"), list) and len(m["options"]) == 4:
+                m["options"][_OPT_FIELD_IDX[field]] = text
+                logger.warning(f"[TOPIC verify] word fix qsn {n} {field}")
+
+        # 4) Apply topic_hint corrections.
+        for fix in topic_fixes:
+            n = fix.get("qsn_no")
+            hint = fix.get("correct_topic_hint")
+            if isinstance(n, int) and hint and n in by_qsn:
+                by_qsn[n]["topic_hint"] = hint
+                logger.warning(f"[TOPIC verify] topic_hint fixed qsn {n} -> {hint[:40]}")
+
+        mcqs = _qbm_dedup_list(mcqs)
     except Exception as e:
-        logger.warning(f"[TOPIC verify] count-check failed, skipping: {e}")
+        logger.warning(f"[TOPIC verify] audit pass failed, skipping: {e}")
 
     return mcqs
 
