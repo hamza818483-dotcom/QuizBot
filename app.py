@@ -16681,8 +16681,30 @@ async def handle_message(msg: dict):
 
     # Auto mhtml/html → smart detect (MCQ→CSV queue, Q&A/CQ→tell user to use /qpdf)
     if msg.get("document") and not msg.get("reply_to_message"):
-        _dfn = msg["document"].get("file_name", "").lower()
-        if _dfn.endswith(".mhtml") or _dfn.endswith(".mht") or _dfn.endswith(".html") or _dfn.endswith(".htm"):
+        _doc = msg["document"]
+        _dfn = _doc.get("file_name", "").lower()
+        _dmime = _doc.get("mime_type", "").lower()
+        _is_html_like = (
+            _dfn.endswith((".mhtml", ".mht", ".html", ".htm"))
+            or _dmime in ("text/html", "message/rfc822", "multipart/related", "application/x-mimearchive")
+            or _dmime.startswith("text/")
+        )
+        if not _is_html_like and not _dfn:
+            # No filename AND no recognizable mime -- last resort: peek at
+            # the first bytes to detect HTML/MHTML content (e.g. "<html",
+            # "<!doctype", or an MHTML "MIME-Version:"/"Content-Type:"
+            # header block), so a file sent with a stripped/missing
+            # extension and a generic mime (application/octet-stream)
+            # still gets auto-detected instead of silently ignored.
+            try:
+                _peek = await download_tg_file(_doc["file_id"])
+                _head = _peek[:512].lower()
+                if (b"<html" in _head or b"<!doctype" in _head
+                        or b"mime-version:" in _head or b"content-type: multipart/related" in _head):
+                    _is_html_like = True
+            except Exception:
+                pass
+        if _is_html_like:
             await _mhtml_auto_queue.put(msg)
             qsize = _mhtml_auto_queue.qsize()
             if qsize > 1:
