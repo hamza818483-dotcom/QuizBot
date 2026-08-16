@@ -1131,11 +1131,71 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                         element_handle = None
 
             if locator is None and element_handle is None:
+                # Last resort before giving up: some elements (esp. filter
+                # chips whose count badge loads via a separate async
+                # request) can still be mid-render even after all the
+                # matchers above ran. Wait a bit longer and retry the
+                # JS-normalized (exact/data-event) + count-chip matchers
+                # once more before declaring NOT FOUND.
+                await page.wait_for_timeout(6000)
+                try:
+                    element_handle = await page.evaluate_handle(
+                        """(target) => {
+                            const norm = s => (s || '').normalize('NFC').replace(/\\s+/g, ' ').trim();
+                            const wanted = norm(target);
+                            const all = Array.from(document.querySelectorAll('*'));
+                            for (const el of all.reverse()) {
+                                const ev = el.getAttribute && el.getAttribute('data-event');
+                                if (ev && norm(ev).endsWith('_' + wanted)) return el;
+                            }
+                            for (const el of all) {
+                                if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+                                if (norm(el.textContent) === wanted) return el;
+                            }
+                            const re = new RegExp('^' + wanted.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '\\\\s*[0-9০-৯]*');
+                            let best = null, bestLen = Infinity;
+                            for (const el of all) {
+                                if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+                                const txt = norm(el.textContent);
+                                if (re.test(txt) && txt.length < bestLen) {
+                                    best = el; bestLen = txt.length;
+                                }
+                            }
+                            return best;
+                        }""",
+                        sub,
+                    )
+                    is_null = await page.evaluate("(h) => h === null", element_handle)
+                    if is_null:
+                        element_handle = None
+                    else:
+                        match_method = "delayed-retry"
+                        logger.info(f"[/auto] step {i}/{total} sub={sub!r}: matched after 6s delayed retry")
+                except Exception:
+                    element_handle = None
+
+            if locator is None and element_handle is None:
+                try:
+                    _candidates_dump = await page.evaluate(
+                        """() => {
+                            const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+                            const all = Array.from(document.querySelectorAll('button, a, [data-event], [role="button"]'));
+                            const texts = [];
+                            for (const el of all) {
+                                const t = norm(el.textContent);
+                                if (t && t.length < 40) texts.push(t);
+                            }
+                            return [...new Set(texts)].slice(0, 60);
+                        }"""
+                    )
+                except Exception:
+                    _candidates_dump = []
                 logger.error(
                     f"[/auto] step {i}/{total} sub={sub!r} NOT FOUND. "
                     f"subject_context={current_subject!r}, "
                     f"processed_so_far={processed_subs}, "
-                    f"known_subjects_in_map={list(KNOWN_CATEGORY_CARD_URLS.keys())}"
+                    f"known_subjects_in_map={list(KNOWN_CATEGORY_CARD_URLS.keys())}, "
+                    f"visible_candidates={_candidates_dump}"
                 )
                 raise AutoScrapeError(
                     f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
