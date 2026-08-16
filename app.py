@@ -9012,6 +9012,323 @@ async def handle_tf(msg: dict):
 
 
 # ============================================================
+# FEATURE 7B: /extra COMMAND — fully standalone, no _EXTRA_MODE, no
+# handle_pdf/pdf_generate_all_pages/generate_mcq_from_image reuse. Only
+# shares low-level utilities (download/render/dashboard/raw AI-provider
+# calls) and the generic process_pdf_pages poster.
+# ============================================================
+def _build_extra_prompt_standalone(topic: str) -> str:
+    """/extra's own prompt builder — completely independent of
+    _build_mcq_prompt/_build_extra_prompt (no shared prompt-selector
+    contextvar chain). STRICT FILTER: only hand-marked (highlighter/pen
+    underline/circle/box/star) content, everything else ignored."""
+    return (
+        f"You are an expert MCQ-extraction engine for Bengali/English academic "
+        f"textbook pages (medical/HSC/admission-standard quality).\n"
+        f"Topic: {topic}\n\n"
+        f"═══════════════════════════════\n"
+        f"🟥 STRICT FILTER — ONLY HAND-MARKED CONTENT, NOTHING ELSE\n"
+        f"═══════════════════════════════\n"
+        f"This page may contain a LOT of printed text, but you must generate "
+        f"MCQs ONLY from the specific lines/words/paragraphs that have an "
+        f"EXTRA mark added on top of the book's original printing by hand or "
+        f"highlighter pen:\n"
+        f"- Highlighter color over the text (any color — yellow, green, "
+        f"orange, pink, blue, etc.)\n"
+        f"- Pen underline drawn under the text (any ink color)\n"
+        f"- A box, circle, or bracket drawn around the text by hand\n"
+        f"- A star, tick, or other hand-drawn mark next to the text pointing "
+        f"to it\n\n"
+        f"🚫 DO NOT generate any MCQ from plain/unmarked text, even if it "
+        f"looks important, is a definition, is bold/italic in the ORIGINAL "
+        f"book printing, or seems exam-relevant. Bold/italic that is part "
+        f"of the book's own original typesetting is NOT a hand-mark — only "
+        f"count marks that are clearly added on top, in a different "
+        f"ink/highlighter color or hand-drawn stroke, distinguishable from "
+        f"the book's own printing.\n\n"
+        f"If NO hand-marks exist anywhere on this page, return exactly [] — "
+        f"zero MCQs is a completely valid and expected result.\n\n"
+        f"For each hand-marked line/phrase found, generate ONE high-quality "
+        f"MCQ (4 options, correct answer, short Bengali explanation).\n\n"
+        f"OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown.\n"
+        f'[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},'
+        f'"answer":"A/B/C/D","explanation":"..."}}]'
+    )
+
+
+async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclude_groq_keys: set = None):
+    """/extra's OWN generation call — completely standalone, does not go
+    through generate_mcq_from_image/_generate_mcq_from_image_raw or the
+    _EXTRA_MODE contextvar. Groq first (own prompt), Gemini fallback if
+    Groq empty, then a dedicated marking-audit pass to drop any MCQ traced
+    to unmarked text. Count is NEVER user-settable (content-driven, could
+    legitimately be 0)."""
+    prompt = _build_extra_prompt_standalone(topic)
+    try:
+        groq_out, tried_keys = await _gen_groq(img, topic, None, exclude_keys=exclude_groq_keys, key_offset=key_offset)
+    except Exception as e:
+        logger.warning(f"[Extra-Standalone] groq failed page {page_num}: {e}")
+        groq_out, tried_keys = [], set()
+
+    out = groq_out
+    if not out:
+        try:
+            out = await _gemini_gen_mcq(img, topic, page_num, None)
+        except Exception as e:
+            logger.warning(f"[Extra-Standalone] gemini failed page {page_num}: {e}")
+            out = []
+
+    out = _cap_mcq_options(out, 4)
+    out = _validate_mcq_structure(out)
+    out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
+
+    if out:
+        out = await _extra_marking_audit(out, img, topic, page_num)
+        out = _validate_mcq_structure(out)
+
+    return out, tried_keys
+
+
+async def extra_generate_all_pages(
+    chat_id: int, pages: list, topic: str,
+    file_name: str, status_msg_id: int = None
+) -> list:
+    """/extra's OWN page-loop — completely standalone copy, not calling
+    pdf_generate_all_pages. Same 2-page-parallel + page-pairing idea (since
+    /extra pages are often mostly empty) but self-contained."""
+    if len(pages) > 1:
+        pages = _pair_pages_for_extra(pages)
+
+    page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
+    start_time = time.time()
+    results_by_idx = [None] * len(pages)
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    clear_cancel(chat_id)
+    new_job_id(chat_id)
+    set_active_job(chat_id, f"EXTRA MCQ generation ({file_name}, parallel)")
+
+    _EXTRA_PARALLEL_PAGES = 2
+    sem = asyncio.Semaphore(_EXTRA_PARALLEL_PAGES)
+    lock = asyncio.Lock()
+    total_mcq_box = {"n": 0}
+    _slot_counter = {"n": 0}
+
+    async def _run_one(idx, page_num, img):
+        if is_cancelled(chat_id):
+            return
+        async with sem:
+            if is_cancelled(chat_id):
+                return
+            async with lock:
+                slot = _slot_counter["n"] % _EXTRA_PARALLEL_PAGES
+                _slot_counter["n"] += 1
+                page_status[idx]["current"] = True
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id,
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+
+            mcqs = []
+            tried = set()
+            try:
+                mcqs, tried = await _extra_gen_from_image(img, topic, page_num, key_offset=slot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[Extra Generate] Page {page_num} error: {e}; retrying once")
+
+            if not mcqs and not is_cancelled(chat_id):
+                try:
+                    await asyncio.sleep(1)
+                    mcqs, _ = await _extra_gen_from_image(img, topic, page_num, key_offset=slot, exclude_groq_keys=tried)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[Extra Generate] Page {page_num} retry also failed: {e}")
+
+            if is_cancelled(chat_id):
+                return
+            async with lock:
+                results_by_idx[idx] = (page_num, img, mcqs)
+                total_mcq_box["n"] += len(mcqs)
+                page_status[idx]["current"] = False
+                page_status[idx]["done"] = True
+                page_status[idx]["mcq"] = len(mcqs)
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id,
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+
+    async def _watch_cancel(tasks):
+        while not all(t.done() for t in tasks):
+            if is_cancelled(chat_id):
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                return
+            await asyncio.sleep(0.3)
+
+    try:
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0), reply_markup=_cancel_kb(chat_id))
+        tasks = [_spawn_task(_run_one(idx, page_num, img)) for idx, (page_num, img) in enumerate(pages)]
+        watcher = _spawn_task(_watch_cancel(tasks))
+        await asyncio.gather(*tasks, return_exceptions=True)
+        watcher.cancel()
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+    return [r for r in results_by_idx if r is not None]
+
+
+async def handle_extra(msg: dict):
+    """/extra — fully standalone command, independent of handle_pdf and
+    _EXTRA_MODE. PDF-এ reply করে দিলে শুধু hand-marked (highlighter/pen
+    underline/circle/star) content থেকে MCQ generate করে; unmarked সব
+    ignore করে। Own lock, own generation loop, own dashboard — shares only
+    low-level utilities (download/render/dashboard/AI-provider calls) and
+    the generic process_pdf_pages poster."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _handle_extra_impl(msg)
+
+
+async def _handle_extra_impl(msg: dict):
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    uname = msg["from"].get("first_name", "User")
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF ফাইলে reply করে <code>/extra</code> দাও!\n\n"
+            "<b>Example:</b>\n"
+            "<code>/extra -p 1-5 -c @channel -m \"Topic\"</code>\n"
+            "<code>/extra -p 2 -c -100xxx -t 447 -m \"Group Topic\"</code>\n\n"
+            "শুধুমাত্র কলম/হাইলাইটার দিয়ে দাগ/মার্ক করা লাইন থেকেই MCQ বানাবে — "
+            "বাকি সব লাইন (মার্ক না করা) সম্পূর্ণ বাদ যাবে। কোনো মার্ক না থাকলে "
+            "সেই পেজে ০টা MCQ হবে।\n"
+            "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে",
+            parse_mode="HTML"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    params = parse_pdf_command(text)
+    topic = params["topic"]
+    if not topic:
+        m_t = re.search(r'-t\s+"([^"]+)"', text) or re.search(r"-t\s+'([^']+)'", text) or re.search(r'-t\s+(\S+)', text)
+        if m_t:
+            topic = m_t.group(1)
+    topic = topic or DEFAULT_TOPIC
+    page_range = params["page_range"]
+    channel_id = params["channel_id"]
+    thread_id = params.get("thread_id")
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+    file_size = reply["document"].get("file_size", 0)
+
+    status_r = await send_msg(chat_id, "⏳ PDF download হচ্ছে...")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+
+        if page_range:
+            parts = page_range.split("-")
+            req_first = int(parts[0])
+            req_last = int(parts[1]) if len(parts) > 1 else req_first
+        else:
+            total_pages = await asyncio.to_thread(get_pdf_page_count, pdf_bytes)
+            req_first, req_last = 1, total_pages
+
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ Hand-marked content খোঁজা হচ্ছে...")
+
+        generated_pages = await extra_generate_all_pages(chat_id, pages, topic, file_name, status_msg_id)
+        pdf_bytes = None
+
+        if channel_id:
+            await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, None,
+                channel_id, False, file_name, status_msg_id, thread_id=thread_id, skip_generate=True)
+            return
+
+        channels = await db_get_channels()
+        if not channels:
+            await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, None,
+                None, True, file_name, status_msg_id, thread_id=thread_id, skip_generate=True)
+            return
+
+        app.state.pdf_cache = getattr(app.state, "pdf_cache", {})
+        app.state.pdf_cache[f"pdf_img_{uid}"] = generated_pages
+        _cap_page_cache(app.state.pdf_cache)
+        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
+            "key": f"pdf_pending_{uid}",
+            "data": json.dumps({"topic": topic, "mcq_count": None, "file_name": file_name, "status_msg_id": status_msg_id, "thread_id": thread_id, "file_id": file_id, "page_range": page_range}),
+            "updated_at": int(time.time())
+        }).execute())
+
+        total_mcq_found = sum(len(mcqs) for _, _, mcqs in generated_pages)
+
+        try:
+            all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
+            if all_mcqs_flat:
+                csv_bytes = _mcqs_to_csv_bytes(all_mcqs_flat)
+                await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
+                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv")
+        except Exception as csv_err:
+            logger.warning(f"[Extra] CSV auto-send failed: {csv_err}")
+
+        page_breakdown = "\n".join(
+            f"✅ Page {fmt_page(p)}: {len(mcqs)} MCQ ✓" for p, _, mcqs in generated_pages
+        )
+        kb = {"inline_keyboard": []}
+        for ch in channels:
+            ch_id = ch.get("channel_id", "")
+            ch_name = ch.get("channel_name", ch_id)
+            kb["inline_keyboard"].append([{"text": f"📢 {ch_name}", "callback_data": f"pdfch_{ch_id}_{uid}"}])
+        kb["inline_keyboard"].append([{"text": "📄 CSV File Only", "callback_data": f"pdfch_csv_{uid}"}])
+        await send_msg(chat_id,
+            f"✅ <b>Extra Extraction Complete!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📝 Total MCQ: {total_mcq_found}  |  📋 Pages: {len(generated_pages)}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{page_breakdown}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 Topic: {topic}\n\nChannel select করো:",
+            reply_markup=kb)
+
+    except Exception as e:
+        logger.error(f"[Extra] Handle error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+        await notify_owner(f"[Extra] Error for user {uid}:\n{e}")
+
+
+# ============================================================
 # FEATURE 8: /pdf COMMAND
 # ============================================================
 async def handle_pdf(msg: dict):
@@ -17259,11 +17576,7 @@ async def handle_message(msg: dict):
                 await send_msg(chat_id, UNAUTH_MSG)
             return
         clear_cancel(chat_id)
-        token = _EXTRA_MODE.set(True)
-        try:
-            await handle_pdf(msg)
-        finally:
-            _EXTRA_MODE.reset(token)
+        _spawn_command_task(uid, handle_extra(msg))
         return
     if text.startswith("/tf"):
         if not is_auth:
