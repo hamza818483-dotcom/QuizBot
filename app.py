@@ -763,6 +763,7 @@ async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
 import contextvars
 _CHOK_MODE = contextvars.ContextVar("chok_mode", default=False)
 _TF_MODE = contextvars.ContextVar("tf_mode", default=False)
+_EXTRA_MODE = contextvars.ContextVar("extra_mode", default=False)
 
 def _build_chok_prompt(topic: str) -> str:
     """
@@ -1206,6 +1207,80 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
     return []
 
 
+def _build_extra_prompt(topic: str) -> str:
+    """
+    /extra command prompt — same pipeline as /pdf (page range, channel,
+    thread, topic, watermark, count-range override all inherited via
+    handle_pdf reuse).
+
+    OPPOSITE of /bangla: instead of maximum-coverage of every line, this
+    is a STRICT FILTER — extract MCQs ONLY from lines/paragraphs/portions
+    that carry a visible extra hand-mark (highlighter color, pen
+    underline, circle, box, star) added ON TOP of the book's original
+    printed text. Any line without such a mark must be completely
+    ignored, even if it looks important or exam-relevant on its own.
+    """
+    return (
+        f"You are an expert MCQ-extraction engine for Bengali/English academic "
+        f"textbook pages (medical/HSC/admission-standard quality).\n"
+        f"Topic: {topic}\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 STRICT FILTER — ONLY HAND-MARKED CONTENT, NOTHING ELSE\n"
+        f"═══════════════════════════════\n"
+        f"This page may contain a LOT of printed text, but you must generate "
+        f"MCQs ONLY from the specific lines/words/paragraphs that have an "
+        f"EXTRA mark added on top of the book's original printing by hand or "
+        f"highlighter pen:\n"
+        f"- Highlighter color over the text (any color — yellow, green, "
+        f"orange, pink, blue, etc.)\n"
+        f"- Pen underline drawn under the text (any ink color)\n"
+        f"- A box, circle, or bracket drawn around the text by hand\n"
+        f"- A star, tick, or other hand-drawn mark next to the text pointing "
+        f"to it\n\n"
+        f"🚫 DO NOT generate any MCQ from plain/unmarked text, even if it "
+        f"looks important, is a definition, is bold/italic in the ORIGINAL "
+        f"book printing, or seems exam-relevant. Bold/italic that is part "
+        f"of the book's own original typesetting is NOT a hand-mark — only "
+        f"count marks that are clearly added on top, in a different "
+        f"color/style than the surrounding printed text.\n"
+        f"- If NO marked content exists on this page at all, return an "
+        f"empty array [] — do not invent marks or fall back to unmarked "
+        f"content.\n"
+        f"- If only ONE small phrase is marked, generate just 1 MCQ from "
+        f"it — never pad with unmarked content to reach a higher count.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 SOURCE FIDELITY (STRICT)\n"
+        f"═══════════════════════════════\n"
+        f"- 100% of question text, options, and explanations must come from "
+        f"the source page — never invent or assume outside facts.\n"
+        f"- Explanation must justify each of the 4 options individually "
+        f"(correct one why right, other 3 why wrong) — pulled directly "
+        f"from source data.\n"
+        f"- Never generate MCQs from topic names, chapter titles, headers, "
+        f"or page numbers, even if marked.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟩 STRICT LANGUAGE RULE\n"
+        f"═══════════════════════════════\n"
+        f"Detect the language of the marked source text (Bengali or "
+        f"English) and write the question, ALL options, and the "
+        f"explanation in that exact same language. Never translate.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟩 OUTPUT\n"
+        f"═══════════════════════════════\n"
+        f"JSON array only, no markdown fences, no preamble. "
+        f"🚨 DO NOT include any <think>, reasoning, or explanation text "
+        f"before the JSON — output must start IMMEDIATELY with '['. "
+        f"Format:\n"
+        f'[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],'
+        f'"answer":0,"explanation":"..."}}]\n'
+        f"answer is integer 0-3 (A=0,B=1,C=2,D=3)."
+    )
+
+
 def _build_mcq_prompt(topic: str, count) -> str:
     if _CHOK_MODE.get():
         return _build_chok_prompt(topic)
@@ -1213,6 +1288,8 @@ def _build_mcq_prompt(topic: str, count) -> str:
         return _build_bangla_prompt(topic)
     if _TF_MODE.get():
         return _build_tf_prompt(topic)
+    if _EXTRA_MODE.get():
+        return _build_extra_prompt(topic)
     count_min = count_max = None
     full_coverage_rule = ""
     if isinstance(count, (tuple, list)) and len(count) == 2:
@@ -3033,6 +3110,12 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
             _rng_min, _rng_max = mcq_count[0], mcq_count[1]
         elif isinstance(mcq_count, (int, float)) and mcq_count:
             _rng_min = _rng_max = int(mcq_count)
+        elif _EXTRA_MODE.get():
+            # /extra output is entirely content-driven by how much is
+            # actually hand-marked on the page -- could legitimately be 0
+            # (unmarked page) or just 1-2 (a single marked phrase). No
+            # floor to retry toward, unlike the normal MIN_MCQ target.
+            _rng_min, _rng_max = 0, None
         else:
             _rng_min, _rng_max = MIN_MCQ, MAX_MCQ
 
@@ -8904,6 +8987,17 @@ async def handle_pdf(msg: dict):
                 "হবে/হবে না\" প্যাটার্ন) — পেইজপ্রতি ১০-২০টি, content অনুযায়ী।\n"
                 "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
             )
+        elif _EXTRA_MODE.get():
+            await send_msg(chat_id,
+                "❌ PDF ফাইলে reply করে <code>/extra</code> দাও!\n\n"
+                "<b>Example:</b>\n"
+                "<code>/extra -p 1-5 -c @channel -m \"Topic\"</code>\n"
+                "<code>/extra -p 2 -c -100xxx -t 447 -m \"Group Topic\"</code>\n\n"
+                "শুধুমাত্র কলম/হাইলাইটার দিয়ে দাগ/মার্ক করা লাইন থেকেই MCQ বানাবে — "
+                "বাকি সব লাইন (মার্ক না করা) সম্পূর্ণ বাদ যাবে। কোনো মার্ক না থাকলে "
+                "সেই পেজে ০টা MCQ হবে।\n"
+                "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
+            )
         else:
             await send_msg(chat_id,
                 "❌ PDF ফাইলে reply করে <code>/pdf</code> দাও!\n\n"
@@ -8935,6 +9029,11 @@ async def handle_pdf(msg: dict):
     if _TF_MODE.get():
         # /tf count is NEVER user-settable — the prompt itself mandates a
         # content-driven 10-20 range, same reasoning as /chok above.
+        mcq_count = None
+    if _EXTRA_MODE.get():
+        # /extra count is content-driven by how much is actually
+        # hand-marked on the page (could legitimately be 0) — never
+        # user-settable, same reasoning as /chok/tf above.
         mcq_count = None
     thread_id = params.get("thread_id")
     file_name = reply["document"].get("file_name", "document.pdf")
@@ -16865,6 +16964,18 @@ async def handle_message(msg: dict):
             await handle_pdf(msg)
         finally:
             _CHOK_MODE.reset(token)
+        return
+    if text.startswith("/extra"):
+        if not is_auth:
+            if is_private:
+                await send_msg(chat_id, UNAUTH_MSG)
+            return
+        clear_cancel(chat_id)
+        token = _EXTRA_MODE.set(True)
+        try:
+            await handle_pdf(msg)
+        finally:
+            _EXTRA_MODE.reset(token)
         return
     if text.startswith("/tf"):
         if not is_auth:
