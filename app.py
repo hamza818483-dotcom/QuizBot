@@ -9100,23 +9100,42 @@ def _build_extra_prompt_standalone(topic: str) -> str:
 async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclude_groq_keys: set = None):
     """/extra's OWN generation call — completely standalone, does not go
     through generate_mcq_from_image/_generate_mcq_from_image_raw or the
-    _EXTRA_MODE contextvar. Groq first (own prompt), Gemini fallback if
-    Groq empty, then a dedicated marking-audit pass to drop any MCQ traced
+    _EXTRA_MODE contextvar. Gemini first (primary), Groq fallback if
+    Gemini empty, then a dedicated marking-audit pass to drop any MCQ traced
     to unmarked text. Count is NEVER user-settable (content-driven, could
     legitimately be 0)."""
     prompt = _build_extra_prompt_standalone(topic)
     try:
-        groq_out, tried_keys = await _gen_groq(img, topic, None, exclude_keys=exclude_groq_keys, key_offset=key_offset)
+        txt = await _gemini_verify_raw_text(img, prompt)
+        out = _qbm_parse_json(txt) if txt else []
     except Exception as e:
-        logger.warning(f"[Extra-Standalone] groq failed page {page_num}: {e}")
-        groq_out, tried_keys = [], set()
+        logger.warning(f"[Extra-Standalone] gemini failed page {page_num}: {e}")
+        out = []
 
-    out = groq_out
+    tried_keys = set()
     if not out:
         try:
-            out = await _gemini_gen_mcq(img, topic, page_num, None)
+            groq_keys = groq_key_rotator.ordered_keys(offset=key_offset)
+            if exclude_groq_keys:
+                fresh = [k for k in groq_keys if k not in exclude_groq_keys]
+                groq_keys = fresh if fresh else groq_keys
+            for key in groq_keys[:5]:
+                tried_keys.add(key)
+                data_url = _img_to_data_url_groq(img, prompt_len_hint=prompt)
+                txt, status = await _post_openai_compat(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    key, "qwen/qwen3.6-27b", data_url, prompt
+                )
+                if txt:
+                    parsed = _qbm_parse_json(txt)
+                    if parsed:
+                        groq_key_rotator.mark_healthy(key)
+                        out = parsed
+                        break
+                if status == 429:
+                    groq_key_rotator.mark_rate_limited(key)
         except Exception as e:
-            logger.warning(f"[Extra-Standalone] gemini failed page {page_num}: {e}")
+            logger.warning(f"[Extra-Standalone] groq failed page {page_num}: {e}")
             out = []
 
     out = _cap_mcq_options(out, 4)
