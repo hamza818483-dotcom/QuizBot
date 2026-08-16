@@ -10940,13 +10940,13 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, Q5 → 5). If truly no visible number, use null.\n'
-    '- "topic_hint": the nearest topic/heading/chapter-section text printed on the page directly above/around this MCQ (e.g. a bold heading line like "টপিক: কোষ বিভাজন" or "অধ্যায়-২: বংশগতি"). Copy the heading text exactly as printed. If no heading is visible anywhere near this MCQ, use "" (empty string) — do NOT guess or reuse a heading from elsewhere.\n\n'
+    '- "topic_hint": the nearest SECTION HEADER text this MCQ falls under — typically a bold/highlighted bar or banner line spanning the page/column width (e.g. a university/organization/subject name like "জগন্নাথ বিশ্ববিদ্যালয়", "রাজশাহী বিশ্ববিদ্যালয়", "চাকুরি", "বাংলাদেশের অবস্থান, আয়তন ও সীমানা"). This is the MAIN section grouping, NOT a smaller sub-label like "বি ইউনিট"/"এ ইউনিট"/"সি ইউনিট" — ignore those sub-unit labels for topic_hint and use the larger bold bar heading above them instead. Copy the heading text exactly as printed (Bangla as-is). If truly no such bold section-bar heading exists anywhere on the page, use "" (empty string) — do NOT guess.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
 )
 
 
-async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
+async def _topic_extract_from_image(img) -> list:
     """Topic-aware single-pass extractor: same strict extraction rules as QBM
     but the prompt also asks for each MCQ's printed serial number (qsn_no)
     and nearest topic heading (topic_hint), used by /topic to detect topic
@@ -10967,10 +10967,10 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
 
 
 def _topic_group_mcqs(extracted_pages: list) -> list:
-    """Walks all MCQs in page order and splits into topic groups: whenever
-    qsn_no resets to 1 (after having seen a higher number already) AND/OR
-    topic_hint text changes, a new topic group starts. Falls back to
-    topic_hint-only grouping if qsn_no is missing/null throughout.
+    """Walks all MCQs in page order and splits into topic groups.
+    PRIMARY signal: topic_hint (heading) text changes -> new topic.
+    FALLBACK signal (only used while topic_hint is empty for a stretch):
+    qsn_no resets to 1 after having seen a higher number -> new topic.
     Returns list of (topic_name, [mcq, ...]) in first-seen order."""
     groups = []  # list of [topic_name, [mcqs]]
     prev_no = None
@@ -10984,13 +10984,13 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             starts_new = False
             if not groups:
                 starts_new = True
-            else:
-                if hint and hint != prev_hint:
+            elif hint:
+                if hint != prev_hint:
                     starts_new = True
-                elif no == 1 and seen_any_no and prev_no is not None and prev_no != 1:
-                    starts_new = True
-                elif no is not None and prev_no is not None and no < prev_no:
-                    starts_new = True
+            elif no == 1 and seen_any_no and prev_no is not None and prev_no != 1:
+                starts_new = True
+            elif no is not None and prev_no is not None and no < prev_no:
+                starts_new = True
             if starts_new:
                 group_seq += 1
                 name = hint if hint else f"Topic {group_seq}"
@@ -10999,6 +10999,8 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             if no is not None:
                 prev_no = no
                 seen_any_no = True
+            # hint only updates prev_hint when non-empty, so a temporary gap
+            # in heading detection doesn't wrongly trigger a fallback split
             if hint:
                 prev_hint = hint
     return [(name, mcqs) for name, mcqs in groups]
