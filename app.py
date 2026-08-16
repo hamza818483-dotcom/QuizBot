@@ -10945,6 +10945,7 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '  a) Do NOT use smaller sub-headers like university/organization names (জাহাঙ্গীরনগর বিশ্ববিদ্যালয়, রাজশাহী বিশ্ববিদ্যালয়, জগন্নাথ বিশ্ববিদ্যালয়, চাকুরি, BUP) or unit labels (বি ইউনিট, এ ইউনিট, এফ ইউনিট, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself.\n'
     '  b) If a new black-bg banner appears anywhere on THIS page (even partway down, even if a different banner was active at the top of the page), every MCQ from that point onward gets the NEW banner text; MCQs above it on the same page keep the banner that was already active for them.\n'
     '  b2) TWO-COLUMN pages specifically: the left and right columns can each have their OWN active banner, independent of each other — e.g. left column may still be finishing an earlier topic (no new banner in the left column at all) while the right column already starts a completely new banner from its very first MCQ. Determine each MCQ\'s topic_hint by which banner is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current banner. Do not assume a banner that appears in one column also applies to the other column\'s MCQs above the same vertical height.\n'
+    '  b3) SPECIFIC TRAP — a full-page-width banner that appears BELOW where one column has already ended for the page but the other column still has a few more MCQs continuing further down (columns are rarely equal length): those extra trailing MCQs in the longer column are STILL under the OLD topic (the banner has not reached them yet, it is only below the shorter column\'s last MCQ) — do NOT retroactively apply the new banner to them just because the banner appears above them in raw top-to-bottom scan order. Only MCQs that are visually below the banner text itself (in their own column) belong to the new topic.\n'
     '  c) If this specific page has genuinely no black-bg banner visible anywhere on it (pure continuation page, no new banner printed), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
     '  d) Every MCQ under the same visible banner on this page must get the EXACT SAME topic_hint string, character-for-character.\n\n'
     'MULTI-COLUMN PAGES (CRITICAL — do not skip or merge any MCQ):\n'
@@ -11165,7 +11166,7 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
     groups = []  # list of [topic_name, [mcqs]]
     hint_to_idx = {}  # hint text -> index into groups
     group_seq = 0
-    for _, _, mcqs in extracted_pages:
+    for pi, (_, _, mcqs) in enumerate(extracted_pages):
         for m in mcqs:
             hint = m.get("_effective_hint", "")
             key = hint if hint else None
@@ -11179,6 +11180,45 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
                 if key is not None:
                     hint_to_idx[key] = idx
             groups[idx][1].append(m)
+
+    # Rescue pass: a same-page banner leak — trailing MCQs from a longer
+    # column visually below a NEW topic's banner (but still logically
+    # continuing the OLD topic's numbering, since the banner hasn't reached
+    # their own column yet) — get miscategorized into the new topic. Detect
+    # this: if the very first MCQ(s) landed in a topic group are NOT close
+    # to qsn_no==1 (a real topic start), but DO extend the immediately
+    # preceding group's qsn_no sequence contiguously (or near-contiguously),
+    # they were very likely leaked from that previous topic — move them back.
+    for i in range(1, len(groups)):
+        prev_name, prev_mcqs = groups[i - 1]
+        cur_name, cur_mcqs = groups[i]
+        if not cur_mcqs or not prev_mcqs:
+            continue
+        prev_nums = sorted(n for n in (m.get("qsn_no") for m in prev_mcqs) if isinstance(n, int))
+        if not prev_nums:
+            continue
+        prev_max = prev_nums[-1]
+        # Look at the leading run of cur_mcqs whose qsn_no continues prev_max+1, +2, ...
+        # and where none of them is qsn_no==1 or 2 (a real topic start almost
+        # always begins at/near 1) — these are the suspected leaked tail MCQs.
+        leaked = []
+        expect = prev_max + 1
+        for m in cur_mcqs:
+            n = m.get("qsn_no")
+            if isinstance(n, int) and n == expect and n > 2:
+                leaked.append(m)
+                expect += 1
+            else:
+                break
+        if leaked and len(leaked) < len(cur_mcqs):
+            logger.warning(
+                f"[TOPIC leak-rescue] moved qsn_no {[m.get('qsn_no') for m in leaked]} "
+                f"from '{cur_name[:30]}' back to '{prev_name[:30]}' (contiguous with prior topic, not a real restart)"
+            )
+            for m in leaked:
+                cur_mcqs.remove(m)
+                prev_mcqs.append(m)
+
     # Sort each group's MCQs by qsn_no (missing/non-numeric sorts last, stable).
     def _qsn_key(m):
         v = m.get("qsn_no")
