@@ -11109,14 +11109,35 @@ def _looks_ai_generated(expl: str) -> bool:
 
 # Visually-similar Bengali word pairs commonly swapped by OCR/vision misread.
 # Pure string match, zero extra API cost, runs inline during existing parse.
-# Never auto-corrects (which word is right can't be known from text alone) --
-# only logs so misreads are traceable/reviewable instead of passing silently.
+# Two tiers:
+#  - AUTO_CORRECT: pair + a nearby anchor phrase that makes the correct word
+#    unambiguous from general knowledge alone (no source image needed) --
+#    safe to silently fix. Each entry: (wrong_word, right_word, anchor_substr).
+#  - Plain pairs (no anchor): logged only, never auto-corrected, since which
+#    side is right can't be determined from text alone.
+_CONFUSABLE_AUTO_CORRECT = (
+    # "কম বসতিপূর্ণ জেলা" (least-populated district) is a standard GK
+    # question type; "কম বৃষ্টিপূর্ণ জেলা" is not phrased this way in
+    # Bangladesh GK sources -- rainfall questions ask "সর্বনিম্ন বৃষ্টিপাত".
+    ("বৃষ্টিপূর্ণ জেলা", "বসতিপূর্ণ জেলা", "জেলা"),
+)
+
 _CONFUSABLE_WORD_PAIRS = (
     ("বসতিপূর্ণ", "বৃষ্টিপূর্ণ"), ("প্রাচীন", "প্রাচীর"),
     ("দক্ষিণ", "রক্ষণ"), ("রাজধানী", "রাজবাড়ী"),
     ("সীমান্ত", "সিমেন্ট"), ("অবস্থান", "অবস্থা"),
     ("বিভাগ", "বিভাজন"), ("স্বাধীনতা", "সাধারণত"),
 )
+
+def _auto_correct_confusable(text: str) -> tuple:
+    """Returns (corrected_text, list_of_corrections_made). Only fires the
+    tightly-anchored substitutions in _CONFUSABLE_AUTO_CORRECT."""
+    corrections = []
+    for wrong, right, _anchor in _CONFUSABLE_AUTO_CORRECT:
+        if wrong in text:
+            text = text.replace(wrong, right)
+            corrections.append(f"{wrong}->{right}")
+    return text, corrections
 
 def _flag_confusable_words(mcq_text: str) -> list:
     """Returns list of matched confusable words found in mcq_text (question
@@ -11157,6 +11178,9 @@ def _qbm_parse_json(text: str) -> list:
             q = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q)
             q = _strip_q_numbering(q)
             q = _clean_mcq_text(q)
+            q, _q_corrections = _auto_correct_confusable(q)
+            if _q_corrections:
+                logger.info(f"[QBM auto-correct] {_q_corrections} in: {q[:60]}")
             opts_list = [_clean_mcq_text(opts.get("A", "")), _clean_mcq_text(opts.get("B", "")),
                          _clean_mcq_text(opts.get("C", "")), _clean_mcq_text(opts.get("D", ""))]
             expl = _clean_mcq_text(mc.get("explanation", ""))
