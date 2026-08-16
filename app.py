@@ -10982,8 +10982,16 @@ def _build_topic_verify_prompt(mcqs: list) -> str:
         "\"correct_text\": \"<the actual text exactly as printed on the page>\"}. "
         "Only flag genuine misreads — do not flag stylistic differences.\n"
         "4) TOPIC COMPLETENESS: does every MCQ under the SAME topic banner on this page "
-        "have the same topic_hint value in the list? List any with a wrong/missing topic_hint "
-        "as {\"qsn_no\": N, \"correct_topic_hint\": \"<actual banner text>\"}.\n\n"
+        "have the same topic_hint value in the list? "
+        "CRITICAL RULE — topic_hint must ONLY be the text inside the widest, full-page-width "
+        "BLACK/DARK BACKGROUND banner bar (e.g. \"বাংলাদেশ পরিচিতি\", \"বাংলাদেশের অবস্থান, আয়তন ও সীমানা\"). "
+        "NEVER use smaller sub-headers as topic_hint — university/organization names "
+        "(জাহাঙ্গীরনগর বিশ্ববিদ্যালয়, রাজশাহী বিশ্ববিদ্যালয়, জগন্নাথ বিশ্ববিদ্যালয়, চাকরি/চাকুরি, BUP, "
+        "FASS, FSSS) and unit labels (বি ইউনিট, এ ইউনিট, এফ ইউনিট) are SUB-SECTIONS inside one topic, "
+        "never the topic itself — do not suggest these as correct_topic_hint under any circumstance. "
+        "Only flag a fix if the MCQ's topic_hint is missing or does not match the real black-bg banner "
+        "text that other MCQs on the same page/topic already correctly have. "
+        "List any needing a fix as {\"qsn_no\": N, \"correct_topic_hint\": \"<the real black-bg banner text>\"}.\n\n"
         "Output ONLY this JSON object, nothing else:\n"
         '{"missing_qsn_no": [<integers>], '
         '"wrong_serials": [{"qsn_no_wrong": <int>, "was": <int>}], '
@@ -11087,13 +11095,29 @@ async def _topic_extract_from_image(img) -> list:
                 m["options"][_OPT_FIELD_IDX[field]] = text
                 logger.warning(f"[TOPIC verify] word fix qsn {n} {field}")
 
-        # 4) Apply topic_hint corrections.
+        # 4) Apply topic_hint corrections — but ONLY if qsn_no resets to 1
+        # (new topic start signal) AND the suggested hint doesn't match known
+        # sub-header patterns (university names, চাকরি/চাকুরি, BUP, unit
+        # labels) — those are never real topic banners, hard-blocked here
+        # regardless of what Call2 suggests, since Call2 itself can misjudge
+        # a sub-header as a black-bg banner.
+        _SUBHEADER_BLOCKLIST = (
+            "বিশ্ববিদ্যালয়", "চাকরি", "চাকুরি", "bup", "fass", "fsss",
+            "ইউনিট", "unit",
+        )
         for fix in topic_fixes:
             n = fix.get("qsn_no")
-            hint = fix.get("correct_topic_hint")
-            if isinstance(n, int) and hint and n in by_qsn:
-                by_qsn[n]["topic_hint"] = hint
-                logger.warning(f"[TOPIC verify] topic_hint fixed qsn {n} -> {hint[:40]}")
+            hint = (fix.get("correct_topic_hint") or "").strip()
+            if not (isinstance(n, int) and hint and n in by_qsn):
+                continue
+            if any(bad in hint.lower() for bad in _SUBHEADER_BLOCKLIST):
+                logger.warning(f"[TOPIC verify] rejected sub-header as topic_hint (qsn {n}): {hint[:40]}")
+                continue
+            if by_qsn[n].get("qsn_no") != 1:
+                logger.warning(f"[TOPIC verify] rejected topic_hint change on non-reset qsn {n}: {hint[:40]}")
+                continue
+            by_qsn[n]["topic_hint"] = hint
+            logger.warning(f"[TOPIC verify] topic_hint fixed qsn {n} -> {hint[:40]}")
 
         mcqs = _qbm_dedup_list(mcqs)
     except Exception as e:
@@ -11105,15 +11129,13 @@ async def _topic_extract_from_image(img) -> list:
 def _topic_group_mcqs(extracted_pages: list) -> list:
     """Walks all MCQs in original extraction order (pages in order, MCQs in
     each page's extracted order) and splits into topic groups.
-    BOUNDARY SIGNAL: topic_hint (the black-box banner text) changing from the
-    previous MCQ's is the trigger for a new topic group. Confirmed from real
-    source documents: each real topic corresponds to exactly one black-box
-    banner, and the serial number under a banner is NOT reliable as an
-    independent signal — a banner's left and right printed columns can run
-    two separate parallel numbering tracks, and various university/unit
-    sub-sections inside the SAME banner can restart their own local
-    numbering too. So qsn_no is kept as data only, never used to trigger
-    splits.
+    BOUNDARY SIGNAL: a new topic group starts ONLY when qsn_no resets to 1
+    (the printed serial number restarting is the sole reliable signal that a
+    new full-page-width black-bg banner topic has begun). topic_hint is used
+    ONLY to NAME the group once started, never to trigger a split by itself —
+    this prevents sub-headers (university/organization names, চাকরি/চাকুরি,
+    unit labels) from ever being mistaken for a new topic, since those can
+    appear mid-topic without any real qsn_no reset.
 
     CARRY-FORWARD: a page with no new banner printed on it (pure
     continuation of an earlier topic) reports topic_hint="" for its MCQs —
@@ -11131,30 +11153,30 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             else:
                 m["_effective_hint"] = last_hint or ""
 
-    # Pass 2: group by the effective (carried-forward) hint. Same hint text
-    # is always merged into the SAME group regardless of where else it
-    # appears in extraction order (fixes same topic being split into
-    # multiple separate groups when a banner re-appears non-contiguously).
+    # Pass 2: walk in extraction order, starting a NEW group only on qsn_no==1
+    # reset. Same-name groups are still merged (fixes a topic being split
+    # into multiple groups when its banner re-appears non-contiguously),
+    # but a group is only ever CREATED at a qsn_no reset point.
     groups = []  # list of [topic_name, [mcqs]]
     hint_to_idx = {}  # hint text -> index into groups
-    prev_hint = None
+    cur_idx = None
     group_seq = 0
     for _, _, mcqs in extracted_pages:
         for m in mcqs:
             hint = m.get("_effective_hint", "")
-            key = hint if hint else None
-            if key is not None and key in hint_to_idx:
-                idx = hint_to_idx[key]
-            else:
-                group_seq += 1
-                name = hint if hint else f"Topic {group_seq}"
-                groups.append([name, []])
-                idx = len(groups) - 1
-                if key is not None:
-                    hint_to_idx[key] = idx
-            groups[idx][1].append(m)
-            if hint:
-                prev_hint = hint
+            is_reset = m.get("qsn_no") == 1
+            if is_reset or cur_idx is None:
+                key = hint if hint else None
+                if key is not None and key in hint_to_idx:
+                    cur_idx = hint_to_idx[key]
+                else:
+                    group_seq += 1
+                    name = hint if hint else f"Topic {group_seq}"
+                    groups.append([name, []])
+                    cur_idx = len(groups) - 1
+                    if key is not None:
+                        hint_to_idx[key] = cur_idx
+            groups[cur_idx][1].append(m)
     # Sort each group's MCQs by qsn_no (missing/non-numeric sorts last, stable).
     def _qsn_key(m):
         v = m.get("qsn_no")
