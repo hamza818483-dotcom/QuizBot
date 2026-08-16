@@ -10999,23 +10999,28 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             else:
                 m["_effective_hint"] = last_hint or ""
 
-    # Pass 2: group by the effective (carried-forward) hint.
+    # Pass 2: group by the effective (carried-forward) hint. Same hint text
+    # is always merged into the SAME group regardless of where else it
+    # appears in extraction order (fixes same topic being split into
+    # multiple separate groups when a banner re-appears non-contiguously).
     groups = []  # list of [topic_name, [mcqs]]
+    hint_to_idx = {}  # hint text -> index into groups
     prev_hint = None
     group_seq = 0
     for _, _, mcqs in extracted_pages:
         for m in mcqs:
             hint = m.get("_effective_hint", "")
-            starts_new = False
-            if not groups:
-                starts_new = True
-            elif hint and hint != prev_hint:
-                starts_new = True
-            if starts_new:
+            key = hint if hint else None
+            if key is not None and key in hint_to_idx:
+                idx = hint_to_idx[key]
+            else:
                 group_seq += 1
                 name = hint if hint else f"Topic {group_seq}"
                 groups.append([name, []])
-            groups[-1][1].append(m)
+                idx = len(groups) - 1
+                if key is not None:
+                    hint_to_idx[key] = idx
+            groups[idx][1].append(m)
             if hint:
                 prev_hint = hint
     return [(name, mcqs) for name, mcqs in groups]
