@@ -915,7 +915,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                         """(target) => {
                             const norm = s => (s || '').normalize('NFC').replace(/\\s+/g, ' ').trim();
                             const wanted = norm(target);
-                            const re = new RegExp('^' + wanted.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '\\\\s*[0-9০-৯]*$');
+                            const re = new RegExp('^' + wanted.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '\\\\s*[0-9০-৯]*');
                             const all = Array.from(document.querySelectorAll('button, a, [data-event], [role="button"], div, span, li'));
                             let best = null, bestLen = Infinity;
                             for (const el of all) {
@@ -958,19 +958,26 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                             const norm = s => (s || '').normalize('NFC').replace(/\\s+/g, ' ').trim();
                             const wanted = norm(target);
                             const all = Array.from(document.querySelectorAll('button, a, [data-event], [role="button"], div, span, li'));
-                            let best = null, bestLen = Infinity, tie = false;
+                            let best = null, bestLen = Infinity;
                             for (const el of all) {
                                 if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
                                 const ev = el.getAttribute && el.getAttribute('data-event');
                                 const txt = norm(ev || el.textContent);
                                 if (!txt.includes(wanted)) continue;
+                                // On a length tie, prefer the element deeper in the
+                                // DOM tree (more specific / less likely to be an
+                                // oversized wrapper) -- an ancestor and its only
+                                // meaningful child often report identical
+                                // normalized textContent length, and previously
+                                // this ambiguity caused the match to be dropped
+                                // entirely instead of picking the more specific one.
                                 if (txt.length < bestLen) {
-                                    best = el; bestLen = txt.length; tie = false;
-                                } else if (txt.length === bestLen && el !== best) {
-                                    tie = true;
+                                    best = el; bestLen = txt.length;
+                                } else if (txt.length === bestLen && best && el !== best && best.contains(el)) {
+                                    best = el; // el is a descendant of current best -- more specific, prefer it
                                 }
                             }
-                            return (best && !tie) ? best : null;
+                            return best;
                         }""",
                         sub_for_match,
                     )
