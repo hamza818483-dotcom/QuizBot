@@ -4090,9 +4090,8 @@ async def handle_rename(msg: dict):
         note += f" | watermark: {wm_text}" if watermarked else ""
         await edit_msg(chat_id, status_id, f"📤 '{new_name}' name e upload hocche...{note}")
 
-    caption = f"✅ Renamed: {new_name}" + (" (compressed)" if compressed else "")
-    if watermarked:
-        caption += f"\n🖋️ Watermark: {wm_text}"
+    _caption_name = new_name.rsplit(".", 1)[0] if "." in new_name else new_name
+    caption = f"✅{_caption_name}" + (" (compressed)" if compressed else "")
     result = await send_document(
         chat_id, file_bytes, new_name,
         caption=caption,
