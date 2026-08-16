@@ -10940,7 +10940,11 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
-    '- "topic_hint": the text inside the widest, full-page-width BLACK/DARK BACKGROUND banner bar above this MCQ (e.g. "বর্তমান ও পুরাতন নাম, ভৌগোলিক উপনাম", "বাংলাদেশের অবস্থান, আয়তন ও সীমানা") — this is the actual topic name. Do NOT use smaller sub-headers below it like university/organization names (জগন্নাথ বিশ্ববিদ্যালয়, রাজশাহী বিশ্ববিদ্যালয়, চাকুরি) or unit labels (বি ইউনিট, এ ইউনিট) — those are subsections under the real topic, not the topic itself. Only the widest full-width black-bg banner text counts. Copy it exactly as printed. If no such wide black-bg banner exists anywhere on the page, use "" (empty string) — do NOT guess or substitute a smaller heading.\n\n'
+    '- "topic_hint": the text inside the widest, full-page-width BLACK/DARK BACKGROUND banner bar that this MCQ falls under (e.g. "বাংলাদেশ পরিচিতি", "বর্তমান ও পুরাতন নাম, ভৌগোলিক উপনাম", "বাংলাদেশের অবস্থান, আয়তন ও সীমানা") — this is the actual topic name and is CRITICAL, used to detect topic boundaries. Rules:\n'
+    '  a) Do NOT use smaller sub-headers like university/organization names (জাহাঙ্গীরনগর বিশ্ববিদ্যালয়, রাজশাহী বিশ্ববিদ্যালয়, জগন্নাথ বিশ্ববিদ্যালয়, চাকুরি, BUP) or unit labels (বি ইউনিট, এ ইউনিট, এফ ইউনিট, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself.\n'
+    '  b) If a new black-bg banner appears anywhere on THIS page (even partway down, even if a different banner was active at the top of the page), every MCQ from that point onward gets the NEW banner text; MCQs above it on the same page keep the banner that was already active for them.\n'
+    '  c) If this specific page has genuinely no black-bg banner visible anywhere on it (pure continuation page, no new banner printed), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
+    '  d) Every MCQ under the same visible banner on this page must get the EXACT SAME topic_hint string, character-for-character.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
 )
@@ -10967,63 +10971,45 @@ async def _topic_extract_from_image(img) -> list:
 
 
 def _topic_group_mcqs(extracted_pages: list) -> list:
-    """Walks all MCQs in serial (qsn_no) order and splits into topic groups.
-    BOUNDARY SIGNAL: a new topic starts only when BOTH (a) qsn_no resets to 1
-    (after having already seen a higher number) AND (b) topic_hint (the
-    black-box banner text) actually changes from the previous MCQ's. Serial
-    number alone is unreliable here — individual university/unit sub-sections
-    within the SAME real topic sometimes restart their own local numbering,
-    which was wrongly splitting one topic into many when qsn_no was trusted
-    alone. Requiring both signals together confirms it's a genuine new topic.
+    """Walks all MCQs in original extraction order (pages in order, MCQs in
+    each page's extracted order) and splits into topic groups.
+    BOUNDARY SIGNAL: topic_hint (the black-box banner text) changing from the
+    previous MCQ's is the trigger for a new topic group. Confirmed from real
+    source documents: each real topic corresponds to exactly one black-box
+    banner, and the serial number under a banner is NOT reliable as an
+    independent signal — a banner's left and right printed columns can run
+    two separate parallel numbering tracks, and various university/unit
+    sub-sections inside the SAME banner can restart their own local
+    numbering too. So qsn_no is kept as data only, never used to trigger
+    splits.
 
-    IMPORTANT: extraction runs column-major per page (whole left column top-
-    to-bottom, then right column), but the right column's MCQs are usually
-    still the SAME topic continuing from the left column, just printed in a
-    different visual position. So within EACH page, numbered MCQs are first
-    re-sorted by their printed qsn_no (ascending) before boundary-checking —
-    this restores true reading/serial order and stops the left/right column
-    split from being misread as a topic change. Any MCQ with no qsn_no is
-    NOT pushed to the end (that previously merged a trailing topic's
-    unnumbered MCQs into the wrong/previous group) — instead it's kept
-    immediately after the last numbered MCQ that preceded it in the original
-    extraction order, so it stays attached to its real neighboring topic.
+    CARRY-FORWARD: a page with no new banner printed on it (pure
+    continuation of an earlier topic) reports topic_hint="" for its MCQs —
+    those inherit the last known non-empty topic_hint before boundary
+    checking, so a continuation page never wrongly starts a new topic.
     Returns list of (topic_name, [mcq, ...]) in first-seen order."""
+    # Pass 1: carry forward empty topic_hint from the last non-empty one seen.
+    last_hint = None
+    for _, _, mcqs in extracted_pages:
+        for m in mcqs:
+            hint = (m.get("topic_hint") or "").strip()
+            if hint:
+                last_hint = hint
+                m["_effective_hint"] = hint
+            else:
+                m["_effective_hint"] = last_hint or ""
+
+    # Pass 2: group by the effective (carried-forward) hint.
     groups = []  # list of [topic_name, [mcqs]]
-    prev_no = None
     prev_hint = None
-    seen_any_no = False
     group_seq = 0
     for _, _, mcqs in extracted_pages:
-        numbered = [(i, m) for i, m in enumerate(mcqs) if m.get("qsn_no") is not None]
-        numbered_sorted = sorted(numbered, key=lambda pair: pair[1]["qsn_no"])
-        # Rebuild page order: walk original list; whenever we hit a numbered
-        # MCQ, emit the next one from the sorted-by-serial sequence instead
-        # (restores true serial order) but unnumbered MCQs stay exactly where
-        # they were relative to their real original neighbors.
-        sorted_iter = iter(numbered_sorted)
-        page_mcqs = []
-        for i, m in enumerate(mcqs):
-            if m.get("qsn_no") is not None:
-                _, sm = next(sorted_iter)
-                page_mcqs.append(sm)
-            else:
-                page_mcqs.append(m)
-        for m in page_mcqs:
-            no = m.get("qsn_no")
-            hint = (m.get("topic_hint") or "").strip()
+        for m in mcqs:
+            hint = m.get("_effective_hint", "")
             starts_new = False
             if not groups:
                 starts_new = True
-            elif no == 1 and seen_any_no and prev_no is not None and prev_no != 1 and hint and hint != prev_hint:
-                # Require BOTH signals together: qsn_no resetting to 1 AND
-                # topic_hint (black-box banner) actually changing. Serial-only
-                # resets happen falsely within the same real topic (each
-                # university/unit sub-section sometimes restarts its own
-                # local numbering, e.g. জাহাঙ্গীরনগর বি ইউনিট ১-৭, then এফ
-                # ইউনিট locally reads as starting near 1 again) — trusting
-                # qsn_no alone was splitting one topic into many. Requiring
-                # the banner text to also change confirms it's a genuine new
-                # topic, not just a sub-section's own local numbering.
+            elif hint and hint != prev_hint:
                 starts_new = True
             if starts_new:
                 group_seq += 1
@@ -11032,9 +11018,6 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             groups[-1][1].append(m)
             if hint:
                 prev_hint = hint
-            if no is not None:
-                prev_no = no
-                seen_any_no = True
     return [(name, mcqs) for name, mcqs in groups]
 
 
