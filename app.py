@@ -10955,24 +10955,76 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 )
 
 
+_TOPIC_COUNT_CHECK_PROMPT = (
+    "Count every single MCQ visible on this page (both columns if present, "
+    "top to bottom, left column fully then right column fully). "
+    "Output ONLY a JSON object, nothing else: "
+    '{"total_mcq_count": <integer>, "qsn_numbers": [<every printed serial number you see, in reading order, integers only, omit if truly unnumbered>]}'
+)
+
+
+def _parse_count_check_json(text: str) -> dict:
+    if not text:
+        return {}
+    t = text.strip()
+    if "```json" in t:
+        t = t.split("```json")[1].split("```")[0].strip()
+    elif "```" in t:
+        t = t.split("```")[1].split("```")[0].strip()
+    try:
+        m = re.search(r'\{.*\}', t, re.DOTALL)
+        return json.loads(m.group()) if m else json.loads(t)
+    except Exception:
+        return {}
+
+
 async def _topic_extract_from_image(img) -> list:
-    """Topic-aware single-pass extractor: same strict extraction rules as QBM
-    but the prompt also asks for each MCQ's printed serial number (qsn_no)
-    and nearest topic heading (topic_hint), used by /topic to detect topic
-    boundaries (serial resetting to 1 under a new heading) and split into
-    separate per-topic CSVs. Single Gemini->Groq->OpenRouter call (no
-    multi-stage verify pass) to keep this fast/cheap — /topic is a grouping
-    utility on top of extraction, not a replacement for /qbm's full pipeline."""
-    gem = await _qbm_gemini_extract(img, TOPIC_EXTRACT_PROMPT)
-    if gem:
-        return _qbm_dedup_list(gem)
-    txt = await _qbm_groq_call(img, TOPIC_EXTRACT_PROMPT)
-    result = _qbm_parse_json(txt) if txt else []
-    if result:
-        return _qbm_dedup_list(result)
-    txt3 = await _qbm_openrouter_call(img, TOPIC_EXTRACT_PROMPT)
-    result3 = _qbm_parse_json(txt3) if txt3 else []
-    return _qbm_dedup_list(result3)
+    """Topic-aware extractor: same strict extraction rules as QBM but the
+    prompt also asks for each MCQ's printed serial number (qsn_no) and
+    nearest topic heading (topic_hint), used by /topic to detect topic
+    boundaries and split into separate per-topic CSVs.
+
+    Call 1: Gemini->Groq->OpenRouter full extraction (as before).
+    Call 2 (verify): lightweight independent count-check on the same image —
+    asks only "how many MCQs / which serial numbers are visible", compares
+    against what Call 1 actually extracted. If Call 1 missed any qsn_no
+    that Call 2 says exists, re-runs Call 1's full extraction ONCE more and
+    merges in whatever new qsn_no it recovers. This catches the multi-column
+    boundary MCQs that silently got dropped, without doubling the cost of
+    every call (Call 2 is a tiny/cheap count-only prompt, not a full re-extract)."""
+    async def _run_extract_call():
+        gem = await _qbm_gemini_extract(img, TOPIC_EXTRACT_PROMPT)
+        if gem:
+            return _qbm_dedup_list(gem)
+        txt = await _qbm_groq_call(img, TOPIC_EXTRACT_PROMPT)
+        result = _qbm_parse_json(txt) if txt else []
+        if result:
+            return _qbm_dedup_list(result)
+        txt3 = await _qbm_openrouter_call(img, TOPIC_EXTRACT_PROMPT)
+        result3 = _qbm_parse_json(txt3) if txt3 else []
+        return _qbm_dedup_list(result3)
+
+    mcqs = await _run_extract_call()
+
+    # Call 2: cheap independent count-check to catch silent misses.
+    try:
+        check_txt = await _qbm_gemini_raw(img, _TOPIC_COUNT_CHECK_PROMPT)
+        check = _parse_count_check_json(check_txt)
+        expected_nums = set(n for n in (check.get("qsn_numbers") or []) if isinstance(n, int))
+        got_nums = set(m.get("qsn_no") for m in mcqs if isinstance(m.get("qsn_no"), int))
+        missing_nums = expected_nums - got_nums
+        if missing_nums:
+            logger.warning(f"[TOPIC verify] Call1 missed qsn_no {sorted(missing_nums)} — re-extracting page")
+            retry_mcqs = await _run_extract_call()
+            retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
+            for n in missing_nums:
+                if n in retry_got:
+                    mcqs.append(retry_got[n])
+            mcqs = _qbm_dedup_list(mcqs)
+    except Exception as e:
+        logger.warning(f"[TOPIC verify] count-check failed, skipping: {e}")
+
+    return mcqs
 
 
 def _topic_group_mcqs(extracted_pages: list) -> list:
