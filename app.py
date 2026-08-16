@@ -11119,6 +11119,8 @@ def _qbm_parse_json(text: str) -> list:
                 "explanation": expl,
                 "qsn_bbox": qsn_bbox,
                 **({"yellow_highlight": mc.get("yellow_highlight")} if "yellow_highlight" in mc else {}),
+                **({"qsn_no": mc.get("qsn_no")} if "qsn_no" in mc else {}),
+                **({"topic_hint": mc.get("topic_hint")} if "topic_hint" in mc else {}),
             })
         except Exception:
             continue
