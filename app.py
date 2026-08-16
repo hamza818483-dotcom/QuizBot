@@ -11013,20 +11013,99 @@ def _parse_count_check_json(text: str) -> dict:
 _OPT_FIELD_IDX = {"optiona": 0, "optionb": 1, "optionc": 2, "optiond": 3}
 
 
+def _split_page_columns(img):
+    """Detects a 2-column layout via a vertical whitespace gutter and returns
+    [left_col_img, right_col_img] cropped at that gutter (with a small
+    margin), or [img] unchanged if no clear 2-column gutter is found (i.e.
+    genuinely single-column page). This eliminates the column-order/topic
+    ambiguity at the source — instead of asking the vision model to
+    correctly infer 'this MCQ belongs to the left vs right column, and each
+    column may have its own topic banner', each column is now sent as its
+    own separate image, so the model only ever needs to read one column's
+    MCQs top-to-bottom, in order, with one clear banner context.
+
+    Detection: converts to grayscale, looks at columns in the middle 20%-80%
+    horizontal band, finds a near-fully-white vertical strip spanning most
+    of the page height — the hallmark of a text-column gutter. Requires the
+    gap to be reasonably wide/tall to avoid false-splitting single-column
+    pages that just have some incidental whitespace in the middle.
+    """
+    try:
+        from PIL import Image as _PILImg
+        import numpy as _np
+        gray = img.convert("L")
+        arr = _np.array(gray)
+        h, w = arr.shape
+        # Only scan the plausible gutter band (avoid edges/margins).
+        band_lo, band_hi = int(w * 0.35), int(w * 0.65)
+        # A column is "white" at a given x if most pixels in that column
+        # (ignoring a small top/bottom margin) are near-white.
+        top_margin, bot_margin = int(h * 0.03), int(h * 0.97)
+        col_slice = arr[top_margin:bot_margin, band_lo:band_hi]
+        # For each x in the band, fraction of near-white pixels (>240).
+        white_frac = (col_slice > 240).mean(axis=0)
+        # Find contiguous run of x's that are >98% white — that's the gutter.
+        is_gutter_col = white_frac > 0.98
+        if not is_gutter_col.any():
+            return [img]
+        # Find the widest contiguous True run.
+        best_start, best_len, cur_start, cur_len = None, 0, None, 0
+        for i, v in enumerate(is_gutter_col):
+            if v:
+                if cur_start is None:
+                    cur_start = i
+                cur_len += 1
+            else:
+                if cur_start is not None and cur_len > best_len:
+                    best_start, best_len = cur_start, cur_len
+                cur_start, cur_len = None, 0
+        if cur_start is not None and cur_len > best_len:
+            best_start, best_len = cur_start, cur_len
+        # Require gutter to be at least ~1% of page width to be a real column gap.
+        if best_start is None or best_len < max(6, int(w * 0.01)):
+            return [img]
+        gutter_center = band_lo + best_start + best_len // 2
+        left = img.crop((0, 0, gutter_center, h))
+        right = img.crop((gutter_center, 0, w, h))
+        return [left, right]
+    except Exception as e:
+        logger.warning(f"[TOPIC column-split] detection failed, using full page: {e}")
+        return [img]
+
+
 async def _topic_extract_from_image(img) -> list:
     """Topic-aware extractor: same strict extraction rules as QBM but the
     prompt also asks for each MCQ's printed serial number (qsn_no) and
     nearest topic heading (topic_hint), used by /topic to detect topic
     boundaries and split into separate per-topic CSVs.
 
-    Call 1: Gemini->Groq->OpenRouter full extraction (as before).
-    Call 2 (audit): feeds Call1's own output back to the model alongside the
-    image and asks it to independently re-check 4 things — (1) count/missing
-    MCQs, (2) wrong serial numbers, (3) word-level accuracy of question/option
-    text against the page, (4) topic_hint correctness/completeness. Only the
-    flagged corrections are applied — cheaper than a full blind re-extraction
-    while still catching column-boundary misses, misread words, and
-    mis-tagged topics."""
+    COLUMN SPLIT: if the page is 2-column, it is split at the whitespace
+    gutter into two separate images FIRST (see _split_page_columns), and
+    each column is extracted independently in full (Call1 + Call2 audit
+    each) before being combined. This removes the column-order/topic
+    ambiguity at the source instead of relying on the model to correctly
+    infer column boundaries within one combined image.
+
+    Call 1 (per column): Gemini->Groq->OpenRouter full extraction.
+    Call 2 (per column, audit): feeds Call1's own output back to the model
+    alongside that column's image and asks it to independently re-check:
+    (1) count/missing MCQs, (2) wrong serial numbers, (3) word-level
+    accuracy of question/option text against the page. Only the flagged
+    corrections are applied — cheaper than a full blind re-extraction while
+    still catching misses and misread words."""
+    cols = _split_page_columns(img)
+    if len(cols) > 1:
+        logger.info(f"[TOPIC column-split] page split into {len(cols)} columns")
+    all_mcqs = []
+    for col_img in cols:
+        all_mcqs.extend(await _topic_extract_single_image(col_img))
+    return _qbm_dedup_list(all_mcqs)
+
+
+async def _topic_extract_single_image(img) -> list:
+    """Extracts one image (a full page, or a single column of a page) with
+    Call1 full extraction + Call2 audit pass. See _topic_extract_from_image
+    for the column-splitting wrapper that calls this per-column."""
     async def _run_extract_call():
         gem = await _qbm_gemini_extract(img, TOPIC_EXTRACT_PROMPT)
         if gem:
