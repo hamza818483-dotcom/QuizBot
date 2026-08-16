@@ -10873,7 +10873,7 @@ def _get_bd_time() -> str:
 # qbm_get_active_prompt() auto-detect a stale DB-cached prompt from before
 # the code update and self-heal to the new default, without needing a manual
 # `DELETE FROM quiz_sessions WHERE key='qbm_active_prompt'` after every edit.
-QBM_PROMPT_VERSION = 2
+QBM_PROMPT_VERSION = 3
 
 QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR — PERMANENT MODE. Extract ONLY MCQs already on this page. Never invent new ones. Follow every rule below, always.
 
@@ -10887,6 +10887,7 @@ FORBIDDEN (zero tolerance):
 EXTRACTION & COMPLETENESS (zero-tolerance):
 - Extract all: Bangla/English/mixed, any font/quality. 3+ internal read-throughs, cross-check before finalizing — don't miss the LAST MCQ on page/column; verify count matches visible MCQs.
 - Strip only numbering; keep wording; fix obvious spelling errors without changing meaning. Verify spelling character-by-character throughout — question, all 4 options, explanation.
+- VISUALLY-SIMILAR WORD CONFUSION (common OCR/vision misread — check every question word against this): বসতি≠বৃষ্টি, প্রাচীন≠প্রাচীর, দক্ষিণ≠রক্ষণ, রাজধানী≠রাজবাড়ী, সীমান্ত≠সিমেন্ট, অবস্থান≠অবস্থা, বিভাগ≠বিভাজন, জনসংখ্যা≠জনসংখ্যক, স্বাধীনতা≠সাধারণত, কর্তৃক≠কর্তব্য. If a word could plausibly be misread as a different real word, re-examine the actual glyphs/shape before committing — never let semantic plausibility override what is literally printed.
 - Never output partial/truncated text — question ends only at proper punctuation (?।) or finished clause; compare word/segment count vs source (fewer = truncated, re-read); same for all 4 options + answer-key text.
 - Hard-to-read word/name: never leave blank — use context/partial letters/general knowledge for the best complete word.
 - Question unclear but options readable: infer question type from options (e.g. all country names → "কোন দেশের...?"; all dates → "কত সালে/কবে") + general knowledge.
