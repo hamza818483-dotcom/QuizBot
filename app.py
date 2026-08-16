@@ -9101,39 +9101,53 @@ async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclu
     """/extra's OWN generation call — completely standalone, does not go
     through generate_mcq_from_image/_generate_mcq_from_image_raw or the
     _EXTRA_MODE contextvar. Gemini first (primary), Groq fallback if
-    Gemini empty, then a dedicated marking-audit pass to drop any MCQ traced
-    to unmarked text. Count is NEVER user-settable (content-driven, could
-    legitimately be 0)."""
+    Gemini gave a technical failure (not a genuine empty result). Most
+    /extra pages legitimately have 0 hand-marked MCQs -- a valid "[]"
+    response from either provider is trusted immediately and does NOT
+    trigger burning through more keys/providers, since that would just be
+    wasted spend chasing a result that was never going to be non-empty.
+    Count is NEVER user-settable (content-driven)."""
     prompt = _build_extra_prompt_standalone(topic)
+    tried_keys = set()
+    gemini_ok = False
     try:
         txt = await _gemini_verify_raw_text(img, prompt)
-        out = _qbm_parse_json(txt) if txt else []
+        if txt:
+            out = _qbm_parse_json(txt)
+            gemini_ok = True  # got a real response (even if it parsed to [])
+        else:
+            out = []
     except Exception as e:
         logger.warning(f"[Extra-Standalone] gemini failed page {page_num}: {e}")
         out = []
 
-    tried_keys = set()
-    if not out:
+    # Only fall to Groq on a TECHNICAL failure (Gemini gave nothing back at
+    # all) -- a genuine "[]" from Gemini is trusted as-is, no key burn.
+    if not out and not gemini_ok:
         try:
             groq_keys = groq_key_rotator.ordered_keys(offset=key_offset)
             if exclude_groq_keys:
                 fresh = [k for k in groq_keys if k not in exclude_groq_keys]
                 groq_keys = fresh if fresh else groq_keys
+            data_url = None
             for key in groq_keys[:5]:
                 tried_keys.add(key)
-                data_url = _img_to_data_url_groq(img, prompt_len_hint=prompt)
+                if data_url is None:
+                    data_url = _img_to_data_url_groq(img, prompt_len_hint=prompt)
                 txt, status = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
                     key, "qwen/qwen3.6-27b", data_url, prompt
                 )
                 if txt:
-                    parsed = _qbm_parse_json(txt)
-                    if parsed:
-                        groq_key_rotator.mark_healthy(key)
-                        out = parsed
-                        break
+                    # Any real response (even parses to []) is trusted --
+                    # stop here, don't keep burning keys chasing MCQs that
+                    # genuinely don't exist on this page.
+                    out = _qbm_parse_json(txt)
+                    groq_key_rotator.mark_healthy(key)
+                    break
                 if status == 429:
                     groq_key_rotator.mark_rate_limited(key)
+                # status/txt empty (technical failure) -- try next key
         except Exception as e:
             logger.warning(f"[Extra-Standalone] groq failed page {page_num}: {e}")
             out = []
@@ -9146,7 +9160,11 @@ async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclu
         out = await _extra_marking_audit(out, img, topic, page_num)
         out = _validate_mcq_structure(out)
 
-    return out, tried_keys
+    # got_real_response: True if EITHER provider actually answered (even []).
+    # False only means both Gemini and Groq had a genuine technical failure
+    # (exception/empty transport) -- that's the only case worth retrying.
+    got_real_response = gemini_ok or bool(tried_keys)
+    return out, tried_keys, got_real_response
 
 
 async def extra_generate_all_pages(
@@ -9189,17 +9207,18 @@ async def extra_generate_all_pages(
 
             mcqs = []
             tried = set()
+            got_real = False
             try:
-                mcqs, tried = await _extra_gen_from_image(img, topic, page_num, key_offset=slot)
+                mcqs, tried, got_real = await _extra_gen_from_image(img, topic, page_num, key_offset=slot)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.error(f"[Extra Generate] Page {page_num} error: {e}; retrying once")
 
-            if not mcqs and not is_cancelled(chat_id):
+            if not mcqs and not got_real and not is_cancelled(chat_id):
                 try:
                     await asyncio.sleep(1)
-                    mcqs, _ = await _extra_gen_from_image(img, topic, page_num, key_offset=slot, exclude_groq_keys=tried)
+                    mcqs, _, _ = await _extra_gen_from_image(img, topic, page_num, key_offset=slot, exclude_groq_keys=tried)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
