@@ -11107,29 +11107,6 @@ def _looks_ai_generated(expl: str) -> bool:
     return any(p.lower() in low for p in _AI_GENERATED_PATTERNS)
 
 
-# Visually-similar Bengali word pairs commonly swapped by OCR/vision misread.
-# Pure string match, zero extra API cost, runs inline during existing parse.
-# Never auto-corrects (which word is right can't be known from text alone) --
-# only logs so misreads are traceable/reviewable instead of passing silently.
-_CONFUSABLE_WORD_PAIRS = (
-    ("বসতিপূর্ণ", "বৃষ্টিপূর্ণ"), ("প্রাচীন", "প্রাচীর"),
-    ("দক্ষিণ", "রক্ষণ"), ("রাজধানী", "রাজবাড়ী"),
-    ("সীমান্ত", "সিমেন্ট"), ("অবস্থান", "অবস্থা"),
-    ("বিভাগ", "বিভাজন"), ("স্বাধীনতা", "সাধারণত"),
-)
-
-def _flag_confusable_words(mcq_text: str) -> list:
-    """Returns list of matched confusable words found in mcq_text (question
-    + options combined), for logging only."""
-    hits = []
-    for w1, w2 in _CONFUSABLE_WORD_PAIRS:
-        if w1 in mcq_text:
-            hits.append(w1)
-        if w2 in mcq_text:
-            hits.append(w2)
-    return hits
-
-
 def _qbm_parse_json(text: str) -> list:
     """Parse extractor JSON output -> list of {question, options[A-D], answer(A-D), explanation}"""
     if not text:
@@ -11171,9 +11148,6 @@ def _qbm_parse_json(text: str) -> list:
             # flag it for review instead of trusting the self-report blindly.
             if expl_source == "page" and _looks_ai_generated(expl):
                 logger.warning(f"[QBM explanation-tag] Suspect 'page' tag (looks generated): {q[:60]}")
-            confusable_hits = _flag_confusable_words(q + " " + " ".join(opts_list))
-            if confusable_hits:
-                logger.warning(f"[QBM confusable-word] Found {confusable_hits} in: {q[:60]}")
             valid.append({
                 "question": q.strip(),
                 "options": opts_list,
