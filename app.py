@@ -7107,7 +7107,8 @@ async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str, mess
     user still recognizes which PDF this was."""
     try:
         pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
-        wm_bytes = add_watermark_to_pdf(pdf_bytes, wm_text, footer_text=footer_text)
+        wm_bytes = add_watermark_to_pdf(pdf_bytes, wm_text, footer_text=footer_text,
+                                          title=(orig_filename.rsplit(".", 1)[0] if orig_filename else None))
         out_name = orig_filename or "watermarked.pdf"
         if not out_name.lower().endswith(".pdf"):
             out_name += ".pdf"

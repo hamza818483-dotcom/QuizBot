@@ -1954,7 +1954,7 @@ async def footer_history_list(limit: int = 10) -> list:
         return []
 
 
-def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str = None) -> bytes:
+def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str = None, title: str = None) -> bytes:
     """Add a diagonal, semi-transparent text watermark to every page of a PDF,
     plus a small top-right 'ATLAS' tag and a red-box white-text footer.
     footer_text: jodi None hoy, active/default footer text (settings theke) use hoy."""
@@ -2048,6 +2048,13 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
             writer.add_page(page)
 
         buf = _io.BytesIO()
+        try:
+            if reader.metadata:
+                writer.add_metadata(reader.metadata)
+            if title:
+                writer.add_metadata({"/Title": title})
+        except Exception as me:
+            logger.warning(f"[Watermark] metadata copy failed: {me}")
         writer.write(buf)
         return buf.getvalue()
     except Exception as e:
