@@ -1344,6 +1344,19 @@ async def auto_click_cache_get(from_url: str, label: str) -> str | None:
         return rows[0].get("target_url")
     return None
 
+
+async def auto_click_cache_clear_all():
+    """Wipe the entire click-cache table -- use when stale/wrong cached
+    targets (e.g. saved during earlier broken runs) are causing wrong
+    navigation instead of normal DOM matching."""
+    await _ensure_d1_table(
+        "auto_click_cache",
+        "CREATE TABLE IF NOT EXISTS auto_click_cache "
+        "(cache_key TEXT PRIMARY KEY, target_url TEXT NOT NULL, updated_at INTEGER)",
+    )
+    await d1_run("DELETE FROM auto_click_cache", [])
+
+
 async def db_get_settings() -> dict:
     try:
         r = await sb_exec(lambda: sb.table("quiz_settings").select("tag,exp_footer,watermark,footer_text").eq("id", 1).execute())

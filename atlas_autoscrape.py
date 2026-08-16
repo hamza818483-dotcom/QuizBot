@@ -775,6 +775,19 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 try:
                     await page.goto(_cached_target, wait_until="networkidle", timeout=30000)
                     await page.wait_for_timeout(300)
+                    # Sanity-check: confirm the cached target actually
+                    # looks like a valid landing (not an error/blank page
+                    # from a stale entry saved during an earlier broken
+                    # run) before trusting it -- a cheap body-text length
+                    # check catches empty/error pages without needing to
+                    # re-verify the exact label is present (the label may
+                    # legitimately not repeat on the destination page).
+                    try:
+                        _body_len = await page.evaluate("() => document.body.innerText.length")
+                    except Exception:
+                        _body_len = 999  # evaluate failed -- don't block on this check
+                    if _body_len < 20:
+                        raise RuntimeError(f"cached target looks empty/broken (body length {_body_len})")
                     processed_subs.append(sub)
                     logger.info(f"[/auto] step {i}/{total} sub={sub!r}: matched via click-cache -> {_cached_target}")
                     continue
