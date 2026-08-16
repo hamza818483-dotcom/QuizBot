@@ -10968,10 +10968,13 @@ async def _topic_extract_from_image(img) -> list:
 
 def _topic_group_mcqs(extracted_pages: list) -> list:
     """Walks all MCQs in serial (qsn_no) order and splits into topic groups.
-    SOLE boundary signal: qsn_no resets to 1 after having already seen a
-    higher number -> that MCQ starts a new topic group. topic_hint (heading
-    text nearest to the group's first MCQ) is used ONLY to name the group,
-    never to trigger a split by itself.
+    BOUNDARY SIGNAL: a new topic starts only when BOTH (a) qsn_no resets to 1
+    (after having already seen a higher number) AND (b) topic_hint (the
+    black-box banner text) actually changes from the previous MCQ's. Serial
+    number alone is unreliable here — individual university/unit sub-sections
+    within the SAME real topic sometimes restart their own local numbering,
+    which was wrongly splitting one topic into many when qsn_no was trusted
+    alone. Requiring both signals together confirms it's a genuine new topic.
 
     IMPORTANT: extraction runs column-major per page (whole left column top-
     to-bottom, then right column), but the right column's MCQs are usually
@@ -11011,13 +11014,17 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             starts_new = False
             if not groups:
                 starts_new = True
-            elif no == 1 and seen_any_no and prev_no is not None and prev_no != 1:
+            elif no == 1 and seen_any_no and prev_no is not None and prev_no != 1 and hint and hint != prev_hint:
+                # Require BOTH signals together: qsn_no resetting to 1 AND
+                # topic_hint (black-box banner) actually changing. Serial-only
+                # resets happen falsely within the same real topic (each
+                # university/unit sub-section sometimes restarts its own
+                # local numbering, e.g. জাহাঙ্গীরনগর বি ইউনিট ১-৭, then এফ
+                # ইউনিট locally reads as starting near 1 again) — trusting
+                # qsn_no alone was splitting one topic into many. Requiring
+                # the banner text to also change confirms it's a genuine new
+                # topic, not just a sub-section's own local numbering.
                 starts_new = True
-            # NOTE: topic_hint is intentionally NOT used to trigger a split.
-            # University/organization names sometimes leak into topic_hint
-            # despite prompt instructions, which was causing the same real
-            # topic to be wrongly split every time the university changed.
-            # qsn_no resetting to 1 is the only reliable, confirmed signal.
             if starts_new:
                 group_seq += 1
                 name = hint if hint else f"Topic {group_seq}"
