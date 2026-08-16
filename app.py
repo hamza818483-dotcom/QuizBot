@@ -10944,6 +10944,7 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '- "topic_hint": the text inside the widest, full-page-width BLACK/DARK BACKGROUND banner bar that this MCQ falls under (e.g. "বাংলাদেশ পরিচিতি", "বর্তমান ও পুরাতন নাম, ভৌগোলিক উপনাম", "বাংলাদেশের অবস্থান, আয়তন ও সীমানা") — this is the actual topic name and is CRITICAL, used to detect topic boundaries. Rules:\n'
     '  a) Do NOT use smaller sub-headers like university/organization names (জাহাঙ্গীরনগর বিশ্ববিদ্যালয়, রাজশাহী বিশ্ববিদ্যালয়, জগন্নাথ বিশ্ববিদ্যালয়, চাকুরি, BUP) or unit labels (বি ইউনিট, এ ইউনিট, এফ ইউনিট, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself.\n'
     '  b) If a new black-bg banner appears anywhere on THIS page (even partway down, even if a different banner was active at the top of the page), every MCQ from that point onward gets the NEW banner text; MCQs above it on the same page keep the banner that was already active for them.\n'
+    '  b2) TWO-COLUMN pages specifically: the left and right columns can each have their OWN active banner, independent of each other — e.g. left column may still be finishing an earlier topic (no new banner in the left column at all) while the right column already starts a completely new banner from its very first MCQ. Determine each MCQ\'s topic_hint by which banner is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current banner. Do not assume a banner that appears in one column also applies to the other column\'s MCQs above the same vertical height.\n'
     '  c) If this specific page has genuinely no black-bg banner visible anywhere on it (pure continuation page, no new banner printed), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
     '  d) Every MCQ under the same visible banner on this page must get the EXACT SAME topic_hint string, character-for-character.\n\n'
     'MULTI-COLUMN PAGES (CRITICAL — do not skip or merge any MCQ):\n'
@@ -11097,13 +11098,16 @@ async def _topic_extract_from_image(img) -> list:
 def _topic_group_mcqs(extracted_pages: list) -> list:
     """Walks all MCQs in original extraction order (pages in order, MCQs in
     each page's extracted order) and splits into topic groups.
-    BOUNDARY SIGNAL: a new topic group starts ONLY when qsn_no resets to 1
-    (the printed serial number restarting is the sole reliable signal that a
-    new full-page-width black-bg banner topic has begun). topic_hint is used
-    ONLY to NAME the group once started, never to trigger a split by itself —
-    this prevents sub-headers (university/organization names, চাকরি/চাকুরি,
-    unit labels) from ever being mistaken for a new topic, since those can
-    appear mid-topic without any real qsn_no reset.
+    BOUNDARY SIGNAL: topic_hint (the black-bg banner text) changing from the
+    previous MCQ's effective hint is the trigger for a new topic group.
+    qsn_no is NOT used as an independent trigger — a page can have two
+    different topics that BOTH restart numbering at 1 (e.g. left column
+    topic A ending at its own Q13, right column topic B starting fresh at
+    its own Q1), so treating every qsn_no==1 as a boundary wrongly splits
+    or merges MCQs across columns. topic_hint carry-forward (see Pass 1)
+    already correctly resolves which topic each MCQ belongs to per the
+    extraction prompt's per-column banner detection, so hint-change alone
+    is the safe, sufficient signal.
 
     CARRY-FORWARD: a page with no new banner printed on it (pure
     continuation of an earlier topic) reports topic_hint="" for its MCQs —
@@ -11121,30 +11125,27 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             else:
                 m["_effective_hint"] = last_hint or ""
 
-    # Pass 2: walk in extraction order, starting a NEW group only on qsn_no==1
-    # reset. Same-name groups are still merged (fixes a topic being split
-    # into multiple groups when its banner re-appears non-contiguously),
-    # but a group is only ever CREATED at a qsn_no reset point.
+    # Pass 2: group by the effective (carried-forward) hint. Same hint text
+    # is always merged into the SAME group regardless of where else it
+    # appears in extraction order (fixes same topic being split into
+    # multiple separate groups when a banner re-appears non-contiguously).
     groups = []  # list of [topic_name, [mcqs]]
     hint_to_idx = {}  # hint text -> index into groups
-    cur_idx = None
     group_seq = 0
     for _, _, mcqs in extracted_pages:
         for m in mcqs:
             hint = m.get("_effective_hint", "")
-            is_reset = m.get("qsn_no") == 1
-            if is_reset or cur_idx is None:
-                key = hint if hint else None
-                if key is not None and key in hint_to_idx:
-                    cur_idx = hint_to_idx[key]
-                else:
-                    group_seq += 1
-                    name = hint if hint else f"Topic {group_seq}"
-                    groups.append([name, []])
-                    cur_idx = len(groups) - 1
-                    if key is not None:
-                        hint_to_idx[key] = cur_idx
-            groups[cur_idx][1].append(m)
+            key = hint if hint else None
+            if key is not None and key in hint_to_idx:
+                idx = hint_to_idx[key]
+            else:
+                group_seq += 1
+                name = hint if hint else f"Topic {group_seq}"
+                groups.append([name, []])
+                idx = len(groups) - 1
+                if key is not None:
+                    hint_to_idx[key] = idx
+            groups[idx][1].append(m)
     # Sort each group's MCQs by qsn_no (missing/non-numeric sorts last, stable).
     def _qsn_key(m):
         v = m.get("qsn_no")
