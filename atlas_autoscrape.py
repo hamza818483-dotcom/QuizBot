@@ -728,7 +728,8 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 if not url.startswith("http"):
                     url = CHORCHA_BASE_URL.rstrip("/") + "/" + url.lstrip("/")
                 try:
-                    await page.goto(url, wait_until="networkidle", timeout=30000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    await page.wait_for_timeout(1200)
                 except Exception:
                     raise AutoScrapeError(
                         f"রান {run_no}/{run_total}, ধাপ {i}/{total}: URL \"{url}\"-এ যাওয়া যায়নি।"
@@ -746,12 +747,12 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 if _url_part.startswith("http"):
                     try:
                         from core import auto_link_map_set
-                        await auto_link_map_set(_label_part, _url_part)
+                        await auto_link_map_set(_label_part, _url_part, context=current_subject or "")
                     except Exception as e:
                         logger.warning(f"[/auto] auto_link_map_set failed for {_label_part!r}: {e}")
                     try:
-                        await page.goto(_url_part, wait_until="networkidle", timeout=30000)
-                        await page.wait_for_timeout(300)
+                        await page.goto(_url_part, wait_until="domcontentloaded", timeout=20000)
+                        await page.wait_for_timeout(1200)
                         processed_subs.append(_label_part)
                         continue
                     except Exception:
@@ -773,8 +774,21 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 _cached_target = None
             if _cached_target:
                 try:
-                    await page.goto(_cached_target, wait_until="networkidle", timeout=30000)
-                    await page.wait_for_timeout(300)
+                    await page.goto(_cached_target, wait_until="domcontentloaded", timeout=20000)
+                    await page.wait_for_timeout(1200)
+                    # Sanity-check: confirm the cached target actually
+                    # looks like a valid landing (not an error/blank page
+                    # from a stale entry saved during an earlier broken
+                    # run) before trusting it -- a cheap body-text length
+                    # check catches empty/error pages without needing to
+                    # re-verify the exact label is present (the label may
+                    # legitimately not repeat on the destination page).
+                    try:
+                        _body_len = await page.evaluate("() => document.body.innerText.length")
+                    except Exception:
+                        _body_len = 999  # evaluate failed -- don't block on this check
+                    if _body_len < 20:
+                        raise RuntimeError(f"cached target looks empty/broken (body length {_body_len})")
                     processed_subs.append(sub)
                     logger.info(f"[/auto] step {i}/{total} sub={sub!r}: matched via click-cache -> {_cached_target}")
                     continue
@@ -791,23 +805,59 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 match_method = "exact-text"
             except Exception:
                 locator = None
-                # Result/CTA pages (e.g. a "retake exam" button) sometimes
-                # finish their score-calculation animation and inject the
-                # button into the DOM slightly AFTER networkidle already
-                # fired -- a single extra settle + one more exact-text
-                # attempt catches that race without slowing down the
-                # common case where the element was already there.
-                await page.wait_for_timeout(2000)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    pass
-                locator = page.get_by_text(sub, exact=True).first
-                try:
-                    await locator.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
-                    match_method = "exact-text (after extra wait)"
-                except Exception:
-                    locator = None
+                # Result/CTA pages (e.g. a "retake exam" button after
+                # submit) sometimes finish their score-calculation
+                # animation and inject the button into the DOM well AFTER
+                # networkidle already fired -- a single extra settle
+                # wasn't always enough (observed real-world timeouts on
+                # "পুনরায় পরীক্ষা দাও"). Poll repeatedly instead of one
+                # extra attempt: up to ~25s total, re-checking every 2s,
+                # so slow post-submit animations are caught without
+                # slowing down the common case where the element was
+                # already there (loop exits immediately on first match).
+                poll_elapsed_ms = 0
+                poll_max_ms = 25000
+                poll_step_ms = 2000
+                while poll_elapsed_ms < poll_max_ms:
+                    await page.wait_for_timeout(poll_step_ms)
+                    poll_elapsed_ms += poll_step_ms
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=3000)
+                    except Exception:
+                        pass
+                    locator = page.get_by_text(sub, exact=True).first
+                    try:
+                        await locator.wait_for(state="visible", timeout=3000)
+                        match_method = "exact-text (after poll wait)"
+                        break
+                    except Exception:
+                        locator = None
+
+            # First-attempt-vs-retake label alias: chorcha.net swaps a
+            # button's own label depending on exam state -- e.g. an exam
+            # never attempted before shows "পরীক্ষা দাও", but the SAME
+            # button/position shows "পুনরায় পরীক্ষা দাও" only AFTER at
+            # least one attempt exists. If the user wrote the "পুনরায়"
+            # variant but this run is hitting the exam for the first
+            # time (or vice versa), the exact-text search above
+            # legitimately finds nothing -- the literal label just isn't
+            # on the page. Strip a leading "পুনরায় " and retry once with
+            # the bare label before falling through to the generic
+            # JS/partial fallbacks.
+            if locator is None and sub.startswith("পুনরায় "):
+                alias = sub[len("পুনরায় "):].strip()
+                if alias:
+                    alias_locator = page.get_by_text(alias, exact=True).first
+                    try:
+                        await alias_locator.wait_for(state="visible", timeout=3000)
+                        locator = alias_locator
+                        match_method = f"exact-text (পুনরায়-alias -> {alias!r})"
+                        logger.info(
+                            f"[/auto] step {i}/{total} sub={sub!r}: literal label not found "
+                            f"(likely first-attempt state), matched first-attempt alias {alias!r} instead"
+                        )
+                    except Exception:
+                        locator = None
 
             element_handle = None  # used for the JS-normalized fallback (bypasses locator)
             if locator is None:
@@ -854,6 +904,42 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                     element_handle = None
 
             if locator is None and element_handle is None and len(sub) >= 2:
+                # Fallback: filter/tag-chip buttons often render as
+                # "লেবেল<count>" combined in one clickable element (e.g.
+                # "গদ্য 1526" as seen in a subject-filter bar) -- an exact
+                # match on the bare label never succeeds because the
+                # element's real text includes a trailing number. Try a
+                # regex match: label followed by optional whitespace and
+                # a number, anchored at the start of the element's text.
+                try:
+                    element_handle = await page.evaluate_handle(
+                        """(target) => {
+                            const norm = s => (s || '').normalize('NFC').replace(/\\s+/g, ' ').trim();
+                            const wanted = norm(target);
+                            const re = new RegExp('^' + wanted.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '\\\\s*[0-9০-৯]*');
+                            const all = Array.from(document.querySelectorAll('button, a, [data-event], [role="button"], div, span, li'));
+                            let best = null, bestLen = Infinity;
+                            for (const el of all) {
+                                if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+                                const txt = norm(el.textContent);
+                                if (re.test(txt) && txt.length < bestLen) {
+                                    best = el; bestLen = txt.length;
+                                }
+                            }
+                            return best;
+                        }""",
+                        sub,
+                    )
+                    is_null = await page.evaluate("(h) => h === null", element_handle)
+                    if is_null:
+                        element_handle = None
+                    else:
+                        match_method = "label-plus-count-chip"
+                        logger.info(f"[/auto] step {i}/{total} sub={sub!r}: matched via label+count chip pattern")
+                except Exception:
+                    element_handle = None
+
+            if locator is None and element_handle is None and len(sub) >= 2:
                 # Fallback: partial/keyword match. Only used as a last
                 # resort when nothing matched exactly -- picks the
                 # SMALLEST element (by text length) whose normalized text
@@ -873,19 +959,26 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                             const norm = s => (s || '').normalize('NFC').replace(/\\s+/g, ' ').trim();
                             const wanted = norm(target);
                             const all = Array.from(document.querySelectorAll('button, a, [data-event], [role="button"], div, span, li'));
-                            let best = null, bestLen = Infinity, tie = false;
+                            let best = null, bestLen = Infinity;
                             for (const el of all) {
                                 if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
                                 const ev = el.getAttribute && el.getAttribute('data-event');
                                 const txt = norm(ev || el.textContent);
                                 if (!txt.includes(wanted)) continue;
+                                // On a length tie, prefer the element deeper in the
+                                // DOM tree (more specific / less likely to be an
+                                // oversized wrapper) -- an ancestor and its only
+                                // meaningful child often report identical
+                                // normalized textContent length, and previously
+                                // this ambiguity caused the match to be dropped
+                                // entirely instead of picking the more specific one.
                                 if (txt.length < bestLen) {
-                                    best = el; bestLen = txt.length; tie = false;
-                                } else if (txt.length === bestLen && el !== best) {
-                                    tie = true;
+                                    best = el; bestLen = txt.length;
+                                } else if (txt.length === bestLen && best && el !== best && best.contains(el)) {
+                                    best = el; // el is a descendant of current best -- more specific, prefer it
                                 }
                             }
-                            return (best && !tie) ? best : null;
+                            return best;
                         }""",
                         sub_for_match,
                     )
@@ -929,7 +1022,7 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                 # user-taught mappings extend it without a code change.
                 try:
                     from core import auto_link_map_get
-                    saved_url = await auto_link_map_get(sub)
+                    saved_url = await auto_link_map_get(sub, context=current_subject or "")
                 except Exception:
                     saved_url = None
                 if saved_url:
@@ -937,8 +1030,17 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                         logger.info(
                             f"[/auto] step {i}/{total} sub={sub!r}: matched via saved link-map -> {saved_url}"
                         )
-                        await page.goto(saved_url, wait_until="networkidle", timeout=30000)
-                        await page.wait_for_timeout(300)
+                        # domcontentloaded instead of networkidle: chorcha.net
+                        # sometimes keeps a background connection open
+                        # (analytics/polling) that never lets networkidle
+                        # fire, causing spurious 30s timeouts even though
+                        # the page itself finished loading. Extra settle
+                        # wait covers the gap instead.
+                        try:
+                            await page.goto(saved_url, wait_until="domcontentloaded", timeout=20000)
+                        except Exception:
+                            await page.goto(saved_url, wait_until="domcontentloaded", timeout=20000)
+                        await page.wait_for_timeout(1500)
                         processed_subs.append(sub)
                         continue
                     except Exception as e:
@@ -1039,11 +1141,98 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
                         element_handle = None
 
             if locator is None and element_handle is None:
+                # Last resort before giving up: some elements (esp. filter
+                # chips whose count badge loads via a separate async
+                # request) can still be mid-render even after all the
+                # matchers above ran. Wait a bit longer and retry the
+                # JS-normalized (exact/data-event) + count-chip matchers
+                # once more before declaring NOT FOUND.
+                await page.wait_for_timeout(6000)
+                try:
+                    element_handle = await page.evaluate_handle(
+                        """(target) => {
+                            const norm = s => (s || '').normalize('NFC').replace(/\\s+/g, ' ').trim();
+                            const wanted = norm(target);
+                            const all = Array.from(document.querySelectorAll('*'));
+                            for (const el of all.reverse()) {
+                                const ev = el.getAttribute && el.getAttribute('data-event');
+                                if (ev && norm(ev).endsWith('_' + wanted)) return el;
+                            }
+                            for (const el of all) {
+                                if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+                                if (norm(el.textContent) === wanted) return el;
+                            }
+                            const re = new RegExp('^' + wanted.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '\\\\s*[0-9০-৯]*');
+                            let best = null, bestLen = Infinity;
+                            for (const el of all) {
+                                if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+                                const txt = norm(el.textContent);
+                                if (re.test(txt) && txt.length < bestLen) {
+                                    best = el; bestLen = txt.length;
+                                }
+                            }
+                            return best;
+                        }""",
+                        sub,
+                    )
+                    is_null = await page.evaluate("(h) => h === null", element_handle)
+                    if is_null:
+                        element_handle = None
+                    else:
+                        match_method = "delayed-retry"
+                        logger.info(f"[/auto] step {i}/{total} sub={sub!r}: matched after 6s delayed retry")
+                except Exception:
+                    element_handle = None
+
+            if locator is None and element_handle is None:
+                try:
+                    _candidates_dump = await page.evaluate(
+                        """() => {
+                            const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+                            const all = Array.from(document.querySelectorAll('button, a, [data-event], [role="button"]'));
+                            const texts = [];
+                            for (const el of all) {
+                                const t = norm(el.textContent);
+                                if (t && t.length < 40) texts.push(t);
+                            }
+                            return [...new Set(texts)].slice(0, 60);
+                        }"""
+                    )
+                except Exception:
+                    _candidates_dump = []
+                try:
+                    # Targeted probe: search the WHOLE document (any tag,
+                    # no length/count cap) for any element whose own text
+                    # contains a fragment of the wanted label -- catches
+                    # cases where the real button got cut off the capped
+                    # general dump above (e.g. buried among 50+ board-list
+                    # cards that sort earlier in DOM order).
+                    _fragment = sub[:4] if len(sub) >= 4 else sub
+                    _targeted_probe = await page.evaluate(
+                        """(frag) => {
+                            const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+                            const all = Array.from(document.querySelectorAll('*'));
+                            const out = [];
+                            for (const el of all) {
+                                if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+                                const own = norm(Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent).join(''));
+                                if (own.includes(frag)) {
+                                    out.push({tag: el.tagName, text: norm(el.textContent).slice(0, 60), cls: (el.className || '').toString().slice(0, 80)});
+                                }
+                            }
+                            return out.slice(0, 10);
+                        }""",
+                        _fragment,
+                    )
+                except Exception:
+                    _targeted_probe = []
                 logger.error(
                     f"[/auto] step {i}/{total} sub={sub!r} NOT FOUND. "
                     f"subject_context={current_subject!r}, "
                     f"processed_so_far={processed_subs}, "
-                    f"known_subjects_in_map={list(KNOWN_CATEGORY_CARD_URLS.keys())}"
+                    f"known_subjects_in_map={list(KNOWN_CATEGORY_CARD_URLS.keys())}, "
+                    f"visible_candidates={_candidates_dump}, "
+                    f"targeted_probe={_targeted_probe}"
                 )
                 raise AutoScrapeError(
                     f"রান {run_no}/{run_total}, ধাপ {i}/{total}: \"{sub}\" নামে কোনো button/link পাওয়া যায়নি এই page-এ। "
@@ -1062,11 +1251,21 @@ async def _run_single_sequence(page, lines: list, progress_cb, run_no: int, run_
             # to the permanent click-cache so future runs skip matching
             # entirely for this exact button. Best-effort -- never let a
             # cache-write failure interrupt the actual scrape.
-            try:
-                from core import auto_click_cache_set
-                await auto_click_cache_set(_cache_from_url, sub, page.url)
-            except Exception as e:
-                logger.warning(f"[/auto] auto_click_cache_set failed for {sub!r}: {e}")
+            #
+            # Skip saving if page.url is identical to the page we clicked
+            # from: this happens when the click was a same-page filter/tab
+            # toggle (no real navigation) or fired before navigation had
+            # actually started -- caching it would create a useless
+            # self-loop entry that later gets served instead of doing real
+            # navigation, silently stranding future runs on the wrong page.
+            if page.url != _cache_from_url:
+                try:
+                    from core import auto_click_cache_set
+                    await auto_click_cache_set(_cache_from_url, sub, page.url)
+                except Exception as e:
+                    logger.warning(f"[/auto] auto_click_cache_set failed for {sub!r}: {e}")
+            else:
+                logger.info(f"[/auto] step {i}/{total} sub={sub!r}: URL unchanged after click, skipping cache save (avoids self-loop)")
 
         await page.wait_for_timeout(SETTLE_WAIT_MS)
         try:
@@ -1377,7 +1576,10 @@ async def run_auto_click_sequence(
                 # Always restart fresh from the homepage and re-click the
                 # full step sequence for every run; slower per-run but
                 # matches the reliability of a standalone /auto run.
-                await page.goto(CHORCHA_BASE_URL, wait_until="networkidle", timeout=30000)
+                try:
+                    await page.goto(CHORCHA_BASE_URL, wait_until="domcontentloaded", timeout=20000)
+                except Exception:
+                    await page.goto(CHORCHA_BASE_URL, wait_until="domcontentloaded", timeout=20000)
                 await page.wait_for_timeout(SETTLE_WAIT_MS)
 
                 html, processed_subs_this_run = await _run_single_sequence(
