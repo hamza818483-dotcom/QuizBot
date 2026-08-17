@@ -10970,16 +10970,16 @@ UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '- "topic_hint": the topic-heading text that this MCQ falls under. THIS PAGE STYLE uses a DIFFERENT topic-marker design than a plain black banner bar — a topic heading here is identified by ALL THREE of the following together, right before the heading text:\n'
     '  i) the heading text itself sits on a WHITE/plain page background (NOT inside a solid dark/black bar),\n'
     '  ii) the heading text is BOLD BLACK font (visibly heavier/darker than normal question text),\n'
-    '  iii) immediately to the LEFT of the heading text there is a small solid BLACK/DARK FILLED CIRCLE (●-shaped bullet icon), and INSIDE or beside that circle there are 1, 2, or 3 small WHITE STAR (★) glyphs — the star COUNT itself does not change the topic (1-star, 2-star and 3-star headings are all still genuine topic headings, just visually styled to mark quiz-bank source importance).\n'
-    '  A line of text is a topic_hint ONLY when all three of i, ii, iii are true together. Do NOT treat as topic_hint: plain bold text with no black-circle-star icon before it, sub-headers like university/organization names, exam-source tags (BCS/MAT/DAT/RU-D/DU-D/JnU-D bracket tags), or ব্যাখ্যা/explanation labels.\n'
-    '  a) Do NOT use smaller sub-headers like university/organization names or unit labels (এ ইউনিট, বি ইউনিট, BUP, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself.\n'
-    '  b) If a new black-circle-star heading appears anywhere on THIS page (even partway down), every MCQ from that point onward gets the NEW heading text; MCQs above it on the same page keep the heading that was already active for them.\n'
-    '  b2) TWO-COLUMN pages: left and right columns can each have their OWN active heading, independent of each other. Determine each MCQ\'s topic_hint by which black-circle-star heading is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current heading.\n'
+    '  iii) immediately to the LEFT of the heading text (and sometimes duplicated once more further left before it) there is a small ICON MARKER — this can be a solid BLACK/DARK FILLED CIRCLE (●) with 1-3 small WHITE STAR (★) glyphs inside/beside it, OR ANY OTHER small colored/graphical icon repeated exactly TWICE in a row right before the heading text (e.g. two folder icons \U0001F4C2\U0001F4C2, two star icons \u2B50\u2B50, two colored circle icons \U0001F535\U0001F535 of any color, two bullseye/target icons, etc.) — the EXACT icon style, color, or star-count does not matter and does not change the topic; what matters is that some small icon glyph appears doubled (twice, back-to-back) immediately before a bold-black heading line on white background. Always treat this doubled-icon + bold-black-heading pattern as a genuine topic marker regardless of which specific icon/emoji/color is used on this particular page — never require it to look identical to markers seen on other pages.\n'
+    '  A line of text is a topic_hint ONLY when i, ii, and iii are true together. Do NOT treat as topic_hint: plain bold text with no doubled-icon marker before it, sub-headers like university/organization names, exam-source tags (BCS/MAT/DAT/RU-D/DU-D/JnU-D bracket tags), \u09ac\u09cd\u09af\u09be\u0996\u09cd\u09af\u09be/explanation labels, or a single generic recurring section-label like \"\u09ac\u09bf\u0997\u09a4 \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8\u09be\u09ac\u09b2\u09c0\" (past-questions label) that itself carries no doubled icon of its own — that label is noise, not a topic name.\n'
+    '  a) Do NOT use smaller sub-headers like university/organization names or unit labels (\u098f \u0987\u0989\u09a8\u09bf\u099f, \u09ac\u09bf \u0987\u0989\u09a8\u09bf\u099f, BUP, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself.\n'
+    '  b) If a new doubled-icon heading appears anywhere on THIS page (even partway down), every MCQ from that point onward gets the NEW heading text; MCQs above it on the same page keep the heading that was already active for them.\n'
+    '  b2) TWO-COLUMN pages: left and right columns can each have their OWN active heading, independent of each other. Determine each MCQ\'s topic_hint by which doubled-icon heading is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current heading.\n'
     '  b3) STRICT RULE — within a single page, a topic must be treated as fully finished in BOTH columns before any MCQ can belong to the next topic, same as standard two-column reading order.\n'
-    '  c) If this specific page has genuinely no black-circle-star heading visible anywhere on it (pure continuation page), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
-    '  d) Every MCQ under the same visible black-circle-star heading on this page must get the EXACT SAME topic_hint string, character-for-character (do not include the star icons/circle themselves in the string, just the heading text).\n\n'
+    '  c) If this specific page has genuinely no doubled-icon heading visible anywhere on it (pure continuation page), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
+    '  d) Every MCQ under the same visible doubled-icon heading on this page must get the EXACT SAME topic_hint string, character-for-character (do not include the icons themselves in the string, just the heading text).\n\n'
     'OUTPUT ORDER (CRITICAL — this is a SEGMENT-major order, not a plain column-major order):\n'
-    '  A "segment" = the vertical span of the page still under ONE black-circle-star heading, before the next such heading starts (in either column). A single page can contain multiple segments stacked vertically.\n'
+    '  A "segment" = the vertical span of the page still under ONE doubled-icon heading, before the next such heading starts (in either column). A single page can contain multiple segments stacked vertically.\n'
     '  For EACH segment, in top-to-bottom page order:\n'
     '    - output every MCQ from THAT segment\'s left column (top to bottom),\n'
     '    - THEN every MCQ from THAT segment\'s right column (top to bottom, same segment only),\n'
@@ -13986,8 +13986,8 @@ async def _handle_unmesh_impl(msg: dict):
             "❌ PDF-এ reply করে /unmesh দাও!\n\n"
             "<b>Format:</b>\n"
             "<code>/unmesh -p 1-10</code>\n\n"
-            "📌 Page-এ থাকা MCQ extract করে (নতুন বানায় না), কিন্তু ⚫★ black-circle-star "
-            "heading (সাদা background + bold black text) দেখে আলাদা টপিক ধরে প্রতিটার জন্য আলাদা CSV পাঠায়।\n"
+            "📌 Page-এ থাকা MCQ extract করে (নতুন বানায় না), কিন্তু ডাবল-আইকন "
+            "heading (⚫★, 📂📂, ⭐⭐, 🔵🔵 — যেকোনো icon দুইবার পাশাপাশি + সাদা background + bold black text) দেখে আলাদা টপিক ধরে প্রতিটার জন্য আলাদা CSV পাঠায়।\n"
             "📌 -p = page range (না দিলে সব page)"
         )
         return
