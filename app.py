@@ -11265,32 +11265,40 @@ async def _topic_extract_from_image(img) -> list:
 def _build_unmesh_heading_scan_prompt() -> str:
     """DEDICATED strict heading-detection pass for /unmesh, run independently
     of the main topic_hint extraction. Asks ONE narrow, unambiguous
-    question — scan the whole page top-to-bottom for ANY visually distinct
-    heading line (regardless of icon style: doubled icon, single icon,
-    boxed/bordered/shaded heading strip, or plain black banner) and report
-    its exact text plus which printed qsn_no comes immediately after it.
+    question — scan the whole page top-to-bottom for a TOPIC-LEVEL heading
+    only (a broad subject-category title that groups many MCQs together,
+    e.g. "বাংলাদেশের নদ-নদী, বঙ্গোপসাগর..."), NOT any small styled label.
     This result is treated as a HARD, code-trusted split signal in
     _unmesh_group_mcqs — not just a logged suggestion — precisely because
     the main extraction prompt's topic_hint field is model-subjective and
     can silently miss heading styles it wasn't primed to recognize."""
     return (
-        "Look ONLY at HEADING LINES on this page — ignore all MCQ question/option text for this task.\n"
-        "A heading line is any short line of text that is visually set apart from ordinary question "
-        "text by AT LEAST ONE of: (a) a bold/dark heading font clearly heavier than body text, "
-        "(b) a small icon/emoji/symbol (single OR doubled, any style) placed right beside it, "
-        "(c) its own bounding box, border, shaded/colored background strip, or horizontal rule "
-        "separating it from the text above and below, (d) sitting inside a solid dark/black banner bar. "
-        "Do NOT count as a heading: exam-source bracket tags (BCS/MAT/DAT/DU-D/JU-B etc), "
-        "university/organization/unit sub-labels (বিশ্ববিদ্যালয়, ইউনিট, BUP, FASS), "
-        "ব্যাখ্যা/explanation labels, or plain unstyled question text.\n\n"
-        "For EVERY heading line found anywhere on the page (top to bottom, both columns if 2-column), report:\n"
+        "Find ONLY genuine TOPIC-LEVEL headings on this page — ignore all MCQ question/option text.\n\n"
+        "A genuine topic heading is a BROAD SUBJECT-CATEGORY TITLE that groups MANY MCQs under it "
+        "(e.g. \"বাংলাদেশের নদ-নদী, বঙ্গোপসাগর, দ্বীপ, বাঁধ...\", \"ভূপ্রকৃতি, পাহাড়-পর্বত, উপত্যকা...\"). "
+        "It is visually set apart (bold/dark heading font, and/or an icon beside it, and/or its own "
+        "box/border/shaded strip/banner bar) AND its wording names a general knowledge subject area, "
+        "not a single fact.\n\n"
+        "STRICTLY DO NOT report any of the following even if styled/boxed/bold — these are NOT topic "
+        "headings, they are per-question labels that repeat on nearly every MCQ and never span many "
+        "MCQs as one group:\n"
+        "  - exam-source bracket tags: [BCS: 17th], [DU-D: 11-12], [MAT: 25-26], [JnU-B: 11-12], etc.\n"
+        "  - ব্যাখ্যা:/explanation labels\n"
+        "  - university/organization/exam-body names (বিশ্ববিদ্যালয়, BUP, FASS) or unit labels (বি ইউনিট)\n"
+        "  - a generic recurring section-label like \"বিগত প্রশ্নাবলি\" or \"সম্ভাব্য আরও প্রশ্ন\" "
+        "(these repeat as a running section divider, not a subject-specific topic name)\n"
+        "  - page footer/header branding, book title, publisher name, page numbers\n\n"
+        "A true topic heading is rare — expect at most 0-2 per page, often ZERO (most pages are pure "
+        "continuation of the previous page's topic with no new heading at all). If you are not confident "
+        "a line is a genuine broad-subject topic title, do NOT report it.\n\n"
+        "For each genuine topic heading found (top to bottom, both columns if 2-column), report:\n"
         "  - its exact text\n"
         "  - the printed qsn_no of the very next MCQ that appears after it on the page "
         "(the first question number below/after that heading in its own column) — use null if the "
         "heading is the last thing on the page with no MCQ following it on this page.\n\n"
-        "Output ONLY this JSON array, nothing else, one object per heading found, in top-to-bottom page order:\n"
+        "Output ONLY this JSON array, nothing else, in top-to-bottom page order:\n"
         '[{"heading_text": "...", "next_qsn_no": <int or null>}]\n'
-        "If there are truly zero heading lines anywhere on this page, output exactly []."
+        "If there are zero genuine topic headings on this page, output exactly []."
     )
 
 
