@@ -11429,15 +11429,26 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
     # (_effective_hint) is used only to NAME the group, not to gate the split.
     groups = []  # list of [topic_name, [mcqs]]
     group_seq = 0
+    prev_hint = None
     for m in flat:
         hint = m.get("_effective_hint", "")
         qno = m.get("qsn_no")
-        starts_new = (not groups) or (qno == 1)
+        # Two independent split signals (either alone is sufficient):
+        # 1) qsn_no resets to 1 (per-topic numbering documents), OR
+        # 2) the real (non-fake, non-empty) topic_hint itself changed since
+        #    the previous MCQ — needed for documents where numbering runs
+        #    CONTINUOUSLY across topic boundaries (e.g. প্রশ্ন ২০১ ends one
+        #    topic, ২০২ starts a new one under a new banner) and qsn_no==1
+        #    never occurs at all.
+        hint_changed = bool(hint) and (prev_hint is not None) and (hint != prev_hint)
+        starts_new = (not groups) or (qno == 1) or hint_changed
         if starts_new:
             group_seq += 1
             name = hint if hint else f"Topic {group_seq}"
             groups.append([name, []])
         groups[-1][1].append(m)
+        if hint:
+            prev_hint = hint
 
     # CODE-LEVEL GUARD: a straggling old-topic MCQ (its own topic_hint
     # clearly differs from the group it landed in — e.g. old topic's
