@@ -501,19 +501,32 @@ async def _ensure_quiz_sessions_live_table():
 async def _persist_quiz_session(session: dict):
     """Best-effort snapshot save — never blocks/raises into the main quiz
     flow if it fails (D1 or Supabase hiccup here must not interrupt a live
-    quiz the user is actively answering)."""
+    quiz the user is actively answering). Dual-write to D1 + Supabase so a
+    D1 outage happening at the exact moment of a bot restart doesn't also
+    wipe the resume snapshot — same pattern as the quizzes table itself."""
+    payload = {
+        "uid": session["uid"], "chat_id": session["chat_id"], "quiz_id": session["quiz_id"],
+        "cur": session["cur"], "tot": session["tot"], "right_count": session["right"],
+        "wrong_count": session["wrong"], "skip_count": session["skip"],
+        "pid": session.get("pid"), "cor": session.get("cor"), "timer": session["timer"],
+        "updated_at": int(time.time()),
+    }
     try:
         await _ensure_quiz_sessions_live_table()
         await d1_run(
             "INSERT OR REPLACE INTO quiz_sessions_live "
             "(uid, chat_id, quiz_id, cur, tot, right_count, wrong_count, skip_count, pid, cor, timer, updated_at) "
             "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            [session["uid"], session["chat_id"], session["quiz_id"], session["cur"],
-             session["tot"], session["right"], session["wrong"], session["skip"],
-             session.get("pid"), session.get("cor"), session["timer"], int(time.time())]
+            [payload["uid"], payload["chat_id"], payload["quiz_id"], payload["cur"],
+             payload["tot"], payload["right_count"], payload["wrong_count"], payload["skip_count"],
+             payload["pid"], payload["cor"], payload["timer"], payload["updated_at"]]
         )
     except Exception as e:
-        logger.warning(f"[Quiz] session persist failed (non-fatal, quiz continues in-memory): {e}")
+        logger.warning(f"[Quiz] D1 session persist failed: {e}")
+    try:
+        await sb_exec(lambda: sb.table("quiz_sessions_live_backup").upsert(payload).execute())
+    except Exception as e:
+        logger.warning(f"[Quiz] Supabase session persist failed (non-fatal, quiz continues in-memory): {e}")
 
 
 async def _clear_persisted_quiz_session(uid: int):
@@ -522,7 +535,11 @@ async def _clear_persisted_quiz_session(uid: int):
     try:
         await d1_run("DELETE FROM quiz_sessions_live WHERE uid=?1", [uid])
     except Exception as e:
-        logger.warning(f"[Quiz] session clear failed (non-fatal): {e}")
+        logger.warning(f"[Quiz] D1 session clear failed (non-fatal): {e}")
+    try:
+        await sb_exec(lambda: sb.table("quiz_sessions_live_backup").delete().eq("uid", uid).execute())
+    except Exception as e:
+        logger.warning(f"[Quiz] Supabase session clear failed (non-fatal): {e}")
 
 
 async def resume_live_quiz_sessions():
@@ -540,8 +557,26 @@ async def resume_live_quiz_sessions():
         await _ensure_quiz_sessions_live_table()
         rows = await d1_select("SELECT * FROM quiz_sessions_live")
     except Exception as e:
-        logger.warning(f"[Quiz] resume_live_quiz_sessions: could not read snapshot table: {e}")
-        return
+        logger.warning(f"[Quiz] resume_live_quiz_sessions: D1 read failed, trying Supabase: {e}")
+        rows = None
+
+    if not rows:
+        # D1 unreachable or empty — check Supabase backup too. If D1 was
+        # simply empty (no crash happened) this correctly finds nothing
+        # either and does nothing further.
+        try:
+            _sbr = await sb_exec(lambda: sb.table("quiz_sessions_live_backup").select("*").execute())
+            if _sbr and _sbr.data:
+                rows = [
+                    {"uid": r["uid"], "chat_id": r["chat_id"], "quiz_id": r["quiz_id"],
+                     "cur": r["cur"], "tot": r["tot"], "right_count": r["right_count"],
+                     "wrong_count": r["wrong_count"], "skip_count": r["skip_count"],
+                     "timer": r.get("timer") or 15}
+                    for r in _sbr.data
+                ]
+        except Exception as e2:
+            logger.warning(f"[Quiz] resume_live_quiz_sessions: Supabase read also failed: {e2}")
+
     if not rows:
         return
     logger.info(f"[Quiz] Found {len(rows)} in-progress quiz session(s) from before restart — resuming")
