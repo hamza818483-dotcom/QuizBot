@@ -11192,24 +11192,16 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
     top-to-bottom, then right column full top-to-bottom, per page, pages in
     order) and splits into topic groups.
 
-    BOUNDARY SIGNAL (per explicit instruction): qsn_no == 1 marks the start
-    of a NEW topic group, every single time it appears in read order —
-    regardless of which university/unit/org sub-header sits above it, and
-    regardless of topic_hint text. This matches how these PDFs are actually
-    structured: one chapter-level topic contains MANY university sections,
-    and EVERY section restarts at its own Q1 — but they all belong to the
-    SAME topic (the black chapter banner), so qsn_no==1 restarts do NOT each
-    start a new group. Instead: a new group starts only when a genuinely new
-    CHAPTER begins, i.e. when the topic_hint (chapter banner) text actually
-    changes AND that change lines up with qsn_no resetting to 1. If qsn_no
-    resets to 1 but topic_hint hasn't changed, it's just the next
-    university/unit section of the SAME chapter — merge, don't split.
-
-    topic_hint carry-forward still resolves which chapter each MCQ belongs
-    to (a continuation page with no new banner reports topic_hint="" and
-    inherits the last real banner). University/unit/org sub-headers must
-    NEVER be treated as topic_hint values (enforced below) — they are noise
-    that must not create fake groups or break carry-forward.
+    BOUNDARY SIGNAL (per explicit instruction, two independent signals):
+    1) qsn_no == 1 marks the start of a NEW topic group, EVERY single time
+       it appears in read order — this alone is sufficient to split, no
+       other condition required.
+    2) topic_hint (the full-width black-background banner text) names the
+       group — carried forward across continuation pages/MCQs that report
+       no new banner of their own.
+    University/unit/org sub-headers (BUP, চাকুরি, এ ইউনিট, university names,
+    etc.) must NEVER be treated as topic_hint values (enforced below) — they
+    are noise that must not leak into the group name or break carry-forward.
 
     Returns list of (topic_name, [mcq, ...]) in first-seen order."""
     # CODE-LEVEL GUARD: the vision model sometimes emits a university/org/
@@ -11258,57 +11250,43 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
     flat = _check_segment_topic_consistency(flat, context="grouping-stage")
 
     # Pass 2: build groups walking flat list in strict read order. A NEW
-    # group starts exactly when BOTH:
-    #   (i)  qsn_no == 1 for this MCQ (a genuine section/chapter restart), AND
-    #   (ii) the effective chapter banner actually changed from the group
-    #        currently being built (so repeated university sections inside
-    #        the SAME chapter, which also restart at qsn_no==1, stay merged
-    #        into that one chapter's group).
-    # If topic_hint never changes across an entire document, this still
-    # correctly keeps everything in one group even though qsn_no restarts
-    # dozens of times (one restart per university/unit section) — exactly
-    # the structure of these GK-supplement PDFs.
+    # group starts exactly when qsn_no == 1 for this MCQ — per explicit
+    # instruction, EVERY time the printed serial restarts at 1 that is a
+    # genuine new topic boundary, regardless of university/unit sub-header
+    # and regardless of whether the chapter banner text changed. The banner
+    # (_effective_hint) is used only to NAME the group, not to gate the split.
     groups = []  # list of [topic_name, [mcqs]]
-    cur_group_hint = None
     group_seq = 0
     for m in flat:
         hint = m.get("_effective_hint", "")
         qno = m.get("qsn_no")
-        starts_new = (
-            not groups
-            or (qno == 1 and hint and hint != cur_group_hint)
-        )
+        starts_new = (not groups) or (qno == 1)
         if starts_new:
             group_seq += 1
             name = hint if hint else f"Topic {group_seq}"
             groups.append([name, []])
-            cur_group_hint = hint
         groups[-1][1].append(m)
 
-    # Post-merge: same chapter banner text appearing as separate groups
-    # (e.g. it briefly went empty/fake between two runs and re-emerged with
-    # an unrelated qsn_no==1 restart) gets folded back into the FIRST group
-    # that used that exact banner text, keeping one group per real chapter.
-    merged = []
-    name_to_idx = {}
-    for name, mcqs in groups:
-        if name in name_to_idx:
-            merged[name_to_idx[name]][1].extend(mcqs)
-        else:
-            name_to_idx[name] = len(merged)
-            merged.append([name, mcqs])
-    groups = merged
+    # Distinguish same-named groups (same chapter banner can legitimately
+    # recur for a different qsn_no==1 restart elsewhere) by numbering them
+    # in output, so the caller/CSV filenames don't collide or silently
+    # overwrite each other.
+    name_counts = {}
+    for g in groups:
+        name_counts[g[0]] = name_counts.get(g[0], 0) + 1
+    seen = {}
+    for g in groups:
+        base = g[0]
+        if name_counts[base] > 1:
+            seen[base] = seen.get(base, 0) + 1
+            g[0] = f"{base} ({seen[base]})"
 
-    # NOTE: do NOT sort each group's MCQs by qsn_no. qsn_no restarts at 1 for
-    # every university/unit sub-section within the same chapter topic (e.g.
-    # 1,2,3 then 1,2,3,4,... again), so sorting by qsn_no would interleave
-    # unrelated sections by their local serial and scramble true page/column
-    # read order. The flat list built in Pass 1 is already in correct
-    # left-column-then-right-column, page-by-page read order — keep it as-is.
+    # NOTE: do NOT sort each group's MCQs by qsn_no — the flat list built in
+    # Pass 1 is already in correct left-column-then-right-column, page-by-
+    # page read order; that read order IS the true serial. Sorting by
+    # qsn_no could misorder across page-boundary spillovers.
 
-    # Gap check per group is not meaningful here since one chapter legitimately
-    # contains many restarting sub-sequences (Q1-Q10, Q1-Q13, Q1-Q46, ...).
-    # Instead, log total MCQ count per group so under-extraction is visible.
+    # Log total MCQ count per group so under-extraction is visible.
     for name, mcqs in groups:
         logger.info(f"[TOPIC group] '{name[:40]}' — {len(mcqs)} MCQ")
 
