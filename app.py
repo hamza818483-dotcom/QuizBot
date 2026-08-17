@@ -11277,8 +11277,9 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
     # non-empty) topic_hint at the same time.
     flat = []
     last_hint = None
-    for _, _, mcqs in extracted_pages:
+    for _page_idx, (_, _, mcqs) in enumerate(extracted_pages):
         for m in mcqs:
+            m["_page_key"] = _page_idx
             hint = (m.get("topic_hint") or "").strip()
             if hint and _is_fake_topic(hint):
                 hint = ""  # treat sub-header noise as "no new banner here"
@@ -11327,10 +11328,51 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             seen[base] = seen.get(base, 0) + 1
             g[0] = f"{base} ({seen[base]})"
 
-    # NOTE: do NOT sort each group's MCQs by qsn_no — the flat list built in
-    # Pass 1 is already in correct left-column-then-right-column, page-by-
-    # page read order; that read order IS the true serial. Sorting by
-    # qsn_no could misorder across page-boundary spillovers.
+    # CODE-LEVEL SAFETY NET: normally do NOT sort each group's MCQs by
+    # qsn_no — the flat list built in Pass 1 is meant to already be in
+    # correct left-column-then-right-column, page-by-page read order (per
+    # the extraction prompt's segment-major rule), and that read order IS
+    # the true serial. But that rule is prompt-enforced only; the model can
+    # still get column interleaving wrong (e.g. old-topic's leftover right-
+    # column MCQs and new-topic's left-column MCQs coming out zig-zagged
+    # instead of "old topic fully, then new topic fully"). Detect that
+    # per-group with a strict-ascending check restricted to each page's own
+    # contiguous slice of the group (a legitimate page-boundary spillover
+    # keeps its own page's run ascending even if the group as a whole
+    # restarts lower after a page break — so this only fires on GENUINE
+    # zig-zag/reversal within one page's contiguous run, never on ordinary
+    # cross-page continuation). When triggered, sort just that page-slice by
+    # qsn_no as the fallback ordering, since qsn_no is the one signal that's
+    # always reliable regardless of column-reading mistakes.
+    for g in groups:
+        mcqs = g[1]
+        # split this group's MCQs into contiguous same-page runs
+        runs = []
+        cur_run = []
+        cur_page = object()
+        for m in mcqs:
+            pg = m.get("_page_key")
+            if pg != cur_page and cur_run:
+                runs.append(cur_run)
+                cur_run = []
+            cur_run.append(m)
+            cur_page = pg
+        if cur_run:
+            runs.append(cur_run)
+        rebuilt = []
+        for run in runs:
+            nums = [m.get("qsn_no") for m in run if isinstance(m.get("qsn_no"), int)]
+            if len(nums) >= 2 and nums != sorted(nums):
+                logger.warning(
+                    f"[TOPIC group-order] '{g[0][:30]}' page-run qsn "
+                    f"{nums[0]}-{nums[-1]} zig-zagged ({nums}) — sorting by qsn_no"
+                )
+                run = sorted(
+                    run,
+                    key=lambda m: (m.get("qsn_no") if isinstance(m.get("qsn_no"), int) else 10**9)
+                )
+            rebuilt.extend(run)
+        g[1] = rebuilt
 
     # Log total MCQ count per group so under-extraction is visible.
     for name, mcqs in groups:
