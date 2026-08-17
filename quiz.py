@@ -1030,14 +1030,37 @@ async def finish_d1_quiz(session: dict):
             )
             result_id = rid_rows[0]["id"] if rid_rows else None
 
-        # Save per-question results
+        # Save per-question results — this is what "Practice (Wrong only /
+        # Wrong+Skip)" reads back later, so a silently-failed row here means
+        # the button shows the correct count (from session, in-memory) but
+        # the practice quiz itself comes up short. Retry any row that fails,
+        # then verify the final count matches what should have been saved;
+        # log loudly if some are still missing so it's visible in logs.
         if result_id:
-            for qr in session.get("q_results", []):
-                if qr.get("type"):
-                    await d1_run(
-                        "INSERT INTO quiz_question_results (result_id, question_index, result_type, quiz_id, user_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-                        [result_id, qr["index"], qr["type"], quiz_id, uid]
-                    )
+            expected = [qr for qr in session.get("q_results", []) if qr.get("type")]
+            failed = []
+            for qr in expected:
+                ok_ins, _ = await d1_run(
+                    "INSERT INTO quiz_question_results (result_id, question_index, result_type, quiz_id, user_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    [result_id, qr["index"], qr["type"], quiz_id, uid],
+                    return_id=True
+                )
+                if not ok_ins:
+                    failed.append(qr)
+            for qr in failed[:]:
+                ok_ins, _ = await d1_run(
+                    "INSERT INTO quiz_question_results (result_id, question_index, result_type, quiz_id, user_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    [result_id, qr["index"], qr["type"], quiz_id, uid],
+                    return_id=True
+                )
+                if ok_ins:
+                    failed.remove(qr)
+            if failed:
+                logger.error(
+                    f"[Quiz] {len(failed)}/{len(expected)} quiz_question_results rows FAILED to save "
+                    f"for result_id={result_id} user={uid} quiz={quiz_id} — mistake-practice button "
+                    f"count will be higher than actual replayable questions for this attempt"
+                )
 
         # Update leaderboard
         existing = await d1_select(
@@ -1186,6 +1209,13 @@ async def handle_d1_mistake(chat_id: int, quiz_id: str, uid: int, user: dict, mt
         if not practice:
             await send_msg(chat_id, "❌ Questions not found!")
             return
+
+        if len(practice) < len(wrong_qs):
+            logger.warning(
+                f"[Mistake] Only {len(practice)}/{len(wrong_qs)} question_index rows resolved "
+                f"for result_id={result_id} quiz={quiz_id} user={uid} — some saved rows had an "
+                f"out-of-range question_index (stale csv_data?), practice will run short."
+            )
 
         await start_d1_quiz(chat_id, quiz_id, user, mistake_qs=practice, mistake_type=mtype)
     except Exception as e:
