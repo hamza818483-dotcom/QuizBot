@@ -10962,6 +10962,35 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 )
 
 
+UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
+    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
+    '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
+    '- "topic_hint": the topic-heading text that this MCQ falls under. THIS PAGE STYLE uses a DIFFERENT topic-marker design than a plain black banner bar — a topic heading here is identified by ALL THREE of the following together, right before the heading text:\n'
+    '  i) the heading text itself sits on a WHITE/plain page background (NOT inside a solid dark/black bar),\n'
+    '  ii) the heading text is BOLD BLACK font (visibly heavier/darker than normal question text),\n'
+    '  iii) immediately to the LEFT of the heading text there is a small solid BLACK/DARK FILLED CIRCLE (●-shaped bullet icon), and INSIDE or beside that circle there are 1, 2, or 3 small WHITE STAR (★) glyphs — the star COUNT itself does not change the topic (1-star, 2-star and 3-star headings are all still genuine topic headings, just visually styled to mark quiz-bank source importance).\n'
+    '  A line of text is a topic_hint ONLY when all three of i, ii, iii are true together. Do NOT treat as topic_hint: plain bold text with no black-circle-star icon before it, sub-headers like university/organization names, exam-source tags (BCS/MAT/DAT/RU-D/DU-D/JnU-D bracket tags), or ব্যাখ্যা/explanation labels.\n'
+    '  a) Do NOT use smaller sub-headers like university/organization names or unit labels (এ ইউনিট, বি ইউনিট, BUP, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself.\n'
+    '  b) If a new black-circle-star heading appears anywhere on THIS page (even partway down), every MCQ from that point onward gets the NEW heading text; MCQs above it on the same page keep the heading that was already active for them.\n'
+    '  b2) TWO-COLUMN pages: left and right columns can each have their OWN active heading, independent of each other. Determine each MCQ\'s topic_hint by which black-circle-star heading is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current heading.\n'
+    '  b3) STRICT RULE — within a single page, a topic must be treated as fully finished in BOTH columns before any MCQ can belong to the next topic, same as standard two-column reading order.\n'
+    '  c) If this specific page has genuinely no black-circle-star heading visible anywhere on it (pure continuation page), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
+    '  d) Every MCQ under the same visible black-circle-star heading on this page must get the EXACT SAME topic_hint string, character-for-character (do not include the star icons/circle themselves in the string, just the heading text).\n\n'
+    'OUTPUT ORDER (CRITICAL — this is a SEGMENT-major order, not a plain column-major order):\n'
+    '  A "segment" = the vertical span of the page still under ONE black-circle-star heading, before the next such heading starts (in either column). A single page can contain multiple segments stacked vertically.\n'
+    '  For EACH segment, in top-to-bottom page order:\n'
+    '    - output every MCQ from THAT segment\'s left column (top to bottom),\n'
+    '    - THEN every MCQ from THAT segment\'s right column (top to bottom, same segment only),\n'
+    '    - THEN move to the next segment down the page and repeat (its left column, then its right column).\n'
+    '  Do NOT do a single whole-page "entire left column, then entire right column" pass. Never zigzag within one segment\'s column, but DO switch back to a new segment\'s left column immediately after finishing that same segment\'s right column.\n'
+    '  Before finalizing output, recount: every MCQ visible on the page (both columns, top to bottom) MUST appear exactly once in the JSON array — zero skipped, zero duplicated.\n\n'
+    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
+)
+
+
 def _check_segment_topic_consistency(mcqs: list, context: str = "") -> list:
     """CODE-LEVEL CHECK (used at both Call1 and Call2 stages): walks mcqs in
     read order and finds every 'segment' — the run of MCQs from one
@@ -11228,6 +11257,102 @@ async def _topic_extract_from_image(img) -> list:
         mcqs = _check_segment_serial_order(mcqs, context="Call2")
     except Exception as e:
         logger.warning(f"[TOPIC verify] audit pass failed, skipping: {e}")
+
+    return mcqs
+
+
+async def _unmesh_extract_from_image(img) -> list:
+    """/unmesh extractor — same Call1+Call2 pipeline as /topic, but topic
+    boundaries are detected via the WHITE-bg + BOLD BLACK text + preceding
+    black-circle-with-1/2/3-white-stars heading style (UNMESH_EXTRACT_PROMPT),
+    instead of /topic's black-background banner bar style. Everything else
+    (qsn_no serial detection, segment-major read order, Call2 audit, code-
+    level consistency/serial checks) is identical to /topic."""
+    async def _run_extract_call():
+        gem = await _qbm_gemini_extract(img, UNMESH_EXTRACT_PROMPT)
+        if gem:
+            return _qbm_dedup_list(gem)
+        txt = await _qbm_groq_call(img, UNMESH_EXTRACT_PROMPT)
+        result = _qbm_parse_json(txt) if txt else []
+        if result:
+            return _qbm_dedup_list(result)
+        txt3 = await _qbm_openrouter_call(img, UNMESH_EXTRACT_PROMPT)
+        result3 = _qbm_parse_json(txt3) if txt3 else []
+        return _qbm_dedup_list(result3)
+
+    mcqs = await _run_extract_call()
+    if not mcqs:
+        return mcqs
+
+    # CODE-LEVEL CHECK (Call1 stage) — same generic segment checks /topic uses.
+    mcqs = _check_segment_topic_consistency(mcqs, context="UNMESH-Call1")
+    mcqs = _check_segment_serial_order(mcqs, context="UNMESH-Call1")
+
+    # Call 2: audit pass against Call1's own output (same verify prompt/logic
+    # as /topic — it only reasons about qsn_no/topic_hint/text, not the
+    # visual marker style, so it's reusable unchanged).
+    try:
+        verify_prompt = _build_topic_verify_prompt(mcqs)
+        check_txt = await _qbm_gemini_raw(img, verify_prompt)
+        check = _parse_count_check_json(check_txt)
+
+        missing_nums = set(n for n in (check.get("missing_qsn_no") or []) if isinstance(n, int))
+        wrong_serials = check.get("wrong_serials") or []
+        word_fixes = check.get("word_fixes") or []
+        topic_leaks = check.get("topic_leaks") or []
+
+        by_qsn = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
+
+        if missing_nums:
+            logger.warning(f"[UNMESH verify] missing qsn_no {sorted(missing_nums)} — re-extracting page")
+            retry_mcqs = await _run_extract_call()
+            retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
+            for n in missing_nums:
+                if n in retry_got:
+                    mcqs.append(retry_got[n])
+                    by_qsn[n] = retry_got[n]
+
+        for fix in wrong_serials:
+            was = fix.get("was")
+            correct = fix.get("qsn_no_wrong")
+            if isinstance(was, int) and isinstance(correct, int) and was in by_qsn:
+                by_qsn[was]["qsn_no"] = correct
+                logger.warning(f"[UNMESH verify] serial fixed: {was} -> {correct}")
+
+        for fix in word_fixes:
+            n = fix.get("qsn_no")
+            field = (fix.get("field") or "").strip().lower().replace(" ", "").replace("_", "")
+            text = fix.get("correct_text")
+            if not (isinstance(n, int) and text and n in by_qsn):
+                continue
+            m = by_qsn[n]
+            if field == "question":
+                m["question"] = text
+                logger.warning(f"[UNMESH verify] word fix qsn {n} question")
+            elif field in _OPT_FIELD_IDX and isinstance(m.get("options"), list) and len(m["options"]) == 4:
+                m["options"][_OPT_FIELD_IDX[field]] = text
+                logger.warning(f"[UNMESH verify] word fix qsn {n} {field}")
+
+        _SUBHEADER_BLOCKLIST = (
+            "বিশ্ববিদ্যালয়", "চাকরি", "চাকুরি", "bup", "fass", "fsss",
+            "ইউনিট", "unit",
+        )
+        for leak in topic_leaks:
+            n = leak.get("qsn_no")
+            actual = (leak.get("actual_banner") or "").strip()
+            if any(bad in actual.lower() for bad in _SUBHEADER_BLOCKLIST):
+                continue
+            logger.warning(
+                f"[UNMESH verify] possible topic leak qsn {n}: "
+                f"extracted='{(leak.get('extracted_hint') or '')[:30]}' "
+                f"actual='{actual[:30]}' (not auto-fixed)"
+            )
+
+        mcqs = _qbm_dedup_list(mcqs)
+        mcqs = _check_segment_topic_consistency(mcqs, context="UNMESH-Call2")
+        mcqs = _check_segment_serial_order(mcqs, context="UNMESH-Call2")
+    except Exception as e:
+        logger.warning(f"[UNMESH verify] audit pass failed, skipping: {e}")
 
     return mcqs
 
@@ -13827,6 +13952,127 @@ async def _handle_topic_impl(msg: dict):
 
     except Exception as e:
         logger.error(f"[TOPIC] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
+async def handle_unmesh(msg: dict):
+    """/unmesh -p (pages) — same arg style as /topic. Extracts existing MCQ
+    like /topic, but detects topic boundaries via the WHITE-bg + BOLD BLACK
+    text + preceding black-circle-with-white-star(s) heading style, instead
+    of /topic's black-background banner bar style. Sends ONE separate CSV
+    per detected topic, named after the topic heading text."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _handle_unmesh_impl(msg)
+
+
+async def _handle_unmesh_impl(msg: dict):
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF-এ reply করে /unmesh দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/unmesh -p 1-10</code>\n\n"
+            "📌 Page-এ থাকা MCQ extract করে (নতুন বানায় না), কিন্তু ⚫★ black-circle-star "
+            "heading (সাদা background + bold black text) দেখে আলাদা টপিক ধরে প্রতিটার জন্য আলাদা CSV পাঠায়।\n"
+            "📌 -p = page range (না দিলে সব page)"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+    params = _parse_pdfm_params(text)
+    page_range = params["page_range"]
+
+    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
+    status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (⚫★ topic detect সহ)...")
+
+        extracted_pages = await qbm_extract_all_pages(
+            chat_id, pages, "Unmesh Extract", file_name, status_msg_id,
+            extractor=_unmesh_extract_from_image
+        )
+
+        total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+        if not total_mcq_found:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ পাওয়া যায়নি!")
+            return
+
+        topic_groups = _topic_group_mcqs(extracted_pages)
+
+        _missing_exp = [m for _, mcqs in topic_groups for m in mcqs if not (m.get("explanation") or "").strip()]
+        if _missing_exp:
+            try:
+                await _ai_generate_all_explanations(_missing_exp)
+            except Exception as e:
+                logger.warning(f"[UNMESH] explanation fill failed: {e}")
+
+        if status_msg_id:
+            breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ CSV পাঠানো হচ্ছে...")
+
+        _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+        import io as _io_unmesh, csv as _csv_unmesh
+        for name, mcqs in topic_groups:
+            buf = _io_unmesh.StringIO()
+            w = _csv_unmesh.writer(buf)
+            w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                        "answer", "explanation", "type", "section"])
+            for m in mcqs:
+                opts = m.get("options", ["", "", "", ""])
+                w.writerow([
+                    m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                    opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                    opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                    _ans_map.get(m.get("answer", "A"), "1"),
+                    _strip_img_tag(m.get("explanation", "")), "1", "1"
+                ])
+            safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip() or "Topic"
+            await send_document(chat_id, buf.getvalue().encode("utf-8"),
+                f"{safe_name}.csv",
+                caption=f"📂 {name} — {len(mcqs)} MCQ",
+                mime_type="text/csv")
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
+
+    except Exception as e:
+        logger.error(f"[UNMESH] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
 
 
@@ -18152,6 +18398,12 @@ async def handle_message(msg: dict):
         # /topic = same extraction as /qbm but groups MCQs into separate
         # CSVs per detected topic (serial-number reset / heading change)
         _spawn_command_task(uid, handle_topic(msg))
+    elif text.startswith("/unmesh"):
+        # /unmesh = same as /topic but topic heading is detected via a
+        # different visual marker: white-bg + bold black text + preceding
+        # black-circle-with-1/2/3-white-stars icon (instead of /topic's
+        # black-background banner bar)
+        _spawn_command_task(uid, handle_unmesh(msg))
     elif text.startswith("/qbm"):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
         # 100% ported from AtlasMasterBot's qbm_handler
