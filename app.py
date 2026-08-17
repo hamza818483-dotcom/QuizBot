@@ -14124,6 +14124,48 @@ async def _handle_qbm_impl(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
+async def _post_topic_groups_to_channel(channel_id, topic_groups: list, thread_id: int = None):
+    """Posts topic_groups (from _topic_group_mcqs / _unmesh_group_mcqs) as
+    live Telegram polls directly to a channel — one header message per
+    topic (name + MCQ count), followed by that topic's polls in order.
+    Used by /topic and /unmesh when -c <channel_id> is given, instead of
+    the default CSV-file output."""
+    settings = await db_get_settings()
+    tag = settings.get("tag", "")
+    exp_footer = settings.get("exp_footer", "")
+    total_polls = 0
+    for name, mcqs in topic_groups:
+        header_text = f"📂 {name}\n💎 MCQ: {len(mcqs)}"
+        header_data = {"chat_id": channel_id, "text": header_text}
+        if thread_id:
+            header_data["message_thread_id"] = thread_id
+        header_r = await tg_post("sendMessage", header_data)
+        header_msg_id = header_r.get("result", {}).get("message_id") if header_r.get("ok") else None
+        for mcq in mcqs:
+            opts = mcq.get("options", [])[:4]
+            ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
+            q_text = mcq.get("question", "")
+            if tag:
+                q_text = f"{tag}\n\n{q_text}"
+            exp = mcq.get("explanation", "")
+            if exp_footer:
+                exp = f"{exp}\n{exp_footer}"
+            poll_r = {"ok": False}
+            for _attempt in range(3):
+                poll_r = await send_poll(
+                    channel_id, q_text, opts, ans_idx,
+                    explanation=exp,
+                    reply_to_message_id=header_msg_id,
+                    message_thread_id=thread_id
+                )
+                if poll_r.get("ok"):
+                    break
+                await asyncio.sleep(2)
+            total_polls += 1
+            await asyncio.sleep(1.0)
+    return total_polls
+
+
 async def handle_topic(msg: dict):
     """/topic -p (pages) — same arg style as /pdf/qbm. Extracts existing MCQ
     like /qbm, but ALSO detects topic boundaries via each MCQ's printed
@@ -14157,7 +14199,8 @@ async def _handle_topic_impl(msg: dict):
             "<code>/topic -p 1-10</code>\n\n"
             "📌 Page-এ থাকা MCQ extract করে (নতুন বানায় না), কিন্তু serial number/topic heading "
             "দেখে আলাদা টপিক ধরে প্রতিটার জন্য আলাদা CSV পাঠায়।\n"
-            "📌 -p = page range (না দিলে সব page)"
+            "📌 -p = page range (না দিলে সব page)\n"
+            "📌 -c <channel_id> = দিলে CSV না, প্রতি টপিকের নামসহ header দিয়ে channel-এ সরাসরি poll পাঠাবে"
         )
         return
 
@@ -14170,6 +14213,8 @@ async def _handle_topic_impl(msg: dict):
     file_unique_id = reply["document"].get("file_unique_id")
     params = _parse_pdfm_params(text)
     page_range = params["page_range"]
+    topic_channel_id = params["channel_id"]
+    topic_thread_id = params["thread_id"]
 
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
     status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
@@ -14211,8 +14256,16 @@ async def _handle_topic_impl(msg: dict):
 
         if status_msg_id:
             breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
+            next_step = "channel-এ poll পাঠানো হচ্ছে..." if topic_channel_id else "CSV পাঠানো হচ্ছে..."
             await edit_msg(chat_id, status_msg_id,
-                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ CSV পাঠানো হচ্ছে...")
+                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
+
+        if topic_channel_id:
+            total_polls = await _post_topic_groups_to_channel(topic_channel_id, topic_groups, topic_thread_id)
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+            return
 
         _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
         import io as _io_topic, csv as _csv_topic
@@ -14291,6 +14344,8 @@ async def _handle_unmesh_impl(msg: dict):
     file_unique_id = reply["document"].get("file_unique_id")
     params = _parse_pdfm_params(text)
     page_range = params["page_range"]
+    unmesh_channel_id = params["channel_id"]
+    unmesh_thread_id = params["thread_id"]
 
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
     status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
@@ -14334,8 +14389,16 @@ async def _handle_unmesh_impl(msg: dict):
 
         if status_msg_id:
             breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
+            next_step = "channel-এ poll পাঠানো হচ্ছে..." if unmesh_channel_id else "CSV পাঠানো হচ্ছে..."
             await edit_msg(chat_id, status_msg_id,
-                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ CSV পাঠানো হচ্ছে...")
+                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
+
+        if unmesh_channel_id:
+            total_polls = await _post_topic_groups_to_channel(unmesh_channel_id, topic_groups, unmesh_thread_id)
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+            return
 
         _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
         import io as _io_unmesh, csv as _csv_unmesh
