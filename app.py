@@ -13224,20 +13224,25 @@ def _ai_parse_explanations_json(text: str, expected_len: int) -> list:
 async def _ai_generate_explanations_chunk(chunk: list) -> dict:
     """Given a chunk of MCQ dicts (with 'question','options','answer'),
     returns {index_in_chunk: explanation_text} for whichever ones Gemini
-    successfully answered. Explanation MUST fit Telegram's poll explanation
-    character limit (~200 chars) -- confirms which option is correct and
-    adds relevant topic/option-related info, never generic filler."""
+    successfully answered. Explanation is NOT length-capped here -- the
+    correct-answer's key info is required to land within the first ~200
+    chars (Telegram poll explanation's hard limit) since that's the part
+    guaranteed to survive when a poll is sent; anything after that is
+    still stored in full in CSV/DB and simply gets trimmed off (not
+    rejected) if/when the poll is actually sent, which is fine since the
+    essential info already landed earlier."""
     if not chunk:
         return {}
     items_json = json.dumps([
         {"question": c["question"], "options": c["options"], "answer": c["answer"]}
         for c in chunk
     ], ensure_ascii=False)
-    prompt = f"""তুমি একজন বিষয়বিশেষজ্ঞ শিক্ষক। নিচে কিছু MCQ (প্রশ্ন + অপশন + সঠিক উত্তর) দেওয়া আছে, প্রতিটার জন্য একটা compact explanation লিখতে হবে।
+    prompt = f"""তুমি একজন বিষয়বিশেষজ্ঞ শিক্ষক। নিচে কিছু MCQ (প্রশ্ন + অপশন + সঠিক উত্তর) দেওয়া আছে, প্রতিটার জন্য একটা তথ্যবহুল explanation লিখতে হবে।
 
-কঠোর নিয়ম:
-- প্রতিটা explanation অবশ্যই সর্বোচ্চ ১৯৯ ক্যারেক্টারের মধ্যে হতে হবে (Telegram poll explanation বক্সের ২০০ ক্যারেক্টার হার্ড-লিমিটের মধ্যে ফিট করাতে হবে) -- এর বেশি হলে চলবে না। ১৯৯-এর মধ্যে যতটুকু সম্ভব maximize করে গুছিয়ে তথ্য দিতে হবে, খামোখা ছোট রাখা যাবে না।
-- Structure (গুছিয়ে, compact, এক প্যারায়): প্রথমে সঠিক option-টা সম্পর্কে প্রশ্ন-প্রাসঙ্গিক সঠিক তথ্য/কারণ (কেন এটাই সঠিক)। তারপর বাকি ভুল option গুলো নিয়ে সংক্ষেপে -- ওগুলো কী/কে/কোনটা, এবং প্রশ্নের সাথে ওদের প্রাসঙ্গিক সম্পর্ক থাকলেও কেন উত্তর না -- ফাঁকা "ভুল" না বলে actual পার্থক্য/তথ্য দিতে হবে।
+কঠোর নিয়ম (Structure — এই order মেনেই লিখতে হবে):
+- **প্রথম অংশ (≈১৯৯ ক্যারেক্টারের মধ্যে অবশ্যই শেষ করতে হবে)**: সঠিক option-টা সম্পর্কে প্রশ্ন-প্রাসঙ্গিক মূল তথ্য/কারণ (কেন এটাই সঠিক উত্তর) — এটা সবচেয়ে জরুরি অংশ, কারণ Telegram poll-এ এই ১৯৯ ক্যারেক্টারের পর বাকিটা কেটে যেতে পারে, তাই মূল উত্তরের তথ্য এই সীমার মধ্যেই সম্পূর্ণ থাকা আবশ্যক।
+- **দ্বিতীয় অংশ (এর পরে, কোনো length limit নাই)**: বাকি ভুল option গুলো নিয়ে বিস্তারিত প্রাসঙ্গিক তথ্য — ওগুলো কী/কে/কোনটা, প্রশ্নের টপিকের সাথে সম্পর্ক থাকলেও কেন উত্তর না, actual পার্থক্য/তথ্য সহ। এই অংশে যতটা দরকার ততটা বিস্তারিত লেখা যাবে, generic "ভুল" বলাটা যথেষ্ট না।
+- পুরো explanation একটাই প্যারা/স্ট্রিং হিসেবে দিতে হবে, দুই অংশের মাঝে কোনো heading/label ছাড়া — শুধু স্বাভাবিকভাবে প্রথম অংশ শেষ হয়ে দ্বিতীয় অংশ শুরু হবে।
 - explanation সরাসরি তথ্য দিয়ে শুরু করবে -- "সঠিক উত্তর X।" জাতীয় কোনো লাইন/prefix লেখা যাবে না, answer letter (A/B/C/D) কোথাও mention করা যাবে না।
 - generic/এক-লাইনের ফাঁকা কথা লেখা যাবে না -- প্রতিটা option সম্পর্কে specific তথ্য থাকতে হবে।
 - ভাষা: প্রশ্ন যে ভাষায় (বাংলা/ইংরেজি) সেই ভাষাতেই লিখতে হবে।
@@ -13259,7 +13264,7 @@ OUTPUT — ONLY a valid JSON array, exactly {len(chunk)} items, same order, noth
     # Defensive cleanup: strip a leading "সঠিক উত্তর X।"/"Correct answer: X."
     # style prefix if the model adds one anyway despite the prompt rule --
     # this line adds no value (option letters aren't shown in the poll UI
-    # the same way) and eats into the 200-char budget.
+    # the same way) and eats into the critical first-199-char budget.
     _answer_prefix_re = re.compile(
         r'^\s*(সঠিক\s*উত্তর|উত্তর)\s*[:\-]?\s*[A-Eক-ঙ১-৫][\)\.।]?\s*[।\.\-:]?\s*',
         re.IGNORECASE
@@ -13268,7 +13273,7 @@ OUTPUT — ONLY a valid JSON array, exactly {len(chunk)} items, same order, noth
         exp = (item.get("explanation") or "").strip() if isinstance(item, dict) else ""
         if exp:
             exp = _answer_prefix_re.sub("", exp).strip()
-            out[i] = exp[:199]
+            out[i] = exp
     return out
 
 
