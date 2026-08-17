@@ -10948,10 +10948,15 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '  b3) STRICT RULE — within a single page, a topic must be treated as fully finished in BOTH columns before any MCQ can belong to the next topic. Concretely: if the left column still has MCQs of an OLD topic that haven\'t been read yet (because you are still scanning the right column, or the right column\'s items appear higher up visually), those left-column OLD-topic MCQs do NOT get replaced by a new banner just because the new banner happens to appear next to or between them and the right column. Read each column fully top-to-bottom on its own; a column keeps its topic exactly until ITS OWN text hits a new banner — never inherit a topic change from the other column\'s position on the page.\n'
     '  c) If this specific page has genuinely no black-bg banner visible anywhere on it (pure continuation page, no new banner printed), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
     '  d) Every MCQ under the same visible banner on this page must get the EXACT SAME topic_hint string, character-for-character.\n\n'
-    'MULTI-COLUMN PAGES (CRITICAL — do not skip or merge any MCQ):\n'
-    '  a) If the page has 2 columns, read the ENTIRE left column top-to-bottom FIRST (every single MCQ in it), THEN the entire right column top-to-bottom. Never interleave/zigzag between columns.\n'
-    '  b) A banner change often happens mid-page at a column boundary (e.g. left column still under the old topic while the right column already starts a new banner) — check each column independently for its own banner, do not assume both columns share one banner just because they are on the same page.\n'
-    '  c) Before finalizing output, recount: every MCQ visible on the page (both columns, top to bottom) MUST appear exactly once in the JSON array — zero skipped, zero duplicated. Double-check page edges/corners and column-boundary MCQs specifically, they are the most commonly missed.\n\n'
+    'OUTPUT ORDER (CRITICAL — this is a SEGMENT-major order, not a plain column-major order):\n'
+    '  A "segment" = the vertical span of the page still under ONE topic banner, before the next banner starts (in either column). A single page can contain multiple segments stacked vertically (e.g. banner1 spans the top ~60% of the page, banner2 starts partway down and spans the rest).\n'
+    '  For EACH segment, in top-to-bottom page order:\n'
+    '    - output every MCQ from THAT segment\'s left column (top to bottom),\n'
+    '    - THEN every MCQ from THAT segment\'s right column (top to bottom, same segment only),\n'
+    '    - THEN move to the next segment down the page and repeat (its left column, then its right column).\n'
+    '  Do NOT do a single whole-page "entire left column, then entire right column" pass — that WRONGLY pulls a later segment\'s left-column MCQs before an earlier segment\'s right-column MCQs, merging two different topics\' MCQs together out of order. Never zigzag within one segment\'s column (left-Q1,right-Q1,left-Q2 is WRONG), but DO switch back to a new segment\'s left column immediately after finishing that same segment\'s right column, even if the OTHER column still has unrelated old-topic MCQs lower down (those belong to a still-open earlier segment in that column and get appended to that earlier segment, not reordered here).\n'
+    '  Example: left column has topicA-Q1,Q2,Q3 then topicB-Q1,Q2; right column at the same vertical range has topicA-Q7...Q13 (no new banner yet) then topicB-Q3,Q4. Correct output order: topicA-Q1,Q2,Q3 (left) → topicA-Q7...Q13 (right) → topicB-Q1,Q2 (left) → topicB-Q3,Q4 (right). NEVER: topicA-left, topicB-left, topicA-right, topicB-right (that scrambles topics together).\n'
+    '  Before finalizing output, recount: every MCQ visible on the page (both columns, top to bottom) MUST appear exactly once in the JSON array — zero skipped, zero duplicated. Double-check page edges/corners and column-boundary MCQs specifically, they are the most commonly missed.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
 )
@@ -11188,9 +11193,10 @@ async def _topic_extract_from_image(img) -> list:
 
 
 def _topic_group_mcqs(extracted_pages: list) -> list:
-    """Walks all MCQs in ORIGINAL PAGE/COLUMN READ ORDER (left column full
-    top-to-bottom, then right column full top-to-bottom, per page, pages in
-    order) and splits into topic groups.
+    """Walks all MCQs in ORIGINAL SEGMENT-MAJOR READ ORDER (per the extraction
+    prompt: for each topic-segment on a page, top to bottom — that segment's
+    left column fully, then that segment's right column fully — before
+    moving to the next segment down the page) and splits into topic groups.
 
     BOUNDARY SIGNAL (per explicit instruction, two independent signals):
     1) qsn_no == 1 marks the start of a NEW topic group, EVERY single time
