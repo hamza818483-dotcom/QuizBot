@@ -475,6 +475,126 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
     await send_quiz_question(chat_id, session)
 
 
+_quiz_sessions_table_ready = False
+
+
+async def _ensure_quiz_sessions_live_table():
+    """quiz_sessions_live: lightweight persisted snapshot of an in-progress
+    quiz (QUIZ_SESSIONS entry), written after every question is sent so a
+    mid-quiz bot restart can resume the user exactly where they left off
+    instead of silently losing their session. Created lazily on first use."""
+    global _quiz_sessions_table_ready
+    if _quiz_sessions_table_ready:
+        return
+    try:
+        await d1_run(
+            "CREATE TABLE IF NOT EXISTS quiz_sessions_live "
+            "(uid INTEGER PRIMARY KEY, chat_id INTEGER, quiz_id TEXT, cur INTEGER, "
+            "tot INTEGER, right_count INTEGER, wrong_count INTEGER, skip_count INTEGER, "
+            "pid TEXT, cor INTEGER, timer INTEGER, updated_at INTEGER)"
+        )
+        _quiz_sessions_table_ready = True
+    except Exception as e:
+        logger.warning(f"[Quiz] _ensure_quiz_sessions_live_table failed: {e}")
+
+
+async def _persist_quiz_session(session: dict):
+    """Best-effort snapshot save — never blocks/raises into the main quiz
+    flow if it fails (D1 or Supabase hiccup here must not interrupt a live
+    quiz the user is actively answering)."""
+    try:
+        await _ensure_quiz_sessions_live_table()
+        await d1_run(
+            "INSERT OR REPLACE INTO quiz_sessions_live "
+            "(uid, chat_id, quiz_id, cur, tot, right_count, wrong_count, skip_count, pid, cor, timer, updated_at) "
+            "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            [session["uid"], session["chat_id"], session["quiz_id"], session["cur"],
+             session["tot"], session["right"], session["wrong"], session["skip"],
+             session.get("pid"), session.get("cor"), session["timer"], int(time.time())]
+        )
+    except Exception as e:
+        logger.warning(f"[Quiz] session persist failed (non-fatal, quiz continues in-memory): {e}")
+
+
+async def _clear_persisted_quiz_session(uid: int):
+    """Called when a quiz finishes normally — the persisted snapshot is no
+    longer needed and must not trigger a resume on the next restart."""
+    try:
+        await d1_run("DELETE FROM quiz_sessions_live WHERE uid=?1", [uid])
+    except Exception as e:
+        logger.warning(f"[Quiz] session clear failed (non-fatal): {e}")
+
+
+async def resume_live_quiz_sessions():
+    """Called once on bot startup. Finds any quiz_sessions_live rows left
+    over from a mid-quiz bot restart/crash and resumes each one: reloads the
+    quiz's question list (via start_d1_quiz's own D1->Supabase fallback
+    logic is not reused here directly since we already know cur/score — we
+    just need the questions array), rebuilds the in-memory QUIZ_SESSIONS
+    entry with the saved progress, tells the user what happened, and sends
+    a FRESH poll for the question they were on (the old poll_id from before
+    the restart is dead — Telegram won't deliver answers for it anymore, so
+    a new poll must be sent for the same question index rather than trying
+    to somehow un-expire the old one)."""
+    try:
+        await _ensure_quiz_sessions_live_table()
+        rows = await d1_select("SELECT * FROM quiz_sessions_live")
+    except Exception as e:
+        logger.warning(f"[Quiz] resume_live_quiz_sessions: could not read snapshot table: {e}")
+        return
+    if not rows:
+        return
+    logger.info(f"[Quiz] Found {len(rows)} in-progress quiz session(s) from before restart — resuming")
+    for row in rows:
+        try:
+            uid = row["uid"]
+            chat_id = row["chat_id"]
+            quiz_id = row["quiz_id"]
+            base_quiz_id = quiz_id[:-2] if quiz_id.endswith("mp") else quiz_id
+
+            qrows = await d1_select("SELECT * FROM quizzes WHERE id=?1", [base_quiz_id])
+            if not qrows:
+                logger.warning(f"[Quiz] Resume: quiz {base_quiz_id} not found anywhere (D1+Supabase) — dropping stale session for uid={uid}")
+                await d1_run("DELETE FROM quiz_sessions_live WHERE uid=?1", [uid])
+                continue
+            qz = qrows[0]
+            questions = json.loads(qz["csv_data"])
+
+            session = {
+                "quiz_id": quiz_id,
+                "name": qz.get("name", "Quiz"),
+                "desc": qz.get("description", ""),
+                "questions": questions,
+                "cur": row["cur"],
+                "tot": row["tot"],
+                "right": row["right_count"],
+                "wrong": row["wrong_count"],
+                "skip": row["skip_count"],
+                "timer": row["timer"] or 15,
+                "tag": qz.get("tag", ""),
+                "exp": qz.get("exp_footer", ""),
+                "chat_id": chat_id,
+                "uname": "Student",
+                "uid": uid,
+                "pid": None,
+                "cor": None,
+                "q_results": [{"index": i, "type": None} for i in range(row["cur"])],
+                "is_mistake": quiz_id.endswith("mp"),
+            }
+            QUIZ_SESSIONS[uid] = session
+
+            if session["cur"] >= session["tot"]:
+                # Was already on the last question when restart happened —
+                # just finish it out cleanly instead of resuming a poll.
+                await finish_d1_quiz(session)
+                continue
+
+            await send_msg(chat_id, "🔄 Bot restart হয়েছিল — তোমার আগের কুইজ যেখানে ছিল সেখান থেকেই আবার শুরু হচ্ছে...")
+            await send_quiz_question(chat_id, session, force=True)
+        except Exception as e:
+            logger.error(f"[Quiz] Failed to resume session for row {row}: {e}")
+
+
 async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
     """Send the current quiz question as a poll.
     force=True (used by the real user-answer path) always proceeds, even if
@@ -544,6 +664,7 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
         session["cor"] = ans_idx
         session["_sending_for"] = None
         QUIZ_SESSIONS[session["uid"]] = session
+        asyncio.create_task(_persist_quiz_session(session))
 
         # Timer: auto-skip after timer expires. NOTE: must wait LONGER than the
         # poll's own open_period (timer+5) so this never fires while the poll
@@ -752,6 +873,7 @@ async def finish_d1_quiz(session: dict):
     chat_id = session["chat_id"]
     QUIZ_SESSIONS.pop(uid, None)
     QUIZ_TIMERS.pop(uid, None)
+    asyncio.create_task(_clear_persisted_quiz_session(uid))
 
     tot = session["tot"]
     right = session["right"]

@@ -19935,6 +19935,16 @@ async def startup():
     except Exception as e:
         logger.warning(f"[App] Page-job resume check failed (non-fatal): {e}")
 
+    # RESUME in-progress D1-quiz sessions (mid-quiz, per-question, /q-created
+    # quizzes) — a bot restart mid-quiz used to silently lose the user's
+    # entire in-memory session (QUIZ_SESSIONS is RAM-only). Now resumes them
+    # from their last-persisted snapshot instead.
+    try:
+        from quiz import resume_live_quiz_sessions
+        _spawn_task(resume_live_quiz_sessions())
+    except Exception as e:
+        logger.warning(f"[App] Quiz session resume check failed (non-fatal): {e}")
+
     async def _supervised(coro_fn, name):
         """Core background task crash korle silently die na kore auto-restart hobe.
         Exponential backoff + alert-spam prevent (repeated crash e max 3 alert)."""
