@@ -11181,18 +11181,16 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
                     hint_to_idx[key] = idx
             groups[idx][1].append(m)
 
-    # Rescue pass: a same-page banner leak — MCQs from a longer column that
-    # visually sit near/below a NEW topic's banner but logically still
-    # continue the OLD topic's numbering (the banner hasn't reached their
-    # own column yet) — get miscategorized into the new group. This can
-    # land at either end of the new group in extraction order depending on
-    # column read order, so both ends are checked:
-    #  - LEADING run: new group's first few MCQs continue the previous
-    #    group's qsn_no contiguously instead of starting near 1.
-    #  - TRAILING run: new group's LAST few MCQs continue the previous
-    #    group's qsn_no contiguously (the column that got read last on the
-    #    page turns out to still belong to the older topic).
-    # Either pattern moves those MCQs back to the correct (previous) group.
+    # Rescue pass (CODE-LEVEL, not prompt-dependent): a topic must be fully
+    # complete — every MCQ, serial order intact — before the next topic
+    # starts. The extraction prompt can still misjudge which column a banner
+    # belongs to, so this is enforced here regardless of what topic_hint
+    # said. Rule: within group i, any MCQ whose qsn_no is NOT a genuine
+    # restart (i.e. it continues group i-1's numbering, prev_max+1, +2, ...)
+    # actually belongs to group i-1. This is checked on qsn_no value alone,
+    # not position (leading/trailing) — so it catches leaks anywhere in the
+    # new group's extraction order, e.g. a right-column tail that got
+    # collected after the new group's own Q1-Q4 in read order.
     for i in range(1, len(groups)):
         prev_name, prev_mcqs = groups[i - 1]
         cur_name, cur_mcqs = groups[i]
@@ -11203,70 +11201,41 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             continue
         prev_max = prev_nums[-1]
 
-        # Leading run.
-        leaked = []
+        # A genuine new topic almost always restarts numbering low (1, 2, 3
+        # ... or occasionally continues a shared page numbering scheme, but
+        # never jumps to exactly prev_max+1 by coincidence on an unrelated
+        # topic). Any cur_mcqs entry whose qsn_no forms a contiguous run
+        # starting at prev_max+1 is a leak, wherever it sits in the list.
         expect = prev_max + 1
-        for m in cur_mcqs:
-            n = m.get("qsn_no")
-            if isinstance(n, int) and n == expect and n > 2:
-                leaked.append(m)
-                expect += 1
-            else:
+        leaked = []
+        remaining = []
+        # Sort a candidate view by qsn_no to detect the contiguous run
+        # reliably regardless of extraction order, then pull those exact
+        # objects out of cur_mcqs.
+        numbered = [m for m in cur_mcqs if isinstance(m.get("qsn_no"), int)]
+        numbered_sorted = sorted(numbered, key=lambda m: m["qsn_no"])
+        run = []
+        want = expect
+        for m in numbered_sorted:
+            if m["qsn_no"] == want:
+                run.append(m)
+                want += 1
+            elif m["qsn_no"] > want:
                 break
+        if run and run[0]["qsn_no"] > 2:  # never treat qsn 1-2 as a leak
+            leaked = run
 
-        # Trailing run (only check if leading run didn't already claim the
-        # whole group, and skip MCQs already caught by the leading check).
-        if len(leaked) < len(cur_mcqs):
-            remaining = [m for m in cur_mcqs if m not in leaked]
-            trailing = []
-            # Walk from the end backwards looking for a contiguous
-            # descending run ending at prev_max+1, +2, ... in reverse.
-            rev_candidates = list(reversed(remaining))
-            expect_desc = None
-            for m in rev_candidates:
-                n = m.get("qsn_no")
-                if not isinstance(n, int) or n <= 2:
-                    break
-                if expect_desc is None:
-                    # First candidate from the end: must itself continue
-                    # prev_max contiguously combined with however many more
-                    # trailing items match going backwards. We verify this
-                    # by checking the full descending contiguous chain below.
-                    pass
-                trailing.append(m)
-            # trailing currently holds every item from the end that's a
-            # plain integer qsn_no>2; now find the longest suffix of that
-            # (in original order) which is contiguous and lands exactly on
-            # prev_max+1 at its start.
-            trailing_sorted = sorted(trailing, key=lambda m: m.get("qsn_no"))
-            best_run = []
-            for k in range(len(trailing_sorted)):
-                run = trailing_sorted[k:]
-                nums = [m.get("qsn_no") for m in run]
-                if nums == list(range(nums[0], nums[0] + len(nums))) and nums[0] == prev_max + 1:
-                    best_run = run
-                    break
-            trailing = best_run
-
-        else:
-            trailing = []
-
-        if leaked and len(leaked) < len(cur_mcqs):
+        if leaked:
             logger.warning(
                 f"[TOPIC leak-rescue] moved qsn_no {[m.get('qsn_no') for m in leaked]} "
-                f"from '{cur_name[:30]}' back to '{prev_name[:30]}' (leading run, contiguous with prior topic)"
+                f"from '{cur_name[:30]}' back to '{prev_name[:30]}' "
+                f"(continues prior topic's numbering, not a genuine restart)"
             )
             for m in leaked:
                 cur_mcqs.remove(m)
                 prev_mcqs.append(m)
-        elif trailing:
-            logger.warning(
-                f"[TOPIC leak-rescue] moved qsn_no {[m.get('qsn_no') for m in trailing]} "
-                f"from '{cur_name[:30]}' back to '{prev_name[:30]}' (trailing run, contiguous with prior topic)"
-            )
-            for m in trailing:
-                cur_mcqs.remove(m)
-                prev_mcqs.append(m)
+            # Keep prev group's MCQs in serial order after the merge.
+            prev_mcqs.sort(key=lambda m: (m.get("qsn_no") is None, m.get("qsn_no")))
 
     # Sort each group's MCQs by qsn_no (missing/non-numeric sorts last, stable).
     def _qsn_key(m):
