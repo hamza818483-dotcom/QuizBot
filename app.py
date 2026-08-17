@@ -11195,28 +11195,43 @@ def _parse_count_check_json(text: str) -> dict:
 _OPT_FIELD_IDX = {"optiona": 0, "optionb": 1, "optionc": 2, "optiond": 3}
 
 
-async def _topic_extract_from_image(img) -> list:
+async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
     """Topic-aware extractor: same strict extraction rules as QBM but the
     prompt also asks for each MCQ's printed serial number (qsn_no) and
     nearest topic heading (topic_hint), used by /topic to detect topic
     boundaries and split into separate per-topic CSVs.
 
-    Call 1: Gemini->Groq->OpenRouter full extraction (as before).
+    Call 1: Gemini->Groq->OpenRouter full extraction (as before). SKIPPED
+    on a cache hit (cache_key given and found in _topic_mcq_result_cache)
+    -- same re-run-same-PDF speedup /qbm has, kept in its OWN cache
+    namespace since topic_hint/qsn_no fields differ from /qbm's shape.
     Call 2 (audit): feeds Call1's own output back to the model alongside the
     image and asks it to independently re-check 4 things — (1) count/missing
     MCQs, (2) wrong serial numbers, (3) word-level accuracy of question/option
     text against the page, (4) topic_hint correctness/completeness. Only the
     flagged corrections are applied — cheaper than a full blind re-extraction
     while still catching column-boundary misses, misread words, and
-    mis-tagged topics."""
+    mis-tagged topics. ALWAYS runs in full, even on a Call1 cache hit."""
     async def _run_extract_call():
+        cached = _topic_mcq_result_cache.get(cache_key) if cache_key else None
+        if cached:
+            logger.info(f"[TOPIC MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
+            return _qbm_dedup_list(cached)
         gem = await _qbm_gemini_extract(img, TOPIC_EXTRACT_PROMPT)
         if gem:
-            return _qbm_dedup_list(gem)
+            result = _qbm_dedup_list(gem)
+            if result and cache_key:
+                _topic_mcq_result_cache[cache_key] = result
+                _cap_qbm_mcq_cache(_topic_mcq_result_cache)
+            return result
         txt = await _qbm_groq_call(img, TOPIC_EXTRACT_PROMPT)
         result = _qbm_parse_json(txt) if txt else []
         if result:
-            return _qbm_dedup_list(result)
+            result = _qbm_dedup_list(result)
+            if result and cache_key:
+                _topic_mcq_result_cache[cache_key] = result
+                _cap_qbm_mcq_cache(_topic_mcq_result_cache)
+            return result
         txt3 = await _qbm_openrouter_call(img, TOPIC_EXTRACT_PROMPT)
         result3 = _qbm_parse_json(txt3) if txt3 else []
         return _qbm_dedup_list(result3)
@@ -11372,21 +11387,38 @@ def _parse_unmesh_heading_scan(text: str) -> list:
         return []
 
 
-async def _unmesh_extract_from_image(img) -> list:
+async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
     """/unmesh extractor — same Call1+Call2 pipeline as /topic, but topic
     boundaries are detected via the WHITE-bg + BOLD BLACK text + preceding
     black-circle-with-1/2/3-white-stars heading style (UNMESH_EXTRACT_PROMPT),
     instead of /topic's black-background banner bar style. Everything else
     (qsn_no serial detection, segment-major read order, Call2 audit, code-
-    level consistency/serial checks) is identical to /topic."""
+    level consistency/serial checks) is identical to /topic.
+
+    Call1 result cached in its own namespace (_unmesh_mcq_result_cache) when
+    cache_key given — same re-run-same-PDF speedup as /topic/qbm. Only
+    Call1's raw extraction is cached; the heading-scan + Call2 audit below
+    always re-run in full, unaffected by this cache."""
     async def _run_extract_call():
+        cached = _unmesh_mcq_result_cache.get(cache_key) if cache_key else None
+        if cached:
+            logger.info(f"[UNMESH MCQ Cache] hit for {cache_key} — skipping Call1, still running full heading-scan + Call2 verify")
+            return _qbm_dedup_list(cached)
         gem = await _qbm_gemini_extract(img, UNMESH_EXTRACT_PROMPT)
         if gem:
-            return _qbm_dedup_list(gem)
+            result = _qbm_dedup_list(gem)
+            if result and cache_key:
+                _unmesh_mcq_result_cache[cache_key] = result
+                _cap_qbm_mcq_cache(_unmesh_mcq_result_cache)
+            return result
         txt = await _qbm_groq_call(img, UNMESH_EXTRACT_PROMPT)
         result = _qbm_parse_json(txt) if txt else []
         if result:
-            return _qbm_dedup_list(result)
+            result = _qbm_dedup_list(result)
+            if result and cache_key:
+                _unmesh_mcq_result_cache[cache_key] = result
+                _cap_qbm_mcq_cache(_unmesh_mcq_result_cache)
+            return result
         txt3 = await _qbm_openrouter_call(img, UNMESH_EXTRACT_PROMPT)
         result3 = _qbm_parse_json(txt3) if txt3 else []
         return _qbm_dedup_list(result3)
@@ -12581,6 +12613,12 @@ async def _qbm_ram_aware_acquire():
 # this, per instruction that this caching is /qbm-specific.
 _QBM_MCQ_CACHE_MAX = 300
 _qbm_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict] (post-Call1, pre-Call2)
+# /topic and /unmesh use their OWN separate Call1 caches -- NOT shared with
+# /qbm's cache above, since each extractor's prompt asks for different
+# fields (qsn_no/topic_hint) and a shared cache would silently return the
+# wrong-shaped result across commands.
+_topic_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
+_unmesh_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
 
 def _qbm_page_content_hash(img) -> str:
     """Hash the actual rendered page image bytes (not file_id) so the QBM
@@ -12593,9 +12631,10 @@ def _qbm_page_content_hash(img) -> str:
     return hashlib.sha256(buf.getvalue()).hexdigest()[:24]
 
 
-def _cap_qbm_mcq_cache():
-    while len(_qbm_mcq_result_cache) > _QBM_MCQ_CACHE_MAX:
-        _qbm_mcq_result_cache.pop(next(iter(_qbm_mcq_result_cache)), None)
+def _cap_qbm_mcq_cache(cache_dict: dict = None):
+    d = cache_dict if cache_dict is not None else _qbm_mcq_result_cache
+    while len(d) > _QBM_MCQ_CACHE_MAX:
+        d.pop(next(iter(d)), None)
 
 
 async def _qbm_extract_from_image(img, cache_key: tuple = None) -> list:
@@ -14273,7 +14312,7 @@ async def _handle_topic_impl(msg: dict):
 
         extracted_pages = await qbm_extract_all_pages(
             chat_id, pages, "Topic Extract", file_name, status_msg_id,
-            extractor=_topic_extract_from_image
+            extractor=_topic_extract_from_image, file_id=file_id
         )
 
         total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
@@ -14404,7 +14443,7 @@ async def _handle_unmesh_impl(msg: dict):
 
         extracted_pages = await qbm_extract_all_pages(
             chat_id, pages, "Unmesh Extract", file_name, status_msg_id,
-            extractor=_unmesh_extract_from_image
+            extractor=_unmesh_extract_from_image, file_id=file_id
         )
 
         total_mcq_found = sum(
@@ -15097,7 +15136,7 @@ async def qbm_extract_all_pages(
         mcqs = []
 
         async def _run_extract():
-            _ck = (_qbm_page_content_hash(img), page_num) if (file_id and extractor is None) else None
+            _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
             return await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
 
         async def _watch_cancel_inner(task):
@@ -15169,7 +15208,7 @@ async def qbm_extract_all_pages(
             logger.error(f"[QBM Extract] Page {page_num} error: {e} — retrying once before giving up (page must never be silently skipped)")
             if not is_cancelled(chat_id):
                 try:
-                    _ck = (_qbm_page_content_hash(img), page_num) if (file_id and extractor is None) else None
+                    _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
                     mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
                 except Exception as e2:
                     logger.error(f"[QBM Extract] Page {page_num} retry also failed: {e2}")
