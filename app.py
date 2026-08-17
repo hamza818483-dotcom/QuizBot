@@ -11262,6 +11262,54 @@ async def _topic_extract_from_image(img) -> list:
     return mcqs
 
 
+def _build_unmesh_heading_scan_prompt() -> str:
+    """DEDICATED strict heading-detection pass for /unmesh, run independently
+    of the main topic_hint extraction. Asks ONE narrow, unambiguous
+    question — scan the whole page top-to-bottom for ANY visually distinct
+    heading line (regardless of icon style: doubled icon, single icon,
+    boxed/bordered/shaded heading strip, or plain black banner) and report
+    its exact text plus which printed qsn_no comes immediately after it.
+    This result is treated as a HARD, code-trusted split signal in
+    _unmesh_group_mcqs — not just a logged suggestion — precisely because
+    the main extraction prompt's topic_hint field is model-subjective and
+    can silently miss heading styles it wasn't primed to recognize."""
+    return (
+        "Look ONLY at HEADING LINES on this page — ignore all MCQ question/option text for this task.\n"
+        "A heading line is any short line of text that is visually set apart from ordinary question "
+        "text by AT LEAST ONE of: (a) a bold/dark heading font clearly heavier than body text, "
+        "(b) a small icon/emoji/symbol (single OR doubled, any style) placed right beside it, "
+        "(c) its own bounding box, border, shaded/colored background strip, or horizontal rule "
+        "separating it from the text above and below, (d) sitting inside a solid dark/black banner bar. "
+        "Do NOT count as a heading: exam-source bracket tags (BCS/MAT/DAT/DU-D/JU-B etc), "
+        "university/organization/unit sub-labels (বিশ্ববিদ্যালয়, ইউনিট, BUP, FASS), "
+        "ব্যাখ্যা/explanation labels, or plain unstyled question text.\n\n"
+        "For EVERY heading line found anywhere on the page (top to bottom, both columns if 2-column), report:\n"
+        "  - its exact text\n"
+        "  - the printed qsn_no of the very next MCQ that appears after it on the page "
+        "(the first question number below/after that heading in its own column) — use null if the "
+        "heading is the last thing on the page with no MCQ following it on this page.\n\n"
+        "Output ONLY this JSON array, nothing else, one object per heading found, in top-to-bottom page order:\n"
+        '[{"heading_text": "...", "next_qsn_no": <int or null>}]\n'
+        "If there are truly zero heading lines anywhere on this page, output exactly []."
+    )
+
+
+def _parse_unmesh_heading_scan(text: str) -> list:
+    if not text:
+        return []
+    t = text.strip()
+    if "```json" in t:
+        t = t.split("```json")[1].split("```")[0].strip()
+    elif "```" in t:
+        t = t.split("```")[1].split("```")[0].strip()
+    try:
+        m = re.search(r'\[.*\]', t, re.DOTALL)
+        data = json.loads(m.group()) if m else json.loads(t)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
 async def _unmesh_extract_from_image(img) -> list:
     """/unmesh extractor — same Call1+Call2 pipeline as /topic, but topic
     boundaries are detected via the WHITE-bg + BOLD BLACK text + preceding
@@ -11284,6 +11332,49 @@ async def _unmesh_extract_from_image(img) -> list:
     mcqs = await _run_extract_call()
     if not mcqs:
         return mcqs
+
+    # CODE-LEVEL STRICT HEADING SCAN — independent narrow pass, run
+    # regardless of what topic_hint the main extraction assigned. Any
+    # heading found here is a HARD split signal applied directly to the
+    # matching qsn_no's topic_hint below, overriding a blank/wrong
+    # topic_hint the main prompt may have silently missed (e.g. box-style
+    # single-icon headings the main prompt wasn't primed to recognize).
+    try:
+        scan_txt = await _qbm_gemini_raw(img, _build_unmesh_heading_scan_prompt())
+        headings = _parse_unmesh_heading_scan(scan_txt)
+    except Exception as e:
+        logger.warning(f"[UNMESH heading-scan] failed, skipping: {e}")
+        headings = []
+
+    if headings:
+        by_qsn_early = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
+        page_qnos_sorted = sorted(by_qsn_early.keys())
+        for h in headings:
+            htext = (h.get("heading_text") or "").strip()
+            if not htext:
+                continue
+            next_q = h.get("next_qsn_no")
+            if isinstance(next_q, int) and next_q in by_qsn_early:
+                old_hint = by_qsn_early[next_q].get("topic_hint", "")
+                if old_hint != htext:
+                    logger.warning(
+                        f"[UNMESH heading-scan] applying heading '{htext[:40]}' "
+                        f"to qsn_no={next_q} (was topic_hint='{old_hint[:40]}')"
+                    )
+                by_qsn_early[next_q]["topic_hint"] = htext
+                # every subsequent MCQ on THIS page (in printed-number order)
+                # inherits this heading until another qsn_no on this page
+                # already carries its own distinct topic_hint from the scan.
+                for qn in page_qnos_sorted:
+                    if qn >= next_q:
+                        m = by_qsn_early[qn]
+                        if not (m.get("topic_hint") or "").strip():
+                            m["topic_hint"] = htext
+            elif next_q is None:
+                # heading is last thing on the page, no MCQ follows it here —
+                # emit as a trailing marker so the NEXT page's first MCQ
+                # picks it up as the carried-forward hint.
+                mcqs.append({"trailing_topic_marker": htext})
 
     # Pull out any trailing_topic_marker sentinel(s) — a marker seen at the
     # bottom of the page with zero MCQs following it on this page. Keep them
