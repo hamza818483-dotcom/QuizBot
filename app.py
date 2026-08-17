@@ -19,6 +19,10 @@ import time
 import random
 import string
 import re
+import html as _html_mod
+
+def _html_escape(s: str) -> str:
+    return _html_mod.escape(s or "", quote=False)
 import difflib
 import hashlib
 import base64
@@ -14379,7 +14383,7 @@ async def _handle_topic_impl(msg: dict):
             safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip() or "Topic"
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
-                caption=f"📂 {name} — {len(mcqs)} MCQ",
+                caption=f"📂 {name} — {len(mcqs)} MCQ\n<code>{_html_escape(name)}</code>",
                 mime_type="text/csv")
 
         if status_msg_id:
@@ -14512,7 +14516,7 @@ async def _handle_unmesh_impl(msg: dict):
             safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip() or "Topic"
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
-                caption=f"📂 {name} — {len(mcqs)} MCQ",
+                caption=f"📂 {name} — {len(mcqs)} MCQ\n<code>{_html_escape(name)}</code>",
                 mime_type="text/csv")
 
         if status_msg_id:
