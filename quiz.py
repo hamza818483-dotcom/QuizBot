@@ -668,7 +668,7 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
     session["q_results"].append({"index": session["cur"], "type": None})
 
     tag_part = f"{session['tag']}\n\n" if session["tag"] else ""
-    q_text = f"{tag_part}{session['cur'] + 1}. {q.get('question', '?')}"[:300]
+    q_text = f"{tag_part}({session['cur'] + 1}/{session['tot']}) {q.get('question', '?')}"[:300]
     exp = q.get("explanation", "")
     if session["exp"]:
         exp = f"{exp}\n{session['exp']}"
