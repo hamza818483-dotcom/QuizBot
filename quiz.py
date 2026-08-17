@@ -170,14 +170,21 @@ async def handle_quiz_create(msg: dict):
         # Step 4: send the confirmation — retried too, since the quiz+link
         # are already valid/usable even if this particular message send
         # fails; retry ensures the user actually SEES the link.
+        _SEP = "─" * 20
         async def _notify():
             await send_msg(chat_id,
-                f"✅ <b>Quiz Created!</b>\n\n"
+                f"✅ <b>Quiz Created!</b>\n"
+                f"{_SEP}\n"
                 f"📝 Name: {name}\n"
+                f"{_SEP}\n"
                 f"📄 Description: {desc}\n"
+                f"{_SEP}\n"
                 f"⏱️ Timer: {timer}s\n"
+                f"{_SEP}\n"
                 f"🔀 Shuffle: {'Yes' if shuffle else 'No'}\n"
-                f"📊 Questions: {len(questions)}\n\n"
+                f"{_SEP}\n"
+                f"📊 Questions: {len(questions)}\n"
+                f"{_SEP}\n\n"
                 f"🌐 Web Quiz:\n{web_link}\n\n"
                 f"🤖 Bot Quiz:\n{link}\n\n"
                 f"👆 যে কেউ এই লিংকে ক্লিক করে কুইজ solve করতে পারবে!"
