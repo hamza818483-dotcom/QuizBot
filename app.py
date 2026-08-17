@@ -1137,6 +1137,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
     gemini_quota_errors = 0
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)]
+        key_rotator.record_call(key)
         try:
             client = gai.Client(api_key=key)
 
@@ -2574,6 +2575,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
         from pdf_handler import image_to_base64
         _ordered = key_rotator.ordered_keys()
         key = _ordered[0] if _ordered else key_rotator.get_key()
+        key_rotator.record_call(key)
         client = gai.Client(api_key=key)
         img_b64 = image_to_base64(img)
 

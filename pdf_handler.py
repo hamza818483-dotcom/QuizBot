@@ -87,13 +87,17 @@ def _save_banned_keys(banned: set):
 
 class GeminiKeyRotator:
     COOLDOWN_SECONDS = 60
+    RPM_PER_KEY = 15  # proactive per-minute ceiling; skip a key before it 429s
+    RPM_WINDOW_SECONDS = 60
 
     def __init__(self):
         self.keys = []
         self.current = 0
         self._cooldown_until = {}
         self._banned = _load_banned_keys()
+        self._call_times = {}  # key -> list[float] call timestamps (rolling 60s window)
         self._load_keys()
+
 
     def _load_keys(self):
         raw = os.environ.get("GEMINI_KEYS", "")
@@ -107,6 +111,22 @@ class GeminiKeyRotator:
             logger.warning(f"[Gemini] Skipped {len(skipped)} previously-banned key(s) at startup: {[k[:12]+'...' for k in skipped]}")
         logger.info(f"[Gemini] Loaded {len(self.keys)} usable keys ({len(skipped)} auto-skipped as banned)")
 
+    def _prune_and_count(self, key: str, now: float) -> int:
+        """Drops call-timestamps older than the rolling window and returns
+        the remaining count for this key."""
+        times = self._call_times.get(key)
+        if not times:
+            return 0
+        cutoff = now - self.RPM_WINDOW_SECONDS
+        fresh = [t for t in times if t > cutoff]
+        self._call_times[key] = fresh
+        return len(fresh)
+
+    def record_call(self, key: str):
+        """Call this right before/when actually using a key, so the rolling
+        window reflects real usage (independent of mark_healthy/rate_limited)."""
+        self._call_times.setdefault(key, []).append(time.time())
+
     def get_key(self):
         if not self.keys:
             raise ValueError("No Gemini keys available")
@@ -116,10 +136,11 @@ class GeminiKeyRotator:
 
     def ordered_keys(self, offset: int = 0):
         """Only non-banned keys, healthy ones first: not exhausted-today AND
-        not in short cooldown, then short-cooldown keys, then today-exhausted
+        not in short cooldown AND not over its rolling per-minute ceiling,
+        then over-RPM keys, then short-cooldown keys, then today-exhausted
         keys last — so a call never wastes its first attempt on a key
         already known dead for the day (daily quota resets at Pacific midnight,
-        not after 60s). Permanently banned keys are excluded entirely.
+        not after 60s), or one about to 429 from hitting its per-minute limit.
 
         Within the healthy tier, starts from self.current (advanced by
         get_key(), also nudged here) instead of always self.keys[0] --
@@ -143,13 +164,16 @@ class GeminiKeyRotator:
         not_exhausted = [k for k in live_keys if not _is_gemini_key_exhausted_today(k)]
         exhausted = [k for k in live_keys if _is_gemini_key_exhausted_today(k)]
         pool = not_exhausted if not_exhausted else live_keys
-        healthy = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
+        cooled = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
         cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
+        under_rpm = [k for k in cooled if self._prune_and_count(k, now) < self.RPM_PER_KEY]
+        over_rpm = [k for k in cooled if self._prune_and_count(k, now) >= self.RPM_PER_KEY]
+        healthy = under_rpm
         if healthy:
             start = (self.current + offset) % len(healthy)
             healthy = healthy[start:] + healthy[:start]
             self.current = (self.current + 1) % max(len(self.keys), 1)
-        return healthy + cooling + (exhausted if not_exhausted else [])
+        return healthy + over_rpm + cooling + (exhausted if not_exhausted else [])
 
     def mark_rate_limited(self, key: str, daily_exhausted: bool = False, retry_after_seconds: int = None):
         cooldown = retry_after_seconds if retry_after_seconds and retry_after_seconds > 0 else self.COOLDOWN_SECONDS
@@ -795,6 +819,7 @@ async def generate_mcq_from_image(
 
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+        key_rotator.record_call(key)
         last_exc = None
         for model_name in _GEMINI_MODELS:
             try:
@@ -946,6 +971,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
     for attempt in range(max_retries):
         try:
             key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+            key_rotator.record_call(key)
             from google import genai as gai
             from google.genai import types
             client = gai.Client(api_key=key)
