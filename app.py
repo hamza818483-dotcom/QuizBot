@@ -14130,12 +14130,18 @@ async def _handle_qbm_impl(msg: dict):
 async def _post_topic_groups_to_channel(channel_id, topic_groups: list, thread_id: int = None):
     """Posts topic_groups (from _topic_group_mcqs / _unmesh_group_mcqs) as
     live Telegram polls directly to a channel — one header message per
-    topic (name + MCQ count), followed by that topic's polls in order.
+    topic (name + MCQ count), followed by that topic's polls in order,
+    followed by an end message (replying to the header) with 3 buttons —
+    Poll Again, Quiz Solve, Website Exam — same as /csv. Channel gets a
+    score-asking prompt in the end message; group/thread does not.
     Used by /topic and /unmesh when -c <channel_id> is given, instead of
     the default CSV-file output."""
     settings = await db_get_settings()
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
+    chat_type = await _get_chat_type(channel_id)
+    ask_score = chat_type == "channel"
+    bot_un = await get_bot_username()
     total_polls = 0
     for name, mcqs in topic_groups:
         header_text = f"📂 {name}\n💎 MCQ: {len(mcqs)}"
@@ -14166,6 +14172,34 @@ async def _post_topic_groups_to_channel(channel_id, topic_groups: list, thread_i
                 await asyncio.sleep(2)
             total_polls += 1
             await asyncio.sleep(1.0)
+
+        # End message for this topic group: cache the MCQs for Quiz
+        # Solve/Poll Again/Website Exam links, then post 3-button end msg
+        # replying to the header (the "first message" for this topic).
+        cache_id = gen_session_id()
+        await db_save_mcq_cache(cache_id, cache_id, 0, name, mcqs)
+        exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+        quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+        poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+        end_text = csv_get_ending_message(name, len(mcqs), ask_score=ask_score)
+        end_data = {
+            "chat_id": channel_id,
+            "text": end_text,
+            "reply_markup": {"inline_keyboard": [
+                [{"text": "🔄 Poll Again", "url": poll_url},
+                 {"text": "📝 Quiz Solve", "url": quiz_url}],
+                [{"text": "🌐 Website Exam", "url": exam_url}]
+            ]},
+        }
+        if header_msg_id:
+            end_data["reply_to_message_id"] = header_msg_id
+        if thread_id:
+            end_data["message_thread_id"] = thread_id
+        for _end_attempt in range(3):
+            end_r = await tg_post("sendMessage", end_data)
+            if end_r.get("ok"):
+                break
+            await asyncio.sleep(2)
     return total_polls
 
 
