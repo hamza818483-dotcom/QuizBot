@@ -18370,9 +18370,10 @@ async def process_update(update: dict):
             uid = update["message"].get("from", {}).get("id")
             _msg = update.get("message", {})
             _txt_check = (_msg.get("text") or "").strip()
-            # /csv, /csvS, /ping, /cancel bypass the per-user serialize queue
-            # entirely. /csv and /csvS reply to an already-uploaded document
-            # with an independent cache_id, so they never share mutable state
+            # /csv, /csvS, /ping, /cancel, /merge + other stateless/quick
+            # commands bypass the per-user serialize queue entirely. /csv
+            # and /csvS reply to an already-uploaded document with an
+            # independent cache_id, so they never share mutable state
             # with other running commands (unlike /txt, /pdf which mutate
             # shared per-user progress state). /ping is a pure status check
             # with no shared state at all. /cancel MUST always run instantly
@@ -18384,7 +18385,18 @@ async def process_update(update: dict):
             # for the same uid — the actual cause of "/csv stuck at 0%" /
             # "/ping late" / "/cancel doesn't work" reports; the underlying
             # work was always fast, the command just hadn't started yet.
-            if _txt_check.startswith("/csv") or _txt_check.startswith("/csvS") or _txt_check == "/ping" or _txt_check == "/error" or _txt_check.startswith("/errors") or _txt_check == "/status" or _txt_check.startswith("/cancel"):
+            # /merge (file-collect + done/status/cancel) and other small
+            # read-only/quick commands (/getid, /id, /menu, /pin, /keys,
+            # /channel, /channelist, /labels, /qlist, /info, /info2) are
+            # instant, don't mutate the same shared progress state as the
+            # heavy extraction commands, and users expect them to respond
+            # immediately even while a long /qbm or /auto job is running.
+            _QUEUE_EXEMPT_EXACT = {"/ping", "/error", "/status", "/getid", "/id",
+                                     "/keys", "/channelist", "/qlist", "/info", "/info2"}
+            _QUEUE_EXEMPT_PREFIX = ("/csv", "/csvS", "/cancel", "/errors", "/merge",
+                                     "/menu", "/pin", "/channel", "/labels")
+            if (_txt_check in _QUEUE_EXEMPT_EXACT
+                    or _txt_check.startswith(_QUEUE_EXEMPT_PREFIX)):
                 _spawn_task(handle_message(_msg))
                 return
             if uid is not None:
