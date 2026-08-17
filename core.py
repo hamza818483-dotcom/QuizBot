@@ -403,7 +403,57 @@ def _sanitize_poll_options(data: dict) -> dict:
         data["options"] = [_strip_option_prefix(o) for o in data["options"]]
     return data
 
+
+# ── Global proactive rate limiter for outbound Telegram API calls ──
+# Telegram's own limit is roughly ~30 messages/sec GLOBAL per bot (across
+# ALL chats/DMs combined, not per-user) plus a per-chat limit of ~1/sec.
+# Previously the only defense was REACTIVE (wait after a 429 already
+# happened) — under a burst (many users starting/answering quizzes within
+# the same second) that meant a wave of 429s, retries, and delay for
+# everyone. This is a simple async token-bucket that proactively paces
+# outbound calls so bursts smooth out BEFORE hitting Telegram's limit,
+# instead of after. Kept conservative (25/sec, safely under Telegram's
+# ~30/sec) since a slightly slower poll delivery is far better than
+# widespread 429s during a traffic spike.
+_TG_RATE_LIMIT_PER_SEC = 25
+_tg_rate_bucket = {"tokens": float(_TG_RATE_LIMIT_PER_SEC), "last_refill": time.time()}
+_tg_rate_lock = asyncio.Lock()
+
+async def _tg_rate_limit_wait():
+    """Proactively paces outbound Telegram API calls to stay under the
+    global per-bot rate limit, smoothing out bursts instead of only
+    reacting to 429s after they've already happened."""
+    async with _tg_rate_lock:
+        now = time.time()
+        elapsed = now - _tg_rate_bucket["last_refill"]
+        _tg_rate_bucket["tokens"] = min(
+            float(_TG_RATE_LIMIT_PER_SEC),
+            _tg_rate_bucket["tokens"] + elapsed * _TG_RATE_LIMIT_PER_SEC
+        )
+        _tg_rate_bucket["last_refill"] = now
+        if _tg_rate_bucket["tokens"] < 1:
+            wait_s = (1 - _tg_rate_bucket["tokens"]) / _TG_RATE_LIMIT_PER_SEC
+            await asyncio.sleep(wait_s)
+            _tg_rate_bucket["tokens"] = 0
+            _tg_rate_bucket["last_refill"] = time.time()
+        else:
+            _tg_rate_bucket["tokens"] -= 1
+
+
+# Methods that actually count against Telegram's send-rate limit (outbound
+# content to users/chats). Read-only/internal methods (getMe, getFile,
+# answerCallbackQuery, setWebhook, etc.) are excluded — throttling those
+# would slow down the bot for no benefit since they aren't what floods the
+# per-bot send limit.
+_TG_RATE_LIMITED_METHODS = {
+    "sendMessage", "sendPoll", "sendPhoto", "sendDocument", "editMessageText",
+    "forwardMessage", "copyMessage", "sendMediaGroup", "sendVideo", "sendAnimation",
+}
+
+
 async def tg_post(method: str, data: dict) -> dict:
+    if method in _TG_RATE_LIMITED_METHODS:
+        await _tg_rate_limit_wait()
     if method == "sendPoll":
         data = _sanitize_poll_options(data)
     # ── setWebhook special-case: target URL host must resolve on Telegram's
@@ -1046,7 +1096,11 @@ async def _get_shared_http_client():
         # commands এলে পুরনো connection বেশি সময় বেঁচে থাকবে, তাই "প্রথমবার
         # stale connection-এ fail করে retry লাগে, দ্বিতীয়বার fast" — এই
         # pattern-টাই কম ঘটবে (retry logic এখনও fallback হিসেবে থাকছে)।
-        limits = httpx.Limits(max_keepalive_connections=20, keepalive_expiry=60.0)
+        # max_keepalive_connections বাড়ানো হলো 20→100 এবং max_connections
+        # যোগ করা হলো — বেশি concurrent user (burst traffic) একসাথে D1/TG
+        # proxy call করলে আগে অল্প pool-এ queue/delay হতো, এখন বেশি
+        # concurrent in-flight request handle করতে পারবে।
+        limits = httpx.Limits(max_keepalive_connections=100, max_connections=200, keepalive_expiry=60.0)
         _shared_http_client = httpx.AsyncClient(timeout=300, limits=limits)
     return _shared_http_client
 
