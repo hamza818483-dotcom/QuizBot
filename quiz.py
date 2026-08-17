@@ -816,14 +816,19 @@ async def handle_quiz_poll_answer(pa: dict):
     poll_id = pa.get("poll_id", "")
     if session.get("pid") != poll_id:
         logger.warning(f"[Quiz] pid mismatch uid={uid} got={poll_id} expected={session.get('pid')} cur={session.get('cur')}")
-        try:
-            await notify_owner(
-                f"⚠️ Quiz auto-next FAILED\nuid: {uid}\ncur: {session.get('cur')}/{session.get('tot')}\n"
-                f"expected pid: {session.get('pid')}\ngot pid: {poll_id}\n\n"
-                f"User answered but poll_id didn't match — next question not sent."
-            )
-        except Exception:
-            pass
+        # expected pid None at cur=0 means the answer raced the very first
+        # sendPoll's own completion (poll not yet persisted to session when
+        # the answer arrived) - self-heals via stall-recovery below in ~2s,
+        # not actionable, so skip the owner alert noise for this specific case.
+        if session.get("pid") is not None or session.get("cur") != 0:
+            try:
+                await notify_owner(
+                    f"⚠️ Quiz auto-next FAILED\nuid: {uid}\ncur: {session.get('cur')}/{session.get('tot')}\n"
+                    f"expected pid: {session.get('pid')}\ngot pid: {poll_id}\n\n"
+                    f"User answered but poll_id didn't match — next question not sent."
+                )
+            except Exception:
+                pass
         # SAFETY NET: never leave the quiz permanently stalled on a mismatch.
         # If nothing has advanced the session shortly after this, force it
         # forward using this answer so the user isn't stuck forever.
