@@ -10975,7 +10975,7 @@ UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '  a) Do NOT use smaller sub-headers like university/organization names or unit labels (\u098f \u0987\u0989\u09a8\u09bf\u099f, \u09ac\u09bf \u0987\u0989\u09a8\u09bf\u099f, BUP, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself.\n'
     '  b) If a new doubled-icon heading appears anywhere on THIS page (even partway down), every MCQ from that point onward gets the NEW heading text; MCQs above it on the same page keep the heading that was already active for them.\n'
     '  b2) TWO-COLUMN pages: left and right columns can each have their OWN active heading, independent of each other. Determine each MCQ\'s topic_hint by which doubled-icon heading is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current heading.\n'
-    '  b3) STRICT RULE — within a single page, a topic must be treated as fully finished in BOTH columns before any MCQ can belong to the next topic, same as standard two-column reading order.\n'
+    '  b3) A NEW doubled-icon heading ALWAYS immediately changes topic_hint for every MCQ after it in ITS OWN column, the instant it appears — even if that heading is the very last thing on the page (right at the bottom, no MCQ follows it on this page at all) and even if the other column still has old-topic MCQs left. Never wait for "both columns to finish" — that is WRONG. If a heading appears with zero MCQs following it on this page, still report it: emit one extra object at the very end of the JSON array in the form {"trailing_topic_marker":"<heading text>"} (no other fields) so the next page knows this new topic already started.\n'
     '  c) If this specific page has genuinely no doubled-icon heading visible anywhere on it (pure continuation page), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
     '  d) Every MCQ under the same visible doubled-icon heading on this page must get the EXACT SAME topic_hint string, character-for-character (do not include the icons themselves in the string, just the heading text).\n\n'
     'OUTPUT ORDER (CRITICAL — this is a SEGMENT-major order, not a plain column-major order):\n'
@@ -11284,6 +11284,15 @@ async def _unmesh_extract_from_image(img) -> list:
     if not mcqs:
         return mcqs
 
+    # Pull out any trailing_topic_marker sentinel(s) — a marker seen at the
+    # bottom of the page with zero MCQs following it on this page. Keep them
+    # aside (re-attached at the end) so the checks/dedup below only see real
+    # MCQ objects.
+    trailing_markers = [m.get("trailing_topic_marker") for m in mcqs if "trailing_topic_marker" in m]
+    mcqs = [m for m in mcqs if "trailing_topic_marker" not in m]
+    if not mcqs and not trailing_markers:
+        return mcqs
+
     # CODE-LEVEL CHECK (Call1 stage) — same generic segment checks /topic uses.
     mcqs = _check_segment_topic_consistency(mcqs, context="UNMESH-Call1")
     mcqs = _check_segment_serial_order(mcqs, context="UNMESH-Call1")
@@ -11354,7 +11363,109 @@ async def _unmesh_extract_from_image(img) -> list:
     except Exception as e:
         logger.warning(f"[UNMESH verify] audit pass failed, skipping: {e}")
 
+    for marker in trailing_markers:
+        if marker:
+            mcqs.append({"trailing_topic_marker": marker})
     return mcqs
+
+
+def _unmesh_group_mcqs(extracted_pages: list) -> list:
+    """DEDICATED grouping for /unmesh (fully independent of /topic's
+    _topic_group_mcqs). Same two split signals — qsn_no==1 OR the effective
+    topic_hint actually changing — PLUS a third: a trailing_topic_marker
+    sentinel emitted by UNMESH_EXTRACT_PROMPT when a new doubled-icon
+    heading appears at the bottom of a page with zero MCQs following it on
+    that page (e.g. ২০১ is the last MCQ on the page, a new heading prints
+    right after it, but the next MCQ ২০২ only appears on the next page).
+    That marker's text becomes the active hint for every MCQ from that point
+    forward, even though nothing on the marker's own page carried it."""
+    _FAKE_TOPIC_RE = re.compile(
+        r'^(বিশ্ববিদ্যালয়|.{0,20}বিশ্ববিদ্যালয়|বি ইউনিট|এ ইউনিট|সি ইউনিট|ডি ইউনিট|'
+        r'এফ ইউনিট|ই ইউনিট|চাকুরি|BUP|FASS|FSSS|[A-Za-z]{1,6}\s*ইউনিট)$',
+        re.IGNORECASE
+    )
+    def _is_fake_topic(hint: str) -> bool:
+        h = hint.strip()
+        if not h:
+            return False
+        if _FAKE_TOPIC_RE.match(h):
+            return True
+        if len(h) <= 25 and (h.endswith("বিশ্ববিদ্যালয়") or h.endswith("ইউনিট")):
+            return True
+        return False
+
+    flat = []
+    last_hint = None
+    for _page_idx, (_, _, mcqs) in enumerate(extracted_pages):
+        for m in mcqs:
+            if "trailing_topic_marker" in m:
+                th = (m.get("trailing_topic_marker") or "").strip()
+                if th and not _is_fake_topic(th):
+                    last_hint = th
+                continue  # sentinel only updates carry-forward, not a real MCQ
+            m["_page_key"] = _page_idx
+            hint = (m.get("topic_hint") or "").strip()
+            if hint and _is_fake_topic(hint):
+                hint = ""
+            if hint:
+                last_hint = hint
+                m["_effective_hint"] = hint
+            else:
+                m["_effective_hint"] = last_hint or ""
+            flat.append(m)
+
+    flat = _check_segment_topic_consistency(flat, context="unmesh-grouping-stage")
+
+    groups = []
+    group_seq = 0
+    prev_hint = None
+    for m in flat:
+        hint = m.get("_effective_hint", "")
+        qno = m.get("qsn_no")
+        hint_changed = bool(hint) and (prev_hint is not None) and (hint != prev_hint)
+        starts_new = (not groups) or (qno == 1) or hint_changed
+        if starts_new:
+            group_seq += 1
+            name = hint if hint else f"Topic {group_seq}"
+            groups.append([name, []])
+        groups[-1][1].append(m)
+        if hint:
+            prev_hint = hint
+
+    hint_to_group_idx = {}
+    for idx, g in enumerate(groups):
+        base_name = re.sub(r'\s*\(\d+\)$', '', g[0])
+        hint_to_group_idx.setdefault(base_name, idx)
+    for idx, g in enumerate(groups):
+        keep, reroute = [], []
+        for m in g[1]:
+            own_hint = m.get("_effective_hint", "")
+            if own_hint and own_hint != re.sub(r'\s*\(\d+\)$', '', g[0]) and own_hint in hint_to_group_idx and hint_to_group_idx[own_hint] < idx:
+                reroute.append(m)
+            else:
+                keep.append(m)
+        g[1] = keep
+        for m in reroute:
+            target_idx = hint_to_group_idx[m.get("_effective_hint", "")]
+            logger.warning(
+                f"[UNMESH group-order] stray MCQ (qsn_no={m.get('qsn_no')}) with hint "
+                f"'{m.get('_effective_hint','')[:30]}' found inside '{g[0][:30]}' — "
+                f"rerouted back to earlier group '{groups[target_idx][0][:30]}'"
+            )
+            groups[target_idx][1].append(m)
+    groups = [g for g in groups if g[1]]
+
+    name_counts = {}
+    for g in groups:
+        name_counts[g[0]] = name_counts.get(g[0], 0) + 1
+    seen = {}
+    for g in groups:
+        base = g[0]
+        if name_counts[base] > 1:
+            seen[base] = seen.get(base, 0) + 1
+            g[0] = f"{base} ({seen[base]})"
+
+    return [(g[0], g[1]) for g in groups]
 
 
 def _topic_group_mcqs(extracted_pages: list) -> list:
@@ -14036,13 +14147,15 @@ async def _handle_unmesh_impl(msg: dict):
             extractor=_unmesh_extract_from_image
         )
 
-        total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+        total_mcq_found = sum(
+            1 for _, _, mcqs in extracted_pages for m in mcqs if "trailing_topic_marker" not in m
+        )
         if not total_mcq_found:
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ পাওয়া যায়নি!")
             return
 
-        topic_groups = _topic_group_mcqs(extracted_pages)
+        topic_groups = _unmesh_group_mcqs(extracted_pages)
 
         _missing_exp = [m for _, mcqs in topic_groups for m in mcqs if not (m.get("explanation") or "").strip()]
         if _missing_exp:
