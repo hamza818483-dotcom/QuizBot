@@ -444,9 +444,14 @@ async def _tg_rate_limit_wait():
 # content to users/chats). Read-only/internal methods (getMe, getFile,
 # answerCallbackQuery, setWebhook, etc.) are excluded — throttling those
 # would slow down the bot for no benefit since they aren't what floods the
-# per-bot send limit.
+# per-bot send limit. sendPoll is ALSO excluded — poll delivery is timing-
+# critical (the quiz session's pid must be set and the answer-race window
+# depends on send_poll returning promptly); adding proactive delay here
+# risks pid-mismatch/stall bugs that are worse than the rare 429 this was
+# meant to prevent. The existing reactive 429-retry-after handling already
+# covers sendPoll bursts safely without this timing risk.
 _TG_RATE_LIMITED_METHODS = {
-    "sendMessage", "sendPoll", "sendPhoto", "sendDocument", "editMessageText",
+    "sendMessage", "sendPhoto", "sendDocument", "editMessageText",
     "forwardMessage", "copyMessage", "sendMediaGroup", "sendVideo", "sendAnimation",
 }
 
