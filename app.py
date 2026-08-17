@@ -11148,11 +11148,37 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
     those inherit the last known non-empty topic_hint before boundary
     checking, so a continuation page never wrongly starts a new topic.
     Returns list of (topic_name, [mcq, ...]) in first-seen order."""
+    # CODE-LEVEL GUARD: the vision model sometimes ignores the prompt's rule
+    # and emits a university/org/exam-source sub-header (BUP, চাকুরি, FASS,
+    # FSSS, a specific বিশ্ববিদ্যালয় name, বি/এ/এফ/সি/ডি ইউনিট) as topic_hint
+    # instead of the real chapter-level black banner. These are never real
+    # topics — treat them as empty (i.e. carry-forward the last real topic)
+    # so a fake hint can never start a bogus new group.
+    _FAKE_TOPIC_RE = re.compile(
+        r'^(বিশ্ববিদ্যালয়|.{0,20}বিশ্ববিদ্যালয়|বি ইউনিট|এ ইউনিট|সি ইউনিট|ডি ইউনিট|'
+        r'এফ ইউনিট|ই ইউনিট|চাকুরি|BUP|FASS|FSSS|[A-Za-z]{1,6}\s*ইউনিট)$',
+        re.IGNORECASE
+    )
+    def _is_fake_topic(hint: str) -> bool:
+        h = hint.strip()
+        if not h:
+            return False
+        if _FAKE_TOPIC_RE.match(h):
+            return True
+        # short (<=25 char) hints ending in বিশ্ববিদ্যালয় or ইউনিট are org/unit
+        # sub-headers, not chapter topics, regardless of exact name matched above
+        if len(h) <= 25 and (h.endswith("বিশ্ববিদ্যালয়") or h.endswith("ইউনিট")):
+            return True
+        return False
+
     # Pass 1: carry forward empty topic_hint from the last non-empty one seen.
     last_hint = None
     for _, _, mcqs in extracted_pages:
         for m in mcqs:
             hint = (m.get("topic_hint") or "").strip()
+            if hint and _is_fake_topic(hint):
+                logger.warning(f"[TOPIC guard] rejected fake topic_hint '{hint}' — carrying forward '{last_hint}'")
+                hint = ""
             if hint:
                 last_hint = hint
                 m["_effective_hint"] = hint
