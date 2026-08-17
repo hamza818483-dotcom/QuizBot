@@ -11131,7 +11131,8 @@ def _build_topic_verify_prompt(mcqs: list) -> str:
     for logging, never change it."""
     compact = [
         {"qsn_no": m.get("qsn_no"), "question": m.get("question", ""),
-         "options": m.get("options", []), "topic_hint": m.get("topic_hint", "")}
+         "options": m.get("options", []), "answer": m.get("answer", ""),
+         "topic_hint": m.get("topic_hint", "")}
         for m in mcqs
     ]
     return (
@@ -11158,7 +11159,21 @@ def _build_topic_verify_prompt(mcqs: list) -> str:
         "BUP, unit labels like বি ইউনিট are sub-headers, NEVER real topic banners — do not "
         "flag topic_hint as wrong just because a sub-header appears near it.) "
         "List any genuine mismatch as {\"qsn_no\": N, \"extracted_hint\": \"...\", \"actual_banner\": \"...\"} "
-        "for review only — this will be logged, not auto-applied.\n\n"
+        "for review only — this will be logged, not auto-applied.\n"
+        "6) LOGICAL RELEVANCE (catches OCR errors that produce a real-looking but WRONG word): "
+        "for each entry, does the option marked as the answer actually make logical/factual sense "
+        "as a correct answer to that question? A misread option can look like a normal, valid word "
+        "yet be the wrong word for that specific question/context (e.g. a wrong city, date, number, "
+        "or name substituted for the correct one, even though the printed page shows something else). "
+        "Cross-check the extracted question+options+answer against what the actual page text says — "
+        "if the marked answer's actual printed option does not logically fit the question, or if "
+        "there is an internal contradiction (e.g. the explanation/ব্যাখ্যা text contradicts the "
+        "marked answer), flag it. List any mismatch as {\"qsn_no\": N, \"field\": \"question\"/"
+        "\"optionA\"/\"optionB\"/\"optionC\"/\"optionD\"/\"answer\", \"correct_text\": \"<the actual "
+        "correct value exactly as printed on the page>\"} — add these to the SAME word_fixes array "
+        "as step 4 (do not create a separate array). Only flag when you can see the real printed "
+        "text on the page proves a genuine mismatch — never guess or flag based on general knowledge "
+        "alone if the page itself is ambiguous or you can't clearly read it.\n\n"
         "Output ONLY this JSON object, nothing else:\n"
         '{"missing_qsn_no": [<integers, left+right column misses combined>], '
         '"wrong_serials": [{"qsn_no_wrong": <int>, "was": <int>}], '
@@ -11263,6 +11278,9 @@ async def _topic_extract_from_image(img) -> list:
             if field == "question":
                 m["question"] = text
                 logger.warning(f"[TOPIC verify] word fix qsn {n} question")
+            elif field == "answer":
+                m["answer"] = text
+                logger.warning(f"[TOPIC verify] word fix qsn {n} answer -> {text}")
             elif field in _OPT_FIELD_IDX and isinstance(m.get("options"), list) and len(m["options"]) == 4:
                 m["options"][_OPT_FIELD_IDX[field]] = text
                 logger.warning(f"[TOPIC verify] word fix qsn {n} {field}")
@@ -11494,6 +11512,9 @@ async def _unmesh_extract_from_image(img) -> list:
             if field == "question":
                 m["question"] = text
                 logger.warning(f"[UNMESH verify] word fix qsn {n} question")
+            elif field == "answer":
+                m["answer"] = text
+                logger.warning(f"[UNMESH verify] word fix qsn {n} answer -> {text}")
             elif field in _OPT_FIELD_IDX and isinstance(m.get("options"), list) and len(m["options"]) == 4:
                 m["options"][_OPT_FIELD_IDX[field]] = text
                 logger.warning(f"[UNMESH verify] word fix qsn {n} {field}")
