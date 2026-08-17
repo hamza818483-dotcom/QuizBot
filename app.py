@@ -14212,26 +14212,43 @@ async def _post_topic_groups_to_channel(channel_id, topic_groups: list, thread_i
             total_polls += 1
             await asyncio.sleep(1.0)
 
-        # End message for this topic group: cache the MCQs for Quiz
-        # Solve/Poll Again/Website Exam links, then post 3-button end msg
-        # replying to the header (the "first message" for this topic).
+        # Polls শেষে: cache করে Style1 PDF (caption + 4 button) পাঠাও,
+        # header-কে reply করে। তারপর score-ask আলাদা message (channel only),
+        # PDF-msg কে reply করে — /csv এর মতোই structure।
         cache_id = gen_session_id()
         await db_save_mcq_cache(cache_id, cache_id, 0, name, mcqs)
-        exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
-        quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
-        poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+
+        pdf_bytes = await _generate_style1_pdf_guaranteed(mcqs, name, channel_id)
+        pdf_msg_id = header_msg_id
+        if pdf_bytes:
+            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", name)[:50] or "ATLAS_Sheet"
+            btn_kb = await _csv_pre_buttons(cache_id)
+            doc_r = await send_document(
+                channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
+                caption=csv_get_pdf_caption(name),
+                message_thread_id=thread_id,
+                reply_to_message_id=header_msg_id
+            )
+            if doc_r and doc_r.get("ok"):
+                doc_msg_id = doc_r.get("result", {}).get("message_id")
+                if doc_msg_id:
+                    pdf_msg_id = doc_msg_id
+                    try:
+                        await tg_post("editMessageReplyMarkup", {
+                            "chat_id": channel_id, "message_id": doc_msg_id,
+                            "reply_markup": btn_kb
+                        })
+                    except Exception as e:
+                        logger.warning(f"[TOPIC-C] PDF button attach failed: {e}")
+
         end_text = csv_get_ending_message(name, len(mcqs), ask_score=ask_score)
         end_data = {
             "chat_id": channel_id,
             "text": end_text,
-            "reply_markup": {"inline_keyboard": [
-                [{"text": "🔄 Poll Again", "url": poll_url},
-                 {"text": "📝 Quiz Solve", "url": quiz_url}],
-                [{"text": "🌐 Website Exam", "url": exam_url}]
-            ]},
+            "disable_web_page_preview": True,
         }
-        if header_msg_id:
-            end_data["reply_to_message_id"] = header_msg_id
+        if pdf_msg_id:
+            end_data["reply_to_message_id"] = pdf_msg_id
         if thread_id:
             end_data["message_thread_id"] = thread_id
         for _end_attempt in range(3):
