@@ -11011,6 +11011,44 @@ def _check_segment_topic_consistency(mcqs: list, context: str = "") -> list:
     return mcqs
 
 
+def _check_segment_serial_order(mcqs: list, context: str = "") -> list:
+    """CODE-LEVEL CHECK (used at both Call1 and Call2 stages, alongside the
+    topic-consistency check): within each segment (run of MCQs from one
+    qsn_no==1 up to the next qsn_no==1), verifies qsn_no forms a clean
+    ascending sequence in list order — no jumbled/out-of-order entries and
+    no gap (a missing serial). Does not reorder or invent MCQs (that's
+    Call2's missing-recovery job) — this only LOGS what it finds so gaps/
+    jumbles are visible per-stage instead of silently slipping through."""
+    if not mcqs:
+        return mcqs
+    segments = []
+    cur = []
+    for m in mcqs:
+        if m.get("qsn_no") == 1 and cur:
+            segments.append(cur)
+            cur = []
+        cur.append(m)
+    if cur:
+        segments.append(cur)
+
+    for seg in segments:
+        nums = [m.get("qsn_no") for m in seg if isinstance(m.get("qsn_no"), int)]
+        if len(nums) < 2:
+            continue
+        if nums != sorted(nums):
+            logger.warning(
+                f"[TOPIC serial-order{(' ' + context) if context else ''}] "
+                f"segment qsn {nums[0]}-{nums[-1]} is OUT OF ORDER in list: {nums}"
+            )
+        gaps = [n for n in range(nums[0], nums[-1] + 1) if n not in set(nums)]
+        if gaps:
+            logger.warning(
+                f"[TOPIC serial-order{(' ' + context) if context else ''}] "
+                f"segment qsn {nums[0]}-{nums[-1]} MISSING serial(s): {gaps}"
+            )
+    return mcqs
+
+
 def _build_topic_verify_prompt(mcqs: list) -> str:
     """Call 2 audit prompt: gives the model its own Call1 output back alongside
     the image, and asks it to independently re-check the page against that
@@ -11115,6 +11153,7 @@ async def _topic_extract_from_image(img) -> list:
     # CODE-LEVEL CHECK (Call1 stage): within this single page's extraction,
     # every MCQ between one qsn_no==1 and the next must share one topic_hint.
     mcqs = _check_segment_topic_consistency(mcqs, context="Call1")
+    mcqs = _check_segment_serial_order(mcqs, context="Call1")
 
     # Call 2: audit pass against Call1's own output.
     try:
@@ -11186,6 +11225,7 @@ async def _topic_extract_from_image(img) -> list:
         # relabel entries), catching anything the Call1-stage check couldn't
         # see yet.
         mcqs = _check_segment_topic_consistency(mcqs, context="Call2")
+        mcqs = _check_segment_serial_order(mcqs, context="Call2")
     except Exception as e:
         logger.warning(f"[TOPIC verify] audit pass failed, skipping: {e}")
 
