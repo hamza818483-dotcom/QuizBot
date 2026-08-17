@@ -837,6 +837,14 @@ async def handle_quiz_poll_answer(pa: dict):
             s2 = QUIZ_SESSIONS.get(uid)
             if not s2 or s2.get("pid") != session.get("pid") or s2.get("cur") != session.get("cur"):
                 return  # something else already advanced it -- no stall after all
+            # Claim the advance atomically so a genuine answer arriving in
+            # this same 2s window (handled by the normal path below, which
+            # also mutates cur/pid) can never double-advance alongside us.
+            guard_key = ("stall_advance", uid, s2["cur"])
+            if s2.get("_advancing") == guard_key:
+                return
+            s2["_advancing"] = guard_key
+            QUIZ_SESSIONS[uid] = s2
             logger.warning(f"[Quiz] Force-recovering stalled quiz uid={uid} cur={s2.get('cur')}")
             option_ids2 = pa.get("option_ids", [])
             if option_ids2 and option_ids2[0] == s2.get("cor"):
@@ -846,6 +854,7 @@ async def handle_quiz_poll_answer(pa: dict):
             else:
                 s2["wrong"] += 1
             s2["cur"] += 1
+            s2["_advancing"] = None
             QUIZ_SESSIONS[uid] = s2
             if s2["cur"] >= s2["tot"]:
                 await finish_d1_quiz(s2)
@@ -853,6 +862,15 @@ async def handle_quiz_poll_answer(pa: dict):
                 await send_quiz_question(s2["chat_id"], s2, force=True)
         asyncio.create_task(_stall_recovery())
         return
+
+    # Claim this advance so a concurrent _stall_recovery task for the same
+    # (uid, cur) from a *previous* mismatch can't also advance in parallel.
+    advance_key = ("answer_advance", uid, session["cur"])
+    if session.get("_advancing") not in (None, advance_key) and session.get("_advancing")[2] == session["cur"]:
+        logger.info(f"[Quiz][TRACE] answer dropped - advance already claimed uid={uid} cur={session['cur']}")
+        return
+    session["_advancing"] = advance_key
+    QUIZ_SESSIONS[uid] = session
 
     option_ids = pa.get("option_ids", [])
     q_result = None
@@ -880,6 +898,7 @@ async def handle_quiz_poll_answer(pa: dict):
     # user answer ashle leftover kono guard thakle clear kore dao,
     # nahole eibar-er advance stale guard e atke jete pare
     session["_sending_for"] = None
+    session["_advancing"] = None
 
     if uid in QUIZ_TIMERS:
         QUIZ_TIMERS[uid].cancel()
