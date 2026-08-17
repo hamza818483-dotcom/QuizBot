@@ -11299,12 +11299,12 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             merged.append([name, mcqs])
     groups = merged
 
-    # Sort each group's MCQs by qsn_no (missing/non-numeric sorts last, stable).
-    def _qsn_key(m):
-        v = m.get("qsn_no")
-        return (0, v) if isinstance(v, int) else (1, 0)
-    for _, mcqs in groups:
-        mcqs.sort(key=_qsn_key)
+    # NOTE: do NOT sort each group's MCQs by qsn_no. qsn_no restarts at 1 for
+    # every university/unit sub-section within the same chapter topic (e.g.
+    # 1,2,3 then 1,2,3,4,... again), so sorting by qsn_no would interleave
+    # unrelated sections by their local serial and scramble true page/column
+    # read order. The flat list built in Pass 1 is already in correct
+    # left-column-then-right-column, page-by-page read order — keep it as-is.
 
     # Gap check per group is not meaningful here since one chapter legitimately
     # contains many restarting sub-sequences (Q1-Q10, Q1-Q13, Q1-Q46, ...).
