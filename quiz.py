@@ -752,6 +752,7 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
     if poll_r.get("ok"):
         logger.info(f"[Quiz][TRACE] send_poll OK uid={session.get('uid')} cur={session.get('cur')}")
         poll_id = poll_r["result"].get("poll", {}).get("id", "")
+        session["_prev_pid"] = session.get("pid")
         session["pid"] = poll_id
         session["cor"] = ans_idx
         session["_sending_for"] = None
@@ -816,11 +817,19 @@ async def handle_quiz_poll_answer(pa: dict):
     poll_id = pa.get("poll_id", "")
     if session.get("pid") != poll_id:
         logger.warning(f"[Quiz] pid mismatch uid={uid} got={poll_id} expected={session.get('pid')} cur={session.get('cur')}")
-        # expected pid None at cur=0 means the answer raced the very first
-        # sendPoll's own completion (poll not yet persisted to session when
-        # the answer arrived) - self-heals via stall-recovery below in ~2s,
-        # not actionable, so skip the owner alert noise for this specific case.
-        if session.get("pid") is not None or session.get("cur") != 0:
+        # Two known-benign mismatch patterns that self-heal via stall-recovery
+        # below in ~2s and aren't actionable, so skip owner alert noise:
+        # 1) expected pid None at cur=0 - answer raced the very first sendPoll's
+        #    own completion (poll not yet persisted to session when it arrived).
+        # 2) got pid is exactly the PREVIOUS question's pid (off-by-one behind
+        #    expected) - a genuinely late poll_answer webhook for an already-
+        #    auto-advanced question (timeout already fired timer+6s ago), not
+        #    a race. Common under Telegram delivery lag on long quizzes.
+        is_cur0_race = session.get("pid") is None and session.get("cur") == 0
+        is_late_stale_answer = (
+            session.get("_prev_pid") is not None and poll_id == session.get("_prev_pid")
+        )
+        if not is_cur0_race and not is_late_stale_answer:
             try:
                 await notify_owner(
                     f"⚠️ Quiz auto-next FAILED\nuid: {uid}\ncur: {session.get('cur')}/{session.get('tot')}\n"
