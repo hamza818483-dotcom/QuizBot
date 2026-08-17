@@ -505,6 +505,17 @@ async def tg_post(method: str, data: dict) -> dict:
     # 24s+12s=36s এর বদলে দ্রুত fallback এ চলে যায়।
     _proxy_timeout = 5 if method == "getFile" else 12
 
+    def _is_permanent_block(result: dict) -> bool:
+        # "bot was blocked by the user" / user deactivated / chat not found are
+        # permanent — retrying across proxies or waiting 2.5s can never fix them,
+        # it only burns proxy calls and delays the rest of the quiz queue.
+        desc = (result.get("description") or "").lower()
+        return (
+            "bot was blocked by the user" in desc
+            or "user is deactivated" in desc
+            or "chat not found" in desc
+        )
+
     async def _try_primary():
         for _proxy_attempt in range(2):
             try:
@@ -520,6 +531,8 @@ async def tg_post(method: str, data: dict) -> dict:
                     # as success so it doesn't trigger secondary-endpoint fallback
                     # + a 2.5s retry-wait for something that isn't actually broken.
                     return result, True
+                if _is_permanent_block(result):
+                    return result, "permanent"
                 if result.get("error_code") == 429:
                     retry_after = result.get("parameters", {}).get("retry_after", 5)
                     logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
@@ -545,6 +558,8 @@ async def tg_post(method: str, data: dict) -> dict:
             desc = (result.get("description") or "")
             if "message is not modified" in desc.lower():
                 return result, True
+            if _is_permanent_block(result):
+                return result, "permanent"
             logger.warning(f"[TG] {method} secondary CF proxy also failed: {desc}")
             return result, False
         except Exception as e:
@@ -558,6 +573,9 @@ async def tg_post(method: str, data: dict) -> dict:
 
     for name, fn in order:
         result, ok = await fn()
+        if ok == "permanent":
+            logger.warning(f"[TG] {method} permanent failure ({result.get('description')}) — not retrying")
+            return result
         if ok:
             if _last_good_api != name:
                 logger.info(f"[TG] {method} succeeded via {name} — sticking with it for next calls")

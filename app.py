@@ -15890,7 +15890,14 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
         poll_res = await send_poll(chat_id, q_text, opts, ans_idx, explanation=exp)
         if not poll_res.get("ok"):
             poll_fail_count += 1
+            _desc = (poll_res.get("description") or "").lower()
             logger.error(f"[PollAgain] sendPoll failed q{i+1}/{total}: {poll_res.get('description') or poll_res.get('error')}")
+            if "bot was blocked by the user" in _desc or "user is deactivated" in _desc or "chat not found" in _desc:
+                # Permanent — user is unreachable, remaining questions will all
+                # fail the same way. Stop burning proxy calls/time on them.
+                skipped_empty += (total - i - 1)
+                logger.warning(f"[PollAgain] aborting remaining {total - i - 1} polls — user unreachable ({_desc})")
+                break
         await asyncio.sleep(1.5)
     if poll_fail_count > 0 or skipped_empty > 0:
         await notify_owner(
