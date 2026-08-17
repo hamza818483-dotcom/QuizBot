@@ -11229,8 +11229,8 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
     flagged corrections are applied — cheaper than a full blind re-extraction
     while still catching column-boundary misses, misread words, and
     mis-tagged topics. ALWAYS runs in full, even on a Call1 cache hit."""
-    async def _run_extract_call():
-        cached = _topic_mcq_result_cache.get(cache_key) if cache_key else None
+    async def _run_extract_call(bypass_cache: bool = False):
+        cached = _topic_mcq_result_cache.get(cache_key) if (cache_key and not bypass_cache) else None
         if cached:
             logger.info(f"[TOPIC MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
             return _qbm_dedup_list(cached)
@@ -11275,15 +11275,26 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
 
         by_qsn = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
 
-        # 1) Recover missing MCQs via a single full re-extraction pass.
+        # 1) Recover missing MCQs — retry up to 2 extraction passes, since a
+        # single re-extraction can still miss the same MCQ (same failure
+        # mode repeating). Re-checks after each attempt so it stops as soon
+        # as everything's recovered instead of always burning both retries.
         if missing_nums:
             logger.warning(f"[TOPIC verify] missing qsn_no {sorted(missing_nums)} — re-extracting page")
-            retry_mcqs = await _run_extract_call()
-            retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
-            for n in missing_nums:
-                if n in retry_got:
-                    mcqs.append(retry_got[n])
-                    by_qsn[n] = retry_got[n]
+            for _retry_attempt in range(2):
+                if not missing_nums:
+                    break
+                retry_mcqs = await _run_extract_call(bypass_cache=True)
+                retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
+                recovered = set()
+                for n in missing_nums:
+                    if n in retry_got:
+                        mcqs.append(retry_got[n])
+                        by_qsn[n] = retry_got[n]
+                        recovered.add(n)
+                missing_nums -= recovered
+                if missing_nums and _retry_attempt == 0:
+                    logger.warning(f"[TOPIC verify] still missing qsn_no {sorted(missing_nums)} after retry 1 — trying once more")
 
         # 2) Fix wrong serial numbers.
         for fix in wrong_serials:
@@ -11416,8 +11427,8 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
     cache_key given — same re-run-same-PDF speedup as /topic/qbm. Only
     Call1's raw extraction is cached; the heading-scan + Call2 audit below
     always re-run in full, unaffected by this cache."""
-    async def _run_extract_call():
-        cached = _unmesh_mcq_result_cache.get(cache_key) if cache_key else None
+    async def _run_extract_call(bypass_cache: bool = False):
+        cached = _unmesh_mcq_result_cache.get(cache_key) if (cache_key and not bypass_cache) else None
         if cached:
             logger.info(f"[UNMESH MCQ Cache] hit for {cache_key} — skipping Call1, still running full heading-scan + Call2 verify")
             return _qbm_dedup_list(cached)
@@ -11531,12 +11542,20 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
 
         if missing_nums:
             logger.warning(f"[UNMESH verify] missing qsn_no {sorted(missing_nums)} — re-extracting page")
-            retry_mcqs = await _run_extract_call()
-            retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
-            for n in missing_nums:
-                if n in retry_got:
-                    mcqs.append(retry_got[n])
-                    by_qsn[n] = retry_got[n]
+            for _retry_attempt in range(2):
+                if not missing_nums:
+                    break
+                retry_mcqs = await _run_extract_call(bypass_cache=True)
+                retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
+                recovered = set()
+                for n in missing_nums:
+                    if n in retry_got:
+                        mcqs.append(retry_got[n])
+                        by_qsn[n] = retry_got[n]
+                        recovered.add(n)
+                missing_nums -= recovered
+                if missing_nums and _retry_attempt == 0:
+                    logger.warning(f"[UNMESH verify] still missing qsn_no {sorted(missing_nums)} after retry 1 — trying once more")
 
         for fix in wrong_serials:
             was = fix.get("was")
@@ -11733,9 +11752,10 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
     # non-empty) topic_hint at the same time.
     flat = []
     last_hint = None
-    for _page_idx, (_, _, mcqs) in enumerate(extracted_pages):
+    for _page_idx, (_page_num, _, mcqs) in enumerate(extracted_pages):
         for m in mcqs:
             m["_page_key"] = _page_idx
+            m["_page_num"] = _page_num
             hint = (m.get("topic_hint") or "").strip()
             if hint and _is_fake_topic(hint):
                 hint = ""  # treat sub-header noise as "no new banner here"
@@ -13241,10 +13261,10 @@ async def _ai_generate_explanations_chunk(chunk: list) -> dict:
 
 কঠোর নিয়ম (Structure — এই order মেনেই লিখতে হবে):
 - **প্রথম অংশ (≈১৯৯ ক্যারেক্টারের মধ্যে অবশ্যই শেষ করতে হবে)**: সঠিক option-টা সম্পর্কে প্রশ্ন-প্রাসঙ্গিক মূল তথ্য/কারণ (কেন এটাই সঠিক উত্তর) — এটা সবচেয়ে জরুরি অংশ, কারণ Telegram poll-এ এই ১৯৯ ক্যারেক্টারের পর বাকিটা কেটে যেতে পারে, তাই মূল উত্তরের তথ্য এই সীমার মধ্যেই সম্পূর্ণ থাকা আবশ্যক।
-- **দ্বিতীয় অংশ (এর পরে, কোনো length limit নাই)**: বাকি ভুল option গুলো নিয়ে বিস্তারিত প্রাসঙ্গিক তথ্য — ওগুলো কী/কে/কোনটা, প্রশ্নের টপিকের সাথে সম্পর্ক থাকলেও কেন উত্তর না, actual পার্থক্য/তথ্য সহ। এই অংশে যতটা দরকার ততটা বিস্তারিত লেখা যাবে, generic "ভুল" বলাটা যথেষ্ট না।
+- **দ্বিতীয় অংশ (এর পরে — এইটা বাধ্যতামূলক, কখনো বাদ দেওয়া যাবে না, ছোট রাখা যাবে না)**: বাকি প্রতিটা ভুল option নিয়ে আলাদা আলাদা ২-৩ বাক্য করে বিস্তারিত তথ্য — প্রতিটা option আসলে কী/কে/কোন ঘটনা/কোন সাল, প্রশ্নের টপিকের সাথে ওর প্রাসঙ্গিক সম্পর্ক কী, এবং নির্দিষ্টভাবে কেন সেটা এই প্রশ্নের উত্তর না। ২-৩টা option থাকলে পুরো explanation মিলিয়ে কমপক্ষে ৪-৬ বাক্য/৫০০-৮০০ ক্যারেক্টার হওয়া উচিত — একটা মাত্র লাইনে সব option একসাথে সংক্ষেপে সেরে ফেলা চলবে না, প্রতিটা option-এর নিজস্ব প্যারা/অংশ থাকতে হবে।
 - পুরো explanation একটাই প্যারা/স্ট্রিং হিসেবে দিতে হবে, দুই অংশের মাঝে কোনো heading/label ছাড়া — শুধু স্বাভাবিকভাবে প্রথম অংশ শেষ হয়ে দ্বিতীয় অংশ শুরু হবে।
 - explanation সরাসরি তথ্য দিয়ে শুরু করবে -- "সঠিক উত্তর X।" জাতীয় কোনো লাইন/prefix লেখা যাবে না, answer letter (A/B/C/D) কোথাও mention করা যাবে না।
-- generic/এক-লাইনের ফাঁকা কথা লেখা যাবে না -- প্রতিটা option সম্পর্কে specific তথ্য থাকতে হবে।
+- generic/এক-লাইনের ফাঁকা কথা লেখা যাবে না -- প্রতিটা option সম্পর্কে নির্দিষ্ট (specific), তথ্যবহুল বাক্য থাকতে হবে, "এটা ভুল কারণ এটা সঠিক না" জাতীয় ফাঁকা logic চলবে না।
 - ভাষা: প্রশ্ন যে ভাষায় (বাংলা/ইংরেজি) সেই ভাষাতেই লিখতে হবে।
 - যদি input-এ আগে থেকেই কোনো explanation থাকে সেটা উপেক্ষা করে নতুন করে সঠিক ও তথ্যবহুল explanation বানাও।
 
@@ -14364,7 +14384,7 @@ async def _handle_topic_impl(msg: dict):
 
         topic_groups = _topic_group_mcqs(extracted_pages)
 
-        _missing_exp = [m for _, mcqs in topic_groups for m in mcqs if not (m.get("explanation") or "").strip()]
+        _missing_exp = [m for _, mcqs in topic_groups for m in mcqs if len((m.get("explanation") or "").strip()) < 80]
         if _missing_exp:
             try:
                 await _ai_generate_all_explanations(_missing_exp)
@@ -14387,6 +14407,7 @@ async def _handle_topic_impl(msg: dict):
         _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
         import io as _io_topic, csv as _csv_topic
         _running_count = 0
+        _cmd_msg_id = msg.get("message_id")
         for name, mcqs in topic_groups:
             buf = _io_topic.StringIO()
             w = _csv_topic.writer(buf)
@@ -14405,12 +14426,19 @@ async def _handle_topic_impl(msg: dict):
             range_start = _running_count + 1
             range_end = _running_count + len(mcqs)
             _running_count = range_end
+            _pg_nums = sorted({m.get("_page_num") for m in mcqs if m.get("_page_num") is not None})
+            if _pg_nums:
+                page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
+            else:
+                page_range_text = "N/A"
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
                 caption=(f"📂 <code>{_html_escape(_clean_topic_name_for_copy(name))}</code>\n"
+                         f"📄 PDF Page: {page_range_text}\n"
                          f"🔢 MCQ Range: {range_start}–{range_end}\n"
                          f"💎 Total: {len(mcqs)}"),
-                mime_type="text/csv")
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
 
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
@@ -14503,7 +14531,7 @@ async def _handle_unmesh_impl(msg: dict):
 
         topic_groups = _unmesh_group_mcqs(extracted_pages)
 
-        _missing_exp = [m for _, mcqs in topic_groups for m in mcqs if not (m.get("explanation") or "").strip()]
+        _missing_exp = [m for _, mcqs in topic_groups for m in mcqs if len((m.get("explanation") or "").strip()) < 80]
         if _missing_exp:
             try:
                 await _ai_generate_all_explanations(_missing_exp)
@@ -14526,6 +14554,7 @@ async def _handle_unmesh_impl(msg: dict):
         _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
         import io as _io_unmesh, csv as _csv_unmesh
         _running_count = 0
+        _cmd_msg_id = msg.get("message_id")
         for name, mcqs in topic_groups:
             buf = _io_unmesh.StringIO()
             w = _csv_unmesh.writer(buf)
@@ -14544,12 +14573,19 @@ async def _handle_unmesh_impl(msg: dict):
             range_start = _running_count + 1
             range_end = _running_count + len(mcqs)
             _running_count = range_end
+            _pg_nums = sorted({m.get("_page_num") for m in mcqs if m.get("_page_num") is not None})
+            if _pg_nums:
+                page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
+            else:
+                page_range_text = "N/A"
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
                 caption=(f"📂 <code>{_html_escape(_clean_topic_name_for_copy(name))}</code>\n"
+                         f"📄 PDF Page: {page_range_text}\n"
                          f"🔢 MCQ Range: {range_start}–{range_end}\n"
                          f"💎 Total: {len(mcqs)}"),
-                mime_type="text/csv")
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
 
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
@@ -14991,7 +15027,7 @@ async def _handle_onu_impl(msg: dict):
         # rare MCQ that came back with an empty explanation (model skipped
         # it) -- avoids a separate /ai run being needed after the fact. ──
         if total_mcq_found:
-            _missing_exp = [m for _, _, mcqs in extracted_pages for m in mcqs if not (m.get("explanation") or "").strip()]
+            _missing_exp = [m for _, _, mcqs in extracted_pages for m in mcqs if len((m.get("explanation") or "").strip()) < 80]
             if _missing_exp:
                 try:
                     await _ai_generate_all_explanations(_missing_exp)
