@@ -502,10 +502,14 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
     else:
         await _ensure_quiz_preview_table()
         preview = await d1_select("SELECT file_id FROM quiz_preview WHERE id=1")
+        _SEP = "─" * 20
         info_text = (
-            f"📝 {session['name']}\n\n"
-            f"📄 {session['desc']}\n\n"
-            f"⏱️ Timer: {session['timer']}s\n\n"
+            f"📝 {session['name']}\n"
+            f"{_SEP}\n"
+            f"📄 {session['desc']}\n"
+            f"{_SEP}\n"
+            f"⏱️ Timer: {session['timer']}s\n"
+            f"{_SEP}\n"
             f"📊 Questions: {session['tot']}"
         )
         if preview and preview[0].get("file_id"):
