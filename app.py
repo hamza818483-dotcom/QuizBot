@@ -23,6 +23,17 @@ import html as _html_mod
 
 def _html_escape(s: str) -> str:
     return _html_mod.escape(s or "", quote=False)
+
+def _clean_topic_name_for_copy(name: str) -> str:
+    """Strips leading decorative symbols/emoji/stars (✪, *, -, punctuation,
+    emoji, etc.) and extra whitespace from a topic-heading string, so the
+    copyable <code> line contains only the actual topic text -- e.g.
+    '✪ ✪ ভাষা আন্দোলন' -> 'ভাষা আন্দোলন'."""
+    s = (name or "").strip()
+    # Strip any leading run of characters that are NOT a Bengali letter,
+    # Latin letter, or digit (covers ✪, *, -, •, #, emoji, punctuation, etc.)
+    s = re.sub(r'^[^\w\u0980-\u09FF]+', '', s, flags=re.UNICODE)
+    return s.strip() or (name or "").strip()
 import difflib
 import hashlib
 import base64
@@ -13225,7 +13236,7 @@ async def _ai_generate_explanations_chunk(chunk: list) -> dict:
     prompt = f"""তুমি একজন বিষয়বিশেষজ্ঞ শিক্ষক। নিচে কিছু MCQ (প্রশ্ন + অপশন + সঠিক উত্তর) দেওয়া আছে, প্রতিটার জন্য একটা compact explanation লিখতে হবে।
 
 কঠোর নিয়ম:
-- প্রতিটা explanation অবশ্যই সর্বোচ্চ ১৯০ ক্যারেক্টারের মধ্যে হতে হবে (Telegram poll explanation বক্সের ২০০ ক্যারেক্টার হার্ড-লিমিটের মধ্যে ফিট করাতে হবে) -- এর বেশি হলে চলবে না। ১৯০-এর মধ্যে যতটুকু সম্ভব maximize করে গুছিয়ে তথ্য দিতে হবে, খামোখা ছোট রাখা যাবে না।
+- প্রতিটা explanation অবশ্যই সর্বোচ্চ ১৯৯ ক্যারেক্টারের মধ্যে হতে হবে (Telegram poll explanation বক্সের ২০০ ক্যারেক্টার হার্ড-লিমিটের মধ্যে ফিট করাতে হবে) -- এর বেশি হলে চলবে না। ১৯৯-এর মধ্যে যতটুকু সম্ভব maximize করে গুছিয়ে তথ্য দিতে হবে, খামোখা ছোট রাখা যাবে না।
 - Structure (গুছিয়ে, compact, এক প্যারায়): প্রথমে সঠিক option-টা সম্পর্কে প্রশ্ন-প্রাসঙ্গিক সঠিক তথ্য/কারণ (কেন এটাই সঠিক)। তারপর বাকি ভুল option গুলো নিয়ে সংক্ষেপে -- ওগুলো কী/কে/কোনটা, এবং প্রশ্নের সাথে ওদের প্রাসঙ্গিক সম্পর্ক থাকলেও কেন উত্তর না -- ফাঁকা "ভুল" না বলে actual পার্থক্য/তথ্য দিতে হবে।
 - explanation সরাসরি তথ্য দিয়ে শুরু করবে -- "সঠিক উত্তর X।" জাতীয় কোনো লাইন/prefix লেখা যাবে না, answer letter (A/B/C/D) কোথাও mention করা যাবে না।
 - generic/এক-লাইনের ফাঁকা কথা লেখা যাবে না -- প্রতিটা option সম্পর্কে specific তথ্য থাকতে হবে।
@@ -13257,7 +13268,7 @@ OUTPUT — ONLY a valid JSON array, exactly {len(chunk)} items, same order, noth
         exp = (item.get("explanation") or "").strip() if isinstance(item, dict) else ""
         if exp:
             exp = _answer_prefix_re.sub("", exp).strip()
-            out[i] = exp[:200]
+            out[i] = exp[:199]
     return out
 
 
@@ -14391,7 +14402,7 @@ async def _handle_topic_impl(msg: dict):
             _running_count = range_end
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
-                caption=(f"📂 <code>{_html_escape(name)}</code>\n"
+                caption=(f"📂 <code>{_html_escape(_clean_topic_name_for_copy(name))}</code>\n"
                          f"🔢 MCQ Range: {range_start}–{range_end}\n"
                          f"💎 Total: {len(mcqs)}"),
                 mime_type="text/csv")
@@ -14530,7 +14541,7 @@ async def _handle_unmesh_impl(msg: dict):
             _running_count = range_end
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
-                caption=(f"📂 <code>{_html_escape(name)}</code>\n"
+                caption=(f"📂 <code>{_html_escape(_clean_topic_name_for_copy(name))}</code>\n"
                          f"🔢 MCQ Range: {range_start}–{range_end}\n"
                          f"💎 Total: {len(mcqs)}"),
                 mime_type="text/csv")
@@ -16292,7 +16303,7 @@ async def start_live_quiz(group_id, session_id: str, topic: str,
 
                 reveal_text = (
                     f"✅ <b>Correct Answer:</b> ({correct_letter}) {correct_option}\n"
-                    f"📖 <b>Explanation:</b> {exp[:200]}"
+                    f"📖 <b>Explanation:</b> {exp[:199]}"
                 )
                 await tg_post("sendMessage", {
                     "chat_id": group_id,
@@ -17064,7 +17075,7 @@ async def _send_quiz_question_inner(uid: int):
 
     poll_r = await send_poll(
         st["chat_id"], q_text[:300], [o[:100] for o in opts], ans_idx,
-        explanation=exp[:200], is_anonymous=False, open_period=QUIZ_Q_SEC + 5,
+        explanation=exp[:199], is_anonymous=False, open_period=QUIZ_Q_SEC + 5,
         reply_to_message_id=st.get("first_msg_id")
     )
 

@@ -1032,7 +1032,7 @@ async def send_poll(chat_id, question: str, options: list, correct_idx: int,
         media_data = dict(base_data)
         media_data["question"] = (q_clean or question)[:300]
         media_data["options"] = api_options
-        media_data["explanation"] = (exp_clean or explanation)[:200]
+        media_data["explanation"] = (exp_clean or explanation)[:199]
         if q_img_url:
             media_data["media"] = {"type": "photo", "media": q_img_url}
         if exp_img_url:
@@ -1046,7 +1046,7 @@ async def send_poll(chat_id, question: str, options: list, correct_idx: int,
     plain_data = dict(base_data)
     plain_data["question"] = (q_clean or question)[:300]
     plain_data["options"] = options_list
-    plain_data["explanation"] = (exp_clean or explanation)[:200]
+    plain_data["explanation"] = (exp_clean or explanation)[:199]
     return await tg_post("sendPoll", plain_data)
 
 _OWNER_JOB_MSG = {}  # job_key -> {"msg_id": int, "lines": [str]}
