@@ -86,28 +86,70 @@ async def handle_quiz_create(msg: dict):
     if not reply or not reply.get("document"):
         await send_msg(chat_id,
             "❌ CSV ফাইলে reply করে <code>/q</code> দাও!\n\n"
-            "📝 Format:\n<code>/q Quiz Name\nDescription\nTimer(sec)\nShuffle(Yes/No)</code>\n\n"
-            "প্রতিটা তথ্য আলাদা লাইনে দিতে হবে:\n"
-            "1️⃣ Quiz Name\n"
-            "2️⃣ Description\n"
-            "3️⃣ Timer (সেকেন্ড)\n"
-            "4️⃣ Shuffle (Yes/No — না দিলে default No)"
+            "📝 Format:\n<code>/q Quiz Name\nDescription (একাধিক লাইন/blank line সহ হতে পারে)\nTimer(sec)\nShuffle(Yes/No)</code>\n\n"
+            "নিয়ম:\n"
+            "1️⃣ প্রথম লাইন: Quiz Name\n"
+            "2️⃣ শেষের আগের সবগুলো লাইন (blank line/একাধিক লাইন সহ): Description\n"
+            "3️⃣ শেষের দিকের একটা লাইন যেটা শুধু সংখ্যা: Timer (সেকেন্ড)\n"
+            "4️⃣ Timer-এর পরের লাইনে Yes/No থাকলে সেটা: Shuffle (না দিলে default No)"
         )
         return
 
-    lines = text.split("/q", 1)[1].strip().split("\n") if "/q" in text else []
-    lines = [l.strip() for l in lines if l.strip()]
-    if len(lines) < 3:
+    raw = text.split("/q", 1)[1].strip("\n") if "/q" in text else ""
+    all_lines = raw.split("\n")
+    # Drop only leading/trailing fully-blank lines (typing artifacts), but
+    # KEEP blank lines that fall inside the block (needed for a multi-line
+    # description with paragraph breaks, e.g. join-link / website / helpline
+    # each separated by an empty line for readability).
+    while all_lines and not all_lines[0].strip():
+        all_lines.pop(0)
+    while all_lines and not all_lines[-1].strip():
+        all_lines.pop()
+
+    if len(all_lines) < 3:
         await send_msg(chat_id,
-            "❌ কমপক্ষে ৩টা info দাও (প্রতিটা আলাদা লাইনে):\n"
+            "❌ কমপক্ষে ৩টা লাইন লাগবে:\n"
             "1️⃣ Name\n2️⃣ Description\n3️⃣ Timer(sec)\n4️⃣ Shuffle(Yes/No) — optional, না দিলে default No")
         return
 
-    name = lines[0]
-    desc = lines[1]
-    timer = int(lines[2]) if lines[2].isdigit() else 15
-    # Shuffle optional — default OFF (No) যদি লাইন 4 না দেওয়া হয়।
-    shuffle = lines[3].lower() == "yes" if len(lines) >= 4 else False
+    name = all_lines[0].strip()
+
+    # Timer detection: walk backward from the end looking for the LAST line
+    # that is purely numeric (a phone number inside the description like
+    # "wa.me/8801999681290" is not purely numeric due to the URL text around
+    # it, so this correctly skips past it). Shuffle, if present, is the one
+    # line right after the timer line.
+    timer = 15
+    timer_idx = None
+    shuffle = False
+    for i in range(len(all_lines) - 1, 0, -1):
+        candidate = all_lines[i].strip()
+        if candidate.isdigit():
+            timer = int(candidate)
+            timer_idx = i
+            break
+        # A Yes/No line found before any numeric line means the layout is
+        # Name/Description/Timer/Shuffle and this IS the shuffle line —
+        # keep looking further back for the actual timer.
+        if candidate.lower() in ("yes", "no"):
+            shuffle = candidate.lower() == "yes"
+            continue
+
+    if timer_idx is None:
+        # No purely-numeric line found anywhere — fall back to the old
+        # behavior (assume line 3 layout) so this never hard-fails.
+        timer_idx = min(2, len(all_lines) - 1)
+        timer = int(all_lines[timer_idx].strip()) if all_lines[timer_idx].strip().isdigit() else 15
+
+    # Everything between Name (line 0) and the Timer line is Description —
+    # this preserves internal blank lines and multiple lines exactly as typed.
+    desc = "\n".join(all_lines[1:timer_idx]).strip("\n")
+
+    # Shuffle: the line immediately after Timer, if it says Yes/No.
+    if timer_idx + 1 < len(all_lines):
+        after = all_lines[timer_idx + 1].strip().lower()
+        if after in ("yes", "no"):
+            shuffle = after == "yes"
 
     loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
 
@@ -461,8 +503,10 @@ async def start_d1_quiz(chat_id: int, quiz_id: str, user: dict, mistake_qs=None,
         await _ensure_quiz_preview_table()
         preview = await d1_select("SELECT file_id FROM quiz_preview WHERE id=1")
         info_text = (
-            f"📝 {session['name']}\n📄 {session['desc']}\n"
-            f"⏱️ Timer: {session['timer']}s\n📊 Questions: {session['tot']}"
+            f"📝 {session['name']}\n\n"
+            f"📄 {session['desc']}\n\n"
+            f"⏱️ Timer: {session['timer']}s\n\n"
+            f"📊 Questions: {session['tot']}"
         )
         if preview and preview[0].get("file_id"):
             r_first = await send_photo_by_id(chat_id, preview[0]["file_id"], info_text)
