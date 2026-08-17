@@ -11181,14 +11181,18 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
                     hint_to_idx[key] = idx
             groups[idx][1].append(m)
 
-    # Rescue pass: a same-page banner leak — trailing MCQs from a longer
-    # column visually below a NEW topic's banner (but still logically
-    # continuing the OLD topic's numbering, since the banner hasn't reached
-    # their own column yet) — get miscategorized into the new topic. Detect
-    # this: if the very first MCQ(s) landed in a topic group are NOT close
-    # to qsn_no==1 (a real topic start), but DO extend the immediately
-    # preceding group's qsn_no sequence contiguously (or near-contiguously),
-    # they were very likely leaked from that previous topic — move them back.
+    # Rescue pass: a same-page banner leak — MCQs from a longer column that
+    # visually sit near/below a NEW topic's banner but logically still
+    # continue the OLD topic's numbering (the banner hasn't reached their
+    # own column yet) — get miscategorized into the new group. This can
+    # land at either end of the new group in extraction order depending on
+    # column read order, so both ends are checked:
+    #  - LEADING run: new group's first few MCQs continue the previous
+    #    group's qsn_no contiguously instead of starting near 1.
+    #  - TRAILING run: new group's LAST few MCQs continue the previous
+    #    group's qsn_no contiguously (the column that got read last on the
+    #    page turns out to still belong to the older topic).
+    # Either pattern moves those MCQs back to the correct (previous) group.
     for i in range(1, len(groups)):
         prev_name, prev_mcqs = groups[i - 1]
         cur_name, cur_mcqs = groups[i]
@@ -11198,9 +11202,8 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
         if not prev_nums:
             continue
         prev_max = prev_nums[-1]
-        # Look at the leading run of cur_mcqs whose qsn_no continues prev_max+1, +2, ...
-        # and where none of them is qsn_no==1 or 2 (a real topic start almost
-        # always begins at/near 1) — these are the suspected leaked tail MCQs.
+
+        # Leading run.
         leaked = []
         expect = prev_max + 1
         for m in cur_mcqs:
@@ -11210,12 +11213,58 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
                 expect += 1
             else:
                 break
+
+        # Trailing run (only check if leading run didn't already claim the
+        # whole group, and skip MCQs already caught by the leading check).
+        if len(leaked) < len(cur_mcqs):
+            remaining = [m for m in cur_mcqs if m not in leaked]
+            trailing = []
+            # Walk from the end backwards looking for a contiguous
+            # descending run ending at prev_max+1, +2, ... in reverse.
+            rev_candidates = list(reversed(remaining))
+            expect_desc = None
+            for m in rev_candidates:
+                n = m.get("qsn_no")
+                if not isinstance(n, int) or n <= 2:
+                    break
+                if expect_desc is None:
+                    # First candidate from the end: must itself continue
+                    # prev_max contiguously combined with however many more
+                    # trailing items match going backwards. We verify this
+                    # by checking the full descending contiguous chain below.
+                    pass
+                trailing.append(m)
+            # trailing currently holds every item from the end that's a
+            # plain integer qsn_no>2; now find the longest suffix of that
+            # (in original order) which is contiguous and lands exactly on
+            # prev_max+1 at its start.
+            trailing_sorted = sorted(trailing, key=lambda m: m.get("qsn_no"))
+            best_run = []
+            for k in range(len(trailing_sorted)):
+                run = trailing_sorted[k:]
+                nums = [m.get("qsn_no") for m in run]
+                if nums == list(range(nums[0], nums[0] + len(nums))) and nums[0] == prev_max + 1:
+                    best_run = run
+                    break
+            trailing = best_run
+
+        else:
+            trailing = []
+
         if leaked and len(leaked) < len(cur_mcqs):
             logger.warning(
                 f"[TOPIC leak-rescue] moved qsn_no {[m.get('qsn_no') for m in leaked]} "
-                f"from '{cur_name[:30]}' back to '{prev_name[:30]}' (contiguous with prior topic, not a real restart)"
+                f"from '{cur_name[:30]}' back to '{prev_name[:30]}' (leading run, contiguous with prior topic)"
             )
             for m in leaked:
+                cur_mcqs.remove(m)
+                prev_mcqs.append(m)
+        elif trailing:
+            logger.warning(
+                f"[TOPIC leak-rescue] moved qsn_no {[m.get('qsn_no') for m in trailing]} "
+                f"from '{cur_name[:30]}' back to '{prev_name[:30]}' (trailing run, contiguous with prior topic)"
+            )
+            for m in trailing:
                 cur_mcqs.remove(m)
                 prev_mcqs.append(m)
 
