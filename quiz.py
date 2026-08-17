@@ -59,6 +59,23 @@ def _gen_session_id_local() -> str:
 # ============================================================
 # QUIZ CREATE / LIST / DELETE
 # ============================================================
+async def _retry(coro_fn, attempts=3, delay=1.5, label="op"):
+    """Runs an async operation with retries (exponential-ish backoff). Raises
+    the last exception if all attempts fail. Used to make /q link creation
+    resilient to transient network/D1/Telegram-API hiccups instead of
+    failing the whole command on a single blip."""
+    last_exc = None
+    for i in range(attempts):
+        try:
+            return await coro_fn()
+        except Exception as e:
+            last_exc = e
+            logger.warning(f"[Q-Retry] {label} attempt {i+1}/{attempts} failed: {e}")
+            if i < attempts - 1:
+                await asyncio.sleep(delay * (i + 1))
+    raise last_exc
+
+
 async def handle_quiz_create(msg: dict):
     """CSV reply করে /q Name\nDescription\nTimer\nShuffle"""
     chat_id = msg["chat"]["id"]
@@ -87,14 +104,20 @@ async def handle_quiz_create(msg: dict):
 
     loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
 
+    quiz_id = "qz_" + _gen_session_id_local()[:8]
+
     try:
-        csv_bytes = await download_tg_file(reply["document"]["file_id"])
+        # Step 1: download CSV — retried, since Telegram file-download can
+        # transiently fail on a slow/large file.
+        async def _dl():
+            return await download_tg_file(reply["document"]["file_id"])
+        csv_bytes = await _retry(_dl, attempts=3, label="csv-download")
+
         mcqs = _parse_csv_bytes_local(csv_bytes)
         if not mcqs:
             await send_msg(chat_id, "❌ CSV-তে কোনো MCQ পাওয়া যায়নি!")
             return
 
-        quiz_id = "qz_" + _gen_session_id_local()[:8]
         settings = await db_get_settings()
         tag = settings.get("tag", "")
         exp = settings.get("exp_footer", "")
@@ -109,28 +132,65 @@ async def handle_quiz_create(msg: dict):
                 "explanation": mcq.get("explanation", "")
             })
 
-        await d1_run(
-            "INSERT OR REPLACE INTO quizzes (id, name, description, timer, shuffle, csv_data, tag, exp_footer, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            [quiz_id, name, desc, timer, 1 if shuffle else 0, json.dumps(questions), tag, exp, uid]
-        )
+        # Step 2: save to D1 — retried. This is the critical step; once this
+        # succeeds the quiz genuinely exists and a link MUST be produced no
+        # matter what happens after (see step 3 fallback below).
+        async def _save():
+            await d1_run(
+                "INSERT OR REPLACE INTO quizzes (id, name, description, timer, shuffle, csv_data, tag, exp_footer, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                [quiz_id, name, desc, timer, 1 if shuffle else 0, json.dumps(questions), tag, exp, uid]
+            )
+        await _retry(_save, attempts=4, delay=2, label="d1-save")
 
-        bot_info = await tg_post("getMe", {})
-        bot_username = bot_info.get("result", {}).get("username", "atlasQuizProBot")
+        # Step 3: fetch bot username for the deep-link — retried, and if
+        # ALL retries fail, falls back to a known hardcoded username instead
+        # of aborting. The quiz already exists in D1 at this point (step 2
+        # succeeded), so the link MUST still be produced — a getMe hiccup
+        # must never leave the user with a quiz that has no way to be shared.
+        _FALLBACK_BOT_USERNAME = "atlasQuizProBot"
+        try:
+            async def _getme():
+                return await tg_post("getMe", {})
+            bot_info = await _retry(_getme, attempts=3, label="getMe")
+            bot_username = bot_info.get("result", {}).get("username") or _FALLBACK_BOT_USERNAME
+        except Exception as e:
+            logger.error(f"[Q] getMe failed after retries, using fallback username: {e}")
+            bot_username = _FALLBACK_BOT_USERNAME
+
         link = f"https://t.me/{bot_username}?start={quiz_id}"
         web_link = f"https://hamza818483-dotcom.github.io/QuizBot/exam.html?id={quiz_id}"
 
-        await send_msg(chat_id,
-            f"✅ <b>Quiz Created!</b>\n\n"
-            f"📝 Name: {name}\n📄 Description: {desc}\n"
-            f"⏱️ Timer: {timer}s\n🔀 Shuffle: {'Yes' if shuffle else 'No'}\n"
-            f"📊 Questions: {len(questions)}\n\n"
-            f"🌐 Web Quiz:\n{web_link}\n\n"
-            f"🤖 Bot Quiz:\n{link}\n\n"
-            f"👆 যে কেউ এই লিংকে ক্লিক করে কুইজ solve করতে পারবে!"
-        )
+        # Step 4: send the confirmation — retried too, since the quiz+link
+        # are already valid/usable even if this particular message send
+        # fails; retry ensures the user actually SEES the link.
+        async def _notify():
+            await send_msg(chat_id,
+                f"✅ <b>Quiz Created!</b>\n\n"
+                f"📝 Name: {name}\n📄 Description: {desc}\n"
+                f"⏱️ Timer: {timer}s\n🔀 Shuffle: {'Yes' if shuffle else 'No'}\n"
+                f"📊 Questions: {len(questions)}\n\n"
+                f"🌐 Web Quiz:\n{web_link}\n\n"
+                f"🤖 Bot Quiz:\n{link}\n\n"
+                f"👆 যে কেউ এই লিংকে ক্লিক করে কুইজ solve করতে পারবে!"
+            )
+        try:
+            await _retry(_notify, attempts=3, label="notify-send")
+        except Exception as e:
+            # Even if every retry to SEND the message fails, the quiz+link
+            # are valid — log this loudly (owner can relay the link
+            # manually) rather than silently losing it.
+            logger.error(f"[Q] Quiz {quiz_id} created successfully but ALL notify attempts failed: {e}. Link: {link}")
+            try:
+                await notify_owner(f"⚠️ Quiz {quiz_id} created but user notify failed.\nLink: {link}\nWeb: {web_link}")
+            except Exception:
+                pass
+
     except Exception as e:
         logger.error(f"[Q] Error: {e}")
-        await send_msg(chat_id, f"❌ Error: {e}")
+        try:
+            await send_msg(chat_id, f"❌ Error (retries exhausted): {e}")
+        except Exception:
+            pass
 
 
 async def handle_qlist(msg: dict):
