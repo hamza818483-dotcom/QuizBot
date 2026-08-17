@@ -10992,7 +10992,7 @@ UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 )
 
 
-def _check_segment_topic_consistency(mcqs: list, context: str = "") -> list:
+def _check_segment_topic_consistency(mcqs: list, context: str = "", forced_boundaries: set = None) -> list:
     """CODE-LEVEL CHECK (used at both Call1 and Call2 stages): walks mcqs in
     read order and finds every 'segment' — the run of MCQs from one
     qsn_no==1 up to (but not including) the NEXT qsn_no==1. Every MCQ inside
@@ -11003,13 +11003,22 @@ def _check_segment_topic_consistency(mcqs: list, context: str = "") -> list:
     banner misread) and gets logged with details so it's visible, and the
     majority hint in that segment is applied to the outliers (self-heals
     the obvious case: one MCQ in the middle got a stray/blank hint while the
-    rest of its own segment agree)."""
+    rest of its own segment agree).
+
+    Any MCQ carrying _forced_marker=True (set when /unmesh's independent ✪
+    heading-scan hard-confirmed a topic marker at that qsn_no) is NEVER
+    treated as a stray outlier to majority-vote away, and always starts a
+    new segment boundary — so a genuine mid-segment topic change (no serial
+    reset, confirmed by the marker scan) is preserved instead of being
+    overwritten by the surrounding majority."""
     if not mcqs:
         return mcqs
     segments = []
     cur = []
     for m in mcqs:
-        if m.get("qsn_no") == 1 and cur:
+        qn = m.get("qsn_no")
+        is_forced = bool(m.get("_forced_marker"))
+        if cur and (qn == 1 or is_forced):
             segments.append(cur)
             cur = []
         cur.append(m)
@@ -11020,6 +11029,33 @@ def _check_segment_topic_consistency(mcqs: list, context: str = "") -> list:
         hints = [(m.get("topic_hint") or m.get("_effective_hint") or "").strip() for m in seg]
         non_empty = [h for h in hints if h]
         if not non_empty:
+            continue
+        # A forced/confirmed hint inside this segment (from the ✪ marker
+        # scan) always wins outright — skip majority-vote entirely so it
+        # can never be treated as an outlier.
+        forced_hints = [
+            (m.get("topic_hint") or m.get("_effective_hint") or "").strip()
+            for m in seg if m.get("_forced_marker")
+        ]
+        if forced_hints:
+            majority = forced_hints[0]
+            distinct = set(non_empty)
+            if len(distinct) > 1:
+                nums = [m.get("qsn_no") for m in seg]
+                logger.warning(
+                    f"[TOPIC segment-check{(' ' + context) if context else ''}] "
+                    f"inconsistent topic within one segment (qsn {nums[0]}-{nums[-1]}): "
+                    f"applying CONFIRMED marker hint '{majority[:30]}' (overrides non-forced outliers)"
+                )
+                for m in seg:
+                    if m.get("_forced_marker"):
+                        continue
+                    h = (m.get("topic_hint") or m.get("_effective_hint") or "").strip()
+                    if h and h != majority:
+                        if "topic_hint" in m:
+                            m["topic_hint"] = majority
+                        if "_effective_hint" in m:
+                            m["_effective_hint"] = majority
             continue
         distinct = set(non_empty)
         if len(distinct) > 1:
@@ -11360,34 +11396,48 @@ async def _unmesh_extract_from_image(img) -> list:
         logger.warning(f"[UNMESH heading-scan] failed, skipping: {e}")
         headings = []
 
+    forced_boundaries = set()
     if headings:
         by_qsn_early = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
         page_qnos_sorted = sorted(by_qsn_early.keys())
-        for h in headings:
+        # sort headings by their next_qsn_no so multiple markers on one page
+        # are applied in page order and don't clobber each other's ranges
+        ordered = sorted(
+            [h for h in headings if isinstance(h.get("next_qsn_no"), int)],
+            key=lambda h: h["next_qsn_no"],
+        )
+        trailing = [h for h in headings if not isinstance(h.get("next_qsn_no"), int)]
+        for idx, h in enumerate(ordered):
             htext = (h.get("heading_text") or "").strip()
             if not htext:
                 continue
             next_q = h.get("next_qsn_no")
-            if isinstance(next_q, int) and next_q in by_qsn_early:
-                old_hint = by_qsn_early[next_q].get("topic_hint", "")
-                if old_hint != htext:
-                    logger.warning(
-                        f"[UNMESH heading-scan] applying heading '{htext[:40]}' "
-                        f"to qsn_no={next_q} (was topic_hint='{old_hint[:40]}')"
-                    )
-                by_qsn_early[next_q]["topic_hint"] = htext
-                # every subsequent MCQ on THIS page (in printed-number order)
-                # inherits this heading until another qsn_no on this page
-                # already carries its own distinct topic_hint from the scan.
-                for qn in page_qnos_sorted:
-                    if qn >= next_q:
-                        m = by_qsn_early[qn]
-                        if not (m.get("topic_hint") or "").strip():
-                            m["topic_hint"] = htext
-            elif next_q is None:
-                # heading is last thing on the page, no MCQ follows it here —
-                # emit as a trailing marker so the NEXT page's first MCQ
-                # picks it up as the carried-forward hint.
+            if next_q not in by_qsn_early:
+                continue
+            # this marker's range ends right before the next marker's start
+            # (or end of page if it's the last marker)
+            range_end = ordered[idx + 1]["next_qsn_no"] if idx + 1 < len(ordered) else None
+            old_hint = by_qsn_early[next_q].get("topic_hint", "")
+            if old_hint != htext:
+                logger.warning(
+                    f"[UNMESH heading-scan] applying heading '{htext[:40]}' "
+                    f"to qsn_no={next_q} (was topic_hint='{old_hint[:40]}')"
+                )
+            forced_boundaries.add(next_q)
+            # CONFIRMED marker overrides topic_hint for every MCQ in its
+            # range, even ones that already carry a (wrong/stale) non-empty
+            # hint from the main extraction pass — a hard-confirmed ✪ marker
+            # always outranks the main prompt's guess. Stamp _forced_marker
+            # so downstream consistency checks (which may run after this
+            # page's mcqs are merged with other pages) never majority-vote
+            # this confirmed value away.
+            for qn in page_qnos_sorted:
+                if qn >= next_q and (range_end is None or qn < range_end):
+                    by_qsn_early[qn]["topic_hint"] = htext
+                    by_qsn_early[qn]["_forced_marker"] = True
+        for h in trailing:
+            htext = (h.get("heading_text") or "").strip()
+            if htext:
                 mcqs.append({"trailing_topic_marker": htext})
 
     # Pull out any trailing_topic_marker sentinel(s) — a marker seen at the
