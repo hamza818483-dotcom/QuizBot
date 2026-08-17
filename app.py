@@ -14368,6 +14368,7 @@ async def _handle_topic_impl(msg: dict):
 
         _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
         import io as _io_topic, csv as _csv_topic
+        _running_count = 0
         for name, mcqs in topic_groups:
             buf = _io_topic.StringIO()
             w = _csv_topic.writer(buf)
@@ -14383,9 +14384,14 @@ async def _handle_topic_impl(msg: dict):
                     _strip_img_tag(m.get("explanation", "")), "1", "1"
                 ])
             safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip() or "Topic"
+            range_start = _running_count + 1
+            range_end = _running_count + len(mcqs)
+            _running_count = range_end
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
-                caption=f"📂 {name} — {len(mcqs)} MCQ\n<code>{_html_escape(name)}</code>",
+                caption=(f"📂 <code>{_html_escape(name)}</code>\n"
+                         f"🔢 MCQ Range: {range_start}–{range_end}\n"
+                         f"💎 Total: {len(mcqs)}"),
                 mime_type="text/csv")
 
         if status_msg_id:
@@ -14501,6 +14507,7 @@ async def _handle_unmesh_impl(msg: dict):
 
         _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
         import io as _io_unmesh, csv as _csv_unmesh
+        _running_count = 0
         for name, mcqs in topic_groups:
             buf = _io_unmesh.StringIO()
             w = _csv_unmesh.writer(buf)
@@ -14516,9 +14523,14 @@ async def _handle_unmesh_impl(msg: dict):
                     _strip_img_tag(m.get("explanation", "")), "1", "1"
                 ])
             safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip() or "Topic"
+            range_start = _running_count + 1
+            range_end = _running_count + len(mcqs)
+            _running_count = range_end
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
-                caption=f"📂 {name} — {len(mcqs)} MCQ\n<code>{_html_escape(name)}</code>",
+                caption=(f"📂 <code>{_html_escape(name)}</code>\n"
+                         f"🔢 MCQ Range: {range_start}–{range_end}\n"
+                         f"💎 Total: {len(mcqs)}"),
                 mime_type="text/csv")
 
         if status_msg_id:
