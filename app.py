@@ -19910,18 +19910,18 @@ async def startup():
         _mhtml_worker_started = True
         logger.info("[App] mhtml auto-queue worker started")
 
-    # RESUME incomplete /csv poll jobs from before a restart/crash — এই
-    # bot-এর কোনো poll-job memory-only ছিল আগে (asyncio.Queue), HF restart
-    # হলে হারিয়ে যেত। এখন D1-এ status='running' রেখে যাওয়া job থাকলে
-    # (মানে আগের process মাঝপথে থেমেছে) সেগুলো একে একে resume করা হয়।
-    try:
-        _incomplete_jobs = await db_get_incomplete_csv_jobs()
-        if _incomplete_jobs:
-            logger.info(f"[App] Found {len(_incomplete_jobs)} incomplete CSV job(s) from before restart — resuming")
-            for _job in _incomplete_jobs:
-                _spawn_task(_resume_csv_job(_job))
-    except Exception as e:
-        logger.warning(f"[App] CSV job resume check failed (non-fatal): {e}")
+    # RESUME incomplete /csv poll jobs from before a restart/crash — DISABLED
+    # per request: bot restart হলে আগের অসম্পূর্ণ /csv poll job আর auto-resume
+    # হবে না। DB-তে থাকা 'running' status job গুলো just untouched থাকবে (আবার
+    # চালু করতে চাইলে ম্যানুয়ালি /csv আবার দিতে হবে)।
+    # try:
+    #     _incomplete_jobs = await db_get_incomplete_csv_jobs()
+    #     if _incomplete_jobs:
+    #         logger.info(f"[App] Found {len(_incomplete_jobs)} incomplete CSV job(s) from before restart — resuming")
+    #         for _job in _incomplete_jobs:
+    #             _spawn_task(_resume_csv_job(_job))
+    # except Exception as e:
+    #     logger.warning(f"[App] CSV job resume check failed (non-fatal): {e}")
 
     # RESUME incomplete /pdf page-jobs (PDF/PPT poll posting) — same idea:
     # restart হলে resume_page_num থেকে বাকি page গুলো নিয়ে চালিয়ে যায়,
