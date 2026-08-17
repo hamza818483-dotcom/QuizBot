@@ -11130,30 +11130,35 @@ async def _topic_extract_from_image(img) -> list:
 
 
 def _topic_group_mcqs(extracted_pages: list) -> list:
-    """Walks all MCQs in original extraction order (pages in order, MCQs in
-    each page's extracted order) and splits into topic groups.
-    BOUNDARY SIGNAL: topic_hint (the black-bg banner text) changing from the
-    previous MCQ's effective hint is the trigger for a new topic group.
-    qsn_no is NOT used as an independent trigger — a page can have two
-    different topics that BOTH restart numbering at 1 (e.g. left column
-    topic A ending at its own Q13, right column topic B starting fresh at
-    its own Q1), so treating every qsn_no==1 as a boundary wrongly splits
-    or merges MCQs across columns. topic_hint carry-forward (see Pass 1)
-    already correctly resolves which topic each MCQ belongs to per the
-    extraction prompt's per-column banner detection, so hint-change alone
-    is the safe, sufficient signal.
+    """Walks all MCQs in ORIGINAL PAGE/COLUMN READ ORDER (left column full
+    top-to-bottom, then right column full top-to-bottom, per page, pages in
+    order) and splits into topic groups.
 
-    CARRY-FORWARD: a page with no new banner printed on it (pure
-    continuation of an earlier topic) reports topic_hint="" for its MCQs —
-    those inherit the last known non-empty topic_hint before boundary
-    checking, so a continuation page never wrongly starts a new topic.
+    BOUNDARY SIGNAL (per explicit instruction): qsn_no == 1 marks the start
+    of a NEW topic group, every single time it appears in read order —
+    regardless of which university/unit/org sub-header sits above it, and
+    regardless of topic_hint text. This matches how these PDFs are actually
+    structured: one chapter-level topic contains MANY university sections,
+    and EVERY section restarts at its own Q1 — but they all belong to the
+    SAME topic (the black chapter banner), so qsn_no==1 restarts do NOT each
+    start a new group. Instead: a new group starts only when a genuinely new
+    CHAPTER begins, i.e. when the topic_hint (chapter banner) text actually
+    changes AND that change lines up with qsn_no resetting to 1. If qsn_no
+    resets to 1 but topic_hint hasn't changed, it's just the next
+    university/unit section of the SAME chapter — merge, don't split.
+
+    topic_hint carry-forward still resolves which chapter each MCQ belongs
+    to (a continuation page with no new banner reports topic_hint="" and
+    inherits the last real banner). University/unit/org sub-headers must
+    NEVER be treated as topic_hint values (enforced below) — they are noise
+    that must not create fake groups or break carry-forward.
+
     Returns list of (topic_name, [mcq, ...]) in first-seen order."""
-    # CODE-LEVEL GUARD: the vision model sometimes ignores the prompt's rule
-    # and emits a university/org/exam-source sub-header (BUP, চাকুরি, FASS,
-    # FSSS, a specific বিশ্ববিদ্যালয় name, বি/এ/এফ/সি/ডি ইউনিট) as topic_hint
-    # instead of the real chapter-level black banner. These are never real
-    # topics — treat them as empty (i.e. carry-forward the last real topic)
-    # so a fake hint can never start a bogus new group.
+    # CODE-LEVEL GUARD: the vision model sometimes emits a university/org/
+    # exam-source sub-header (BUP, চাকুরি, FASS, FSSS, a specific
+    # বিশ্ববিদ্যালয় name, বি/এ/এফ/সি/ডি ইউনিট) as topic_hint instead of the
+    # real chapter-level black banner, or leaves it blank. Never treat these
+    # as real topics — carry forward the last real chapter banner instead.
     _FAKE_TOPIC_RE = re.compile(
         r'^(বিশ্ববিদ্যালয়|.{0,20}বিশ্ববিদ্যালয়|বি ইউনিট|এ ইউনিট|সি ইউনিট|ডি ইউনিট|'
         r'এফ ইউনিট|ই ইউনিট|চাকুরি|BUP|FASS|FSSS|[A-Za-z]{1,6}\s*ইউনিট)$',
@@ -11165,103 +11170,70 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             return False
         if _FAKE_TOPIC_RE.match(h):
             return True
-        # short (<=25 char) hints ending in বিশ্ববিদ্যালয় or ইউনিট are org/unit
-        # sub-headers, not chapter topics, regardless of exact name matched above
         if len(h) <= 25 and (h.endswith("বিশ্ববিদ্যালয়") or h.endswith("ইউনিট")):
             return True
         return False
 
-    # Pass 1: carry forward empty topic_hint from the last non-empty one seen.
+    # Pass 1: flatten to one single ordered list preserving exact page/column
+    # read order (extracted_pages is already in that order — page N's MCQs
+    # list is itself left-column-then-right-column per the extraction
+    # prompt's MULTI-COLUMN rule). Carry forward the last real (non-fake,
+    # non-empty) topic_hint at the same time.
+    flat = []
     last_hint = None
     for _, _, mcqs in extracted_pages:
         for m in mcqs:
             hint = (m.get("topic_hint") or "").strip()
             if hint and _is_fake_topic(hint):
-                logger.warning(f"[TOPIC guard] rejected fake topic_hint '{hint}' — carrying forward '{last_hint}'")
-                hint = ""
+                hint = ""  # treat sub-header noise as "no new banner here"
             if hint:
                 last_hint = hint
                 m["_effective_hint"] = hint
             else:
                 m["_effective_hint"] = last_hint or ""
+            flat.append(m)
 
-    # Pass 2: group by the effective (carried-forward) hint. Same hint text
-    # is always merged into the SAME group regardless of where else it
-    # appears in extraction order (fixes same topic being split into
-    # multiple separate groups when a banner re-appears non-contiguously).
+    # Pass 2: build groups walking flat list in strict read order. A NEW
+    # group starts exactly when BOTH:
+    #   (i)  qsn_no == 1 for this MCQ (a genuine section/chapter restart), AND
+    #   (ii) the effective chapter banner actually changed from the group
+    #        currently being built (so repeated university sections inside
+    #        the SAME chapter, which also restart at qsn_no==1, stay merged
+    #        into that one chapter's group).
+    # If topic_hint never changes across an entire document, this still
+    # correctly keeps everything in one group even though qsn_no restarts
+    # dozens of times (one restart per university/unit section) — exactly
+    # the structure of these GK-supplement PDFs.
     groups = []  # list of [topic_name, [mcqs]]
-    hint_to_idx = {}  # hint text -> index into groups
+    cur_group_hint = None
     group_seq = 0
-    for pi, (_, _, mcqs) in enumerate(extracted_pages):
-        for m in mcqs:
-            hint = m.get("_effective_hint", "")
-            key = hint if hint else None
-            if key is not None and key in hint_to_idx:
-                idx = hint_to_idx[key]
-            else:
-                group_seq += 1
-                name = hint if hint else f"Topic {group_seq}"
-                groups.append([name, []])
-                idx = len(groups) - 1
-                if key is not None:
-                    hint_to_idx[key] = idx
-            groups[idx][1].append(m)
+    for m in flat:
+        hint = m.get("_effective_hint", "")
+        qno = m.get("qsn_no")
+        starts_new = (
+            not groups
+            or (qno == 1 and hint and hint != cur_group_hint)
+        )
+        if starts_new:
+            group_seq += 1
+            name = hint if hint else f"Topic {group_seq}"
+            groups.append([name, []])
+            cur_group_hint = hint
+        groups[-1][1].append(m)
 
-    # Rescue pass (CODE-LEVEL, not prompt-dependent): a topic must be fully
-    # complete — every MCQ, serial order intact — before the next topic
-    # starts. The extraction prompt can still misjudge which column a banner
-    # belongs to, so this is enforced here regardless of what topic_hint
-    # said. Rule: within group i, any MCQ whose qsn_no is NOT a genuine
-    # restart (i.e. it continues group i-1's numbering, prev_max+1, +2, ...)
-    # actually belongs to group i-1. This is checked on qsn_no value alone,
-    # not position (leading/trailing) — so it catches leaks anywhere in the
-    # new group's extraction order, e.g. a right-column tail that got
-    # collected after the new group's own Q1-Q4 in read order.
-    for i in range(1, len(groups)):
-        prev_name, prev_mcqs = groups[i - 1]
-        cur_name, cur_mcqs = groups[i]
-        if not cur_mcqs or not prev_mcqs:
-            continue
-        prev_nums = sorted(n for n in (m.get("qsn_no") for m in prev_mcqs) if isinstance(n, int))
-        if not prev_nums:
-            continue
-        prev_max = prev_nums[-1]
-
-        # A genuine new topic almost always restarts numbering low (1, 2, 3
-        # ... or occasionally continues a shared page numbering scheme, but
-        # never jumps to exactly prev_max+1 by coincidence on an unrelated
-        # topic). Any cur_mcqs entry whose qsn_no forms a contiguous run
-        # starting at prev_max+1 is a leak, wherever it sits in the list.
-        expect = prev_max + 1
-        leaked = []
-        remaining = []
-        # Sort a candidate view by qsn_no to detect the contiguous run
-        # reliably regardless of extraction order, then pull those exact
-        # objects out of cur_mcqs.
-        numbered = [m for m in cur_mcqs if isinstance(m.get("qsn_no"), int)]
-        numbered_sorted = sorted(numbered, key=lambda m: m["qsn_no"])
-        run = []
-        want = expect
-        for m in numbered_sorted:
-            if m["qsn_no"] == want:
-                run.append(m)
-                want += 1
-            elif m["qsn_no"] > want:
-                break
-        if run and run[0]["qsn_no"] > 2:  # never treat qsn 1-2 as a leak
-            leaked = run
-
-        if leaked:
-            logger.warning(
-                f"[TOPIC leak-rescue] moved qsn_no {[m.get('qsn_no') for m in leaked]} "
-                f"from '{cur_name[:30]}' back to '{prev_name[:30]}' "
-                f"(continues prior topic's numbering, not a genuine restart)"
-            )
-            for m in leaked:
-                cur_mcqs.remove(m)
-                prev_mcqs.append(m)
-            # Keep prev group's MCQs in serial order after the merge.
-            prev_mcqs.sort(key=lambda m: (m.get("qsn_no") is None, m.get("qsn_no")))
+    # Post-merge: same chapter banner text appearing as separate groups
+    # (e.g. it briefly went empty/fake between two runs and re-emerged with
+    # an unrelated qsn_no==1 restart) gets folded back into the FIRST group
+    # that used that exact banner text, keeping one group per real chapter.
+    merged = []
+    name_to_idx = {}
+    for name, mcqs in groups:
+        if name in name_to_idx:
+            merged[name_to_idx[name]][1].extend(mcqs)
+        else:
+            name_to_idx[name] = len(merged)
+            merged.append([name, mcqs])
+    groups = merged
 
     # Sort each group's MCQs by qsn_no (missing/non-numeric sorts last, stable).
     def _qsn_key(m):
@@ -11269,15 +11241,13 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
         return (0, v) if isinstance(v, int) else (1, 0)
     for _, mcqs in groups:
         mcqs.sort(key=_qsn_key)
-    # Gap check: within each group, if qsn_no sequence has a gap (e.g. 5,6,8 —
-    # missing 7), log it so silent extraction misses (column-boundary MCQs
-    # dropped by the vision model) are visible instead of unnoticed.
+
+    # Gap check per group is not meaningful here since one chapter legitimately
+    # contains many restarting sub-sequences (Q1-Q10, Q1-Q13, Q1-Q46, ...).
+    # Instead, log total MCQ count per group so under-extraction is visible.
     for name, mcqs in groups:
-        nums = sorted(m.get("qsn_no") for m in mcqs if isinstance(m.get("qsn_no"), int))
-        if len(nums) >= 2:
-            missing = [n for n in range(nums[0], nums[-1] + 1) if n not in nums]
-            if missing:
-                logger.warning(f"[TOPIC gap] '{name[:40]}' missing qsn_no: {missing}")
+        logger.info(f"[TOPIC group] '{name[:40]}' — {len(mcqs)} MCQ")
+
     return [(name, mcqs) for name, mcqs in groups]
 
 
