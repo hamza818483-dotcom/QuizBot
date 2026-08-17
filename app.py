@@ -11314,6 +11314,35 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             groups.append([name, []])
         groups[-1][1].append(m)
 
+    # CODE-LEVEL GUARD: a straggling old-topic MCQ (its own topic_hint
+    # clearly differs from the group it landed in — e.g. old topic's
+    # leftover right-column MCQ got appended after a new qsn_no==1 group
+    # already started) must NOT silently stay mixed into the new group's
+    # CSV. Reroute it back to the most recent EARLIER group that shares its
+    # own hint, if one exists; otherwise leave it (better than guessing).
+    hint_to_group_idx = {}
+    for idx, g in enumerate(groups):
+        base_name = re.sub(r'\s*\(\d+\)$', '', g[0])
+        hint_to_group_idx.setdefault(base_name, idx)
+    for idx, g in enumerate(groups):
+        keep, reroute = [], []
+        for m in g[1]:
+            own_hint = m.get("_effective_hint", "")
+            if own_hint and own_hint != re.sub(r'\s*\(\d+\)$', '', g[0]) and own_hint in hint_to_group_idx and hint_to_group_idx[own_hint] < idx:
+                reroute.append(m)
+            else:
+                keep.append(m)
+        g[1] = keep
+        for m in reroute:
+            target_idx = hint_to_group_idx[m.get("_effective_hint", "")]
+            logger.warning(
+                f"[TOPIC group-order] stray MCQ (qsn_no={m.get('qsn_no')}) with hint "
+                f"'{m.get('_effective_hint','')[:30]}' found inside '{g[0][:30]}' — "
+                f"rerouted back to earlier group '{groups[target_idx][0][:30]}'"
+            )
+            groups[target_idx][1].append(m)
+    groups = [g for g in groups if g[1]]  # drop any group emptied by reroute
+
     # Distinguish same-named groups (same chapter banner can legitimately
     # recur for a different qsn_no==1 restart elsewhere) by numbering them
     # in output, so the caller/CSV filenames don't collide or silently
