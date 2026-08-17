@@ -11139,7 +11139,7 @@ def _build_topic_verify_prompt(mcqs: list) -> str:
         "You are auditing a previous extraction of this page against the actual image. "
         "Below is what was already extracted:\n"
         f"{json.dumps(compact, ensure_ascii=False)}\n\n"
-        "Re-check the page carefully and verify FOUR things:\n"
+        "Re-check the page carefully and verify:\n"
         "1) LEFT COLUMN COUNT: if the page has 2 columns, look ONLY at the left column, "
         "top to bottom. Is every MCQ visible in the left column present in the list above? "
         "List any left-column qsn_no that is visible on the page but MISSING from the list.\n"
