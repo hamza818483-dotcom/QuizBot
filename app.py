@@ -10957,6 +10957,55 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 )
 
 
+def _check_segment_topic_consistency(mcqs: list, context: str = "") -> list:
+    """CODE-LEVEL CHECK (used at both Call1 and Call2 stages): walks mcqs in
+    read order and finds every 'segment' — the run of MCQs from one
+    qsn_no==1 up to (but not including) the NEXT qsn_no==1. Every MCQ inside
+    ONE segment must share the exact same effective topic_hint/topic_hint,
+    since a segment is by definition one university/unit section that never
+    itself contains a real chapter change partway through. If a segment has
+    more than one distinct hint, that's a real inconsistency (mid-segment
+    banner misread) and gets logged with details so it's visible, and the
+    majority hint in that segment is applied to the outliers (self-heals
+    the obvious case: one MCQ in the middle got a stray/blank hint while the
+    rest of its own segment agree)."""
+    if not mcqs:
+        return mcqs
+    segments = []
+    cur = []
+    for m in mcqs:
+        if m.get("qsn_no") == 1 and cur:
+            segments.append(cur)
+            cur = []
+        cur.append(m)
+    if cur:
+        segments.append(cur)
+
+    for seg in segments:
+        hints = [(m.get("topic_hint") or m.get("_effective_hint") or "").strip() for m in seg]
+        non_empty = [h for h in hints if h]
+        if not non_empty:
+            continue
+        distinct = set(non_empty)
+        if len(distinct) > 1:
+            counts = {h: non_empty.count(h) for h in distinct}
+            majority = max(counts, key=counts.get)
+            nums = [m.get("qsn_no") for m in seg]
+            logger.warning(
+                f"[TOPIC segment-check{(' ' + context) if context else ''}] "
+                f"inconsistent topic within one segment (qsn {nums[0]}-{nums[-1]}): "
+                f"{counts} — applying majority '{majority[:30]}' to outliers"
+            )
+            for m in seg:
+                h = (m.get("topic_hint") or m.get("_effective_hint") or "").strip()
+                if h and h != majority:
+                    if "topic_hint" in m:
+                        m["topic_hint"] = majority
+                    if "_effective_hint" in m:
+                        m["_effective_hint"] = majority
+    return mcqs
+
+
 def _build_topic_verify_prompt(mcqs: list) -> str:
     """Call 2 audit prompt: gives the model its own Call1 output back alongside
     the image, and asks it to independently re-check the page against that
@@ -11058,6 +11107,10 @@ async def _topic_extract_from_image(img) -> list:
     if not mcqs:
         return mcqs
 
+    # CODE-LEVEL CHECK (Call1 stage): within this single page's extraction,
+    # every MCQ between one qsn_no==1 and the next must share one topic_hint.
+    mcqs = _check_segment_topic_consistency(mcqs, context="Call1")
+
     # Call 2: audit pass against Call1's own output.
     try:
         verify_prompt = _build_topic_verify_prompt(mcqs)
@@ -11123,6 +11176,11 @@ async def _topic_extract_from_image(img) -> list:
             )
 
         mcqs = _qbm_dedup_list(mcqs)
+        # CODE-LEVEL CHECK (Call2 stage): re-run the same segment-consistency
+        # check after Call2's fixes (missing-recovery/serial-fix can add or
+        # relabel entries), catching anything the Call1-stage check couldn't
+        # see yet.
+        mcqs = _check_segment_topic_consistency(mcqs, context="Call2")
     except Exception as e:
         logger.warning(f"[TOPIC verify] audit pass failed, skipping: {e}")
 
@@ -11192,6 +11250,12 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             else:
                 m["_effective_hint"] = last_hint or ""
             flat.append(m)
+
+    # CODE-LEVEL CHECK (final stage, across page boundaries): a segment
+    # (qsn 1 up to next qsn 1) can span two pages if a section's last few
+    # MCQs spill onto the next page — re-run the same consistency check on
+    # the fully flattened, page-order-preserved list to catch that case too.
+    flat = _check_segment_topic_consistency(flat, context="grouping-stage")
 
     # Pass 2: build groups walking flat list in strict read order. A NEW
     # group starts exactly when BOTH:
