@@ -192,7 +192,7 @@ def _try_supabase_upload(supabase_url, supabase_key, img_bytes):
 
 def upload_to_imgbb(b64):
     """
-    Image upload: Supabase Storage S1 -> S2 -> imgbb, in order.
+    Image upload: imgbb (primary) -> Supabase Storage S1 -> S2 (last-resort fallback only).
     Env vars: SUPABASE_URL/SUPABASE_KEY (S1), SB2_URL/SB2_KEY (S2, same as core.py's DB fallback account).
     একই base64 image দ্বিতীয়বার এলে cache থেকে URL রিটার্ন করে।
     """
@@ -204,6 +204,11 @@ def upload_to_imgbb(b64):
     try:
         compressed = compress_image(b64)
         img_bytes = base64.b64decode(compressed)
+
+        primary_url = imgbb_manager.upload(img_bytes)
+        if primary_url:
+            _upload_cache[cache_key] = primary_url
+            return primary_url
 
         s1_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
         s1_key = os.environ.get("SUPABASE_KEY", "")
@@ -217,13 +222,9 @@ def upload_to_imgbb(b64):
             if url:
                 _upload_cache[cache_key] = url
                 return url
-
-        fallback_url = imgbb_manager.upload(img_bytes)
-        if fallback_url:
-            _upload_cache[cache_key] = fallback_url
-        return fallback_url
+        return ""
     except Exception as e:
-        logger.warning(f"[ImageUpload] Exception: {e} — falling back to imgbb")
+        logger.warning(f"[ImageUpload] Exception: {e} — retrying imgbb")
         try:
             fb = imgbb_manager.upload(base64.b64decode(compress_image(b64)))
             if fb:
