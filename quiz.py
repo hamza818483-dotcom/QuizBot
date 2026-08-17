@@ -86,21 +86,28 @@ async def handle_quiz_create(msg: dict):
     if not reply or not reply.get("document"):
         await send_msg(chat_id,
             "❌ CSV ফাইলে reply করে <code>/q</code> দাও!\n\n"
-            "📝 Format:\n<code>/q Quiz Name\nDescription\nTimer(sec)\nShuffle(Yes/No)</code>"
+            "📝 Format:\n<code>/q Quiz Name\nDescription\nTimer(sec)\nShuffle(Yes/No)</code>\n\n"
+            "প্রতিটা তথ্য আলাদা লাইনে দিতে হবে:\n"
+            "1️⃣ Quiz Name\n"
+            "2️⃣ Description\n"
+            "3️⃣ Timer (সেকেন্ড)\n"
+            "4️⃣ Shuffle (Yes/No — না দিলে default No)"
         )
         return
 
     lines = text.split("/q", 1)[1].strip().split("\n") if "/q" in text else []
     lines = [l.strip() for l in lines if l.strip()]
-    if len(lines) < 4:
+    if len(lines) < 3:
         await send_msg(chat_id,
-            "❌ ৪টা info দাও:\n1. Name\n2. Description\n3. Timer(sec)\n4. Shuffle(Yes/No)")
+            "❌ কমপক্ষে ৩টা info দাও (প্রতিটা আলাদা লাইনে):\n"
+            "1️⃣ Name\n2️⃣ Description\n3️⃣ Timer(sec)\n4️⃣ Shuffle(Yes/No) — optional, না দিলে default No")
         return
 
     name = lines[0]
     desc = lines[1]
     timer = int(lines[2]) if lines[2].isdigit() else 15
-    shuffle = lines[3].lower() == "yes"
+    # Shuffle optional — default OFF (No) যদি লাইন 4 না দেওয়া হয়।
+    shuffle = lines[3].lower() == "yes" if len(lines) >= 4 else False
 
     loading = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
 
@@ -166,8 +173,10 @@ async def handle_quiz_create(msg: dict):
         async def _notify():
             await send_msg(chat_id,
                 f"✅ <b>Quiz Created!</b>\n\n"
-                f"📝 Name: {name}\n📄 Description: {desc}\n"
-                f"⏱️ Timer: {timer}s\n🔀 Shuffle: {'Yes' if shuffle else 'No'}\n"
+                f"📝 Name: {name}\n"
+                f"📄 Description: {desc}\n"
+                f"⏱️ Timer: {timer}s\n"
+                f"🔀 Shuffle: {'Yes' if shuffle else 'No'}\n"
                 f"📊 Questions: {len(questions)}\n\n"
                 f"🌐 Web Quiz:\n{web_link}\n\n"
                 f"🤖 Bot Quiz:\n{link}\n\n"
