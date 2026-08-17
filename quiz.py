@@ -789,7 +789,19 @@ async def finish_d1_quiz(session: dict):
             logger.warning(f"[Quiz] quiz_results insert attempt {_attempt_n+1}/3 failed, retrying...")
             await asyncio.sleep(0.6 * (_attempt_n + 1))
         if not _ok:
-            logger.error(f"[Quiz] quiz_results insert FAILED after 3 attempts for user={uid} quiz={quiz_id} — mistake-practice will show 'No previous attempt found' for this run")
+            # D1 unreachable after 3 retries — fall back to Supabase directly
+            # so the result/score is not lost even if D1 (Cloudflare) is
+            # fully down. Same table shape as quiz_results, via the sb client.
+            try:
+                await sb_exec(lambda: sb.table("quiz_results_backup").insert({
+                    "user_id": uid, "user_name": uname, "quiz_id": quiz_id,
+                    "right_count": right, "wrong_count": wrong, "skip_count": skip,
+                    "total": tot, "score": score, "attempt": attempt,
+                    "created_at": int(time.time()),
+                }).execute())
+                logger.warning(f"[Quiz] quiz_results D1 failed for user={uid} quiz={quiz_id} — saved to Supabase backup instead")
+            except Exception as _be:
+                logger.error(f"[Quiz] quiz_results insert FAILED after 3 D1 attempts AND Supabase backup for user={uid} quiz={quiz_id}: {_be} — mistake-practice will show 'No previous attempt found' for this run")
 
         # Fallback: if meta.last_row_id unavailable, look it up via a fresh SELECT
         if not result_id:
