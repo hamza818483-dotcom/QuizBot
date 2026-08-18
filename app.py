@@ -1088,9 +1088,10 @@ def _build_bio_prompt(topic: str) -> str:
         f"  SIGNAL 2 — ENGLISH NAME IN BRACKETS TO THE RIGHT: does it have an English "
         f"translation in parentheses to the RIGHT of the Bengali text on the same line, e.g. "
         f"\"সেন্ট্রিওল (Centriole)\"? (A line below counts as a weaker version.)\n"
-        f"  SIGNAL 3 — BANGLA NUMBERING PREFIX: does the line START with a Bangla-numeral + "
-        f"\"।\", e.g. \"৭।\", \"৮।\", or hierarchical \"২.৪।\", directly before the heading "
-        f"text? Read this number as part of the heading text exactly as printed.\n"
+        f"  SIGNAL 3 — BANGLA NUMBERING PREFIX: does the line START with a Bangla-numeral "
+        f"prefix, EITHER dandi style with \"।\", e.g. \"৭।\", \"৮।\", \"২.৪।\", OR plain "
+        f"dot-hierarchy with no trailing দাঁড়ি, e.g. \"১.৮\" (as in \"১.৮ নিউক্লিয়াস\") — BOTH "
+        f"count equally. Read this number as part of the heading text exactly as printed.\n"
         f"  SIGNAL 4 — BOLD + LARGER FONT: is it BOLD and visibly LARGER than the surrounding "
         f"paragraph/body text (a modest, clearly-noticeable jump is enough)?\n"
         f"A line matching signal 1 alone is already a strong candidate. Signals 1+2+3+4 together "
@@ -12207,9 +12208,11 @@ def _build_bio_heading_scan_prompt() -> str:
         "e.g. \"সেন্ট্রিওল (Centriole)\"? (A separate line below, not to the right, counts as a "
         "weaker version of this same signal.)\n"
         "  SIGNAL 3 — BANGLA NUMBERING PREFIX: does the line START with a Bangla-numeral "
-        "followed by \"।\", e.g. \"৭।\", \"৮।\", or a hierarchical form like \"২.৪।\", directly "
-        "before the heading text? Read this number as part of the heading_text exactly as "
-        "printed (e.g. \"৭। সেন্ট্রিওল\").\n"
+        "prefix, in EITHER of these forms — (a) dandi style with \"।\" after the number, e.g. "
+        "\"৭।\", \"৮।\", \"২.৪।\", OR (b) plain dot-hierarchy style with NO trailing দাঁড়ি, e.g. "
+        "\"১.৮\" (as in \"১.৮ নিউক্লিয়াস (Nucleus)\") — BOTH count equally as signal 3. Read "
+        "this number as part of the heading_text exactly as printed (e.g. \"৭। সেন্ট্রিওল\" or "
+        "\"১.৮ নিউক্লিয়াস\").\n"
         "  SIGNAL 4 — BOLD + LARGER FONT: is the line BOLD and visibly LARGER than the "
         "surrounding paragraph/body text around it (does not need to be a huge jump — a modest, "
         "clearly-noticeable increase in weight/size over body text counts)?\n\n"
@@ -12354,9 +12357,18 @@ def _bio_verify_heading_text_signals(heading_text: str) -> dict:
     self-reported booleans blindly for these two -- cross-checks them
     against the actual heading_text so a model that says
     bangla_number_prefix=true but reports text with no such prefix doesn't
-    silently inflate its own score."""
+    silently inflate its own score.
+
+    Accepts BOTH numbering styles seen in real textbooks: the dandi-style
+    "৭।" / "৮।" prefix, AND the hierarchical dot style like "১.৮" (no
+    trailing দাঁড়ি) as in "১.৮ নিউক্লিয়াস (Nucleus)" -- either counts as
+    signal 3.
+    """
     t = (heading_text or "").strip()
-    has_number_prefix = bool(re.match(r'^[০-৯]+(\.[০-৯]+)*।', t))
+    has_number_prefix = bool(
+        re.match(r'^[০-৯]+(\.[০-৯]+)*।', t)          # dandi style: ৭।  ২.৪।
+        or re.match(r'^[০-৯]+\.[০-৯]+(\s|$)', t)     # dot-hierarchy, no দাঁড়ি: ১.৮ 
+    )
     has_bracket_right = bool(re.search(r'\([A-Za-z][A-Za-z \-&]*\)\s*$', t))
     return {"bangla_number_prefix": has_number_prefix, "english_bracket_right": has_bracket_right}
 
