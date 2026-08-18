@@ -15091,10 +15091,8 @@ STRICT RULES — follow exactly, no exceptions:
 For each MCQ found INSIDE a red marking:
 1. Extract the exact question number label if printed (e.g. "১ক১", "1", "১খ৩") into "mcq_no" (string, exact as printed; empty string if none printed).
 2. Extract question text and all options exactly as written (Bangla stays Bangla, English stays English). Number options A,B,C,D by position (1st=A...4th=D).
-3. Find the RED-MARKED option (red circle/dot or red box around one option's letter/text/bullet). This is ONLY a pointer to what was marked — it can be wrong. Using your own subject knowledge, verify independently:
-   - If the marked option IS factually correct -> "answer" = that option, "marked_answer_wrong": false.
-   - If the marked option is NOT factually correct -> "answer" = the ACTUALLY correct option, "marked_answer_wrong": true.
-   - If no option is marked at all -> determine from subject knowledge, "marked_answer_wrong": false, "no_mark": true.
+3. Find the RED-CIRCLED/RED-MARKED option: the option with a RED GOLLA (red circle/dot, "লাল গোল্লা") or red box drawn around its letter/text/bullet — this circle IS the student's chosen answer marking. TRUST this red-circled option as "answer" by default — in the overwhelming majority of cases (about 99%) the red-circled option is the correct answer, so set "marked_answer_wrong": false and use the circled option as "answer" UNLESS you are highly confident from strong subject knowledge that it is factually wrong (only then set "marked_answer_wrong": true and use the actually-correct option as "answer" instead). Do not second-guess a correct-looking red-circled answer just because you'd have picked differently by default — only override with strong, clear certainty.
+   - If no option is red-circled/marked at all -> determine the answer from subject knowledge, "marked_answer_wrong": false, "no_mark": true.
 4. Write a short explanation (1-2 sentences, Bangla if MCQ is Bangla, max ~180 characters) for why the correct answer is correct — use any ব্যাখ্যা text printed near it if present, otherwise your own knowledge.
 
 No red-marked MCQ on this page -> return [].
@@ -15127,14 +15125,20 @@ OUTPUT — ONLY valid JSON array of MISSED MCQs, nothing else:
 
 ONU2_ANSWER_KEY_PROMPT_TMPL = """This page may contain an ANSWER KEY / উত্তরমালা section — usually a small table or grid near the end of an MCQ set, mapping question numbers to their correct option letter (e.g. "১।(ক) ২।(খ) ৩।(খ)..." or a table with numbered cells each showing "১ (ক)" style entries).
 
-Here is a list of MCQs already extracted from red-boxed regions, with their question numbers (as printed) and their currently-determined answer:
+Here is a list of MCQs already extracted from red-marked regions (question number, a short snippet of the question text to confirm real content match, and the answer already determined from the red-circled option on the page):
 {mcq_list}
 
-Task: If this page contains a উত্তরমালা/answer-key table, find entries matching ANY of the mcq_no values above (by exact number match). For every match found, return the answer key's letter for that number — this OVERRIDES whatever answer was determined from the option's red mark.
+Task: The red-circled option (লাল গোল্লা) on the page is the DEFAULT trusted answer — in ~99% of cases it is already correct. This answer-key check exists ONLY to catch the rare genuine mismatch, never to casually override a good answer.
 
-If this page has no answer-key table at all, or none of its entries match these mcq_no values, return exactly: []
+If this page contains a উত্তরমালা/answer-key table:
+1. For each entry above, find its MATCHING row in the answer-key table -- match by mcq_no AND sanity-check that the row genuinely corresponds to that same question (numbers can coincidentally repeat across pages/sections, so don't blindly trust a number match alone).
+2. Compare the key's answer letter to the "current_answer" already listed above for that MCQ.
+3. If they MATCH -> do not include this entry in your output at all (no mismatch, nothing to report).
+4. If they DIFFER (a genuine mismatch) -> before reporting it, use your OWN subject knowledge to independently verify which of the two (the red-circled option, or the answer-key's letter) is actually, factually correct for that question. Only report entries where you've done this check. Include your verified correct letter as "key_answer" (this may be the key's letter, or -- if your own knowledge says the key itself looks wrong for that specific question -- the red-circled option instead; always trust independently-verified subject knowledge over blindly picking one side).
 
-OUTPUT — ONLY valid JSON array, nothing else:
+If this page has no answer-key table at all, or no genuine mismatches were found, return exactly: []
+
+OUTPUT — ONLY valid JSON array of genuine, verified mismatches only, nothing else:
 [{{"mcq_no":"...","key_answer":"A/B/C/D"}}]"""
 
 
@@ -15271,15 +15275,22 @@ async def _onu2_call2_misscheck(img, existing: list) -> list:
 
 async def _onu2_answer_key_check(img, mcqs: list) -> None:
     """Cross-checks extracted MCQs against a উত্তরমালা/answer-key table on
-    the SAME page (if one exists). Mutates mcqs in place -- when a
-    matching key entry is found for an mcq_no, it ALWAYS overrides the
-    option-mark-derived answer (per requirement: key takes precedence)."""
+    the SAME page (if one exists). The red-circled option is the DEFAULT
+    trusted answer (~99% of cases correct) -- this only overrides on a
+    GENUINE mismatch that the AI has independently verified against its
+    own subject knowledge (the prompt itself does this verification and
+    returns only confirmed mismatches; this function applies the override
+    as a straight pass-through of that verified result, plus a defensive
+    same-value no-op check so a no-mismatch entry can never silently
+    "override" to the value it already had)."""
     candidates = [m for m in mcqs if (m.get("mcq_no") or "").strip()]
     if not candidates:
         return
     try:
         mcq_list = json.dumps(
-            [{"mcq_no": m.get("mcq_no", ""), "answer": m.get("answer", "")} for m in candidates],
+            [{"mcq_no": m.get("mcq_no", ""),
+              "question_snippet": (m.get("question") or "")[:80],
+              "current_answer": m.get("answer", "")} for m in candidates],
             ensure_ascii=False
         )
         prompt = ONU2_ANSWER_KEY_PROMPT_TMPL.format(mcq_list=mcq_list)
@@ -15303,10 +15314,13 @@ async def _onu2_answer_key_check(img, mcqs: list) -> None:
             no = (m.get("mcq_no") or "").strip()
             if no in key_map:
                 key_ans = key_map[no]
+                # Only a real change counts as an override -- if the
+                # model's "verified mismatch" turned out identical to the
+                # existing answer, this is a no-op, not an override.
                 if m.get("answer") != key_ans:
                     m["answer"] = key_ans
                     m["marked_answer_wrong"] = False
-                    m["_answer_source"] = "answer_key_override"
+                    m["_answer_source"] = "answer_key_verified_override"
     except Exception as e:
         logger.warning(f"[ONU2 answer-key check] failed: {e}")
 
