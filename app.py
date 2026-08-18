@@ -1053,18 +1053,24 @@ def _build_bio_prompt(topic: str) -> str:
     section heading it was generated from), so output can be split into
     separate per-topic CSVs exactly like /topic does for extraction.
 
-    Topic-heading detection (per user spec, 3 combined visual signals — a
-    line only counts as a topic_hint if it matches these, not just any bold
-    text):
-      1) BOLD BLACK font, and visibly LARGER than the font size of the
-         paragraph text immediately before/around it.
-      2) HORIZONTALLY CENTERED on the page/column (not left-aligned like a
-         normal paragraph or sub-label).
-      3) Often (not always) followed on the same line or the line right
+    Topic-heading detection (per user spec — a line only counts as a
+    topic_hint if it matches these):
+      1) BOLD font, and slightly LARGER than the font size of the
+         paragraph/body text around it (a modest, clearly-noticeable
+         weight/size jump is enough, not necessarily huge).
+      2) POSITIONED ABOVE the block of content it introduces, and
+         typically (99% of cases) HORIZONTALLY CENTERED on the page/column
+         right above that content — this above-content/centered
+         positioning is the strongest signal.
+      3) Often (not always) PREFIXED with Bangla numbering directly before
+         the heading text, e.g. "১।", "২।", or hierarchical "২.৪।" — read
+         it as part of the heading text exactly as printed.
+      4) Often (not always) followed on the same line or the line right
          below by an English translation in parentheses, e.g. "(Cell Cycle
-         & Interphase)" — optional signal, absence doesn't disqualify a
-         heading that already satisfies 1+2.
-    Everything between one such heading and the next belongs to that topic.
+         & Interphase)" — optional signal.
+    Only 1+2 are required; 3 and 4 are bonus confirming signals when
+    present. Everything between one such heading and the next belongs to
+    that topic.
     """
     return (
         f"You are an expert MCQ-generation engine for Bengali/English academic "
@@ -1075,26 +1081,37 @@ def _build_bio_prompt(topic: str) -> str:
         f"🟨 STEP 1 — DETECT TOPIC HEADINGS FIRST (before generating any MCQ)\n"
         f"═══════════════════════════════\n"
         f"Scan the ENTIRE page top-to-bottom and find every TOPIC HEADING line. "
-        f"A line is a genuine topic heading ONLY if it matches these signals "
-        f"TOGETHER:\n"
-        f"  1) BOLD BLACK font, and clearly LARGER in size than the normal "
-        f"paragraph/body text immediately above or below it.\n"
-        f"  2) HORIZONTALLY CENTERED on the page/column — not left-aligned "
-        f"like normal paragraph text or a small sub-label.\n"
-        f"  3) Often (not mandatory) has an English translation in "
+        f"A line is a genuine topic heading if it matches these signals:\n"
+        f"  1) BOLD font, and slightly LARGER in size than the normal "
+        f"paragraph/body text around it (a modest, clearly-noticeable jump "
+        f"in weight/size is enough).\n"
+        f"  2) POSITIONED ABOVE the block of content it introduces, and "
+        f"typically (99% of cases) HORIZONTALLY CENTERED on the page/column "
+        f"right above that content — this above-content/centered "
+        f"positioning is the strongest signal; treat a bold line sitting "
+        f"centered right above a new content block as a heading even if the "
+        f"size jump is modest.\n"
+        f"  3) Often (not mandatory) PREFIXED with Bangla numbering "
+        f"directly before the heading text, in forms like \"১।\", \"২।\", "
+        f"or hierarchical \"২.৪।\" — read this number as part of the "
+        f"heading text exactly as printed (e.g. \"২.৪। কোষচক্র ও "
+        f"ইন্টারফেজ\").\n"
+        f"  4) Often (not mandatory) has an English translation in "
         f"parentheses on the same line or the line right below it, e.g. "
-        f"\"কোষচক্র ও ইন্টারফেজ (Cell Cycle & Interphase)\" — a heading "
-        f"missing this English part is still valid if 1+2 already hold.\n"
+        f"\"কোষচক্র ও ইন্টারফেজ (Cell Cycle & Interphase)\".\n"
+        f"Only 1+2 are required; 3 and 4 are bonus confirming signals when "
+        f"present, not requirements.\n"
         f"Do NOT treat as a topic heading: normal bold body text with no "
-        f"size increase, left-aligned sub-labels like '(ক) ইন্টারফেজ' "
-        f"inline within a paragraph, figure captions, or table headers — "
-        f"only a genuinely separate, centered, larger heading line counts.\n"
+        f"size increase sitting inline within a paragraph, left-aligned "
+        f"sub-labels like '(ক) ইন্টারফেজ' not centered above a content "
+        f"block, figure captions, or table headers.\n"
         f"Everything (paragraphs, bullet points, sub-labels, diagrams-text) "
         f"appearing AFTER one such heading and BEFORE the next belongs to "
-        f"that heading's topic — that heading's exact text (Bengali part "
-        f"only, drop the English parenthetical if present) is the topic name "
-        f"for all content under it. If the page has genuinely zero heading "
-        f"matching all signals, use \"{topic}\" as the topic for the whole "
+        f"that heading's topic — that heading's exact text (Bangla "
+        f"numbering prefix if present + Bengali heading text, drop the "
+        f"English parenthetical if present) is the topic name for all "
+        f"content under it. If the page has genuinely zero heading "
+        f"matching the signals, use \"{topic}\" as the topic for the whole "
         f"page's content.\n\n"
 
         f"═══════════════════════════════\n"
@@ -12138,31 +12155,47 @@ def _unmesh_group_mcqs(extracted_pages: list) -> list:
 
 def _build_bio_heading_scan_prompt() -> str:
     """DEDICATED strict heading-detection pass for /bio, mirroring /chem's
-    _build_chem_heading_scan_prompt but tuned for /bio's 3-signal criteria:
-    bold-black + larger font + HORIZONTALLY CENTERED (instead of /chem's
-    Bangla hierarchical-number prefix). Since /bio GENERATES new MCQs
-    (rather than extracting existing ones with printed qsn_no), this scan
-    is matched to generated MCQs via their page-sequential index instead
-    of a printed serial number -- see _bio_apply_heading_scan below."""
+    _build_chem_heading_scan_prompt but tuned for /bio's criteria:
+    bold + slightly-larger font, horizontally centered ABOVE the content it
+    introduces (99% of cases), optionally prefixed with Bangla numbering
+    (১।, ২।, ২.৪। style) and/or suffixed with an English name in
+    parentheses. Since /bio GENERATES new MCQs (rather than extracting
+    existing ones with printed qsn_no), this scan is matched to generated
+    MCQs via their page-sequential index instead of a printed serial
+    number -- see _bio_apply_heading_scan below."""
     return (
         "Find ONLY genuine topic-heading lines on this page — ignore all body/paragraph text.\n\n"
-        "‼️ HARD RULE — CHECK THIS FIRST, ALWAYS: a line is a genuine topic heading ONLY if it "
-        "matches ALL of these signals TOGETHER:\n"
-        "  1) BOLD BLACK font, and visibly LARGER than the surrounding paragraph/body text.\n"
-        "  2) HORIZONTALLY CENTERED on the page/column — not left-aligned like normal paragraph "
-        "text or a small sub-label.\n"
-        "  3) Often (not mandatory) has an English translation in parentheses on the same line or "
-        "the line right below it, e.g. \"কোষচক্র ও ইন্টারফেজ (Cell Cycle & Interphase)\" — a heading "
-        "missing this English part is still valid if 1+2 already hold.\n\n"
+        "‼️ HARD RULE — CHECK THIS FIRST, ALWAYS: a line is a genuine topic heading if it "
+        "matches these signals:\n"
+        "  1) BOLD, and slightly LARGER than the surrounding paragraph/body text (does not need "
+        "to be a huge jump — a modest, clearly-noticeable increase in weight/size over body text "
+        "is enough).\n"
+        "  2) POSITIONED ABOVE the block of content it introduces, and typically (99% of cases) "
+        "HORIZONTALLY CENTERED on the page/column above that content — sitting roughly mid-way "
+        "across the page width right before the topic's MCQs/paragraphs start. This is the "
+        "strongest signal: if a bold line sits centered right above a new block of content, treat "
+        "it as a heading candidate even if the size increase is modest.\n"
+        "  3) Often (not mandatory) PREFIXED with Bangla numbering directly before the heading "
+        "text, in forms like \"১।\", \"২।\", or a hierarchical form like \"২.৪।\" — read this "
+        "number as part of the heading_text exactly as printed (e.g. \"২.৪। কোষচক্র ও ইন্টারফেজ\"). "
+        "Its absence doesn't disqualify a heading that already satisfies 1+2.\n"
+        "  4) Often (not mandatory) has an English translation in parentheses to the right of the "
+        "Bengali text, on the same line or the line right below it, e.g. \"কোষচক্র ও ইন্টারফেজ "
+        "(Cell Cycle & Interphase)\" — include it in heading_text when present. Its absence "
+        "doesn't disqualify a heading that already satisfies 1+2.\n\n"
+        "A line only needs 1+2 to qualify; the numbering prefix (3) and English parenthetical (4) "
+        "are bonus confirming signals when present, not requirements.\n\n"
         "STRICTLY DO NOT report any of the following even if bold/boxed — these are NOT topic headings:\n"
-        "  - normal bold body text with no size increase\n"
-        "  - left-aligned sub-labels like '(ক) ইন্টারফেজ' inline within a paragraph\n"
+        "  - normal bold body text with no size increase, sitting inline within a paragraph\n"
+        "  - left-aligned sub-labels like '(ক) ইন্টারফেজ' inline within a paragraph, not centered "
+        "above a content block\n"
         "  - figure captions, table headers, page footer/header branding, page numbers\n\n"
         "A true topic heading is rare per page — expect at most 0-3, often ZERO (pure continuation "
-        "pages). If not confident a line satisfies BOTH the font-size/weight jump AND horizontal "
-        "centering, do NOT report it.\n\n"
+        "pages). If not confident a line satisfies BOTH the bold/size signal AND the "
+        "above-content/centered positioning, do NOT report it.\n\n"
         "For each genuine topic heading found (top to bottom order on the page), report:\n"
-        "  - its exact text (Bengali part; include the English parenthetical if present)\n"
+        "  - its exact text (Bangla numbering prefix if present + Bengali heading text + English "
+        "parenthetical if present)\n"
         "  - approximately how far down the page it sits, as a fraction from 0.0 (very top) to "
         "1.0 (very bottom) of the page height — your best visual estimate, used only to order "
         "multiple headings relative to each other on this same page.\n\n"
