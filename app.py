@@ -8109,9 +8109,9 @@ def _build_print_style7(data, heading):
         is_short = _check_short_option(d["opts"])
         body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
         if is_short:
-            body += f'<table class="options-table-short"><tr><td>(A) {d["opts"][0]}{d["oimgs"][0]}</td><td>(B) {d["opts"][1]}{d["oimgs"][1]}</td></tr><tr><td>(C) {d["opts"][2]}{d["oimgs"][2]}</td><td>(D) {d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
+            body += f'<table class="options-table-short"><tr><td>ⓐ {d["opts"][0]}{d["oimgs"][0]}</td><td>ⓑ {d["opts"][1]}{d["oimgs"][1]}</td></tr><tr><td>ⓒ {d["opts"][2]}{d["oimgs"][2]}</td><td>ⓓ {d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
         else:
-            body += f'<ul class="options-list"><li>(A) {d["opts"][0]}{d["oimgs"][0]}</li><li>(B) {d["opts"][1]}{d["oimgs"][1]}</li><li>(C) {d["opts"][2]}{d["oimgs"][2]}</li><li>(D) {d["opts"][3]}{d["oimgs"][3]}</li></ul>'
+            body += f'<ul class="options-list"><li>ⓐ {d["opts"][0]}{d["oimgs"][0]}</li><li>ⓑ {d["opts"][1]}{d["oimgs"][1]}</li><li>ⓒ {d["opts"][2]}{d["oimgs"][2]}</li><li>ⓓ {d["opts"][3]}{d["oimgs"][3]}</li></ul>'
         body += '</div>'
     body += '</div><div class="page-break"></div><div class="answers-section"><table class="answer-table"><thead><tr><th class="qno-col">Q.No.</th><th class="ans-col">Ans</th><th class="exp-col">Explanation</th></tr></thead><tbody>'
     for d in data:
