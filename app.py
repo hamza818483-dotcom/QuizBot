@@ -15085,6 +15085,7 @@ STRICT RULES — follow exactly, no exceptions:
 - Only output MCQs whose serial number is inside a left-margin red marking. Zero such MCQs on this page -> output exactly [].
 - Never invent, guess, or hallucinate an MCQ that isn't printed on the page.
 - Never alter question/option wording from what's printed (Bangla stays Bangla, English stays English) — exact text only.
+- SKIP any MCQ that is roman-numeral/serial-combination style and needs an উদ্দীপক (numbered statement list like i/ii/iii or ১/২/৩ printed ABOVE the question) to make sense — i.e. its OPTIONS are combinations like "i, ii" / "i ও ii" / "১, ৩" / "i, ii ও iii" referring back to that statement list. Even if such an MCQ is inside a red marking, do NOT extract it — these need the উদ্দীপক context and don't stand alone.
 - Every output item MUST have all 7 fields: mcq_no, question, options (with A,B,C,D), answer, marked_answer_wrong, no_mark, explanation. Missing/malformed items will be rejected downstream.
 
 For each MCQ found INSIDE a red marking:
@@ -15107,7 +15108,9 @@ STRICT RULES:
 - Do not re-list any MCQ already in the existing list below.
 - Do not invent MCQs not printed on the page.
 - Only report an MCQ as missed if its serial number is genuinely inside a left-margin red marking.
+- SKIP any roman-numeral/serial-combination style MCQ that needs an উদ্দীপক (numbered statement list i/ii/iii or ১/২/৩ printed above it) to make sense — i.e. options like "i, ii" / "i ও ii" / "১, ৩" referring back to that list. Do not report these even if red-marked.
 - Every reported item MUST have all 7 fields (mcq_no, question, options, answer, marked_answer_wrong, no_mark, explanation) — incomplete items will be rejected downstream.
+- For every missed MCQ you report, the "answer" field MUST be independently verified against your own subject knowledge (not just copied from the red option-mark) — same rule as the first extraction pass: if the red-marked option is wrong, output the correct one and set marked_answer_wrong=true.
 
 
 Already-extracted red-boxed MCQs from this page (do not re-list these, only find ones MISSED):
@@ -15173,14 +15176,29 @@ def _onu2_validate_mcq(m: dict) -> bool:
 
 
 def _onu2_filter_valid(mcqs: list) -> list:
-    """Drops any item failing _onu2_validate_mcq, logging how many were
-    rejected so bad extractions are visible rather than silently corrupt."""
+    """Drops any item failing _onu2_validate_mcq OR being a roman/serial
+    combination-type MCQ (needs an উদ্দীপক statement list to make sense),
+    logging how many were rejected so bad extractions are visible rather
+    than silently corrupt. Reuses /onu's existing _onu_mcq_is_roman_combo
+    detector as a code-level safety net (prompt already instructs the
+    model to skip these, this catches anything that slips through)."""
     if not mcqs:
         return []
-    valid = [m for m in mcqs if _onu2_validate_mcq(m)]
-    dropped = len(mcqs) - len(valid)
-    if dropped:
-        logger.warning(f"[ONU2] dropped {dropped} malformed/incomplete MCQ item(s) failing strict validation")
+    valid = []
+    dropped_invalid = 0
+    dropped_combo = 0
+    for m in mcqs:
+        if not _onu2_validate_mcq(m):
+            dropped_invalid += 1
+            continue
+        if _onu_mcq_is_roman_combo(m):
+            dropped_combo += 1
+            continue
+        valid.append(m)
+    if dropped_invalid:
+        logger.warning(f"[ONU2] dropped {dropped_invalid} malformed/incomplete MCQ item(s) failing strict validation")
+    if dropped_combo:
+        logger.warning(f"[ONU2] dropped {dropped_combo} roman/serial-combination উদ্দীপক-dependent MCQ item(s)")
     return valid
 
 
@@ -15316,7 +15334,7 @@ async def _onu2_extract_from_image(img) -> list:
         # Final strict re-validation: answer-key override or explanation
         # fill could theoretically leave a field malformed -- never let a
         # broken item reach the CSV.
-        combined = [m for m in combined if _onu2_validate_mcq(m)]
+        combined = [m for m in combined if _onu2_validate_mcq(m) and not _onu_mcq_is_roman_combo(m)]
         if not combined:
             return []
         for m in combined:
