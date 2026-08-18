@@ -8079,7 +8079,7 @@ body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:1
 .exam-header h1{color:#166534;margin:0;font-size:20pt;font-weight:bold}
 .abpage{page-break-after:always;break-after:page}
 .abpage:last-of-type{page-break-after:auto;break-after:auto}
-.content-columns{column-count:3;column-gap:16px;column-fill:auto;column-rule:1px solid #ddd;height:560mm}
+.content-columns{column-count:3;column-gap:16px;column-fill:auto;column-rule:1px solid #ddd}
 .question{margin-bottom:10px;break-inside:avoid;page-break-inside:avoid}
 .question-header{margin-bottom:4px;display:flex;align-items:flex-start}
 .question-num{font-family:'Times New Roman',serif;font-weight:bold;color:#15803d;font-size:15pt;margin-right:5px;white-space:nowrap;flex-shrink:0}
@@ -8126,7 +8126,17 @@ def _build_print_style7(data, heading):
     body = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>'
     for pg_start in range(0, len(data), PER_PAGE):
         chunk = data[pg_start:pg_start + PER_PAGE]
-        body += '<div class="abpage"><div class="content-columns">'
+        # Estimate column height from actual MCQ count on this page so a
+        # partial page (e.g. 13 or 25 MCQ) doesn't reserve a full 560mm
+        # column height with a huge blank gap below — height shrinks to
+        # fit content while still filling column1 fully before column2/3
+        # (column-fill:auto needs an explicit height to do that, unlike
+        # 'balance' which would spread items evenly across all 3 columns
+        # regardless of count).
+        import math as _math
+        rows_per_col = _math.ceil(len(chunk) / 3) if chunk else 1
+        est_mm = max(60, min(560, rows_per_col * 13 + 15))
+        body += f'<div class="abpage"><div class="content-columns" style="height:{est_mm}mm">'
         for d in chunk:
             body += _render_question(d)
         body += '</div></div>'
