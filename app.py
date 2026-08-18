@@ -15125,7 +15125,7 @@ If nothing was missed, return exactly: []
 OUTPUT — ONLY valid JSON array of MISSED MCQs, nothing else:
 [{{"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}]"""
 
-ONU2_ANSWER_KEY_PROMPT_TMPL = """This page may contain an ANSWER KEY / উত্তরমালা section — usually a small table or grid near the end of an MCQ set, mapping question numbers to their correct option letter (e.g. "১।(ক) ২।(খ) ৩।(খ)..." or a table with numbered cells each showing "১ (ক)" style entries).
+ONU2_ANSWER_KEY_PROMPT_TMPL = """This page may contain an ANSWER KEY / উত্তরমালা section — this is a small table or grid that appears AFTER an entire MCQ set ends (not beside or next to individual MCQs), mapping question numbers to their correct option letter (e.g. "১।(ক) ২।(খ) ৩।(খ)..." or a table with numbered cells each showing "১ (ক)" style entries). It is often on a LATER page than the MCQs it covers -- if this page has no MCQs at all but has such a table, that's expected, still check it.
 
 Here is a list of MCQs already extracted from red-marked regions (question number, a short snippet of the question text to confirm real content match, and the answer already determined from the red-circled option on the page):
 {mcq_list}
@@ -15514,6 +15514,23 @@ async def _handle_onu2_impl(msg: dict):
             chat_id, pages, topic, file_name, status_msg_id,
             extractor=_onu2_extract_from_image
         )
+
+        # ── Cross-page উত্তরমালা sweep ──
+        # The answer-key table usually sits on a LATER page, right after
+        # the MCQ set ends (not beside/adjacent to each MCQ) -- the
+        # per-page check inside _onu2_extract_from_image only catches a
+        # same-page key, so this sweep re-checks every extracted MCQ
+        # (that still has an mcq_no) against every page's image, in case
+        # its key entry lives on a different page than the MCQ itself.
+        all_mcqs_with_no = [m for _, _, mcqs in extracted_pages for m in mcqs if (m.get("mcq_no") or "").strip()]
+        if all_mcqs_with_no:
+            try:
+                for _, page_img in pages:
+                    if not all_mcqs_with_no:
+                        break
+                    await _onu2_answer_key_check(page_img, all_mcqs_with_no)
+            except Exception as e:
+                logger.warning(f"[ONU2] cross-page answer-key sweep failed: {e}")
 
         total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
 
