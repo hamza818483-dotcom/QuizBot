@@ -1112,6 +1112,13 @@ def _build_bio_prompt(topic: str) -> str:
         f"  → correct grouping for that page: topic ৭, topic ৮ (covers "
         f"both the Cytoskeleton intro AND the (১) Microtubules sub-point), "
         f"topic ৯.\n"
+        f"🔎 CONTENT-RELEVANCE CROSS-CHECK: before finalizing any visual candidate as a real "
+        f"heading, read the paragraph right below it and confirm it actually discusses the named "
+        f"subject (e.g. a \"সেন্ট্রিওল (Centriole)\" heading must be followed by content about "
+        f"centrioles specifically). If the content below doesn't match the heading's name, or "
+        f"there's no real explanatory content under it at all, do NOT treat it as a topic heading "
+        f"even if it looked visually bold-centered — it's a decorative line or box label, not a "
+        f"real topic boundary.\n"
         f"Everything (paragraphs, bullet points, sub-labels, diagrams-text) "
         f"appearing AFTER one such heading and BEFORE the next belongs to "
         f"that heading's topic — that heading's exact text (Bangla "
@@ -12202,28 +12209,48 @@ def _build_bio_heading_scan_prompt() -> str:
         "  - figure captions, table headers, page footer/header branding, page numbers\n\n"
         "A true topic heading is rare per page — expect at most 0-3, often ZERO (pure continuation "
         "pages). If a candidate line scores low on all 4 signals, do NOT report it.\n\n"
+        "🔎 STEP 2 — CONTENT-RELEVANCE CROSS-CHECK (do this for every visual candidate from Step 1 "
+        "BEFORE finalizing it as a real heading): read the paragraph/content immediately below the "
+        "candidate line. Ask: is this content ACTUALLY about the subject named in the candidate "
+        "line? A genuine topic heading's name always matches what the following content discusses "
+        "— e.g. a heading \"সেন্ট্রিওল (Centriole)\" must be followed by content describing "
+        "centrioles (their structure, discovery, function), not some unrelated topic. If a "
+        "visually-bold-centered line is followed by content that talks about something else "
+        "entirely, or is just a random phrase/quote/label with no real explanatory content under "
+        "it at all, DO NOT report it as a topic heading even if it passed the visual signals — "
+        "visual signals alone are not enough, the content underneath must genuinely belong to that "
+        "named topic. This content-check is what separates a REAL topic heading from a coincidentally "
+        "bold-and-centered decorative line, box label, or quote.\n\n"
         "WORKED EXAMPLE (real textbook page, for calibration):\n"
         "  A page has, top to bottom:\n"
         "    \"৭। সেন্ট্রিওল (Centriole)\" — signals 1,2,3,4 ALL match (centered + bracket-right "
-        "+ numbered + bold-larger) → REPORT this, heading_text = \"৭। সেন্ট্রিওল (Centriole)\"\n"
-        "    \"৮। কোষীয় কঙ্কাল (Cytoskeleton)\" — signals 1,2,3,4 ALL match → REPORT this\n"
+        "+ numbered + bold-larger), AND the paragraph right below it is entirely about centrioles "
+        "(structure, discovery, function) → content-check PASSES → REPORT this, heading_text = "
+        "\"৭। সেন্ট্রিওল (Centriole)\"\n"
+        "    \"৮। কোষীয় কঙ্কাল (Cytoskeleton)\" — signals 1,2,3,4 ALL match, content below is "
+        "about the cytoskeleton → content-check PASSES → REPORT this\n"
         "    \"(১) মাইক্রোটিউবিউলস্ (Microtubules) :\" — has bracket (signal 2) and is bold "
         "(signal 4), but FAILS signal 1 (left-margin, not centered) and signal 3 (no Bangla "
         "numbering+দাঁড়ি prefix, it's a bracket-number not a \"X।\" prefix) → only 2/4 signals, "
-        "sits at the left margin → DO NOT report, it is a sub-heading of ৮, not its own topic\n"
-        "    \"৯। পারঅক্সিসোম (Peroxisome)\" — signals 1,2,3,4 ALL match → REPORT this\n"
+        "fails the visual gate already → DO NOT report, it is a sub-heading of ৮, not its own topic\n"
+        "    \"৯। পারঅক্সিসোম (Peroxisome)\" — signals 1,2,3,4 ALL match, content below is about "
+        "peroxisomes → content-check PASSES → REPORT this\n"
         "  Correct output for that page: three entries (৭, ৮, ৯), NOT four.\n\n"
-        "For each genuine topic heading found (top to bottom order on the page), report:\n"
+        "For each genuine topic heading found — one that PASSED BOTH the visual-signal score AND "
+        "the content-relevance cross-check — (top to bottom order on the page), report:\n"
         "  - its exact text (Bangla numbering prefix if present + Bengali heading text + English "
         "parenthetical if present)\n"
         "  - approximately how far down the page it sits, as a fraction from 0.0 (very top) to "
         "1.0 (very bottom) of the page height — your best visual estimate, used only to order "
         "multiple headings relative to each other on this same page.\n"
         "  - a true/false flag for EACH of the 4 signals individually, so the exact match count "
-        "can be verified downstream — do not skip any flag.\n\n"
+        "can be verified downstream — do not skip any flag.\n"
+        "  - \"content_matches\": true (only report headings where this is true — content-check "
+        "already filtered out any that failed).\n\n"
         "Output ONLY this JSON array, nothing else, in top-to-bottom page order:\n"
         '[{"heading_text": "...", "vertical_position": 0.0, "centered": true, '
-        '"english_bracket_right": true, "bangla_number_prefix": true, "bold_larger_font": true}]\n'
+        '"english_bracket_right": true, "bangla_number_prefix": true, "bold_larger_font": true, '
+        '"content_matches": true}]\n'
         "If there are zero genuine topic headings on this page, output exactly []."
     )
 
@@ -12292,12 +12319,23 @@ def _bio_heading_score(h: dict) -> int:
     on its own to even be considered -- per the prompt, centered alone is
     already the strongest signal, and a heading that isn't centered but
     is only bold+larger (signal 4 only) is treated as a left-margin
-    sub-label, not a real topic heading, and scores 0 (rejected)."""
+    sub-label, not a real topic heading, and scores 0 (rejected).
+    Also gates on "content_matches" -- the model's own content-relevance
+    self-check (does the paragraph under this heading actually discuss
+    the named topic, not just visually look like a heading) -- a
+    candidate failing that check scores 0 regardless of visual signals,
+    since a heading whose content doesn't match its name is not a real
+    topic boundary, just a decorative bold-centered line."""
     centered = bool(h.get("centered"))
     if not centered:
         # Matches only signal 4 (bold/larger) at best -- per the serial
         # priority rule this is a sub-label, not a real heading. Reject
         # outright rather than let a lower score still slip through.
+        return 0
+    if not bool(h.get("content_matches", True)):
+        # Model itself flagged that the content below doesn't actually
+        # discuss this heading's named topic -- reject regardless of how
+        # visually heading-like the line looked.
         return 0
     text_signals = _bio_verify_heading_text_signals(h.get("heading_text"))
     score = 1  # signal 1: centered
