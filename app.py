@@ -15100,7 +15100,7 @@ ONU2_CALL2_MISSCHECK_PROMPT_TMPL = """Re-scan this page image for the SOLE inclu
 Already-extracted red-boxed MCQs from this page (do not re-list these, only find ones MISSED):
 {existing_list}
 
-Task: Check every red box region on this page (including box(es) that enclosed MULTIPLE MCQs together) — is there ANY MCQ inside a red box that is NOT in the already-extracted list above? Look carefully at grouped boxes especially, since a group can hide a missed MCQ in the middle or end of the group.
+Task: This is a FULL AUDIT of the page — independently re-find every left-margin red box marking (short, single-number boxes AND tall, multi-number boxes alike) and compare against the already-extracted list above. Report ANY red-marked MCQ, whether marked alone or as part of a group, that is missing from that list. Pay special attention to the middle/last numbers inside a tall group-box, since those are most often missed.
 
 If you find MISSED red-boxed MCQ(s), extract them fully (same fields as before: mcq_no, question, options A-D, answer with independent verification against the small red option-mark if present, marked_answer_wrong, no_mark, explanation).
 
