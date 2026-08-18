@@ -15121,6 +15121,11 @@ STRICT RULES:
 
 SECOND TASK — ANSWER AUDIT of the already-extracted list (separate from the miss-check above): for each MCQ already in the existing list, look at the page image again and re-confirm: did the extraction correctly read the red-circled/red-marked option as its answer? Report ONLY entries where you find the recorded answer does NOT match what is actually red-circled on the page (a genuine reading error), as a SEPARATE array under "answer_corrections". If everything matches, return an empty array for this too.
 
+THIRD TASK — SPELLING/WORD-MISMATCH AUDIT of the already-extracted list (separate from both tasks above): OCR/vision extraction sometimes misreads a word inside the question text or an option -- producing a misspelled word, or a word that is clearly the WRONG word for that context (e.g. a physics/chemistry/biology term that doesn't fit the surrounding sentence, or is not a real term at all in that subject). For each MCQ already in the existing list, re-look at the actual printed text on the page image, and using both (a) the literal printed text and (b) your own subject-knowledge of what term/word SHOULD correctly appear there given the full context of the question + its options + its answer together, check whether any word in the question or in any option is suspicious, out-of-context, or misspelled compared to what the page actually shows or what correct subject terminology requires.
+- Only report a genuine mismatch -- do not "improve" or rephrase correct text, do not change meaning, do not touch numbers/units/proper nouns that are already correct. This is strictly a misread/misspelling fix, not a rewrite.
+- If you find a genuine mismatch, report it as a SEPARATE array under "text_corrections", with the corrected FULL question text (if the question had the error) and/or corrected FULL option text for just the affected option letter(s) (if an option had the error) -- always give the complete corrected field, never a partial/diff.
+- If nothing needs correcting, return an empty array for this too.
+
 Already-extracted red-boxed MCQs from this page, with the answer already recorded (do not re-list these in "missed", only find truly MISSED ones there; DO use "current_answer" for Task 2's answer audit):
 {existing_list}
 
@@ -15130,10 +15135,12 @@ If you find MISSED red-boxed MCQ(s), extract them fully (same fields as before: 
 
 Task 2 (answer audit): for entries with a "current_answer" field in the existing list, re-look at the red-circled option for that specific MCQ on the page and confirm the recorded letter matches. Only include an entry in "answer_corrections" if it's a genuine mismatch (a misread option), with the corrected letter as "correct_answer".
 
-If nothing was missed and no answer mismatches found, return the empty-array structure shown below.
+Task 3 (spelling/word-mismatch audit): for each entry in the existing list, re-check its question text and option texts against the page image and your subject knowledge as described above. Only include an entry in "text_corrections" if a genuine word-level error is found, identified by "mcq_no", with "corrected_question" (full corrected question text, omit this key entirely if the question itself needed no fix) and/or "corrected_options" (an object with only the affected letter(s) as keys, e.g. {{"B":"corrected option B text"}}, omit this key entirely if no option needed a fix).
+
+If nothing was missed and no answer mismatches or text corrections found, return the empty-array structure shown below.
 
 OUTPUT — ONLY valid JSON object, nothing else, no markdown fences:
-{{"missed": [{{"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}], "answer_corrections": [{{"mcq_no":"...","correct_answer":"A/B/C/D"}}]}}"""
+{{"missed": [{{"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}], "answer_corrections": [{{"mcq_no":"...","correct_answer":"A/B/C/D"}}], "text_corrections": [{{"mcq_no":"...","corrected_question":"...","corrected_options":{{"B":"..."}}}}]}}"""
 
 ONU2_ANSWER_KEY_PROMPT_TMPL = """This page may contain an ANSWER KEY / উত্তরমালা section — this is a small table or grid that appears AFTER an entire MCQ set ends (not beside or next to individual MCQs), mapping question numbers to their correct option letter (e.g. "১।(ক) ২।(খ) ৩।(খ)..." or a table with numbered cells each showing "১ (ক)" style entries). It is often on a LATER page than the MCQs it covers -- if this page has no MCQs at all but has such a table, that's expected, still check it.
 
@@ -15207,10 +15214,10 @@ def _onu2_parse_mcq_array(text: str) -> list:
 
 
 def _onu2_parse_call2_object(text: str) -> dict:
-    """Dedicated parser for Call2's {"missed": [...], "answer_corrections": [...]}
-    object output. Returns {"missed": [], "answer_corrections": []} on any
-    parse failure so callers never need extra None-checks."""
-    empty = {"missed": [], "answer_corrections": []}
+    """Dedicated parser for Call2's {"missed": [...], "answer_corrections": [...],
+    "text_corrections": [...]} object output. Returns all three keys empty on
+    any parse failure so callers never need extra None-checks."""
+    empty = {"missed": [], "answer_corrections": [], "text_corrections": []}
     if not text:
         return empty
     t = text.strip()
@@ -15227,9 +15234,11 @@ def _onu2_parse_call2_object(text: str) -> dict:
         return empty
     missed = raw.get("missed", [])
     corrections = raw.get("answer_corrections", [])
+    text_corrections = raw.get("text_corrections", [])
     return {
         "missed": [mc for mc in missed if isinstance(mc, dict)] if isinstance(missed, list) else [],
         "answer_corrections": [c for c in corrections if isinstance(c, dict)] if isinstance(corrections, list) else [],
+        "text_corrections": [c for c in text_corrections if isinstance(c, dict)] if isinstance(text_corrections, list) else [],
     }
 
 
@@ -15384,6 +15393,52 @@ async def _onu2_call2_misscheck(img, existing: list) -> list:
                     m["answer"] = new_ans
                     m["marked_answer_wrong"] = False
                     m["_answer_source"] = "call2_audit_correction"
+
+        # Apply spelling/word-mismatch text corrections in place onto
+        # `existing` -- same mcq_no-match pattern as answer_corrections
+        # above. corrected_question replaces the whole question text;
+        # corrected_options only overwrites the specific letter(s) given,
+        # leaving other options untouched. Both go through the same
+        # numbering-strip/cleanup as Call1/Call2 MCQ output so a corrected
+        # question never reintroduces a leading "১ক১।" the model echoes.
+        for corr in parsed.get("text_corrections", []):
+            no = (corr.get("mcq_no") or "").strip()
+            if not no:
+                continue
+            for m in existing:
+                if (m.get("mcq_no") or "").strip() != no:
+                    continue
+                new_q = corr.get("corrected_question")
+                if new_q and str(new_q).strip():
+                    cleaned_q = _clean_mcq_text(_strip_q_numbering(str(new_q).strip()))
+                    if cleaned_q and cleaned_q != m.get("question"):
+                        logger.warning(f"[ONU2] Call2 text-audit correction (question): mcq_no={no}")
+                        m["question"] = cleaned_q
+                        m["_text_corrected"] = True
+                new_opts = corr.get("corrected_options")
+                if isinstance(new_opts, dict) and new_opts:
+                    opts = m.get("options")
+                    if isinstance(opts, dict):
+                        for letter, val in new_opts.items():
+                            letter = str(letter).strip().upper()
+                            if letter in ("A", "B", "C", "D") and val and str(val).strip():
+                                cleaned_opt = _clean_mcq_text(str(val).strip())
+                                if cleaned_opt and cleaned_opt != opts.get(letter):
+                                    logger.warning(f"[ONU2] Call2 text-audit correction (option {letter}): mcq_no={no}")
+                                    opts[letter] = cleaned_opt
+                                    m["_text_corrected"] = True
+                    elif isinstance(opts, list) and len(opts) == 4:
+                        _letter_idx = {"A": 0, "B": 1, "C": 2, "D": 3}
+                        for letter, val in new_opts.items():
+                            letter = str(letter).strip().upper()
+                            if letter in _letter_idx and val and str(val).strip():
+                                idx = _letter_idx[letter]
+                                cleaned_opt = _clean_mcq_text(str(val).strip())
+                                if cleaned_opt and cleaned_opt != opts[idx]:
+                                    logger.warning(f"[ONU2] Call2 text-audit correction (option {letter}): mcq_no={no}")
+                                    opts[idx] = cleaned_opt
+                                    m["_text_corrected"] = True
+                break
 
         if not missed:
             return []
