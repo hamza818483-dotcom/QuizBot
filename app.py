@@ -7507,6 +7507,42 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
             if progress_cb:
                 await progress_cb(70)
 
+            if use_css_page_size:
+                # Measure REAL rendered height of each .abpage's tallest column
+                # (actual browser layout, not a character-count guess) and
+                # shrink each page's @page-equivalent height to match exactly
+                # — eliminates leftover blank space regardless of font
+                # rendering quirks, wrapped-line counts, or option length.
+                try:
+                    await page.evaluate("""
+                        () => {
+                            const pages = document.querySelectorAll('.abpage');
+                            pages.forEach(pg => {
+                                const cc = pg.querySelector('.content-columns');
+                                if (!cc) return;
+                                // Measure tallest column by checking each question's
+                                // bottom offset relative to the columns container,
+                                // grouped by which column (x-position) it landed in.
+                                const items = Array.from(cc.querySelectorAll(':scope > .question'));
+                                if (!items.length) return;
+                                const colBottoms = {};
+                                items.forEach(it => {
+                                    const r = it.getBoundingClientRect();
+                                    const key = Math.round(r.left);
+                                    const bottom = r.bottom;
+                                    if (!colBottoms[key] || bottom > colBottoms[key]) colBottoms[key] = bottom;
+                                });
+                                const ccTop = cc.getBoundingClientRect().top;
+                                const maxBottom = Math.max(...Object.values(colBottoms));
+                                const neededPx = Math.ceil(maxBottom - ccTop) + 12; // small breathing margin
+                                cc.style.height = neededPx + 'px';
+                            });
+                        }
+                    """)
+                    await asyncio.sleep(0.15)
+                except Exception as _e:
+                    logger.warning(f"[PDF Gen] style7 real-height measurement failed, falling back to estimated height: {_e}")
+
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as pf:
                 output_path = pf.name
 
@@ -8162,7 +8198,7 @@ def _build_print_style7(data, heading):
             seg = chunk[c * per_col:(c + 1) * per_col]
             col_heights.append(sum(_est_item_height_mm(d) for d in seg))
         tallest_mm = max(col_heights) if col_heights else 40
-        est_mm = max(40, min(560, round(tallest_mm + 10)))  # +10mm header/breathing room
+        est_mm = max(40, min(560, round(tallest_mm * 1.15 + 15)))  # generous buffer; real height gets measured+shrunk in _html_to_pdf before final render
         body += f'<div class="abpage"><div class="content-columns" style="height:{est_mm}mm">'
         for d in chunk:
             body += _render_question(d)
