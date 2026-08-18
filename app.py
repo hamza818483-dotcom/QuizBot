@@ -15079,7 +15079,7 @@ async def _handle_onu_impl(msg: dict):
 #   a question number ALWAYS overrides the option's red-circle mark).
 # ============================================================
 
-ONU2_CALL1_PROMPT = """MCQ EXTRACTOR — RED-BOX REGION ONLY. This page has some MCQs enclosed inside a RED BOX or RED RECTANGLE outline (drawn around the question+options). A red box may contain a SINGLE MCQ, or a GROUP of several consecutive MCQs together — both are valid, check carefully. IGNORE every MCQ that is NOT inside any red box — do not extract it at all. Do not confuse this with the small red circle/box drawn around one OPTION letter inside an MCQ (that is the answer-mark, not a region box — every region box is drawn around whole MCQ block(s), clearly larger, enclosing question text and all 4 options).
+ONU2_CALL1_PROMPT = """MCQ EXTRACTOR — RED-BOX REGION ONLY. The SOLE indicator for inclusion is: a RED BOX/RECTANGLE drawn around the MCQ's SERIAL NUMBER label, positioned to the LEFT of the question text (e.g. around "১ক১", "1", "১খ৩" — the number sitting before/left of the question line). This left-side number-box may enclose a SINGLE MCQ's number, or sit beside a GROUP marking several consecutive MCQs together — both are valid, check carefully. A red box drawn anywhere else (around the question text itself, around an option, around a whole paragraph with no left-side number box) does NOT count — do NOT include that MCQ. IGNORE every MCQ whose left-side number has no red box/rectangle around it — do not extract it at all. Do not confuse this left-side number-box with the small red circle/box drawn around one OPTION letter inside an MCQ (that is the separate answer-mark, unrelated to inclusion).
 
 For each MCQ found INSIDE a red box:
 1. Extract the exact question number label if printed (e.g. "১ক১", "1", "১খ৩") into "mcq_no" (string, exact as printed; empty string if none printed).
@@ -15095,7 +15095,7 @@ No red-boxed MCQ on this page -> return [].
 OUTPUT — ONLY valid JSON array, nothing else:
 [{"mcq_no":"...","question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}]"""
 
-ONU2_CALL2_MISSCHECK_PROMPT_TMPL = """Re-scan this page image for RED BOX / RED RECTANGLE regions ONLY (boxes drawn around MCQ question+options — single MCQ per box, or a group of consecutive MCQs boxed together). Do NOT confuse with the small red circle/box marking one option's letter as the answer (that is a different, smaller mark, always INSIDE an MCQ, never the region box itself).
+ONU2_CALL2_MISSCHECK_PROMPT_TMPL = """Re-scan this page image for the SOLE inclusion marker: a RED BOX/RECTANGLE drawn around an MCQ's SERIAL NUMBER label, to the LEFT of the question text (e.g. around "১ক১", "1" -- the number before/left of the question line). A single number-box can mark one MCQ, or a group of consecutive MCQs together. A red box anywhere else (around question text, an option, a paragraph) with no left-side number box does NOT count. Do NOT confuse this with the small red circle/box marking one option's letter as the chosen answer (a different, smaller mark, always INSIDE an MCQ's option list).
 
 Already-extracted red-boxed MCQs from this page (do not re-list these, only find ones MISSED):
 {existing_list}
