@@ -1105,6 +1105,17 @@ def _build_bio_prompt(topic: str) -> str:
         f"size increase sitting inline within a paragraph, left-aligned "
         f"sub-labels like '(ক) ইন্টারফেজ' — not centered above a content "
         f"block, figure captions, or table headers.\n"
+        f"WORKED EXAMPLE (real textbook page, for calibration):\n"
+        f"  \"৭। সেন্ট্রিওল (Centriole)\" — bold, centered → topic heading.\n"
+        f"  \"৮। কোষীয় কঙ্কাল (Cytoskeleton)\" — bold, centered → topic heading.\n"
+        f"  \"(১) মাইক্রোটিউবিউলস্ (Microtubules) :\" — bold but LEFT-MARGIN "
+        f"(not centered), a sub-point under ৮ → NOT its own topic, its MCQs "
+        f"still belong to topic_hint \"৮। কোষীয় কঙ্কাল\".\n"
+        f"  \"৯। পারঅক্সিসোম (Peroxisome)\" — bold, centered → topic heading.\n"
+        f"  → correct grouping for that page: topic ৭, topic ৮ (covers "
+        f"both the Cytoskeleton intro AND the (১) Microtubules sub-point), "
+        f"topic ৯ — the bracketed left-aligned sub-point never starts a "
+        f"new topic_hint on its own.\n"
         f"Everything (paragraphs, bullet points, sub-labels, diagrams-text) "
         f"appearing AFTER one such heading and BEFORE the next belongs to "
         f"that heading's topic — that heading's exact text (Bangla "
@@ -12192,6 +12203,17 @@ def _build_bio_heading_scan_prompt() -> str:
         "A true topic heading is rare per page — expect at most 0-3, often ZERO (pure continuation "
         "pages). If not confident a line satisfies BOTH the bold/size signal AND the "
         "above-content/centered positioning, do NOT report it.\n\n"
+        "WORKED EXAMPLE (real textbook page, for calibration):\n"
+        "  A page has, top to bottom:\n"
+        "    \"৭। সেন্ট্রিওল (Centriole)\" — bold, centered, above a paragraph → REPORT this, "
+        "heading_text = \"৭। সেন্ট্রিওল (Centriole)\"\n"
+        "    \"৮। কোষীয় কঙ্কাল (Cytoskeleton)\" — bold, centered, above a paragraph → REPORT this\n"
+        "    \"(১) মাইক্রোটিউবিউলস্ (Microtubules) :\" — bold, but sits at the LEFT MARGIN "
+        "(not centered), introducing a sub-point inside the Cytoskeleton section → DO NOT report "
+        "this, it is a sub-heading of ৮, not its own topic\n"
+        "    \"৯। পারঅক্সিসোম (Peroxisome)\" — bold, centered, above a paragraph → REPORT this\n"
+        "  Correct output for that page: three entries (৭, ৮, ৯), NOT four — the bracketed "
+        "left-aligned sub-point is excluded.\n\n"
         "For each genuine topic heading found (top to bottom order on the page), report:\n"
         "  - its exact text (Bangla numbering prefix if present + Bengali heading text + English "
         "parenthetical if present)\n"
@@ -12206,6 +12228,37 @@ def _build_bio_heading_scan_prompt() -> str:
 
 def _parse_bio_heading_scan(text: str) -> list:
     return _parse_unmesh_heading_scan(text)
+
+
+def _is_sane_bio_heading(text: str) -> bool:
+    """Code-level sanity guard on heading text the scan reports, so a
+    mis-detected line (a full sentence, a stray fragment, a left-margin
+    bracketed sub-point like '(১) মাইক্রোটিউবিউলস্' that slipped through
+    despite the prompt's exclusion rule) can't corrupt the topic name that
+    gets force-written into topic_hint. Deliberately generous (heading
+    length varies), just catches obvious garbage."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    # Too long to plausibly be a heading (a real sentence/paragraph leaked
+    # through) -- genuine headings incl. English parenthetical rarely
+    # exceed ~80 chars.
+    if len(t) > 90:
+        return False
+    # Too short to be meaningful (a stray digit/punctuation mark).
+    if len(t) < 2:
+        return False
+    # A left-margin bracketed sub-point leaking through despite the
+    # prompt's exclusion instruction -- e.g. "(১) মাইক্রোটিউবিউলস্",
+    # "(ক) ইন্টারফেজ". Reject outright at the code level as a backstop.
+    if re.match(r'^\([০-৯0-9ক-হ]{1,3}\)', t):
+        return False
+    # A line ending mid-sentence with a Bengali sentence-continuation verb
+    # form is a strong sign this was extracted paragraph text, not a
+    # heading (headings are noun-phrase topic names, never full clauses).
+    if t.endswith(("।", "এবং", "কারণ", "যেহেতু")) and len(t) > 40:
+        return False
+    return True
 
 
 async def _bio_apply_heading_scan(generated_pages: list) -> list:
@@ -12244,7 +12297,9 @@ async def _bio_apply_heading_scan(generated_pages: list) -> list:
             # previous page's topic group.
             return
         ordered = sorted(
-            [h for h in headings if isinstance(h.get("vertical_position"), (int, float)) and (h.get("heading_text") or "").strip()],
+            [h for h in headings
+             if isinstance(h.get("vertical_position"), (int, float))
+             and _is_sane_bio_heading(h.get("heading_text"))],
             key=lambda h: h["vertical_position"],
         )
         if not ordered:
