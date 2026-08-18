@@ -886,6 +886,7 @@ def _build_chok_prompt(topic: str) -> str:
 
 
 _BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
+_BIO_MODE = contextvars.ContextVar("bio_mode", default=False)
 
 def _build_bangla_prompt(topic: str) -> str:
     """
@@ -1040,6 +1041,135 @@ def _build_bangla_prompt(topic: str) -> str:
         f"with '[' and contain nothing but the JSON array. Schema:\n"
         f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"exp_bbox\":[100,200,900,350]}}]"
+    )
+
+
+def _build_bio_prompt(topic: str) -> str:
+    """
+    /bio command prompt — generation pipeline identical to /bangla (full
+    source-utilization, no MCQ cap) PLUS topic-wise grouping: each generated
+    MCQ also gets 'qsn_no' (sequential per-page counter, used the same way
+    /topic's qsn_no==1 marks a new segment) and 'topic_hint' (the detected
+    section heading it was generated from), so output can be split into
+    separate per-topic CSVs exactly like /topic does for extraction.
+
+    Topic-heading detection (per user spec, 3 combined visual signals — a
+    line only counts as a topic_hint if it matches these, not just any bold
+    text):
+      1) BOLD BLACK font, and visibly LARGER than the font size of the
+         paragraph text immediately before/around it.
+      2) HORIZONTALLY CENTERED on the page/column (not left-aligned like a
+         normal paragraph or sub-label).
+      3) Often (not always) followed on the same line or the line right
+         below by an English translation in parentheses, e.g. "(Cell Cycle
+         & Interphase)" — optional signal, absence doesn't disqualify a
+         heading that already satisfies 1+2.
+    Everything between one such heading and the next belongs to that topic.
+    """
+    return (
+        f"You are an expert MCQ-generation engine for Bengali/English academic "
+        f"textbook pages (medical/HSC/admission-standard quality).\n"
+        f"Subject: {topic}\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟨 STEP 1 — DETECT TOPIC HEADINGS FIRST (before generating any MCQ)\n"
+        f"═══════════════════════════════\n"
+        f"Scan the ENTIRE page top-to-bottom and find every TOPIC HEADING line. "
+        f"A line is a genuine topic heading ONLY if it matches these signals "
+        f"TOGETHER:\n"
+        f"  1) BOLD BLACK font, and clearly LARGER in size than the normal "
+        f"paragraph/body text immediately above or below it.\n"
+        f"  2) HORIZONTALLY CENTERED on the page/column — not left-aligned "
+        f"like normal paragraph text or a small sub-label.\n"
+        f"  3) Often (not mandatory) has an English translation in "
+        f"parentheses on the same line or the line right below it, e.g. "
+        f"\"কোষচক্র ও ইন্টারফেজ (Cell Cycle & Interphase)\" — a heading "
+        f"missing this English part is still valid if 1+2 already hold.\n"
+        f"Do NOT treat as a topic heading: normal bold body text with no "
+        f"size increase, left-aligned sub-labels like '(ক) ইন্টারফেজ' "
+        f"inline within a paragraph, figure captions, or table headers — "
+        f"only a genuinely separate, centered, larger heading line counts.\n"
+        f"Everything (paragraphs, bullet points, sub-labels, diagrams-text) "
+        f"appearing AFTER one such heading and BEFORE the next belongs to "
+        f"that heading's topic — that heading's exact text (Bengali part "
+        f"only, drop the English parenthetical if present) is the topic name "
+        f"for all content under it. If the page has genuinely zero heading "
+        f"matching all signals, use \"{topic}\" as the topic for the whole "
+        f"page's content.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 STEP 2 — GENERATE MCQs — MAXIMUM SOURCE UTILIZATION, NO CAP\n"
+        f"═══════════════════════════════\n"
+        f"- Go through this page LINE BY LINE, PARAGRAPH BY PARAGRAPH, POINT BY "
+        f"POINT, CELL BY CELL, topic-segment by topic-segment (per Step 1). "
+        f"Every distinct line, sentence, fact, or definition MUST generate at "
+        f"least one MCQ — zero exceptions, zero skipped content, zero skipped "
+        f"topic segments.\n"
+        f"- If a segment/paragraph is rich in information, generate MORE than "
+        f"one MCQ from it, covering different angles (direct fact, "
+        f"definition, cause-effect, fill-in-the-blank, comparison, 'কোনটি "
+        f"সঠিক নয়' style).\n"
+        f"- NO MAXIMUM MCQ COUNT per page — squeeze out every usable fact "
+        f"under every topic heading. Never artificially stop early.\n"
+        f"- Never skip a topic segment for being short — even a short "
+        f"one-paragraph topic must produce at least one real MCQ.\n"
+        f"- Pay special attention to the LAST topic segment / bottom of the "
+        f"page — most commonly missed.\n"
+        f"- Never make junk/filler MCQs just to inflate count.\n"
+        f"- NEVER generate MCQs from the topic heading text itself, chapter "
+        f"titles, page numbers, or figure numbers — these are structural "
+        f"labels, not content.\n"
+        f"- Include several MCQs that combine 2-3 distinct facts from within "
+        f"the SAME topic segment into one question (options are fact-"
+        f"combinations, only one fully correct) — moderate difficulty only, "
+        f"never combine facts across two different topic segments.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 MUST-PRIORITY — marked/highlighted content\n"
+        f"═══════════════════════════════\n"
+        f"Any line/paragraph highlighted, boxed, circled, or underlined in "
+        f"ANY color always gets an MCQ, in addition to normal coverage above.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 প্রশ্ন / অপশন / উত্তর / ব্যাখ্যা — same quality bar as standard MCQ generation\n"
+        f"═══════════════════════════════\n"
+        f"- Question: short and clear (1-1.5-2 lines).\n"
+        f"- 🚨 EXACT TERM FIDELITY: copy every proper noun/term/spelling "
+        f"exactly as printed on the page, character for character.\n"
+        f"- Exactly 4 options, all substantive, distractors close/confusable "
+        f"with the correct answer pulled from nearby related info in the "
+        f"SAME topic segment. Exactly one correct, no ambiguity.\n"
+        f"- Vary which option letter is correct across the set.\n"
+        f"- Explanation (150-280 chars): state the correct option and why, "
+        f"THEN briefly say why each of the other 3 is wrong. Source-first, "
+        f"general knowledge only if source is silent on a wrong option.\n"
+        f"- Detect Bengali vs English script and write question/options/"
+        f"explanation in that exact language, never translate/mix.\n"
+        f"- 🚫 NEVER reference the source itself (word-root ban): পৃষ্ঠা, "
+        f"চিত্র, বক্স/box, ছক/table, সারণি, টেক্সট/text, অনুচ্ছেদ, প্যাসেজ, টপিক "
+        f"in any grammatical form, or phrases like \"দেখা যাচ্ছে\"/\"লিখা "
+        f"আছে\"/\"as shown in the figure\". State facts directly as general "
+        f"knowledge.\n\n"
+
+        f"For EACH MCQ also give:\n"
+        f"- \"qsn_no\": a sequential integer counter starting at 1 for the "
+        f"FIRST MCQ generated on this page, incrementing by 1 for every "
+        f"subsequent MCQ on this page in generation order (this is NOT a "
+        f"printed number, you are creating it) — used to detect topic "
+        f"boundaries downstream.\n"
+        f"- \"topic_hint\": the exact Bengali topic heading text (from Step "
+        f"1) that this MCQ's content falls under, EXACT SAME string for "
+        f"every MCQ generated under the same heading.\n"
+        f"- \"exp_bbox\": a TIGHT bounding box centered on the specific line/"
+        f"paragraph this MCQ came from, normalized 0-1000 ([x_min,y_min,"
+        f"x_max,y_max]). Use null if unsure.\n\n"
+
+        f"Return STRICT JSON array only, no prose, no markdown fences, no "
+        f"<think>/reasoning text — output must start IMMEDIATELY with '[' "
+        f"and contain nothing but the JSON array. Schema:\n"
+        f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
+        f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"exp_bbox\":"
+        f"[100,200,900,350],\"qsn_no\":1,\"topic_hint\":\"...\"}}]"
     )
 
 
@@ -1307,6 +1437,8 @@ def _build_mcq_prompt(topic: str, count) -> str:
         return _build_chok_prompt(topic)
     if _BANGLA_MODE.get():
         return _build_bangla_prompt(topic)
+    if _BIO_MODE.get():
+        return _build_bio_prompt(topic)
     if _TF_MODE.get():
         return _build_tf_prompt(topic)
     if _EXTRA_MODE.get():
@@ -3200,6 +3332,10 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
             # (unmarked page) or just 1-2 (a single marked phrase). No
             # floor to retry toward, unlike the normal MIN_MCQ target.
             _rng_min, _rng_max = 0, None
+        elif _BIO_MODE.get():
+            # /bio, like /bangla, is maximum-source-utilization with no cap
+            # -- topic-wise full coverage, not a fixed page target.
+            _rng_min, _rng_max = MIN_MCQ, None
         else:
             _rng_min, _rng_max = MIN_MCQ, MAX_MCQ
 
@@ -14660,6 +14796,152 @@ async def _handle_topic_impl(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
+async def handle_bio(msg: dict):
+    """/bio -p (pages) [-c channel] [-m "Subject"] — same arg style as /pdf.
+    UNLIKE /topic (extracts EXISTING MCQ), /bio GENERATES NEW MCQ from the
+    page content like /pdf/bangla, but also detects topic headings (bold
+    black, larger font, horizontally centered, optional English "(...)"
+    subtitle) and groups the newly-generated MCQs into ONE separate CSV per
+    detected topic, exactly like /topic's output style."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        token = _BIO_MODE.set(True)
+        try:
+            return await _handle_bio_impl(msg)
+        finally:
+            _BIO_MODE.reset(token)
+
+
+async def _handle_bio_impl(msg: dict):
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF-এ reply করে /bio দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/bio -p 1-10 -m \"Subject\"</code>\n\n"
+            "📌 Page content থেকে নতুন MCQ বানায় (extract করে না, /pdf-এর মতো), "
+            "কিন্তু bold-black/বড় ফন্ট/centered heading দেখে টপিক ধরে প্রতিটার জন্য "
+            "আলাদা CSV পাঠায়।\n"
+            "📌 -p = page range (না দিলে সব page)\n"
+            "📌 -m = Subject/topic name (না দিলে default)\n"
+            "📌 -c <channel_id> = দিলে CSV না, প্রতি টপিকের নামসহ header দিয়ে channel-এ সরাসরি poll পাঠাবে"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+    params = _parse_pdfm_params(text)
+    page_range = params["page_range"]
+    bio_channel_id = params["channel_id"]
+    bio_thread_id = params["thread_id"]
+    subject = params.get("topic") or DEFAULT_TOPIC
+
+    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
+    status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Generation শুরু হচ্ছে (topic detect সহ)...")
+
+        generated_pages = await pdf_generate_all_pages(
+            chat_id, pages, subject, None, file_name, status_msg_id
+        )
+
+        total_mcq_found = sum(len(mcqs) for _, _, mcqs in generated_pages)
+        if not total_mcq_found:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ generate হয়নি!")
+            return
+
+        topic_groups = _topic_group_mcqs(generated_pages)
+
+        if status_msg_id:
+            breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
+            next_step = "channel-এ poll পাঠানো হচ্ছে..." if bio_channel_id else "CSV পাঠানো হচ্ছে..."
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ Generation Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
+
+        if bio_channel_id:
+            total_polls = await _post_topic_groups_to_channel(bio_channel_id, topic_groups, bio_thread_id)
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+            return
+
+        _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+        import io as _io_bio, csv as _csv_bio
+        _running_count = 0
+        _cmd_msg_id = msg.get("message_id")
+        for name, mcqs in topic_groups:
+            buf = _io_bio.StringIO()
+            w = _csv_bio.writer(buf)
+            w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                        "answer", "explanation", "type", "section"])
+            for m in mcqs:
+                opts = m.get("options", ["", "", "", ""])
+                w.writerow([
+                    m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                    opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                    opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                    _ans_map.get(m.get("answer", "A"), "1"),
+                    _strip_img_tag(m.get("explanation", "")), "1", "1"
+                ])
+            safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip() or "Topic"
+            range_start = _running_count + 1
+            range_end = _running_count + len(mcqs)
+            _running_count = range_end
+            _pg_nums = sorted({m.get("_page_num") for m in mcqs if m.get("_page_num") is not None})
+            if _pg_nums:
+                page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
+            else:
+                page_range_text = "N/A"
+            await send_document(chat_id, buf.getvalue().encode("utf-8"),
+                f"{safe_name}.csv",
+                caption=(f"📂 <code>{_html_escape(_clean_topic_name_for_copy(name))}</code>\n"
+                         f"📄 PDF Page: {page_range_text}\n"
+                         f"🔢 MCQ Range: {range_start}–{range_end}\n"
+                         f"💎 Total: {len(mcqs)}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
+
+    except Exception as e:
+        logger.error(f"[BIO] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
 async def handle_unmesh(msg: dict):
     """/unmesh -p (pages) — same arg style as /topic. Extracts existing MCQ
     like /topic, but detects topic boundaries via the WHITE-bg + BOLD BLACK
@@ -19857,6 +20139,13 @@ async def handle_message(msg: dict):
         # /topic = same extraction as /qbm but groups MCQs into separate
         # CSVs per detected topic (serial-number reset / heading change)
         _spawn_command_task(uid, handle_topic(msg))
+    elif text.startswith("/bio"):
+        # /bio = same GENERATION as /pdf (new MCQ from content, not
+        # extraction) but groups the newly-generated MCQs into separate
+        # CSVs per detected topic heading (bold-black/larger-font/centered,
+        # optional English "(...)" subtitle) — /topic's output style applied
+        # to /pdf's generation engine.
+        _spawn_command_task(uid, handle_bio(msg))
     elif text.startswith("/unmesh"):
         # /unmesh = same as /topic but topic heading is detected via a
         # different visual marker: white-bg + bold black text + preceding
