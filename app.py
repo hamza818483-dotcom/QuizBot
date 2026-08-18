@@ -15064,6 +15064,389 @@ async def _handle_onu_impl(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
+# ============================================================
+# /onu2 — RED-BOX REGION extraction (fully independent from /onu's
+# yellow/green-highlight logic; shares only pure stateless helpers).
+#   Inclusion rule: a MCQ is kept ONLY if it falls inside a RED BOX/RED
+#   RECTANGLE drawn around it on the page (single MCQ per box, or a group
+#   of consecutive MCQs boxed together — both are valid). MCQs outside any
+#   red box are ignored entirely — this is separate from the small red
+#   circle/box marking an individual OPTION as the chosen answer.
+#   Pipeline: Call1 (region-detect + extract + self-verify the marked
+#   answer) -> Call2 (independent miss-check: did Call1 miss any MCQ that
+#   is inside a red box, single or grouped?) -> Answer-key cross-check
+#   (উত্তরমালা table at the end of the MCQ set; if present, its answer for
+#   a question number ALWAYS overrides the option's red-circle mark).
+# ============================================================
+
+ONU2_CALL1_PROMPT = """MCQ EXTRACTOR — RED-BOX REGION ONLY. This page has some MCQs enclosed inside a RED BOX or RED RECTANGLE outline (drawn around the question+options). A red box may contain a SINGLE MCQ, or a GROUP of several consecutive MCQs together — both are valid, check carefully. IGNORE every MCQ that is NOT inside any red box — do not extract it at all. Do not confuse this with the small red circle/box drawn around one OPTION letter inside an MCQ (that is the answer-mark, not a region box — every region box is drawn around whole MCQ block(s), clearly larger, enclosing question text and all 4 options).
+
+For each MCQ found INSIDE a red box:
+1. Extract the exact question number label if printed (e.g. "১ক১", "1", "১খ৩") into "mcq_no" (string, exact as printed; empty string if none printed).
+2. Extract question text and all options exactly as written (Bangla stays Bangla, English stays English). Number options A,B,C,D by position (1st=A...4th=D).
+3. Find the RED-MARKED option (red circle/dot or red box around one option's letter/text/bullet). This is ONLY a pointer to what was marked — it can be wrong. Using your own subject knowledge, verify independently:
+   - If the marked option IS factually correct -> "answer" = that option, "marked_answer_wrong": false.
+   - If the marked option is NOT factually correct -> "answer" = the ACTUALLY correct option, "marked_answer_wrong": true.
+   - If no option is marked at all -> determine from subject knowledge, "marked_answer_wrong": false, "no_mark": true.
+4. Write a short explanation (1-2 sentences, Bangla if MCQ is Bangla) for why the correct answer is correct — use any ব্যাখ্যা text printed near it if present, otherwise your own knowledge.
+
+No red-boxed MCQ on this page -> return [].
+
+OUTPUT — ONLY valid JSON array, nothing else:
+[{"mcq_no":"...","question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}]"""
+
+ONU2_CALL2_MISSCHECK_PROMPT_TMPL = """Re-scan this page image for RED BOX / RED RECTANGLE regions ONLY (boxes drawn around MCQ question+options — single MCQ per box, or a group of consecutive MCQs boxed together). Do NOT confuse with the small red circle/box marking one option's letter as the answer (that is a different, smaller mark, always INSIDE an MCQ, never the region box itself).
+
+Already-extracted red-boxed MCQs from this page (do not re-list these, only find ones MISSED):
+{existing_list}
+
+Task: Check every red box region on this page (including box(es) that enclosed MULTIPLE MCQs together) — is there ANY MCQ inside a red box that is NOT in the already-extracted list above? Look carefully at grouped boxes especially, since a group can hide a missed MCQ in the middle or end of the group.
+
+If you find MISSED red-boxed MCQ(s), extract them fully (same fields as before: mcq_no, question, options A-D, answer with independent verification against the small red option-mark if present, marked_answer_wrong, no_mark, explanation).
+
+If nothing was missed, return exactly: []
+
+OUTPUT — ONLY valid JSON array of MISSED MCQs, nothing else:
+[{{"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}]"""
+
+ONU2_ANSWER_KEY_PROMPT_TMPL = """This page may contain an ANSWER KEY / উত্তরমালা section — usually a small table or grid near the end of an MCQ set, mapping question numbers to their correct option letter (e.g. "১।(ক) ২।(খ) ৩।(খ)..." or a table with numbered cells each showing "১ (ক)" style entries).
+
+Here is a list of MCQs already extracted from red-boxed regions, with their question numbers (as printed) and their currently-determined answer:
+{mcq_list}
+
+Task: If this page contains a উত্তরমালা/answer-key table, find entries matching ANY of the mcq_no values above (by exact number match). For every match found, return the answer key's letter for that number — this OVERRIDES whatever answer was determined from the option's red mark.
+
+If this page has no answer-key table at all, or none of its entries match these mcq_no values, return exactly: []
+
+OUTPUT — ONLY valid JSON array, nothing else:
+[{{"mcq_no":"...","key_answer":"A/B/C/D"}}]"""
+
+
+def _onu2_letter_from_bengali_option(raw: str) -> str:
+    """Maps a Bengali option-letter (ক/খ/গ/ঘ) or an already-Latin A/B/C/D
+    to a normalized A/B/C/D letter. Falls back to '' if unrecognized."""
+    raw = (raw or "").strip().upper()
+    mapping = {"ক": "A", "খ": "B", "গ": "C", "ঘ": "D",
+               "A": "A", "B": "B", "C": "C", "D": "D"}
+    for ch in raw:
+        if ch in mapping:
+            return mapping[ch]
+    return ""
+
+
+async def _onu2_call1_extract(img) -> list:
+    """Call1 -- red-box region detect + extract + self-verify marked answer.
+    Gemini primary / Groq fallback / OpenRouter last (same provider order
+    as /onu and /qbm)."""
+    try:
+        gem = await _qbm_gemini_extract(img, ONU2_CALL1_PROMPT)
+        out = _qbm_dedup_list(gem) if gem else []
+        if out:
+            for m in out:
+                m["_provider"] = "Gemini"
+            return out
+        txt = await _qbm_groq_call(img, ONU2_CALL1_PROMPT)
+        result = _qbm_parse_json(txt) if txt else []
+        if result:
+            out = _qbm_dedup_list(result)
+            for m in out:
+                m["_provider"] = "Groq"
+            return out
+        or_txt = await _qbm_openrouter_call(img, ONU2_CALL1_PROMPT)
+        result3 = _qbm_parse_json(or_txt) if or_txt else []
+        out = _qbm_dedup_list(result3)
+        for m in out:
+            m["_provider"] = "OpenRouter"
+        return out
+    except Exception as e:
+        logger.warning(f"[ONU2 Call1] failed: {e}")
+        return []
+
+
+async def _onu2_call2_misscheck(img, existing: list) -> list:
+    """Call2 -- independent miss-check pass: did Call1 miss any red-boxed
+    MCQ (single or inside a group-box)? Returns ONLY newly-found MCQs
+    (never re-lists/duplicates existing ones)."""
+    try:
+        existing_brief = json.dumps(
+            [{"mcq_no": m.get("mcq_no", ""), "question": (m.get("question") or "")[:100]} for m in existing],
+            ensure_ascii=False
+        )
+        prompt = ONU2_CALL2_MISSCHECK_PROMPT_TMPL.format(existing_list=existing_brief)
+        txt = await _qbm_gemini_raw(img, prompt)
+        if not txt:
+            txt = await _qbm_groq_call(img, prompt)
+        if not txt:
+            txt = await _qbm_openrouter_call(img, prompt)
+        if not txt:
+            return []
+        missed = _qbm_parse_json(txt)
+        if not missed or not isinstance(missed, list):
+            return []
+        # Dedup against existing by question-text prefix, so a miss-check
+        # false-positive re-detecting an already-found MCQ never duplicates.
+        existing_keys = {(m.get("question") or "").strip()[:60] for m in existing}
+        fresh = [m for m in missed if (m.get("question") or "").strip()[:60] not in existing_keys]
+        for m in fresh:
+            m["_provider"] = "ONU2-misscheck"
+        return _qbm_dedup_list(fresh)
+    except Exception as e:
+        logger.warning(f"[ONU2 Call2 misscheck] failed: {e}")
+        return []
+
+
+async def _onu2_answer_key_check(img, mcqs: list) -> None:
+    """Cross-checks extracted MCQs against a উত্তরমালা/answer-key table on
+    the SAME page (if one exists). Mutates mcqs in place -- when a
+    matching key entry is found for an mcq_no, it ALWAYS overrides the
+    option-mark-derived answer (per requirement: key takes precedence)."""
+    candidates = [m for m in mcqs if (m.get("mcq_no") or "").strip()]
+    if not candidates:
+        return
+    try:
+        mcq_list = json.dumps(
+            [{"mcq_no": m.get("mcq_no", ""), "answer": m.get("answer", "")} for m in candidates],
+            ensure_ascii=False
+        )
+        prompt = ONU2_ANSWER_KEY_PROMPT_TMPL.format(mcq_list=mcq_list)
+        txt = await _qbm_gemini_raw(img, prompt)
+        if not txt:
+            txt = await _qbm_groq_call(img, prompt)
+        if not txt:
+            return
+        found = _qbm_parse_json(txt)
+        if not found or not isinstance(found, list):
+            return
+        key_map = {}
+        for entry in found:
+            no = (entry.get("mcq_no") or "").strip()
+            ans = _onu2_letter_from_bengali_option(entry.get("key_answer", ""))
+            if no and ans:
+                key_map[no] = ans
+        if not key_map:
+            return
+        for m in mcqs:
+            no = (m.get("mcq_no") or "").strip()
+            if no in key_map:
+                key_ans = key_map[no]
+                if m.get("answer") != key_ans:
+                    m["answer"] = key_ans
+                    m["marked_answer_wrong"] = False
+                    m["_answer_source"] = "answer_key_override"
+    except Exception as e:
+        logger.warning(f"[ONU2 answer-key check] failed: {e}")
+
+
+async def _onu2_extract_from_image(img) -> list:
+    """/onu2's fully independent extraction pipeline for a single page.
+    Steps: Call1 (region-detect+extract+verify) -> Call2 (miss-check for
+    any red-boxed MCQ, single or grouped, that Call1 missed) -> answer-key
+    cross-check on this same page (overrides option-mark answer when a
+    উত্তরমালা match is found) -> explanation safety-net fill."""
+    await _qbm_ram_aware_acquire()
+    try:
+        call1 = await _onu2_call1_extract(img)
+        missed = await _onu2_call2_misscheck(img, call1)
+        combined = call1 + missed
+        if not combined:
+            return []
+        for m in combined:
+            opts = m.get("options")
+            if isinstance(opts, dict):
+                m["options"] = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
+        combined = _cap_mcq_options(combined)
+        await _onu2_answer_key_check(img, combined)
+        for m in combined:
+            if not (m.get("explanation") or "").strip():
+                try:
+                    m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m.get("answer", "A"))
+                except Exception as e:
+                    logger.warning(f"[ONU2] explanation fallback failed: {e}")
+            exp = m.get("explanation", "") or ""
+            if len(exp) > 200:
+                m["explanation"] = exp[:197] + "..."
+        return combined
+    finally:
+        _QBM_EXTRACT_HARD_CAP.release()
+
+
+async def handle_onu2(msg: dict):
+    """
+    /onu2 -p (pages) -c (channel) -m (topic) -t (thread_id)
+    RED-BOX REGION extraction: keeps only MCQs enclosed in a red box/
+    rectangle on the page (single or grouped), cross-checked against any
+    উত্তরমালা answer-key table found on the same page (key always wins
+    over the option's red-mark when both exist).
+    """
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _handle_onu2_impl(msg)
+
+
+async def _handle_onu2_impl(msg: dict):
+    """Same file-handling scaffold as /onu, but extraction uses
+    _onu2_extract_from_image (red-box region logic) and output is always
+    CSV-only (no channel posting)."""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not (reply.get("document") or reply.get("photo")):
+        await send_msg(chat_id,
+            "❌ PDF বা Image-এ reply করে /onu2 দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/onu2 -p 1-5 -c @channel -m \"Topic\" -t group_id</code>\n\n"
+            "📌 শুধুমাত্র RED BOX/RECTANGLE দিয়ে ঘেরা MCQ নেবে (একটি বা group করে একাধিক)\n"
+            "📌 উত্তরমালা (answer key) থাকলে সেটাই প্রাধান্য পাবে option-mark এর চেয়ে\n"
+            "📌 -p = page range, PDF-only (না দিলে সব page)\n"
+            "📌 -c = channel id (না দিলে CSV আসবে)\n"
+            "📌 -m = topic name\n"
+            "📌 -t = topic/thread id (group হলে)"
+        )
+        return
+
+    is_image_reply = bool(reply.get("photo")) or (
+        reply.get("document") and not reply["document"].get("file_name", "").lower().endswith(".pdf")
+        and (reply["document"].get("mime_type", "").startswith("image/"))
+    )
+
+    if reply.get("document") and not is_image_reply and not reply["document"].get("file_name", "").lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF বা Image file support করে!")
+        return
+
+    params = _parse_pdfm_params(text)
+    topic = params["topic"] or "🌟ATLAS Question Bank"
+    page_range = params["page_range"]
+
+    if is_image_reply:
+        if reply.get("photo"):
+            file_id = reply["photo"][-1]["file_id"]
+            file_unique_id = reply["photo"][-1].get("file_unique_id")
+        else:
+            file_id = reply["document"]["file_id"]
+            file_unique_id = reply["document"].get("file_unique_id")
+        file_name = reply.get("document", {}).get("file_name", "image.jpg")
+    else:
+        file_id = reply["document"]["file_id"]
+        file_unique_id = reply["document"].get("file_unique_id")
+        file_name = reply["document"].get("file_name", "document.pdf")
+
+    status_r = await send_msg(chat_id, "⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    _last_pct = {"v": -1}
+    _dl_start = time.time()
+    def _dl_progress_pdf(done, total):
+        if not status_msg_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct["v"] < 10 and pct != 100:
+            return
+        _last_pct["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        label = "Image" if is_image_reply else "PDF"
+        elapsed = time.time() - _dl_start
+        eta_txt = ""
+        if pct > 0 and pct < 100:
+            eta_s = int(elapsed * (100 - pct) / pct)
+            eta_txt = f" | ETA {eta_s}s"
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ {label} download হচ্ছে...\n📄 {file_name}\n[{bar} {pct}%{eta_txt}]"))
+
+    try:
+        if is_image_reply:
+            img_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id, message_id=reply["message_id"])
+            from PIL import Image as PILImage
+            img = PILImage.open(BytesIO(img_bytes))
+            pages = [(1, img)]
+        else:
+            pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id,
+                                                    message_id=reply["message_id"], file_unique_id=file_unique_id)
+            ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+            if not ok:
+                await send_msg(chat_id, pages)
+                return
+
+            if not pages:
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "🔍 OCR Scanning (scanned PDF detected)...")
+                try:
+                    from pdf2image import convert_from_bytes
+                    if page_range:
+                        parts = str(page_range).split("-")
+                        first = int(parts[0])
+                        last = int(parts[1]) if len(parts) > 1 else first
+                        ocr_images = await asyncio.to_thread(
+                            convert_from_bytes, pdf_bytes, dpi=150, first_page=first, last_page=last
+                        )
+                        pages = list(zip(range(first, last + 1), ocr_images))
+                    else:
+                        ocr_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+                        pages = list(enumerate(ocr_images, 1))
+                except Exception as e:
+                    logger.warning(f"[ONU2] OCR fallback failed: {e}")
+
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে...")
+
+        extracted_pages = await qbm_extract_all_pages(
+            chat_id, pages, topic, file_name, status_msg_id,
+            extractor=_onu2_extract_from_image
+        )
+
+        total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+
+        if total_mcq_found:
+            import io as _io_onu2, csv as _csv_mod_onu2
+            _buf_onu2 = _io_onu2.StringIO()
+            _w_onu2 = _csv_mod_onu2.writer(_buf_onu2)
+            _w_onu2.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                               "answer", "explanation", "type", "section"])
+            _ans_map_onu2 = {"A": "1", "B": "2", "C": "3", "D": "4"}
+            for _, _, mcqs in extracted_pages:
+                for m in mcqs:
+                    opts = m.get("options", ["", "", "", ""])
+                    if isinstance(opts, dict):
+                        opts = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
+                    _w_onu2.writerow([
+                        m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                        opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                        opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                        _ans_map_onu2.get(m.get("answer", "A"), "1"),
+                        _strip_img_tag(m.get("explanation", "")), "1", "1"
+                    ])
+            await send_document(chat_id, _buf_onu2.getvalue().encode("utf-8"),
+                f"{topic}_ONU2.csv",
+                caption=f"📋 {topic} — {total_mcq_found} MCQ (Red-box extracted)",
+                mime_type="text/csv")
+        else:
+            await send_msg(chat_id, "❌ কোনো red-box marked MCQ পাওয়া যায়নি।")
+        return
+    except Exception as e:
+        logger.error(f"[ONU2] failed: {e}", exc_info=True)
+        if status_msg_id:
+            try:
+                await edit_msg(chat_id, status_msg_id, f"❌ Error হয়েছে: {str(e)[:200]}")
+            except Exception:
+                pass
+
+
 async def _qbm_scan_answer_key(img, unresolved_mcqs: list) -> dict:
     """
     Given a page image and a list of MCQs whose answer wasn't found on their
@@ -18940,6 +19323,10 @@ async def handle_message(msg: dict):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
         # 100% ported from AtlasMasterBot's qbm_handler
         _spawn_command_task(uid, handle_qbm(msg))
+    elif text.startswith("/onu2"):
+        # /onu2 = RED-BOX REGION extraction (single or grouped MCQs inside a
+        # red box/rectangle), cross-checked against উত্তরমালা answer-key if present
+        _spawn_command_task(uid, handle_onu2(msg))
     elif text.startswith("/onu"):
         # /onu = same as /qbm but skips image-attached MCQs and roman/serial
         # combination-type (i,ii,iii / ১,২,৩) MCQs that need a উদ্দীপক to make sense
