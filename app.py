@@ -12136,7 +12136,106 @@ def _unmesh_group_mcqs(extracted_pages: list) -> list:
     return [(g[0], g[1]) for g in groups]
 
 
-def _build_chem_heading_scan_prompt() -> str:
+def _build_bio_heading_scan_prompt() -> str:
+    """DEDICATED strict heading-detection pass for /bio, mirroring /chem's
+    _build_chem_heading_scan_prompt but tuned for /bio's 3-signal criteria:
+    bold-black + larger font + HORIZONTALLY CENTERED (instead of /chem's
+    Bangla hierarchical-number prefix). Since /bio GENERATES new MCQs
+    (rather than extracting existing ones with printed qsn_no), this scan
+    is matched to generated MCQs via their page-sequential index instead
+    of a printed serial number -- see _bio_apply_heading_scan below."""
+    return (
+        "Find ONLY genuine topic-heading lines on this page — ignore all body/paragraph text.\n\n"
+        "‼️ HARD RULE — CHECK THIS FIRST, ALWAYS: a line is a genuine topic heading ONLY if it "
+        "matches ALL of these signals TOGETHER:\n"
+        "  1) BOLD BLACK font, and visibly LARGER than the surrounding paragraph/body text.\n"
+        "  2) HORIZONTALLY CENTERED on the page/column — not left-aligned like normal paragraph "
+        "text or a small sub-label.\n"
+        "  3) Often (not mandatory) has an English translation in parentheses on the same line or "
+        "the line right below it, e.g. \"কোষচক্র ও ইন্টারফেজ (Cell Cycle & Interphase)\" — a heading "
+        "missing this English part is still valid if 1+2 already hold.\n\n"
+        "STRICTLY DO NOT report any of the following even if bold/boxed — these are NOT topic headings:\n"
+        "  - normal bold body text with no size increase\n"
+        "  - left-aligned sub-labels like '(ক) ইন্টারফেজ' inline within a paragraph\n"
+        "  - figure captions, table headers, page footer/header branding, page numbers\n\n"
+        "A true topic heading is rare per page — expect at most 0-3, often ZERO (pure continuation "
+        "pages). If not confident a line satisfies BOTH the font-size/weight jump AND horizontal "
+        "centering, do NOT report it.\n\n"
+        "For each genuine topic heading found (top to bottom order on the page), report:\n"
+        "  - its exact text (Bengali part; include the English parenthetical if present)\n"
+        "  - approximately how far down the page it sits, as a fraction from 0.0 (very top) to "
+        "1.0 (very bottom) of the page height — your best visual estimate, used only to order "
+        "multiple headings relative to each other on this same page.\n\n"
+        "Output ONLY this JSON array, nothing else, in top-to-bottom page order:\n"
+        '[{"heading_text": "...", "vertical_position": 0.0}]\n'
+        "If there are zero genuine topic headings on this page, output exactly []."
+    )
+
+
+def _parse_bio_heading_scan(text: str) -> list:
+    return _parse_unmesh_heading_scan(text)
+
+
+async def _bio_apply_heading_scan(generated_pages: list) -> list:
+    """Code-level verification/override pass for /bio, run AFTER generation
+    -- same role as /chem's inline heading-scan override, but applied as a
+    separate post-process step since /bio's generation pipeline
+    (pdf_generate_all_pages) is shared with /pdf/bangla/tf/extra and
+    shouldn't be modified per-mode. For each page, runs the dedicated
+    heading-scan prompt independently of generation, then FORCES each
+    heading's text onto every generated MCQ on that page whose position
+    (approximated by its sequential order on the page) falls at or after
+    that heading's vertical_position -- overriding whatever topic_hint the
+    generation call itself may have assigned, closing the gap where
+    generation-only self-tagging could silently mislabel or miss a topic
+    boundary the model wasn't paying attention to. This is a best-effort
+    synchronous verification: any single page's scan failing never blocks
+    the rest of the run, that page just keeps its generation-time
+    topic_hint values as originally produced.
+    """
+    async def _scan_one(page_num, img, mcqs):
+        if not mcqs:
+            return
+        for i, m in enumerate(mcqs, start=1):
+            m["qsn_no"] = i
+        try:
+            scan_txt = await _qbm_gemini_raw(img, _build_bio_heading_scan_prompt())
+            headings = _parse_bio_heading_scan(scan_txt)
+        except Exception as e:
+            logger.warning(f"[BIO heading-scan] page {page_num} failed, skipping: {e}")
+            return
+        if not headings:
+            return
+        ordered = sorted(
+            [h for h in headings if isinstance(h.get("vertical_position"), (int, float)) and (h.get("heading_text") or "").strip()],
+            key=lambda h: h["vertical_position"],
+        )
+        if not ordered:
+            return
+        n = len(mcqs)
+        for idx, h in enumerate(ordered):
+            htext = h["heading_text"].strip()
+            start_frac = h["vertical_position"]
+            end_frac = ordered[idx + 1]["vertical_position"] if idx + 1 < len(ordered) else 1.01
+            start_i = max(1, int(start_frac * n) + 1) if n else 1
+            end_i = int(end_frac * n) + 1 if n else n + 1
+            old_hints = set()
+            for j, m in enumerate(mcqs, start=1):
+                if start_i <= j < end_i:
+                    old_hint = m.get("topic_hint", "")
+                    if old_hint and old_hint != htext:
+                        old_hints.add(old_hint[:40])
+                    m["topic_hint"] = htext
+            if old_hints:
+                logger.warning(f"[BIO heading-scan] page {page_num}: forced '{htext[:40]}' over {old_hints}")
+
+    await asyncio.gather(*[
+        _scan_one(page_num, img, mcqs) for page_num, img, mcqs in generated_pages
+    ], return_exceptions=True)
+    return generated_pages
+
+
+
     """DEDICATED strict heading-detection pass for /chem, mirroring
     /unmesh's _build_unmesh_heading_scan_prompt but tuned for the
     bold-black-larger-font + Bangla hierarchical-number (১.২, ১.২.১...)
@@ -15336,6 +15435,13 @@ async def _handle_bio_impl(msg: dict):
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ generate হয়নি!")
             return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {total_mcq_found} MCQ generate হয়েছে!\n⏳ Topic heading নিশ্চিত করা হচ্ছে...")
+        try:
+            generated_pages = await _bio_apply_heading_scan(generated_pages)
+        except Exception as e:
+            logger.warning(f"[BIO] heading-scan pass failed, keeping generation-time topic_hint: {e}")
 
         topic_groups = _topic_group_mcqs(generated_pages)
 
