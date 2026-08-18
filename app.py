@@ -7441,9 +7441,14 @@ async def _apply_saved_watermark(pdf_bytes: bytes) -> bytes:
         logger.warning(f"[AutoWatermark] apply failed: {e}")
     return pdf_bytes
 
-async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
+async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = False) -> bytes:
     """Playwright-based HTML->PDF, ported 1:1 from AtlasMasterBot's
-    AsyncPDFExporter.html_to_pdf (proven working in production there)."""
+    AsyncPDFExporter.html_to_pdf (proven working in production there).
+    use_css_page_size=True lets the page's own @page{size:...} CSS rule
+    (e.g. style7's 420x594mm large sheet) control the actual PDF page
+    dimensions instead of being forced into a fixed A4 — required for any
+    custom-size print style, otherwise Playwright silently overrides the
+    CSS @page size with A4 and content gets clipped/rescaled unpredictably."""
     async with _PDF_SEMAPHORE:
         import tempfile
         temp_path = None
@@ -7502,13 +7507,71 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
             if progress_cb:
                 await progress_cb(70)
 
+            if use_css_page_size:
+                # Measure REAL rendered height of each .abpage's tallest column
+                # (actual browser layout, not a character-count guess), then
+                # inject a NAMED @page rule per page (Chromium print-to-PDF
+                # supports different page sizes per page ONLY via CSS named
+                # pages — a single unnamed @page{size:...} rule applies the
+                # SAME size to every page in the PDF, which was the earlier
+                # bug: our inline .content-columns height was being measured
+                # correctly but the actual PDF page (paper size) never
+                # shrank to match it, leaving the same blank space).
+                try:
+                    await page.evaluate("""
+                        () => {
+                            const pages = document.querySelectorAll('.abpage');
+                            const rules = [];
+                            const MM_PER_PX = 25.4 / 96;
+                            pages.forEach((pg, idx) => {
+                                const pageNum = idx + 1;
+                                const isAnswers = pg.classList.contains('answers-page');
+                                const cc = isAnswers ? pg.querySelector('.answers-section') : pg.querySelector('.content-columns');
+                                if (!cc) return;
+                                let neededPx;
+                                if (isAnswers) {
+                                    neededPx = Math.ceil(cc.getBoundingClientRect().height) + 12;
+                                } else {
+                                    const items = Array.from(cc.querySelectorAll(':scope > .question'));
+                                    if (!items.length) return;
+                                    const colBottoms = {};
+                                    items.forEach(it => {
+                                        const r = it.getBoundingClientRect();
+                                        const key = Math.round(r.left);
+                                        const bottom = r.bottom;
+                                        if (!colBottoms[key] || bottom > colBottoms[key]) colBottoms[key] = bottom;
+                                    });
+                                    const ccTop = cc.getBoundingClientRect().top;
+                                    const maxBottom = Math.max(...Object.values(colBottoms));
+                                    neededPx = Math.ceil(maxBottom - ccTop) + 12;
+                                    cc.style.height = neededPx + 'px';
+                                }
+                                // header block (only present inside page 1's .abpage) is
+                                // already part of pg's flow height above content-columns.
+                                const header = pg.querySelector(':scope > .exam-header');
+                                const headerPx = header ? header.getBoundingClientRect().height + 15 : 0;
+                                const totalPx = neededPx + headerPx;
+                                const heightMm = Math.max(40, Math.min(560, Math.ceil(totalPx * MM_PER_PX) + 15));
+                                const pageName = isAnswers ? 'pans' : `p${pageNum}`;
+                                rules.push(`@page ${pageName}{size:420mm ${heightMm}mm;margin:10mm 10mm 25mm 10mm;}`);
+                            });
+                            const styleEl = document.createElement('style');
+                            styleEl.textContent = rules.join('\\n');
+                            document.head.appendChild(styleEl);
+                        }
+                    """)
+                    await asyncio.sleep(0.15)
+                except Exception as _e:
+                    logger.warning(f"[PDF Gen] style7 real-height measurement failed, falling back to estimated height: {_e}")
+
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as pf:
                 output_path = pf.name
 
             await asyncio.wait_for(page.pdf(
-                path=output_path, format="A4",
-                margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"},
-                print_background=True
+                path=output_path, format=None if use_css_page_size else "A4",
+                margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"} if not use_css_page_size else None,
+                print_background=True,
+                prefer_css_page_size=use_css_page_size
             ), timeout=20)
             if progress_cb:
                 await progress_cb(95)
@@ -8072,6 +8135,105 @@ def _build_print_style1(data, heading):
     body += '</div>'
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
+_PRINT_STYLE7_CSS = """<style>
+@page{size:420mm 60mm;margin:10mm 10mm 25mm 10mm;@top-center{content:none}@bottom-center{content:none}}
+body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:15pt;line-height:1.35;color:#000;margin:0;padding:10px;width:420mm;max-width:420mm}
+.exam-header{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:10px;margin-bottom:15px}
+.exam-header h1{color:#166534;margin:0;font-size:20pt;font-weight:bold}
+.abpage{page-break-after:always;break-after:page}
+.abpage:last-of-type{page-break-after:auto;break-after:auto}
+.content-columns{column-count:3;column-gap:16px;column-fill:auto;column-rule:1px solid #ddd}
+.question{margin-bottom:10px;break-inside:avoid;page-break-inside:avoid}
+.question-header{margin-bottom:4px;display:flex;align-items:flex-start}
+.question-num{font-family:'Times New Roman',serif;font-weight:bold;color:#15803d;font-size:15pt;margin-right:5px;white-space:nowrap;flex-shrink:0}
+.question-text{flex:1;line-height:1.35;font-size:15pt;color:#000;word-wrap:break-word}
+.options-table-short{width:100%;border-collapse:collapse;margin:4px 0 4px 8px;table-layout:fixed}
+.options-table-short td{border:none;padding:2px 8px 2px 0;vertical-align:top;font-size:15pt;color:#000;width:40%}
+.options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;vertical-align:middle;font-family:'Poppins',sans-serif;font-weight:600;font-size:15pt;color:#000;padding-left:10px}
+.answer-circle{font-weight:300;font-family:'Poppins',sans-serif;font-size:15pt;line-height:1}
+.options-list{margin:4px 0 4px 8px;padding:0;list-style:none}
+.options-list li{margin:2px 0;font-size:15pt;color:#000;word-wrap:break-word}
+.option-with-answer{display:flex;justify-content:space-between;align-items:flex-start}
+.explanation{margin:4px 0 2px 8px;padding:4px;color:#000;background-color:rgba(22,163,74,0.1);border-left:3px solid #16a34a;font-size:13pt;font-style:italic;break-inside:avoid}
+.explanation-label{font-weight:bold;color:#166534}
+.page-break{page-break-before:always;break-before:page}
+.answers-section{column-count:1;margin-top:0}
+.answer-table{width:100%;border-collapse:collapse;margin-top:0;border:1px solid #16a34a}
+.answer-table th,.answer-table td{border:1px solid #86efac;padding:6px;text-align:left;vertical-align:top;word-wrap:break-word}
+.answer-table th{background-color:#F0FDF4;font-weight:bold;text-align:center;font-size:14pt;color:#166534}
+.qno-col{width:8%;text-align:center}.ans-col{width:8%;text-align:center;font-weight:bold;font-size:14pt}.exp-col{width:84%;font-size:13pt}
+img{max-width:30%!important;height:auto!important;vertical-align:middle}
+@media print{@page{size:420mm 594mm;margin:10mm 10mm 25mm 10mm;@top-center{content:none}@bottom-center{content:none}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:420mm;max-width:420mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
+</style>"""
+
+def _build_print_style7(data, heading):
+    """Format P7: Exam Book Style — page size shrinks to fit actual content
+    per page (width fixed 420mm, height computed from real MCQ count so no
+    large blank area is left on the right/bottom when content doesn't fill
+    a full 594mm page), 3 columns, left-to-right vertical fill (col1
+    top-to-bottom, then col2, then col3), 50 MCQ per page target."""
+    css = _PRINT_STYLE7_CSS
+    PER_PAGE = 50
+    import math as _math
+
+    def _render_question(d):
+        is_short = _check_short_option(d["opts"])
+        h = f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
+        if is_short:
+            h += f'<table class="options-table-short"><tr><td>ⓐ {d["opts"][0]}{d["oimgs"][0]}</td><td>ⓑ {d["opts"][1]}{d["oimgs"][1]}</td></tr><tr><td>ⓒ {d["opts"][2]}{d["oimgs"][2]}</td><td>ⓓ {d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
+        else:
+            h += f'<ul class="options-list"><li>ⓐ {d["opts"][0]}{d["oimgs"][0]}</li><li>ⓑ {d["opts"][1]}{d["oimgs"][1]}</li><li>ⓒ {d["opts"][2]}{d["oimgs"][2]}</li><li>ⓓ {d["opts"][3]}{d["oimgs"][3]}</li></ul>'
+        h += '</div>'
+        return h
+
+    def _est_item_height_mm(d):
+        # Estimate this ONE MCQ's rendered height in mm at 15pt/1.35 line-height.
+        # Question text: ~48 chars/line in a ~130mm-wide column at 15pt Bengali.
+        qlen = len(d.get("q", "") or "")
+        q_lines = max(1, _math.ceil(qlen / 46))
+        base = 6.5 + q_lines * 7.2  # header row + question wrapped lines
+        is_short = _check_short_option(d["opts"])
+        if is_short:
+            base += 2 * 7.2  # two option rows (A/B on one row, C/D on next)
+        else:
+            # 4 stacked option lines, each may itself wrap once if long
+            for opt in d["opts"]:
+                olen = len(opt or "")
+                o_lines = max(1, _math.ceil(olen / 40))
+                base += o_lines * 6.6
+        base += 3.5  # question block bottom margin
+        return base
+
+    body = ''
+    page_idx = 0
+    total_pages = _math.ceil(len(data) / PER_PAGE) if data else 0
+    for pg_start in range(0, len(data), PER_PAGE):
+        chunk = data[pg_start:pg_start + PER_PAGE]
+        page_idx += 1
+        # Distribute chunk into 3 columns left-to-right (col1 filled first)
+        # the same way column-fill:auto would, so our height estimate
+        # matches the TALLEST column, not the average.
+        n = len(chunk)
+        per_col = _math.ceil(n / 3) if n else 1
+        col_heights = []
+        for c in range(3):
+            seg = chunk[c * per_col:(c + 1) * per_col]
+            col_heights.append(sum(_est_item_height_mm(d) for d in seg))
+        tallest_mm = max(col_heights) if col_heights else 40
+        est_mm = max(40, min(560, round(tallest_mm * 1.15 + 15)))  # generous buffer; real height gets measured+shrunk in _html_to_pdf before final render
+        header_html = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>' if page_idx == 1 else ''
+        body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}">{header_html}<div class="content-columns" style="height:{est_mm}mm">'
+        for d in chunk:
+            body += _render_question(d)
+        body += '</div></div>'
+
+    ans_page_num = total_pages + 1
+    body += f'<div class="abpage answers-page" id="abpage-{ans_page_num}" style="page:pans"><div class="answers-section"><table class="answer-table"><thead><tr><th class="qno-col">Q.No.</th><th class="ans-col">Ans</th><th class="exp-col">Explanation</th></tr></thead><tbody>'
+    for d in data:
+        body += f'<tr><td class="qno-col">{d["n"]}</td><td class="ans-col">{d["al"]}</td><td class="exp-col">{d["exp"] if d["exp"] else "-"}</td></tr>'
+    body += '</tbody></table></div></div>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
+
 def _build_print_style2(data, heading):
     """Format P2: Exam Style — Questions page then separate Answer Table (100% ported)"""
     css = _PRINT_CSS
@@ -8374,6 +8536,7 @@ PRINT_STYLE_BUILDERS = {
     "style4": _build_print2_style1,
     "style5": _build_print2_style2,
     "style6": _build_print2_style3,
+    "style7": _build_print_style7,
 }
 PRINT_STYLE_NAMES = {
     "style1": "🖨️ Study Material (প্রশ্ন + উত্তর + ব্যাখ্যা)",
@@ -8382,6 +8545,7 @@ PRINT_STYLE_NAMES = {
     "style4": "🖨️ Practice Style (প্রশ্ন + Answer Table)",
     "style5": "🖨️ Preparation Style (উত্তর + ব্যাখ্যা inline)",
     "style6": "🖨️ Preparation Style-02 (English + Bengali)",
+    "style7": "🖨️ Exam Book Style",
 }
 
 # ============================================================
@@ -8731,7 +8895,7 @@ async def handle_sheet_style_callback(callback_query: dict):
                 data_adapted = _adapt_mcqs_for_print(mcqs)
                 html_out = PRINT_STYLE_BUILDERS[style_key](data_adapted, title)
 
-            pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress)
+            pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress, use_css_page_size=(style_key == "style7"))
             pdf_bytes = await _apply_saved_watermark(pdf_bytes)
 
         if not pdf_bytes:
@@ -11038,6 +11202,10 @@ UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '    - THEN move to the next segment down the page and repeat (its left column, then its right column).\n'
     '  Do NOT do a single whole-page "entire left column, then entire right column" pass. Never zigzag within one segment\'s column, but DO switch back to a new segment\'s left column immediately after finishing that same segment\'s right column.\n'
     '  Before finalizing output, recount: every MCQ visible on the page (both columns, top to bottom) MUST appear exactly once in the JSON array — zero skipped, zero duplicated.\n\n'
+    'FINAL MANDATORY CHECKS before you output anything (do all three, every page, no exceptions):\n'
+    '  1) Scan the ENTIRE page top-to-bottom, BOTH columns independently, for the icon+bold-black-heading pattern (rule iii/iii-ALT above). A heading can appear on EITHER the left OR right column, at ANY vertical position including the very bottom of the page — check the bottom of both columns specifically, this is the most commonly missed spot.\n'
+    '  2) If ANY such heading is found anywhere on the page — even with zero MCQs following it on this page — you MUST emit the trailing_topic_marker sentinel for it (or apply it as topic_hint to the MCQs after it in that same column). Do not silently omit a heading you detected; if unsure whether something qualifies, err toward reporting it as a marker rather than dropping it.\n'
+    '  3) Every single MCQ, including the very last MCQ(s) at the bottom of the page (last row of either column), must carry the topic_hint of whichever heading is actually active in ITS OWN column at that position — never leave the last few MCQs of a page defaulting to an old/wrong topic just because no new heading happened to follow them; if the most recent heading in their own column is topic X, they belong to topic X even if that heading was near the top of the page.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
 )
@@ -11670,6 +11838,27 @@ def _unmesh_group_mcqs(extracted_pages: list) -> list:
     flat = []
     last_hint = None
     for _page_idx, (_, _, mcqs) in enumerate(extracted_pages):
+        # CODE-LEVEL FIX: trailing_topic_marker sentinels are appended by the
+        # extraction prompt at the END of a page's MCQ array, but they can
+        # logically apply to MCQs that appear EARLIER in that same array if
+        # the model emitted the array out of strict top-to-bottom order (a
+        # known mis-ordering case). To guarantee last-page/last-column MCQs
+        # never get stuck on a stale hint, pre-scan this page's list: if a
+        # trailing_topic_marker exists anywhere in it, and one or more real
+        # MCQs after the LAST real MCQ before that marker are missing their
+        # own topic_hint, apply the marker's text to any trailing (tail-end)
+        # MCQs in this page that still have blank topic_hint AND come after
+        # the marker's position in the raw list.
+        marker_positions = [i for i, m in enumerate(mcqs) if "trailing_topic_marker" in m]
+        for mp in marker_positions:
+            marker_text = (mcqs[mp].get("trailing_topic_marker") or "").strip()
+            if not marker_text:
+                continue
+            for j in range(mp + 1, len(mcqs)):
+                if "trailing_topic_marker" in mcqs[j]:
+                    continue
+                if not (mcqs[j].get("topic_hint") or "").strip():
+                    mcqs[j]["topic_hint"] = marker_text
         for m in mcqs:
             if "trailing_topic_marker" in m:
                 th = (m.get("trailing_topic_marker") or "").strip()
@@ -11686,6 +11875,23 @@ def _unmesh_group_mcqs(extracted_pages: list) -> list:
             else:
                 m["_effective_hint"] = last_hint or ""
             flat.append(m)
+
+    # CODE-LEVEL GUARD: the very last page of the whole extracted range is a
+    # common failure spot — its final MCQ(s) (tail of whichever column ends
+    # last) sometimes carry an empty/blank topic_hint even though a marker
+    # or heading DID appear for them, simply because that was the last thing
+    # on the page and got no further reinforcement. Force the tail run of
+    # blank-hint MCQs on the LAST page to explicitly inherit last_hint (this
+    # is already what _effective_hint does above, but re-assert it directly
+    # onto topic_hint too so downstream consumers reading topic_hint,not
+    # _effective_hint, also see the corrected value).
+    if extracted_pages:
+        last_page_idx = len(extracted_pages) - 1
+        for m in reversed(flat):
+            if m.get("_page_key") != last_page_idx:
+                break
+            if not (m.get("topic_hint") or "").strip() and m.get("_effective_hint"):
+                m["topic_hint"] = m["_effective_hint"]
 
     flat = _check_segment_topic_consistency(flat, context="unmesh-grouping-stage")
 
