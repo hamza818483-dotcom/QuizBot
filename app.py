@@ -15126,16 +15126,23 @@ STRICT RULES — follow exactly, no exceptions:
 - SKIP any MCQ that has an IMAGE/DIAGRAM/FIGURE attached to its question, any option, or its explanation. Even if such an MCQ is inside a red marking, do NOT extract it — image-dependent MCQs can't be represented as plain text/CSV.
 - Every output item MUST have all 7 fields: mcq_no, question, options (with A,B,C,D), answer, marked_answer_wrong, no_mark, explanation. Missing/malformed items will be rejected downstream.
 
-For each MCQ found INSIDE a red marking:
-1. Extract the exact question number label if printed (e.g. "১ক১", "1", "১খ৩") into "mcq_no" (string, exact as printed; empty string if none printed).
-2. Extract question text and all options exactly as written (Bangla stays Bangla, English stays English).
-   OPTION LAYOUT: options aren't always one vertical list — a common layout is a 2×2 grid, ক)/খ) side-by-side on top, গ)/ঘ) side-by-side below (খ is RIGHT of ক, not below it; গ is below ক; ঘ is below খ). Map by the PRINTED LABEL at each cell (ক→A, খ→B, গ→C, ঘ→D), never by assumed reading-order — trace each label's actual position first, especially in a grid.
-3. Find the RED-CIRCLED option (red golla/circle/box around a letter/text/bullet):
-   - Trace the circle's exact boundary against the actual grid/list position to identify WHICH label it surrounds — this is the main error source, so re-check it precisely rather than assuming position order.
-   - Once confident which label is circled, TRUST it as "answer" (~99% of cases): "marked_answer_wrong": false. Only override (true) if that option's content is a clear, unambiguous factual error (e.g. "ঢাকা" for "France-এর রাজধানী?") — never override just because another option also seems plausible; that's reasoning overriding a correct read, not catching a real mistake.
-   - No option circled at all → answer from subject knowledge, "marked_answer_wrong": false, "no_mark": true.
-4. Write a short explanation (Bangla if MCQ is Bangla) for why the correct answer is correct — use any ব্যাখ্যা text printed near it if present (copy verbatim, no rewrite), otherwise self-write following the structure below.
+For each MCQ found INSIDE a red marking, work through these 4 STEPS IN ORDER — each is a separate, independent task, do not blend them:
+
+STEP 1 — MCQ DETECTION (what to extract):
+- Extract the exact question number label if printed (e.g. "১ক১", "1", "১খ৩") into "mcq_no" (string, exact as printed; empty string if none printed).
+- Extract question text and all 4 options exactly as written (Bangla stays Bangla, English stays English).
+- OPTION LAYOUT: options aren't always one vertical list — a common layout is a 2×2 grid, ক)/খ) side-by-side on top, গ)/ঘ) side-by-side below (খ is RIGHT of ক, not below it; গ is below ক; ঘ is below খ). Map by the PRINTED LABEL at each cell (ক→A, খ→B, গ→C, ঘ→D), never by assumed reading-order — trace each label's actual position first, especially in a grid.
+
+STEP 2 — ANSWER DETECTION (how to decide "answer" + "marked_answer_wrong" + "no_mark" — completely separate from Step 1's text extraction):
+- Find the RED-CIRCLED option (red golla/circle/box around a letter/text/bullet). Trace the circle's exact boundary against the actual grid/list position from Step 1 to identify WHICH label it surrounds — this is the main error source, so re-check it precisely rather than assuming position order.
+- Once confident which label is circled, TRUST it as "answer" (~99% of cases): "marked_answer_wrong": false. Only override (true) if that option's content is a clear, unambiguous factual error (e.g. "ঢাকা" for "France-এর রাজধানী?") — never override just because another option also seems plausible; that's reasoning overriding a correct read, not catching a real mistake.
+- No option circled at all → determine "answer" from subject knowledge, "marked_answer_wrong": false, "no_mark": true.
+
+STEP 3 — EXPLANATION (write only after Step 1 + Step 2 are both settled, using their final result):
+- Use any ব্যাখ্যা text printed near this MCQ if present (copy verbatim, no rewrite). Otherwise self-write following the structure below.
 """ + _EXPLANATION_DEPTH_RULE + """
+
+STEP 4 — FORMATTING (apply to question/options/explanation text from the steps above):
 """ + _MATH_UNICODE_RULE + """
 
 No red-marked MCQ on this page -> return [].
@@ -15154,29 +15161,25 @@ STRICT RULES:
 - SKIP any roman-numeral/serial-combination style MCQ that needs an উদ্দীপক (numbered statement list i/ii/iii or ১/২/৩ printed above it) to make sense — i.e. options like "i, ii" / "i ও ii" / "১, ৩" referring back to that list. Do not report these even if red-marked.
 - SKIP any MCQ with an IMAGE/DIAGRAM/FIGURE attached to its question, an option, or its explanation. Do not report these even if red-marked.
 - Every reported item MUST have all 7 fields (mcq_no, question, options, answer, marked_answer_wrong, no_mark, explanation) — incomplete items will be rejected downstream.
-- For every missed MCQ you report, the "answer" field MUST be independently verified against your own subject knowledge (not just copied from the red option-mark) — same rule as the first extraction pass: if the red-marked option is wrong, output the correct one and set marked_answer_wrong=true.
-- For every missed MCQ's "explanation": use any ব্যাখ্যা text printed near it if present (verbatim, no rewrite), otherwise self-write following this structure:
-""" + _EXPLANATION_DEPTH_RULE_FMT_SAFE + """
-
-SECOND TASK — ANSWER AUDIT of the already-extracted list (separate from the miss-check above): for each MCQ already in the existing list, look at the page image again and re-confirm: did the extraction correctly read the red-circled/red-marked option as its answer? Report ONLY entries where you find the recorded answer does NOT match what is actually red-circled on the page (a genuine reading error), as a SEPARATE array under "answer_corrections". If everything matches, return an empty array for this too.
-
-THIRD TASK — SPELLING/WORD-MISMATCH AUDIT of the already-extracted list (separate from both tasks above): OCR/vision extraction sometimes misreads a word inside the question text or an option -- producing a misspelled word, or a word that is clearly the WRONG word for that context (e.g. a physics/chemistry/biology term that doesn't fit the surrounding sentence, or is not a real term at all in that subject). For each MCQ already in the existing list, re-look at the actual printed text on the page image, and using both (a) the literal printed text and (b) your own subject-knowledge of what term/word SHOULD correctly appear there given the full context of the question + its options + its answer together, check whether any word in the question or in any option is suspicious, out-of-context, or misspelled compared to what the page actually shows or what correct subject terminology requires.
-- Only report a genuine mismatch -- do not "improve" or rephrase correct text, do not change meaning, do not touch numbers/units/proper nouns that are already correct. This is strictly a misread/misspelling fix, not a rewrite.
-- If you find a genuine mismatch, report it as a SEPARATE array under "text_corrections", with the corrected FULL question text (if the question had the error) and/or corrected FULL option text for just the affected option letter(s) (if an option had the error) -- always give the complete corrected field, never a partial/diff.
-- If nothing needs correcting, return an empty array for this too.
 
 Already-extracted red-boxed MCQs from this page, with the answer already recorded (do not re-list these in "missed", only find truly MISSED ones there; DO use "current_answer" for Task 2's answer audit):
 {existing_list}
 
-Task 1 (miss-check): This is a FULL AUDIT of the page — independently re-find every left-margin red box marking (short, single-number boxes AND tall, multi-number boxes alike) and compare against the already-extracted list above. Report ANY red-marked MCQ, whether marked alone or as part of a group, that is missing from that list. Pay special attention to the middle/last numbers inside a tall group-box, since those are most often missed.
+Do these 3 TASKS IN ORDER — each is independent, do not blend them:
 
-If you find MISSED red-boxed MCQ(s), extract them fully (same fields as before: mcq_no, question, options A-D, answer with independent verification against the small red option-mark if present, marked_answer_wrong, no_mark, explanation).
+TASK 1 — MCQ DETECTION (miss-check): This is a FULL AUDIT of the page — independently re-find every left-margin red box marking (short, single-number boxes AND tall, multi-number boxes alike) and compare against the already-extracted list above. Report ANY red-marked MCQ, whether marked alone or as part of a group, that is missing from that list. Pay special attention to the middle/last numbers inside a tall group-box, since those are most often missed.
+If you find MISSED red-boxed MCQ(s), extract them fully into "missed" (mcq_no, question, options A-D — same grid-layout label-mapping care as the first extraction pass).
 
-Task 2 (answer audit): for entries with a "current_answer" field, re-check the red-circled option and confirm the recorded letter matches. Same grid-layout care as above (2×2 grid: খ is right of ক, গ below ক, ঘ below খ — map by printed label, trace the circle's boundary against the actual grid before judging). Only report a mismatch in "answer_corrections" (with "correct_answer") if the circled-label read was genuinely wrong — never "correct" it just because another option also seems plausible.
+TASK 2 — ANSWER DETECTION (answer audit + missed-item answers): for entries with a "current_answer" field, re-check the red-circled option and confirm the recorded letter matches. Same grid-layout care (2×2 grid: খ is right of ক, গ below ক, ঘ below খ — map by printed label, trace the circle's boundary against the actual grid before judging). Only report a mismatch in "answer_corrections" (with "correct_answer") if the circled-label read was genuinely wrong — never "correct" it just because another option also seems plausible. For any MISSED MCQ from Task 1, its "answer"/"marked_answer_wrong"/"no_mark" fields follow this same detection logic.
 
-Task 3 (spelling/word-mismatch audit): for each entry in the existing list, re-check its question text and option texts against the page image and your subject knowledge as described above. Only include an entry in "text_corrections" if a genuine word-level error is found, identified by "mcq_no", with "corrected_question" (full corrected question text, omit this key entirely if the question itself needed no fix) and/or "corrected_options" (an object with only the affected letter(s) as keys, e.g. {{"B":"corrected option B text"}}, omit this key entirely if no option needed a fix).
+TASK 3a — SPELLING/WORD-MISMATCH AUDIT: for each entry in the existing list, re-check its question text and option texts against the page image and subject knowledge — is any word suspicious, out-of-context, or misspelled vs. what the page shows or correct subject terminology requires? Only report a genuine misread/misspelling (never rephrase/"improve" already-correct text, never touch correct numbers/units/proper nouns). Report in "text_corrections" by "mcq_no", with "corrected_question" (full corrected text, omit if question needed no fix) and/or "corrected_options" (object with only the affected letter(s), e.g. {{"B":"corrected option B text"}}, omit if no option needed a fix).
+
+TASK 3b — EXPLANATION (for any MISSED MCQ from Task 1, written after its Task 1 + Task 2 result is settled): use any ব্যাখ্যা text printed near it if present (verbatim, no rewrite), otherwise self-write following this structure:
+""" + _EXPLANATION_DEPTH_RULE_FMT_SAFE + """
 
 If nothing was missed and no answer mismatches or text corrections found, return the empty-array structure shown below.
+
+FORMATTING (apply to all question/option/explanation text above):
 """ + _MATH_UNICODE_RULE_FMT_SAFE + """
 
 OUTPUT — ONLY valid JSON object, nothing else, no markdown fences:
