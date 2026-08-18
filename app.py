@@ -15119,18 +15119,21 @@ STRICT RULES:
 - Every reported item MUST have all 7 fields (mcq_no, question, options, answer, marked_answer_wrong, no_mark, explanation) — incomplete items will be rejected downstream.
 - For every missed MCQ you report, the "answer" field MUST be independently verified against your own subject knowledge (not just copied from the red option-mark) — same rule as the first extraction pass: if the red-marked option is wrong, output the correct one and set marked_answer_wrong=true.
 
+SECOND TASK — ANSWER AUDIT of the already-extracted list (separate from the miss-check above): for each MCQ already in the existing list, look at the page image again and re-confirm: did the extraction correctly read the red-circled/red-marked option as its answer? Report ONLY entries where you find the recorded answer does NOT match what is actually red-circled on the page (a genuine reading error), as a SEPARATE array under "answer_corrections". If everything matches, return an empty array for this too.
 
-Already-extracted red-boxed MCQs from this page (do not re-list these, only find ones MISSED):
+Already-extracted red-boxed MCQs from this page, with the answer already recorded (do not re-list these in "missed", only find truly MISSED ones there; DO use "current_answer" for Task 2's answer audit):
 {existing_list}
 
-Task: This is a FULL AUDIT of the page — independently re-find every left-margin red box marking (short, single-number boxes AND tall, multi-number boxes alike) and compare against the already-extracted list above. Report ANY red-marked MCQ, whether marked alone or as part of a group, that is missing from that list. Pay special attention to the middle/last numbers inside a tall group-box, since those are most often missed.
+Task 1 (miss-check): This is a FULL AUDIT of the page — independently re-find every left-margin red box marking (short, single-number boxes AND tall, multi-number boxes alike) and compare against the already-extracted list above. Report ANY red-marked MCQ, whether marked alone or as part of a group, that is missing from that list. Pay special attention to the middle/last numbers inside a tall group-box, since those are most often missed.
 
 If you find MISSED red-boxed MCQ(s), extract them fully (same fields as before: mcq_no, question, options A-D, answer with independent verification against the small red option-mark if present, marked_answer_wrong, no_mark, explanation).
 
-If nothing was missed, return exactly: []
+Task 2 (answer audit): for entries with a "current_answer" field in the existing list, re-look at the red-circled option for that specific MCQ on the page and confirm the recorded letter matches. Only include an entry in "answer_corrections" if it's a genuine mismatch (a misread option), with the corrected letter as "correct_answer".
 
-OUTPUT — ONLY valid JSON array of MISSED MCQs, nothing else:
-[{{"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}]"""
+If nothing was missed and no answer mismatches found, return the empty-array structure shown below.
+
+OUTPUT — ONLY valid JSON object, nothing else, no markdown fences:
+{{"missed": [{{"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}], "answer_corrections": [{{"mcq_no":"...","correct_answer":"A/B/C/D"}}]}}"""
 
 ONU2_ANSWER_KEY_PROMPT_TMPL = """This page may contain an ANSWER KEY / উত্তরমালা section — this is a small table or grid that appears AFTER an entire MCQ set ends (not beside or next to individual MCQs), mapping question numbers to their correct option letter (e.g. "১।(ক) ২।(খ) ৩।(খ)..." or a table with numbered cells each showing "১ (ক)" style entries). It is often on a LATER page than the MCQs it covers -- if this page has no MCQs at all but has such a table, that's expected, still check it.
 
@@ -15149,6 +15152,59 @@ If this page has no answer-key table at all, or no genuine mismatches were found
 
 OUTPUT — ONLY valid JSON array of genuine, verified mismatches only, nothing else:
 [{{"mcq_no":"...","key_answer":"A/B/C/D"}}]"""
+
+
+def _onu2_parse_mcq_array(text: str) -> list:
+    """Dedicated JSON-array parser for onu2 Call1/Call2 MCQ output --
+    _qbm_parse_json is NOT used here because it whitelists a fixed key set
+    (question/options/answer/explanation/qsn_bbox/...) and silently drops
+    any field not in that list, which would strip mcq_no, marked_answer_wrong,
+    and no_mark from every item -- exactly the fields onu2's answer-key
+    cross-check and audit passes depend on. This parser keeps ALL fields
+    from the raw model output as-is (only requiring question+options+answer
+    to exist), no per-field whitelist."""
+    if not text:
+        return []
+    t = text.strip()
+    if "```json" in t:
+        t = t.split("```json")[1].split("```")[0].strip()
+    elif "```" in t:
+        t = t.split("```")[1].split("```")[0].strip()
+    try:
+        m = re.search(r'\[.*\]', t, re.DOTALL)
+        raw = json.loads(m.group()) if m else json.loads(t)
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [mc for mc in raw if isinstance(mc, dict)]
+
+
+def _onu2_parse_call2_object(text: str) -> dict:
+    """Dedicated parser for Call2's {"missed": [...], "answer_corrections": [...]}
+    object output. Returns {"missed": [], "answer_corrections": []} on any
+    parse failure so callers never need extra None-checks."""
+    empty = {"missed": [], "answer_corrections": []}
+    if not text:
+        return empty
+    t = text.strip()
+    if "```json" in t:
+        t = t.split("```json")[1].split("```")[0].strip()
+    elif "```" in t:
+        t = t.split("```")[1].split("```")[0].strip()
+    try:
+        m = re.search(r'\{.*\}', t, re.DOTALL)
+        raw = json.loads(m.group()) if m else json.loads(t)
+    except Exception:
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    missed = raw.get("missed", [])
+    corrections = raw.get("answer_corrections", [])
+    return {
+        "missed": [mc for mc in missed if isinstance(mc, dict)] if isinstance(missed, list) else [],
+        "answer_corrections": [c for c in corrections if isinstance(c, dict)] if isinstance(corrections, list) else [],
+    }
 
 
 def _onu2_letter_from_bengali_option(raw: str) -> str:
@@ -15226,17 +15282,22 @@ def _onu2_filter_valid(mcqs: list) -> list:
 async def _onu2_call1_extract(img) -> list:
     """Call1 -- red-boundary/box region detect + extract + self-verify
     marked answer. Gemini primary / Groq fallback / OpenRouter last (same
-    provider order as /onu and /qbm). Every returned item passes strict
-    field validation before being handed back to the caller."""
+    provider order as /onu and /qbm). Uses _onu2_parse_mcq_array (NOT
+    _qbm_parse_json / _qbm_gemini_extract) so mcq_no, marked_answer_wrong,
+    and no_mark survive parsing -- those fields are required by the
+    answer-key cross-check and answer-audit passes downstream. Every
+    returned item passes strict field validation before being handed
+    back to the caller."""
     try:
-        gem = await _qbm_gemini_extract(img, ONU2_CALL1_PROMPT)
+        gem_txt = await _qbm_gemini_raw(img, ONU2_CALL1_PROMPT)
+        gem = _onu2_parse_mcq_array(gem_txt) if gem_txt else []
         out = _onu2_filter_valid(_qbm_dedup_list(gem)) if gem else []
         if out:
             for m in out:
                 m["_provider"] = "Gemini"
             return out
         txt = await _qbm_groq_call(img, ONU2_CALL1_PROMPT)
-        result = _qbm_parse_json(txt) if txt else []
+        result = _onu2_parse_mcq_array(txt) if txt else []
         if result:
             out = _onu2_filter_valid(_qbm_dedup_list(result))
             if out:
@@ -15244,7 +15305,7 @@ async def _onu2_call1_extract(img) -> list:
                     m["_provider"] = "Groq"
                 return out
         or_txt = await _qbm_openrouter_call(img, ONU2_CALL1_PROMPT)
-        result3 = _qbm_parse_json(or_txt) if or_txt else []
+        result3 = _onu2_parse_mcq_array(or_txt) if or_txt else []
         out = _onu2_filter_valid(_qbm_dedup_list(result3))
         for m in out:
             m["_provider"] = "OpenRouter"
@@ -15255,13 +15316,22 @@ async def _onu2_call1_extract(img) -> list:
 
 
 async def _onu2_call2_misscheck(img, existing: list) -> list:
-    """Call2 -- independent full-page AUDIT pass: did Call1 miss any
-    red-marked MCQ (single or inside a group boundary)? Returns ONLY
-    newly-found, strictly-validated MCQs (never re-lists/duplicates
-    existing ones)."""
+    """Call2 -- independent full-page AUDIT pass with TWO tasks:
+    (1) did Call1 miss any red-marked MCQ (single or inside a group
+        boundary)? Returns newly-found, strictly-validated MCQs (never
+        re-lists/duplicates existing ones).
+    (2) did Call1 correctly read the red-circled option as the answer for
+        MCQs it DID find? Any genuine misread is applied as an in-place
+        correction directly onto `existing` (mutated), BEFORE the
+        answer-key cross-check runs afterward -- so the sequence is:
+        option-mark read -> Call2 re-confirms the read -> answer-key
+        double-verifies against উত্তরমালা if present.
+    Uses _onu2_parse_call2_object (NOT _qbm_parse_json) so mcq_no,
+    marked_answer_wrong, and no_mark survive parsing on newly-found items."""
     try:
         existing_brief = json.dumps(
-            [{"mcq_no": m.get("mcq_no", ""), "question": (m.get("question") or "")[:100]} for m in existing],
+            [{"mcq_no": m.get("mcq_no", ""), "question": (m.get("question") or "")[:100],
+              "current_answer": m.get("answer", "")} for m in existing],
             ensure_ascii=False
         )
         prompt = ONU2_CALL2_MISSCHECK_PROMPT_TMPL.format(existing_list=existing_brief)
@@ -15272,10 +15342,23 @@ async def _onu2_call2_misscheck(img, existing: list) -> list:
             txt = await _qbm_openrouter_call(img, prompt)
         if not txt:
             return []
-        missed = _qbm_parse_json(txt)
-        if not missed or not isinstance(missed, list):
-            return []
-        missed = _onu2_filter_valid(missed)
+        parsed = _onu2_parse_call2_object(txt)
+        missed = _onu2_filter_valid(parsed["missed"])
+
+        # Apply answer-audit corrections in place onto `existing`, only on
+        # a genuine, valid A/B/C/D letter that differs from current.
+        for corr in parsed["answer_corrections"]:
+            no = (corr.get("mcq_no") or "").strip()
+            new_ans = str(corr.get("correct_answer", "")).strip().upper()
+            if not no or new_ans not in ("A", "B", "C", "D"):
+                continue
+            for m in existing:
+                if (m.get("mcq_no") or "").strip() == no and m.get("answer") != new_ans:
+                    logger.warning(f"[ONU2] Call2 answer-audit correction: mcq_no={no} {m.get('answer')} -> {new_ans}")
+                    m["answer"] = new_ans
+                    m["marked_answer_wrong"] = False
+                    m["_answer_source"] = "call2_audit_correction"
+
         if not missed:
             return []
         # Dedup against existing by question-text prefix, so a miss-check
@@ -15316,8 +15399,8 @@ async def _onu2_answer_key_check(img, mcqs: list) -> None:
             txt = await _qbm_groq_call(img, prompt)
         if not txt:
             return
-        found = _qbm_parse_json(txt)
-        if not found or not isinstance(found, list):
+        found = _onu2_parse_mcq_array(txt)
+        if not found:
             return
         key_map = {}
         for entry in found:
@@ -15344,11 +15427,13 @@ async def _onu2_answer_key_check(img, mcqs: list) -> None:
 
 async def _onu2_extract_from_image(img) -> list:
     """/onu2's fully independent extraction pipeline for a single page.
-    Steps: Call1 (region-detect+extract+verify, strict-validated) ->
-    Call2 (full-page audit for any red-marked MCQ, single or grouped,
-    that Call1 missed, strict-validated) -> answer-key cross-check on this
-    same page (overrides option-mark answer when a উত্তরমালা match is
-    found) -> final re-validation -> explanation safety-net fill."""
+    Steps: Call1 (region-detect+extract, answer taken from red-circled
+    option by default, ~99% trusted) -> Call2 (full-page audit: finds any
+    red-marked MCQ Call1 missed, single or grouped; ALSO re-confirms
+    Call1's answer reads and corrects genuine misreads in place) ->
+    answer-key cross-check on this same page (further double-verifies
+    against উত্তরমালা if present, only overriding on an AI-verified genuine
+    mismatch) -> final re-validation -> explanation safety-net fill."""
     await _qbm_ram_aware_acquire()
     try:
         call1 = await _onu2_call1_extract(img)
