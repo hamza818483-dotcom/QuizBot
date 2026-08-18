@@ -15154,6 +15154,31 @@ OUTPUT — ONLY valid JSON array of genuine, verified mismatches only, nothing e
 [{{"mcq_no":"...","key_answer":"A/B/C/D"}}]"""
 
 
+def _onu2_clean_mcq_fields(mc: dict) -> dict:
+    """Strips any leading numbering the model may have echoed into the
+    question text (e.g. "১ক১।", "1)") and normalizes text via the shared
+    _strip_q_numbering/_clean_mcq_text helpers -- same safety net /qbm
+    already applies, but onu2's dedicated parser bypasses _qbm_parse_json
+    so this must be applied explicitly here instead."""
+    if not isinstance(mc, dict):
+        return mc
+    q = mc.get("question", "")
+    if q:
+        q = _strip_q_numbering(str(q))
+        q = _clean_mcq_text(q)
+        mc["question"] = q
+    opts = mc.get("options")
+    if isinstance(opts, dict):
+        for k in ("A", "B", "C", "D"):
+            if opts.get(k):
+                opts[k] = _clean_mcq_text(str(opts[k]))
+    elif isinstance(opts, list):
+        mc["options"] = [_clean_mcq_text(str(o)) if o else o for o in opts]
+    if mc.get("explanation"):
+        mc["explanation"] = _clean_mcq_text(str(mc["explanation"]))
+    return mc
+
+
 def _onu2_parse_mcq_array(text: str) -> list:
     """Dedicated JSON-array parser for onu2 Call1/Call2 MCQ output --
     _qbm_parse_json is NOT used here because it whitelists a fixed key set
@@ -15162,7 +15187,8 @@ def _onu2_parse_mcq_array(text: str) -> list:
     and no_mark from every item -- exactly the fields onu2's answer-key
     cross-check and audit passes depend on. This parser keeps ALL fields
     from the raw model output as-is (only requiring question+options+answer
-    to exist), no per-field whitelist."""
+    to exist), no per-field whitelist. Applies _onu2_clean_mcq_fields to
+    strip any leading numbering the model echoed into question text."""
     if not text:
         return []
     t = text.strip()
@@ -15177,7 +15203,7 @@ def _onu2_parse_mcq_array(text: str) -> list:
         return []
     if not isinstance(raw, list):
         return []
-    return [mc for mc in raw if isinstance(mc, dict)]
+    return [_onu2_clean_mcq_fields(mc) for mc in raw if isinstance(mc, dict)]
 
 
 def _onu2_parse_call2_object(text: str) -> dict:
