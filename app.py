@@ -12256,6 +12256,46 @@ def _build_bio_heading_scan_prompt() -> str:
 
 
 
+def _build_bio_heading_scan_prompt_batched(n_pages: int) -> str:
+    """Batched variant of _build_bio_heading_scan_prompt -- scans N page
+    images in ONE call instead of one call per page (cost/quota
+    optimization). Same 4-signal scoring + content-relevance rules,
+    unchanged, just wrapped with per-page separation instructions and a
+    page_index field in the output schema so results can be routed back
+    to the correct page. Images are provided to the model in order as
+    Page 1, Page 2, ... Page N (1-indexed, matching their position in the
+    API call's image list)."""
+    base = _build_bio_heading_scan_prompt()
+    # Splice in page-index reporting right before the final JSON schema.
+    header = (
+        f"⚠️ MULTI-PAGE INPUT: you are being given {n_pages} SEPARATE page images in this call, "
+        f"in order (the 1st image is Page 1, 2nd is Page 2, ..., {n_pages}th is Page {n_pages}). "
+        f"Analyze EACH page independently using the exact same rules below — a heading detected on "
+        f"Page 2 has its own vertical_position measured within Page 2's own height (0.0-1.0), "
+        f"NEVER relative to the combined stack of all pages. Do not let content on one page "
+        f"influence heading detection on another page. Report a \"page_index\" field for every "
+        f"heading found, stating which page (1-indexed per the order above) it belongs to.\n\n"
+    )
+    schema_old = (
+        '[{"heading_text": "...", "vertical_position": 0.0, "centered": true, '
+        '"english_bracket_right": true, "bangla_number_prefix": true, "bold_larger_font": true, '
+        '"content_matches": true}]'
+    )
+    schema_new = (
+        '[{"page_index": 1, "heading_text": "...", "vertical_position": 0.0, "centered": true, '
+        '"english_bracket_right": true, "bangla_number_prefix": true, "bold_larger_font": true, '
+        '"content_matches": true}]'
+    )
+    body = base.replace(schema_old, schema_new)
+    body = body.replace(
+        "If there are zero genuine topic headings on this page, output exactly [].",
+        f"Output ONE combined JSON array covering all {n_pages} pages together (not one array per "
+        f"page). If a page has zero genuine topic headings, it simply contributes no entries to "
+        f"the array — if NO page has any heading at all, output exactly []."
+    )
+    return header + body
+
+
 def _parse_bio_heading_scan(text: str) -> list:
     return _parse_unmesh_heading_scan(text)
 
@@ -12362,14 +12402,11 @@ async def _bio_apply_heading_scan(generated_pages: list) -> list:
     the rest of the run, that page just keeps its generation-time
     topic_hint values as originally produced.
     """
-    async def _scan_one(page_num, img, mcqs):
+    def _apply_headings_to_page(page_num, headings, mcqs):
+        """Applies a list of already-scored heading dicts (from either the
+        single-page or batched scan) onto one page's MCQs -- shared logic
+        so batching the scan call doesn't duplicate the override math."""
         if not mcqs:
-            return
-        try:
-            scan_txt = await _qbm_gemini_raw(img, _build_bio_heading_scan_prompt())
-            headings = _parse_bio_heading_scan(scan_txt)
-        except Exception as e:
-            logger.warning(f"[BIO heading-scan] page {page_num} failed, skipping: {e}")
             return
         if not headings:
             # No genuine heading found on this page at all -- do NOT reset
@@ -12417,10 +12454,42 @@ async def _bio_apply_heading_scan(generated_pages: list) -> list:
             if old_hints:
                 logger.warning(f"[BIO heading-scan] page {page_num}: forced '{htext[:40]}' (score={h.get('_score')}/4) over {old_hints}")
 
-    await asyncio.gather(*[
-        _scan_one(page_num, img, mcqs) for page_num, img, mcqs in generated_pages
-    ], return_exceptions=True)
+    # BATCHED scan: group pages into chunks (default 3/call) and send each
+    # chunk's images together in ONE Gemini call via
+    # _build_bio_heading_scan_prompt_batched + _qbm_gemini_raw_multi,
+    # instead of the old 1-call-per-page approach -- cuts heading-scan API
+    # calls to roughly 1/3 of page count (e.g. 30 pages: 30 calls -> ~10),
+    # a direct key/quota cost reduction. Generation calls (Call 1, in
+    # pdf_generate_all_pages) are untouched -- only this independent
+    # verification pass is batched, so per-MCQ generation quality/accuracy
+    # is unaffected; only the heading-detection call count changes.
+    BATCH_SIZE = 3
+    pages_with_mcqs = [(pn, img, mcqs) for pn, img, mcqs in generated_pages if mcqs]
+
+    async def _scan_batch(batch):
+        page_nums = [pn for pn, _, _ in batch]
+        imgs = [img for _, img, _ in batch]
+        try:
+            prompt = _build_bio_heading_scan_prompt_batched(len(batch))
+            scan_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+            all_headings = _parse_bio_heading_scan(scan_txt)
+        except Exception as e:
+            logger.warning(f"[BIO heading-scan] batch {page_nums} failed, skipping: {e}")
+            return
+        # Route headings back to their page via page_index (1-indexed
+        # within this batch, matching the image order sent in the call).
+        by_index = {}
+        for h in all_headings:
+            idx = h.get("page_index")
+            if isinstance(idx, (int, float)) and 1 <= int(idx) <= len(batch):
+                by_index.setdefault(int(idx), []).append(h)
+        for i, (page_num, _img, mcqs) in enumerate(batch, start=1):
+            _apply_headings_to_page(page_num, by_index.get(i, []), mcqs)
+
+    batches = [pages_with_mcqs[i:i + BATCH_SIZE] for i in range(0, len(pages_with_mcqs), BATCH_SIZE)]
+    await asyncio.gather(*[_scan_batch(b) for b in batches], return_exceptions=True)
     return generated_pages
+
 
 
 
@@ -14255,6 +14324,81 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
     except Exception as e:
         logger.warning(f"[QBM] Gemini raw call failed: {e}")
         return await _gen_groq_raw_text(img, prompt)
+
+
+async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
+    """Multi-image variant of _qbm_gemini_raw -- sends several page images
+    in ONE Gemini call instead of one call per image, used by /bio's
+    batched heading-scan (_bio_apply_heading_scan) to cut per-page API
+    calls. Same key-rotation/quota-exhaustion/Groq-fallback behavior as
+    the single-image version; Groq fallback here only ever uses the FIRST
+    image (Groq vision path is single-image), which is an acceptable
+    degradation for the rare full-Gemini-outage case."""
+    try:
+        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
+        if not key_rotator.keys:
+            return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+        if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
+            logger.warning("[QBM] all Gemini keys already known daily-exhausted — skipping straight to Groq")
+            return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+        from google import genai as gai
+        from google.genai import types
+        img_bytes_list = []
+        for img in imgs:
+            b64 = image_to_base64(img)
+            img_bytes_list.append(base64.b64decode(b64))
+
+        def _call(key):
+            client = gai.Client(api_key=key)
+            parts = [types.Part.from_text(text=prompt)]
+            for ib in img_bytes_list:
+                parts.append(types.Part.from_bytes(data=ib, mime_type="image/jpeg"))
+            return client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=parts,
+                config=types.GenerateContentConfig(temperature=0.1)
+            )
+
+        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
+        if _live:
+            keys_to_try = _live
+        for key in keys_to_try:
+            if is_cancelled():
+                return ""
+            try:
+                response = await asyncio.to_thread(_call, key)
+                key_rotator.mark_healthy(key)
+                return response.text or ""
+            except Exception as e:
+                msg = str(e)
+                extra = ""
+                try:
+                    resp_obj = getattr(e, "response", None)
+                    if resp_obj is not None:
+                        extra = getattr(resp_obj, "text", "") or ""
+                except Exception:
+                    pass
+                full_msg = msg + " " + extra
+                if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                    daily = "PerDay" in full_msg
+                    retry_s = None
+                    try:
+                        rd_match = re.search(r"'retryDelay':\s*'(\d+)s'", full_msg)
+                        if rd_match:
+                            retry_s = int(rd_match.group(1))
+                    except Exception:
+                        pass
+                    key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
+                    logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
+                    continue
+                logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
+                continue
+        logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision (first image only)")
+        return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+    except Exception as e:
+        logger.warning(f"[QBM] Gemini multi-image raw call failed: {e}")
+        return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
 
 
 async def _ai_gemini_text_call(prompt: str) -> str:
