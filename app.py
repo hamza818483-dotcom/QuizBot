@@ -10932,11 +10932,11 @@ OPTION ORDER (absolute, never reorder):
 - Strictly remove ONLY the navigation sentence telling reader which question numbers to answer via the passage — e.g. "উদ্দীপকের আলোকে ২১ ও ২২ নং প্রশ্নের উত্তর দাও", "নিচের উদ্দীপকের ভিত্তিতে ২৩-২৫ নং প্রশ্নের উত্তর দাও", or English "Answer questions 21 and 22 based on the stimulus above" — this pattern (question-number(s) + "প্রশ্নের উত্তর দাও"/"answer question(s)") is page-navigation, never the actual question.
   Do NOT strip any other sentence just for containing "উদ্দীপক" — e.g. "উদ্দীপকে প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" IS the real question, keep in full.
 
-EXPLANATION RULES (strict priority, max 165 chars Bengali unless case 1):
-1) TOP PRIORITY: page has explanation/reasoning text for this MCQ → copy 100% VERBATIM, byte-for-byte, no summarizing/paraphrasing/translating/"improving" (overrides 165-char limit; never edited even if it doesn't cover all 4 options). Skip to case 2 only if truly none exists.
-2) No direct explanation but other relevant info exists (paragraph/note/box/table/fact) → build from it as direct fact (see forbidden phrases below), covering all 4 options: why correct is right + why each of the 3 wrong ones is incorrect.
-3) Nothing relevant exists → generate best accurate explanation from own knowledge, same all-4-options coverage.
-Case 1 always checked first; never mix (verbatim text never edited, self-written always covers all 4).
+EXPLANATION RULES (strict priority, max 190 chars Bengali unless case 1):
+1) TOP PRIORITY: page has explanation/reasoning text for this MCQ → copy 100% VERBATIM, byte-for-byte, no summarizing/paraphrasing/translating/"improving" (overrides 190-char limit; never edited even if it doesn't cover all 4 options). Skip to case 2 only if truly none exists.
+2) No direct explanation but other relevant info exists (paragraph/note/box/table/fact) → build from it as direct fact (see forbidden phrases below). Structure: correct option's own relevant info FIRST (why it's right), then the 3 wrong options' actual identity/relevant facts and why each doesn't fit — never a bare "ভুল"/"incorrect" with no reason. Correct-option info must land first since that's what survives if length forces a cut.
+3) Nothing relevant exists → generate best accurate explanation from own knowledge, same structure (correct-option info first, then real detail on why each wrong option doesn't fit).
+Case 1 always checked first; never mix (verbatim text never edited, self-written always covers all 4, correct-answer-first ordering).
 
 MATH/CHEMISTRY FORMATTING (always, in question/options/explanation): NEVER output raw LaTeX commands (no \vec, \hat, \frac, \sqrt, \sum, \int, ^, _, {, } used as LaTeX syntax) — always convert to proper Unicode instead:
 - Vectors: \vec{A} → A⃗ (or bold+arrow style like **A**⃗), \hat{i} → î, \hat{j} → ĵ, \hat{k} → k̂
@@ -10955,12 +10955,12 @@ QUESTION has a diagram/figure/chart needed to understand/answer it → add "qsn_
 MANDATORY TRIGGER: figure caption/label near question (e.g. "চিত্র: G", "চিত্র-১", "Figure 1") = PROOF a diagram exists there — MUST add qsn_bbox covering the actual diagram (not the caption text).
 
 OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450]}]"""
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]"""
 
 
 TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": the text inside the widest, full-page-width BLACK/DARK BACKGROUND banner bar that this MCQ falls under (e.g. "বাংলাদেশ পরিচিতি", "বর্তমান ও পুরাতন নাম, ভৌগোলিক উপনাম", "বাংলাদেশের অবস্থান, আয়তন ও সীমানা") — this is the actual topic name and is CRITICAL, used to detect topic boundaries. Rules:\n'
@@ -10980,13 +10980,13 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '  Example: left column has topicA-Q1,Q2,Q3 then topicB-Q1,Q2; right column at the same vertical range has topicA-Q7...Q13 (no new banner yet) then topicB-Q3,Q4. Correct output order: topicA-Q1,Q2,Q3 (left) → topicA-Q7...Q13 (right) → topicB-Q1,Q2 (left) → topicB-Q3,Q4 (right). NEVER: topicA-left, topicB-left, topicA-right, topicB-right (that scrambles topics together).\n'
     '  Before finalizing output, recount: every MCQ visible on the page (both columns, top to bottom) MUST appear exactly once in the JSON array — zero skipped, zero duplicated. Double-check page edges/corners and column-boundary MCQs specifically, they are the most commonly missed.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
 )
 
 
 UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": the topic-heading text that this MCQ falls under. THIS PAGE STYLE uses a DIFFERENT topic-marker design than a plain black banner bar — a topic heading here is identified by ALL THREE of the following together, right before the heading text:\n'
@@ -11010,7 +11010,7 @@ UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '  Do NOT do a single whole-page "entire left column, then entire right column" pass. Never zigzag within one segment\'s column, but DO switch back to a new segment\'s left column immediately after finishing that same segment\'s right column.\n'
     '  Before finalizing output, recount: every MCQ visible on the page (both columns, top to bottom) MUST appear exactly once in the JSON array — zero skipped, zero duplicated.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 165 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
 )
 
 
@@ -14679,6 +14679,12 @@ def _onu_filter_mcqs(mcqs: list):
 # marked answer (red circle/box around an option). No passage handling, no
 # math formatting, no explanation-generation rules -- those aren't part of
 # /onu's job and were only bloating the prompt for QBM's use case.
+_EXPLANATION_DEPTH_RULE = """
+EXPLANATION DEPTH (always, whenever you write/generate an explanation yourself rather than copying page text verbatim): structure it in this order, one compact paragraph, no headings/labels between the parts:
+1) FIRST: the correct option's own relevant info — why it's factually correct, tied to the question's context/subject.
+2) THEN: the other (wrong) options — briefly what each one actually is/means, and why it doesn't fit this question, using real distinguishing facts (never a bare "ভুল"/"incorrect" with no reason).
+Keep the WHOLE explanation within ~190 characters — put the correct-option info first since that's what must survive if length forces a cut, then the other-options detail after it. Never a single generic one-line filler; every option gets real, specific content."""
+
 _MATH_UNICODE_RULE = """
 MATH/CHEMISTRY FORMATTING (always, in question/options/explanation): NEVER output raw LaTeX commands (no \\vec, \\hat, \\frac, \\sqrt, \\sum, \\int, ^, _, {, } used as LaTeX syntax) — always convert to proper Unicode instead:
 - Vectors: \\vec{A} → A⃗, \\hat{i} → î, \\hat{j} → ĵ, \\hat{k} → k̂
@@ -14694,6 +14700,8 @@ Only fall back to minimal LaTeX for the ONE specific expression that is genuinel
 # brace there would raise/corrupt the format call.
 _MATH_UNICODE_RULE_FMT_SAFE = _MATH_UNICODE_RULE.replace("{", "{{").replace("}", "}}")
 
+_EXPLANATION_DEPTH_RULE_FMT_SAFE = _EXPLANATION_DEPTH_RULE.replace("{", "{{").replace("}", "}}")
+
 ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY. Scan every MCQ block on this page (question + 4 options), one block at a time. For EACH block, look specifically at the pixels directly behind its question line AND its 4 options. If ANY yellow marker-pen color OR ANY green marker-pen color is visible there (a light/pale/faint tint of either still counts, not just bright/saturated), INCLUDE this MCQ in the output — this is a MUST-TAKE rule, never miss a highlighted MCQ even if faint. If the background is plain white/no-color for this block, SKIP it entirely — do NOT include it in the output at all. Do not assume based on other MCQs on the page — each block gets its own independent check, since a page can mix highlighted and non-highlighted blocks. Never invent new MCQs, exact order, exact wording (Bangla stays Bangla, English stays English). 0 highlighted MCQs → return [].
 
 For each INCLUDED MCQ, find the RED-MARKED option: the option with a RED CIRCLE or RED BOX drawn around its letter/text (A/B/C/D by position, 1st option=A...4th=D). This red mark is ONLY a visual pointer to what someone marked — it is NOT automatically correct. You must INDEPENDENTLY VERIFY using your own subject knowledge which option is actually, factually correct:
@@ -14701,7 +14709,8 @@ For each INCLUDED MCQ, find the RED-MARKED option: the option with a RED CIRCLE 
 - If the red-marked option is NOT the factually correct answer (the mark is wrong) → output the ACTUALLY CORRECT option as "answer" (not the red-marked one), set "marked_answer_wrong":true, and in the explanation clearly state the red-marked option was wrong and give the correct one.
 - If no red mark is visible at all, determine the correct answer purely from subject knowledge, set "marked_answer_wrong":false.
 
-Also write a short explanation (1-2 sentences, Bangla if the MCQ is in Bangla) for why the correct answer is correct — from any ব্যাখ্যা text physically printed on the page near this MCQ if present, otherwise from your own knowledge of the subject. If marked_answer_wrong is true, the explanation MUST also mention the marked option was incorrect and state the correct one.
+Also write a short explanation (Bangla if the MCQ is in Bangla) for why the correct answer is correct — from any ব্যাখ্যা text physically printed on the page near this MCQ if present (copy verbatim, no rewrite), otherwise self-write following the structure below. If marked_answer_wrong is true, the explanation MUST also mention the marked option was incorrect and state the correct one.
+""" + _EXPLANATION_DEPTH_RULE + """
 """ + _MATH_UNICODE_RULE + """
 
 OUTPUT FORMAT — ONLY valid JSON array containing ONLY the highlighted MCQs, nothing else:
@@ -14732,7 +14741,8 @@ STEP 3 — For each KEPT (highlighted) MCQ, find the RED-MARKED option: the opti
    - Red-marked option is NOT factually correct → "answer" = the ACTUALLY correct option (ignore the wrong red mark), "marked_answer_wrong":true.
    - No red mark visible at all → determine correct answer from subject knowledge, "marked_answer_wrong":false.
 
-STEP 4 — For each KEPT MCQ, write a short explanation (1-2 sentences, Bangla if the MCQ is in Bangla) for why the correct answer is correct — use any ব্যাখ্যা text physically printed on the page near this MCQ if present, otherwise use your own knowledge of the subject. If marked_answer_wrong is true, the explanation MUST also state the red-marked option was wrong and give the correct one.
+STEP 4 — For each KEPT MCQ, write a short explanation (Bangla if the MCQ is in Bangla) for why the correct answer is correct — use any ব্যাখ্যা text physically printed on the page near this MCQ if present (copy verbatim, no rewrite), otherwise self-write following the structure below. If marked_answer_wrong is true, the explanation MUST also state the red-marked option was wrong and give the correct one.
+""" + _EXPLANATION_DEPTH_RULE + """
 """ + _MATH_UNICODE_RULE + """
 
 OUTPUT FORMAT — ONLY valid JSON array of the KEPT (highlighted) MCQs only, exact order, exact wording (Bangla stays Bangla, English stays English), nothing else, no commentary, no markdown fences:
@@ -15121,7 +15131,8 @@ For each MCQ found INSIDE a red marking:
 2. Extract question text and all options exactly as written (Bangla stays Bangla, English stays English). Number options A,B,C,D by position (1st=A...4th=D).
 3. Find the RED-CIRCLED/RED-MARKED option: the option with a RED GOLLA (red circle/dot, "লাল গোল্লা") or red box drawn around its letter/text/bullet — this circle IS the student's chosen answer marking. TRUST this red-circled option as "answer" by default — in the overwhelming majority of cases (about 99%) the red-circled option is the correct answer, so set "marked_answer_wrong": false and use the circled option as "answer" UNLESS you are highly confident from strong subject knowledge that it is factually wrong (only then set "marked_answer_wrong": true and use the actually-correct option as "answer" instead). Do not second-guess a correct-looking red-circled answer just because you'd have picked differently by default — only override with strong, clear certainty.
    - If no option is red-circled/marked at all -> determine the answer from subject knowledge, "marked_answer_wrong": false, "no_mark": true.
-4. Write a short explanation (1-2 sentences, Bangla if MCQ is Bangla, max ~180 characters) for why the correct answer is correct — use any ব্যাখ্যা text printed near it if present, otherwise your own knowledge.
+4. Write a short explanation (Bangla if MCQ is Bangla) for why the correct answer is correct — use any ব্যাখ্যা text printed near it if present (copy verbatim, no rewrite), otherwise self-write following the structure below.
+""" + _EXPLANATION_DEPTH_RULE + """
 """ + _MATH_UNICODE_RULE + """
 
 No red-marked MCQ on this page -> return [].
@@ -15141,6 +15152,8 @@ STRICT RULES:
 - SKIP any MCQ with an IMAGE/DIAGRAM/FIGURE attached to its question, an option, or its explanation. Do not report these even if red-marked.
 - Every reported item MUST have all 7 fields (mcq_no, question, options, answer, marked_answer_wrong, no_mark, explanation) — incomplete items will be rejected downstream.
 - For every missed MCQ you report, the "answer" field MUST be independently verified against your own subject knowledge (not just copied from the red option-mark) — same rule as the first extraction pass: if the red-marked option is wrong, output the correct one and set marked_answer_wrong=true.
+- For every missed MCQ's "explanation": use any ব্যাখ্যা text printed near it if present (verbatim, no rewrite), otherwise self-write following this structure:
+""" + _EXPLANATION_DEPTH_RULE_FMT_SAFE + """
 
 SECOND TASK — ANSWER AUDIT of the already-extracted list (separate from the miss-check above): for each MCQ already in the existing list, look at the page image again and re-confirm: did the extraction correctly read the red-circled/red-marked option as its answer? Report ONLY entries where you find the recorded answer does NOT match what is actually red-circled on the page (a genuine reading error), as a SEPARATE array under "answer_corrections". If everything matches, return an empty array for this too.
 
