@@ -12218,9 +12218,12 @@ def _build_bio_heading_scan_prompt() -> str:
         "parenthetical if present)\n"
         "  - approximately how far down the page it sits, as a fraction from 0.0 (very top) to "
         "1.0 (very bottom) of the page height — your best visual estimate, used only to order "
-        "multiple headings relative to each other on this same page.\n\n"
+        "multiple headings relative to each other on this same page.\n"
+        "  - a true/false flag for EACH of the 4 signals individually, so the exact match count "
+        "can be verified downstream — do not skip any flag.\n\n"
         "Output ONLY this JSON array, nothing else, in top-to-bottom page order:\n"
-        '[{"heading_text": "...", "vertical_position": 0.0}]\n'
+        '[{"heading_text": "...", "vertical_position": 0.0, "centered": true, '
+        '"english_bracket_right": true, "bangla_number_prefix": true, "bold_larger_font": true}]\n'
         "If there are zero genuine topic headings on this page, output exactly []."
     )
 
@@ -12261,6 +12264,49 @@ def _is_sane_bio_heading(text: str) -> bool:
     return True
 
 
+def _bio_verify_heading_text_signals(heading_text: str) -> dict:
+    """TEXT-LEVEL, code-verified re-check of signals 2 and 3 (the two
+    signals that are objectively verifiable from the reported string
+    itself, unlike 1/centered and 4/bold-larger which are visual-only and
+    must be trusted from the model's flag). Never trusts the model's
+    self-reported booleans blindly for these two -- cross-checks them
+    against the actual heading_text so a model that says
+    bangla_number_prefix=true but reports text with no such prefix doesn't
+    silently inflate its own score."""
+    t = (heading_text or "").strip()
+    has_number_prefix = bool(re.match(r'^[০-৯]+(\.[০-৯]+)*।', t))
+    has_bracket_right = bool(re.search(r'\([A-Za-z][A-Za-z \-&]*\)\s*$', t))
+    return {"bangla_number_prefix": has_number_prefix, "english_bracket_right": has_bracket_right}
+
+
+def _bio_heading_score(h: dict) -> int:
+    """Code-level SCORING gate implementing the 4-signal serial-priority
+    rule from the prompt: (1) centered, (2) English bracket-name to the
+    right, (3) Bangla numbering prefix, (4) bold+larger font. Signals 1
+    and 4 are visual-only (trusted from the model's self-reported flag,
+    since code has no independent way to verify layout/font from text
+    alone); signals 2 and 3 are re-verified against the actual
+    heading_text string via _bio_verify_heading_text_signals, since those
+    ARE objectively checkable from text and a model's flag can drift from
+    what it actually printed. A candidate needs signal 1 (centered) TRUE
+    on its own to even be considered -- per the prompt, centered alone is
+    already the strongest signal, and a heading that isn't centered but
+    is only bold+larger (signal 4 only) is treated as a left-margin
+    sub-label, not a real topic heading, and scores 0 (rejected)."""
+    centered = bool(h.get("centered"))
+    if not centered:
+        # Matches only signal 4 (bold/larger) at best -- per the serial
+        # priority rule this is a sub-label, not a real heading. Reject
+        # outright rather than let a lower score still slip through.
+        return 0
+    text_signals = _bio_verify_heading_text_signals(h.get("heading_text"))
+    score = 1  # signal 1: centered
+    score += 1 if text_signals["english_bracket_right"] else 0       # signal 2
+    score += 1 if text_signals["bangla_number_prefix"] else 0        # signal 3
+    score += 1 if bool(h.get("bold_larger_font", True)) else 0       # signal 4
+    return score
+
+
 async def _bio_apply_heading_scan(generated_pages: list) -> list:
     """Code-level verification/override pass for /bio, run AFTER generation
     -- same role as /chem's inline heading-scan override, but applied as a
@@ -12299,11 +12345,14 @@ async def _bio_apply_heading_scan(generated_pages: list) -> list:
         ordered = sorted(
             [h for h in headings
              if isinstance(h.get("vertical_position"), (int, float))
-             and _is_sane_bio_heading(h.get("heading_text"))],
+             and _is_sane_bio_heading(h.get("heading_text"))
+             and _bio_heading_score(h) >= 1],  # score 0 => not centered => reject (sub-label)
             key=lambda h: h["vertical_position"],
         )
         if not ordered:
             return
+        for h in ordered:
+            h["_score"] = _bio_heading_score(h)
         n = len(mcqs)
         # Only mark a fresh qsn_no==1 boundary for the MCQ where the FIRST
         # real heading's range begins -- MCQs before that (if the page
@@ -12328,7 +12377,7 @@ async def _bio_apply_heading_scan(generated_pages: list) -> list:
                         old_hints.add(old_hint[:40])
                     m["topic_hint"] = htext
             if old_hints:
-                logger.warning(f"[BIO heading-scan] page {page_num}: forced '{htext[:40]}' over {old_hints}")
+                logger.warning(f"[BIO heading-scan] page {page_num}: forced '{htext[:40]}' (score={h.get('_score')}/4) over {old_hints}")
 
     await asyncio.gather(*[
         _scan_one(page_num, img, mcqs) for page_num, img, mcqs in generated_pages
