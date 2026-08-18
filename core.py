@@ -1319,6 +1319,52 @@ async def _ensure_d1_table(name: str, create_sql: str):
     except Exception as e:
         logger.warning(f"[D1] ensure {name} table warn: {e}")
 
+# ============================================================
+# GEMINI DAILY-EXHAUSTED KEY PERSISTENCE
+# Previously this state lived only in an in-memory dict inside
+# pdf_handler.py, so a bot restart (which happens routinely on the free
+# hosting tier) silently wiped it -- /keys would then show every key as
+# "healthy" even though Google's actual daily quota for those keys was
+# still exhausted, until the bot re-discovered that the hard way via a
+# fresh 429 on each one. Persisting to D1 means /keys reflects reality
+# across restarts, and a restart no longer burns wasted 429 round-trips
+# re-learning what was already known before the restart.
+# ============================================================
+async def _ensure_gemini_exhausted_table():
+    await _ensure_d1_table("gemini_exhausted_keys",
+        "CREATE TABLE IF NOT EXISTS gemini_exhausted_keys ("
+        "key_hash TEXT PRIMARY KEY, exhausted_day TEXT, updated_at INTEGER)")
+
+async def db_mark_gemini_key_exhausted(key_hash: str, day_str: str):
+    try:
+        await _ensure_gemini_exhausted_table()
+        await d1_run(
+            "INSERT INTO gemini_exhausted_keys (key_hash, exhausted_day, updated_at) VALUES (?1,?2,?3) "
+            "ON CONFLICT(key_hash) DO UPDATE SET exhausted_day=excluded.exhausted_day, updated_at=excluded.updated_at",
+            [key_hash, day_str, int(time.time())]
+        )
+    except Exception as e:
+        logger.warning(f"[D1] mark_gemini_key_exhausted warn (non-fatal): {e}")
+
+async def db_mark_gemini_key_healthy(key_hash: str):
+    try:
+        await _ensure_gemini_exhausted_table()
+        await d1_run("DELETE FROM gemini_exhausted_keys WHERE key_hash=?1", [key_hash])
+    except Exception as e:
+        logger.warning(f"[D1] mark_gemini_key_healthy warn (non-fatal): {e}")
+
+async def db_load_gemini_exhausted_keys() -> dict:
+    """Returns {key_hash: exhausted_day} for all keys currently marked
+    exhausted in D1 -- called once at startup to rehydrate pdf_handler.py's
+    in-memory cache so a restart doesn't lose this state."""
+    try:
+        await _ensure_gemini_exhausted_table()
+        rows = await d1_select("SELECT key_hash, exhausted_day FROM gemini_exhausted_keys")
+        return {r["key_hash"]: r["exhausted_day"] for r in (rows or [])}
+    except Exception as e:
+        logger.warning(f"[D1] load_gemini_exhausted_keys warn: {e}")
+        return {}
+
 async def auto_link_map_set(label: str, url: str, context: str = ""):
     """Persist a /auto label->link mapping (survives bot restart) so image-only
     or unmatchable-text cards can be goto:'d directly instead of clicked.

@@ -12,6 +12,7 @@ import base64
 import asyncio
 import time
 import contextvars
+import hashlib
 from io import BytesIO
 from PIL import Image
 
@@ -41,12 +42,45 @@ logger = logging.getLogger("atlas.pdf_handler")
 # ============================================================
 _gemini_key_exhausted_day: dict = {}   # key -> 'YYYY-MM-DD' (Pacific) it was marked exhausted
 _gemini_key_exhausted_flag: dict = {}  # key -> True while exhausted-today
+_gemini_exhausted_d1_loaded = False    # set True once startup rehydrate has run
+
+def _gemini_key_hash(key: str) -> str:
+    """Short, stable, non-reversible identifier for a key -- stored in D1
+    instead of the raw key so the exhausted-keys table never holds live
+    credentials."""
+    return hashlib.sha256(key.encode()).hexdigest()[:24]
 
 def _gemini_quota_today_str() -> str:
     from datetime import datetime
     if GEMINI_QUOTA_TZ is not None:
         return datetime.now(GEMINI_QUOTA_TZ).strftime('%Y-%m-%d')
     return datetime.utcnow().strftime('%Y-%m-%d')
+
+async def load_gemini_exhausted_keys_from_d1():
+    """Call once at bot startup, after key_rotator is constructed. Rehydrates
+    the in-memory exhausted-today state from D1 so a restart doesn't lose
+    it -- without this, /keys always shows every key "healthy" right after
+    a restart even if Google's actual daily quota for those keys is still
+    exhausted, and the bot wastes a fresh 429 round-trip re-discovering
+    what it already knew before restarting."""
+    global _gemini_exhausted_d1_loaded
+    try:
+        from core import db_load_gemini_exhausted_keys
+        today = _gemini_quota_today_str()
+        rows = await db_load_gemini_exhausted_keys()
+        restored = 0
+        for key in key_rotator.keys:
+            h = _gemini_key_hash(key)
+            day = rows.get(h)
+            if day == today:
+                _gemini_key_exhausted_day[key] = day
+                _gemini_key_exhausted_flag[key] = True
+                restored += 1
+        if restored:
+            logger.warning(f"[Gemini] Restored {restored} daily-exhausted key(s) from D1 after restart")
+        _gemini_exhausted_d1_loaded = True
+    except Exception as e:
+        logger.warning(f"[Gemini] load_gemini_exhausted_keys_from_d1 failed (non-fatal, starts fresh): {e}")
 
 def _is_gemini_key_exhausted_today(key: str) -> bool:
     """Daily quota-exhaustion memory for Gemini free-tier keys
@@ -64,9 +98,21 @@ def _mark_gemini_key_exhausted_today(key: str):
     today = _gemini_quota_today_str()
     _gemini_key_exhausted_day[key] = today
     _gemini_key_exhausted_flag[key] = True
+    try:
+        import asyncio
+        from core import db_mark_gemini_key_exhausted
+        asyncio.create_task(db_mark_gemini_key_exhausted(_gemini_key_hash(key), today))
+    except Exception as e:
+        logger.warning(f"[Gemini] D1 persist exhausted-mark failed (non-fatal, in-memory state still correct): {e}")
 
 def _mark_gemini_key_healthy_today(key: str):
     _gemini_key_exhausted_flag[key] = False
+    try:
+        import asyncio
+        from core import db_mark_gemini_key_healthy
+        asyncio.create_task(db_mark_gemini_key_healthy(_gemini_key_hash(key)))
+    except Exception as e:
+        logger.warning(f"[Gemini] D1 clear exhausted-mark failed (non-fatal, in-memory state still correct): {e}")
 
 
 _BANNED_KEYS_FILE = "/tmp/atlas_banned_gemini_keys.json"

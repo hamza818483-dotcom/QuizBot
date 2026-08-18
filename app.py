@@ -21498,6 +21498,16 @@ async def startup():
     except Exception as e:
         logger.warning(f"[App] CF Worker pre-warm failed (non-fatal): {e}")
 
+    # Rehydrate Gemini daily-exhausted key state from D1 so /keys and the
+    # rotator reflect real quota status right after a restart, instead of
+    # showing every key "healthy" until each is re-discovered via a fresh
+    # 429 (see pdf_handler.load_gemini_exhausted_keys_from_d1 for detail).
+    try:
+        from pdf_handler import load_gemini_exhausted_keys_from_d1
+        await load_gemini_exhausted_keys_from_d1()
+    except Exception as e:
+        logger.warning(f"[App] Gemini exhausted-key D1 rehydrate failed (non-fatal, starts fresh): {e}")
+
     try:
         if sb is not None:
             await sb_exec(lambda: sb.table("pdf_users").select("user_id").limit(1).execute(), timeout=10)
