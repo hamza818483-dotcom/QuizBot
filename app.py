@@ -7525,29 +7525,35 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                             const MM_PER_PX = 25.4 / 96;
                             pages.forEach((pg, idx) => {
                                 const pageNum = idx + 1;
-                                const cc = pg.querySelector('.content-columns');
+                                const isAnswers = pg.classList.contains('answers-page');
+                                const cc = isAnswers ? pg.querySelector('.answers-section') : pg.querySelector('.content-columns');
                                 if (!cc) return;
-                                const items = Array.from(cc.querySelectorAll(':scope > .question'));
-                                if (!items.length) return;
-                                const colBottoms = {};
-                                items.forEach(it => {
-                                    const r = it.getBoundingClientRect();
-                                    const key = Math.round(r.left);
-                                    const bottom = r.bottom;
-                                    if (!colBottoms[key] || bottom > colBottoms[key]) colBottoms[key] = bottom;
-                                });
-                                const ccTop = cc.getBoundingClientRect().top;
-                                const maxBottom = Math.max(...Object.values(colBottoms));
-                                const neededPx = Math.ceil(maxBottom - ccTop) + 12;
-                                cc.style.height = neededPx + 'px';
-                                // header block above .content-columns (only present on page 1) +
-                                // top/bottom page margins already reserved via @page margin.
-                                const header = pg.previousElementSibling && pg.previousElementSibling.classList && pg.previousElementSibling.classList.contains('exam-header')
-                                    ? pg.previousElementSibling : (pg.querySelector(':scope > .exam-header'));
+                                let neededPx;
+                                if (isAnswers) {
+                                    neededPx = Math.ceil(cc.getBoundingClientRect().height) + 12;
+                                } else {
+                                    const items = Array.from(cc.querySelectorAll(':scope > .question'));
+                                    if (!items.length) return;
+                                    const colBottoms = {};
+                                    items.forEach(it => {
+                                        const r = it.getBoundingClientRect();
+                                        const key = Math.round(r.left);
+                                        const bottom = r.bottom;
+                                        if (!colBottoms[key] || bottom > colBottoms[key]) colBottoms[key] = bottom;
+                                    });
+                                    const ccTop = cc.getBoundingClientRect().top;
+                                    const maxBottom = Math.max(...Object.values(colBottoms));
+                                    neededPx = Math.ceil(maxBottom - ccTop) + 12;
+                                    cc.style.height = neededPx + 'px';
+                                }
+                                // header block (only present inside page 1's .abpage) is
+                                // already part of pg's flow height above content-columns.
+                                const header = pg.querySelector(':scope > .exam-header');
                                 const headerPx = header ? header.getBoundingClientRect().height + 15 : 0;
                                 const totalPx = neededPx + headerPx;
                                 const heightMm = Math.max(40, Math.min(560, Math.ceil(totalPx * MM_PER_PX) + 15));
-                                rules.push(`@page p${pageNum}{size:420mm ${heightMm}mm;margin:10mm 10mm 25mm 10mm;}`);
+                                const pageName = isAnswers ? 'pans' : `p${pageNum}`;
+                                rules.push(`@page ${pageName}{size:420mm ${heightMm}mm;margin:10mm 10mm 25mm 10mm;}`);
                             });
                             const styleEl = document.createElement('style');
                             styleEl.textContent = rules.join('\\n');
@@ -8130,7 +8136,7 @@ def _build_print_style1(data, heading):
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
 _PRINT_STYLE7_CSS = """<style>
-@page{size:420mm 594mm;margin:10mm 10mm 25mm 10mm;@top-center{content:none}@bottom-center{content:none}}
+@page{size:420mm 60mm;margin:10mm 10mm 25mm 10mm;@top-center{content:none}@bottom-center{content:none}}
 body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:15pt;line-height:1.35;color:#000;margin:0;padding:10px;width:420mm;max-width:420mm}
 .exam-header{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:10px;margin-bottom:15px}
 .exam-header h1{color:#166534;margin:0;font-size:20pt;font-weight:bold}
@@ -8198,8 +8204,9 @@ def _build_print_style7(data, heading):
         base += 3.5  # question block bottom margin
         return base
 
-    body = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>'
+    body = ''
     page_idx = 0
+    total_pages = _math.ceil(len(data) / PER_PAGE) if data else 0
     for pg_start in range(0, len(data), PER_PAGE):
         chunk = data[pg_start:pg_start + PER_PAGE]
         page_idx += 1
@@ -8214,15 +8221,17 @@ def _build_print_style7(data, heading):
             col_heights.append(sum(_est_item_height_mm(d) for d in seg))
         tallest_mm = max(col_heights) if col_heights else 40
         est_mm = max(40, min(560, round(tallest_mm * 1.15 + 15)))  # generous buffer; real height gets measured+shrunk in _html_to_pdf before final render
-        body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}"><div class="content-columns" style="height:{est_mm}mm">'
+        header_html = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>' if page_idx == 1 else ''
+        body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}">{header_html}<div class="content-columns" style="height:{est_mm}mm">'
         for d in chunk:
             body += _render_question(d)
         body += '</div></div>'
 
-    body += '<div class="page-break"></div><div class="answers-section"><table class="answer-table"><thead><tr><th class="qno-col">Q.No.</th><th class="ans-col">Ans</th><th class="exp-col">Explanation</th></tr></thead><tbody>'
+    ans_page_num = total_pages + 1
+    body += f'<div class="abpage answers-page" id="abpage-{ans_page_num}" style="page:pans"><div class="answers-section"><table class="answer-table"><thead><tr><th class="qno-col">Q.No.</th><th class="ans-col">Ans</th><th class="exp-col">Explanation</th></tr></thead><tbody>'
     for d in data:
         body += f'<tr><td class="qno-col">{d["n"]}</td><td class="ans-col">{d["al"]}</td><td class="exp-col">{d["exp"] if d["exp"] else "-"}</td></tr>'
-    body += '</tbody></table></div>'
+    body += '</tbody></table></div></div>'
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
 def _build_print_style2(data, heading):
