@@ -8072,7 +8072,7 @@ def _build_print_style1(data, heading):
     body += '</div>'
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
-_PRINT_STYLE2_CSS = """<style>
+_PRINT_STYLE7_CSS = """<style>
 @page{size:420mm 594mm;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}}
 body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:10pt;line-height:1.15;color:#000;margin:0;padding:10px;width:420mm;max-width:420mm}
 .exam-header{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:10px;margin-bottom:15px}
@@ -8101,9 +8101,27 @@ img{max-width:30%!important;height:auto!important;vertical-align:middle}
 @media print{@page{size:420mm 594mm;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:420mm;max-width:420mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
 </style>"""
 
+def _build_print_style7(data, heading):
+    """Format P7: Exam Book Style — Large A3-ish page, 3 columns, ~50 MCQ/page so 100 MCQ fit in 2 pages, then separate Answer Table"""
+    css = _PRINT_STYLE7_CSS
+    body = f'<div class="exam-header"><h1>{heading} - Questions</h1></div><div class="content-columns">'
+    for d in data:
+        is_short = _check_short_option(d["opts"])
+        body += f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
+        if is_short:
+            body += f'<table class="options-table-short"><tr><td>(A) {d["opts"][0]}{d["oimgs"][0]}</td><td>(B) {d["opts"][1]}{d["oimgs"][1]}</td></tr><tr><td>(C) {d["opts"][2]}{d["oimgs"][2]}</td><td>(D) {d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
+        else:
+            body += f'<ul class="options-list"><li>(A) {d["opts"][0]}{d["oimgs"][0]}</li><li>(B) {d["opts"][1]}{d["oimgs"][1]}</li><li>(C) {d["opts"][2]}{d["oimgs"][2]}</li><li>(D) {d["opts"][3]}{d["oimgs"][3]}</li></ul>'
+        body += '</div>'
+    body += '</div><div class="page-break"></div><div class="answers-section"><table class="answer-table"><thead><tr><th class="qno-col">Q.No.</th><th class="ans-col">Ans</th><th class="exp-col">Explanation</th></tr></thead><tbody>'
+    for d in data:
+        body += f'<tr><td class="qno-col">{d["n"]}</td><td class="ans-col">{d["al"]}</td><td class="exp-col">{d["exp"] if d["exp"] else "-"}</td></tr>'
+    body += '</tbody></table></div>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
+
 def _build_print_style2(data, heading):
-    """Format P2: Exam Style — Large A3-ish page, 3 columns, ~50 MCQ/page so 100 MCQ fit in 2 pages, then separate Answer Table"""
-    css = _PRINT_STYLE2_CSS
+    """Format P2: Exam Style — Questions page then separate Answer Table (100% ported)"""
+    css = _PRINT_CSS
     body = f'<div class="exam-header"><h1>{heading} - Questions</h1></div><div class="content-columns">'
     for d in data:
         is_short = _check_short_option(d["opts"])
@@ -8403,6 +8421,7 @@ PRINT_STYLE_BUILDERS = {
     "style4": _build_print2_style1,
     "style5": _build_print2_style2,
     "style6": _build_print2_style3,
+    "style7": _build_print_style7,
 }
 PRINT_STYLE_NAMES = {
     "style1": "🖨️ Study Material (প্রশ্ন + উত্তর + ব্যাখ্যা)",
@@ -8411,6 +8430,7 @@ PRINT_STYLE_NAMES = {
     "style4": "🖨️ Practice Style (প্রশ্ন + Answer Table)",
     "style5": "🖨️ Preparation Style (উত্তর + ব্যাখ্যা inline)",
     "style6": "🖨️ Preparation Style-02 (English + Bengali)",
+    "style7": "🖨️ Exam Book Style",
 }
 
 # ============================================================
@@ -11674,6 +11694,27 @@ def _unmesh_group_mcqs(extracted_pages: list) -> list:
     flat = []
     last_hint = None
     for _page_idx, (_, _, mcqs) in enumerate(extracted_pages):
+        # CODE-LEVEL FIX: trailing_topic_marker sentinels are appended by the
+        # extraction prompt at the END of a page's MCQ array, but they can
+        # logically apply to MCQs that appear EARLIER in that same array if
+        # the model emitted the array out of strict top-to-bottom order (a
+        # known mis-ordering case). To guarantee last-page/last-column MCQs
+        # never get stuck on a stale hint, pre-scan this page's list: if a
+        # trailing_topic_marker exists anywhere in it, and one or more real
+        # MCQs after the LAST real MCQ before that marker are missing their
+        # own topic_hint, apply the marker's text to any trailing (tail-end)
+        # MCQs in this page that still have blank topic_hint AND come after
+        # the marker's position in the raw list.
+        marker_positions = [i for i, m in enumerate(mcqs) if "trailing_topic_marker" in m]
+        for mp in marker_positions:
+            marker_text = (mcqs[mp].get("trailing_topic_marker") or "").strip()
+            if not marker_text:
+                continue
+            for j in range(mp + 1, len(mcqs)):
+                if "trailing_topic_marker" in mcqs[j]:
+                    continue
+                if not (mcqs[j].get("topic_hint") or "").strip():
+                    mcqs[j]["topic_hint"] = marker_text
         for m in mcqs:
             if "trailing_topic_marker" in m:
                 th = (m.get("trailing_topic_marker") or "").strip()
@@ -11690,6 +11731,23 @@ def _unmesh_group_mcqs(extracted_pages: list) -> list:
             else:
                 m["_effective_hint"] = last_hint or ""
             flat.append(m)
+
+    # CODE-LEVEL GUARD: the very last page of the whole extracted range is a
+    # common failure spot — its final MCQ(s) (tail of whichever column ends
+    # last) sometimes carry an empty/blank topic_hint even though a marker
+    # or heading DID appear for them, simply because that was the last thing
+    # on the page and got no further reinforcement. Force the tail run of
+    # blank-hint MCQs on the LAST page to explicitly inherit last_hint (this
+    # is already what _effective_hint does above, but re-assert it directly
+    # onto topic_hint too so downstream consumers reading topic_hint,not
+    # _effective_hint, also see the corrected value).
+    if extracted_pages:
+        last_page_idx = len(extracted_pages) - 1
+        for m in reversed(flat):
+            if m.get("_page_key") != last_page_idx:
+                break
+            if not (m.get("topic_hint") or "").strip() and m.get("_effective_hint"):
+                m["topic_hint"] = m["_effective_hint"]
 
     flat = _check_segment_topic_consistency(flat, context="unmesh-grouping-stage")
 
