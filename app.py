@@ -14679,6 +14679,21 @@ def _onu_filter_mcqs(mcqs: list):
 # marked answer (red circle/box around an option). No passage handling, no
 # math formatting, no explanation-generation rules -- those aren't part of
 # /onu's job and were only bloating the prompt for QBM's use case.
+_MATH_UNICODE_RULE = """
+MATH/CHEMISTRY FORMATTING (always, in question/options/explanation): NEVER output raw LaTeX commands (no \\vec, \\hat, \\frac, \\sqrt, \\sum, \\int, ^, _, {, } used as LaTeX syntax) — always convert to proper Unicode instead:
+- Vectors: \\vec{A} → A⃗, \\hat{i} → î, \\hat{j} → ĵ, \\hat{k} → k̂
+- Fractions: \\frac{a}{b} → a/b or a⁄b — never leave \\frac{}{} literally
+- Roots: \\sqrt{x} → √x, \\sqrt[3]{x} → ∛x
+- Subscript/superscript: H₂O, CO₂, NaHCO₃, x², 10³, Na⁺, Ca²⁺, SO₄²⁻ (never H2O or x^2 style)
+- Symbols: °C, ×, ·, ∑ ∫ ∞ ∂ √ ± ≤ ≥ ≠ ≈ ∝ ∆ π θ α β γ λ μ Ω directly as Unicode.
+Only fall back to minimal LaTeX for the ONE specific expression that is genuinely impossible to represent clearly in Unicode/plain text (rare, e.g. a multi-line matrix) — everything else stays Unicode."""
+
+# .format()-safe variant: every literal { and } escaped to {{ / }} so this
+# can be concatenated into ONU2_CALL2_MISSCHECK_PROMPT_TMPL, which goes
+# through .format(existing_list=...) at call time -- an unescaped single
+# brace there would raise/corrupt the format call.
+_MATH_UNICODE_RULE_FMT_SAFE = _MATH_UNICODE_RULE.replace("{", "{{").replace("}", "}}")
+
 ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY. Scan every MCQ block on this page (question + 4 options), one block at a time. For EACH block, look specifically at the pixels directly behind its question line AND its 4 options. If ANY yellow marker-pen color OR ANY green marker-pen color is visible there (a light/pale/faint tint of either still counts, not just bright/saturated), INCLUDE this MCQ in the output — this is a MUST-TAKE rule, never miss a highlighted MCQ even if faint. If the background is plain white/no-color for this block, SKIP it entirely — do NOT include it in the output at all. Do not assume based on other MCQs on the page — each block gets its own independent check, since a page can mix highlighted and non-highlighted blocks. Never invent new MCQs, exact order, exact wording (Bangla stays Bangla, English stays English). 0 highlighted MCQs → return [].
 
 For each INCLUDED MCQ, find the RED-MARKED option: the option with a RED CIRCLE or RED BOX drawn around its letter/text (A/B/C/D by position, 1st option=A...4th=D). This red mark is ONLY a visual pointer to what someone marked — it is NOT automatically correct. You must INDEPENDENTLY VERIFY using your own subject knowledge which option is actually, factually correct:
@@ -14687,6 +14702,7 @@ For each INCLUDED MCQ, find the RED-MARKED option: the option with a RED CIRCLE 
 - If no red mark is visible at all, determine the correct answer purely from subject knowledge, set "marked_answer_wrong":false.
 
 Also write a short explanation (1-2 sentences, Bangla if the MCQ is in Bangla) for why the correct answer is correct — from any ব্যাখ্যা text physically printed on the page near this MCQ if present, otherwise from your own knowledge of the subject. If marked_answer_wrong is true, the explanation MUST also mention the marked option was incorrect and state the correct one.
+""" + _MATH_UNICODE_RULE + """
 
 OUTPUT FORMAT — ONLY valid JSON array containing ONLY the highlighted MCQs, nothing else:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"explanation":"...","yellow_highlight":true}]"""
@@ -14717,6 +14733,7 @@ STEP 3 — For each KEPT (highlighted) MCQ, find the RED-MARKED option: the opti
    - No red mark visible at all → determine correct answer from subject knowledge, "marked_answer_wrong":false.
 
 STEP 4 — For each KEPT MCQ, write a short explanation (1-2 sentences, Bangla if the MCQ is in Bangla) for why the correct answer is correct — use any ব্যাখ্যা text physically printed on the page near this MCQ if present, otherwise use your own knowledge of the subject. If marked_answer_wrong is true, the explanation MUST also state the red-marked option was wrong and give the correct one.
+""" + _MATH_UNICODE_RULE + """
 
 OUTPUT FORMAT — ONLY valid JSON array of the KEPT (highlighted) MCQs only, exact order, exact wording (Bangla stays Bangla, English stays English), nothing else, no commentary, no markdown fences:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"explanation":"...","yellow_highlight":true}]"""
@@ -15105,6 +15122,7 @@ For each MCQ found INSIDE a red marking:
 3. Find the RED-CIRCLED/RED-MARKED option: the option with a RED GOLLA (red circle/dot, "লাল গোল্লা") or red box drawn around its letter/text/bullet — this circle IS the student's chosen answer marking. TRUST this red-circled option as "answer" by default — in the overwhelming majority of cases (about 99%) the red-circled option is the correct answer, so set "marked_answer_wrong": false and use the circled option as "answer" UNLESS you are highly confident from strong subject knowledge that it is factually wrong (only then set "marked_answer_wrong": true and use the actually-correct option as "answer" instead). Do not second-guess a correct-looking red-circled answer just because you'd have picked differently by default — only override with strong, clear certainty.
    - If no option is red-circled/marked at all -> determine the answer from subject knowledge, "marked_answer_wrong": false, "no_mark": true.
 4. Write a short explanation (1-2 sentences, Bangla if MCQ is Bangla, max ~180 characters) for why the correct answer is correct — use any ব্যাখ্যা text printed near it if present, otherwise your own knowledge.
+""" + _MATH_UNICODE_RULE + """
 
 No red-marked MCQ on this page -> return [].
 
@@ -15143,6 +15161,7 @@ Task 2 (answer audit): for entries with a "current_answer" field in the existing
 Task 3 (spelling/word-mismatch audit): for each entry in the existing list, re-check its question text and option texts against the page image and your subject knowledge as described above. Only include an entry in "text_corrections" if a genuine word-level error is found, identified by "mcq_no", with "corrected_question" (full corrected question text, omit this key entirely if the question itself needed no fix) and/or "corrected_options" (an object with only the affected letter(s) as keys, e.g. {{"B":"corrected option B text"}}, omit this key entirely if no option needed a fix).
 
 If nothing was missed and no answer mismatches or text corrections found, return the empty-array structure shown below.
+""" + _MATH_UNICODE_RULE_FMT_SAFE + """
 
 OUTPUT — ONLY valid JSON object, nothing else, no markdown fences:
 {{"missed": [{{"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}], "answer_corrections": [{{"mcq_no":"...","correct_answer":"A/B/C/D"}}], "text_corrections": [{{"mcq_no":"...","corrected_question":"...","corrected_options":{{"B":"..."}}}}]}}"""
