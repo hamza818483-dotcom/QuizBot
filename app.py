@@ -10984,6 +10984,35 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 )
 
 
+CHEM_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
+    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
+    '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
+    '- "topic_hint": the topic-heading text that this MCQ falls under. THIS PAGE STYLE (chemistry/science textbook chapter layout) uses a topic-marker design identified by these signals, checked TOGETHER on any candidate heading line:\n'
+    '  i) BOLD BLACK FONT + LARGER SIZE: the heading text is bold black and visibly LARGER than the font size of the surrounding question/body text and any lines immediately before it — this size+weight jump is the primary visual signal, distinct from a normal bold sub-phrase inside a sentence.\n'
+    '  ii) BANGLA HIERARCHICAL NUMBERING PREFIX: the heading is prefixed with a Bangla-numeral, dot-separated hierarchical number, e.g. ১.২, ১.২.১, ১.২.২, ২.১, ২.২.১, etc. Read this exactly as printed into the topic_hint text (keep the number attached to the topic name, e.g. "১.২.১ পরমাণুর গঠন"). The DEPTH of the number matters for hierarchy but NOT for topic-splitting — every distinct number+heading combination (১.২, ১.২.১, ১.২.২, ২.১...) is its own separate topic_hint/topic boundary, whether top-level (১.২) or a sub-level (১.২.১) entry — treat each one as starting a new segment exactly like /unmesh\'s heading rule, do not merge sub-numbers into their parent number\'s segment.\n'
+    '  iii) ENGLISH NAME LINE UNDERNEATH: directly below the Bangla heading line, there is usually a second line giving the same topic name in English (e.g. Bangla heading "১.২ পরমাণুর গঠন" followed by "Structure of Atom" on the next line, smaller/lighter than the Bangla heading). When present, this English line is part of the SAME topic_hint — append it after the Bangla text separated by " — " (e.g. "১.২ পরমাণুর গঠন — Structure of Atom"). Its absence does not disqualify a heading that already satisfies i+ii.\n'
+    '  A line of text is a topic_hint when i AND ii are both true (bold-black larger font + Bangla hierarchical number prefix); iii (English line) is appended when present but not required on its own. Do NOT treat as topic_hint: plain bold text with no hierarchical number prefix, page headers/footers, exam-source tags, ব্যাখ্যা/explanation labels, or any numbered line that is NOT visibly larger/bolder than surrounding text (a normal in-line reference to "১.২" inside a sentence is not a heading).\n'
+    '  a) Do NOT use smaller sub-headers like university/organization names, chapter/page footers, or exam-board tags — those are noise, never the topic itself.\n'
+    '  b) If a new numbered bold-black heading appears anywhere on THIS page (even partway down), every MCQ from that point onward gets the NEW heading text; MCQs above it on the same page keep the heading that was already active for them.\n'
+    '  b2) TWO-COLUMN pages: left and right columns can each have their OWN active heading, independent of each other. Determine each MCQ\'s topic_hint by which numbered heading is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current heading.\n'
+    '  b3) A NEW numbered heading ALWAYS immediately changes topic_hint for every MCQ after it in ITS OWN column, the instant it appears — even if that heading is the very last thing on the page (right at the bottom, no MCQ follows it on this page at all) and even if the other column still has old-topic MCQs left. Never wait for "both columns to finish" — that is WRONG. If a heading appears with zero MCQs following it on this page, still report it: emit one extra object at the very end of the JSON array in the form {"trailing_topic_marker":"<heading text>"} (no other fields) so the next page knows this new topic already started.\n'
+    '  c) If this specific page has genuinely no numbered heading visible anywhere on it (pure continuation page), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
+    '  d) Every MCQ under the same visible numbered heading on this page must get the EXACT SAME topic_hint string, character-for-character.\n\n'
+    'OUTPUT ORDER (CRITICAL — this is a SEGMENT-major order, not a plain column-major order):\n'
+    '  A "segment" = the vertical span of the page still under ONE numbered heading, before the next such heading starts (in either column). A single page can contain multiple segments stacked vertically.\n'
+    '  For EACH segment, in top-to-bottom page order:\n'
+    '    - output every MCQ from THAT segment\'s left column (top to bottom),\n'
+    '    - THEN every MCQ from THAT segment\'s right column (top to bottom, same segment only),\n'
+    '    - THEN move to the next segment down the page and repeat (its left column, then its right column).\n'
+    '  Do NOT do a single whole-page "entire left column, then entire right column" pass. Never zigzag within one segment\'s column, but DO switch back to a new segment\'s left column immediately after finishing that same segment\'s right column.\n'
+    '  Before finalizing output, recount: every MCQ visible on the page (both columns, top to bottom) MUST appear exactly once in the JSON array — zero skipped, zero duplicated. IMPORTANT PRIORITY: getting every MCQ extracted (none skipped) is more important than getting the segment/topic ordering perfect — if unsure exactly where a segment boundary falls, still include every MCQ you can see; a slightly-off topic_hint is fixable, but a completely MISSING MCQ is not.\n\n'
+    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
+)
+
+
 UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
@@ -11693,6 +11722,316 @@ def _unmesh_group_mcqs(extracted_pages: list) -> list:
             target_idx = hint_to_group_idx[m.get("_effective_hint", "")]
             logger.warning(
                 f"[UNMESH group-order] stray MCQ (qsn_no={m.get('qsn_no')}) with hint "
+                f"'{m.get('_effective_hint','')[:30]}' found inside '{g[0][:30]}' — "
+                f"rerouted back to earlier group '{groups[target_idx][0][:30]}'"
+            )
+            groups[target_idx][1].append(m)
+    groups = [g for g in groups if g[1]]
+
+    name_counts = {}
+    for g in groups:
+        name_counts[g[0]] = name_counts.get(g[0], 0) + 1
+    seen = {}
+    for g in groups:
+        base = g[0]
+        if name_counts[base] > 1:
+            seen[base] = seen.get(base, 0) + 1
+            g[0] = f"{base} ({seen[base]})"
+
+    return [(g[0], g[1]) for g in groups]
+
+
+def _build_chem_heading_scan_prompt() -> str:
+    """DEDICATED strict heading-detection pass for /chem, mirroring
+    /unmesh's _build_unmesh_heading_scan_prompt but tuned for the
+    bold-black-larger-font + Bangla hierarchical-number (১.২, ১.২.১...)
+    heading style instead of icon markers. Treated as a HARD, code-trusted
+    split signal in _chem_group_mcqs, same reasoning as /unmesh."""
+    return (
+        "Find ONLY genuine chapter/section-level headings on this page — ignore all MCQ question/option text.\n\n"
+        "‼️ HARD RULE — CHECK THIS FIRST, ALWAYS: if you see a heading line that is BOTH (a) BOLD BLACK "
+        "and visibly LARGER font than the surrounding body/question text, AND (b) prefixed with a Bangla-"
+        "numeral, dot-separated hierarchical number such as ১.২, ১.২.১, ১.২.২, ২.১, ২.২.১ — that line IS "
+        "a genuine topic heading, no exceptions, regardless of whether it's a top-level (১.২) or a deeper "
+        "sub-level (১.২.১) number. Every distinct number+heading is its own separate heading/topic boundary "
+        "— do not merge a sub-level heading into its parent's group.\n\n"
+        "If directly below the Bangla heading there is a second line giving the same topic name in English "
+        "(usually smaller/lighter), include it in heading_text appended after the Bangla text separated by "
+        "\" — \" (e.g. \"১.২.১ পরমাণুর গঠন — Structure of Atom\"). Its absence doesn't disqualify a heading "
+        "that already satisfies the bold+larger-font + Bangla-number rule above.\n\n"
+        "STRICTLY DO NOT report any of the following even if bold/boxed — these are NOT topic headings:\n"
+        "  - exam-source bracket tags, page footer/header branding, book title, publisher name, page numbers\n"
+        "  - ব্যাখ্যা:/explanation labels\n"
+        "  - a bare in-line reference to a number like \"১.২\" inside a sentence (not its own heading line)\n"
+        "  - university/organization/exam-body names or unit labels\n\n"
+        "A true topic heading is rare per page — expect at most 0-3, often ZERO (pure continuation pages). "
+        "If not confident a line satisfies BOTH the font-size/weight jump AND the Bangla-number prefix, do "
+        "NOT report it.\n\n"
+        "For each genuine topic heading found (top to bottom, both columns if 2-column), report:\n"
+        "  - its exact text (Bangla heading, plus English line if present, per the format above)\n"
+        "  - the printed qsn_no of the very next MCQ that appears after it on the page "
+        "(the first question number below/after that heading in its own column) — use null if the "
+        "heading is the last thing on the page with no MCQ following it on this page.\n\n"
+        "Output ONLY this JSON array, nothing else, in top-to-bottom page order:\n"
+        '[{"heading_text": "...", "next_qsn_no": <int or null>}]\n'
+        "If there are zero genuine topic headings on this page, output exactly []."
+    )
+
+
+def _parse_chem_heading_scan(text: str) -> list:
+    return _parse_unmesh_heading_scan(text)
+
+
+async def _chem_extract_from_image(img, cache_key: tuple = None) -> list:
+    """/chem extractor — same Call1+Call2 pipeline as /topic and /unmesh, but
+    topic boundaries are detected via the BOLD-BLACK-LARGER-FONT + Bangla
+    hierarchical-number-prefix (১.২, ১.২.১, ২.২.১...) heading style
+    (CHEM_EXTRACT_PROMPT), typical of chemistry/science textbook chapter
+    layouts, instead of /topic's banner-bar or /unmesh's icon-marker style.
+    Everything else (qsn_no serial detection, segment-major read order,
+    Call2 audit, code-level consistency/serial checks) is identical.
+
+    Call1 result cached in its own namespace (_chem_mcq_result_cache) when
+    cache_key given — same re-run-same-PDF speedup as /topic/unmesh/qbm.
+    Only Call1's raw extraction is cached; the heading-scan + Call2 audit
+    below always re-run in full, unaffected by this cache."""
+    async def _run_extract_call(bypass_cache: bool = False):
+        cached = _chem_mcq_result_cache.get(cache_key) if (cache_key and not bypass_cache) else None
+        if cached:
+            logger.info(f"[CHEM MCQ Cache] hit for {cache_key} — skipping Call1, still running full heading-scan + Call2 verify")
+            return _qbm_dedup_list(cached)
+        gem = await _qbm_gemini_extract(img, CHEM_EXTRACT_PROMPT)
+        if gem:
+            result = _qbm_dedup_list(gem)
+            if result and cache_key:
+                _chem_mcq_result_cache[cache_key] = result
+                _cap_qbm_mcq_cache(_chem_mcq_result_cache)
+            return result
+        txt = await _qbm_groq_call(img, CHEM_EXTRACT_PROMPT)
+        result = _qbm_parse_json(txt) if txt else []
+        if result:
+            result = _qbm_dedup_list(result)
+            if result and cache_key:
+                _chem_mcq_result_cache[cache_key] = result
+                _cap_qbm_mcq_cache(_chem_mcq_result_cache)
+            return result
+        txt3 = await _qbm_openrouter_call(img, CHEM_EXTRACT_PROMPT)
+        result3 = _qbm_parse_json(txt3) if txt3 else []
+        return _qbm_dedup_list(result3)
+
+    mcqs = await _run_extract_call()
+    if not mcqs:
+        return mcqs
+
+    # CODE-LEVEL STRICT HEADING SCAN — independent narrow pass, same role as
+    # /unmesh's: a HARD split signal applied directly to the matching
+    # qsn_no's topic_hint, overriding a blank/wrong topic_hint the main
+    # extraction may have silently missed.
+    try:
+        scan_txt = await _qbm_gemini_raw(img, _build_chem_heading_scan_prompt())
+        headings = _parse_chem_heading_scan(scan_txt)
+    except Exception as e:
+        logger.warning(f"[CHEM heading-scan] failed, skipping: {e}")
+        headings = []
+
+    forced_boundaries = set()
+    if headings:
+        by_qsn_early = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
+        page_qnos_sorted = sorted(by_qsn_early.keys())
+        ordered = sorted(
+            [h for h in headings if isinstance(h.get("next_qsn_no"), int)],
+            key=lambda h: h["next_qsn_no"],
+        )
+        trailing = [h for h in headings if not isinstance(h.get("next_qsn_no"), int)]
+        for idx, h in enumerate(ordered):
+            htext = (h.get("heading_text") or "").strip()
+            if not htext:
+                continue
+            next_q = h.get("next_qsn_no")
+            if next_q not in by_qsn_early:
+                continue
+            range_end = ordered[idx + 1]["next_qsn_no"] if idx + 1 < len(ordered) else None
+            old_hint = by_qsn_early[next_q].get("topic_hint", "")
+            if old_hint != htext:
+                logger.warning(
+                    f"[CHEM heading-scan] applying heading '{htext[:40]}' "
+                    f"to qsn_no={next_q} (was topic_hint='{old_hint[:40]}')"
+                )
+            forced_boundaries.add(next_q)
+            for qn in page_qnos_sorted:
+                if qn >= next_q and (range_end is None or qn < range_end):
+                    by_qsn_early[qn]["topic_hint"] = htext
+                    by_qsn_early[qn]["_forced_marker"] = True
+        for h in trailing:
+            htext = (h.get("heading_text") or "").strip()
+            if htext:
+                mcqs.append({"trailing_topic_marker": htext})
+
+    trailing_markers = [m.get("trailing_topic_marker") for m in mcqs if "trailing_topic_marker" in m]
+    mcqs = [m for m in mcqs if "trailing_topic_marker" not in m]
+    if not mcqs and not trailing_markers:
+        return mcqs
+
+    mcqs = _check_segment_topic_consistency(mcqs, context="CHEM-Call1")
+    mcqs = _check_segment_serial_order(mcqs, context="CHEM-Call1")
+
+    try:
+        verify_prompt = _build_topic_verify_prompt(mcqs)
+        check_txt = await _qbm_gemini_raw(img, verify_prompt)
+        check = _parse_count_check_json(check_txt)
+
+        missing_nums = set(n for n in (check.get("missing_qsn_no") or []) if isinstance(n, int))
+        wrong_serials = check.get("wrong_serials") or []
+        word_fixes = check.get("word_fixes") or []
+        topic_leaks = check.get("topic_leaks") or []
+
+        by_qsn = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
+
+        if missing_nums:
+            logger.warning(f"[CHEM verify] missing qsn_no {sorted(missing_nums)} — re-extracting page")
+            for _retry_attempt in range(2):
+                if not missing_nums:
+                    break
+                retry_mcqs = await _run_extract_call(bypass_cache=True)
+                retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
+                recovered = set()
+                for n in missing_nums:
+                    if n in retry_got:
+                        mcqs.append(retry_got[n])
+                        by_qsn[n] = retry_got[n]
+                        recovered.add(n)
+                missing_nums -= recovered
+                if missing_nums and _retry_attempt == 0:
+                    logger.warning(f"[CHEM verify] still missing qsn_no {sorted(missing_nums)} after retry 1 — trying once more")
+
+        for fix in wrong_serials:
+            was = fix.get("was")
+            correct = fix.get("qsn_no_wrong")
+            if isinstance(was, int) and isinstance(correct, int) and was in by_qsn:
+                by_qsn[was]["qsn_no"] = correct
+                logger.warning(f"[CHEM verify] serial fixed: {was} -> {correct}")
+
+        for fix in word_fixes:
+            n = fix.get("qsn_no")
+            field = (fix.get("field") or "").strip().lower().replace(" ", "").replace("_", "")
+            text = fix.get("correct_text")
+            if not (isinstance(n, int) and text and n in by_qsn):
+                continue
+            m = by_qsn[n]
+            if field == "question":
+                m["question"] = text
+                logger.warning(f"[CHEM verify] word fix qsn {n} question")
+            elif field == "answer":
+                m["answer"] = text
+                logger.warning(f"[CHEM verify] word fix qsn {n} answer -> {text}")
+            elif field in _OPT_FIELD_IDX and isinstance(m.get("options"), list) and len(m["options"]) == 4:
+                m["options"][_OPT_FIELD_IDX[field]] = text
+                logger.warning(f"[CHEM verify] word fix qsn {n} {field}")
+
+        _SUBHEADER_BLOCKLIST = (
+            "বিশ্ববিদ্যালয়", "চাকরি", "চাকুরি", "bup", "fass", "fsss",
+            "ইউনিট", "unit",
+        )
+        for leak in topic_leaks:
+            n = leak.get("qsn_no")
+            actual = (leak.get("actual_banner") or "").strip()
+            if any(bad in actual.lower() for bad in _SUBHEADER_BLOCKLIST):
+                continue
+            logger.warning(
+                f"[CHEM verify] possible topic leak qsn {n}: "
+                f"extracted='{(leak.get('extracted_hint') or '')[:30]}' "
+                f"actual='{actual[:30]}' (not auto-fixed)"
+            )
+
+        mcqs = _qbm_dedup_list(mcqs)
+        mcqs = _check_segment_topic_consistency(mcqs, context="CHEM-Call2")
+        mcqs = _check_segment_serial_order(mcqs, context="CHEM-Call2")
+    except Exception as e:
+        logger.warning(f"[CHEM verify] audit pass failed, skipping: {e}")
+
+    for marker in trailing_markers:
+        if marker:
+            mcqs.append({"trailing_topic_marker": marker})
+    return mcqs
+
+
+def _chem_group_mcqs(extracted_pages: list) -> list:
+    """DEDICATED grouping for /chem (fully independent of /topic's and
+    /unmesh's grouping functions, though structurally identical). Same two
+    split signals as /unmesh — qsn_no==1 OR the effective topic_hint
+    actually changing — PLUS trailing_topic_marker carry-forward for a
+    heading appearing at the bottom of a page with zero MCQs following it
+    on that page."""
+    _FAKE_TOPIC_RE = re.compile(
+        r'^(বিশ্ববিদ্যালয়|.{0,20}বিশ্ববিদ্যালয়|বি ইউনিট|এ ইউনিট|সি ইউনিট|ডি ইউনিট|'
+        r'এফ ইউনিট|ই ইউনিট|চাকুরি|BUP|FASS|FSSS|[A-Za-z]{1,6}\s*ইউনিট)$',
+        re.IGNORECASE
+    )
+    def _is_fake_topic(hint: str) -> bool:
+        h = hint.strip()
+        if not h:
+            return False
+        if _FAKE_TOPIC_RE.match(h):
+            return True
+        if len(h) <= 25 and (h.endswith("বিশ্ববিদ্যালয়") or h.endswith("ইউনিট")):
+            return True
+        return False
+
+    flat = []
+    last_hint = None
+    for _page_idx, (_, _, mcqs) in enumerate(extracted_pages):
+        for m in mcqs:
+            if "trailing_topic_marker" in m:
+                th = (m.get("trailing_topic_marker") or "").strip()
+                if th and not _is_fake_topic(th):
+                    last_hint = th
+                continue
+            m["_page_key"] = _page_idx
+            hint = (m.get("topic_hint") or "").strip()
+            if hint and _is_fake_topic(hint):
+                hint = ""
+            if hint:
+                last_hint = hint
+                m["_effective_hint"] = hint
+            else:
+                m["_effective_hint"] = last_hint or ""
+            flat.append(m)
+
+    flat = _check_segment_topic_consistency(flat, context="chem-grouping-stage")
+
+    groups = []
+    group_seq = 0
+    prev_hint = None
+    for m in flat:
+        hint = m.get("_effective_hint", "")
+        qno = m.get("qsn_no")
+        hint_changed = bool(hint) and (prev_hint is not None) and (hint != prev_hint)
+        starts_new = (not groups) or (qno == 1) or hint_changed
+        if starts_new:
+            group_seq += 1
+            name = hint if hint else f"Topic {group_seq}"
+            groups.append([name, []])
+        groups[-1][1].append(m)
+        if hint:
+            prev_hint = hint
+
+    hint_to_group_idx = {}
+    for idx, g in enumerate(groups):
+        base_name = re.sub(r'\s*\(\d+\)$', '', g[0])
+        hint_to_group_idx.setdefault(base_name, idx)
+    for idx, g in enumerate(groups):
+        keep, reroute = [], []
+        for m in g[1]:
+            own_hint = m.get("_effective_hint", "")
+            if own_hint and own_hint != re.sub(r'\s*\(\d+\)$', '', g[0]) and own_hint in hint_to_group_idx and hint_to_group_idx[own_hint] < idx:
+                reroute.append(m)
+            else:
+                keep.append(m)
+        g[1] = keep
+        for m in reroute:
+            target_idx = hint_to_group_idx[m.get("_effective_hint", "")]
+            logger.warning(
+                f"[CHEM group-order] stray MCQ (qsn_no={m.get('qsn_no')}) with hint "
                 f"'{m.get('_effective_hint','')[:30]}' found inside '{g[0][:30]}' — "
                 f"rerouted back to earlier group '{groups[target_idx][0][:30]}'"
             )
@@ -12661,6 +13000,7 @@ _qbm_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict] (post-C
 # wrong-shaped result across commands.
 _topic_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
 _unmesh_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
+_chem_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
 
 def _qbm_page_content_hash(img) -> str:
     """Hash the actual rendered page image bytes (not file_id) so the QBM
@@ -14598,6 +14938,155 @@ async def _handle_unmesh_impl(msg: dict):
 
     except Exception as e:
         logger.error(f"[UNMESH] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
+async def handle_chem(msg: dict):
+    """/chem -p (pages) — same arg style as /topic and /unmesh. Extracts
+    existing MCQ like /topic/unmesh, but detects topic boundaries via the
+    bold-black + LARGER font + Bangla hierarchical-number-prefix (১.২,
+    ১.২.১, ২.২.১...) heading style typical of chemistry/science textbook
+    chapters, instead of /topic's black-banner or /unmesh's icon-marker
+    style. Sends ONE separate CSV per detected topic, named after the
+    topic heading text."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _handle_chem_impl(msg)
+
+
+async def _handle_chem_impl(msg: dict):
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF-এ reply করে /chem দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/chem -p 1-10</code>\n\n"
+            "📌 Page-এ থাকা MCQ extract করে (নতুন বানায় না), কিন্তু বোল্ড-কালো বড় ফন্টের "
+            "বাংলা numbering heading (১.২, ১.২.১, ২.২.১ ইত্যাদি — সাথে নিচে ইংরেজি নামও থাকতে পারে) দেখে আলাদা টপিক ধরে প্রতিটার জন্য আলাদা CSV পাঠায়।\n"
+            "📌 -p = page range (না দিলে সব page)"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+    params = _parse_pdfm_params(text)
+    page_range = params["page_range"]
+    chem_channel_id = params["channel_id"]
+    chem_thread_id = params["thread_id"]
+
+    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
+    status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (নাম্বারিং heading topic detect সহ)...")
+
+        extracted_pages = await qbm_extract_all_pages(
+            chat_id, pages, "Chem Extract", file_name, status_msg_id,
+            extractor=_chem_extract_from_image, file_id=file_id
+        )
+
+        total_mcq_found = sum(
+            1 for _, _, mcqs in extracted_pages for m in mcqs if "trailing_topic_marker" not in m
+        )
+        if not total_mcq_found:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ পাওয়া যায়নি!")
+            return
+
+        topic_groups = _chem_group_mcqs(extracted_pages)
+
+        _missing_exp = [m for _, mcqs in topic_groups for m in mcqs if len((m.get("explanation") or "").strip()) < 80]
+        if _missing_exp:
+            try:
+                await _ai_generate_all_explanations(_missing_exp)
+            except Exception as e:
+                logger.warning(f"[CHEM] explanation fill failed: {e}")
+
+        if status_msg_id:
+            breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
+            next_step = "channel-এ poll পাঠানো হচ্ছে..." if chem_channel_id else "CSV পাঠানো হচ্ছে..."
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
+
+        if chem_channel_id:
+            total_polls = await _post_topic_groups_to_channel(chem_channel_id, topic_groups, chem_thread_id)
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+            return
+
+        _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+        import io as _io_chem, csv as _csv_chem
+        _running_count = 0
+        _cmd_msg_id = msg.get("message_id")
+        for name, mcqs in topic_groups:
+            buf = _io_chem.StringIO()
+            w = _csv_chem.writer(buf)
+            w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                        "answer", "explanation", "type", "section"])
+            for m in mcqs:
+                opts = m.get("options", ["", "", "", ""])
+                w.writerow([
+                    m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                    opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                    opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                    _ans_map.get(m.get("answer", "A"), "1"),
+                    _strip_img_tag(m.get("explanation", "")), "1", "1"
+                ])
+            safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip() or "Topic"
+            range_start = _running_count + 1
+            range_end = _running_count + len(mcqs)
+            _running_count = range_end
+            _pg_nums = sorted({m.get("_page_num") for m in mcqs if m.get("_page_num") is not None})
+            if _pg_nums:
+                page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
+            else:
+                page_range_text = "N/A"
+            await send_document(chat_id, buf.getvalue().encode("utf-8"),
+                f"{safe_name}.csv",
+                caption=(f"📂 <code>{_html_escape(_clean_topic_name_for_copy(name))}</code>\n"
+                         f"📄 PDF Page: {page_range_text}\n"
+                         f"🔢 MCQ Range: {range_start}–{range_end}\n"
+                         f"💎 Total: {len(mcqs)}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
+
+    except Exception as e:
+        logger.error(f"[CHEM] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
 
 
@@ -19657,6 +20146,13 @@ async def handle_message(msg: dict):
         # black-circle-with-1/2/3-white-stars icon (instead of /topic's
         # black-background banner bar)
         _spawn_command_task(uid, handle_unmesh(msg))
+    elif text.startswith("/chem"):
+        # /chem = same as /topic/unmesh but topic heading is detected via
+        # a third visual marker: bold-black + LARGER font + Bangla
+        # hierarchical numbering prefix (১.২, ১.২.১, ২.২.১...), optionally
+        # with an English name line underneath — typical of chemistry/
+        # science textbook chapter layouts.
+        _spawn_command_task(uid, handle_chem(msg))
     elif text.startswith("/qbm"):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
         # 100% ported from AtlasMasterBot's qbm_handler
