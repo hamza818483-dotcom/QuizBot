@@ -15079,23 +15079,36 @@ async def _handle_onu_impl(msg: dict):
 #   a question number ALWAYS overrides the option's red-circle mark).
 # ============================================================
 
-ONU2_CALL1_PROMPT = """MCQ EXTRACTOR — RED-BOX REGION ONLY. The SOLE indicator for inclusion is: a RED BOX/RECTANGLE drawn in the LEFT MARGIN of the page around the MCQ's SERIAL NUMBER label (e.g. "১ক১", "1", "১খ৩"). This box sits ONLY around the number column, separate from the question text. It can be SHORT (wrapping just one number, marking a single MCQ) or TALL/VERTICAL (stretching down the margin to wrap SEVERAL CONSECUTIVE numbers together in one box, marking that whole consecutive run of MCQs as included — e.g. one tall box spanning "১ক৬" through "১ক১০" means all 5 of those MCQs are included). Carefully trace each margin box's top and bottom edge to see exactly which serial numbers fall inside it. A red mark anywhere else on the page (around question text, an option, a paragraph, or NOT in the left margin) does NOT count for inclusion — ignore it. IGNORE every MCQ whose serial number is not inside a left-margin red box — do not extract it at all. Do not confuse this margin number-box with the small red circle/dot drawn around one OPTION letter inside an MCQ (that is a separate, unrelated answer-mark).
+ONU2_CALL1_PROMPT = """MCQ EXTRACTOR — RED-MARKED SERIAL NUMBER REGION ONLY. The SOLE indicator for inclusion is a RED MARKING drawn in the LEFT MARGIN of the page around the MCQ's SERIAL NUMBER label (e.g. "১ক১", "1", "১খ৩") — this marking can appear as a RED BOUNDARY, a RED BOX, or a RED RECTANGLE outline; all three are the same signal, just drawn differently by hand. This marking sits ONLY around the number column, separate from the question text. It can be SHORT (wrapping just one number, marking a single MCQ) or TALL/VERTICAL (stretching down the margin to wrap SEVERAL CONSECUTIVE numbers together in one boundary, marking that whole consecutive run of MCQs as included — e.g. one tall boundary spanning "১ক৬" through "১ক১০" means all 5 of those MCQs are included). Carefully trace each margin marking's top and bottom edge to see exactly which serial numbers fall inside it. A red mark anywhere else on the page (around question text, an option, a paragraph, or NOT in the left margin) does NOT count for inclusion — ignore it. IGNORE every MCQ whose serial number has no red boundary/box/rectangle around it in the left margin — do not extract it at all. Do not confuse this margin number-marking with the small red circle/dot drawn around one OPTION letter inside an MCQ (that is a separate, unrelated answer-mark).
 
-For each MCQ found INSIDE a red box:
+STRICT RULES — follow exactly, no exceptions:
+- Only output MCQs whose serial number is inside a left-margin red marking. Zero such MCQs on this page -> output exactly [].
+- Never invent, guess, or hallucinate an MCQ that isn't printed on the page.
+- Never alter question/option wording from what's printed (Bangla stays Bangla, English stays English) — exact text only.
+- Every output item MUST have all 7 fields: mcq_no, question, options (with A,B,C,D), answer, marked_answer_wrong, no_mark, explanation. Missing/malformed items will be rejected downstream.
+
+For each MCQ found INSIDE a red marking:
 1. Extract the exact question number label if printed (e.g. "১ক১", "1", "১খ৩") into "mcq_no" (string, exact as printed; empty string if none printed).
 2. Extract question text and all options exactly as written (Bangla stays Bangla, English stays English). Number options A,B,C,D by position (1st=A...4th=D).
 3. Find the RED-MARKED option (red circle/dot or red box around one option's letter/text/bullet). This is ONLY a pointer to what was marked — it can be wrong. Using your own subject knowledge, verify independently:
    - If the marked option IS factually correct -> "answer" = that option, "marked_answer_wrong": false.
    - If the marked option is NOT factually correct -> "answer" = the ACTUALLY correct option, "marked_answer_wrong": true.
    - If no option is marked at all -> determine from subject knowledge, "marked_answer_wrong": false, "no_mark": true.
-4. Write a short explanation (1-2 sentences, Bangla if MCQ is Bangla) for why the correct answer is correct — use any ব্যাখ্যা text printed near it if present, otherwise your own knowledge.
+4. Write a short explanation (1-2 sentences, Bangla if MCQ is Bangla, max ~180 characters) for why the correct answer is correct — use any ব্যাখ্যা text printed near it if present, otherwise your own knowledge.
 
-No red-boxed MCQ on this page -> return [].
+No red-marked MCQ on this page -> return [].
 
-OUTPUT — ONLY valid JSON array, nothing else:
+OUTPUT — ONLY valid JSON array, nothing else, no markdown fences, no commentary:
 [{"mcq_no":"...","question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}]"""
 
-ONU2_CALL2_MISSCHECK_PROMPT_TMPL = """Re-scan this page image for the SOLE inclusion marker: a RED BOX/RECTANGLE in the LEFT MARGIN around MCQ serial number(s) only (e.g. "১ক১", "1"). The box can be short (one number = one MCQ) or tall/vertical (spanning several consecutive numbers in the margin = all those consecutive MCQs included). Trace each margin box's top/bottom edge carefully to see which numbers fall inside. A red mark NOT in the left margin (on question text, an option, a paragraph) does not count. Do NOT confuse this with the small red circle/dot marking one option's letter as the chosen answer (a different, smaller, unrelated mark).
+ONU2_CALL2_MISSCHECK_PROMPT_TMPL = """AUDIT PASS — this is a strict, independent re-check of the SAME page for the SOLE inclusion marker: a RED MARKING in the LEFT MARGIN around MCQ serial number(s) only (e.g. "১ক১", "1"). This marking can be a red boundary, red box, or red rectangle outline — all count as the same signal. The marking can be short (one number = one MCQ) or tall/vertical (spanning several consecutive numbers in the margin = all those consecutive MCQs included). Trace each margin marking's top/bottom edge carefully to see which numbers fall inside. A red mark NOT in the left margin (on question text, an option, a paragraph) does not count. Do NOT confuse this with the small red circle/dot marking one option's letter as the chosen answer (a different, smaller, unrelated mark).
+
+STRICT RULES:
+- Do not re-list any MCQ already in the existing list below.
+- Do not invent MCQs not printed on the page.
+- Only report an MCQ as missed if its serial number is genuinely inside a left-margin red marking.
+- Every reported item MUST have all 7 fields (mcq_no, question, options, answer, marked_answer_wrong, no_mark, explanation) — incomplete items will be rejected downstream.
+
 
 Already-extracted red-boxed MCQs from this page (do not re-list these, only find ones MISSED):
 {existing_list}
@@ -15134,13 +15147,51 @@ def _onu2_letter_from_bengali_option(raw: str) -> str:
     return ""
 
 
+def _onu2_validate_mcq(m: dict) -> bool:
+    """Strict shape check for a Call1/Call2 output item -- rejects anything
+    that doesn't have the full required field set, non-empty question and
+    options, and a valid answer letter. Keeps garbage/hallucinated or
+    truncated model output from ever reaching the CSV."""
+    if not isinstance(m, dict):
+        return False
+    q = (m.get("question") or "").strip()
+    if not q:
+        return False
+    opts = m.get("options")
+    if isinstance(opts, dict):
+        vals = [str(opts.get(k, "")).strip() for k in ("A", "B", "C", "D")]
+    elif isinstance(opts, list):
+        vals = [str(o).strip() for o in opts[:4]]
+    else:
+        return False
+    if len([v for v in vals if v]) < 4:
+        return False
+    ans = str(m.get("answer", "")).strip().upper()
+    if ans not in ("A", "B", "C", "D"):
+        return False
+    return True
+
+
+def _onu2_filter_valid(mcqs: list) -> list:
+    """Drops any item failing _onu2_validate_mcq, logging how many were
+    rejected so bad extractions are visible rather than silently corrupt."""
+    if not mcqs:
+        return []
+    valid = [m for m in mcqs if _onu2_validate_mcq(m)]
+    dropped = len(mcqs) - len(valid)
+    if dropped:
+        logger.warning(f"[ONU2] dropped {dropped} malformed/incomplete MCQ item(s) failing strict validation")
+    return valid
+
+
 async def _onu2_call1_extract(img) -> list:
-    """Call1 -- red-box region detect + extract + self-verify marked answer.
-    Gemini primary / Groq fallback / OpenRouter last (same provider order
-    as /onu and /qbm)."""
+    """Call1 -- red-boundary/box region detect + extract + self-verify
+    marked answer. Gemini primary / Groq fallback / OpenRouter last (same
+    provider order as /onu and /qbm). Every returned item passes strict
+    field validation before being handed back to the caller."""
     try:
         gem = await _qbm_gemini_extract(img, ONU2_CALL1_PROMPT)
-        out = _qbm_dedup_list(gem) if gem else []
+        out = _onu2_filter_valid(_qbm_dedup_list(gem)) if gem else []
         if out:
             for m in out:
                 m["_provider"] = "Gemini"
@@ -15148,13 +15199,14 @@ async def _onu2_call1_extract(img) -> list:
         txt = await _qbm_groq_call(img, ONU2_CALL1_PROMPT)
         result = _qbm_parse_json(txt) if txt else []
         if result:
-            out = _qbm_dedup_list(result)
-            for m in out:
-                m["_provider"] = "Groq"
-            return out
+            out = _onu2_filter_valid(_qbm_dedup_list(result))
+            if out:
+                for m in out:
+                    m["_provider"] = "Groq"
+                return out
         or_txt = await _qbm_openrouter_call(img, ONU2_CALL1_PROMPT)
         result3 = _qbm_parse_json(or_txt) if or_txt else []
-        out = _qbm_dedup_list(result3)
+        out = _onu2_filter_valid(_qbm_dedup_list(result3))
         for m in out:
             m["_provider"] = "OpenRouter"
         return out
@@ -15164,9 +15216,10 @@ async def _onu2_call1_extract(img) -> list:
 
 
 async def _onu2_call2_misscheck(img, existing: list) -> list:
-    """Call2 -- independent miss-check pass: did Call1 miss any red-boxed
-    MCQ (single or inside a group-box)? Returns ONLY newly-found MCQs
-    (never re-lists/duplicates existing ones)."""
+    """Call2 -- independent full-page AUDIT pass: did Call1 miss any
+    red-marked MCQ (single or inside a group boundary)? Returns ONLY
+    newly-found, strictly-validated MCQs (never re-lists/duplicates
+    existing ones)."""
     try:
         existing_brief = json.dumps(
             [{"mcq_no": m.get("mcq_no", ""), "question": (m.get("question") or "")[:100]} for m in existing],
@@ -15182,6 +15235,9 @@ async def _onu2_call2_misscheck(img, existing: list) -> list:
             return []
         missed = _qbm_parse_json(txt)
         if not missed or not isinstance(missed, list):
+            return []
+        missed = _onu2_filter_valid(missed)
+        if not missed:
             return []
         # Dedup against existing by question-text prefix, so a miss-check
         # false-positive re-detecting an already-found MCQ never duplicates.
@@ -15239,10 +15295,11 @@ async def _onu2_answer_key_check(img, mcqs: list) -> None:
 
 async def _onu2_extract_from_image(img) -> list:
     """/onu2's fully independent extraction pipeline for a single page.
-    Steps: Call1 (region-detect+extract+verify) -> Call2 (miss-check for
-    any red-boxed MCQ, single or grouped, that Call1 missed) -> answer-key
-    cross-check on this same page (overrides option-mark answer when a
-    উত্তরমালা match is found) -> explanation safety-net fill."""
+    Steps: Call1 (region-detect+extract+verify, strict-validated) ->
+    Call2 (full-page audit for any red-marked MCQ, single or grouped,
+    that Call1 missed, strict-validated) -> answer-key cross-check on this
+    same page (overrides option-mark answer when a উত্তরমালা match is
+    found) -> final re-validation -> explanation safety-net fill."""
     await _qbm_ram_aware_acquire()
     try:
         call1 = await _onu2_call1_extract(img)
@@ -15256,6 +15313,12 @@ async def _onu2_extract_from_image(img) -> list:
                 m["options"] = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
         combined = _cap_mcq_options(combined)
         await _onu2_answer_key_check(img, combined)
+        # Final strict re-validation: answer-key override or explanation
+        # fill could theoretically leave a field malformed -- never let a
+        # broken item reach the CSV.
+        combined = [m for m in combined if _onu2_validate_mcq(m)]
+        if not combined:
+            return []
         for m in combined:
             if not (m.get("explanation") or "").strip():
                 try:
