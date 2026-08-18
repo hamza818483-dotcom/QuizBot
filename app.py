@@ -7441,9 +7441,14 @@ async def _apply_saved_watermark(pdf_bytes: bytes) -> bytes:
         logger.warning(f"[AutoWatermark] apply failed: {e}")
     return pdf_bytes
 
-async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
+async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = False) -> bytes:
     """Playwright-based HTML->PDF, ported 1:1 from AtlasMasterBot's
-    AsyncPDFExporter.html_to_pdf (proven working in production there)."""
+    AsyncPDFExporter.html_to_pdf (proven working in production there).
+    use_css_page_size=True lets the page's own @page{size:...} CSS rule
+    (e.g. style7's 420x594mm large sheet) control the actual PDF page
+    dimensions instead of being forced into a fixed A4 — required for any
+    custom-size print style, otherwise Playwright silently overrides the
+    CSS @page size with A4 and content gets clipped/rescaled unpredictably."""
     async with _PDF_SEMAPHORE:
         import tempfile
         temp_path = None
@@ -7506,9 +7511,10 @@ async def _html_to_pdf(html: str, progress_cb=None) -> bytes:
                 output_path = pf.name
 
             await asyncio.wait_for(page.pdf(
-                path=output_path, format="A4",
-                margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"},
-                print_background=True
+                path=output_path, format=None if use_css_page_size else "A4",
+                margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"} if not use_css_page_size else None,
+                print_background=True,
+                prefer_css_page_size=use_css_page_size
             ), timeout=20)
             if progress_cb:
                 await progress_cb(95)
@@ -8104,14 +8110,14 @@ img{max-width:30%!important;height:auto!important;vertical-align:middle}
 </style>"""
 
 def _build_print_style7(data, heading):
-    """Format P7: Exam Book Style — Fixed A3-ish page (420x594mm), 3 columns,
-    left-to-right vertical fill (col1 top-to-bottom, then col2, then col3),
-    exactly 50 MCQ per page (paginated in code, not CSS auto-flow) so a
-    partial last page still fills columns in strict left-to-right order
-    without leaving a large blank gap; font sized larger to reduce empty
-    space, ~1 inch reserved at bottom via page margin."""
+    """Format P7: Exam Book Style — page size shrinks to fit actual content
+    per page (width fixed 420mm, height computed from real MCQ count so no
+    large blank area is left on the right/bottom when content doesn't fill
+    a full 594mm page), 3 columns, left-to-right vertical fill (col1
+    top-to-bottom, then col2, then col3), 50 MCQ per page target."""
     css = _PRINT_STYLE7_CSS
     PER_PAGE = 50
+    import math as _math
 
     def _render_question(d):
         is_short = _check_short_option(d["opts"])
@@ -8123,19 +8129,40 @@ def _build_print_style7(data, heading):
         h += '</div>'
         return h
 
+    def _est_item_height_mm(d):
+        # Estimate this ONE MCQ's rendered height in mm at 15pt/1.35 line-height.
+        # Question text: ~48 chars/line in a ~130mm-wide column at 15pt Bengali.
+        qlen = len(d.get("q", "") or "")
+        q_lines = max(1, _math.ceil(qlen / 46))
+        base = 6.5 + q_lines * 7.2  # header row + question wrapped lines
+        is_short = _check_short_option(d["opts"])
+        if is_short:
+            base += 2 * 7.2  # two option rows (A/B on one row, C/D on next)
+        else:
+            # 4 stacked option lines, each may itself wrap once if long
+            for opt in d["opts"]:
+                olen = len(opt or "")
+                o_lines = max(1, _math.ceil(olen / 40))
+                base += o_lines * 6.6
+        base += 3.5  # question block bottom margin
+        return base
+
     body = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>'
+    page_idx = 0
     for pg_start in range(0, len(data), PER_PAGE):
         chunk = data[pg_start:pg_start + PER_PAGE]
-        # Estimate column height from actual MCQ count on this page so a
-        # partial page (e.g. 13 or 25 MCQ) doesn't reserve a full 560mm
-        # column height with a huge blank gap below — height shrinks to
-        # fit content while still filling column1 fully before column2/3
-        # (column-fill:auto needs an explicit height to do that, unlike
-        # 'balance' which would spread items evenly across all 3 columns
-        # regardless of count).
-        import math as _math
-        rows_per_col = _math.ceil(len(chunk) / 3) if chunk else 1
-        est_mm = max(60, min(560, rows_per_col * 13 + 15))
+        page_idx += 1
+        # Distribute chunk into 3 columns left-to-right (col1 filled first)
+        # the same way column-fill:auto would, so our height estimate
+        # matches the TALLEST column, not the average.
+        n = len(chunk)
+        per_col = _math.ceil(n / 3) if n else 1
+        col_heights = []
+        for c in range(3):
+            seg = chunk[c * per_col:(c + 1) * per_col]
+            col_heights.append(sum(_est_item_height_mm(d) for d in seg))
+        tallest_mm = max(col_heights) if col_heights else 40
+        est_mm = max(40, min(560, round(tallest_mm + 10)))  # +10mm header/breathing room
         body += f'<div class="abpage"><div class="content-columns" style="height:{est_mm}mm">'
         for d in chunk:
             body += _render_question(d)
@@ -8808,7 +8835,7 @@ async def handle_sheet_style_callback(callback_query: dict):
                 data_adapted = _adapt_mcqs_for_print(mcqs)
                 html_out = PRINT_STYLE_BUILDERS[style_key](data_adapted, title)
 
-            pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress)
+            pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress, use_css_page_size=(style_key == "style7"))
             pdf_bytes = await _apply_saved_watermark(pdf_bytes)
 
         if not pdf_bytes:
