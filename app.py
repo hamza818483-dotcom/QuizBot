@@ -7509,20 +7509,24 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
 
             if use_css_page_size:
                 # Measure REAL rendered height of each .abpage's tallest column
-                # (actual browser layout, not a character-count guess) and
-                # shrink each page's @page-equivalent height to match exactly
-                # — eliminates leftover blank space regardless of font
-                # rendering quirks, wrapped-line counts, or option length.
+                # (actual browser layout, not a character-count guess), then
+                # inject a NAMED @page rule per page (Chromium print-to-PDF
+                # supports different page sizes per page ONLY via CSS named
+                # pages — a single unnamed @page{size:...} rule applies the
+                # SAME size to every page in the PDF, which was the earlier
+                # bug: our inline .content-columns height was being measured
+                # correctly but the actual PDF page (paper size) never
+                # shrank to match it, leaving the same blank space).
                 try:
                     await page.evaluate("""
                         () => {
                             const pages = document.querySelectorAll('.abpage');
-                            pages.forEach(pg => {
+                            const rules = [];
+                            const MM_PER_PX = 25.4 / 96;
+                            pages.forEach((pg, idx) => {
+                                const pageNum = idx + 1;
                                 const cc = pg.querySelector('.content-columns');
                                 if (!cc) return;
-                                // Measure tallest column by checking each question's
-                                // bottom offset relative to the columns container,
-                                // grouped by which column (x-position) it landed in.
                                 const items = Array.from(cc.querySelectorAll(':scope > .question'));
                                 if (!items.length) return;
                                 const colBottoms = {};
@@ -7534,9 +7538,20 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                 });
                                 const ccTop = cc.getBoundingClientRect().top;
                                 const maxBottom = Math.max(...Object.values(colBottoms));
-                                const neededPx = Math.ceil(maxBottom - ccTop) + 12; // small breathing margin
+                                const neededPx = Math.ceil(maxBottom - ccTop) + 12;
                                 cc.style.height = neededPx + 'px';
+                                // header block above .content-columns (only present on page 1) +
+                                // top/bottom page margins already reserved via @page margin.
+                                const header = pg.previousElementSibling && pg.previousElementSibling.classList && pg.previousElementSibling.classList.contains('exam-header')
+                                    ? pg.previousElementSibling : (pg.querySelector(':scope > .exam-header'));
+                                const headerPx = header ? header.getBoundingClientRect().height + 15 : 0;
+                                const totalPx = neededPx + headerPx;
+                                const heightMm = Math.max(40, Math.min(560, Math.ceil(totalPx * MM_PER_PX) + 15));
+                                rules.push(`@page p${pageNum}{size:420mm ${heightMm}mm;margin:10mm 10mm 25mm 10mm;}`);
                             });
+                            const styleEl = document.createElement('style');
+                            styleEl.textContent = rules.join('\\n');
+                            document.head.appendChild(styleEl);
                         }
                     """)
                     await asyncio.sleep(0.15)
@@ -8199,7 +8214,7 @@ def _build_print_style7(data, heading):
             col_heights.append(sum(_est_item_height_mm(d) for d in seg))
         tallest_mm = max(col_heights) if col_heights else 40
         est_mm = max(40, min(560, round(tallest_mm * 1.15 + 15)))  # generous buffer; real height gets measured+shrunk in _html_to_pdf before final render
-        body += f'<div class="abpage"><div class="content-columns" style="height:{est_mm}mm">'
+        body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}"><div class="content-columns" style="height:{est_mm}mm">'
         for d in chunk:
             body += _render_question(d)
         body += '</div></div>'
