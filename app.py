@@ -549,7 +549,12 @@ ACTIVE_JOB_LABEL = {}  # chat_id -> human-readable label of the job currently ru
 CURRENT_JOB_ID = {}  # chat_id -> int, id of the job currently running in that chat
 _job_id_counter = itertools.count(1)
 _current_job_chat_id_ctx = contextvars.ContextVar("_current_job_chat_id_ctx", default=None)
-_qbm_key_offset_ctx = contextvars.ContextVar("_qbm_key_offset_ctx", default=0)
+# Reuse pdf_handler's contextvar instance (not a new local one) so setting
+# it here is visible inside pdf_handler.py's Gemini extraction functions --
+# contextvars only propagate correctly through await-chains when both sides
+# reference the SAME ContextVar object, not two separately-created vars
+# with the same name/default.
+from pdf_handler import _qbm_key_offset_ctx
 
 def is_cancelled(chat_id=None):
     if chat_id is None:
@@ -2584,7 +2589,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
         from google import genai as gai
         from google.genai import types
         from pdf_handler import image_to_base64
-        _ordered = key_rotator.ordered_keys()
+        _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
         key = _ordered[0] if _ordered else key_rotator.get_key()
         key_rotator.record_call(key)
         client = gai.Client(api_key=key)
@@ -13187,7 +13192,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
                 config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=65536)
             )
 
-        keys_to_try = key_rotator.ordered_keys() or key_rotator.keys
+        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
@@ -15797,7 +15802,7 @@ Return ONLY the JSON array, nothing else."""
         if not result_json:
             try:
                 from pdf_handler import key_rotator, image_to_base64
-                _gkeys = key_rotator.ordered_keys()
+                _gkeys = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
                 if _gkeys:
                     gkey = _gkeys[0]
                     from google import genai as gai

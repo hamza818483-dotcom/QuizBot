@@ -11,6 +11,7 @@ import random
 import base64
 import asyncio
 import time
+import contextvars
 from io import BytesIO
 from PIL import Image
 
@@ -197,6 +198,19 @@ class GeminiKeyRotator:
         _mark_gemini_key_healthy_today(key)
 
 key_rotator = GeminiKeyRotator()
+
+# Shared with app.py's qbm_extract_all_pages: each concurrent page-window
+# slot sets this to a distinct offset before calling into any Gemini
+# extraction path here, so ordered_keys(offset=...) below spreads
+# concurrent Call1/Call2 requests across different starting keys instead
+# of every slot racing for the same "healthiest" key and all 429-ing it
+# at once (the bug behind "3 keys exhausted but Gemini still fails" --
+# many concurrent slots all picked the SAME first-choice key before any
+# of their mark_rate_limited() calls could land, so the exhaustion wasn't
+# visible to the others in time). contextvars propagate through await
+# chains automatically, so app.py setting this before calling into
+# pdf_handler.py functions works with zero explicit parameter threading.
+_qbm_key_offset_ctx = contextvars.ContextVar("_qbm_key_offset_ctx", default=0)
 
 # ============================================================
 # OPENROUTER KEY ROTATION
@@ -796,7 +810,7 @@ async def generate_mcq_from_image(
     # with 5-6 keys that's 4-5 minutes of stalling per image before ever
     # reaching the OpenRouter fallback. Cap attempts at 3 keys max, and use a
     # shorter timeout on the 2nd/3rd attempt so a bad/slow key fails fast.
-    _ordered = key_rotator.ordered_keys()
+    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
 
     # If every key is already known daily-exhausted (Pacific-day), skip Gemini
     # entirely instead of burning 429 round-trips we already know will fail —
@@ -967,7 +981,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
 
     # ── PRIMARY: Gemini (new google.genai SDK, multi-key rotation) ──
     max_retries = len(key_rotator.keys) if key_rotator.keys else 3
-    _ordered = key_rotator.ordered_keys()
+    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
     for attempt in range(max_retries):
         try:
             key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
