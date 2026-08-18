@@ -1228,7 +1228,60 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
     return []
 
 
-def _build_extra_prompt(topic: str) -> str:
+def _build_chem_gen_prompt(topic: str, count) -> str:
+    """/chem generation prompt: same MCQ-generation engine as default
+    _build_mcq_prompt (creates NEW MCQs from page content, does not just
+    extract existing ones), PLUS the topic-heading detection rule from the
+    original /chem extraction prompt (bold-black larger font + Bangla
+    hierarchical numbering ১.২/১.২.১ prefix, optional English name line
+    underneath) so generated MCQs can be grouped into per-topic CSVs the
+    same way /topic and /unmesh group their extracted MCQs."""
+    base = _build_mcq_prompt(topic, count)
+    # Swap the OUTPUT schema to add qsn_no/topic_hint, and inject the
+    # heading-detection rule right before it, reusing the exact wording
+    # from the original extraction-based CHEM_EXTRACT_PROMPT so detection
+    # behavior is unchanged even though this is now a generation prompt.
+    heading_rule = (
+        "\n═══════════════════════════════\n"
+        "🟦 TOPIC HEADING DETECTION (for topic-wise grouping)\n"
+        "═══════════════════════════════\n"
+        "For EACH generated MCQ, also include:\n"
+        "- \"topic_hint\": the topic-heading text that this MCQ's source content falls under. "
+        "This page style (chemistry/science textbook chapter layout) uses a topic-marker design "
+        "identified by these signals, checked TOGETHER on any candidate heading line:\n"
+        "  i) BOLD BLACK FONT + LARGER SIZE: the heading text is bold black and visibly LARGER "
+        "than the surrounding body text — this size+weight jump is the primary visual signal.\n"
+        "  ii) BANGLA HIERARCHICAL NUMBERING PREFIX: the heading is prefixed with a Bangla-numeral, "
+        "dot-separated hierarchical number, e.g. ১.২, ১.২.১, ১.২.২, ২.১, ২.২.১. Read this exactly "
+        "as printed into topic_hint (e.g. \"১.২.১ পরমাণুর গঠন\"). Every distinct number+heading "
+        "combination is its own separate topic_hint/segment, whether top-level or sub-level.\n"
+        "  iii) ENGLISH NAME LINE UNDERNEATH (optional): a second line in English directly below "
+        "the Bangla heading is part of the SAME topic_hint — append after a dash separator "
+        "(e.g. \"১.২ পরমাণুর গঠন — Structure of Atom\").\n"
+        "  A line is a topic_hint when i AND ii are both true; iii is appended when present.\n"
+        "- If a new numbered heading appears anywhere on this page, every MCQ generated from "
+        "content below it gets the NEW heading; MCQs from content above it keep the prior heading.\n"
+        "- If this page has genuinely no numbered heading visible anywhere (pure continuation "
+        "page), use \"\" (empty string) for topic_hint on every MCQ from this page.\n"
+        "- If a heading appears with no generatable content following it on this page at all, "
+        "still report it: emit one extra object at the end of the JSON array in the form "
+        '{"trailing_topic_marker":"<heading text>"} (no other fields).\n\n'
+    )
+    old_schema_marker = 'Return STRICT JSON array only, no prose, no markdown fences.'
+    if old_schema_marker in base:
+        base = base.replace(old_schema_marker, heading_rule + old_schema_marker)
+    else:
+        base = base + heading_rule
+    # Add topic_hint to the JSON schema example, right before the closing
+    # of the object (after exp_bbox, before the closing }] of the array).
+    base = re.sub(
+        r'("exp_bbox":\[100,200,900,350\])\}\]',
+        r'\1,"topic_hint":"...","qsn_no":1}]',
+        base
+    )
+    return base
+
+
     """
     /extra command prompt — same pipeline as /pdf (page range, channel,
     thread, topic, watermark, count-range override all inherited via
@@ -12161,6 +12214,68 @@ async def _chem_extract_from_image(img, cache_key: tuple = None) -> list:
     return mcqs
 
 
+async def _chem_generate_from_image(img, cache_key: tuple = None) -> list:
+    """/chem GENERATION function (creates NEW MCQs from page content, does
+    NOT extract existing ones) — same generation engine as /pdf's default
+    mode, via _build_chem_gen_prompt, PLUS the same independent heading-scan
+    pass /chem's old extraction path used for reliable topic-boundary
+    detection (bold-black larger font + Bangla hierarchical numbering
+    ১.২/১.২.১), so generated MCQs can still be grouped into per-topic CSVs.
+    No Call2 audit here (unlike extraction) — there's no printed ground-
+    truth to audit generated content against; the heading-scan pass is the
+    only secondary pass, purely for topic-boundary reliability."""
+    prompt = _build_chem_gen_prompt(DEFAULT_TOPIC, None)
+    gem = await _qbm_gemini_extract(img, prompt)
+    mcqs = _qbm_dedup_list(gem) if gem else []
+    if not mcqs:
+        txt = await _qbm_groq_call(img, prompt)
+        mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
+    if not mcqs:
+        txt3 = await _qbm_openrouter_call(img, prompt)
+        mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
+    if not mcqs:
+        return mcqs
+
+    # Assign a sequential qsn_no per-page (1,2,3...) since generated MCQs
+    # have no printed serial number to read -- _chem_group_mcqs' qno==1
+    # split-signal still needs SOME qsn_no field to work with, and the
+    # heading-scan pass below maps its next_qsn_no onto this same sequence.
+    for i, m in enumerate(mcqs, start=1):
+        m["qsn_no"] = i
+
+    try:
+        scan_txt = await _qbm_gemini_raw(img, _build_chem_heading_scan_prompt())
+        headings = _parse_chem_heading_scan(scan_txt)
+    except Exception as e:
+        logger.warning(f"[CHEM-GEN heading-scan] failed, skipping: {e}")
+        headings = []
+
+    if headings:
+        by_qsn = {m.get("qsn_no"): m for m in mcqs}
+        page_qnos_sorted = sorted(by_qsn.keys())
+        ordered = sorted(
+            [h for h in headings if isinstance(h.get("next_qsn_no"), int) and h["next_qsn_no"] in by_qsn],
+            key=lambda h: h["next_qsn_no"],
+        )
+        trailing = [h for h in headings if not (isinstance(h.get("next_qsn_no"), int) and h["next_qsn_no"] in by_qsn)]
+        for idx, h in enumerate(ordered):
+            htext = (h.get("heading_text") or "").strip()
+            if not htext:
+                continue
+            next_q = h["next_qsn_no"]
+            range_end = ordered[idx + 1]["next_qsn_no"] if idx + 1 < len(ordered) else None
+            for qn in page_qnos_sorted:
+                if qn >= next_q and (range_end is None or qn < range_end):
+                    by_qsn[qn]["topic_hint"] = htext
+        for h in trailing:
+            htext = (h.get("heading_text") or "").strip()
+            if htext:
+                mcqs.append({"trailing_topic_marker": htext})
+
+    mcqs = _check_segment_topic_consistency(mcqs, context="CHEM-GEN")
+    return mcqs
+
+
 def _chem_group_mcqs(extracted_pages: list) -> list:
     """DEDICATED grouping for /chem (fully independent of /topic's and
     /unmesh's grouping functions, though structurally identical). Same two
@@ -15148,8 +15263,9 @@ async def _handle_unmesh_impl(msg: dict):
 
 
 async def handle_chem(msg: dict):
-    """/chem -p (pages) — same arg style as /topic and /unmesh. Extracts
-    existing MCQ like /topic/unmesh, but detects topic boundaries via the
+    """/chem -p (pages) — same arg style as /topic and /unmesh. GENERATES
+    NEW MCQ from page content (like /pdf's default generation mode, does
+    NOT extract pre-existing MCQs), but detects topic boundaries via the
     bold-black + LARGER font + Bangla hierarchical-number-prefix (১.২,
     ১.২.১, ২.২.১...) heading style typical of chemistry/science textbook
     chapters, instead of /topic's black-banner or /unmesh's icon-marker
@@ -15180,7 +15296,7 @@ async def _handle_chem_impl(msg: dict):
             "❌ PDF-এ reply করে /chem দাও!\n\n"
             "<b>Format:</b>\n"
             "<code>/chem -p 1-10</code>\n\n"
-            "📌 Page-এ থাকা MCQ extract করে (নতুন বানায় না), কিন্তু বোল্ড-কালো বড় ফন্টের "
+            "📌 Page-এর content থেকে নতুন MCQ বানায় (/pdf-এর মতো generation, extract করে না), কিন্তু বোল্ড-কালো বড় ফন্টের "
             "বাংলা numbering heading (১.২, ১.২.১, ২.২.১ ইত্যাদি — সাথে নিচে ইংরেজি নামও থাকতে পারে) দেখে আলাদা টপিক ধরে প্রতিটার জন্য আলাদা CSV পাঠায়।\n"
             "📌 -p = page range (না দিলে সব page)"
         )
@@ -15214,11 +15330,11 @@ async def _handle_chem_impl(msg: dict):
             return
 
         if status_msg_id:
-            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (নাম্বারিং heading topic detect সহ)...")
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ নতুন MCQ Generation শুরু হচ্ছে (নাম্বারিং heading topic detect সহ)...")
 
         extracted_pages = await qbm_extract_all_pages(
-            chat_id, pages, "Chem Extract", file_name, status_msg_id,
-            extractor=_chem_extract_from_image, file_id=file_id
+            chat_id, pages, "Chem Generate", file_name, status_msg_id,
+            extractor=_chem_generate_from_image, file_id=file_id
         )
 
         total_mcq_found = sum(
@@ -15226,7 +15342,7 @@ async def _handle_chem_impl(msg: dict):
         )
         if not total_mcq_found:
             if status_msg_id:
-                await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ পাওয়া যায়নি!")
+                await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ বানানো যায়নি!")
             return
 
         topic_groups = _chem_group_mcqs(extracted_pages)
@@ -15242,7 +15358,7 @@ async def _handle_chem_impl(msg: dict):
             breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
             next_step = "channel-এ poll পাঠানো হচ্ছে..." if chem_channel_id else "CSV পাঠানো হচ্ছে..."
             await edit_msg(chat_id, status_msg_id,
-                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
+                f"✅ Generation Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
 
         if chem_channel_id:
             total_polls = await _post_topic_groups_to_channel(chem_channel_id, topic_groups, chem_thread_id)
@@ -20353,8 +20469,9 @@ async def handle_message(msg: dict):
         # black-background banner bar)
         _spawn_command_task(uid, handle_unmesh(msg))
     elif text.startswith("/chem"):
-        # /chem = same as /topic/unmesh but topic heading is detected via
-        # a third visual marker: bold-black + LARGER font + Bangla
+        # /chem = GENERATES new MCQs from page content (like /pdf's default
+        # generation mode), grouped topic-wise like /topic/unmesh, with
+        # topic heading detected via bold-black + LARGER font + Bangla
         # hierarchical numbering prefix (১.২, ১.২.১, ২.২.১...), optionally
         # with an English name line underneath — typical of chemistry/
         # science textbook chapter layouts.
