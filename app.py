@@ -8072,9 +8072,38 @@ def _build_print_style1(data, heading):
     body += '</div>'
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
+_PRINT_STYLE2_CSS = """<style>
+@page{size:420mm 594mm;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}}
+body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:10pt;line-height:1.15;color:#000;margin:0;padding:10px;width:420mm;max-width:420mm}
+.exam-header{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:10px;margin-bottom:15px}
+.exam-header h1{color:#166534;margin:0;font-size:15pt;font-weight:bold}
+.content-columns{column-count:3;column-gap:12px;column-fill:balance;column-rule:1px solid #ddd}
+.question{margin-bottom:6px;break-inside:avoid;page-break-inside:avoid}
+.question-header{margin-bottom:3px;display:flex;align-items:flex-start}
+.question-num{font-family:'Times New Roman',serif;font-weight:bold;color:#15803d;font-size:10pt;margin-right:4px;white-space:nowrap;flex-shrink:0}
+.question-text{flex:1;line-height:1.3;font-size:10pt;color:#000;word-wrap:break-word}
+.options-table-short{width:100%;border-collapse:collapse;margin:3px 0 3px 6px;table-layout:fixed}
+.options-table-short td{border:none;padding:1px 6px 1px 0;vertical-align:top;font-size:10pt;color:#000;width:40%}
+.options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;vertical-align:middle;font-family:'Poppins',sans-serif;font-weight:600;font-size:10pt;color:#000;padding-left:8px}
+.answer-circle{font-weight:300;font-family:'Poppins',sans-serif;font-size:10pt;line-height:1}
+.options-list{margin:3px 0 3px 6px;padding:0;list-style:none}
+.options-list li{margin:1px 0;font-size:10pt;color:#000;word-wrap:break-word}
+.option-with-answer{display:flex;justify-content:space-between;align-items:flex-start}
+.explanation{margin:3px 0 2px 6px;padding:3px;color:#000;background-color:rgba(22,163,74,0.1);border-left:3px solid #16a34a;font-size:9pt;font-style:italic;break-inside:avoid}
+.explanation-label{font-weight:bold;color:#166534}
+.page-break{page-break-before:always;break-before:page}
+.answers-section{column-count:1;margin-top:0}
+.answer-table{width:100%;border-collapse:collapse;margin-top:0;border:1px solid #16a34a}
+.answer-table th,.answer-table td{border:1px solid #86efac;padding:5px;text-align:left;vertical-align:top;word-wrap:break-word}
+.answer-table th{background-color:#F0FDF4;font-weight:bold;text-align:center;font-size:11pt;color:#166534}
+.qno-col{width:8%;text-align:center}.ans-col{width:8%;text-align:center;font-weight:bold;font-size:12pt}.exp-col{width:84%;font-size:10pt}
+img{max-width:30%!important;height:auto!important;vertical-align:middle}
+@media print{@page{size:420mm 594mm;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:420mm;max-width:420mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
+</style>"""
+
 def _build_print_style2(data, heading):
-    """Format P2: Exam Style — Questions page then separate Answer Table (100% ported)"""
-    css = _PRINT_CSS
+    """Format P2: Exam Style — Large A3-ish page, 3 columns, ~50 MCQ/page so 100 MCQ fit in 2 pages, then separate Answer Table"""
+    css = _PRINT_STYLE2_CSS
     body = f'<div class="exam-header"><h1>{heading} - Questions</h1></div><div class="content-columns">'
     for d in data:
         is_short = _check_short_option(d["opts"])
