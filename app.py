@@ -12196,8 +12196,6 @@ async def _bio_apply_heading_scan(generated_pages: list) -> list:
     async def _scan_one(page_num, img, mcqs):
         if not mcqs:
             return
-        for i, m in enumerate(mcqs, start=1):
-            m["qsn_no"] = i
         try:
             scan_txt = await _qbm_gemini_raw(img, _build_bio_heading_scan_prompt())
             headings = _parse_bio_heading_scan(scan_txt)
@@ -12205,6 +12203,13 @@ async def _bio_apply_heading_scan(generated_pages: list) -> list:
             logger.warning(f"[BIO heading-scan] page {page_num} failed, skipping: {e}")
             return
         if not headings:
+            # No genuine heading found on this page at all -- do NOT reset
+            # qsn_no to 1 here (that would force _topic_group_mcqs to start
+            # a bogus new group every single page, falling back to a
+            # generic "Topic N" name since there's no real topic_hint to
+            # carry). Leave qsn_no/topic_hint exactly as generation-time
+            # produced them so this page's MCQs correctly continue the
+            # previous page's topic group.
             return
         ordered = sorted(
             [h for h in headings if isinstance(h.get("vertical_position"), (int, float)) and (h.get("heading_text") or "").strip()],
@@ -12213,6 +12218,15 @@ async def _bio_apply_heading_scan(generated_pages: list) -> list:
         if not ordered:
             return
         n = len(mcqs)
+        # Only mark a fresh qsn_no==1 boundary for the MCQ where the FIRST
+        # real heading's range begins -- MCQs before that (if the page
+        # opens mid-topic, before any heading) must NOT get qsn_no reset,
+        # or they'd wrongly force a new "Topic N" group with no real name.
+        first_start_frac = ordered[0]["vertical_position"]
+        first_start_i = max(1, int(first_start_frac * n) + 1) if n else 1
+        for j, m in enumerate(mcqs, start=1):
+            if j >= first_start_i:
+                m["qsn_no"] = 1 if j == first_start_i else j - first_start_i + 1
         for idx, h in enumerate(ordered):
             htext = h["heading_text"].strip()
             start_frac = h["vertical_position"]
