@@ -13097,13 +13097,23 @@ async def _chem_generate_from_image(img, cache_key: tuple = None) -> list:
     prompt = _build_chem_gen_prompt(DEFAULT_TOPIC, None)
     gem = await _qbm_gemini_extract(img, prompt)
     mcqs = _qbm_dedup_list(gem) if gem else []
+    # DEBUG (2026-08-20): /chem pages were coming back 0 MCQ with zero
+    # error visibility -- _qbm_gemini_extract/_qbm_groq_call/_qbm_openrouter_call
+    # swallow the raw model response, so there was no way to tell "model
+    # genuinely said no content here" apart from "call silently failed".
+    # Log the raw parsed-length at each provider stage so the next failing
+    # run's logs show exactly which stage returned what.
+    logger.info(f"[CHEM-GEN debug] Gemini stage: {len(gem) if gem else 0} raw MCQs parsed")
     if not mcqs:
         txt = await _qbm_groq_call(img, prompt)
         mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
+        logger.info(f"[CHEM-GEN debug] Groq stage: raw_text_len={len(txt) if txt else 0}, parsed={len(mcqs)}")
     if not mcqs:
         txt3 = await _qbm_openrouter_call(img, prompt)
         mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
+        logger.info(f"[CHEM-GEN debug] OpenRouter stage: raw_text_len={len(txt3) if txt3 else 0}, parsed={len(mcqs)}")
     if not mcqs:
+        logger.warning(f"[CHEM-GEN debug] ALL 3 providers returned 0 MCQ for this page — genuinely empty result, not an exception.")
         return mcqs
 
     # Assign a sequential qsn_no per-page (1,2,3...) since generated MCQs
@@ -15046,6 +15056,13 @@ async def handle_ai(msg: dict):
 async def _qbm_gemini_extract(img, prompt: str = None) -> list:
     """Direct Gemini call with the strict extraction prompt (fallback path)."""
     txt = await _qbm_gemini_raw(img, prompt or await qbm_get_active_prompt())
+    # DEBUG (2026-08-20): log raw response snippet so a genuinely-empty
+    # Gemini result (model says no content) can be told apart from a
+    # non-JSON/refusal response that _qbm_parse_json would silently drop.
+    if not txt:
+        logger.info("[QBM-debug] _qbm_gemini_extract: EMPTY raw response text from Gemini")
+    elif not _qbm_parse_json(txt):
+        logger.info(f"[QBM-debug] _qbm_gemini_extract: Gemini responded but 0 MCQs parsed. Raw (first 300 chars): {txt[:300]!r}")
     return _qbm_parse_json(txt) if txt else []
 
 
