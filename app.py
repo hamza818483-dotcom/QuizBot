@@ -1417,27 +1417,34 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
     underneath) so generated MCQs can be grouped into per-topic CSVs the
     same way /topic and /unmesh group their extracted MCQs."""
     base = _build_mcq_prompt(topic, count)
+    # /chem doesn't need the exp_bbox (source-image-crop) feature -- strip
+    # both the instruction paragraph and its schema field so /chem's own
+    # prompt doesn't ask the model for it or waste output tokens on it.
+    base = re.sub(
+        r"For EACH MCQ, give 'exp_bbox':.*?Use null if unsure\.\s*",
+        "",
+        base, flags=re.DOTALL
+    )
+    base = base.replace(',"exp_bbox":[100,200,900,350]', '')
+    # /chem-specific strengthening of the shared base prompt's existing
+    # MUST-PRIORITY (hand-marked content) rule -- adds the ONE nuance
+    # /chem needs that the shared rule doesn't state: unlike /extra, marks
+    # set PRIORITY/ORDERING only, never an exclusive filter. Placed inline
+    # right after the existing rule instead of a separate duplicate block.
+    base = base.replace(
+        "- Tables/charts: use every cell of info, don't just describe the table.\n\n",
+        "- Tables/charts: use every cell of info, don't just describe the table.\n"
+        "- ⚠️ UNLIKE /extra: marked content sets PRIORITY only, never an exclusive filter -- "
+        "after covering marked lines, generate MCQs normally from the rest of the page's "
+        "unmarked content too, exactly as if no marks existed. No marks on the page at all "
+        "is the common case and needs no special handling.\n\n"
+    )
     # Swap the OUTPUT schema to add qsn_no/topic_hint, and inject the
     # heading-detection rule right before it, reusing the exact wording
     # from the original extraction-based CHEM_EXTRACT_PROMPT so detection
     # behavior is unchanged even though this is now a generation prompt.
     heading_rule = (
         "\n═══════════════════════════════\n"
-        "🟨 HAND-MARKED CONTENT PRIORITY (important — read carefully)\n"
-        "═══════════════════════════════\n"
-        "This page may have hand-marks on top of the book's own printing — highlighter color "
-        "(any color), pen underline, a hand-drawn box/circle/bracket, or a star/tick pointing to "
-        "a line. If such marks exist:\n"
-        "- Give PRIORITY to generating MCQs from the marked lines/phrases FIRST — these are the "
-        "most exam-relevant content the student flagged.\n"
-        "- Bold/italic that is part of the book's OWN original typesetting is NOT a hand-mark.\n"
-        "- ⚠️ UNLIKE /extra, this is NOT an exclusive filter — after covering the marked content, "
-        "ALSO generate MCQs normally from the REST of the page's unmarked content, exactly as you "
-        "would if no marks existed at all. Marked content sets priority/ordering, it never excludes "
-        "the rest of the page.\n"
-        "- If NO hand-marks exist anywhere on this page, just generate normally from all content — "
-        "this is the common case and is completely fine.\n\n"
-        "═══════════════════════════════\n"
         "🟦 TOPIC HEADING DETECTION (for topic-wise grouping)\n"
         "═══════════════════════════════\n"
         "For EACH generated MCQ, also include:\n"
@@ -1468,9 +1475,10 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
     else:
         base = base + heading_rule
     # Add topic_hint to the JSON schema example, right before the closing
-    # of the object (after exp_bbox, before the closing }] of the array).
+    # of the object (exp_bbox already stripped above, so append directly
+    # after explanation).
     base = re.sub(
-        r'("exp_bbox":\[100,200,900,350\])\}\]',
+        r'(\"explanation\":\"\.\.\.\")\}\]',
         r'\1,"topic_hint":"...","qsn_no":1}]',
         base
     )
