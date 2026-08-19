@@ -1103,6 +1103,13 @@ def _build_bio_prompt(topic: str) -> str:
             f"or would make a more interesting question.\n"
             f"- Process segment by segment, top to bottom, in the exact order listed above. "
             f"Generate ALL of one segment's MCQs before moving to the next.\n"
+            f"- MCQ count per segment MUST scale with that segment's own content volume — "
+            f"do NOT force an equal/fixed number of MCQs per segment. A segment with more "
+            f"distinct facts/lines/paragraphs should yield proportionally MORE MCQs; a segment "
+            f"with only 1-2 lines should yield only 1-2 MCQs (or even zero if truly empty). "
+            f"Cover the segment's content as thoroughly as its length allows — don't stop early "
+            f"just because a neighboring segment got fewer, and don't pad a short segment to "
+            f"match a longer one.\n"
             f"- If a segment genuinely has little content, generate fewer MCQs for it rather than "
             f"borrowing from a neighboring segment to pad the count.\n\n"
         )
