@@ -14471,7 +14471,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
             if is_cancelled():
                 return ""
             try:
-                response = await asyncio.to_thread(_call, key)
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=90)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
             except Exception as e:
@@ -14550,7 +14550,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
             if is_cancelled():
                 return ""
             try:
-                response = await asyncio.to_thread(_call, key)
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=90)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
             except Exception as e:
@@ -14611,7 +14611,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
             if is_cancelled():
                 return ""
             try:
-                response = await asyncio.to_thread(_call, key)
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=90)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
             except Exception as e:
