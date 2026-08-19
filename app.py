@@ -13544,8 +13544,14 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     zero content isolation between segments, and no error visibility when
     a stage silently returned empty). Returns the same (page_num, img,
     mcqs) tuple list shape _chem_group_mcqs already expects, so no
-    downstream grouping/CSV code needs to change."""
-    BATCH_SIZE = 3
+    downstream grouping/CSV code needs to change.
+
+    2026-08-20: BATCH_SIZE dropped 3->2 -- field testing showed a 3-image
+    batched heading-scan call reliably misses the MIDDLE page's heading
+    (page 2 of a 1-2-3 batch), while the same page detects fine in a
+    2-image batch. Gemini multi-image attention issue, not a prompt/
+    parsing bug -- smaller batches are the reliable fix."""
+    BATCH_SIZE = 2
     batches = [pages[i:i + BATCH_SIZE] for i in range(0, len(pages), BATCH_SIZE)]
     headings_by_page = {}
 
