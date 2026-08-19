@@ -704,21 +704,19 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             # errors on pages with many MCQs. Detect Bangla content (any char
             # in the Bengali Unicode block) and use a much tighter ratio.
             _has_bangla = any('\u0980' <= ch <= '\u09FF' for ch in prompt_len_hint[:500])
-            _chars_per_token = 1.45 if _has_bangla else 2.6  # 2026-08-19: 1.6
-            # still undercounted real Groq tokenization on Bangla /bio
-            # prompts (observed Requested 8411/8000) — tightened further
+            _chars_per_token = 1.15 if _has_bangla else 2.6  # 2026-08-19: 1.45
+            # still undercounted (observed Requested 9422/8000 even after the
+            # 1.45 tightening) — tightened further to 1.15
             PROMPT_TOKENS = max(400, int(len(prompt_len_hint) / _chars_per_token) + 300)
         else:
             # Measured from the compacted static QBM_EXTRACT_PROMPT_DEFAULT
             # (~8k chars / 3.5) + margin. Only accurate for that fixed prompt.
             PROMPT_TOKENS = 2400
-        SAFETY_MARGIN = 2000  # 2026-08-19: /bio 413 logs showed Requested
-        # 8411/8000 even with the 1500 margin — real Groq-side token counting
-        # (tokenizer + request framing overhead) runs higher than this
-        # estimator predicts, especially for Bangla-heavy prompts. Raised
-        # 1500->2000 (extra 500 headroom) so the image gets squeezed harder
-        # BEFORE the request is sent, instead of relying on the 413 shrink-
-        # retry path to recover after the fact.
+        SAFETY_MARGIN = 3000  # 2026-08-19: /bio 413 logs showed Requested
+        # 9422/8000 even with the 2000 margin — raised 2000->3000 (extra 1000
+        # headroom) so the image gets squeezed harder BEFORE the request is
+        # sent, instead of relying on the 413 shrink-retry path to recover
+        # after the fact.
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
@@ -2082,8 +2080,23 @@ def _parse_mcq_json(text: str) -> list:
     try:
         data = json.loads(s)
     except Exception as e:
-        logger.warning(f"[_parse_mcq_json] JSON decode failed: {e} | raw (first 200 chars): {s[:200]!r}")
-        return []
+        # 2026-08-19: qwen3.6-27b sometimes emits a malformed/truncated
+        # array (missing comma, cut off mid-object) that fails outright
+        # even though most earlier objects are complete and usable. Repair
+        # by truncating to the last complete top-level object (last '}'
+        # before the failure point) and re-closing the array, instead of
+        # discarding the whole page's MCQs over one bad tail object.
+        try:
+            last_obj_end = s.rfind("}")
+            if last_obj_end != -1:
+                repaired = s[:last_obj_end + 1] + "]"
+                data = json.loads(repaired)
+                logger.warning(f"[_parse_mcq_json] JSON decode failed, repaired via truncation to last complete object: {e}")
+            else:
+                raise e
+        except Exception:
+            logger.warning(f"[_parse_mcq_json] JSON decode failed: {e} | raw (first 200 chars): {s[:200]!r}")
+            return []
     if not isinstance(data, list):
         logger.warning(f"[_parse_mcq_json] top-level JSON is not a list (type={type(data).__name__}) | raw (first 200 chars): {s[:200]!r}")
     elif not data:
