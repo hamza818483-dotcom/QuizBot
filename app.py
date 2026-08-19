@@ -13329,6 +13329,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             prompt = _build_chem_heading_scan_prompt_v2_batched(len(batch))
             scan_txt = await _qbm_gemini_raw_multi(imgs, prompt)
             all_headings = _parse_chem_heading_scan_v2(scan_txt)
+            logger.warning(f"[CHEM pre-scan debug] batch pages={page_nums}: raw scan found {len(all_headings)} heading(s): {[(h.get('page_index'), h.get('heading_text'), h.get('vertical_position')) for h in all_headings]}")
         except Exception as e:
             logger.warning(f"[CHEM pre-scan] batch {page_nums} failed, treating as headingless: {e}")
             return
