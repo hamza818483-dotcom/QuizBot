@@ -17621,16 +17621,34 @@ async def qbm_extract_all_pages(
     new_job_id(chat_id)
     set_active_job(chat_id, f"QBM extraction ({file_name}, page-by-page)")
 
-    if status_msg_id:
-        await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0), reply_markup=_cancel_kb(chat_id))
-
     # Live ticker: QBM's 2-call pipeline (full Call1+Call2, no shortcuts)
     # can take 30-90s per page, and the dashboard previously only refreshed on
     # page start/finish -- elapsed time looked frozen the whole time. This
     # refreshes the same message every few seconds purely for the live clock,
     # independent of page completion events (same pattern as /pdf's ticker).
     _qbm_dash_stop = asyncio.Event()
+    _qbm_dash_lock = asyncio.Lock()
+    _qbm_last_dash_text = [None]
+
+    async def _qbm_safe_dash_edit():
+        # Serialize every dashboard edit (page-start, page-done, ticker) —
+        # WINDOW=4 pages finishing concurrently used to fire edit_msg calls
+        # in parallel on the SAME status_msg_id with no ordering guarantee,
+        # so a page's "done, N MCQ" update could get raced/overwritten by
+        # another in-flight edit before it ever reached Telegram, making
+        # completed pages silently vanish from the live status. Skip the
+        # call entirely when the text is unchanged (avoids Telegram's
+        # "message is not modified" error burning a request for nothing).
+        async with _qbm_dash_lock:
+            text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0)
+            if text == _qbm_last_dash_text[0]:
+                return
+            try:
+                await edit_msg(chat_id, status_msg_id, text, reply_markup=_cancel_kb(chat_id))
+                _qbm_last_dash_text[0] = text
+            except Exception:
+                pass
+
     async def _qbm_dashboard_ticker():
         _ticker_deadline = time.time() + 1800
         while not _qbm_dash_stop.is_set() and time.time() < _ticker_deadline:
@@ -17641,11 +17659,9 @@ async def qbm_extract_all_pages(
             if _qbm_dash_stop.is_set():
                 break
             if status_msg_id:
-                try:
-                    await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0), reply_markup=_cancel_kb(chat_id))
-                except Exception:
-                    pass
+                await _qbm_safe_dash_edit()
+    if status_msg_id:
+        await _qbm_safe_dash_edit()
     _qbm_ticker_task = _spawn_task(_qbm_dashboard_ticker())
 
     async def _extract_one(idx, page_num, img):
@@ -17655,8 +17671,7 @@ async def qbm_extract_all_pages(
             return idx, page_num, img, []
         page_status[idx]["current"] = True
         if status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0), reply_markup=_cancel_kb(chat_id))
+            await _qbm_safe_dash_edit()
         mcqs = []
 
         async def _run_extract():
@@ -17749,8 +17764,7 @@ async def qbm_extract_all_pages(
         page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _counts.items())
         total_mcq += len(mcqs)
         if status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0), reply_markup=_cancel_kb(chat_id))
+            await _qbm_safe_dash_edit()
         return idx, page_num, img, mcqs
 
     # Parallel window. WINDOW=1 was strict-sequential (avoided same-key TPM
