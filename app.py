@@ -12485,8 +12485,32 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
     await asyncio.gather(*[_scan_batch(b) for b in batches], return_exceptions=True)
 
     results = [None] * len(pages)
+    page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
+    start_time = time.time()
+    total_mcq = 0
+    _bio_dash_lock = asyncio.Lock()
+    _bio_last_dash_text = [None]
+
+    async def _bio_safe_dash_edit():
+        # Same fix as /unmesh's qbm_extract_all_pages: serialize edits and
+        # skip no-op edits so concurrent pages (PARALLEL=2) never race each
+        # other out and leave the status message frozen on the initial text.
+        if not status_msg_id:
+            return
+        async with _bio_dash_lock:
+            text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0)
+            if text == _bio_last_dash_text[0]:
+                return
+            try:
+                await edit_msg(chat_id, status_msg_id, text)
+                _bio_last_dash_text[0] = text
+            except Exception:
+                pass
 
     async def _run_page(idx, page_num, img):
+        nonlocal total_mcq
+        page_status[idx]["current"] = True
+        await _bio_safe_dash_edit()
         raw_headings = headings_by_page.get(page_num, [])
         ordered = sorted(
             [h for h in raw_headings
@@ -12537,6 +12561,11 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
                             m["topic_hint"] = heading_text
 
         results[idx] = (page_num, img, mcqs)
+        page_status[idx]["current"] = False
+        page_status[idx]["done"] = True
+        page_status[idx]["mcq"] = len(mcqs)
+        total_mcq += len(mcqs)
+        await _bio_safe_dash_edit()
 
     _PARALLEL = 2
     sem = asyncio.Semaphore(_PARALLEL)
