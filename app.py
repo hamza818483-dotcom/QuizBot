@@ -12482,7 +12482,35 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
         for i, (page_num, _img) in enumerate(batch, start=1):
             headings_by_page[page_num] = by_index.get(i, [])
 
-    await asyncio.gather(*[_scan_batch(b) for b in batches], return_exceptions=True)
+    if status_msg_id:
+        try:
+            await edit_msg(chat_id, status_msg_id,
+                f"🔎 Heading-scan হচ্ছে... (0/{len(batches)} batch)")
+        except Exception:
+            pass
+
+    _scan_done = [0]
+    _scan_lock = asyncio.Lock()
+
+    async def _scan_batch_tracked(b):
+        await _scan_batch(b)
+        async with _scan_lock:
+            _scan_done[0] += 1
+            if status_msg_id:
+                try:
+                    await edit_msg(chat_id, status_msg_id,
+                        f"🔎 Heading-scan হচ্ছে... ({_scan_done[0]}/{len(batches)} batch)")
+                except Exception:
+                    pass
+
+    await asyncio.gather(*[_scan_batch_tracked(b) for b in batches], return_exceptions=True)
+
+    if status_msg_id:
+        try:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ Heading-scan শেষ!\n⏳ MCQ generation শুরু হচ্ছে ({len(pages)} page)...")
+        except Exception:
+            pass
 
     results = [None] * len(pages)
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
@@ -14579,9 +14607,12 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
             if is_cancelled():
                 return ""
             try:
-                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=90)
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=35)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
+            except asyncio.TimeoutError:
+                logger.warning(f"[QBM] Gemini key {key[:12]}... multi-image call timed out (35s), trying next key")
+                continue
             except Exception as e:
                 msg = str(e)
                 extra = ""
