@@ -12623,6 +12623,50 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
                         if start_i <= j < end_i and (m.get("topic_hint") or "").strip() not in valid_heads:
                             m["topic_hint"] = heading_text
 
+            # CODE-LEVEL CROSS-TOPIC LEAK CHECK: even after trusting the
+            # model's topic_hint, do a keyword cross-check against every
+            # OTHER segment's heading text. If an MCQ's own text (question +
+            # options + explanation) doesn't contain any keyword tied to its
+            # claimed segment but strongly matches a different segment's
+            # heading keywords instead, that's a real sign of cross-topic
+            # content leakage -- flag it for manual review rather than
+            # silently shipping it under the wrong topic.
+            def _kw(s: str) -> set:
+                import re as _re
+                return {w for w in _re.findall(r"[^\W\d_]{3,}", (s or ""), flags=_re.UNICODE) if w}
+
+            seg_keywords = {seg_h: _kw(seg_h) for seg_h, _s, _e in segments}
+            if len(segments) > 1:
+                for m in mcqs:
+                    claimed = (m.get("topic_hint") or "").strip()
+                    if claimed not in seg_keywords:
+                        continue
+                    body = " ".join([
+                        m.get("question", ""), " ".join(m.get("options", []) or []),
+                        m.get("explanation", "")
+                    ])
+                    body_kw = _kw(body)
+                    if not body_kw:
+                        continue
+                    own_overlap = len(body_kw & seg_keywords[claimed])
+                    best_other = None
+                    best_other_overlap = 0
+                    for other_h, other_kw in seg_keywords.items():
+                        if other_h == claimed:
+                            continue
+                        ov = len(body_kw & other_kw)
+                        if ov > best_other_overlap:
+                            best_other_overlap = ov
+                            best_other = other_h
+                    if best_other and best_other_overlap > own_overlap:
+                        m["_topic_leak_suspect"] = True
+                        m["_topic_leak_candidate"] = best_other
+                        logger.warning(
+                            f"[BIO] page {page_num}: MCQ tagged '{claimed}' shows stronger "
+                            f"keyword match with segment '{best_other}' (own={own_overlap} "
+                            f"vs other={best_other_overlap}) — flagged as possible cross-topic leak."
+                        )
+
         results[idx] = (page_num, img, mcqs)
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
@@ -16056,6 +16100,20 @@ async def _handle_bio_impl(msg: dict):
             await edit_msg(chat_id, status_msg_id, f"✅ {total_mcq_found} MCQ generate হয়েছে (per-topic isolated)!\n⏳ Grouping হচ্ছে...")
 
         topic_groups = _topic_group_mcqs(generated_pages)
+
+        # Pull code-flagged cross-topic-leak MCQs out into their own review
+        # bucket instead of letting them silently sit inside a topic's CSV.
+        _leak_mcqs = []
+        _clean_groups = []
+        for _name, _mcqs in topic_groups:
+            _keep = [m for m in _mcqs if not m.get("_topic_leak_suspect")]
+            _leaked = [m for m in _mcqs if m.get("_topic_leak_suspect")]
+            _leak_mcqs.extend(_leaked)
+            if _keep:
+                _clean_groups.append((_name, _keep))
+        if _leak_mcqs:
+            _clean_groups.append(("⚠️ Needs Review (possible cross-topic mix)", _leak_mcqs))
+        topic_groups = _clean_groups
 
         if status_msg_id:
             breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
