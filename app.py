@@ -13770,18 +13770,31 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         via _pair_pages_for_extra) and generate BOTH pages' MCQs in a
         SINGLE provider call, halving call count for this pair.
 
-        Handles BOTH sub-cases:
-        - Same topic across the pair (topic continues page1->page2): tag
-          the whole result with that one topic_hint, no split needed.
-        - Different topics (page2 starts a new topic): the composite
-          prompt explicitly marks a PAGE A / PAGE B boundary and requires
-          each MCQ to report which half it came from ("source_half":
-          "A"/"B") -- Call1 already told us exactly where each topic's
-          content is (that's what made seg1/seg2 single-segment in the
-          first place), so this is a deterministic code-level split on
-          the model's own per-MCQ attribution, not a guess."""
+        ONLY combines when heading1 == heading2 (same topic continuing
+        across both pages) -- in that case there's nothing to split, the
+        whole result belongs to one topic, zero ambiguity.
+
+        When the two pages have DIFFERENT topics, this does NOT attempt a
+        combined call at all (a prior version asked the model to self-tag
+        which half each MCQ came from via a "source_half" field, but that
+        is a trust-the-model split, not a deterministic one -- Call1 only
+        gives us WHERE the topic boundary is on a single page's own
+        vertical_position, not a reliable way to attribute a GENERATED
+        MCQ back to page A vs page B from Call2's text output alone). To
+        guarantee zero MCQ loss and zero mis-tagging, different-topic
+        pairs always fall back to the original safe per-page calls."""
         heading1 = seg1[0][0]
         heading2 = seg2[0][0]
+
+        if heading1 != heading2:
+            # Different topics -- no reliable deterministic split exists
+            # for a combined-call result, so don't combine: this is the
+            # ONLY topic-detection-safe choice, not a fallback-after-try.
+            await asyncio.gather(
+                _run_single_page(idx1, page_num1, img1, seg1),
+                _run_single_page(idx2, page_num2, img2, seg2),
+            )
+            return
 
         page_status[idx1]["current"] = True
         page_status[idx2]["current"] = True
@@ -13795,61 +13808,14 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         composite.paste(img1, (0, 0))
         composite.paste(img2, (0, img1.height + gap))
 
-        if heading1 == heading2:
-            # Same topic continuing across both pages -- no split needed,
-            # whole combined result belongs to one topic.
-            mcqs = await _gen_segment(composite, f"{page_num1}-{page_num2}")
-            for m in mcqs:
-                m["topic_hint"] = heading1
-            _renumber_by_topic(mcqs)
-            _mark_done(idx1, page_num1, mcqs, img1)
-            _mark_done(idx2, page_num2, [], img2)
-        else:
-            # Different topics -- ask the model to tag each MCQ with which
-            # half (A=page1/top, B=page2/bottom) it came from, so we can
-            # deterministically split the combined result back into the
-            # two topics instead of guessing.
-            split_prompt = (
-                _chem_gen_prompt_v2
-                + f"\n\n⚠️ TWO-PAGE COMPOSITE: this image is TWO pages stacked vertically. "
-                f"PAGE A (top half) covers topic \"{heading1}\". PAGE B (bottom half) covers "
-                f"topic \"{heading2}\". For EVERY MCQ in your output, add a mandatory field "
-                f"\"source_half\": \"A\" or \"B\" stating which page's content that MCQ came from. "
-                f"Never mix content from the two pages into one MCQ."
-            )
-            gem = await _qbm_gemini_extract(composite, split_prompt)
-            raw = _qbm_dedup_list(gem) if gem else []
-            if not raw:
-                txt = await _qbm_groq_call(composite, split_prompt)
-                raw = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
-            if not raw:
-                txt3 = await _qbm_openrouter_call(composite, split_prompt)
-                raw = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
-
-            mcqs_a = [m for m in raw if str(m.get("source_half", "")).strip().upper() == "A"]
-            mcqs_b = [m for m in raw if str(m.get("source_half", "")).strip().upper() == "B"]
-            _unlabeled = [m for m in raw if str(m.get("source_half", "")).strip().upper() not in ("A", "B")]
-
-            if _unlabeled or not raw:
-                # Model didn't reliably tag halves (or returned nothing) --
-                # don't risk mis-attributing MCQs to the wrong topic, fall
-                # back to the safe original per-page path for this pair.
-                logger.warning(f"[CHEM-GEN v2] paired pages {page_num1}-{page_num2}: source_half tagging unreliable ({len(_unlabeled)} unlabeled of {len(raw)}), falling back to per-page calls.")
-                await asyncio.gather(
-                    _run_single_page(idx1, page_num1, img1, seg1),
-                    _run_single_page(idx2, page_num2, img2, seg2),
-                )
-                return
-
-            for m in mcqs_a:
-                m["topic_hint"] = heading1
-            for m in mcqs_b:
-                m["topic_hint"] = heading2
-            _renumber_by_topic(mcqs_a)
-            _renumber_by_topic(mcqs_b)
-            _mark_done(idx1, page_num1, mcqs_a, img1)
-            _mark_done(idx2, page_num2, mcqs_b, img2)
-
+        # Same topic continuing across both pages -- no split needed,
+        # whole combined result belongs to one topic.
+        mcqs = await _gen_segment(composite, f"{page_num1}-{page_num2}")
+        for m in mcqs:
+            m["topic_hint"] = heading1
+        _renumber_by_topic(mcqs)
+        _mark_done(idx1, page_num1, mcqs, img1)
+        _mark_done(idx2, page_num2, [], img2)
         await _chem_safe_dash_edit()
 
     def _renumber_by_topic(mcqs):
