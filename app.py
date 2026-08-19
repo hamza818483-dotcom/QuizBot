@@ -1078,7 +1078,8 @@ def _build_bio_prompt(topic: str) -> str:
         f"Subject: {topic}\n\n"
 
         f"═══════════════════════════════\n"
-        f"🟨 STEP 1 — DETECT TOPIC HEADINGS FIRST (before generating any MCQ)\n"
+        f"🚨🚨 TOP PRIORITY — TOPIC HEADING DETECTION (this is the MAIN task, "
+        f"more important than MCQ count/style — get this exactly right first)\n"
         f"═══════════════════════════════\n"
         f"Scan the ENTIRE page top-to-bottom and find every TOPIC HEADING line. "
         f"CHECK ALL 4 SIGNALS BELOW FOR EVERY BOLD CANDIDATE LINE, IN THIS ORDER, AND SCORE IT — "
@@ -1140,10 +1141,11 @@ def _build_bio_prompt(topic: str) -> str:
 
 
         f"═══════════════════════════════\n"
-        f"🟥 STEP 2 — GENERATE MCQs — MAXIMUM SOURCE UTILIZATION, NO CAP\n"
+        f"🟥 STEP 3 — GENERATE MCQs — MAXIMUM SOURCE UTILIZATION, NO CAP\n"
         f"═══════════════════════════════\n"
         f"- Go through this page LINE BY LINE, PARAGRAPH BY PARAGRAPH, POINT BY "
-        f"POINT, CELL BY CELL, topic-segment by topic-segment (per Step 1). "
+        f"POINT, CELL BY CELL, topic-segment by topic-segment (per Steps "
+        f"1-2 above). "
         f"Every distinct line, sentence, fact, or definition MUST generate at "
         f"least one MCQ — zero exceptions, zero skipped content, zero skipped "
         f"topic segments.\n"
@@ -7766,7 +7768,7 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                 if (!cc) return;
                                 let neededPx;
                                 if (isAnswers) {
-                                    neededPx = Math.ceil(cc.getBoundingClientRect().height) + 12;
+                                    neededPx = Math.ceil(cc.getBoundingClientRect().height);
                                 } else {
                                     const items = Array.from(cc.querySelectorAll(':scope > .question'));
                                     if (!items.length) return;
@@ -7779,15 +7781,18 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                     });
                                     const ccTop = cc.getBoundingClientRect().top;
                                     const maxBottom = Math.max(...Object.values(colBottoms));
-                                    neededPx = Math.ceil(maxBottom - ccTop) + 12;
+                                    neededPx = Math.ceil(maxBottom - ccTop);
                                     cc.style.height = neededPx + 'px';
                                 }
                                 // header block (only present inside page 1's .abpage) is
                                 // already part of pg's flow height above content-columns.
                                 const header = pg.querySelector(':scope > .exam-header');
-                                const headerPx = header ? header.getBoundingClientRect().height + 15 : 0;
+                                const headerPx = header ? header.getBoundingClientRect().height : 0;
                                 const totalPx = neededPx + headerPx;
-                                const heightMm = Math.max(40, Math.min(560, Math.ceil(totalPx * MM_PER_PX) + 15));
+                                // single minimal safety margin (~1mm) to avoid clipping the
+                                // very last pixel row -- no stacked buffers, page height must
+                                // match content height exactly, no leftover blank space.
+                                const heightMm = Math.max(40, Math.min(560, Math.ceil(totalPx * MM_PER_PX) + 1));
                                 const pageName = isAnswers ? 'pans' : `p${pageNum}`;
                                 rules.push(`@page ${pageName}{size:420mm ${heightMm}mm;margin:10mm 10mm 25mm 10mm;}`);
                             });
