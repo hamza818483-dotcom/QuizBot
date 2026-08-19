@@ -908,7 +908,17 @@ async def generate_mcq_from_image(
                 # so genuinely slow-but-successful generations aren't
                 # killed early; only truly hung/dead keys will still hit
                 # the ceiling and rotate to the next key.
-                _attempt_timeout = 60 if attempt == 0 else 45
+                # 2026-08-20: kept attempt 0 at 60s (first-try, give it the
+                # best chance) but trimmed subsequent attempts 45s -> 30s --
+                # a request that's going to succeed on a healthy key
+                # normally returns well under 30s (seen consistently in
+                # logs, ~1-40s), so a hang past 30s on a RETRY attempt is
+                # almost always a genuinely dead/throttled key, not a slow
+                # success in progress. Cuts wasted time on the TimeoutError
+                # case specifically without touching the SSL/503/429 paths
+                # (those fail near-instantly already, this timeout ceiling
+                # was never their bottleneck).
+                _attempt_timeout = 60 if attempt == 0 else 30
                 response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 valid = _parse_mcq_json(response.text)
                 if not valid:
