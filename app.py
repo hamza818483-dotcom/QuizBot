@@ -12639,7 +12639,7 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
             if text == _bio_last_dash_text[0]:
                 return
             try:
-                await edit_msg(chat_id, status_msg_id, text)
+                await edit_msg(chat_id, status_msg_id, text, reply_markup=_cancel_kb(chat_id))
                 _bio_last_dash_text[0] = text
             except Exception:
                 pass
@@ -13655,7 +13655,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             if text == _chem_last_dash_text[0]:
                 return
             try:
-                await edit_msg(chat_id, status_msg_id, text)
+                await edit_msg(chat_id, status_msg_id, text, reply_markup=_cancel_kb(chat_id))
                 _chem_last_dash_text[0] = text
             except Exception:
                 pass
