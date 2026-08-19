@@ -2553,8 +2553,12 @@ async def _gen_groq(img, topic, count, exclude_keys: set = None, key_offset: int
                 # otherwise the retry still 413s on the same key for the
                 # same reason (observed 2026-08-19: default shrunk_count=12
                 # still overflowed on /bio pages).
-                _shrink_cap = 8 if (_BIO_MODE.get() or _CHEM_MODE.get()) else 12
-                shrunk_count = max(6, min(int(count) if count else 25, _shrink_cap))
+                # 2026-08-19: 8 still 413'd on /bio (Requested 8139-8172/8000
+                # -- only 139-172 tokens over). Lowered further to 5, AND
+                # added a second, harder shrink pass below if 5 still 413s,
+                # instead of giving up after one retry.
+                _shrink_cap = 5 if (_BIO_MODE.get() or _CHEM_MODE.get()) else 12
+                shrunk_count = max(4, min(int(count) if count else 25, _shrink_cap))
                 shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=shrunk_count, prompt_len_hint=prompt)
             if shrunk_url:
                 txt2, status2 = await _post_openai_compat(
@@ -2568,6 +2572,29 @@ async def _gen_groq(img, topic, count, exclude_keys: set = None, key_offset: int
                         groq_key_rotator.mark_healthy(key)
                         return parsed2, tried_keys
                     record_empty_parse("groq")
+                if status2 == 413:
+                    # Still over budget -- one more, even harder shrink
+                    # (min floor: count=3, smallest image dimension tier)
+                    # before giving up on this key. Mirrors the same logic
+                    # one level smaller instead of moving to the next key,
+                    # since the key itself is fine -- only sizing was wrong.
+                    hard_count = 3
+                    hard_url = _img_to_data_url_groq(img, mcq_count_hint=hard_count, prompt_len_hint=prompt)
+                    if hard_url:
+                        txt3, status3 = await _post_openai_compat(
+                            "https://api.groq.com/openai/v1/chat/completions",
+                            key, "qwen/qwen3.6-27b",
+                            hard_url, prompt, mcq_count_hint=hard_count
+                        )
+                        if txt3:
+                            parsed3 = _parse_mcq_json(txt3)
+                            if parsed3:
+                                groq_key_rotator.mark_healthy(key)
+                                return parsed3, tried_keys
+                            record_empty_parse("groq")
+                        key_errors.append(f"key#{i+1}: 413 even after double-shrink (status={status3})")
+                        _FAILURE_COUNTS["groq"]["payload_too_large_413"] += 1
+                        continue
                 key_errors.append(f"key#{i+1}: 413 even after shrink (status={status2})")
                 _FAILURE_COUNTS["groq"]["payload_too_large_413"] += 1
                 continue
