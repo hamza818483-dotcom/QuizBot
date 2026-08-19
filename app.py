@@ -13307,6 +13307,120 @@ def _is_sane_chem_heading(text: str) -> bool:
     return True
 
 
+# Bangla-digit dot-hierarchical numbering prefix, e.g. ১.৩, ১.২.১, ২.১ —
+# same shape the Gemini scan prompt is told to look for.
+_CHEM_HEADING_NUM_RE = re.compile(r'^([০-৯]+(?:\.[০-৯]+)*)\s*[।.]?\s*(.{2,80})$')
+
+def _ocr_chem_heading_candidates(img) -> list:
+    """OCR-based (pytesseract, zero AI cost, local CPU) CODE-LEVEL cross-check
+    for /chem's heading-scan — independent of what the Gemini vision scan
+    self-reports, so a heading the model silently missed (e.g. a numbered
+    heading sitting right below the running book/chapter-name header, which
+    field-testing showed gets dropped) can still be recovered.
+
+    Runs OCR line-detection (same block/par/line grouping as
+    _ocr_bangla_line_count), then regex-matches each line's FIRST FEW WORDS
+    against the Bangla-numeral dot-hierarchical prefix pattern (১.৩, ১.২.১,
+    ২.১...). Returns candidates as dicts shaped like the Gemini scan's own
+    heading objects: {"heading_text", "vertical_position", "bold_larger_font":
+    None, "bangla_number_prefix": True, "left_aligned_above_content": None}
+    — the two visual-only signals are left None/unverifiable from OCR text
+    alone (only the numbering signal is objectively checkable this way);
+    callers should treat these as "worth adding if not already covered by
+    the model's own scan", not as authoritative headings on their own, since
+    OCR text alone can't confirm bold/larger-font or "above its own content"
+    — a numbered in-line reference mid-paragraph could false-positive if it
+    happens to start a line. Best-effort: any OCR failure returns [].
+    """
+    try:
+        import pytesseract
+        try:
+            data = pytesseract.image_to_data(img, lang="ben+eng", output_type=pytesseract.Output.DICT)
+        except pytesseract.TesseractError:
+            data = pytesseract.image_to_data(img, lang="eng", output_type=pytesseract.Output.DICT)
+
+        img_h = getattr(img, "height", None) or 1
+        lines = {}
+        n = len(data.get("text", []))
+        for i in range(n):
+            word = (data["text"][i] or "").strip()
+            if not word:
+                continue
+            key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+            lines.setdefault(key, {"words": [], "tops": [], "heights": []})
+            lines[key]["words"].append(word)
+            lines[key]["tops"].append(data["top"][i])
+            lines[key]["heights"].append(data["height"][i])
+
+        candidates = []
+        for info in lines.values():
+            text = " ".join(info["words"]).strip()
+            if not text or len(text) < 3:
+                continue
+            m = _CHEM_HEADING_NUM_RE.match(text)
+            if not m:
+                continue
+            # Skip if the numeral prefix looks like a stray page-number/
+            # single-digit reference rather than a hierarchical heading
+            # number (require either a dot-hierarchy like ১.৩/১.২.১, or a
+            # single-level number followed by at least a few words of
+            # heading text so a bare "৭।" isn't treated as a heading).
+            num_part, rest_part = m.group(1), m.group(2).strip()
+            if "." not in num_part and len(rest_part) < 4:
+                continue
+            avg_top = sum(info["tops"]) / len(info["tops"]) if info["tops"] else 0
+            vpos = max(0.0, min(1.0, avg_top / img_h))
+            candidates.append({
+                "heading_text": text,
+                "vertical_position": round(vpos, 4),
+                "bold_larger_font": None,
+                "bangla_number_prefix": True,
+                "left_aligned_above_content": None,
+                "_source": "ocr",
+            })
+        return candidates
+    except Exception as e:
+        logger.warning(f"[CHEM OCR heading cross-check] failed, skipping: {e}")
+        return []
+
+
+def _chem_merge_ocr_heading_candidates(model_headings: list, img) -> list:
+    """Cross-checks the Gemini scan's OWN heading list against a code-level
+    OCR pass (_ocr_chem_heading_candidates). Any OCR candidate whose
+    heading_text isn't already present (fuzzy-matched on the numeral prefix
+    + first ~10 chars, since OCR and the model may transcribe trailing
+    characters slightly differently) gets ADDED to the result — this never
+    removes a model-reported heading, only recovers ones the model's own
+    scan silently missed. Kept deliberately conservative (only fires when
+    the OCR line clearly carries a hierarchical/well-formed number prefix,
+    see _ocr_chem_heading_candidates) to avoid injecting false positives.
+    """
+    ocr_candidates = _ocr_chem_heading_candidates(img)
+    if not ocr_candidates:
+        return model_headings
+
+    def _key(text: str) -> str:
+        t = (text or "").strip()
+        m = _CHEM_HEADING_NUM_RE.match(t)
+        num = m.group(1) if m else ""
+        return (num + t[:12]).replace(" ", "")
+
+    existing_keys = {_key(h.get("heading_text", "")) for h in model_headings}
+    added = []
+    for c in ocr_candidates:
+        k = _key(c["heading_text"])
+        if k and k not in existing_keys:
+            existing_keys.add(k)
+            added.append(c)
+            logger.warning(
+                f"[CHEM OCR heading cross-check] recovered heading Gemini scan missed: "
+                f"'{c['heading_text'][:40]}' at vpos={c['vertical_position']}"
+            )
+    if added:
+        return model_headings + added
+    return model_headings
+
+
 def _chem_heading_score(h: dict) -> int:
     """Code-level SCORING gate mirroring /bio's _bio_heading_score --
     implements the "most matching signals wins" rule from the v2 scan
@@ -13323,10 +13437,18 @@ def _chem_heading_score(h: dict) -> int:
     has_number_prefix = bool(
         re.match(r'^[০-৯]+(\.[০-৯]+)*', (h.get("heading_text") or "").strip())
     )
+    # OCR-sourced candidates (see _ocr_chem_heading_candidates) report
+    # bold_larger_font/left_aligned_above_content as None (visually
+    # unverifiable from text alone) rather than True/False — treat None as
+    # "assume signal present" (same as the missing-key default) rather than
+    # counting it as a failed signal, so a genuinely OCR-recovered numbered
+    # heading isn't unfairly scored below the >=1 keep threshold.
+    blf = h.get("bold_larger_font", True)
+    laac = h.get("left_aligned_above_content", True)
     score = 0
-    score += 1 if bool(h.get("bold_larger_font", True)) else 0        # signal 1
+    score += 1 if (blf is None or bool(blf)) else 0                    # signal 1
     score += 1 if has_number_prefix else 0                             # signal 2
-    score += 1 if bool(h.get("left_aligned_above_content", True)) else 0  # signal 3
+    score += 1 if (laac is None or bool(laac)) else 0                  # signal 3
     return score
 
 
@@ -13362,8 +13484,13 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             idx = h.get("page_index")
             if isinstance(idx, (int, float)) and 1 <= int(idx) <= len(batch):
                 by_index.setdefault(int(idx), []).append(h)
-        for i, (page_num, _img) in enumerate(batch, start=1):
-            headings_by_page[page_num] = by_index.get(i, [])
+        for i, (page_num, _pg_img) in enumerate(batch, start=1):
+            page_headings = by_index.get(i, [])
+            # Code-level OCR cross-check (see _chem_merge_ocr_heading_candidates):
+            # recovers any numbered heading the Gemini scan silently missed on
+            # this specific page, never removes anything the model reported.
+            page_headings = _chem_merge_ocr_heading_candidates(page_headings, _pg_img)
+            headings_by_page[page_num] = page_headings
 
     if status_msg_id:
         try:
