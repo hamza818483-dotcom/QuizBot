@@ -12512,6 +12512,22 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
         except Exception:
             pass
 
+    # Build a static "detected topics" summary from the Phase-1 heading-scan
+    # so Phase-2's dashboard can show it alongside the per-page progress.
+    _detected_topics = []
+    _seen_topics = set()
+    for _p, _ in pages:
+        for h in headings_by_page.get(_p, []):
+            _t = (h.get("heading_text") or "").strip()
+            if _t and _is_sane_bio_heading(_t) and _bio_heading_score(h) >= 1 and _t not in _seen_topics:
+                _seen_topics.add(_t)
+                _detected_topics.append((_p, _t))
+    _topics_block = ""
+    if _detected_topics:
+        _topics_block = "🗂 Detected Topics (Call1):\n" + "\n".join(
+            f"  • p{p}: {t}" for p, t in _detected_topics
+        )
+
     results = [None] * len(pages)
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
     start_time = time.time()
@@ -12527,6 +12543,8 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
             return
         async with _bio_dash_lock:
             text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0)
+            if _topics_block:
+                text = text + "\n━━━━━━━━━━━━━━━━━━━━━━\n" + _topics_block
             if text == _bio_last_dash_text[0]:
                 return
             try:
