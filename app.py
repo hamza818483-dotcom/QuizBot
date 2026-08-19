@@ -13774,7 +13774,19 @@ def _chem_group_mcqs(extracted_pages: list) -> list:
         hint = m.get("_effective_hint", "")
         qno = m.get("qsn_no")
         hint_changed = bool(hint) and (prev_hint is not None) and (hint != prev_hint)
-        starts_new = (not groups) or (qno == 1) or hint_changed
+        # qsn_no==1 alone is NOT a valid split signal on its own -- it resets
+        # per PAGE/SEGMENT (see _run_page's per-segment local counter), so it
+        # fires on every single page boundary even when the SAME topic
+        # continues across pages (e.g. \u09e7.\u09e8 starting on page 1 and
+        # continuing onto page 2 with no new heading there). Splitting on
+        # qno==1 alone was creating a separate same-named group per page,
+        # which then all got numbered (1)/(2)/(3) by the disambiguation step
+        # below instead of merging into one real topic. A new group should
+        # only start when the topic hint has genuinely changed, OR this is
+        # truly the very first MCQ with no group yet, OR the hint is unset
+        # entirely (can't tell continuity, so must be conservative and split
+        # -- only happens for the ungrouped-headingless-content fallback).
+        starts_new = (not groups) or hint_changed or (not hint and qno == 1)
         if starts_new:
             group_seq += 1
             name = hint if hint else f"Topic {group_seq}"
