@@ -12589,13 +12589,57 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
                 end_frac = ordered[i + 1]["vertical_position"] if i + 1 < len(ordered) else 1.0
                 segments.append((h["heading_text"].strip(), start_frac, end_frac))
 
-        token = _BIO_SEGMENTS.set(segments)
-        try:
-            mcqs = await generate_mcq_from_image(img, topic, page_num, None)
-        finally:
-            _BIO_SEGMENTS.reset(token)
+        if segments and len(segments) > 1:
+            # TRUE ISOLATION FIX (2026-08-19): instead of giving the model
+            # the whole page + a list of segment bands in one call (which
+            # still lets it SEE other segments' content and occasionally
+            # pull facts/options across the boundary despite instructions),
+            # physically CROP the page image per segment and issue a
+            # SEPARATE generation call per segment. The model then literally
+            # cannot see any other segment's content -- cross-topic leakage
+            # becomes structurally impossible rather than instruction-
+            # dependent. A small vertical PAD is added above/below each crop
+            # (clamped to page bounds) purely so a line of text sitting
+            # exactly on the boundary isn't sliced in half; the pad is small
+            # enough that it very rarely reaches into a neighboring
+            # segment's own distinct content block.
+            PAD_FRAC = 0.015
+            all_mcqs = []
+            for seg_i, (heading_text, s, e) in enumerate(segments):
+                top = max(0.0, s - PAD_FRAC)
+                bottom = min(1.0, e + PAD_FRAC)
+                y0 = int(top * img.height)
+                y1 = max(y0 + 1, int(bottom * img.height))
+                crop = img.crop((0, y0, img.width, y1))
+                token = _BIO_SEGMENTS.set(None)
+                try:
+                    seg_mcqs = await generate_mcq_from_image(crop, topic, page_num, None)
+                finally:
+                    _BIO_SEGMENTS.reset(token)
+                for m in seg_mcqs:
+                    m["topic_hint"] = heading_text
+                all_mcqs.extend(seg_mcqs)
+            # Renumber qsn_no globally per-page so segment boundaries still
+            # read as qsn_no==1 at each new segment (downstream grouping
+            # relies on this signal as a secondary check).
+            _local = 0
+            _prev_hint = None
+            for m in all_mcqs:
+                if m.get("topic_hint") != _prev_hint:
+                    _local = 1
+                    _prev_hint = m.get("topic_hint")
+                else:
+                    _local += 1
+                m["qsn_no"] = _local
+            mcqs = all_mcqs
+        else:
+            token = _BIO_SEGMENTS.set(segments)
+            try:
+                mcqs = await generate_mcq_from_image(img, topic, page_num, None)
+            finally:
+                _BIO_SEGMENTS.reset(token)
 
-        if segments:
+        if segments and len(segments) <= 1:
             # 2026-08-19 FIX: previously this ALWAYS overrode the model's own
             # self-reported topic_hint with a linear vertical_position-fraction
             # -> MCQ-index mapping. That assumes MCQs are spread evenly across
