@@ -12580,12 +12580,22 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
             _BIO_SEGMENTS.reset(token)
 
         if segments:
-            # Force topic_hint to the exact detected heading text (code-level
-            # guarantee, don't fully trust the model's self-reported string)
-            # using the same qsn_no-based boundary math as the old post-hoc
-            # override pass -- keeps grouping deterministic.
+            # 2026-08-19 FIX: previously this ALWAYS overrode the model's own
+            # self-reported topic_hint with a linear vertical_position-fraction
+            # -> MCQ-index mapping. That assumes MCQs are spread evenly across
+            # the page's vertical space, which is false whenever one segment's
+            # questions are longer/shorter than another's — causing MCQs near
+            # a boundary to get assigned to the wrong topic even though the
+            # model itself correctly reported which segment they came from.
+            # Now: trust the model's own topic_hint whenever it exactly matches
+            # one of the known segment heading texts (the model was given the
+            # exact strings to use verbatim). Only fall back to the fraction-
+            # math guess for MCQs where the model's hint is missing/invalid —
+            # a much rarer case, and a safety net rather than the primary path.
+            valid_heads = {seg_h for seg_h, _s, _e in segments}
             n = len(mcqs)
-            if n:
+            needs_fallback = [m for m in mcqs if (m.get("topic_hint") or "").strip() not in valid_heads]
+            if needs_fallback and n:
                 start_indices = [max(1, int(s * n) + 1) for _, s, _ in segments]
                 boundary_set = set(start_indices)
                 local_counter = 0
@@ -12603,7 +12613,7 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
                     start_i = max(1, int(s * n) + 1)
                     end_i = int(end_frac * n) + 1
                     for j, m in enumerate(mcqs, start=1):
-                        if start_i <= j < end_i:
+                        if start_i <= j < end_i and (m.get("topic_hint") or "").strip() not in valid_heads:
                             m["topic_hint"] = heading_text
 
         results[idx] = (page_num, img, mcqs)
