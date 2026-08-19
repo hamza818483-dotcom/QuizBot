@@ -13461,6 +13461,36 @@ def _chem_merge_ocr_heading_candidates(model_headings: list, img) -> list:
     for c in ocr_candidates:
         k = _key(c["heading_text"])
         if k and k not in existing_keys:
+            # CONFLICT CHECK before adding: if a Gemini-reported heading sits
+            # at a CLOSE vertical position (within ~5% of page height) but
+            # has a DIFFERENT number prefix, this is very likely the SAME
+            # real heading with one side (OCR or Gemini) misreading the
+            # number — e.g. Gemini reading ১.৩ as ১.২ (visually similar
+            # digits, easy vision-model misread). Silently adding the OCR
+            # version as a brand-new separate topic would then create TWO
+            # groups for what's really one heading, one under the wrong
+            # number. Flag this loudly instead of guessing which side is
+            # right — a human can check the actual page image once this
+            # shows up in logs.
+            c_num = _key(c["heading_text"])
+            conflict = None
+            for h in model_headings:
+                h_vpos = h.get("vertical_position")
+                if not isinstance(h_vpos, (int, float)):
+                    continue
+                if abs(h_vpos - c["vertical_position"]) <= 0.05:
+                    h_num = _key(h.get("heading_text", ""))
+                    if h_num and h_num != c_num:
+                        conflict = h
+                        break
+            if conflict:
+                logger.warning(
+                    f"[CHEM OCR/Gemini NUMBER CONFLICT] possible number misread on this page — "
+                    f"Gemini reported '{conflict.get('heading_text','')[:40]}' (vpos={conflict.get('vertical_position')}) "
+                    f"but OCR reads the SAME position as '{c['heading_text'][:40]}' (vpos={c['vertical_position']}). "
+                    f"Both being added as separate candidates — review manually if the CSV output shows a "
+                    f"duplicate/near-duplicate topic split across two numbers."
+                )
             existing_keys.add(k)
             added.append(c)
             logger.warning(
