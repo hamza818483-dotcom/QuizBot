@@ -13711,7 +13711,11 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 end_frac = ordered[i + 1]["vertical_position"] if i + 1 < len(ordered) else 1.0
                 segments.append((h["heading_text"].strip(), start_frac, end_frac))
             _carry = _carry_topic_by_page.get(page_num)
-            if _carry and segments[0][1] > 0.03:
+            _MIN_SEG_FRAC = 0.06  # below this the crop is near-blank (just the
+            # next heading's line) -- skip it: not worth a call, and an empty
+            # crop is more likely to trip a provider error that (pre-fix) could
+            # kill the whole page/batch via an unguarded gather.
+            if _carry and segments[0][1] > _MIN_SEG_FRAC:
                 segments.insert(0, (_carry, 0.0, segments[0][1]))
         elif _carry_topic_by_page.get(page_num):
             segments = [(_carry_topic_by_page[page_num], 0.0, 1.0)]
@@ -13722,17 +13726,26 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         3-provider fallback chain /chem always used (Gemini -> Groq ->
         OpenRouter), with WARNING-level stage logging kept from the
         debug pass so genuinely-empty results stay diagnosable."""
-        gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
-        mcqs = _qbm_dedup_list(gem) if gem else []
-        if not mcqs:
-            txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
-            mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
-        if not mcqs:
-            txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
-            mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
-        if not mcqs:
-            logger.warning(f"[CHEM-GEN v2] page {page_num}: ALL 3 providers returned 0 MCQ for this segment/page.")
-        return mcqs
+        try:
+            gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
+            mcqs = _qbm_dedup_list(gem) if gem else []
+            if not mcqs:
+                txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
+                mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
+            if not mcqs:
+                txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
+                mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
+            if not mcqs:
+                logger.warning(f"[CHEM-GEN v2] page {page_num}: ALL 3 providers returned 0 MCQ for this segment/page.")
+            return mcqs
+        except Exception as e:
+            # A provider error on one segment (e.g. a near-empty crop) must
+            # never kill the whole page/batch -- previously this exception
+            # propagated up through _run_single_page/_run_paired_pages into
+            # the outer asyncio.gather, silently wiping out sibling pages'
+            # results too (this is what caused whole topics to go missing).
+            logger.warning(f"[CHEM-GEN v2] page {page_num}: segment generation raised {type(e).__name__}: {e} -- treating as 0 MCQ, continuing.")
+            return []
 
     def _mark_done(idx, page_num, mcqs, img):
         nonlocal total_mcq
@@ -13869,7 +13882,10 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 _, idx1, pn1, img1, seg1, idx2, pn2, img2, seg2 = unit
                 await _run_paired_pages(idx1, pn1, img1, seg1, idx2, pn2, img2, seg2)
 
-    await asyncio.gather(*[_guarded(u) for u in _units])
+    _gather_results = await asyncio.gather(*[_guarded(u) for u in _units], return_exceptions=True)
+    for _u, _r in zip(_units, _gather_results):
+        if isinstance(_r, Exception):
+            logger.warning(f"[CHEM-GEN v2] unit {_u[0]} pages={_u[1:3]}: unit-level exception {type(_r).__name__}: {_r} -- results for this unit may be incomplete, other pages unaffected.")
     return results
 
 
