@@ -731,7 +731,7 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
         # against the 8000 TPM budget. A mismatch here means this sizer
         # underestimates the real reserved output, silently overshooting
         # the TPM limit regardless of how small the image gets.
-        est_output_tokens = max(900, min(3800, int(est_count) * 175 + 300))
+        est_output_tokens = max(900, min(4500, int(est_count) * 190 + 400))
         TOKEN_BUDGET = max(300, 8000 - PROMPT_TOKENS - est_output_tokens - SAFETY_MARGIN)
         # qwen3.6-27b vision tokenization is roughly proportional to
         # (width/28)*(height/28) patches + a fixed base overhead.
@@ -2131,7 +2131,7 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
         est_count = mcq_count_hint
     else:
         est_count = 25  # aligned with _img_to_data_url_groq's default
-    dynamic_max_tokens = max(900, min(3800, int(est_count) * 175 + 300))
+    dynamic_max_tokens = max(900, min(4500, int(est_count) * 190 + 400))
     payload = {
         "model": model,
         "messages": [{
