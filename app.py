@@ -12592,6 +12592,12 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
         page_status[idx]["mcq"] = len(mcqs)
+        _model_counts = {}
+        for _m in (mcqs or []):
+            _prov = _m.get("_provider", "Unknown")
+            _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
+        if _model_counts:
+            page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
         total_mcq += len(mcqs)
         await _bio_safe_dash_edit()
 
