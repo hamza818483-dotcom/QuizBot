@@ -889,6 +889,11 @@ def _build_chok_prompt(topic: str) -> str:
 _BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
 _BIO_MODE = contextvars.ContextVar("bio_mode", default=False)
 _CHEM_MODE = contextvars.ContextVar("chem_mode", default=False)
+# When set (non-None), _build_bio_prompt restricts generation to ONE topic
+# segment only -- (heading_text, start_frac, end_frac) -- so a per-topic
+# isolated Gemini call can't pull facts/distractors from other topics on
+# the same page. None = old whole-page behavior (all topics in one call).
+_BIO_TOPIC_RESTRICT = contextvars.ContextVar("bio_topic_restrict", default=None)
 
 def _build_bangla_prompt(topic: str) -> str:
     """
@@ -1074,10 +1079,40 @@ def _build_bio_prompt(topic: str) -> str:
     present. Everything between one such heading and the next belongs to
     that topic.
     """
+    _restrict = _BIO_TOPIC_RESTRICT.get()
+    _restrict_block = ""
+    if _restrict:
+        _r_heading, _r_start, _r_end = _restrict
+        _restrict_block = (
+            f"═══════════════════════════════\n"
+            f"🔒🔒 HARD SCOPE LOCK — SINGLE TOPIC ONLY (read this before anything else)\n"
+            f"═══════════════════════════════\n"
+            f"This page has MULTIPLE topic segments, but for THIS call you must generate MCQs "
+            f"for EXACTLY ONE of them and IGNORE all the rest:\n"
+            f"  ▶ TARGET TOPIC HEADING: \"{_r_heading}\"\n"
+            f"  ▶ Its content occupies roughly the vertical band {_r_start:.2f}–{_r_end:.2f} "
+            f"(0.0 = top of page, 1.0 = bottom) on this page image.\n"
+            f"STRICT RULES:\n"
+            f"- Read and use ONLY the text/content that visually falls within this topic's own "
+            f"section (from its heading down to just before the next heading, or page bottom if "
+            f"it's the last one).\n"
+            f"- Every question, every option (including wrong/distractor options), and every "
+            f"explanation MUST be built ONLY from facts inside this one topic's section. NEVER "
+            f"pull a fact, term, or distractor option from any other topic segment visible "
+            f"elsewhere on the same page, even if it seems related or convenient.\n"
+            f"- Set \"topic_hint\" to EXACTLY \"{_r_heading}\" for every MCQ you generate in this call.\n"
+            f"- Completely IGNORE all other headings/content blocks on the page — pretend they "
+            f"don't exist for the purpose of generating MCQs.\n"
+            f"- If this topic's own section genuinely has very little content, generate fewer "
+            f"MCQs rather than borrowing from another topic to pad the count — a short accurate "
+            f"topic is correct; a padded/mixed one is not.\n\n"
+        )
+
     return (
         f"You are an expert MCQ-generation engine for Bengali/English academic "
         f"textbook pages (medical/HSC/admission-standard quality).\n"
         f"Subject: {topic}\n\n"
+        f"{_restrict_block}"
 
         f"═══════════════════════════════\n"
         f"🚨🚨 TOP PRIORITY — TOPIC HEADING DETECTION (this is the MAIN task, "
@@ -12429,6 +12464,95 @@ def _bio_heading_score(h: dict) -> int:
     return score
 
 
+async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None) -> list:
+    """/bio ACCURACY FIX: runs the heading-scan pass FIRST (before any MCQ
+    generation), then generates MCQs per DETECTED TOPIC SEGMENT in its own
+    isolated Gemini call (via _BIO_TOPIC_RESTRICT), instead of the old
+    single whole-page call that let one topic's content/distractors leak
+    into another topic's MCQs. Pages with zero detected headings fall back
+    to one plain whole-page call (nothing to isolate). Returns the same
+    (page_num, img, mcqs) tuple list shape as pdf_generate_all_pages so the
+    rest of the /bio pipeline (topic grouping, CSV/poll output) is unchanged.
+    """
+    BATCH_SIZE = 3
+    batches = [pages[i:i + BATCH_SIZE] for i in range(0, len(pages), BATCH_SIZE)]
+    headings_by_page = {}
+
+    async def _scan_batch(batch):
+        page_nums = [pn for pn, _ in batch]
+        imgs = [img for _, img in batch]
+        try:
+            prompt = _build_bio_heading_scan_prompt_batched(len(batch))
+            scan_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+            all_headings = _parse_bio_heading_scan(scan_txt)
+        except Exception as e:
+            logger.warning(f"[BIO pre-scan] batch {page_nums} failed, treating as headingless: {e}")
+            return
+        by_index = {}
+        for h in all_headings:
+            idx = h.get("page_index")
+            if isinstance(idx, (int, float)) and 1 <= int(idx) <= len(batch):
+                by_index.setdefault(int(idx), []).append(h)
+        for i, (page_num, _img) in enumerate(batch, start=1):
+            headings_by_page[page_num] = by_index.get(i, [])
+
+    await asyncio.gather(*[_scan_batch(b) for b in batches], return_exceptions=True)
+
+    results = [None] * len(pages)
+
+    async def _run_page(idx, page_num, img):
+        raw_headings = headings_by_page.get(page_num, [])
+        ordered = sorted(
+            [h for h in raw_headings
+             if isinstance(h.get("vertical_position"), (int, float))
+             and _is_sane_bio_heading(h.get("heading_text"))
+             and _bio_heading_score(h) >= 1],
+            key=lambda h: h["vertical_position"],
+        )
+        if not ordered:
+            # No genuine topic split on this page -- one plain whole-page
+            # call, same as the old behavior (nothing to isolate).
+            mcqs = await generate_mcq_from_image(img, topic, page_num, None)
+            results[idx] = (page_num, img, mcqs)
+            return
+
+        segments = []
+        for i, h in enumerate(ordered):
+            start_frac = h["vertical_position"]
+            end_frac = ordered[i + 1]["vertical_position"] if i + 1 < len(ordered) else 1.0
+            segments.append((h["heading_text"].strip(), start_frac, end_frac))
+
+        page_mcqs = []
+        for heading_text, start_frac, end_frac in segments:
+            token = _BIO_TOPIC_RESTRICT.set((heading_text, start_frac, end_frac))
+            try:
+                seg_mcqs = await generate_mcq_from_image(img, topic, page_num, None)
+            except Exception as e:
+                logger.warning(f"[BIO per-topic] page {page_num} topic '{heading_text[:30]}' failed: {e}")
+                seg_mcqs = []
+            finally:
+                _BIO_TOPIC_RESTRICT.reset(token)
+            for m in seg_mcqs:
+                m["topic_hint"] = heading_text
+            # Re-sequence qsn_no to start fresh at 1 within this segment so
+            # downstream _topic_group_mcqs sees a clean new-group boundary.
+            for j, m in enumerate(seg_mcqs, start=1):
+                m["qsn_no"] = j
+            page_mcqs.extend(seg_mcqs)
+
+        results[idx] = (page_num, img, page_mcqs)
+
+    _PARALLEL = 2
+    sem = asyncio.Semaphore(_PARALLEL)
+
+    async def _guarded(idx, page_num, img):
+        async with sem:
+            await _run_page(idx, page_num, img)
+
+    await asyncio.gather(*[_guarded(i, pn, img) for i, (pn, img) in enumerate(pages)])
+    return results
+
+
 async def _bio_apply_heading_scan(generated_pages: list) -> list:
     """Code-level verification/override pass for /bio, run AFTER generation
     -- same role as /chem's inline heading-scan override, but applied as a
@@ -15821,8 +15945,8 @@ async def _handle_bio_impl(msg: dict):
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Generation শুরু হচ্ছে (topic detect সহ)...")
 
-        generated_pages = await pdf_generate_all_pages(
-            chat_id, pages, subject, None, file_name, status_msg_id
+        generated_pages = await _bio_generate_per_topic_pages(
+            chat_id, pages, subject, status_msg_id
         )
 
         total_mcq_found = sum(len(mcqs) for _, _, mcqs in generated_pages)
@@ -15832,11 +15956,7 @@ async def _handle_bio_impl(msg: dict):
             return
 
         if status_msg_id:
-            await edit_msg(chat_id, status_msg_id, f"✅ {total_mcq_found} MCQ generate হয়েছে!\n⏳ Topic heading নিশ্চিত করা হচ্ছে...")
-        try:
-            generated_pages = await _bio_apply_heading_scan(generated_pages)
-        except Exception as e:
-            logger.warning(f"[BIO] heading-scan pass failed, keeping generation-time topic_hint: {e}")
+            await edit_msg(chat_id, status_msg_id, f"✅ {total_mcq_found} MCQ generate হয়েছে (per-topic isolated)!\n⏳ Grouping হচ্ছে...")
 
         topic_groups = _topic_group_mcqs(generated_pages)
 
