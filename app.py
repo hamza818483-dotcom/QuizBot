@@ -13753,32 +13753,20 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         segment (single topic, whole page). Stitch both pages into one
         vertically-stacked composite image (same technique /extra uses
         via _pair_pages_for_extra) and generate BOTH pages' MCQs in a
-        SINGLE provider call, halving call count for this pair. The two
-        pages' topic_hints stay separate (seg1's heading vs seg2's
-        heading) -- we simply crop the combined RESULT list by which half
-        of the (padded) composite each MCQ's source falls under is not
-        needed, because /chem's generation prompt returns MCQs already
-        tagged to page content; we instead ask each page's own segment
-        heading via topic_hint post-assignment identical to the
-        single-page path, applied per half using page-relative MCQ order
-        is unreliable -- so instead we tag the WHOLE composite result with
-        BOTH candidate topics only if seg1's topic == seg2's topic
-        (true continuation across the pair); if they differ (a topic
-        genuinely ends between the two pages) we fall back to the safe
-        single-page path for this pair instead of guessing which MCQ
-        belongs to which page."""
+        SINGLE provider call, halving call count for this pair.
+
+        Handles BOTH sub-cases:
+        - Same topic across the pair (topic continues page1->page2): tag
+          the whole result with that one topic_hint, no split needed.
+        - Different topics (page2 starts a new topic): the composite
+          prompt explicitly marks a PAGE A / PAGE B boundary and requires
+          each MCQ to report which half it came from ("source_half":
+          "A"/"B") -- Call1 already told us exactly where each topic's
+          content is (that's what made seg1/seg2 single-segment in the
+          first place), so this is a deterministic code-level split on
+          the model's own per-MCQ attribution, not a guess."""
         heading1 = seg1[0][0]
         heading2 = seg2[0][0]
-        if heading1 != heading2:
-            # Different topics across the pair -- splitting a single
-            # combined-call result back into "belongs to page 1" vs
-            # "belongs to page 2" isn't reliably inferable, so don't
-            # risk mis-tagging: process both pages separately instead.
-            await asyncio.gather(
-                _run_single_page(idx1, page_num1, img1, seg1),
-                _run_single_page(idx2, page_num2, img2, seg2),
-            )
-            return
 
         page_status[idx1]["current"] = True
         page_status[idx2]["current"] = True
@@ -13792,20 +13780,61 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         composite.paste(img1, (0, 0))
         composite.paste(img2, (0, img1.height + gap))
 
-        mcqs = await _gen_segment(composite, f"{page_num1}-{page_num2}")
-        for m in mcqs:
-            m["topic_hint"] = heading1
-        _renumber_by_topic(mcqs)
+        if heading1 == heading2:
+            # Same topic continuing across both pages -- no split needed,
+            # whole combined result belongs to one topic.
+            mcqs = await _gen_segment(composite, f"{page_num1}-{page_num2}")
+            for m in mcqs:
+                m["topic_hint"] = heading1
+            _renumber_by_topic(mcqs)
+            _mark_done(idx1, page_num1, mcqs, img1)
+            _mark_done(idx2, page_num2, [], img2)
+        else:
+            # Different topics -- ask the model to tag each MCQ with which
+            # half (A=page1/top, B=page2/bottom) it came from, so we can
+            # deterministically split the combined result back into the
+            # two topics instead of guessing.
+            split_prompt = (
+                _chem_gen_prompt_v2
+                + f"\n\n⚠️ TWO-PAGE COMPOSITE: this image is TWO pages stacked vertically. "
+                f"PAGE A (top half) covers topic \"{heading1}\". PAGE B (bottom half) covers "
+                f"topic \"{heading2}\". For EVERY MCQ in your output, add a mandatory field "
+                f"\"source_half\": \"A\" or \"B\" stating which page's content that MCQ came from. "
+                f"Never mix content from the two pages into one MCQ."
+            )
+            gem = await _qbm_gemini_extract(composite, split_prompt)
+            raw = _qbm_dedup_list(gem) if gem else []
+            if not raw:
+                txt = await _qbm_groq_call(composite, split_prompt)
+                raw = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
+            if not raw:
+                txt3 = await _qbm_openrouter_call(composite, split_prompt)
+                raw = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
 
-        # Single combined call -> can't cleanly attribute individual MCQs
-        # back to page_num1 vs page_num2 (no per-page boundary signal in
-        # the model's output), so the full result is attached to page 1's
-        # slot and page 2's slot is marked done with 0 (its content is
-        # already fully represented in page 1's mcqs) -- downstream
-        # grouping only cares about topic_hint/qsn_no continuity, not
-        # which literal page_num a row is stamped with, so this is safe.
-        _mark_done(idx1, page_num1, mcqs, img1)
-        _mark_done(idx2, page_num2, [], img2)
+            mcqs_a = [m for m in raw if str(m.get("source_half", "")).strip().upper() == "A"]
+            mcqs_b = [m for m in raw if str(m.get("source_half", "")).strip().upper() == "B"]
+            _unlabeled = [m for m in raw if str(m.get("source_half", "")).strip().upper() not in ("A", "B")]
+
+            if _unlabeled or not raw:
+                # Model didn't reliably tag halves (or returned nothing) --
+                # don't risk mis-attributing MCQs to the wrong topic, fall
+                # back to the safe original per-page path for this pair.
+                logger.warning(f"[CHEM-GEN v2] paired pages {page_num1}-{page_num2}: source_half tagging unreliable ({len(_unlabeled)} unlabeled of {len(raw)}), falling back to per-page calls.")
+                await asyncio.gather(
+                    _run_single_page(idx1, page_num1, img1, seg1),
+                    _run_single_page(idx2, page_num2, img2, seg2),
+                )
+                return
+
+            for m in mcqs_a:
+                m["topic_hint"] = heading1
+            for m in mcqs_b:
+                m["topic_hint"] = heading2
+            _renumber_by_topic(mcqs_a)
+            _renumber_by_topic(mcqs_b)
+            _mark_done(idx1, page_num1, mcqs_a, img1)
+            _mark_done(idx2, page_num2, mcqs_b, img2)
+
         await _chem_safe_dash_edit()
 
     def _renumber_by_topic(mcqs):
