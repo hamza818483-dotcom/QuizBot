@@ -2490,7 +2490,14 @@ async def _gen_groq(img, topic, count, exclude_keys: set = None, key_offset: int
                 # image budget worse) while the retry call still passed the
                 # ORIGINAL count (bigger max_tokens, no actual shrink) — the
                 # combination meant this retry could never succeed.
-                shrunk_count = max(8, min(int(count) if count else 25, 12))
+                # /bio and /chem generate heavier per-MCQ explanations than
+                # normal mode, so their shrink-retry needs a smaller count
+                # ceiling to actually fit under Groq's 8000 TPM this call --
+                # otherwise the retry still 413s on the same key for the
+                # same reason (observed 2026-08-19: default shrunk_count=12
+                # still overflowed on /bio pages).
+                _shrink_cap = 8 if (_BIO_MODE.get() or _CHEM_MODE.get()) else 12
+                shrunk_count = max(6, min(int(count) if count else 25, _shrink_cap))
                 shrunk_url = _img_to_data_url_groq(img, mcq_count_hint=shrunk_count, prompt_len_hint=prompt)
             if shrunk_url:
                 txt2, status2 = await _post_openai_compat(
