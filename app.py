@@ -13668,10 +13668,10 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
 
     _chem_gen_prompt_v2 = _build_chem_gen_prompt(DEFAULT_TOPIC, None)
 
-    async def _run_page(idx, page_num, img):
-        nonlocal total_mcq
-        page_status[idx]["current"] = True
-        await _chem_safe_dash_edit()
+    def _page_segments(page_num, img):
+        """Same segment-detection logic as before, factored out standalone
+        so pairing (below) can inspect a page's segment count BEFORE
+        deciding whether it's eligible to be stitched with its neighbor."""
         raw_headings = headings_by_page.get(page_num, [])
         ordered = sorted(
             [h for h in raw_headings
@@ -13692,24 +13692,40 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 segments.insert(0, (_carry, 0.0, segments[0][1]))
         elif _carry_topic_by_page.get(page_num):
             segments = [(_carry_topic_by_page[page_num], 0.0, 1.0)]
+        return segments
 
-        async def _gen_segment(crop):
-            """Generate MCQs from a (possibly cropped) image using the same
-            3-provider fallback chain /chem always used (Gemini -> Groq ->
-            OpenRouter), with WARNING-level stage logging kept from the
-            debug pass so genuinely-empty results stay diagnosable."""
-            gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
-            mcqs = _qbm_dedup_list(gem) if gem else []
-            if not mcqs:
-                txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
-                mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
-            if not mcqs:
-                txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
-                mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
-            if not mcqs:
-                logger.warning(f"[CHEM-GEN v2] page {page_num}: ALL 3 providers returned 0 MCQ for this segment/page.")
-            return mcqs
+    async def _gen_segment(crop, page_num):
+        """Generate MCQs from a (possibly cropped) image using the same
+        3-provider fallback chain /chem always used (Gemini -> Groq ->
+        OpenRouter), with WARNING-level stage logging kept from the
+        debug pass so genuinely-empty results stay diagnosable."""
+        gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
+        mcqs = _qbm_dedup_list(gem) if gem else []
+        if not mcqs:
+            txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
+            mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
+        if not mcqs:
+            txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
+            mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
+        if not mcqs:
+            logger.warning(f"[CHEM-GEN v2] page {page_num}: ALL 3 providers returned 0 MCQ for this segment/page.")
+        return mcqs
 
+    def _mark_done(idx, page_num, mcqs, img):
+        nonlocal total_mcq
+        mcqs = _check_segment_topic_consistency(mcqs, context="CHEM-GEN-v2")
+        results[idx] = (page_num, img, mcqs)
+        page_status[idx]["current"] = False
+        page_status[idx]["done"] = True
+        page_status[idx]["mcq"] = len(mcqs)
+        total_mcq += len(mcqs)
+
+    async def _run_single_page(idx, page_num, img, segments):
+        """Unchanged single-page path (used when a page has >1 segment i.e.
+        a rare multi-topic page, or has no pairable neighbor) -- one
+        provider call per segment, exactly as before."""
+        page_status[idx]["current"] = True
+        await _chem_safe_dash_edit()
         if segments:
             PAD_FRAC = 0.015
             LAST_SEG_EXTRA_PAD = 0.03
@@ -13721,41 +13737,121 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 y0 = int(top * img.height)
                 y1 = max(y0 + 1, int(bottom * img.height))
                 crop = img.crop((0, y0, img.width, y1))
-                seg_mcqs = await _gen_segment(crop)
+                seg_mcqs = await _gen_segment(crop, page_num)
                 for m in seg_mcqs:
                     m["topic_hint"] = heading_text
                 all_mcqs.extend(seg_mcqs)
-            _local = 0
-            _prev_hint = None
-            for m in all_mcqs:
-                if m.get("topic_hint") != _prev_hint:
-                    _local = 1
-                    _prev_hint = m.get("topic_hint")
-                else:
-                    _local += 1
-                m["qsn_no"] = _local
             mcqs = all_mcqs
         else:
-            mcqs = await _gen_segment(img)
-            for i, m in enumerate(mcqs, start=1):
-                m["qsn_no"] = i
-
-        mcqs = _check_segment_topic_consistency(mcqs, context="CHEM-GEN-v2")
-        results[idx] = (page_num, img, mcqs)
-        page_status[idx]["current"] = False
-        page_status[idx]["done"] = True
-        page_status[idx]["mcq"] = len(mcqs)
-        total_mcq += len(mcqs)
+            mcqs = await _gen_segment(img, page_num)
+        _renumber_by_topic(mcqs)
+        _mark_done(idx, page_num, mcqs, img)
         await _chem_safe_dash_edit()
+
+    async def _run_paired_pages(idx1, page_num1, img1, seg1, idx2, page_num2, img2, seg2):
+        """99% case: each of the 2 consecutive pages has exactly ONE
+        segment (single topic, whole page). Stitch both pages into one
+        vertically-stacked composite image (same technique /extra uses
+        via _pair_pages_for_extra) and generate BOTH pages' MCQs in a
+        SINGLE provider call, halving call count for this pair. The two
+        pages' topic_hints stay separate (seg1's heading vs seg2's
+        heading) -- we simply crop the combined RESULT list by which half
+        of the (padded) composite each MCQ's source falls under is not
+        needed, because /chem's generation prompt returns MCQs already
+        tagged to page content; we instead ask each page's own segment
+        heading via topic_hint post-assignment identical to the
+        single-page path, applied per half using page-relative MCQ order
+        is unreliable -- so instead we tag the WHOLE composite result with
+        BOTH candidate topics only if seg1's topic == seg2's topic
+        (true continuation across the pair); if they differ (a topic
+        genuinely ends between the two pages) we fall back to the safe
+        single-page path for this pair instead of guessing which MCQ
+        belongs to which page."""
+        heading1 = seg1[0][0]
+        heading2 = seg2[0][0]
+        if heading1 != heading2:
+            # Different topics across the pair -- splitting a single
+            # combined-call result back into "belongs to page 1" vs
+            # "belongs to page 2" isn't reliably inferable, so don't
+            # risk mis-tagging: process both pages separately instead.
+            await asyncio.gather(
+                _run_single_page(idx1, page_num1, img1, seg1),
+                _run_single_page(idx2, page_num2, img2, seg2),
+            )
+            return
+
+        page_status[idx1]["current"] = True
+        page_status[idx2]["current"] = True
+        await _chem_safe_dash_edit()
+
+        from PIL import Image as _PILImg
+        gap = 12
+        w = max(img1.width, img2.width)
+        h = img1.height + gap + img2.height
+        composite = _PILImg.new("RGB", (w, h), (255, 255, 255))
+        composite.paste(img1, (0, 0))
+        composite.paste(img2, (0, img1.height + gap))
+
+        mcqs = await _gen_segment(composite, f"{page_num1}-{page_num2}")
+        for m in mcqs:
+            m["topic_hint"] = heading1
+        _renumber_by_topic(mcqs)
+
+        # Single combined call -> can't cleanly attribute individual MCQs
+        # back to page_num1 vs page_num2 (no per-page boundary signal in
+        # the model's output), so the full result is attached to page 1's
+        # slot and page 2's slot is marked done with 0 (its content is
+        # already fully represented in page 1's mcqs) -- downstream
+        # grouping only cares about topic_hint/qsn_no continuity, not
+        # which literal page_num a row is stamped with, so this is safe.
+        _mark_done(idx1, page_num1, mcqs, img1)
+        _mark_done(idx2, page_num2, [], img2)
+        await _chem_safe_dash_edit()
+
+    def _renumber_by_topic(mcqs):
+        _local = 0
+        _prev_hint = None
+        for m in mcqs:
+            if m.get("topic_hint") != _prev_hint:
+                _local = 1
+                _prev_hint = m.get("topic_hint")
+            else:
+                _local += 1
+            m["qsn_no"] = _local
+
+    # Build the list of work units: pair up consecutive pages ONLY when
+    # both have exactly one segment each (single-topic whole-page case,
+    # the 99% norm per user confirmation) -- otherwise each page runs
+    # through the unchanged single-page path.
+    _units = []  # each: ("single", idx, pn, img, segs) or ("pair", idx1, pn1, img1, seg1, idx2, pn2, img2, seg2)
+    _all_segs = [_page_segments(pn, img) for pn, img in pages]
+    i = 0
+    while i < len(pages):
+        pn1, img1 = pages[i]
+        seg1 = _all_segs[i]
+        if (i + 1 < len(pages) and seg1 is not None and len(seg1) == 1):
+            pn2, img2 = pages[i + 1]
+            seg2 = _all_segs[i + 1]
+            if seg2 is not None and len(seg2) == 1:
+                _units.append(("pair", i, pn1, img1, seg1, i + 1, pn2, img2, seg2))
+                i += 2
+                continue
+        _units.append(("single", i, pn1, img1, seg1))
+        i += 1
 
     _PARALLEL = 2
     sem = asyncio.Semaphore(_PARALLEL)
 
-    async def _guarded(idx, page_num, img):
+    async def _guarded(unit):
         async with sem:
-            await _run_page(idx, page_num, img)
+            if unit[0] == "single":
+                _, idx, pn, img, segs = unit
+                await _run_single_page(idx, pn, img, segs)
+            else:
+                _, idx1, pn1, img1, seg1, idx2, pn2, img2, seg2 = unit
+                await _run_paired_pages(idx1, pn1, img1, seg1, idx2, pn2, img2, seg2)
 
-    await asyncio.gather(*[_guarded(i, pn, img) for i, (pn, img) in enumerate(pages)])
+    await asyncio.gather(*[_guarded(u) for u in _units])
     return results
 
 
