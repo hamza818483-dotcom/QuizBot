@@ -13308,8 +13308,23 @@ def _is_sane_chem_heading(text: str) -> bool:
 
 
 # Bangla-digit dot-hierarchical numbering prefix, e.g. ১.৩, ১.২.১, ২.১ —
-# same shape the Gemini scan prompt is told to look for.
-_CHEM_HEADING_NUM_RE = re.compile(r'^([০-৯]+(?:\.[০-৯]+)*)\s*[।.]?\s*(.{2,80})$')
+# same shape the Gemini scan prompt is told to look for. REQUIRES a dot
+# (single bare-digit numbers like "৬" or "৭" are page numbers / list-item
+# markers, never a real /chem topic heading on their own — /chem's own
+# spec is explicit that headings use Bangla HIERARCHICAL numbering).
+_CHEM_HEADING_NUM_RE = re.compile(r'^([০-৯]+\.[০-৯]+(?:\.[০-৯]+)*)\s*[।.]?\s*(.{4,80})$')
+# Any OTHER number+dot group appearing later in the same line signals an
+# enumerated list/figure-caption ("১. পরিমাপক ফ্লাস্ক ২. কনিকেল ফ্লাস্ক...") —
+# a real heading line has exactly one leading number, nothing else.
+_CHEM_MULTI_NUM_RE = re.compile(r'[০-৯]+\s*[।.]\s*[^\s০-৯]')
+# The very next OCR line must be recognizably English (Latin script) — this
+# is the SECOND required signal per spec: a real topic heading is ALWAYS
+# followed by its English name on the line directly below, either bracketed
+# ("১.২.১ পরমাণুর গঠন" → "(Structure of Atom)") or plain ("১.২ ... নিরাপদ
+# কৌশল" → "Safe-Techniques to Use Lab Apparatus", as seen in this exact
+# textbook's own layout) — bracket presence doesn't matter, only that the
+# line is in English script.
+_ENGLISH_LINE_RE = re.compile(r'^[\(\)A-Za-z0-9 ,.\-–—:;\'"&/]{4,}$')
 
 def _ocr_chem_heading_candidates(img) -> list:
     """OCR-based (pytesseract, zero AI cost, local CPU) CODE-LEVEL cross-check
@@ -13318,19 +13333,27 @@ def _ocr_chem_heading_candidates(img) -> list:
     heading sitting right below the running book/chapter-name header, which
     field-testing showed gets dropped) can still be recovered.
 
-    Runs OCR line-detection (same block/par/line grouping as
-    _ocr_bangla_line_count), then regex-matches each line's FIRST FEW WORDS
-    against the Bangla-numeral dot-hierarchical prefix pattern (১.৩, ১.২.১,
-    ২.১...). Returns candidates as dicts shaped like the Gemini scan's own
-    heading objects: {"heading_text", "vertical_position", "bold_larger_font":
-    None, "bangla_number_prefix": True, "left_aligned_above_content": None}
-    — the two visual-only signals are left None/unverifiable from OCR text
-    alone (only the numbering signal is objectively checkable this way);
-    callers should treat these as "worth adding if not already covered by
-    the model's own scan", not as authoritative headings on their own, since
-    OCR text alone can't confirm bold/larger-font or "above its own content"
-    — a numbered in-line reference mid-paragraph could false-positive if it
-    happens to start a line. Best-effort: any OCR failure returns [].
+    STRICT TWO-SIGNAL REQUIREMENT (per exact user spec — BOTH must be true,
+    this is what actually distinguishes a real topic heading from any other
+    numbered line on the page):
+    1) Bangla HIERARCHICAL numbering prefix (১.৩, ১.২.১, not a bare ৬/৭).
+    2) The very next OCR line (by reading order) is in ENGLISH script —
+       the topic's English name, bracketed or plain, always sits directly
+       below the Bangla heading line in real /chem source books.
+    Only candidates satisfying BOTH get returned — this alone eliminates
+    the false positives seen in real testing: page-number+book-title lines
+    ("৬ রসায়ন-প্রথম পত্র" — no dot-hierarchy, fails signal 1), figure-caption
+    enumeration lists ("১. পরিমাপক ফ্লাস্ক ২. কনিকেল ফ্লাস্ক..." — multiple
+    number groups AND next line isn't English, fails both), and OCR garbage
+    ("১৮ ভুত]" — fails signal 1, no dot).
+
+    Returns candidates as dicts shaped like the Gemini scan's own heading
+    objects: {"heading_text" (Bangla heading + " — " + English line),
+    "vertical_position", "bold_larger_font": None, "bangla_number_prefix":
+    True, "left_aligned_above_content": None} — the two visual-only signals
+    stay None/unverifiable from OCR text alone; callers should treat these
+    as "worth adding if not already covered by the model's own scan", not
+    authoritative on their own. Best-effort: any OCR failure returns [].
     """
     try:
         import pytesseract
@@ -13352,26 +13375,48 @@ def _ocr_chem_heading_candidates(img) -> list:
             lines[key]["tops"].append(data["top"][i])
             lines[key]["heights"].append(data["height"][i])
 
-        candidates = []
+        # Sort all detected lines top-to-bottom (by average vertical
+        # position) so we can look at each candidate's IMMEDIATE NEXT line
+        # in true reading order — required to check signal 2.
+        ordered_lines = []
         for info in lines.values():
             text = " ".join(info["words"]).strip()
-            if not text or len(text) < 3:
+            if not text:
+                continue
+            avg_top = sum(info["tops"]) / len(info["tops"]) if info["tops"] else 0
+            ordered_lines.append((avg_top, text))
+        ordered_lines.sort(key=lambda x: x[0])
+
+        candidates = []
+        for idx, (avg_top, text) in enumerate(ordered_lines):
+            if len(text) < 3:
                 continue
             m = _CHEM_HEADING_NUM_RE.match(text)
             if not m:
                 continue
-            # Skip if the numeral prefix looks like a stray page-number/
-            # single-digit reference rather than a hierarchical heading
-            # number (require either a dot-hierarchy like ১.৩/১.২.১, or a
-            # single-level number followed by at least a few words of
-            # heading text so a bare "৭।" isn't treated as a heading).
             num_part, rest_part = m.group(1), m.group(2).strip()
-            if "." not in num_part and len(rest_part) < 4:
+            # Signal 1b: reject enumerated-list/figure-caption lines — a
+            # second number+dot group appearing anywhere after the leading
+            # one.
+            rest_after_first_num = text[len(num_part):]
+            if _CHEM_MULTI_NUM_RE.search(rest_after_first_num):
                 continue
-            avg_top = sum(info["tops"]) / len(info["tops"]) if info["tops"] else 0
+            # Require at least one real Bangla word of 3+ chars in the
+            # heading text (filters pure OCR-garbage lines).
+            bangla_words = re.findall(r'[\u0980-\u09FF]{3,}', rest_part)
+            if not bangla_words:
+                continue
+            # Signal 2 (REQUIRED): the immediate next OCR line must be
+            # recognizably English script.
+            if idx + 1 >= len(ordered_lines):
+                continue
+            next_text = ordered_lines[idx + 1][1].strip()
+            if not _ENGLISH_LINE_RE.match(next_text):
+                continue
+            heading_text = f"{text} — {next_text}"
             vpos = max(0.0, min(1.0, avg_top / img_h))
             candidates.append({
-                "heading_text": text,
+                "heading_text": heading_text,
                 "vertical_position": round(vpos, 4),
                 "bold_larger_font": None,
                 "bangla_number_prefix": True,
@@ -13400,10 +13445,16 @@ def _chem_merge_ocr_heading_candidates(model_headings: list, img) -> list:
         return model_headings
 
     def _key(text: str) -> str:
+        # Dedup on the NUMBER PREFIX ALONE — two headings sharing the same
+        # hierarchical number (১.৩ vs ১.৩) are always the same topic
+        # regardless of how the trailing text was transcribed differently
+        # by OCR vs the vision model (spelling/spacing noise is common,
+        # e.g. OCR read "পরিষ্কার" as "wats" in one real case) — matching
+        # on trailing text was too strict and caused near-duplicate entries
+        # for the same real heading.
         t = (text or "").strip()
         m = _CHEM_HEADING_NUM_RE.match(t)
-        num = m.group(1) if m else ""
-        return (num + t[:12]).replace(" ", "")
+        return m.group(1) if m else t[:20].replace(" ", "")
 
     existing_keys = {_key(h.get("heading_text", "")) for h in model_headings}
     added = []
