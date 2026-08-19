@@ -1175,7 +1175,13 @@ def _build_bio_prompt(topic: str) -> str:
         f"chapter titles, page numbers, or figure numbers.\n"
         f"- Include several MCQs combining 2-3 facts from within the SAME topic segment into one "
         f"question (fact-combination options, one fully correct) — moderate difficulty, never "
-        f"combine facts across different segments.\n\n"
+        f"combine facts across different segments.\n"
+        f"- 🚫🚫 NEVER generate roman-numeral/serial-combination style options — options that are "
+        f"themselves combinations of numbered statements like 'i, ii' / 'i ও iii' / 'ii, iii' / "
+        f"'i, ii, iii' / '১, ২' / 'I ও II'. These require a numbered statement list (উদ্দীপক-style) "
+        f"this pipeline doesn't build, so they can never stand alone correctly here — every option "
+        f"must be a plain, direct, self-contained answer, never a reference back to numbered "
+        f"sub-statements.\n\n"
 
         f"═══════════════════════════════\n"
         f"🟥 MUST-PRIORITY — marked/highlighted content\n"
@@ -1649,7 +1655,12 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"- Distractors may pull from anywhere in the source (not just one box) — "
         f"prefer CLOSE/CONFUSABLE distractors from related nearby info (high priority) "
         f"so guessing by elimination doesn't work.\n"
-        f"- Exactly ONE correct option — verify no ambiguity/double-correct.\n\n"
+        f"- Exactly ONE correct option — verify no ambiguity/double-correct.\n"
+        f"- 🚫🚫 NEVER make options that are roman-numeral/serial-combinations of numbered "
+        f"statements — e.g. 'i, ii' / 'i ও iii' / 'ii, iii' / 'i, ii, iii' / '১, ২' / 'I ও II'. "
+        f"These require a numbered statement list (উদ্দীপক-style) this pipeline doesn't build, "
+        f"so they can never stand alone correctly here — every option must be a plain, direct, "
+        f"self-contained answer.\n\n"
 
         f"💥 উত্তর (ANSWER)\n"
         f"- Exactly one A/B/C/D. Double-check no other option could be defended as correct.\n"
@@ -13581,27 +13592,37 @@ def _chem_group_mcqs(extracted_pages: list) -> list:
         if hint:
             prev_hint = hint
 
-    hint_to_group_idx = {}
-    for idx, g in enumerate(groups):
-        base_name = re.sub(r'\s*\(\d+\)$', '', g[0])
-        hint_to_group_idx.setdefault(base_name, idx)
-    for idx, g in enumerate(groups):
+    # NOTE: rerouting is intentionally restricted to the IMMEDIATELY
+    # PRECEDING group only (idx-1), never "any earlier group with a
+    # matching name across the whole document". A whole-document name→idx
+    # map here would silently MERGE two genuinely distinct topic instances
+    # that happen to share the same heading text (e.g. a recurring section
+    # title like "উদাহরণ", or the same chapter heading appearing again
+    # later for an unrelated section) into a single group — losing the
+    # later occurrence's own identity. This function only exists to catch
+    # a stray MCQ that leaked one group late/early due to a page-order
+    # glitch, which by definition only ever involves the group immediately
+    # next to it, not a same-named group pages/sections away.
+    for idx in range(1, len(groups)):
+        g = groups[idx]
+        prev_g = groups[idx - 1]
+        prev_base_name = re.sub(r'\s*\(\d+\)$', '', prev_g[0])
+        cur_base_name = re.sub(r'\s*\(\d+\)$', '', g[0])
         keep, reroute = [], []
         for m in g[1]:
             own_hint = m.get("_effective_hint", "")
-            if own_hint and own_hint != re.sub(r'\s*\(\d+\)$', '', g[0]) and own_hint in hint_to_group_idx and hint_to_group_idx[own_hint] < idx:
+            if own_hint and own_hint != cur_base_name and own_hint == prev_base_name:
                 reroute.append(m)
             else:
                 keep.append(m)
         g[1] = keep
         for m in reroute:
-            target_idx = hint_to_group_idx[m.get("_effective_hint", "")]
             logger.warning(
                 f"[CHEM group-order] stray MCQ (qsn_no={m.get('qsn_no')}) with hint "
                 f"'{m.get('_effective_hint','')[:30]}' found inside '{g[0][:30]}' — "
-                f"rerouted back to earlier group '{groups[target_idx][0][:30]}'"
+                f"rerouted back to immediately preceding group '{prev_g[0][:30]}'"
             )
-            groups[target_idx][1].append(m)
+            prev_g[1].append(m)
     groups = [g for g in groups if g[1]]
 
     name_counts = {}
