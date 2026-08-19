@@ -12456,15 +12456,34 @@ async def _bio_apply_heading_scan(generated_pages: list) -> list:
         for h in ordered:
             h["_score"] = _bio_heading_score(h)
         n = len(mcqs)
-        # Only mark a fresh qsn_no==1 boundary for the MCQ where the FIRST
-        # real heading's range begins -- MCQs before that (if the page
-        # opens mid-topic, before any heading) must NOT get qsn_no reset,
-        # or they'd wrongly force a new "Topic N" group with no real name.
-        first_start_frac = ordered[0]["vertical_position"]
-        first_start_i = max(1, int(first_start_frac * n) + 1) if n else 1
+        # Reset qsn_no to a fresh 1-based boundary at EVERY heading's
+        # start position (not just the first) -- a page can contain
+        # multiple topic headings (e.g. পারঅক্সিসোম, গ্লাইঅক্সিসোম, কোষ
+        # গহ্বর, ভেসিকল, নিউক্লিয়াস all landing close together), and each
+        # one must independently start a new qsn_no==1 boundary so the
+        # downstream segment-check (which splits purely on qsn_no==1)
+        # actually sees each topic as its own segment instead of lumping
+        # several different topic_hints into one giant segment and forcing
+        # a majority-vote pick that discards the other real topics. MCQs
+        # before the FIRST heading's start (page opens mid-topic) are left
+        # untouched -- their qsn_no correctly continues the previous
+        # page's topic group.
+        start_indices = []
+        for h in ordered:
+            start_frac = h["vertical_position"]
+            start_i = max(1, int(start_frac * n) + 1) if n else 1
+            start_indices.append(start_i)
+        boundary_set = set(start_indices)
+        local_counter = 0
+        in_topic_zone = False
         for j, m in enumerate(mcqs, start=1):
-            if j >= first_start_i:
-                m["qsn_no"] = 1 if j == first_start_i else j - first_start_i + 1
+            if j in boundary_set:
+                local_counter = 1
+                in_topic_zone = True
+                m["qsn_no"] = 1
+            elif in_topic_zone:
+                local_counter += 1
+                m["qsn_no"] = local_counter
         for idx, h in enumerate(ordered):
             htext = h["heading_text"].strip()
             start_frac = h["vertical_position"]
