@@ -865,7 +865,7 @@ async def generate_mcq_from_image(
         logger.warning(f"[Gemini] All {len(key_rotator.keys)} keys already daily-exhausted for today — returning empty (caller will try Groq/other fallbacks)")
         return []
 
-    max_retries = min(len(key_rotator.keys), 3) if key_rotator.keys else 3
+    max_retries = min(len(key_rotator.keys), 5) if key_rotator.keys else 5
     # Model fallback chain: try the latest model first, and if the WHOLE
     # Gemini backend for it is overloaded (503 UNAVAILABLE — this is a
     # server-side capacity issue, not a per-key problem, so it hits every
@@ -900,19 +900,15 @@ async def generate_mcq_from_image(
                         ]
                     )
 
-                # 30s/15s was too tight — a full page asking for 15-35 MCQs
-                # routinely takes 25-50s to generate even under NORMAL load
-                # (large JSON output + image processing), so the old timeout
-                # was killing successful-but-slow responses, not just genuinely
-                # stuck ones. 60s/45s gives real generations room to finish
-                # while still bounding worst-case wait per attempt.
-                # Shortened from 60s/45s (2026-08-19): during real Gemini
-                # outages every attempt was timing out at full length,
-                # burning ~2.5min across 3 attempts before Groq fallback
-                # ever ran. 35s/25s still gives normal slow generations
-                # room to finish while failing fast when Gemini is actually
-                # down, so /bio etc. reach the working fallback sooner.
-                _attempt_timeout = 35 if attempt == 0 else 25
+                # 2026-08-19: Gemini is now the primary provider for ALL
+                # modes (explicit preference) -- it must get a real chance
+                # to succeed even under Google-side slow/high-demand
+                # conditions rather than failing fast to Groq. Raised
+                # 35s/25s -> 60s/45s/45s/45s/45s (across up to 5 attempts)
+                # so genuinely slow-but-successful generations aren't
+                # killed early; only truly hung/dead keys will still hit
+                # the ceiling and rotate to the next key.
+                _attempt_timeout = 60 if attempt == 0 else 45
                 response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 valid = _parse_mcq_json(response.text)
                 if not valid:
