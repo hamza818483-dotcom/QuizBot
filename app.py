@@ -1201,7 +1201,11 @@ def _build_bio_prompt(topic: str) -> str:
         f"- \"qsn_no\": sequential integer starting at 1 for the first MCQ on this page, +1 each "
         f"subsequent MCQ in generation order (you create this) — used to detect topic boundaries.\n"
         f"- \"topic_hint\": exact Bengali topic heading text this MCQ falls under, identical string "
-        f"for every MCQ under the same heading.\n"
+        f"for every MCQ under the same heading. SELF-CHECK before finalizing: re-read the MCQ's "
+        f"own question/options/explanation you just wrote — does every fact in it actually come "
+        f"from content physically located under THIS heading, not a neighboring one? If any part "
+        f"leaked from a different heading's content, REWRITE the MCQ using only this heading's "
+        f"own material rather than mislabeling it.\n"
         f"- \"exp_bbox\": tight bounding box centered on the source line/paragraph, normalized 0-1000 "
         f"([x_min,y_min,x_max,y_max]). Use null if unsure.\n\n"
 
