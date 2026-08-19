@@ -13839,8 +13839,25 @@ def _qbm_parse_json(text: str) -> list:
             q = re.sub(r'\s*[\[\(].*?[\]\)]\s*$', '', q)
             q = _strip_q_numbering(q)
             q = _clean_mcq_text(q)
-            opts_list = [_clean_mcq_text(opts.get("A", "")), _clean_mcq_text(opts.get("B", "")),
-                         _clean_mcq_text(opts.get("C", "")), _clean_mcq_text(opts.get("D", ""))]
+            # 2026-08-20 FIX: options can come back as EITHER a dict
+            # {"A":.., "B":.., "C":.., "D":..} (extraction-style prompts)
+            # OR a plain array ["...","...","...","..."] (generation-style
+            # prompts -- _build_mcq_prompt's schema explicitly uses this
+            # array form: "options":["A","B","C","D"]). Calling .get("A")
+            # on a list silently raised AttributeError, caught by the
+            # try/except below, dropping EVERY MCQ from any generation-
+            # prompt call (this was the root cause of /chem's "0 MCQ,
+            # content না পাওয়া গেছে" despite Gemini returning valid,
+            # correct MCQs every time -- confirmed via the debug logging
+            # added earlier). Normalize both shapes to a 4-item list here.
+            if isinstance(opts, dict):
+                opts_list = [_clean_mcq_text(opts.get("A", "")), _clean_mcq_text(opts.get("B", "")),
+                             _clean_mcq_text(opts.get("C", "")), _clean_mcq_text(opts.get("D", ""))]
+            elif isinstance(opts, list):
+                padded = (list(opts) + ["", "", "", ""])[:4]
+                opts_list = [_clean_mcq_text(o) for o in padded]
+            else:
+                continue
             expl = _clean_mcq_text(mc.get("explanation", ""))
             expl_source = mc.get("explanation_source", "")
             raw_qbbox = mc.get("qsn_bbox")
