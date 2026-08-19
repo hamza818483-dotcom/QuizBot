@@ -889,11 +889,12 @@ def _build_chok_prompt(topic: str) -> str:
 _BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
 _BIO_MODE = contextvars.ContextVar("bio_mode", default=False)
 _CHEM_MODE = contextvars.ContextVar("chem_mode", default=False)
-# When set (non-None), _build_bio_prompt restricts generation to ONE topic
-# segment only -- (heading_text, start_frac, end_frac) -- so a per-topic
-# isolated Gemini call can't pull facts/distractors from other topics on
-# the same page. None = old whole-page behavior (all topics in one call).
-_BIO_TOPIC_RESTRICT = contextvars.ContextVar("bio_topic_restrict", default=None)
+# When set (non-None), _build_bio_prompt injects the already-detected topic
+# segment boundaries into the SAME single generation call, hard-locking each
+# segment's MCQs to only that segment's own content -- so the whole page
+# still only costs ONE generation call (plus the earlier heading-scan call),
+# 2 calls total per page, with no cross-topic mixing.
+_BIO_SEGMENTS = contextvars.ContextVar("bio_segments", default=None)
 
 def _build_bangla_prompt(topic: str) -> str:
     """
@@ -1079,33 +1080,31 @@ def _build_bio_prompt(topic: str) -> str:
     present. Everything between one such heading and the next belongs to
     that topic.
     """
-    _restrict = _BIO_TOPIC_RESTRICT.get()
+    _segments = _BIO_SEGMENTS.get()
     _restrict_block = ""
-    if _restrict:
-        _r_heading, _r_start, _r_end = _restrict
+    if _segments:
+        _seg_lines = "\n".join(
+            f"  {i+1}) \"{seg_h}\" — band {seg_s:.2f}–{seg_e:.2f}"
+            for i, (seg_h, seg_s, seg_e) in enumerate(_segments)
+        )
         _restrict_block = (
             f"═══════════════════════════════\n"
-            f"🔒🔒 HARD SCOPE LOCK — SINGLE TOPIC ONLY (read this before anything else)\n"
+            f"🔒🔒 PRE-DETECTED TOPIC SEGMENTS — HARD SCOPE LOCK PER SEGMENT\n"
             f"═══════════════════════════════\n"
-            f"This page has MULTIPLE topic segments, but for THIS call you must generate MCQs "
-            f"for EXACTLY ONE of them and IGNORE all the rest:\n"
-            f"  ▶ TARGET TOPIC HEADING: \"{_r_heading}\"\n"
-            f"  ▶ Its content occupies roughly the vertical band {_r_start:.2f}–{_r_end:.2f} "
-            f"(0.0 = top of page, 1.0 = bottom) on this page image.\n"
-            f"STRICT RULES:\n"
-            f"- Read and use ONLY the text/content that visually falls within this topic's own "
-            f"section (from its heading down to just before the next heading, or page bottom if "
-            f"it's the last one).\n"
-            f"- Every question, every option (including wrong/distractor options), and every "
-            f"explanation MUST be built ONLY from facts inside this one topic's section. NEVER "
-            f"pull a fact, term, or distractor option from any other topic segment visible "
-            f"elsewhere on the same page, even if it seems related or convenient.\n"
-            f"- Set \"topic_hint\" to EXACTLY \"{_r_heading}\" for every MCQ you generate in this call.\n"
-            f"- Completely IGNORE all other headings/content blocks on the page — pretend they "
-            f"don't exist for the purpose of generating MCQs.\n"
-            f"- If this topic's own section genuinely has very little content, generate fewer "
-            f"MCQs rather than borrowing from another topic to pad the count — a short accurate "
-            f"topic is correct; a padded/mixed one is not.\n\n"
+            f"This page has ALREADY been scanned and split into these topic segments "
+            f"(heading text + approximate vertical band, 0.0=top, 1.0=bottom of page):\n"
+            f"{_seg_lines}\n\n"
+            f"STRICT RULES — apply to EVERY MCQ you generate:\n"
+            f"- Use ONLY the exact heading text list above as topic_hint values — do not invent, "
+            f"reword, merge, or split them.\n"
+            f"- For each MCQ, its question/options/explanation/distractors MUST come ONLY from "
+            f"content physically inside that ONE segment's own vertical band. NEVER pull a fact, "
+            f"term, or distractor option from a different segment's band, even if it seems related "
+            f"or would make a more interesting question.\n"
+            f"- Process segment by segment, top to bottom, in the exact order listed above. "
+            f"Generate ALL of one segment's MCQs before moving to the next.\n"
+            f"- If a segment genuinely has little content, generate fewer MCQs for it rather than "
+            f"borrowing from a neighboring segment to pad the count.\n\n"
         )
 
     return (
@@ -12465,12 +12464,13 @@ def _bio_heading_score(h: dict) -> int:
 
 
 async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None) -> list:
-    """/bio ACCURACY FIX: runs the heading-scan pass FIRST (before any MCQ
-    generation), then generates MCQs per DETECTED TOPIC SEGMENT in its own
-    isolated Gemini call (via _BIO_TOPIC_RESTRICT), instead of the old
-    single whole-page call that let one topic's content/distractors leak
-    into another topic's MCQs. Pages with zero detected headings fall back
-    to one plain whole-page call (nothing to isolate). Returns the same
+    """/bio ACCURACY FIX: 2 calls per page total.
+    Call 1 (batched, ~1 per 3 pages): heading-scan detects topic segments.
+    Call 2 (1 per page): single generation call with the detected segment
+    boundaries injected into the prompt (_BIO_SEGMENTS), hard-locking each
+    segment's MCQs to only its own content -- no separate call per topic,
+    no cross-topic mixing. Pages with zero detected headings just skip the
+    lock block (old plain whole-page behavior). Returns the same
     (page_num, img, mcqs) tuple list shape as pdf_generate_all_pages so the
     rest of the /bio pipeline (topic grouping, CSV/poll output) is unchanged.
     """
@@ -12509,38 +12509,48 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
              and _bio_heading_score(h) >= 1],
             key=lambda h: h["vertical_position"],
         )
-        if not ordered:
-            # No genuine topic split on this page -- one plain whole-page
-            # call, same as the old behavior (nothing to isolate).
+        segments = None
+        if ordered:
+            segments = []
+            for i, h in enumerate(ordered):
+                start_frac = h["vertical_position"]
+                end_frac = ordered[i + 1]["vertical_position"] if i + 1 < len(ordered) else 1.0
+                segments.append((h["heading_text"].strip(), start_frac, end_frac))
+
+        token = _BIO_SEGMENTS.set(segments)
+        try:
             mcqs = await generate_mcq_from_image(img, topic, page_num, None)
-            results[idx] = (page_num, img, mcqs)
-            return
+        finally:
+            _BIO_SEGMENTS.reset(token)
 
-        segments = []
-        for i, h in enumerate(ordered):
-            start_frac = h["vertical_position"]
-            end_frac = ordered[i + 1]["vertical_position"] if i + 1 < len(ordered) else 1.0
-            segments.append((h["heading_text"].strip(), start_frac, end_frac))
+        if segments:
+            # Force topic_hint to the exact detected heading text (code-level
+            # guarantee, don't fully trust the model's self-reported string)
+            # using the same qsn_no-based boundary math as the old post-hoc
+            # override pass -- keeps grouping deterministic.
+            n = len(mcqs)
+            if n:
+                start_indices = [max(1, int(s * n) + 1) for _, s, _ in segments]
+                boundary_set = set(start_indices)
+                local_counter = 0
+                in_zone = False
+                for j, m in enumerate(mcqs, start=1):
+                    if j in boundary_set:
+                        local_counter = 1
+                        in_zone = True
+                        m["qsn_no"] = 1
+                    elif in_zone:
+                        local_counter += 1
+                        m["qsn_no"] = local_counter
+                for i, (heading_text, s, _e) in enumerate(segments):
+                    end_frac = segments[i + 1][1] if i + 1 < len(segments) else 1.01
+                    start_i = max(1, int(s * n) + 1)
+                    end_i = int(end_frac * n) + 1
+                    for j, m in enumerate(mcqs, start=1):
+                        if start_i <= j < end_i:
+                            m["topic_hint"] = heading_text
 
-        page_mcqs = []
-        for heading_text, start_frac, end_frac in segments:
-            token = _BIO_TOPIC_RESTRICT.set((heading_text, start_frac, end_frac))
-            try:
-                seg_mcqs = await generate_mcq_from_image(img, topic, page_num, None)
-            except Exception as e:
-                logger.warning(f"[BIO per-topic] page {page_num} topic '{heading_text[:30]}' failed: {e}")
-                seg_mcqs = []
-            finally:
-                _BIO_TOPIC_RESTRICT.reset(token)
-            for m in seg_mcqs:
-                m["topic_hint"] = heading_text
-            # Re-sequence qsn_no to start fresh at 1 within this segment so
-            # downstream _topic_group_mcqs sees a clean new-group boundary.
-            for j, m in enumerate(seg_mcqs, start=1):
-                m["qsn_no"] = j
-            page_mcqs.extend(seg_mcqs)
-
-        results[idx] = (page_num, img, page_mcqs)
+        results[idx] = (page_num, img, mcqs)
 
     _PARALLEL = 2
     sem = asyncio.Semaphore(_PARALLEL)
