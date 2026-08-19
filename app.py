@@ -12551,6 +12551,27 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
     _bio_dash_lock = asyncio.Lock()
     _bio_last_dash_text = [None]
 
+    # CROSS-PAGE CONTINUITY FIX: precompute, for every page in order, which
+    # topic heading (if any) is still "active" carried forward from an
+    # earlier page's LAST heading -- so a page with zero/one heading of its
+    # own (a topic continuing without a new marker) can be told explicitly
+    # which topic it belongs to, instead of the model guessing/inventing a
+    # slightly different topic_hint string that would break grouping's
+    # hint-based carry-forward and continuity across page boundaries.
+    _carry_topic_by_page = {}
+    _last_seen_heading = None
+    for _p, _ in pages:
+        _hs = sorted(
+            [h for h in headings_by_page.get(_p, [])
+             if isinstance(h.get("vertical_position"), (int, float))
+             and _is_sane_bio_heading(h.get("heading_text"))
+             and _bio_heading_score(h) >= 1],
+            key=lambda h: h["vertical_position"],
+        )
+        _carry_topic_by_page[_p] = _last_seen_heading
+        if _hs:
+            _last_seen_heading = _hs[-1]["heading_text"].strip()
+
     async def _bio_safe_dash_edit():
         # Same fix as /unmesh's qbm_extract_all_pages: serialize edits and
         # skip no-op edits so concurrent pages (PARALLEL=2) never race each
@@ -12570,6 +12591,7 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
                 pass
 
     async def _run_page(idx, page_num, img):
+
         nonlocal total_mcq
         page_status[idx]["current"] = True
         await _bio_safe_dash_edit()
@@ -12588,21 +12610,31 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
                 start_frac = h["vertical_position"]
                 end_frac = ordered[i + 1]["vertical_position"] if i + 1 < len(ordered) else 1.0
                 segments.append((h["heading_text"].strip(), start_frac, end_frac))
+            # CONTINUITY: if this page's FIRST heading doesn't start at the
+            # very top, the content above it belongs to the still-active
+            # topic carried forward from an earlier page -- add it as its
+            # own explicit leading segment instead of leaving it unlabeled
+            # (which previously let the model guess/mislabel that leading
+            # chunk instead of tying it to the correct ongoing topic).
+            _carry = _carry_topic_by_page.get(page_num)
+            if _carry and segments[0][1] > 0.03:
+                segments.insert(0, (_carry, 0.0, segments[0][1]))
+        elif _carry_topic_by_page.get(page_num):
+            # Zero headings detected on this page at all -> the WHOLE page
+            # is a continuation of the last known topic. Give it one
+            # explicit full-page segment naming that topic, instead of
+            # generating headinglessly with no topic context (previously
+            # let the model invent its own topic_hint per MCQ, which could
+            # drift from the previous page's exact heading string and break
+            # cross-page grouping continuity).
+            segments = [(_carry_topic_by_page[page_num], 0.0, 1.0)]
 
-        if segments and len(segments) > 1:
-            # TRUE ISOLATION FIX (2026-08-19): instead of giving the model
-            # the whole page + a list of segment bands in one call (which
-            # still lets it SEE other segments' content and occasionally
-            # pull facts/options across the boundary despite instructions),
-            # physically CROP the page image per segment and issue a
-            # SEPARATE generation call per segment. The model then literally
-            # cannot see any other segment's content -- cross-topic leakage
-            # becomes structurally impossible rather than instruction-
-            # dependent. A small vertical PAD is added above/below each crop
-            # (clamped to page bounds) purely so a line of text sitting
-            # exactly on the boundary isn't sliced in half; the pad is small
-            # enough that it very rarely reaches into a neighboring
-            # segment's own distinct content block.
+        if segments:
+            # UNIFIED ISOLATION PATH: applies to single-segment (including
+            # carried-forward continuation) and multi-segment pages alike.
+            # Cropping + forcing topic_hint even for a lone segment removes
+            # reliance on the model self-reporting the right string, keeping
+            # cross-page grouping continuity exact.
             PAD_FRAC = 0.015
             all_mcqs = []
             for seg_i, (heading_text, s, e) in enumerate(segments):
@@ -12638,43 +12670,6 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
                 mcqs = await generate_mcq_from_image(img, topic, page_num, None)
             finally:
                 _BIO_SEGMENTS.reset(token)
-
-        if segments and len(segments) <= 1:
-            # 2026-08-19 FIX: previously this ALWAYS overrode the model's own
-            # self-reported topic_hint with a linear vertical_position-fraction
-            # -> MCQ-index mapping. That assumes MCQs are spread evenly across
-            # the page's vertical space, which is false whenever one segment's
-            # questions are longer/shorter than another's — causing MCQs near
-            # a boundary to get assigned to the wrong topic even though the
-            # model itself correctly reported which segment they came from.
-            # Now: trust the model's own topic_hint whenever it exactly matches
-            # one of the known segment heading texts (the model was given the
-            # exact strings to use verbatim). Only fall back to the fraction-
-            # math guess for MCQs where the model's hint is missing/invalid —
-            # a much rarer case, and a safety net rather than the primary path.
-            valid_heads = {seg_h for seg_h, _s, _e in segments}
-            n = len(mcqs)
-            needs_fallback = [m for m in mcqs if (m.get("topic_hint") or "").strip() not in valid_heads]
-            if needs_fallback and n:
-                start_indices = [max(1, int(s * n) + 1) for _, s, _ in segments]
-                boundary_set = set(start_indices)
-                local_counter = 0
-                in_zone = False
-                for j, m in enumerate(mcqs, start=1):
-                    if j in boundary_set:
-                        local_counter = 1
-                        in_zone = True
-                        m["qsn_no"] = 1
-                    elif in_zone:
-                        local_counter += 1
-                        m["qsn_no"] = local_counter
-                for i, (heading_text, s, _e) in enumerate(segments):
-                    end_frac = segments[i + 1][1] if i + 1 < len(segments) else 1.01
-                    start_i = max(1, int(s * n) + 1)
-                    end_i = int(end_frac * n) + 1
-                    for j, m in enumerate(mcqs, start=1):
-                        if start_i <= j < end_i and (m.get("topic_hint") or "").strip() not in valid_heads:
-                            m["topic_hint"] = heading_text
 
         results[idx] = (page_num, img, mcqs)
         page_status[idx]["current"] = False
