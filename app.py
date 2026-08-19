@@ -13156,6 +13156,291 @@ async def _chem_generate_from_image(img, cache_key: tuple = None) -> list:
     return mcqs
 
 
+def _build_chem_heading_scan_prompt_v2() -> str:
+    """/bio-STYLE heading-scan for /chem's GENERATION pipeline (2026-08-20
+    rebuild) -- unlike the original _build_chem_heading_scan_prompt (which
+    reports next_qsn_no matched against an EXTRACTION pass's printed
+    question numbers), this variant reports vertical_position (0.0-1.0
+    fraction of page height), the same way /bio's heading-scan does, so
+    the page can be CROPPED per detected topic segment and each segment
+    generated in its own isolated model call -- structurally preventing
+    cross-topic content leakage, instead of generating the whole page in
+    one call and labeling topic_hint after the fact (the old approach,
+    which had zero isolation between segments and no error visibility
+    when a stage silently returned empty). Same detection signals as the
+    original chem prompt (bold-black + larger font + Bangla hierarchical
+    numbering ১.২/১.২.১), unchanged."""
+    return (
+        "Find ONLY genuine chapter/section-level headings on this page — ignore all body/paragraph text.\n\n"
+        "‼️ HARD RULE — CHECK THIS FIRST, ALWAYS: if you see a heading line that is BOTH (a) BOLD BLACK "
+        "and visibly LARGER font than the surrounding body text, AND (b) prefixed with a Bangla-"
+        "numeral, dot-separated hierarchical number such as ১.২, ১.২.১, ১.২.২, ২.১, ২.২.১ — that line IS "
+        "a genuine topic heading, no exceptions, regardless of whether it's a top-level (১.২) or a deeper "
+        "sub-level (১.২.১) number. Every distinct number+heading is its own separate heading/topic boundary "
+        "— do not merge a sub-level heading into its parent's group.\n\n"
+        "If directly below the Bangla heading there is a second line giving the same topic name in English "
+        "(usually smaller/lighter), include it in heading_text appended after the Bangla text separated by "
+        "\" — \" (e.g. \"১.২.১ পরমাণুর গঠন — Structure of Atom\"). Its absence doesn't disqualify a heading "
+        "that already satisfies the bold+larger-font + Bangla-number rule above.\n\n"
+        "STRICTLY DO NOT report any of the following even if bold/boxed — these are NOT topic headings:\n"
+        "  - exam-source bracket tags, page footer/header branding, book title, publisher name, page numbers\n"
+        "  - ব্যাখ্যা:/explanation labels\n"
+        "  - a bare in-line reference to a number like \"১.২\" inside a sentence (not its own heading line)\n"
+        "  - university/organization/exam-body names or unit labels\n\n"
+        "A true topic heading is rare per page — expect at most 0-3, often ZERO (pure continuation pages). "
+        "If not confident a line satisfies BOTH the font-size/weight jump AND the Bangla-number prefix, do "
+        "NOT report it.\n\n"
+        "For each genuine topic heading found (top to bottom, both columns if 2-column), report:\n"
+        "  - its exact text (Bangla heading, plus English line if present, per the format above)\n"
+        "  - approximately how far down the page it sits, as a fraction from 0.0 (very top) to "
+        "1.0 (very bottom) of the page height — your best visual estimate, used only to order "
+        "multiple headings relative to each other and to crop the page into per-topic sections.\n\n"
+        "Output ONLY this JSON array, nothing else, in top-to-bottom page order:\n"
+        '[{"heading_text": "...", "vertical_position": 0.0}]\n'
+        "If there are zero genuine topic headings on this page, output exactly []."
+    )
+
+
+def _build_chem_heading_scan_prompt_v2_batched(n_pages: int) -> str:
+    """Batched variant of _build_chem_heading_scan_prompt_v2 -- identical
+    pattern to /bio's _build_bio_heading_scan_prompt_batched, scans N pages
+    in one call with a page_index field routing results back."""
+    base = _build_chem_heading_scan_prompt_v2()
+    header = (
+        f"⚠️ MULTI-PAGE INPUT: you are being given {n_pages} SEPARATE page images in this call, "
+        f"in order (the 1st image is Page 1, 2nd is Page 2, ..., {n_pages}th is Page {n_pages}). "
+        f"Analyze EACH page independently using the exact same rules below — a heading detected on "
+        f"Page 2 has its own vertical_position measured within Page 2's own height (0.0-1.0), "
+        f"NEVER relative to the combined stack of all pages. Do not let content on one page "
+        f"influence heading detection on another page. Report a \"page_index\" field for every "
+        f"heading found, stating which page (1-indexed per the order above) it belongs to.\n\n"
+    )
+    schema_old = '[{"heading_text": "...", "vertical_position": 0.0}]'
+    schema_new = '[{"page_index": 1, "heading_text": "...", "vertical_position": 0.0}]'
+    body = base.replace(schema_old, schema_new)
+    body = body.replace(
+        "If there are zero genuine topic headings on this page, output exactly [].",
+        f"Output ONE combined JSON array covering all {n_pages} pages together (not one array per "
+        f"page). If a page has zero genuine topic headings, it simply contributes no entries to "
+        f"the array — if NO page has any heading at all, output exactly []."
+    )
+    return header + body
+
+
+def _parse_chem_heading_scan_v2(text: str) -> list:
+    """Parser for the v2 (vertical_position-based) scan -- same JSON-array
+    parsing as /bio's _parse_bio_heading_scan, just a thin alias since the
+    schema shape (heading_text/vertical_position[/page_index]) matches."""
+    return _parse_bio_heading_scan(text)
+
+
+def _is_sane_chem_heading(text: str) -> bool:
+    """Sanity guard mirroring /bio's _is_sane_bio_heading, tuned for /chem's
+    Bangla-hierarchical-number heading style instead of /bio's numbering."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if len(t) > 100:
+        return False
+    if len(t) < 2:
+        return False
+    if t.endswith(("।", "এবং", "কারণ", "যেহেতু")) and len(t) > 40:
+        return False
+    return True
+
+
+async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None) -> list:
+    """/chem GENERATION pipeline, rebuilt 2026-08-20 to mirror /bio's
+    _bio_generate_per_topic_pages architecture exactly: Call 1 (batched
+    heading-scan, ~1 per 3 pages) detects topic segment boundaries via
+    vertical_position, then Call 2 crops the page PER detected segment and
+    generates each segment's MCQs in a SEPARATE, isolated model call --
+    replacing the old approach (whole page generated in one call, topic
+    boundaries labeled onto the result afterward via next_qsn_no matching,
+    zero content isolation between segments, and no error visibility when
+    a stage silently returned empty). Returns the same (page_num, img,
+    mcqs) tuple list shape _chem_group_mcqs already expects, so no
+    downstream grouping/CSV code needs to change."""
+    BATCH_SIZE = 3
+    batches = [pages[i:i + BATCH_SIZE] for i in range(0, len(pages), BATCH_SIZE)]
+    headings_by_page = {}
+
+    async def _scan_batch(batch):
+        page_nums = [pn for pn, _ in batch]
+        imgs = [img for _, img in batch]
+        try:
+            prompt = _build_chem_heading_scan_prompt_v2_batched(len(batch))
+            scan_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+            all_headings = _parse_chem_heading_scan_v2(scan_txt)
+        except Exception as e:
+            logger.warning(f"[CHEM pre-scan] batch {page_nums} failed, treating as headingless: {e}")
+            return
+        by_index = {}
+        for h in all_headings:
+            idx = h.get("page_index")
+            if isinstance(idx, (int, float)) and 1 <= int(idx) <= len(batch):
+                by_index.setdefault(int(idx), []).append(h)
+        for i, (page_num, _img) in enumerate(batch, start=1):
+            headings_by_page[page_num] = by_index.get(i, [])
+
+    if status_msg_id:
+        try:
+            await edit_msg(chat_id, status_msg_id,
+                f"🔎 Heading-scan হচ্ছে... (0/{len(batches)} batch)")
+        except Exception:
+            pass
+
+    _scan_done = [0]
+    _scan_lock = asyncio.Lock()
+
+    async def _scan_batch_tracked(b):
+        await _scan_batch(b)
+        async with _scan_lock:
+            _scan_done[0] += 1
+            if status_msg_id:
+                try:
+                    await edit_msg(chat_id, status_msg_id,
+                        f"🔎 Heading-scan হচ্ছে... ({_scan_done[0]}/{len(batches)} batch)")
+                except Exception:
+                    pass
+
+    await asyncio.gather(*[_scan_batch_tracked(b) for b in batches], return_exceptions=True)
+
+    if status_msg_id:
+        try:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ Heading-scan শেষ!\n⏳ MCQ generation শুরু হচ্ছে ({len(pages)} page)...")
+        except Exception:
+            pass
+
+    results = [None] * len(pages)
+    page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
+    start_time = time.time()
+    total_mcq = 0
+    _chem_dash_lock = asyncio.Lock()
+    _chem_last_dash_text = [None]
+
+    # CROSS-PAGE CONTINUITY: same carry-forward logic as /bio, so a page
+    # with zero/one heading of its own (topic continuing without a new
+    # marker) is told explicitly which topic it belongs to.
+    _carry_topic_by_page = {}
+    _last_seen_heading = None
+    for _p, _ in pages:
+        _hs = sorted(
+            [h for h in headings_by_page.get(_p, [])
+             if isinstance(h.get("vertical_position"), (int, float))
+             and _is_sane_chem_heading(h.get("heading_text"))],
+            key=lambda h: h["vertical_position"],
+        )
+        _carry_topic_by_page[_p] = _last_seen_heading
+        if _hs:
+            _last_seen_heading = _hs[-1]["heading_text"].strip()
+
+    async def _chem_safe_dash_edit():
+        if not status_msg_id:
+            return
+        async with _chem_dash_lock:
+            text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0)
+            if text == _chem_last_dash_text[0]:
+                return
+            try:
+                await edit_msg(chat_id, status_msg_id, text)
+                _chem_last_dash_text[0] = text
+            except Exception:
+                pass
+
+    _chem_gen_prompt_v2 = _build_chem_gen_prompt(DEFAULT_TOPIC, None)
+
+    async def _run_page(idx, page_num, img):
+        nonlocal total_mcq
+        page_status[idx]["current"] = True
+        await _chem_safe_dash_edit()
+        raw_headings = headings_by_page.get(page_num, [])
+        ordered = sorted(
+            [h for h in raw_headings
+             if isinstance(h.get("vertical_position"), (int, float))
+             and _is_sane_chem_heading(h.get("heading_text"))],
+            key=lambda h: h["vertical_position"],
+        )
+        segments = None
+        if ordered:
+            segments = []
+            for i, h in enumerate(ordered):
+                start_frac = h["vertical_position"]
+                end_frac = ordered[i + 1]["vertical_position"] if i + 1 < len(ordered) else 1.0
+                segments.append((h["heading_text"].strip(), start_frac, end_frac))
+            _carry = _carry_topic_by_page.get(page_num)
+            if _carry and segments[0][1] > 0.03:
+                segments.insert(0, (_carry, 0.0, segments[0][1]))
+        elif _carry_topic_by_page.get(page_num):
+            segments = [(_carry_topic_by_page[page_num], 0.0, 1.0)]
+
+        async def _gen_segment(crop):
+            """Generate MCQs from a (possibly cropped) image using the same
+            3-provider fallback chain /chem always used (Gemini -> Groq ->
+            OpenRouter), with WARNING-level stage logging kept from the
+            debug pass so genuinely-empty results stay diagnosable."""
+            gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
+            mcqs = _qbm_dedup_list(gem) if gem else []
+            if not mcqs:
+                txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
+                mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
+            if not mcqs:
+                txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
+                mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
+            if not mcqs:
+                logger.warning(f"[CHEM-GEN v2] page {page_num}: ALL 3 providers returned 0 MCQ for this segment/page.")
+            return mcqs
+
+        if segments:
+            PAD_FRAC = 0.015
+            LAST_SEG_EXTRA_PAD = 0.03
+            all_mcqs = []
+            for seg_i, (heading_text, s, e) in enumerate(segments):
+                top = max(0.0, s - PAD_FRAC)
+                extra = LAST_SEG_EXTRA_PAD if seg_i == len(segments) - 1 else 0.0
+                bottom = min(1.0, e + PAD_FRAC + extra)
+                y0 = int(top * img.height)
+                y1 = max(y0 + 1, int(bottom * img.height))
+                crop = img.crop((0, y0, img.width, y1))
+                seg_mcqs = await _gen_segment(crop)
+                for m in seg_mcqs:
+                    m["topic_hint"] = heading_text
+                all_mcqs.extend(seg_mcqs)
+            _local = 0
+            _prev_hint = None
+            for m in all_mcqs:
+                if m.get("topic_hint") != _prev_hint:
+                    _local = 1
+                    _prev_hint = m.get("topic_hint")
+                else:
+                    _local += 1
+                m["qsn_no"] = _local
+            mcqs = all_mcqs
+        else:
+            mcqs = await _gen_segment(img)
+            for i, m in enumerate(mcqs, start=1):
+                m["qsn_no"] = i
+
+        mcqs = _check_segment_topic_consistency(mcqs, context="CHEM-GEN-v2")
+        results[idx] = (page_num, img, mcqs)
+        page_status[idx]["current"] = False
+        page_status[idx]["done"] = True
+        page_status[idx]["mcq"] = len(mcqs)
+        total_mcq += len(mcqs)
+        await _chem_safe_dash_edit()
+
+    _PARALLEL = 2
+    sem = asyncio.Semaphore(_PARALLEL)
+
+    async def _guarded(idx, page_num, img):
+        async with sem:
+            await _run_page(idx, page_num, img)
+
+    await asyncio.gather(*[_guarded(i, pn, img) for i, (pn, img) in enumerate(pages)])
+    return results
+
+
 def _chem_group_mcqs(extracted_pages: list) -> list:
     """DEDICATED grouping for /chem (fully independent of /topic's and
     /unmesh's grouping functions, though structurally identical). Same two
@@ -16452,9 +16737,8 @@ async def _handle_chem_impl(msg: dict):
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ নতুন MCQ Generation শুরু হচ্ছে (নাম্বারিং heading topic detect সহ)...")
 
-        extracted_pages = await qbm_extract_all_pages(
-            chat_id, pages, "Chem Generate", file_name, status_msg_id,
-            extractor=_chem_generate_from_image, file_id=file_id
+        extracted_pages = await _chem_generate_per_topic_pages(
+            chat_id, pages, "Chem Generate", status_msg_id
         )
 
         total_mcq_found = sum(
