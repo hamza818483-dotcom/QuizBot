@@ -3905,26 +3905,20 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
 
 
 async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0):
-    # Groq is the TRUE primary now (2026-08-07: Gemini free-tier daily quota
-    # (20 req/day on gemini-3.6-flash) kept exhausting mid-run and killing
-    # pagewise generation). Groq is tried first, alone; Gemini is only
-    # invoked if Groq fails or comes back empty (sequential, not raced), so
-    # Groq's result is used whenever Groq succeeds, with no latency penalty
-    # from waiting on Gemini.
-    #
-    # EXCEPTION: /extra, /bio, /chem flip this order (Gemini primary, Groq
-    # fallback) -- /extra depends on correctly distinguishing hand-marked
-    # (highlighter/pen) content from plain printed text; /bio and /chem
-    # depend on fine-grained heading/boundary + subject-content detail
-    # where Gemini's vision tends to be more reliable than Groq's vision
-    # models, per explicit user preference for these modes.
+    # 2026-08-19: Gemini is now PRIMARY for ALL modes (explicit user
+    # preference), Groq is fallback only when Gemini fails/empty. Previously
+    # (2026-08-07) Groq was made primary because Gemini's free-tier daily
+    # quota (20 req/day) kept exhausting mid-run and killing pagewise
+    # generation -- that risk still exists, but Groq fallback + the shared
+    # fallback-provider rotation below still catches it when Gemini is
+    # exhausted/down, so quality/consistency wins for now.
     _LAST_GROQ_ERROR["reason"] = ""
     _LAST_GEMINI_ERROR["reason"] = ""
     _LAST_FALLBACK_ERROR["reason"] = ""
 
-    _gemini_primary_mode = _EXTRA_MODE.get() or _BIO_MODE.get() or _CHEM_MODE.get()
+    _gemini_primary_mode = True
     if _gemini_primary_mode:
-        _gp_tag = "/extra" if _EXTRA_MODE.get() else ("/bio" if _BIO_MODE.get() else "/chem")
+        _gp_tag = "/extra" if _EXTRA_MODE.get() else ("/bio" if _BIO_MODE.get() else ("/chem" if _CHEM_MODE.get() else "default"))
         try:
             gemini_out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
         except Exception as e:
