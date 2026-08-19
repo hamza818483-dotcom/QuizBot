@@ -13184,36 +13184,45 @@ def _build_chem_heading_scan_prompt_v2() -> str:
     position check as a supporting signal."""
     return (
         "Find ONLY genuine chapter/section-level headings on this page — ignore all body/paragraph text.\n\n"
-        "‼️ HARD RULE — CHECK THIS FIRST, ALWAYS: if you see a heading line that is BOTH (a) BOLD BLACK "
-        "and visibly LARGER font than the surrounding body text, AND (b) prefixed with a Bangla-"
-        "numeral, dot-separated hierarchical number such as ১.২, ১.২.১, ১.২.২, ২.১, ২.২.১ — that line IS "
-        "a genuine topic heading, no exceptions, regardless of whether it's a top-level (১.২) or a deeper "
-        "sub-level (১.২.১) number. Every distinct number+heading is its own separate heading/topic boundary "
-        "— do not merge a sub-level heading into its parent's group.\n\n"
-        "📍 POSITION CHECK (supporting signal): a genuine topic heading sits LEFT-ALIGNED, directly ABOVE "
-        "the paragraph/content it introduces — not centered, not indented to match a sub-point, not floating "
-        "beside body text. If a bold-larger-numbered candidate line is positioned to the left and immediately "
-        "above its own content block, that confirms it as a heading; a line that's centered mid-paragraph or "
-        "sits beside (not above) body text is more likely a stray bold phrase, not a real heading.\n\n"
+        "‼️ SCORE EVERY CANDIDATE BOLD LINE ON THESE 3 SIGNALS, CHECKED TOGETHER — the candidate matching "
+        "the MOST signals together is the real topic heading. Do not require all 3, but MORE matching "
+        "signals always wins over fewer:\n\n"
+        "  SIGNAL 1 — BOLD BLACK + LARGER FONT: the line is bold black and visibly LARGER than the "
+        "surrounding body text (a clear size+weight jump).\n"
+        "  SIGNAL 2 — BANGLA HIERARCHICAL NUMBERING PREFIX: the line is prefixed with a Bangla-numeral, "
+        "dot-separated hierarchical number such as ১.২, ১.২.১, ১.২.২, ২.১, ২.২.১. Every distinct "
+        "number+heading is its own separate heading/topic boundary — do not merge a sub-level heading "
+        "(১.২.১) into its parent's (১.২) group.\n"
+        "  SIGNAL 3 — POSITION (left-aligned, directly above its content): the line sits LEFT-ALIGNED and "
+        "immediately ABOVE the paragraph/content block it introduces — not centered, not indented to match "
+        "a sub-point, not floating beside body text.\n\n"
+        "A candidate matching signals 1+2+3 together is a certain heading. A candidate matching only "
+        "signal 1 (bold+larger, but no numbering, not positioned above its own content block) is usually "
+        "just an emphasized phrase or a left-margin sub-label, not a real topic heading — reject it unless "
+        "no stronger candidate exists nearby. When TWO candidates could both plausibly be the heading for "
+        "the same content block, always pick the one matching MORE of the 3 signals.\n\n"
         "If directly below the Bangla heading there is a second line giving the same topic name in English "
         "(usually smaller/lighter), include it in heading_text appended after the Bangla text separated by "
         "\" — \" (e.g. \"১.২.১ পরমাণুর গঠন — Structure of Atom\"). Its absence doesn't disqualify a heading "
-        "that already satisfies the bold+larger-font + Bangla-number rule above.\n\n"
+        "that already satisfies signals 1+2 above.\n\n"
         "STRICTLY DO NOT report any of the following even if bold/boxed — these are NOT topic headings:\n"
         "  - exam-source bracket tags, page footer/header branding, book title, publisher name, page numbers\n"
         "  - ব্যাখ্যা:/explanation labels\n"
         "  - a bare in-line reference to a number like \"১.২\" inside a sentence (not its own heading line)\n"
         "  - university/organization/exam-body names or unit labels\n\n"
         "A true topic heading is rare per page — expect at most 0-3, often ZERO (pure continuation pages). "
-        "If not confident a line satisfies BOTH the font-size/weight jump AND the Bangla-number prefix, do "
-        "NOT report it.\n\n"
+        "If a candidate scores low on all 3 signals (no numbering AND not clearly positioned above its own "
+        "content block), do NOT report it.\n\n"
         "For each genuine topic heading found (top to bottom, both columns if 2-column), report:\n"
         "  - its exact text (Bangla heading, plus English line if present, per the format above)\n"
         "  - approximately how far down the page it sits, as a fraction from 0.0 (very top) to "
         "1.0 (very bottom) of the page height — your best visual estimate, used only to order "
-        "multiple headings relative to each other and to crop the page into per-topic sections.\n\n"
+        "multiple headings relative to each other and to crop the page into per-topic sections.\n"
+        "  - a true/false flag for EACH of the 3 signals individually, so the exact match count can be "
+        "verified downstream — do not skip any flag.\n\n"
         "Output ONLY this JSON array, nothing else, in top-to-bottom page order:\n"
-        '[{"heading_text": "...", "vertical_position": 0.0}]\n'
+        '[{"heading_text": "...", "vertical_position": 0.0, "bold_larger_font": true, '
+        '"bangla_number_prefix": true, "left_aligned_above_content": true}]\n'
         "If there are zero genuine topic headings on this page, output exactly []."
     )
 
@@ -13232,8 +13241,8 @@ def _build_chem_heading_scan_prompt_v2_batched(n_pages: int) -> str:
         f"influence heading detection on another page. Report a \"page_index\" field for every "
         f"heading found, stating which page (1-indexed per the order above) it belongs to.\n\n"
     )
-    schema_old = '[{"heading_text": "...", "vertical_position": 0.0}]'
-    schema_new = '[{"page_index": 1, "heading_text": "...", "vertical_position": 0.0}]'
+    schema_old = '[{"heading_text": "...", "vertical_position": 0.0, "bold_larger_font": true, "bangla_number_prefix": true, "left_aligned_above_content": true}]'
+    schema_new = '[{"page_index": 1, "heading_text": "...", "vertical_position": 0.0, "bold_larger_font": true, "bangla_number_prefix": true, "left_aligned_above_content": true}]'
     body = base.replace(schema_old, schema_new)
     body = body.replace(
         "If there are zero genuine topic headings on this page, output exactly [].",
@@ -13264,6 +13273,29 @@ def _is_sane_chem_heading(text: str) -> bool:
     if t.endswith(("।", "এবং", "কারণ", "যেহেতু")) and len(t) > 40:
         return False
     return True
+
+
+def _chem_heading_score(h: dict) -> int:
+    """Code-level SCORING gate mirroring /bio's _bio_heading_score --
+    implements the "most matching signals wins" rule from the v2 scan
+    prompt. Signal 2 (Bangla numbering prefix) is re-verified against the
+    actual heading_text string (objectively checkable from text, so a
+    model's self-reported flag isn't trusted blindly); signals 1
+    (bold/larger) and 3 (left-aligned-above-content) are visual-only and
+    trusted from the model's own flag, since code has no independent way
+    to verify layout/font from text alone. When multiple candidates could
+    apply to the same content, the one with the higher score here wins
+    (see _chem_generate_per_topic_pages' heading filter, which keeps only
+    score>=1 candidates in vertical order -- a genuine multi-signal
+    heading will always outscore a stray bold phrase)."""
+    has_number_prefix = bool(
+        re.match(r'^[০-৯]+(\.[০-৯]+)*', (h.get("heading_text") or "").strip())
+    )
+    score = 0
+    score += 1 if bool(h.get("bold_larger_font", True)) else 0        # signal 1
+    score += 1 if has_number_prefix else 0                             # signal 2
+    score += 1 if bool(h.get("left_aligned_above_content", True)) else 0  # signal 3
+    return score
 
 
 async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None) -> list:
@@ -13339,7 +13371,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     for _p, _ in pages:
         for h in headings_by_page.get(_p, []):
             _t = (h.get("heading_text") or "").strip()
-            if _t and _is_sane_chem_heading(_t) and _t not in _seen_topics:
+            if _t and _is_sane_chem_heading(_t) and _chem_heading_score(h) >= 1 and _t not in _seen_topics:
                 _seen_topics.add(_t)
                 _detected_topics.append((_p, _t))
     _topics_block = ""
@@ -13364,7 +13396,8 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         _hs = sorted(
             [h for h in headings_by_page.get(_p, [])
              if isinstance(h.get("vertical_position"), (int, float))
-             and _is_sane_chem_heading(h.get("heading_text"))],
+             and _is_sane_chem_heading(h.get("heading_text"))
+             and _chem_heading_score(h) >= 1],
             key=lambda h: h["vertical_position"],
         )
         _carry_topic_by_page[_p] = _last_seen_heading
@@ -13396,7 +13429,8 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         ordered = sorted(
             [h for h in raw_headings
              if isinstance(h.get("vertical_position"), (int, float))
-             and _is_sane_chem_heading(h.get("heading_text"))],
+             and _is_sane_chem_heading(h.get("heading_text"))
+             and _chem_heading_score(h) >= 1],
             key=lambda h: h["vertical_position"],
         )
         segments = None
