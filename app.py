@@ -13180,7 +13180,8 @@ def _build_chem_heading_scan_prompt_v2() -> str:
     which had zero isolation between segments and no error visibility
     when a stage silently returned empty). Same detection signals as the
     original chem prompt (bold-black + larger font + Bangla hierarchical
-    numbering ১.২/১.২.১), unchanged."""
+    numbering ১.২/১.২.১), plus an added left-aligned-above-content
+    position check as a supporting signal."""
     return (
         "Find ONLY genuine chapter/section-level headings on this page — ignore all body/paragraph text.\n\n"
         "‼️ HARD RULE — CHECK THIS FIRST, ALWAYS: if you see a heading line that is BOTH (a) BOLD BLACK "
@@ -13189,6 +13190,11 @@ def _build_chem_heading_scan_prompt_v2() -> str:
         "a genuine topic heading, no exceptions, regardless of whether it's a top-level (১.২) or a deeper "
         "sub-level (১.২.১) number. Every distinct number+heading is its own separate heading/topic boundary "
         "— do not merge a sub-level heading into its parent's group.\n\n"
+        "📍 POSITION CHECK (supporting signal): a genuine topic heading sits LEFT-ALIGNED, directly ABOVE "
+        "the paragraph/content it introduces — not centered, not indented to match a sub-point, not floating "
+        "beside body text. If a bold-larger-numbered candidate line is positioned to the left and immediately "
+        "above its own content block, that confirms it as a heading; a line that's centered mid-paragraph or "
+        "sits beside (not above) body text is more likely a stray bold phrase, not a real heading.\n\n"
         "If directly below the Bangla heading there is a second line giving the same topic name in English "
         "(usually smaller/lighter), include it in heading_text appended after the Bangla text separated by "
         "\" — \" (e.g. \"১.২.১ পরমাণুর গঠন — Structure of Atom\"). Its absence doesn't disqualify a heading "
