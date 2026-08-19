@@ -722,7 +722,9 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
             est_count = mcq_count_hint
         else:
-            est_count = 25  # default full-page mode target ceiling
+            est_count = 15  # 2026-08-19: lowered from 25, must match
+            # _post_openai_compat's default so the sizer and the actual
+            # request agree on est_output_tokens
         # Output tokens per MCQ — MUST match _post_openai_compat's
         # dynamic_max_tokens formula exactly (max(900, min(4500, count*180+300))),
         # since that's the actual max_tokens value sent to Groq and counted
@@ -2177,7 +2179,14 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
     elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
         est_count = mcq_count_hint
     else:
-        est_count = 25  # aligned with _img_to_data_url_groq's default
+        est_count = 15  # 2026-08-19: lowered from 25 -- default full-page
+        # estimate of 25 MCQs pushed dynamic_max_tokens to the 4500 cap,
+        # which alone (plus a Bangla-heavy prompt ~2000-2500 tokens) already
+        # exceeds the 8000 TPM budget before the image is even counted --
+        # this was the real cause of persistent 413s regardless of image
+        # compression. 15 keeps max_tokens well under the cap for the
+        # common case; genuinely large pages still get mcq_count_hint set
+        # explicitly by their caller and aren't affected by this default.
     dynamic_max_tokens = max(900, min(4500, int(est_count) * 190 + 400))
     payload = {
         "model": model,
