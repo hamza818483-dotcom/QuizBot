@@ -12482,29 +12482,19 @@ def _bio_filter_offtopic_mcqs(mcqs: list, heading_text: str) -> list:
     any MCQ whose question+options text shares NONE of the heading's
     keyword tokens with the heading name -- a signal the crop still
     leaked in neighboring-topic content that the model generated an MCQ
-    from. Deliberately lenient (keyword overlap, not strict matching) to
-    avoid false-positive drops of correctly-scoped MCQs that simply don't
-    repeat the topic name verbatim."""
-    kw = _bio_heading_keywords(heading_text)
-    if not kw or not mcqs:
-        return mcqs
-    kept = []
-    for m in mcqs:
-        blob = " ".join([
-            str(m.get("question", "")),
-            " ".join(str(o) for o in (m.get("options") or [])),
-        ]).lower()
-        if any(w in blob for w in kw):
-            kept.append(m)
-        else:
-            # No keyword overlap at all with the topic name -- flag rather
-            # than silently drop, since a legitimately on-topic MCQ can
-            # still fail this loose check (e.g. topic named by a
-            # transliterated term the MCQ paraphrases). Keep it but log so
-            # real leakage cases are visible for review.
-            logger.warning(f"[BIO verify] MCQ possibly off-topic for '{heading_text}': {str(m.get('question',''))[:60]}")
-            kept.append(m)
-    return kept
+    from.
+
+    NOTE: kept as a NO-OP pass-through. In practice, MCQs legitimately
+    about the heading's topic routinely don't repeat the exact heading
+    word (e.g. a "Peroxisome" heading's content covers glyoxysome,
+    catalase, beta-oxidation -- all genuinely part of that topic but none
+    literally containing "peroxisome"), so a keyword-overlap check flags
+    correct MCQs as false positives far more often than it catches real
+    leakage. The crop itself (bounded by the next heading's detected
+    vertical_position) is the real isolation mechanism; this function is
+    left in place only as a hook if a more reliable check is added later.
+    """
+    return mcqs
 
 
 async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None) -> list:
