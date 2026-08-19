@@ -887,6 +887,7 @@ def _build_chok_prompt(topic: str) -> str:
 
 _BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
 _BIO_MODE = contextvars.ContextVar("bio_mode", default=False)
+_CHEM_MODE = contextvars.ContextVar("chem_mode", default=False)
 
 def _build_bangla_prompt(topic: str) -> str:
     """
@@ -3856,42 +3857,45 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
     # Groq's result is used whenever Groq succeeds, with no latency penalty
     # from waiting on Gemini.
     #
-    # EXCEPTION: /extra flips this order (Gemini primary, Groq fallback) --
-    # this mode depends entirely on correctly distinguishing hand-marked
-    # (highlighter/pen) content from plain printed text, a fine-grained
-    # visual-detail task where Gemini's vision tends to be more reliable
-    # than Groq's vision models, per explicit user preference for this mode.
+    # EXCEPTION: /extra, /bio, /chem flip this order (Gemini primary, Groq
+    # fallback) -- /extra depends on correctly distinguishing hand-marked
+    # (highlighter/pen) content from plain printed text; /bio and /chem
+    # depend on fine-grained heading/boundary + subject-content detail
+    # where Gemini's vision tends to be more reliable than Groq's vision
+    # models, per explicit user preference for these modes.
     _LAST_GROQ_ERROR["reason"] = ""
     _LAST_GEMINI_ERROR["reason"] = ""
     _LAST_FALLBACK_ERROR["reason"] = ""
 
-    if _EXTRA_MODE.get():
+    _gemini_primary_mode = _EXTRA_MODE.get() or _BIO_MODE.get() or _CHEM_MODE.get()
+    if _gemini_primary_mode:
+        _gp_tag = "/extra" if _EXTRA_MODE.get() else ("/bio" if _BIO_MODE.get() else "/chem")
         try:
             gemini_out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
         except Exception as e:
             _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"
             classify_ai_error(e, "gemini", page_num)
-            logger.warning(f"[AI-ROT] /extra gemini (primary) failed (page {page_num}): {e}")
+            logger.warning(f"[AI-ROT] {_gp_tag} gemini (primary) failed (page {page_num}): {e}")
             gemini_out = []
 
         if gemini_out:
-            logger.info(f"[AI-ROT] /extra page {page_num} satisfied by provider=gemini (primary)")
+            logger.info(f"[AI-ROT] {_gp_tag} page {page_num} satisfied by provider=gemini (primary)")
             _track_provider_use("gemini", page_num)
             for _m in gemini_out:
                 _m.setdefault("_provider", "Gemini")
             return gemini_out, set()
 
-        logger.warning(f"[AI-ROT] /extra gemini empty (page {page_num}); trying groq")
+        logger.warning(f"[AI-ROT] {_gp_tag} gemini empty (page {page_num}); trying groq")
         try:
             groq_out, groq_tried = await _gen_groq(img, topic, mcq_count, exclude_keys=exclude_groq_keys, key_offset=key_offset)
         except Exception as e:
             _LAST_GROQ_ERROR["reason"] = f"{type(e).__name__}: {e}"
             classify_ai_error(e, "groq", page_num)
-            logger.warning(f"[AI-ROT] /extra groq (fallback) failed (page {page_num}): {e}")
+            logger.warning(f"[AI-ROT] {_gp_tag} groq (fallback) failed (page {page_num}): {e}")
             groq_out, groq_tried = [], set()
 
         if groq_out:
-            logger.info(f"[AI-ROT] /extra page {page_num} satisfied by provider=groq (fallback)")
+            logger.info(f"[AI-ROT] {_gp_tag} page {page_num} satisfied by provider=groq (fallback)")
             _track_provider_use("groq", page_num)
             for _m in groq_out:
                 _m.setdefault("_provider", "Groq")
@@ -16054,7 +16058,11 @@ async def handle_chem(msg: dict):
             pass
     async with lock:
         _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
-        return await _handle_chem_impl(msg)
+        token = _CHEM_MODE.set(True)
+        try:
+            return await _handle_chem_impl(msg)
+        finally:
+            _CHEM_MODE.reset(token)
 
 
 async def _handle_chem_impl(msg: dict):
