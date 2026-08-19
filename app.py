@@ -3488,7 +3488,18 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         elif _BIO_MODE.get():
             # /bio, like /bangla, is maximum-source-utilization with no cap
             # -- topic-wise full coverage, not a fixed page target.
-            _rng_min, _rng_max = MIN_MCQ, None
+            # 2026-08-20: floor dropped MIN_MCQ(10) -> 1. /bio crops the
+            # page PER TOPIC SEGMENT (see _bio_generate_per_topic_pages),
+            # so a single call here is often just ONE small topic's worth
+            # of content -- genuinely 3-9 MCQs for a short topic, not a
+            # full page. The old MIN_MCQ=10 floor forced up to 2 extra
+            # retry calls (3x key usage) on every small segment trying to
+            # pad it up to 10, even though the segment simply doesn't have
+            # 10 facts worth covering. Model already extracts max possible
+            # from the given crop (that instruction lives in the /bio
+            # prompt itself) -- the floor was pure wasted key spend, not
+            # improving coverage.
+            _rng_min, _rng_max = 1, None
         else:
             _rng_min, _rng_max = MIN_MCQ, MAX_MCQ
 
