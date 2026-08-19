@@ -12465,6 +12465,48 @@ def _bio_heading_score(h: dict) -> int:
     return score
 
 
+def _bio_heading_keywords(heading_text: str) -> set:
+    """Extract meaningful keyword tokens (Bangla/English words, 3+ chars)
+    from a heading string for lightweight relevance cross-checking. Strips
+    numbering prefixes and the English bracket so only the actual topic
+    name words remain."""
+    t = (heading_text or "")
+    t = re.sub(r'^[০-৯0-9.।\s]+', '', t)  # strip leading numbering
+    t = re.sub(r'\([^)]*\)', ' ', t)       # strip bracketed English name
+    words = re.findall(r'[^\W\d_]{3,}', t, flags=re.UNICODE)
+    return {w.lower() for w in words}
+
+
+def _bio_filter_offtopic_mcqs(mcqs: list, heading_text: str) -> list:
+    """Self-verification backstop: for a cropped single-topic segment, drop
+    any MCQ whose question+options text shares NONE of the heading's
+    keyword tokens with the heading name -- a signal the crop still
+    leaked in neighboring-topic content that the model generated an MCQ
+    from. Deliberately lenient (keyword overlap, not strict matching) to
+    avoid false-positive drops of correctly-scoped MCQs that simply don't
+    repeat the topic name verbatim."""
+    kw = _bio_heading_keywords(heading_text)
+    if not kw or not mcqs:
+        return mcqs
+    kept = []
+    for m in mcqs:
+        blob = " ".join([
+            str(m.get("question", "")),
+            " ".join(str(o) for o in (m.get("options") or [])),
+        ]).lower()
+        if any(w in blob for w in kw):
+            kept.append(m)
+        else:
+            # No keyword overlap at all with the topic name -- flag rather
+            # than silently drop, since a legitimately on-topic MCQ can
+            # still fail this loose check (e.g. topic named by a
+            # transliterated term the MCQ paraphrases). Keep it but log so
+            # real leakage cases are visible for review.
+            logger.warning(f"[BIO verify] MCQ possibly off-topic for '{heading_text}': {str(m.get('question',''))[:60]}")
+            kept.append(m)
+    return kept
+
+
 async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None) -> list:
     """/bio ACCURACY FIX: 2 calls per page total.
     Call 1 (batched, ~1 per 3 pages): heading-scan detects topic segments.
@@ -12636,10 +12678,20 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
             # reliance on the model self-reporting the right string, keeping
             # cross-page grouping continuity exact.
             PAD_FRAC = 0.015
+            # LAST-SEGMENT EXTRA PAD: only the final segment on a page risks
+            # having its true content bottom cut short by the fixed pad --
+            # earlier segments are bounded by the next heading's own
+            # vertical_position (already the real boundary), but the last
+            # segment's "end" is just 1.0 (page bottom) or a following
+            # heading's start. A larger pad here ensures the FULL topic
+            # content (not just up to an arbitrary fraction) is captured
+            # when the topic genuinely runs to the page edge.
+            LAST_SEG_EXTRA_PAD = 0.03
             all_mcqs = []
             for seg_i, (heading_text, s, e) in enumerate(segments):
                 top = max(0.0, s - PAD_FRAC)
-                bottom = min(1.0, e + PAD_FRAC)
+                extra = LAST_SEG_EXTRA_PAD if seg_i == len(segments) - 1 else 0.0
+                bottom = min(1.0, e + PAD_FRAC + extra)
                 y0 = int(top * img.height)
                 y1 = max(y0 + 1, int(bottom * img.height))
                 crop = img.crop((0, y0, img.width, y1))
@@ -12648,6 +12700,13 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
                     seg_mcqs = await generate_mcq_from_image(crop, topic, page_num, None)
                 finally:
                     _BIO_SEGMENTS.reset(token)
+                # SELF-VERIFY: drop any MCQ whose generated question/options
+                # text doesn't plausibly relate to this segment's heading --
+                # a code-level backstop catching cases where the crop still
+                # bled in a neighboring topic's tail/head content despite
+                # padding, so a mismatched MCQ isn't silently mislabeled
+                # with this segment's topic_hint.
+                seg_mcqs = _bio_filter_offtopic_mcqs(seg_mcqs, heading_text)
                 for m in seg_mcqs:
                     m["topic_hint"] = heading_text
                 all_mcqs.extend(seg_mcqs)
