@@ -906,7 +906,13 @@ async def generate_mcq_from_image(
                 # was killing successful-but-slow responses, not just genuinely
                 # stuck ones. 60s/45s gives real generations room to finish
                 # while still bounding worst-case wait per attempt.
-                _attempt_timeout = 60 if attempt == 0 else 45
+                # Shortened from 60s/45s (2026-08-19): during real Gemini
+                # outages every attempt was timing out at full length,
+                # burning ~2.5min across 3 attempts before Groq fallback
+                # ever ran. 35s/25s still gives normal slow generations
+                # room to finish while failing fast when Gemini is actually
+                # down, so /bio etc. reach the working fallback sooner.
+                _attempt_timeout = 35 if attempt == 0 else 25
                 response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 valid = _parse_mcq_json(response.text)
                 if not valid:

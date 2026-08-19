@@ -704,20 +704,21 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             # errors on pages with many MCQs. Detect Bangla content (any char
             # in the Bengali Unicode block) and use a much tighter ratio.
             _has_bangla = any('\u0980' <= ch <= '\u09FF' for ch in prompt_len_hint[:500])
-            _chars_per_token = 1.6 if _has_bangla else 2.6
+            _chars_per_token = 1.45 if _has_bangla else 2.6  # 2026-08-19: 1.6
+            # still undercounted real Groq tokenization on Bangla /bio
+            # prompts (observed Requested 8411/8000) — tightened further
             PROMPT_TOKENS = max(400, int(len(prompt_len_hint) / _chars_per_token) + 300)
         else:
             # Measured from the compacted static QBM_EXTRACT_PROMPT_DEFAULT
             # (~8k chars / 3.5) + margin. Only accurate for that fixed prompt.
             PROMPT_TOKENS = 2400
-        SAFETY_MARGIN = 1500  # 2026-08-07: 2200 + 4500-cap output left almost no
-        # image budget for /tf's long Bangla prompt (~1850 tokens with the
-        # min/max hint prefix) — reserved total hit 7943/8000, so the image
-        # got squeezed to the 300-token floor and requests still landed at
-        # ~7500+/8000, causing live 429 TPM errors. Lowered output cap
-        # (150/MCQ, max 3500) + this smaller margin restores real headroom
-        # (~1350 tokens for the image) while still leaving buffer for
-        # rotator-collision retries.
+        SAFETY_MARGIN = 2000  # 2026-08-19: /bio 413 logs showed Requested
+        # 8411/8000 even with the 1500 margin — real Groq-side token counting
+        # (tokenizer + request framing overhead) runs higher than this
+        # estimator predicts, especially for Bangla-heavy prompts. Raised
+        # 1500->2000 (extra 500 headroom) so the image gets squeezed harder
+        # BEFORE the request is sent, instead of relying on the 413 shrink-
+        # retry path to recover after the fact.
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
