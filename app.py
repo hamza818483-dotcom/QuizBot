@@ -13672,6 +13672,9 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
     start_time = time.time()
     total_mcq = 0
+    clear_cancel(chat_id)
+    new_job_id(chat_id)
+    set_active_job(chat_id, "/chem MCQ generation")
     _chem_dash_lock = asyncio.Lock()
     _chem_last_dash_text = [None]
 
@@ -13745,6 +13748,9 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         3-provider fallback chain /chem always used (Gemini -> Groq ->
         OpenRouter), with WARNING-level stage logging kept from the
         debug pass so genuinely-empty results stay diagnosable."""
+        _current_job_chat_id_ctx.set(chat_id)
+        if is_cancelled(chat_id):
+            return []
         try:
             gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
             mcqs = _qbm_dedup_list(gem) if gem else []
@@ -13902,6 +13908,8 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
 
     async def _guarded(unit):
         async with sem:
+            if is_cancelled(chat_id):
+                return
             if unit[0] == "single":
                 _, idx, pn, img, segs = unit
                 await _run_single_page(idx, pn, img, segs)
@@ -13913,6 +13921,20 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     for _u, _r in zip(_units, _gather_results):
         if isinstance(_r, Exception):
             logger.warning(f"[CHEM-GEN v2] unit {_u[0]} pages={_u[1:3]}: unit-level exception {type(_r).__name__}: {_r} -- results for this unit may be incomplete, other pages unaffected.")
+    clear_active_job(chat_id)
+    if is_cancelled(chat_id) and status_msg_id:
+        # Keep the dashboard's last state visible (stats intact) instead of
+        # silently letting a later unrelated edit wipe it -- just append a
+        # clear "stopped" notice so the numbers the user was watching stay
+        # on screen exactly as they were when Cancel was pressed.
+        try:
+            text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0)
+            if _topics_block:
+                text = text + "\n━━━━━━━━━━━━━━━━━━━━━━\n" + _topics_block
+            text = text + "\n\n🛑 এই কাজ বাতিল করা হয়েছে।"
+            await edit_msg(chat_id, status_msg_id, text)
+        except Exception:
+            pass
     return results
 
 
@@ -17264,6 +17286,14 @@ async def _handle_chem_impl(msg: dict):
         extracted_pages = await _chem_generate_per_topic_pages(
             chat_id, pages, "Chem Generate", status_msg_id
         )
+
+        if is_cancelled(chat_id):
+            # Job was stopped mid-generation -- final dashboard state (with
+            # the "🛑 বাতিল করা হয়েছে" notice) is already left on screen by
+            # _chem_generate_per_topic_pages, so don't overwrite it with any
+            # further status edit or continue to CSV/poll sending.
+            clear_cancel(chat_id)
+            return
 
         total_mcq_found = sum(
             1 for _, _, mcqs in extracted_pages for m in mcqs if "trailing_topic_marker" not in m
