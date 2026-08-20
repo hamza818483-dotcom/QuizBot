@@ -14465,6 +14465,16 @@ async def _qbm_openrouter_call(img, prompt: str) -> str:
     keys = rotator.ordered_keys() if rotator else []
     if not keys:
         return ""
+    # Same skip-exhausted-first system Gemini/Groq already use: without this,
+    # every already-known-dead key gets a live retry (x3 models each) on
+    # every single call, wasting real time for a predictable 429 outcome.
+    now = time.time()
+    live_keys = [k for k in keys if rotator._cooldown_until.get(k, 0) <= now]
+    if live_keys:
+        keys = live_keys
+    else:
+        logger.warning("[QBM-OpenRouter] all keys cooling/exhausted — skipping call")
+        return ""
     for model in _OPENROUTER_VISION_MODELS:
         for key in keys:
             if is_cancelled():
