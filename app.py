@@ -9938,6 +9938,8 @@ async def extra_generate_all_pages(
                     # Whole batched call had a technical failure (no
                     # provider answered at all) -- fall back to the old
                     # single-image path for this page as a safety net.
+                    # (This path already runs _extra_marking_audit inside
+                    # _extra_gen_from_image, so no need to audit again.)
                     try:
                         mcqs, _, _ = await _extra_gen_from_image(img, topic, page_num)
                     except asyncio.CancelledError:
@@ -9945,6 +9947,18 @@ async def extra_generate_all_pages(
                     except Exception as e:
                         logger.error(f"[Extra Generate] fallback single-page {page_num} failed: {e}")
                         mcqs = []
+                elif mcqs:
+                    # Batch path succeeded -- still run the SAME strict
+                    # second-pass marking audit the single-page path uses,
+                    # so both paths enforce identical rules (drop any MCQ
+                    # traced to unmarked/plain text).
+                    try:
+                        mcqs = await _extra_marking_audit(mcqs, img, topic, page_num)
+                        mcqs = _validate_mcq_structure(mcqs)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"[Extra Generate] audit page {page_num} skipped: {e}")
                 pair_results.append((page_num, img, mcqs))
 
             if is_cancelled(chat_id):
