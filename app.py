@@ -16385,11 +16385,16 @@ async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str) 
 সঠিক উত্তর: {answer_letter}
 
 Write a Bengali explanation in STEP-BY-STEP format, each step on its own separate line (use actual newlines, not one paragraph):
+
+IF this is a MATH/NUMERICAL/CALCULATION question: show the WORKED SOLUTION step-by-step (given values -> formula -> substitution -> result), one step per line, ending with the final answer matching option {answer_letter}. Do not skip steps.
+
+IF this is a CONCEPTUAL/FACTUAL question:
 Line 1 (MAIN line, max ~200 characters): why the correct option ({answer_letter}) is right, plain direct fact like a textbook.
 Line 2 onward (one line per WRONG option, in order): briefly what that option actually is/means and why it's wrong here, specific fact each time -- never a bare "ভুল" with no reason.
+
 NEVER mention the source, page, answer key, or how the answer was determined. Output ONLY the explanation text (with real line breaks), nothing else."""
         txt = (await _qbm_groq_text_call(prompt)).strip()
-        return txt[:600]
+        return txt[:800]
     except Exception as e:
         logger.warning(f"[QBM] Explanation build failed: {e}")
         return ""
@@ -18019,9 +18024,17 @@ def _onu_filter_mcqs(mcqs: list):
 # /onu's job and were only bloating the prompt for QBM's use case.
 _EXPLANATION_DEPTH_RULE = """
 EXPLANATION FORMAT (always, whenever you write/generate an explanation yourself rather than copying page text verbatim): write it STEP-BY-STEP, each step on its OWN separate line (use \\n between steps, not one run-on paragraph):
+
+FOR MATH/NUMERICAL/CALCULATION questions (the question requires solving, computing, or deriving a numeric/formula-based result): show the actual WORKED SOLUTION step-by-step, one calculation step per line, e.g.:
+Line 1: given values / what's being found.
+Line 2 onward: each calculation step in order (formula used -> substitution -> result), one step per line, ending with the final answer matching the correct option.
+Do NOT skip steps or jump straight to the answer -- a student should be able to follow the math line by line.
+
+FOR CONCEPTUAL/FACTUAL questions (non-numerical): 
 Line 1 (MAIN explanation — why the correct option is right, tied to the question's context/subject): keep this line within ~200 characters, since this is the core answer and must survive on its own.
 Line 2 onward (one line per wrong option, in order): briefly state what that option actually is/means and why it doesn't fit this question, using real distinguishing facts (never a bare "ভুল"/"incorrect" with no reason).
-Never a single generic one-line filler; every option gets real, specific content. No headings/labels like "Step 1:" — just the plain lines separated by \\n."""
+
+Never a single generic one-line filler; every option/step gets real, specific content. No headings/labels like "Step 1:" — just the plain lines separated by \\n."""
 
 _MATH_UNICODE_RULE = """
 MATH/CHEMISTRY FORMATTING (always, in question/options/explanation): NEVER output raw LaTeX commands (no \\vec, \\hat, \\frac, \\sqrt, \\sum, \\int, ^, _, {, } used as LaTeX syntax) — always convert to proper Unicode instead:
@@ -19203,7 +19216,7 @@ async def _onu2_finish_from_missed(img, call1: list, missed: list, skip_key_chec
         # mid-step. Cap only the total length (generous, covers 4 lines)
         # and, if it must cut, cut at the last full line break so no
         # step is left mid-sentence.
-        MAX_EXPLANATION_LEN = 600
+        MAX_EXPLANATION_LEN = 800  # raised to fit multi-step math solutions
         if len(exp) > MAX_EXPLANATION_LEN:
             cut = exp[:MAX_EXPLANATION_LEN]
             last_nl = cut.rfind("\n")
