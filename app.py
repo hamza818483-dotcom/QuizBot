@@ -1675,6 +1675,28 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"each MCQ, verify: 'is this fact actually visible in the image I was "
         f"given?' — if the honest answer is no, delete that MCQ.\n\n"
 
+        f"🚨 SOURCE-GROUNDING LOCK (ABSOLUTE, HIGHEST PRIORITY — overrides any "
+        f"count target below): EVERY MCQ must be built ONLY from facts/content "
+        f"actually visible on THIS page image. Do NOT invent, assume, or pull in "
+        f"outside facts, unrelated topics, or generic textbook knowledge that "
+        f"is not genuinely present on this specific page — even to hit a "
+        f"requested count. If the page's real content runs out before the "
+        f"count target is reached, STOP and output fewer MCQs; a smaller but "
+        f"100% source-grounded set is always correct, a padded set with "
+        f"fabricated/off-topic questions is NEVER acceptable.\n"
+        f"For EACH MCQ, also give 'source_verbatim': an 8-15 word snippet copied "
+        f"EXACTLY (character-for-character, same script) from THIS page image "
+        f"that the MCQ's core fact came from — this must be text a human could "
+        f"find by Ctrl+F on the actual page. Then give 'verified': true only if "
+        f"you personally re-checked that source_verbatim truly appears on this "
+        f"page and the MCQ is fully supported by it; if you are not certain, or "
+        f"the fact isn't really there, set 'verified': false instead of "
+        f"guessing or forcing it true — a false MCQ will simply be dropped "
+        f"downstream, which is the correct/safe outcome, never a failure to "
+        f"avoid. Before finalizing each MCQ, ask yourself: 'is source_verbatim "
+        f"an exact quote I can point to on this image?' — if not, delete the "
+        f"MCQ entirely rather than submitting it with a fabricated quote.\n\n"
+
         f"🟥 OVERALL RULES\n"
         f"- Generate MCQs from EVERY part of the image (ready-made-looking MCQs "
         f"or plain info) — nothing off-limits.\n"
@@ -1760,7 +1782,8 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"explanation text before the JSON — output must start IMMEDIATELY "
         f"with '[' and contain nothing but the JSON array. Schema:\n"
         f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
-        f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"exp_bbox\":[100,200,900,350]}}]"
+        f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"source_verbatim\":\"...\","
+        f"\"verified\":true,\"exp_bbox\":[100,200,900,350]}}]"
     )
 
 def _strip_q_numbering(q: str) -> str:
@@ -13636,6 +13659,50 @@ def _chem_heading_score(h: dict) -> int:
     return score
 
 
+def _chem_filter_verified_mcqs(mcqs: list, page_num) -> list:
+    """CODE-LEVEL enforcement of the SOURCE-GROUNDING LOCK -- the prompt
+    asks Gemini to self-report 'source_verbatim' (an exact quote from the
+    page) and 'verified' (its own honest re-check that the quote is real
+    and supports the MCQ) per MCQ, but a prompt instruction alone is not
+    enforcement: a model under count pressure can still emit 'verified':
+    true on a fabricated MCQ. This function is the actual gate -- it does
+    NOT trust 'verified' blindly, it requires BOTH:
+      1) verified is explicitly True (not missing, not falsy, not a string
+         "true" -- the model must emit the literal JSON boolean)
+      2) source_verbatim is present and non-trivial (>=4 chars) -- an
+         empty/missing quote means there is nothing to have verified
+         against in the first place, so it can never count as grounded
+         regardless of what 'verified' claims.
+    A dropped MCQ is logged (page + the fabricated question's start) so a
+    pattern of frequent drops on one page is visible for review, but is
+    otherwise silently removed -- per the SOURCE-GROUNDING LOCK, outputting
+    fewer MCQs is always the correct/safe outcome, never a bug to work
+    around. This never removes exp_bbox/topic_hint/qsn_no or any other
+    field -- source_verbatim/verified themselves are stripped from the
+    kept MCQ afterward since they're internal-only, never meant for the
+    final CSV/poll output."""
+    kept = []
+    dropped = 0
+    for m in mcqs:
+        verified = m.get("verified")
+        src = (m.get("source_verbatim") or "").strip()
+        if verified is True and len(src) >= 4:
+            m.pop("source_verbatim", None)
+            m.pop("verified", None)
+            kept.append(m)
+        else:
+            dropped += 1
+            q_preview = (m.get("question") or "")[:60]
+            logger.warning(
+                f"[CHEM SOURCE-GROUNDING] page {page_num}: dropped unverified/"
+                f"unsupported MCQ (verified={verified!r}, source_verbatim="
+                f"{src[:40]!r}) -- question: '{q_preview}'"
+            )
+    if dropped:
+        logger.warning(f"[CHEM SOURCE-GROUNDING] page {page_num}: {dropped}/{len(mcqs)} MCQ dropped as unverified/fabricated, {len(kept)} kept")
+    return kept
+
+
 async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None) -> list:
     """/chem GENERATION pipeline, rebuilt 2026-08-20 to mirror /bio's
     _bio_generate_per_topic_pages architecture exactly: Call 1 (batched
@@ -13828,18 +13895,21 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             try:
                 gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
                 mcqs = _qbm_dedup_list(gem) if gem else []
+                mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
                 if mcqs:
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini ({len(mcqs)} MCQ)")
                     return mcqs
                 logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini returned 0 MCQ, trying Groq")
                 txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
                 mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
+                mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
                 if mcqs:
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Groq ({len(mcqs)} MCQ)")
                     return mcqs
                 logger.warning(f"[CHEM-GEN v2] page {page_num}: Groq returned 0 MCQ, trying OpenRouter")
                 txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
                 mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
+                mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
                 if mcqs:
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via OpenRouter ({len(mcqs)} MCQ)")
                     return mcqs
