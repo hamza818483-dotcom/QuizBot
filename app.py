@@ -18560,6 +18560,41 @@ FORMATTING (apply to all question/option/explanation text above):
 OUTPUT — ONLY valid JSON object, nothing else, no markdown fences:
 {{"missed": [{{"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}], "answer_corrections": [{{"mcq_no":"...","correct_answer":"A/B/C/D"}}], "text_corrections": [{{"mcq_no":"...","corrected_question":"...","corrected_options":{{"B":"..."}}}}]}}"""
 
+ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL = """AUDIT PASS — this is a strict, independent re-check of {n} SEPARATE page images given to you in this SAME call (image order = page_index 1, 2, ... {n} — treat each page's audit completely independently, never mix pages) for the SOLE inclusion marker: a RED MARKING in the LEFT MARGIN around MCQ serial number(s) only (e.g. "১ক১", "1"). This marking can be a red boundary, red box, or red rectangle outline — all count as the same signal. The marking can be short (one number = one MCQ) or tall/vertical (spanning several consecutive numbers in the margin = all those consecutive MCQs included). Trace each margin marking's top/bottom edge carefully to see which numbers fall inside ON THAT SAME PAGE. A red mark NOT in the left margin (on question text, an option, a paragraph) does not count for inclusion.
+
+REMEMBER: the small red circle/dot marking one option's letter as the chosen answer is a COMPLETELY SEPARATE, unrelated mark from the left-margin inclusion marking. Never use it to decide inclusion, and never treat a missing/unclear option-mark as a reason an MCQ was correctly excluded — if its serial number is inside a left-margin marking, it belongs in the output regardless of its option-mark state.
+
+STRICT RULES, applied SEPARATELY per page:
+- Do not re-list any MCQ already in that page's existing list below.
+- Do not invent MCQs not printed on the page.
+- Only report an MCQ as missed if its serial number is genuinely inside a left-margin red marking ON THAT SAME PAGE.
+- SKIP any roman-numeral/serial-combination style MCQ that needs an উদ্দীপক (numbered statement list i/ii/iii or ১/২/৩ printed above it) to make sense — i.e. options like "i, ii" / "i ও ii" / "১, ৩" referring back to that list. Do not report these even if red-marked.
+- SKIP any MCQ with an IMAGE/DIAGRAM/FIGURE attached to its question, an option, or its explanation. Do not report these even if red-marked.
+- Every reported "missed" item MUST have all 8 fields (page_index, mcq_no, question, options, answer, marked_answer_wrong, no_mark, explanation) — incomplete items will be rejected downstream. Every "answer_corrections"/"text_corrections" item MUST have "page_index" so it can be matched back to the right page's existing MCQ (mcq_no alone can repeat across different pages).
+
+Already-extracted red-boxed MCQs, grouped by page_index, with the answer already recorded (do not re-list these in "missed", only find truly MISSED ones there; DO use "current_answer" for Task 2's answer audit):
+{existing_list}
+
+Do these 3 TASKS IN ORDER, for EACH page independently — each task is independent, do not blend them:
+
+TASK 1 — MCQ DETECTION (miss-check): This is a FULL AUDIT of each page — independently re-find every left-margin red box marking on that page (short, single-number boxes AND tall, multi-number boxes alike) and compare against that page's already-extracted list above. Report ANY red-marked MCQ, whether marked alone or as part of a group, that is missing from that page's list. Pay special attention to the middle/last numbers inside a tall group-box, since those are most often missed.
+If you find MISSED red-boxed MCQ(s) on a page, extract them fully into "missed" with the correct "page_index" (mcq_no, question, options A-D — same grid-layout label-mapping care as the first extraction pass).
+
+TASK 2 — ANSWER DETECTION (answer audit + missed-item answers): for entries with a "current_answer" field, re-check the red-circled option ON THEIR OWN PAGE and confirm the recorded letter matches. Same grid-layout care (2×2 grid: খ is right of ক, গ below ক, ঘ below খ — map by printed label, trace the circle's boundary against the actual grid before judging). Only report a mismatch in "answer_corrections" (with "page_index" + "correct_answer") if the circled-label read was genuinely wrong — never "correct" it just because another option also seems plausible. For any MISSED MCQ from Task 1, its "answer"/"marked_answer_wrong"/"no_mark" fields follow this same detection logic.
+
+TASK 3a — SPELLING/WORD-MISMATCH AUDIT: for each entry in each page's existing list, re-check its question text and option texts against that page's image and subject knowledge — is any word suspicious, out-of-context, or misspelled vs. what the page shows or correct subject terminology requires? Only report a genuine misread/misspelling (never rephrase/"improve" already-correct text, never touch correct numbers/units/proper nouns). Report in "text_corrections" by "page_index" + "mcq_no", with "corrected_question" (full corrected text, omit if question needed no fix) and/or "corrected_options" (object with only the affected letter(s), e.g. {{"B":"corrected option B text"}}, omit if no option needed a fix).
+
+TASK 3b — EXPLANATION (for any MISSED MCQ from Task 1, written after its Task 1 + Task 2 result is settled): use any ব্যাখ্যা text printed near it if present (verbatim, no rewrite), otherwise self-write following this structure:
+""" + _EXPLANATION_DEPTH_RULE_FMT_SAFE + """
+
+If nothing was missed and no answer mismatches or text corrections found on ANY page, return the empty-array structure shown below.
+
+FORMATTING (apply to all question/option/explanation text above):
+""" + _MATH_UNICODE_RULE_FMT_SAFE + """
+
+OUTPUT — ONLY valid JSON object covering ALL {n} pages together, nothing else, no markdown fences:
+{{"missed": [{{"page_index":1,"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}], "answer_corrections": [{{"page_index":1,"mcq_no":"...","correct_answer":"A/B/C/D"}}], "text_corrections": [{{"page_index":1,"mcq_no":"...","corrected_question":"...","corrected_options":{{"B":"..."}}}}]}}"""
+
 ONU2_ANSWER_KEY_PROMPT_TMPL = """This page may contain an ANSWER KEY / উত্তরমালা section — this is a small table or grid that appears AFTER an entire MCQ set ends (not beside or next to individual MCQs), mapping question numbers to their correct option letter (e.g. "১।(ক) ২।(খ) ৩।(খ)..." or a table with numbered cells each showing "১ (ক)" style entries). It is often on a LATER page than the MCQs it covers -- if this page has no MCQs at all but has such a table, that's expected, still check it.
 
 Here is a list of MCQs already extracted from red-marked regions (question number, a short snippet of the question text to confirm real content match, and the answer already determined from the red-circled option on the page):
@@ -18915,7 +18950,124 @@ async def _onu2_call2_misscheck(img, existing: list) -> list:
         return []
 
 
-async def _onu2_answer_key_check(img, mcqs: list) -> None:
+async def _onu2_call2_misscheck_batch(imgs: list, existing_by_index: dict) -> dict:
+    """Call2 BATCHED (2026-08-20) -- same 3-task AUDIT (miss-check +
+    answer-audit + spelling-audit) as _onu2_call2_misscheck, but scans
+    MULTIPLE consecutive page images in ONE model call, matching Call1's
+    batching. existing_by_index: {1-based page_index: [existing mcq
+    dicts for that page]} -- corrections are applied IN PLACE onto those
+    same lists (mutated), keyed by page_index+mcq_no since mcq_no alone
+    can repeat across different pages. Returns {page_index: [newly-found
+    missed mcqs for that page]}. Groq/OpenRouter fallback only ever sees
+    the FIRST image (same acceptable degradation as Call1's batch /
+    /bio's multi-image scan, for the rare full-Gemini-outage case)."""
+    n = len(imgs)
+    if n == 0:
+        return {}
+    try:
+        existing_payload = {
+            str(idx): [
+                {"mcq_no": m.get("mcq_no", ""), "question": (m.get("question") or "")[:100],
+                 "current_answer": m.get("answer", "")} for m in existing_by_index.get(idx, [])
+            ]
+            for idx in range(1, n + 1)
+        }
+        existing_brief = json.dumps(existing_payload, ensure_ascii=False)
+        prompt = ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL.format(n=n, existing_list=existing_brief)
+        txt = await _qbm_gemini_raw_multi(imgs, prompt)
+        if not txt:
+            txt = await _qbm_groq_call(imgs[0], prompt)
+        if not txt:
+            txt = await _qbm_openrouter_call(imgs[0], prompt)
+        if not txt:
+            return {}
+        parsed = _onu2_parse_call2_object(txt)
+
+        def _valid_idx(v):
+            return isinstance(v, (int, float)) and 1 <= int(v) <= n
+
+        # Apply answer-audit corrections in place onto the matching page's
+        # existing list, only on a genuine, valid A/B/C/D letter that
+        # differs from current.
+        for corr in parsed["answer_corrections"]:
+            if not _valid_idx(corr.get("page_index")):
+                continue
+            idx = int(corr["page_index"])
+            no = (corr.get("mcq_no") or "").strip()
+            new_ans = str(corr.get("correct_answer", "")).strip().upper()
+            if not no or new_ans not in ("A", "B", "C", "D"):
+                continue
+            for m in existing_by_index.get(idx, []):
+                if (m.get("mcq_no") or "").strip() == no and m.get("answer") != new_ans:
+                    logger.warning(f"[ONU2 batch] Call2 answer-audit correction: page_index={idx} mcq_no={no} {m.get('answer')} -> {new_ans}")
+                    m["answer"] = new_ans
+                    m["marked_answer_wrong"] = False
+                    m["_answer_source"] = "call2_audit_correction"
+
+        # Apply spelling/word-mismatch text corrections in place, same
+        # page_index+mcq_no matching.
+        for corr in parsed.get("text_corrections", []):
+            if not _valid_idx(corr.get("page_index")):
+                continue
+            idx = int(corr["page_index"])
+            no = (corr.get("mcq_no") or "").strip()
+            if not no:
+                continue
+            for m in existing_by_index.get(idx, []):
+                if (m.get("mcq_no") or "").strip() != no:
+                    continue
+                new_q = corr.get("corrected_question")
+                if new_q and str(new_q).strip():
+                    cleaned_q = _clean_mcq_text(_strip_q_numbering(str(new_q).strip()))
+                    if cleaned_q and cleaned_q != m.get("question"):
+                        logger.warning(f"[ONU2 batch] Call2 text-audit correction (question): page_index={idx} mcq_no={no}")
+                        m["question"] = cleaned_q
+                        m["_text_corrected"] = True
+                new_opts = corr.get("corrected_options")
+                if isinstance(new_opts, dict) and new_opts:
+                    opts = m.get("options")
+                    if isinstance(opts, dict):
+                        for letter, val in new_opts.items():
+                            letter = str(letter).strip().upper()
+                            if letter in ("A", "B", "C", "D") and val and str(val).strip():
+                                cleaned_opt = _clean_mcq_text(str(val).strip())
+                                if cleaned_opt and cleaned_opt != opts.get(letter):
+                                    logger.warning(f"[ONU2 batch] Call2 text-audit correction (option {letter}): page_index={idx} mcq_no={no}")
+                                    opts[letter] = cleaned_opt
+                                    m["_text_corrected"] = True
+                    elif isinstance(opts, list) and len(opts) == 4:
+                        _letter_idx = {"A": 0, "B": 1, "C": 2, "D": 3}
+                        for letter, val in new_opts.items():
+                            letter = str(letter).strip().upper()
+                            if letter in _letter_idx and val and str(val).strip():
+                                lidx = _letter_idx[letter]
+                                cleaned_opt = _clean_mcq_text(str(val).strip())
+                                if cleaned_opt and cleaned_opt != opts[lidx]:
+                                    logger.warning(f"[ONU2 batch] Call2 text-audit correction (option {letter}): page_index={idx} mcq_no={no}")
+                                    opts[lidx] = cleaned_opt
+                                    m["_text_corrected"] = True
+                break
+
+        missed = _onu2_filter_valid(parsed["missed"])
+        by_index_missed = {}
+        for m in missed:
+            if not _valid_idx(m.get("page_index")):
+                continue
+            idx = int(m["page_index"])
+            existing_keys = {(e.get("question") or "").strip()[:60] for e in existing_by_index.get(idx, [])}
+            if (m.get("question") or "").strip()[:60] in existing_keys:
+                continue  # false-positive re-detecting an already-found MCQ
+            m["_provider"] = "ONU2-misscheck"
+            by_index_missed.setdefault(idx, []).append(m)
+        for idx in list(by_index_missed.keys()):
+            by_index_missed[idx] = _qbm_dedup_list(by_index_missed[idx])
+        return by_index_missed
+    except Exception as e:
+        logger.warning(f"[ONU2 Call2 misscheck batch] failed: {e}")
+        return {}
+
+
+
     """Cross-checks extracted MCQs against a উত্তরমালা/answer-key table on
     the SAME page (if one exists). The red-circled option is the DEFAULT
     trusted answer (~99% of cases correct) -- this only overrides on a
@@ -18967,14 +19119,13 @@ async def _onu2_answer_key_check(img, mcqs: list) -> None:
         logger.warning(f"[ONU2 answer-key check] failed: {e}")
 
 
-async def _onu2_finish_page(img, call1: list) -> list:
-    """Shared tail of the /onu2 pipeline, given Call1's already-extracted
-    MCQs for this page (from either the single-image or the batched
-    Call1 path): Call2 (full-page audit -- finds any red-marked MCQ Call1
-    missed, single or grouped; ALSO re-confirms Call1's answer reads and
-    corrects genuine misreads in place) -> answer-key cross-check on this
-    same page -> final re-validation -> explanation safety-net fill."""
-    missed = await _onu2_call2_misscheck(img, call1)
+async def _onu2_finish_from_missed(img, call1: list, missed: list) -> list:
+    """Tail of the /onu2 pipeline given Call1's MCQs AND Call2's
+    already-computed missed-list for this page (used by both the
+    single-page and the batched-Call2 paths, so the post-Call2 steps
+    -- answer-key check, validation, explanation fill -- are never
+    duplicated): answer-key cross-check on this same page -> final
+    re-validation -> explanation safety-net fill."""
     combined = call1 + missed
     if not combined:
         return []
@@ -19002,6 +19153,17 @@ async def _onu2_finish_page(img, call1: list) -> list:
     return combined
 
 
+async def _onu2_finish_page(img, call1: list) -> list:
+    """Shared tail of the /onu2 pipeline for the SINGLE-PAGE path, given
+    Call1's already-extracted MCQs for this page: Call2 (full-page audit
+    -- finds any red-marked MCQ Call1 missed, single or grouped; ALSO
+    re-confirms Call1's answer reads and corrects genuine misreads in
+    place) -> _onu2_finish_from_missed (answer-key check + validation +
+    explanation fill)."""
+    missed = await _onu2_call2_misscheck(img, call1)
+    return await _onu2_finish_from_missed(img, call1, missed)
+
+
 async def _onu2_extract_from_image(img) -> list:
     """/onu2's fully independent extraction pipeline for a single page
     (used for image-reply /onu2 calls, and as a fallback path). Steps:
@@ -19017,15 +19179,15 @@ async def _onu2_extract_from_image(img) -> list:
 
 
 async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_id: int = None) -> list:
-    """/onu2 PDF pipeline (2026-08-20): Call1 now runs on PAIRS of
-    consecutive pages in ONE batched multi-image call (same red-box
-    detection rules applied independently per page inside that call --
-    see ONU2_CALL1_PROMPT_BATCHED_TMPL), cutting Call1's page-level API
-    calls roughly in half. Call2 (full audit + answer-mark re-confirm)
-    stays a full, independent, PER-PAGE single-image call exactly as
-    before -- only Call1 is paired. Returns the same (page_num, img, mcqs)
-    tuple list shape the rest of /onu2's CSV/channel output already
-    expects."""
+    """/onu2 PDF pipeline (2026-08-20): BOTH Call1 (initial extraction)
+    AND Call2 (full audit + answer-mark re-confirm) now run on PAIRS of
+    consecutive pages in ONE batched multi-image call each (same
+    detection/audit rules applied independently per page inside each
+    batched call -- see ONU2_CALL1_PROMPT_BATCHED_TMPL and
+    ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL), cutting BOTH call types'
+    page-level API calls roughly in half. Returns the same (page_num,
+    img, mcqs) tuple list shape the rest of /onu2's CSV/channel output
+    already expects."""
     PAIR_SIZE = 2
     pairs = [pages[i:i + PAIR_SIZE] for i in range(0, len(pages), PAIR_SIZE)]
     results = [None] * len(pages)
@@ -19047,10 +19209,14 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
         await _qbm_ram_aware_acquire()
         try:
             imgs = [img for _, img in pair]
-            by_index = await _onu2_call1_extract_batch(imgs)
+            call1_by_index = await _onu2_call1_extract_batch(imgs)
+            for i in range(1, len(pair) + 1):
+                call1_by_index.setdefault(i, [])
+            missed_by_index = await _onu2_call2_misscheck_batch(imgs, call1_by_index)
             for i, (page_num, img) in enumerate(pair, start=1):
-                call1 = by_index.get(i, [])
-                mcqs = await _onu2_finish_page(img, call1)
+                call1 = call1_by_index.get(i, [])
+                missed = missed_by_index.get(i, [])
+                mcqs = await _onu2_finish_from_missed(img, call1, missed)
                 global_idx = pair_idx * PAIR_SIZE + (i - 1)
                 results[global_idx] = (page_num, img, mcqs)
                 async with _lock:
