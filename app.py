@@ -13862,11 +13862,26 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         heading2 = seg2[0][0]
         is_carried = bool(seg1[0][3]) or bool(seg2[0][3])
 
-        if heading1 != heading2:
-            # Different topics -- no reliable deterministic split exists
-            # for a combined-call result, so don't combine: this is the
-            # ONLY topic-detection-safe choice, not a fallback-after-try.
-            logger.info(f"[CHEM-PAIR] pages {page_num1}+{page_num2}: confirmed different headings at combine-time ('{heading1[:40]}' vs '{heading2[:40]}') -- falling back to separate per-page calls")
+        # HARD SAFETY NET (2026-08-20): a reported case showed pages with
+        # visibly different headings still reaching the combined-call path
+        # despite the heading1 != heading2 check below -- root cause never
+        # fully pinned, but the consequence is severe: page2's real topic
+        # gets mislabeled as page1's heading (composite call only ever
+        # tags results with heading1), so page2's actual topic silently
+        # has ZERO correctly-tagged MCQ anywhere, even after reconciliation
+        # retries it (the retry recovers content but the original
+        # mis-tagged MCQs from the wrongly-combined call remain sitting in
+        # page1's group too, since nothing removes them).
+        # Do a strict .strip() re-normalize + explicit non-empty check
+        # here as well, so even if seg1/seg2 upstream somehow carried
+        # equal-looking-but-different text, this is the last line of
+        # defense before a combined call is ever issued.
+        h1_norm = (heading1 or "").strip()
+        h2_norm = (heading2 or "").strip()
+        if not h1_norm or not h2_norm or h1_norm != h2_norm:
+            if h1_norm != heading1 or h2_norm != heading2:
+                logger.warning(f"[CHEM-PAIR] pages {page_num1}+{page_num2}: heading had un-stripped whitespace -- treating as DIFFERENT to be safe ('{heading1[:40]}' vs '{heading2[:40]}')")
+            logger.info(f"[CHEM-PAIR] pages {page_num1}+{page_num2}: confirmed different/empty headings at combine-time ('{heading1[:40]}' vs '{heading2[:40]}') -- falling back to separate per-page calls")
             await asyncio.gather(
                 _run_single_page(idx1, page_num1, img1, seg1),
                 _run_single_page(idx2, page_num2, img2, seg2),
