@@ -13447,14 +13447,29 @@ def _ocr_chem_heading_candidates(img) -> list:
             bangla_words = re.findall(r'[\u0980-\u09FF]{3,}', rest_part)
             if not bangla_words:
                 continue
-            # Signal 2 (REQUIRED): the immediate next OCR line must be
-            # recognizably English script.
-            if idx + 1 >= len(ordered_lines):
-                continue
-            next_text = ordered_lines[idx + 1][1].strip()
-            if not _ENGLISH_LINE_RE.match(next_text):
-                continue
-            heading_text = f"{text} — {next_text}"
+            # Signal 2 (preferred, not required): the immediate next OCR
+            # line being recognizably English script is strong confirmation
+            # and gets appended to the heading text. But requiring it
+            # outright meant a real numbered heading whose English subtitle
+            # was OCR-garbled, wrapped to a further line, or simply absent
+            # for that heading's style was silently invisible to BOTH the
+            # Gemini scan (its own documented miss case) and this OCR
+            # fallback -- a heading no detection layer ever saw can't be
+            # caught by reconciliation either, since reconciliation only
+            # checks topics that were detected in the first place. A
+            # numbered heading + real Bangla words is already a strong
+            # signal on its own (this is exactly signal 1+1b+bangla-word
+            # filtering above) -- keep it as a lower-confidence candidate
+            # (bangla_number_prefix True, but flagged) instead of dropping
+            # it outright. _chem_heading_score's >=1 threshold and the
+            # existing merge/DIFFERENT-heading safety nets still guard
+            # against false positives downstream.
+            has_english_next = False
+            if idx + 1 < len(ordered_lines):
+                next_text = ordered_lines[idx + 1][1].strip()
+                if _ENGLISH_LINE_RE.match(next_text):
+                    has_english_next = True
+            heading_text = f"{text} — {next_text}" if has_english_next else text
             vpos = max(0.0, min(1.0, avg_top / img_h))
             candidates.append({
                 "heading_text": heading_text,
@@ -13463,6 +13478,7 @@ def _ocr_chem_heading_candidates(img) -> list:
                 "bangla_number_prefix": True,
                 "left_aligned_above_content": None,
                 "_source": "ocr",
+                "_ocr_no_english_confirm": not has_english_next,
             })
         return candidates
     except Exception as e:
