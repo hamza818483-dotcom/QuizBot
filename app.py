@@ -1206,10 +1206,12 @@ def _build_bio_prompt(topic: str) -> str:
         f"sub-statements.\n\n"
 
         f"═══════════════════════════════\n"
-        f"🟥 MUST-PRIORITY — marked/highlighted content\n"
+        f"🟥 MUST-PRIORITY — marked/highlighted content (covered FIRST)\n"
         f"═══════════════════════════════\n"
         f"Any line/paragraph highlighted, boxed, circled, or underlined in ANY color always gets an "
-        f"MCQ, in addition to normal coverage above.\n\n"
+        f"MCQ, in addition to normal coverage above. These marked lines are PRIORITY ORDER — cover "
+        f"them FIRST within their topic segment, before other unmarked content in the same segment, "
+        f"so a marked line is never skipped, delayed, or crowded out.\n\n"
 
         f"═══════════════════════════════\n"
         f"💥 প্রশ্ন / অপশন / উত্তর / ব্যাখ্যা — same quality bar as standard MCQ generation\n"
@@ -17291,7 +17293,110 @@ async def handle_bio(msg: dict):
             _BIO_MODE.reset(token)
 
 
-async def _handle_bio_impl(msg: dict):
+async def handle_biot(msg: dict):
+    """/biot -p (pages) [-m "Subject"] — DIAGNOSTIC ONLY, Call1 of /bio.
+    Runs ONLY the heading-scan stage (same _bio_generate_per_topic_pages
+    scan logic /bio uses internally) — no MCQ generation, no CSV output.
+    Reports whether the scan is working (yes/no per page) and the exact
+    list of topics it detected, so topic-detection health can be verified
+    without burning a full /bio generation run."""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF-এ reply করে /biot দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/biot -p 1-10</code>\n\n"
+            "📌 শুধু Call1 (heading-scan) চালায় — MCQ generate করে না, CSV পাঠায় না। "
+            "কোন কোন page-এ topic detect হলো আর কোন heading গুলো ধরলো তার list দেখায়।\n"
+            "📌 -p = page range (না দিলে সব page)"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+    params = _parse_pdfm_params(text)
+    page_range = params["page_range"]
+
+    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
+    status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n🔎 Heading-scan (Call1 only) হচ্ছে...")
+
+        BATCH_SIZE = 3
+        batches = [pages[i:i + BATCH_SIZE] for i in range(0, len(pages), BATCH_SIZE)]
+        headings_by_page = {}
+
+        async def _scan_batch(batch):
+            page_nums = [pn for pn, _ in batch]
+            imgs = [img for _, img in batch]
+            try:
+                prompt = _build_bio_heading_scan_prompt_batched(len(batch))
+                scan_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+                all_headings = _parse_bio_heading_scan(scan_txt)
+            except Exception as e:
+                logger.warning(f"[BIOT] batch {page_nums} failed: {e}")
+                return
+            by_index = {}
+            for h in all_headings:
+                idx = h.get("page_index")
+                if isinstance(idx, (int, float)) and 1 <= int(idx) <= len(batch):
+                    by_index.setdefault(int(idx), []).append(h)
+            for i, (page_num, _img) in enumerate(batch, start=1):
+                headings_by_page[page_num] = by_index.get(i, [])
+
+        await asyncio.gather(*[_scan_batch(b) for b in batches], return_exceptions=True)
+
+        lines = []
+        total_topics = 0
+        for page_num, _ in pages:
+            hs = headings_by_page.get(page_num, [])
+            if hs:
+                for h in hs:
+                    ht = (h.get("heading_text") or "").strip()
+                    if ht:
+                        total_topics += 1
+                        lines.append(f"✅ p{page_num}: {ht}")
+            else:
+                lines.append(f"➖ p{page_num}: (কোনো topic detect হয়নি)")
+
+        body = "\n".join(lines) if lines else "কিছুই পাওয়া যায়নি।"
+        result = (
+            f"🔎 <b>/biot Call1 Result</b>\n"
+            f"📄 {len(pages)} page স্ক্যান হয়েছে | 🗂 {total_topics}টি topic detect হয়েছে\n\n"
+            f"{body}"
+        )
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, result[:4000])
+        else:
+            await send_msg(chat_id, result[:4000])
+
+    except Exception as e:
+        logger.error(f"[BIOT] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
+
     chat_id = msg["chat"]["id"]
     text = msg.get("text", "")
     reply = msg.get("reply_to_message")
@@ -17593,7 +17698,111 @@ async def handle_chem(msg: dict):
             _CHEM_MODE.reset(token)
 
 
-async def _handle_chem_impl(msg: dict):
+async def handle_chemt(msg: dict):
+    """/chemt -p (pages) — DIAGNOSTIC ONLY, Call1 of /chem. Runs ONLY the
+    heading-scan stage (same v2 batched scan /chem's generation pipeline
+    uses internally, including the code-level OCR heading cross-check) —
+    no MCQ generation, no CSV output. Reports whether the scan is working
+    and the exact list of detected topics."""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF-এ reply করে /chemt দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/chemt -p 1-10</code>\n\n"
+            "📌 শুধু Call1 (heading-scan) চালায় — MCQ generate করে না, CSV পাঠায় না। "
+            "কোন কোন page-এ topic detect হলো আর কোন heading গুলো ধরলো তার list দেখায়।\n"
+            "📌 -p = page range (না দিলে সব page)"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+    params = _parse_pdfm_params(text)
+    page_range = params["page_range"]
+
+    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
+    status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n🔎 Heading-scan (Call1 only) হচ্ছে...")
+
+        BATCH_SIZE = 2
+        batches = [pages[i:i + BATCH_SIZE] for i in range(0, len(pages), BATCH_SIZE)]
+        headings_by_page = {}
+
+        async def _scan_batch(batch):
+            page_nums = [pn for pn, _ in batch]
+            imgs = [img for _, img in batch]
+            try:
+                prompt = _build_chem_heading_scan_prompt_v2_batched(len(batch))
+                scan_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+                all_headings = _parse_chem_heading_scan_v2(scan_txt)
+            except Exception as e:
+                logger.warning(f"[CHEMT] batch {page_nums} failed: {e}")
+                return
+            by_index = {}
+            for h in all_headings:
+                idx = h.get("page_index")
+                if isinstance(idx, (int, float)) and 1 <= int(idx) <= len(batch):
+                    by_index.setdefault(int(idx), []).append(h)
+            for i, (page_num, _pg_img) in enumerate(batch, start=1):
+                page_headings = by_index.get(i, [])
+                page_headings = _chem_merge_ocr_heading_candidates(page_headings, _pg_img)
+                headings_by_page[page_num] = page_headings
+
+        await asyncio.gather(*[_scan_batch(b) for b in batches], return_exceptions=True)
+
+        lines = []
+        total_topics = 0
+        for page_num, _ in pages:
+            hs = headings_by_page.get(page_num, [])
+            valid = [h for h in hs if _is_sane_chem_heading((h.get("heading_text") or "").strip())]
+            if valid:
+                for h in valid:
+                    ht = (h.get("heading_text") or "").strip()
+                    total_topics += 1
+                    lines.append(f"✅ p{page_num}: {ht}")
+            else:
+                lines.append(f"➖ p{page_num}: (কোনো topic detect হয়নি)")
+
+        body = "\n".join(lines) if lines else "কিছুই পাওয়া যায়নি।"
+        result = (
+            f"🔎 <b>/chemt Call1 Result</b>\n"
+            f"📄 {len(pages)} page স্ক্যান হয়েছে | 🗂 {total_topics}টি topic detect হয়েছে\n\n"
+            f"{body}"
+        )
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, result[:4000])
+        else:
+            await send_msg(chat_id, result[:4000])
+
+    except Exception as e:
+        logger.error(f"[CHEMT] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
+
     chat_id = msg["chat"]["id"]
     text = msg.get("text", "")
     reply = msg.get("reply_to_message")
@@ -22792,6 +23001,12 @@ async def handle_message(msg: dict):
         # /topic = same extraction as /qbm but groups MCQs into separate
         # CSVs per detected topic (serial-number reset / heading change)
         _spawn_command_task(uid, handle_topic(msg))
+    elif text.startswith("/biot"):
+        # /biot = Call1-ONLY diagnostic for /bio: runs just the heading-scan
+        # stage (no MCQ generation, no CSV) and reports whether the scan is
+        # working plus the exact list of detected topics — for verifying
+        # topic-detection health without burning a full generation run.
+        _spawn_command_task(uid, handle_biot(msg))
     elif text.startswith("/bio"):
         # /bio = same GENERATION as /pdf (new MCQ from content, not
         # extraction) but groups the newly-generated MCQs into separate
@@ -22805,6 +23020,10 @@ async def handle_message(msg: dict):
         # black-circle-with-1/2/3-white-stars icon (instead of /topic's
         # black-background banner bar)
         _spawn_command_task(uid, handle_unmesh(msg))
+    elif text.startswith("/chemt"):
+        # /chemt = Call1-ONLY diagnostic for /chem: same idea as /biot but
+        # for /chem's Bangla-hierarchical-numbering heading-scan pipeline.
+        _spawn_command_task(uid, handle_chemt(msg))
     elif text.startswith("/chem"):
         # /chem = GENERATES new MCQs from page content (like /pdf's default
         # generation mode), grouped topic-wise like /topic/unmesh, with
