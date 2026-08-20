@@ -19225,31 +19225,69 @@ async def _onu2_extract_from_image(img) -> list:
         _QBM_EXTRACT_HARD_CAP.release()
 
 
-async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_id: int = None) -> list:
+async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_id: int = None,
+                                          file_name: str = "", topic: str = "") -> list:
     """/onu2 PDF pipeline (2026-08-20): BOTH Call1 (initial extraction)
-    AND Call2 (full audit + answer-mark re-confirm) now run on PAIRS of
-    consecutive pages in ONE batched multi-image call each (same
-    detection/audit rules applied independently per page inside each
-    batched call -- see ONU2_CALL1_PROMPT_BATCHED_TMPL and
-    ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL), cutting BOTH call types'
-    page-level API calls roughly in half. Returns the same (page_num,
-    img, mcqs) tuple list shape the rest of /onu2's CSV/channel output
-    already expects."""
+    AND Call2 (full audit + answer-mark re-confirm + answer-key check)
+    now run on PAIRS of consecutive pages in ONE batched multi-image
+    call each (same detection/audit rules applied independently per
+    page inside each batched call -- see ONU2_CALL1_PROMPT_BATCHED_TMPL
+    and ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL), cutting API calls to
+    exactly 2 per pair. Shows a detailed per-page live dashboard
+    (matching /onu's _build_dashboard style) instead of a single status
+    line. Returns the same (page_num, img, mcqs) tuple list shape the
+    rest of /onu2's CSV output already expects."""
     PAIR_SIZE = 2
     pairs = [pages[i:i + PAIR_SIZE] for i in range(0, len(pages), PAIR_SIZE)]
     results = [None] * len(pages)
-    _done = [0]
     _lock = asyncio.Lock()
+    start_time = time.time()
+    page_status = [{"page": p, "current": False, "done": False, "mcq": 0, "model": "", "failed": False, "error": ""}
+                   for p, _ in pages]
 
-    async def _status(extra=""):
+    def _dashboard():
+        elapsed = int(time.time() - start_time)
+        mins, secs = divmod(elapsed, 60)
+        done = sum(1 for s in page_status if s["done"])
+        total = len(page_status)
+        pct = int(done / total * 100) if total else 0
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        lines = [
+            "⏳ <b>ATLAS PDF Processing (/onu2)...</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            f"📄 File: {file_name}", f"🎯 Topic: {topic}", f"📋 Pages: {total} total",
+            "━━━━━━━━━━━━━━━━━━━━━━"
+        ]
+        for s in page_status:
+            if s["done"]:
+                if s["mcq"] == 0:
+                    lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ (red-box marked পাওয়া যায়নি)")
+                else:
+                    model_str = f" ({s['model']})" if s["model"] else ""
+                    lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str} ✓")
+            elif s["current"]:
+                lines.append(f"⏳ Page {fmt_page(s['page'])}: Processing...")
+            else:
+                lines.append(f"⬜ Page {fmt_page(s['page'])}: Waiting")
+        total_mcq = sum(s["mcq"] for s in page_status)
+        lines += [
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            f"📊 Progress: {pct}% [{bar}]",
+            f"⏱️ Elapsed: {mins}:{secs:02d}",
+            f"📝 MCQ done: {total_mcq}"
+        ]
+        return "\n".join(lines)
+
+    async def _status():
         if not status_msg_id:
             return
         try:
-            await edit_msg(chat_id, status_msg_id,
-                f"⏳ MCQ Extraction হচ্ছে... ({_done[0]}/{len(pages)} page){extra}")
+            await edit_msg(chat_id, status_msg_id, _dashboard())
         except Exception:
             pass
 
+    for s in page_status[:PAIR_SIZE]:
+        s["current"] = True
     await _status()
 
     async def _process_pair(pair_idx, pair):
@@ -19267,7 +19305,15 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
                 global_idx = pair_idx * PAIR_SIZE + (i - 1)
                 results[global_idx] = (page_num, img, mcqs)
                 async with _lock:
-                    _done[0] += 1
+                    providers = sorted({m.get("_provider", "Gemini").replace("ONU2-misscheck", "ONU2-misscheck") for m in mcqs}) if mcqs else []
+                    model_tag = ", ".join(providers) if providers else ""
+                    page_status[global_idx]["done"] = True
+                    page_status[global_idx]["current"] = False
+                    page_status[global_idx]["mcq"] = len(mcqs)
+                    page_status[global_idx]["model"] = model_tag
+                    next_idx = global_idx + 1
+                    if next_idx < len(page_status) and not page_status[next_idx]["done"]:
+                        page_status[next_idx]["current"] = True
                 await _status()
         finally:
             _QBM_EXTRACT_HARD_CAP.release()
@@ -19280,6 +19326,9 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
     for i, (page_num, img) in enumerate(pages):
         if results[i] is None:
             results[i] = (page_num, img, [])
+            page_status[i]["done"] = True
+            page_status[i]["failed"] = True
+    await _status()
     return results
 
 
@@ -19418,7 +19467,7 @@ async def _handle_onu2_impl(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে...")
 
-        extracted_pages = await _onu2_extract_all_pages_paired(chat_id, pages, status_msg_id)
+        extracted_pages = await _onu2_extract_all_pages_paired(chat_id, pages, status_msg_id, file_name, topic)
 
         # ── Cross-page উত্তরমালা sweep ──
         # The answer-key table usually sits on a LATER page, right after
