@@ -1707,9 +1707,14 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"- 3-5 MCQs should combine 2-3 distinct facts per question (options are "
         f"fact-combinations, only one fully correct) — moderate difficulty only.\n\n"
 
-        f"🟥 MUST-PRIORITY (never skip)\n"
+        f"🟥 MUST-PRIORITY (never skip, and covered FIRST before anything else)\n"
         f"- Any line/paragraph highlighted, boxed, circled, or underlined in ANY "
-        f"color (green/red/orange/yellow/etc.) — always make an MCQ from it.\n"
+        f"color (green/red/orange/yellow/etc.) — always make an MCQ from it, and "
+        f"these MCQs take PRIORITY ORDER over unmarked content: when picking which "
+        f"facts to cover (especially if a max-count cap forces choices), highlighted/"
+        f"marked/boxed/underlined lines are selected FIRST, before any unmarked "
+        f"content — never let unmarked material fill the count while a marked line "
+        f"on the same page gets skipped or cut for space.\n"
         f"- Tables/charts: use every cell of info, don't just describe the table.\n\n"
 
         f"🟥 বক্স/ছক COVERAGE\n"
