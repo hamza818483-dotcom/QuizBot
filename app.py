@@ -16369,10 +16369,12 @@ Line 3: the 165-char-max Bengali explanation (omit this line entirely if Line 2 
 
 async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str) -> str:
     """
-    Builds a clean, question-related, 4-option-covering Bengali explanation
-    (max 165 chars) when the correct answer is already known (e.g. matched
-    from an answer-key on a nearby page) but no real explanation text came
-    with it. NEVER references the source, page, or how the answer was found.
+    Builds a clean, question-related, step-by-step Bengali explanation
+    when the correct answer is already known (e.g. matched from an
+    answer-key on a nearby page) but no real explanation text came with
+    it. Main line (why the correct option is right) capped at ~200 chars,
+    then one line per wrong option -- each on its own line (\\n-separated).
+    NEVER references the source, page, or how the answer was found.
     """
     try:
         q = mc.get("question", "")
@@ -16382,12 +16384,12 @@ async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str) 
 {opts_txt}
 সঠিক উত্তর: {answer_letter}
 
-Write a Bengali explanation (max 165 characters) that briefly covers ALL 4 options: why the
-correct option ({answer_letter}) is right, and why each of the other 3 is wrong -- stated as
-plain direct fact, exactly like a normal textbook explanation. NEVER mention the source, page,
-answer key, or how the answer was determined. Output ONLY the explanation text, nothing else."""
+Write a Bengali explanation in STEP-BY-STEP format, each step on its own separate line (use actual newlines, not one paragraph):
+Line 1 (MAIN line, max ~200 characters): why the correct option ({answer_letter}) is right, plain direct fact like a textbook.
+Line 2 onward (one line per WRONG option, in order): briefly what that option actually is/means and why it's wrong here, specific fact each time -- never a bare "ভুল" with no reason.
+NEVER mention the source, page, answer key, or how the answer was determined. Output ONLY the explanation text (with real line breaks), nothing else."""
         txt = (await _qbm_groq_text_call(prompt)).strip()
-        return txt[:165]
+        return txt[:600]
     except Exception as e:
         logger.warning(f"[QBM] Explanation build failed: {e}")
         return ""
@@ -18016,10 +18018,10 @@ def _onu_filter_mcqs(mcqs: list):
 # math formatting, no explanation-generation rules -- those aren't part of
 # /onu's job and were only bloating the prompt for QBM's use case.
 _EXPLANATION_DEPTH_RULE = """
-EXPLANATION DEPTH (always, whenever you write/generate an explanation yourself rather than copying page text verbatim): structure it in this order, one compact paragraph, no headings/labels between the parts:
-1) FIRST: the correct option's own relevant info — why it's factually correct, tied to the question's context/subject.
-2) THEN: the other (wrong) options — briefly what each one actually is/means, and why it doesn't fit this question, using real distinguishing facts (never a bare "ভুল"/"incorrect" with no reason).
-Keep the WHOLE explanation within ~190 characters — put the correct-option info first since that's what must survive if length forces a cut, then the other-options detail after it. Never a single generic one-line filler; every option gets real, specific content."""
+EXPLANATION FORMAT (always, whenever you write/generate an explanation yourself rather than copying page text verbatim): write it STEP-BY-STEP, each step on its OWN separate line (use \\n between steps, not one run-on paragraph):
+Line 1 (MAIN explanation — why the correct option is right, tied to the question's context/subject): keep this line within ~200 characters, since this is the core answer and must survive on its own.
+Line 2 onward (one line per wrong option, in order): briefly state what that option actually is/means and why it doesn't fit this question, using real distinguishing facts (never a bare "ভুল"/"incorrect" with no reason).
+Never a single generic one-line filler; every option gets real, specific content. No headings/labels like "Step 1:" — just the plain lines separated by \\n."""
 
 _MATH_UNICODE_RULE = """
 MATH/CHEMISTRY FORMATTING (always, in question/options/explanation): NEVER output raw LaTeX commands (no \\vec, \\hat, \\frac, \\sqrt, \\sum, \\int, ^, _, {, } used as LaTeX syntax) — always convert to proper Unicode instead:
@@ -19195,8 +19197,19 @@ async def _onu2_finish_from_missed(img, call1: list, missed: list, skip_key_chec
             except Exception as e:
                 logger.warning(f"[ONU2] explanation fallback failed: {e}")
         exp = m.get("explanation", "") or ""
-        if len(exp) > 200:
-            m["explanation"] = exp[:197] + "..."
+        # Explanation is now step-by-step, one line per option (main line
+        # <=200 chars per the prompt rule, then one line per wrong option)
+        # -- so the OLD hard 200-char cap on the whole string would slice
+        # mid-step. Cap only the total length (generous, covers 4 lines)
+        # and, if it must cut, cut at the last full line break so no
+        # step is left mid-sentence.
+        MAX_EXPLANATION_LEN = 600
+        if len(exp) > MAX_EXPLANATION_LEN:
+            cut = exp[:MAX_EXPLANATION_LEN]
+            last_nl = cut.rfind("\n")
+            if last_nl > 0:
+                cut = cut[:last_nl]
+            m["explanation"] = cut.rstrip() + "..."
     return combined
 
 
