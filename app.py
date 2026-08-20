@@ -18501,7 +18501,7 @@ No red-marked MCQ on this page -> return [].
 OUTPUT — ONLY valid JSON array, nothing else, no markdown fences, no commentary:
 [{"mcq_no":"...","question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}]"""
 
-ONU2_CALL1_PROMPT_BATCHED_TMPL = """MCQ EXTRACTOR — RED-MARKED SERIAL NUMBER REGION ONLY, applied INDEPENDENTLY to {n} SEPARATE page images given to you in this SAME call (image order = page_index 1, 2, ... {n} — never mix content between pages, each page's MCQs stay strictly on that page's own page_index). The SOLE indicator for inclusion is a RED MARKING drawn in the LEFT MARGIN of each page around the MCQ's SERIAL NUMBER label (e.g. "১ক১", "1", "১খ৩") — this marking can appear as a RED BOUNDARY, a RED BOX, or a RED RECTANGLE outline; all three are the same signal, just drawn differently by hand. This marking sits ONLY around the number column, separate from the question text. It can be SHORT (wrapping just one number, marking a single MCQ) or TALL/VERTICAL (stretching down the margin to wrap SEVERAL CONSECUTIVE numbers together in one boundary, marking that whole consecutive run of MCQs as included — e.g. one tall boundary spanning "১ক৬" through "১ক১০" means all 5 of those MCQs are included). Carefully trace each margin marking's top and bottom edge to see exactly which serial numbers fall inside it, ON ITS OWN PAGE. A red mark anywhere else on a page (around question text, an option, a paragraph, or NOT in the left margin) does NOT count for inclusion — ignore it. IGNORE every MCQ whose serial number has no red boundary/box/rectangle around it in the left margin — do not extract it at all.
+ONU2_CALL1_PROMPT_BATCHED_TMPL = """MCQ EXTRACTOR — RED-MARKED SERIAL NUMBER ONLY, applied INDEPENDENTLY to {n} SEPARATE page images given to you in this SAME call (image order = page_index 1, 2, ... {n} — never mix content between pages, each page's MCQs stay strictly on that page's own page_index). The SOLE indicator for inclusion is a RED MARKING drawn AROUND or DIRECTLY BESIDE the MCQ's SERIAL NUMBER label (e.g. "১ক১", "1", "৪জ ৯", "১খ৩") — this marking can appear as a RED BOUNDARY, a RED BOX, or a RED RECTANGLE outline; all three are the same signal, just drawn differently by hand, and its exact position/shape varies (may sit tightly around just the number, may extend slightly to include the "।" or a couple of nearby characters, may be a clean rectangle or a rougher hand-drawn loop) -- judge by INTENT (is the serial number clearly circled/boxed in red?) not by exact pixel-perfect shape or position. This marking identifies which MCQ(s) are included, separate from the question text itself. It can be SHORT (wrapping just one number, marking a single MCQ) or TALL/VERTICAL (stretching down to wrap SEVERAL CONSECUTIVE numbers together in one boundary, marking that whole consecutive run of MCQs as included — e.g. one tall boundary spanning "১ক৬" through "১ক১০" means all 5 of those MCQs are included). Carefully trace each marking's edge to see exactly which serial numbers fall inside/beside it, ON ITS OWN PAGE. A red mark that is clearly NOT associated with any serial number at all (e.g. only around question text, an option, or a paragraph, with no number anywhere near it) does NOT count for inclusion — ignore it. IGNORE every MCQ whose serial number has no red boundary/box/rectangle marking it — do not extract it at all.
 
 CRITICAL — TWO COMPLETELY SEPARATE RED MARKS EXIST ON EACH PAGE, NEVER MIX THEM UP:
   (a) The LEFT-MARGIN number marking described above -> this is the ONLY thing that decides INCLUSION (is this MCQ in the output at all).
@@ -18575,14 +18575,14 @@ FORMATTING (apply to all question/option/explanation text above):
 OUTPUT — ONLY valid JSON object, nothing else, no markdown fences:
 {{"missed": [{{"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}], "answer_corrections": [{{"mcq_no":"...","correct_answer":"A/B/C/D"}}], "text_corrections": [{{"mcq_no":"...","corrected_question":"...","corrected_options":{{"B":"..."}}}}]}}"""
 
-ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL = """AUDIT PASS — this is a strict, independent re-check of {n} SEPARATE page images given to you in this SAME call (image order = page_index 1, 2, ... {n} — treat each page's audit completely independently, never mix pages) for the SOLE inclusion marker: a RED MARKING in the LEFT MARGIN around MCQ serial number(s) only (e.g. "১ক১", "1"). This marking can be a red boundary, red box, or red rectangle outline — all count as the same signal. The marking can be short (one number = one MCQ) or tall/vertical (spanning several consecutive numbers in the margin = all those consecutive MCQs included). Trace each margin marking's top/bottom edge carefully to see which numbers fall inside ON THAT SAME PAGE. A red mark NOT in the left margin (on question text, an option, a paragraph) does not count for inclusion.
+ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL = """AUDIT PASS — this is a strict, independent re-check of {n} SEPARATE page images given to you in this SAME call (image order = page_index 1, 2, ... {n} — treat each page's audit completely independently, never mix pages) for the SOLE inclusion marker: a RED MARKING around or beside MCQ serial number(s) only (e.g. "১ক১", "1"). This marking can be a red boundary, red box, or red rectangle outline — all count as the same signal, and its exact position/shape can vary (tight around just the number, extending slightly to nearby characters, clean rectangle or a rougher hand-drawn loop) -- judge by INTENT (is the serial number clearly circled/boxed in red?), not by exact pixel-perfect shape or position. The marking can be short (one number = one MCQ) or tall/vertical (spanning several consecutive numbers = all those consecutive MCQs included). Trace each marking's edge carefully to see which numbers fall inside/beside it ON THAT SAME PAGE. A red mark that is clearly NOT associated with any serial number at all (only on question text, an option, a paragraph, with no number anywhere near it) does not count for inclusion.
 
-REMEMBER: the small red circle/dot marking one option's letter as the chosen answer is a COMPLETELY SEPARATE, unrelated mark from the left-margin inclusion marking. Never use it to decide inclusion, and never treat a missing/unclear option-mark as a reason an MCQ was correctly excluded — if its serial number is inside a left-margin marking, it belongs in the output regardless of its option-mark state.
+REMEMBER: the small red circle/dot marking one option's letter as the chosen answer is a COMPLETELY SEPARATE, unrelated mark from the serial-number inclusion marking. Never use it to decide inclusion, and never treat a missing/unclear option-mark as a reason an MCQ was correctly excluded — if its serial number is marked, it belongs in the output regardless of its option-mark state.
 
 STRICT RULES, applied SEPARATELY per page:
 - Do not re-list any MCQ already in that page's existing list below.
 - Do not invent MCQs not printed on the page.
-- Only report an MCQ as missed if its serial number is genuinely inside a left-margin red marking ON THAT SAME PAGE.
+- Only report an MCQ as missed if its serial number is genuinely marked with a red boundary ON THAT SAME PAGE.
 - SKIP any roman-numeral/serial-combination style MCQ that needs an উদ্দীপক (numbered statement list i/ii/iii or ১/২/৩ printed above it) to make sense — i.e. options like "i, ii" / "i ও ii" / "১, ৩" referring back to that list. Do not report these even if red-marked.
 - SKIP any MCQ with an IMAGE/DIAGRAM/FIGURE attached to its question, an option, or its explanation. Do not report these even if red-marked.
 - Every reported "missed" item MUST have all 8 fields (page_index, mcq_no, question, options, answer, marked_answer_wrong, no_mark, explanation) — incomplete items will be rejected downstream. Every "answer_corrections"/"text_corrections" item MUST have "page_index" so it can be matched back to the right page's existing MCQ (mcq_no alone can repeat across different pages).
@@ -18592,7 +18592,7 @@ Already-extracted red-boxed MCQs, grouped by page_index, with the answer already
 
 Do these 3 TASKS IN ORDER, for EACH page independently — each task is independent, do not blend them:
 
-TASK 1 — MCQ DETECTION (miss-check): This is a FULL AUDIT of each page — independently re-find every left-margin red box marking on that page (short, single-number boxes AND tall, multi-number boxes alike) and compare against that page's already-extracted list above. Report ANY red-marked MCQ, whether marked alone or as part of a group, that is missing from that page's list. Pay special attention to the middle/last numbers inside a tall group-box, since those are most often missed.
+TASK 1 — MCQ DETECTION (miss-check): This is a FULL AUDIT of each page — independently re-find every red box/boundary marking a serial number on that page (short, single-number boxes AND tall, multi-number boxes alike) and compare against that page's already-extracted list above. Report ANY red-marked MCQ, whether marked alone or as part of a group, that is missing from that page's list. Pay special attention to the middle/last numbers inside a tall group-box, since those are most often missed.
 If you find MISSED red-boxed MCQ(s) on a page, extract them fully into "missed" with the correct "page_index" (mcq_no, question, options A-D — same grid-layout label-mapping care as the first extraction pass).
 
 TASK 2 — ANSWER DETECTION (answer audit + missed-item answers): for entries with a "current_answer" field, re-check the red-circled option ON THEIR OWN PAGE and confirm the recorded letter matches. Same grid-layout care (2×2 grid: খ is right of ক, গ below ক, ঘ below খ — map by printed label, trace the circle's boundary against the actual grid before judging). Only report a mismatch in "answer_corrections" (with "page_index" + "correct_answer") if the circled-label read was genuinely wrong — never "correct" it just because another option also seems plausible. For any MISSED MCQ from Task 1, its "answer"/"marked_answer_wrong"/"no_mark" fields follow this same detection logic.
@@ -19316,33 +19316,42 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
         s["current"] = True
     await _status()
 
+    # Cap how many PAIRS run concurrently (2 pairs = up to 4 pages in
+    # flight at once) -- unlimited concurrency made the dashboard order
+    # look random (later pairs could finish before earlier ones) and
+    # hammered the API harder than needed. This keeps most of the speed
+    # benefit while making progress look roughly sequential.
+    MAX_CONCURRENT_PAIRS = 2
+    _pair_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PAIRS)
+
     async def _process_pair(pair_idx, pair):
-        await _qbm_ram_aware_acquire()
-        try:
-            imgs = [img for _, img in pair]
-            call1_by_index = await _onu2_call1_extract_batch(imgs)
-            for i in range(1, len(pair) + 1):
-                call1_by_index.setdefault(i, [])
-            missed_by_index = await _onu2_call2_misscheck_batch(imgs, call1_by_index)
-            for i, (page_num, img) in enumerate(pair, start=1):
-                call1 = call1_by_index.get(i, [])
-                missed = missed_by_index.get(i, [])
-                mcqs = await _onu2_finish_from_missed(img, call1, missed, skip_key_check=True)
-                global_idx = pair_idx * PAIR_SIZE + (i - 1)
-                results[global_idx] = (page_num, img, mcqs)
-                async with _lock:
-                    providers = sorted({m.get("_provider", "Gemini").replace("ONU2-misscheck", "ONU2-misscheck") for m in mcqs}) if mcqs else []
-                    model_tag = ", ".join(providers) if providers else ""
-                    page_status[global_idx]["done"] = True
-                    page_status[global_idx]["current"] = False
-                    page_status[global_idx]["mcq"] = len(mcqs)
-                    page_status[global_idx]["model"] = model_tag
-                    next_idx = global_idx + 1
-                    if next_idx < len(page_status) and not page_status[next_idx]["done"]:
-                        page_status[next_idx]["current"] = True
-                await _status()
-        finally:
-            _QBM_EXTRACT_HARD_CAP.release()
+        async with _pair_semaphore:
+            await _qbm_ram_aware_acquire()
+            try:
+                imgs = [img for _, img in pair]
+                call1_by_index = await _onu2_call1_extract_batch(imgs)
+                for i in range(1, len(pair) + 1):
+                    call1_by_index.setdefault(i, [])
+                missed_by_index = await _onu2_call2_misscheck_batch(imgs, call1_by_index)
+                for i, (page_num, img) in enumerate(pair, start=1):
+                    call1 = call1_by_index.get(i, [])
+                    missed = missed_by_index.get(i, [])
+                    mcqs = await _onu2_finish_from_missed(img, call1, missed, skip_key_check=True)
+                    global_idx = pair_idx * PAIR_SIZE + (i - 1)
+                    results[global_idx] = (page_num, img, mcqs)
+                    async with _lock:
+                        providers = sorted({m.get("_provider", "Gemini").replace("ONU2-misscheck", "ONU2-misscheck") for m in mcqs}) if mcqs else []
+                        model_tag = ", ".join(providers) if providers else ""
+                        page_status[global_idx]["done"] = True
+                        page_status[global_idx]["current"] = False
+                        page_status[global_idx]["mcq"] = len(mcqs)
+                        page_status[global_idx]["model"] = model_tag
+                        next_idx = global_idx + 1
+                        if next_idx < len(page_status) and not page_status[next_idx]["done"]:
+                            page_status[next_idx]["current"] = True
+                    await _status()
+            finally:
+                _QBM_EXTRACT_HARD_CAP.release()
 
     await asyncio.gather(*[_process_pair(pi, pair) for pi, pair in enumerate(pairs)], return_exceptions=True)
 
