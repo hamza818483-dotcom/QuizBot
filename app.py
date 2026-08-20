@@ -1598,22 +1598,27 @@ def _build_mcq_prompt(topic: str, count) -> str:
         count = None
     if count_min and count_max:
         count_rule = (
-            f"STRICT RANGE REQUIRED: Extract BETWEEN {count_min} AND {count_max} MCQs "
-            f"from this page — never fewer than {count_min}, never more than {count_max}. "
-            f"If the page doesn't have enough distinct information for {count_min}, "
-            f"get as close as possible by rephrasing/re-angling the same facts from "
-            f"different angles (different question style, different correct option "
-            f"position) — never stop early just because it feels repetitive. If the "
-            f"page has more content than {count_max} MCQs worth, pick the {count_max} "
+            f"Extract BETWEEN {count_min} AND {count_max} MCQs from this page "
+            f"if the content supports it — never fewer than {count_min} when "
+            f"the page has that much genuine content, never more than "
+            f"{count_max}. If the page doesn't have enough distinct information "
+            f"for {count_min}, first try re-angling the same real facts "
+            f"(different question style, different correct option position); "
+            f"if that's still not enough, output fewer than {count_min} rather "
+            f"than inventing content not on the page — the SOURCE-GROUNDING "
+            f"LOCK above always wins over this count. If the page has more "
+            f"content than {count_max} MCQs worth, pick the {count_max} "
             f"most important/highest-priority facts (highlighted/marked content first)."
         )
     elif count:
         count_rule = (
-            f"EXACT COUNT REQUIRED: Extract exactly {count} MCQs from this page. "
-            f"If the page genuinely doesn't have enough distinct information for "
-            f"{count}, get as close as possible by rephrasing/re-angling the same "
-            f"facts from different angles (different question style, different "
-            f"correct option position) — never stop early just because it feels repetitive."
+            f"Extract exactly {count} MCQs from this page if the content "
+            f"supports it. If the page genuinely doesn't have enough distinct "
+            f"information for {count}, first try re-angling the same real "
+            f"facts (different question style, different correct option "
+            f"position); if that's still not enough, output fewer than "
+            f"{count} rather than inventing content not on the page — the "
+            f"SOURCE-GROUNDING LOCK above always wins over this count."
         )
     else:
         count_rule = (
@@ -1657,6 +1662,18 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"default to Bengali if source is English (or vice versa). Self-check "
         f"every MCQ against this before finalizing.\n"
         f"{full_coverage_rule}\n"
+
+        f"🚨 SOURCE-GROUNDING LOCK (ABSOLUTE, HIGHEST PRIORITY — overrides any "
+        f"count target below): EVERY MCQ must be built ONLY from facts/content "
+        f"actually visible on THIS page image. Do NOT invent, assume, or pull in "
+        f"outside facts, unrelated topics, or generic textbook knowledge that "
+        f"is not genuinely present on this specific page — even to hit a "
+        f"requested count. If the page's real content runs out before the "
+        f"count target is reached, STOP and output fewer MCQs; a smaller but "
+        f"100% source-grounded set is always correct, a padded set with "
+        f"fabricated/off-topic questions is NEVER acceptable. Before finalizing "
+        f"each MCQ, verify: 'is this fact actually visible in the image I was "
+        f"given?' — if the honest answer is no, delete that MCQ.\n\n"
 
         f"🟥 OVERALL RULES\n"
         f"- Generate MCQs from EVERY part of the image (ready-made-looking MCQs "
