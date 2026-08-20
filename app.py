@@ -18823,13 +18823,20 @@ async def _onu2_call1_extract_batch(imgs: list) -> dict:
     prompt = ONU2_CALL1_PROMPT_BATCHED_TMPL.format(n=n)
     try:
         gem_txt = await _qbm_gemini_raw_multi(imgs, prompt)
-        gem = _onu2_parse_mcq_array(gem_txt) if gem_txt else []
         provider = "Gemini"
-        if not gem:
+        if gem_txt:
+            # Gemini actually responded -- trust the parse even if it's
+            # an empty list (legit "no MCQs on this page" case). Only a
+            # TRUE Gemini failure (empty text = all keys exhausted/errored
+            # inside _qbm_gemini_raw_multi) should fall through to Groq.
+            gem = _onu2_parse_mcq_array(gem_txt)
+        else:
+            gem = []
             txt = await _qbm_groq_call(imgs[0], prompt)
-            gem = _onu2_parse_mcq_array(txt) if txt else []
             provider = "Groq"
-            if not gem:
+            if txt:
+                gem = _onu2_parse_mcq_array(txt)
+            else:
                 or_txt = await _qbm_openrouter_call(imgs[0], prompt)
                 gem = _onu2_parse_mcq_array(or_txt) if or_txt else []
                 provider = "OpenRouter"
@@ -18861,9 +18868,12 @@ async def _onu2_call1_extract(img) -> list:
     back to the caller."""
     try:
         gem_txt = await _qbm_gemini_raw(img, ONU2_CALL1_PROMPT)
-        gem = _onu2_parse_mcq_array(gem_txt) if gem_txt else []
-        out = _onu2_filter_valid(_qbm_dedup_list(gem)) if gem else []
-        if out:
+        if gem_txt:
+            # Gemini actually responded -- trust it even if parse yields
+            # an empty list (legit "no MCQs on this page"). Only fall
+            # through to Groq/OpenRouter when Gemini itself gave nothing.
+            gem = _onu2_parse_mcq_array(gem_txt)
+            out = _onu2_filter_valid(_qbm_dedup_list(gem)) if gem else []
             for m in out:
                 m["_provider"] = "Gemini"
             return out
