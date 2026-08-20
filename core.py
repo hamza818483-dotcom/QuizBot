@@ -1197,7 +1197,12 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_c
     try:
         client = await _get_pyro_client()
         if not client:
-            logger.error("[pyrogram] TELEGRAM_API_ID/HASH not set, cannot download large file")
+            if not (TELEGRAM_API_ID and TELEGRAM_API_HASH):
+                logger.error("[pyrogram] TELEGRAM_API_ID/HASH not set, cannot download large file")
+            elif time.time() < _pyro_flood_wait_until:
+                logger.warning(f"[pyrogram] still inside FLOOD_WAIT cooldown ({_pyro_flood_wait_until - time.time():.0f}s remaining), cannot download large file")
+            else:
+                logger.error("[pyrogram] client unavailable (start() failed), cannot download large file")
             return None
         msg = await client.get_messages(chat_id, message_id)
         if not msg or not (msg.document or msg.video or msg.audio):
