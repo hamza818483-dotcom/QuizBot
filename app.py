@@ -9699,6 +9699,104 @@ def _build_extra_prompt_standalone(topic: str) -> str:
     )
 
 
+def _build_extra_prompt_batched(topic: str, n: int) -> str:
+    """/extra's batched prompt -- same STRICT hand-mark-only filter as
+    _build_extra_prompt_standalone, applied INDEPENDENTLY to n SEPARATE
+    page images given in this SAME call (image order = page_index
+    1, 2, ... n -- never mix marks between pages). Each output item must
+    carry a page_index field so the caller can split results per page."""
+    return (
+        f"You are an expert MCQ-extraction engine for Bengali/English academic "
+        f"textbook pages (medical/HSC/admission-standard quality).\n"
+        f"Topic: {topic}\n\n"
+        f"You are given {n} SEPARATE page images in this SAME call, in order "
+        f"(page_index 1, 2, ... {n}). Treat each page COMPLETELY INDEPENDENTLY "
+        f"-- never mix or borrow marked content between pages, each page's "
+        f"MCQs must come strictly from that page's own hand-marks.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟥 STRICT FILTER — ONLY HAND-MARKED CONTENT, NOTHING ELSE\n"
+        f"═══════════════════════════════\n"
+        f"Each page may contain a LOT of printed text, but you must generate "
+        f"MCQs ONLY from the specific lines/words/paragraphs that have an "
+        f"EXTRA mark added on top of the book's original printing by hand or "
+        f"highlighter pen:\n"
+        f"- Highlighter color over the text (any color — yellow, green, "
+        f"orange, pink, blue, etc.)\n"
+        f"- Pen underline drawn under the text (any ink color)\n"
+        f"- A box, circle, or bracket drawn around the text by hand\n"
+        f"- A star, tick, or other hand-drawn mark next to the text pointing "
+        f"to it\n\n"
+        f"🚫 DO NOT generate any MCQ from plain/unmarked text, even if it "
+        f"looks important, is a definition, is bold/italic in the ORIGINAL "
+        f"book printing, or seems exam-relevant. Bold/italic that is part "
+        f"of the book's own original typesetting is NOT a hand-mark — only "
+        f"count marks that are clearly added on top, in a different "
+        f"ink/highlighter color or hand-drawn stroke, distinguishable from "
+        f"the book's own printing.\n\n"
+        f"⚠️ A page may have VERY FEW marks — even just 1 or 2 lines marked "
+        f"on that entire page. That is completely normal: extract exactly "
+        f"what is marked on THAT page, no more, no less. Do not skip a "
+        f"sparsely-marked page and do not pad it with unmarked content.\n\n"
+        f"If NO hand-marks exist anywhere on a given page, that page "
+        f"contributes zero items — do not force an MCQ onto it.\n\n"
+        f"For each hand-marked line/phrase found on each page, generate ONE "
+        f"high-quality MCQ (4 options, correct answer, short Bengali "
+        f"explanation), tagged with the page_index it came from.\n\n"
+        f"OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. "
+        f"EVERY item MUST include \"page_index\" (1-based int matching the "
+        f"image order above):\n"
+        f'[{{"page_index":1,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},'
+        f'"answer":"A/B/C/D","explanation":"..."}}]'
+    )
+
+
+async def _extra_gen_from_images_batch(imgs: list, topic: str) -> dict:
+    """/extra's BATCHED generation call -- scans multiple consecutive page
+    images in ONE Gemini call (Groq/OpenRouter fallback only ever sees the
+    first image, same acceptable-degradation pattern onu2 uses). Gemini
+    first (primary), Groq fallback ONLY on a true technical failure (empty
+    response), never on a genuine empty/[] result -- most /extra pages are
+    legitimately sparse or empty, so an empty parse is trusted as-is and
+    does NOT burn through more keys/providers. Returns
+    {page_index (1-based int): [mcq dicts]}."""
+    n = len(imgs)
+    if n == 0:
+        return {}
+    prompt = _build_extra_prompt_batched(topic, n)
+    try:
+        gem_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+        provider = "Gemini"
+        if gem_txt:
+            gem = _onu2_parse_mcq_array(gem_txt)
+        else:
+            gem = []
+            txt = await _qbm_groq_call(imgs[0], prompt)
+            provider = "Groq"
+            if txt:
+                gem = _onu2_parse_mcq_array(txt)
+            else:
+                or_txt = await _qbm_openrouter_call(imgs[0], prompt)
+                gem = _onu2_parse_mcq_array(or_txt) if or_txt else []
+                provider = "OpenRouter"
+        by_index = {}
+        for m in gem:
+            idx = m.get("page_index")
+            if not isinstance(idx, (int, float)) or not (1 <= int(idx) <= n):
+                continue
+            idx = int(idx)
+            m["_provider"] = provider
+            by_index.setdefault(idx, []).append(m)
+        for idx in list(by_index.keys()):
+            out = _cap_mcq_options(by_index[idx], 4)
+            out = _validate_mcq_structure(out)
+            out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
+            by_index[idx] = out
+        return by_index
+    except Exception as e:
+        logger.warning(f"[Extra batch] failed: {e}")
+        return {}
+
+
 async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclude_groq_keys: set = None):
     """/extra's OWN generation call — completely standalone, does not go
     through generate_mcq_from_image/_generate_mcq_from_image_raw or the
@@ -9773,11 +9871,15 @@ async def extra_generate_all_pages(
     chat_id: int, pages: list, topic: str,
     file_name: str, status_msg_id: int = None
 ) -> list:
-    """/extra's OWN page-loop — completely standalone copy, not calling
-    pdf_generate_all_pages. Same 2-page-parallel + page-pairing idea (since
-    /extra pages are often mostly empty) but self-contained."""
-    if len(pages) > 1:
-        pages = _pair_pages_for_extra(pages)
+    """/extra's OWN page-loop — TRUE batching (2026-08-20): pages are
+    grouped into pairs and EACH PAIR gets exactly ONE Gemini call via
+    _extra_gen_from_images_batch (same idea as /onu2's Call1 batching),
+    instead of 2 separate parallel single-image calls. Cuts API calls
+    roughly in half. Falls back to the old single-image path per-page
+    only if a pair's batched call returns nothing at all (technical
+    failure) as a safety net. Up to 2 pairs run concurrently."""
+    PAIR_SIZE = 2
+    pairs = [pages[i:i + PAIR_SIZE] for i in range(0, len(pages), PAIR_SIZE)]
 
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
     start_time = time.time()
@@ -9785,58 +9887,69 @@ async def extra_generate_all_pages(
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
     clear_cancel(chat_id)
     new_job_id(chat_id)
-    set_active_job(chat_id, f"EXTRA MCQ generation ({file_name}, parallel)")
+    set_active_job(chat_id, f"EXTRA MCQ generation ({file_name}, batched)")
 
-    _EXTRA_PARALLEL_PAGES = 2
-    sem = asyncio.Semaphore(_EXTRA_PARALLEL_PAGES)
+    MAX_CONCURRENT_PAIRS = 2
+    pair_sem = asyncio.Semaphore(MAX_CONCURRENT_PAIRS)
     lock = asyncio.Lock()
     total_mcq_box = {"n": 0}
-    _slot_counter = {"n": 0}
 
-    async def _run_one(idx, page_num, img):
-        if is_cancelled(chat_id):
-            return
-        async with sem:
-            if is_cancelled(chat_id):
-                return
-            async with lock:
-                slot = _slot_counter["n"] % _EXTRA_PARALLEL_PAGES
-                _slot_counter["n"] += 1
+    async def _mark_current(pair):
+        async with lock:
+            for pg, _ in pair:
+                idx = next(i for i, (p, _) in enumerate(pages) if p == pg)
                 page_status[idx]["current"] = True
-                if status_msg_id:
-                    await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
 
-            mcqs = []
-            tried = set()
-            got_real = False
-            try:
-                mcqs, tried, got_real = await _extra_gen_from_image(img, topic, page_num, key_offset=slot)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(f"[Extra Generate] Page {page_num} error: {e}; retrying once")
-
-            if not mcqs and not got_real and not is_cancelled(chat_id):
-                try:
-                    await asyncio.sleep(1)
-                    mcqs, _, _ = await _extra_gen_from_image(img, topic, page_num, key_offset=slot, exclude_groq_keys=tried)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logger.error(f"[Extra Generate] Page {page_num} retry also failed: {e}")
-
-            if is_cancelled(chat_id):
-                return
-            async with lock:
+    async def _mark_done(pair_results):
+        async with lock:
+            for page_num, img, mcqs in pair_results:
+                idx = next(i for i, (p, _) in enumerate(pages) if p == page_num)
                 results_by_idx[idx] = (page_num, img, mcqs)
                 total_mcq_box["n"] += len(mcqs)
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
                 page_status[idx]["mcq"] = len(mcqs)
-                if status_msg_id:
-                    await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+
+    async def _process_pair(pair):
+        async with pair_sem:
+            if is_cancelled(chat_id):
+                return
+            await _mark_current(pair)
+            imgs = [img for _, img in pair]
+            n = len(pair)
+            try:
+                by_index = await _extra_gen_from_images_batch(imgs, topic)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[Extra Generate] batch pair error: {e}")
+                by_index = {}
+
+            pair_results = []
+            for i, (page_num, img) in enumerate(pair, start=1):
+                mcqs = by_index.get(i, [])
+                if not by_index and n > 0:
+                    # Whole batched call had a technical failure (no
+                    # provider answered at all) -- fall back to the old
+                    # single-image path for this page as a safety net.
+                    try:
+                        mcqs, _, _ = await _extra_gen_from_image(img, topic, page_num)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.error(f"[Extra Generate] fallback single-page {page_num} failed: {e}")
+                        mcqs = []
+                pair_results.append((page_num, img, mcqs))
+
+            if is_cancelled(chat_id):
+                return
+            await _mark_done(pair_results)
 
     async def _watch_cancel(tasks):
         while not all(t.done() for t in tasks):
@@ -9851,7 +9964,7 @@ async def extra_generate_all_pages(
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0), reply_markup=_cancel_kb(chat_id))
-        tasks = [_spawn_task(_run_one(idx, page_num, img)) for idx, (page_num, img) in enumerate(pages)]
+        tasks = [_spawn_task(_process_pair(pair)) for pair in pairs]
         watcher = _spawn_task(_watch_cancel(tasks))
         await asyncio.gather(*tasks, return_exceptions=True)
         watcher.cancel()
