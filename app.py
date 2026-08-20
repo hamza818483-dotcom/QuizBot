@@ -13934,10 +13934,11 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     while i < len(pages):
         pn1, img1 = pages[i]
         seg1 = _all_segs[i]
-        if (i + 1 < len(pages) and seg1 is not None and len(seg1) == 1):
+        if (i + 1 < len(pages) and seg1 is not None and len(seg1) == 1
+                and not seg1[0][3]):
             pn2, img2 = pages[i + 1]
             seg2 = _all_segs[i + 1]
-            if seg2 is not None and len(seg2) == 1:
+            if seg2 is not None and len(seg2) == 1 and not seg2[0][3]:
                 # DEBUG (2026-08-20): a reported case showed pages with
                 # visibly DIFFERENT headings still getting pair-combined
                 # (log showed "page 1-2: SUCCESS" for a Call1 scan that
