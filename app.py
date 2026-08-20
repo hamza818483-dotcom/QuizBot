@@ -13932,13 +13932,29 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             if is_cancelled(chat_id):
                 return []
             try:
-                gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
+                gem, _gem_marker_only = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True)
                 mcqs = _qbm_dedup_list(gem) if gem else []
                 mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
                 _chem_flag_letter_ref_explanations(mcqs, page_num)
                 if mcqs:
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini ({len(mcqs)} MCQ)")
                     return mcqs
+                if not _gem_marker_only:
+                    # 2026-08-20: 0 MCQ with NO trailing_topic_marker is
+                    # ambiguous -- could be a genuine fluke (proven by logs:
+                    # same page/crop retried moments later via the outer
+                    # 3-attempt cycle and Gemini found 10 real MCQs). Give
+                    # Gemini one more shot on a different rotated key before
+                    # burning Groq/OpenRouter quota on it. Adds ~2-3s but is
+                    # far cheaper than OpenRouter's scarce 11-key quota.
+                    logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini 0 MCQ, no marker (ambiguous) -- retrying Gemini once on next key before Groq")
+                    gem_retry, _ = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True)
+                    mcqs = _qbm_dedup_list(gem_retry) if gem_retry else []
+                    mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
+                    _chem_flag_letter_ref_explanations(mcqs, page_num)
+                    if mcqs:
+                        logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini retry ({len(mcqs)} MCQ)")
+                        return mcqs
                 logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini returned 0 MCQ, trying Groq")
                 txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
                 mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
@@ -16200,8 +16216,17 @@ async def handle_ai(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
-async def _qbm_gemini_extract(img, prompt: str = None) -> list:
-    """Direct Gemini call with the strict extraction prompt (fallback path)."""
+async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False):
+    """Direct Gemini call with the strict extraction prompt (fallback path).
+
+    2026-08-20: added optional _return_marker_info flag (default False, so
+    all existing callers are unaffected) -- when True, returns
+    (mcqs, is_marker_only) where is_marker_only tells the caller whether the
+    0-MCQ result was a *genuine* trailing_topic_marker-only response (Gemini
+    legitimately saying "heading here, no content") vs an ambiguous/empty
+    result (parse fail, empty text, or 0 items with no marker at all) that
+    may just be a fluke worth retrying with a different Gemini key before
+    burning scarce Groq/OpenRouter quota."""
     txt = await _qbm_gemini_raw(img, prompt or await qbm_get_active_prompt())
     # DEBUG (2026-08-20): log raw response snippet so a genuinely-empty
     # Gemini result (model says no content) can be told apart from a
@@ -16212,7 +16237,11 @@ async def _qbm_gemini_extract(img, prompt: str = None) -> list:
         logger.warning("[QBM-debug] _qbm_gemini_extract: EMPTY raw response text from Gemini")
     elif not _qbm_parse_json(txt):
         logger.warning(f"[QBM-debug] _qbm_gemini_extract: Gemini responded but 0 MCQs parsed. Raw (first 300 chars): {txt[:300]!r}")
-    return _qbm_parse_json(txt) if txt else []
+    parsed = _qbm_parse_json(txt) if txt else []
+    if not _return_marker_info:
+        return parsed
+    is_marker_only = bool(parsed) and all(isinstance(m, dict) and "trailing_topic_marker" in m for m in parsed)
+    return parsed, is_marker_only
 
 
 async def _qbm_groq_text_call(prompt: str, model: str = "openai/gpt-oss-120b") -> str:
