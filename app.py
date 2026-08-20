@@ -13766,16 +13766,23 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             try:
                 gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
                 mcqs = _qbm_dedup_list(gem) if gem else []
-                if not mcqs:
-                    txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
-                    mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
-                if not mcqs:
-                    txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
-                    mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
                 if mcqs:
+                    logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini ({len(mcqs)} MCQ)")
                     return mcqs
-                last_err = "all 3 providers returned 0 MCQ"
-                logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 -- ALL 3 providers returned 0 MCQ for this segment/page.")
+                logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini returned 0 MCQ, trying Groq")
+                txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
+                mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
+                if mcqs:
+                    logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Groq ({len(mcqs)} MCQ)")
+                    return mcqs
+                logger.warning(f"[CHEM-GEN v2] page {page_num}: Groq returned 0 MCQ, trying OpenRouter")
+                txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
+                mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
+                if mcqs:
+                    logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via OpenRouter ({len(mcqs)} MCQ)")
+                    return mcqs
+                last_err = "Gemini+Groq+OpenRouter all returned 0 MCQ"
+                logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 -- ALL 3 providers (Gemini, Groq, OpenRouter) returned 0 MCQ for this segment/page.")
             except Exception as e:
                 # A provider error on one segment (e.g. a near-empty crop) must
                 # never kill the whole page/batch -- previously this exception
@@ -13786,7 +13793,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 raised {last_err} -- retrying." if _attempt < 2 else f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 raised {last_err} -- giving up, treating as 0 MCQ.")
             if _attempt < 2:
                 await asyncio.sleep(2.0 * (_attempt + 1))  # backoff: 2s, 4s
-        logger.warning(f"[CHEM-GEN v2] page {page_num}: segment produced 0 MCQ after 3 full attempts ({last_err}).")
+        logger.warning(f"[CHEM-GEN v2] page {page_num}: segment produced 0 MCQ after 3 full attempts across Gemini+Groq+OpenRouter ({last_err}).")
         return []
 
     def _mark_done(idx, page_num, mcqs, img):
