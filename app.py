@@ -18486,6 +18486,45 @@ No red-marked MCQ on this page -> return [].
 OUTPUT — ONLY valid JSON array, nothing else, no markdown fences, no commentary:
 [{"mcq_no":"...","question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}]"""
 
+ONU2_CALL1_PROMPT_BATCHED_TMPL = """MCQ EXTRACTOR — RED-MARKED SERIAL NUMBER REGION ONLY, applied INDEPENDENTLY to {n} SEPARATE page images given to you in this SAME call (image order = page_index 1, 2, ... {n} — never mix content between pages, each page's MCQs stay strictly on that page's own page_index). The SOLE indicator for inclusion is a RED MARKING drawn in the LEFT MARGIN of each page around the MCQ's SERIAL NUMBER label (e.g. "১ক১", "1", "১খ৩") — this marking can appear as a RED BOUNDARY, a RED BOX, or a RED RECTANGLE outline; all three are the same signal, just drawn differently by hand. This marking sits ONLY around the number column, separate from the question text. It can be SHORT (wrapping just one number, marking a single MCQ) or TALL/VERTICAL (stretching down the margin to wrap SEVERAL CONSECUTIVE numbers together in one boundary, marking that whole consecutive run of MCQs as included — e.g. one tall boundary spanning "১ক৬" through "১ক১০" means all 5 of those MCQs are included). Carefully trace each margin marking's top and bottom edge to see exactly which serial numbers fall inside it, ON ITS OWN PAGE. A red mark anywhere else on a page (around question text, an option, a paragraph, or NOT in the left margin) does NOT count for inclusion — ignore it. IGNORE every MCQ whose serial number has no red boundary/box/rectangle around it in the left margin — do not extract it at all.
+
+CRITICAL — TWO COMPLETELY SEPARATE RED MARKS EXIST ON EACH PAGE, NEVER MIX THEM UP:
+  (a) The LEFT-MARGIN number marking described above -> this is the ONLY thing that decides INCLUSION (is this MCQ in the output at all).
+  (b) The small red circle/dot/golla around ONE OPTION's letter, inside the MCQ's answer choices -> this ONLY tells you which option was chosen as the answer. It has ZERO effect on inclusion.
+  Every MCQ that has (a) present MUST be included in the output regardless of whether (b) looks unusual, faint, missing, or ambiguous — never skip/exclude an otherwise-included MCQ because of anything related to (b). If (b) is missing entirely on an included MCQ, still include it (set "no_mark": true and pick the answer from your own subject knowledge) — a missing option-mark is NEVER a reason to drop the MCQ from the output.
+
+STRICT RULES — follow exactly, no exceptions, applied SEPARATELY per page:
+- Only output MCQs whose serial number is inside a left-margin red marking ON THAT SAME PAGE. Zero such MCQs on a given page -> that page simply contributes nothing (never borrow/copy an MCQ from a different page_index).
+- Never invent, guess, or hallucinate an MCQ that isn't printed on the page.
+- Never alter question/option wording from what's printed (Bangla stays Bangla, English stays English) — exact text only.
+- SKIP any MCQ that is roman-numeral/serial-combination style and needs an উদ্দীপক (numbered statement list like i/ii/iii or ১/২/৩ printed ABOVE the question) to make sense — i.e. its OPTIONS are combinations like "i, ii" / "i ও ii" / "১, ৩" / "i, ii ও iii" referring back to that statement list. Even if such an MCQ is inside a red marking, do NOT extract it — these need the উদ্দীপক context and don't stand alone.
+- SKIP any MCQ that has an IMAGE/DIAGRAM/FIGURE attached to its question, any option, or its explanation. Even if such an MCQ is inside a red marking, do NOT extract it — image-dependent MCQs can't be represented as plain text/CSV.
+- Every output item MUST have all 8 fields: page_index (integer, 1-based, which image this MCQ came from), mcq_no, question, options (with A,B,C,D), answer, marked_answer_wrong, no_mark, explanation. Missing/malformed items will be rejected downstream.
+
+For each MCQ found INSIDE a red marking on its own page, work through these 4 STEPS IN ORDER — each is a separate, independent task, do not blend them:
+
+STEP 1 — MCQ DETECTION (what to extract):
+- Extract the exact question number label if printed (e.g. "১ক১", "1", "১খ৩") into "mcq_no" (string, exact as printed; empty string if none printed).
+- Extract question text and all 4 options exactly as written (Bangla stays Bangla, English stays English).
+- OPTION LAYOUT: options aren't always one vertical list — a common layout is a 2×2 grid, ক)/খ) side-by-side on top, গ)/ঘ) side-by-side below (খ is RIGHT of ক, not below it; গ is below ক; ঘ is below খ). Map by the PRINTED LABEL at each cell (ক→A, খ→B, গ→C, ঘ→D), never by assumed reading-order — trace each label's actual position first, especially in a grid.
+
+STEP 2 — ANSWER DETECTION (how to decide "answer" + "marked_answer_wrong" + "no_mark" — completely separate from Step 1's text extraction):
+- Find the RED-CIRCLED option (red golla/circle/box around a letter/text/bullet). Trace the circle's exact boundary against the actual grid/list position from Step 1 to identify WHICH label it surrounds — this is the main error source, so re-check it precisely rather than assuming position order.
+- Once confident which label is circled, TRUST it as "answer" (~99% of cases): "marked_answer_wrong": false. Only override (true) if that option's content is a clear, unambiguous factual error (e.g. "ঢাকা" for "France-এর রাজধানী?") — never override just because another option also seems plausible; that's reasoning overriding a correct read, not catching a real mistake.
+- No option circled at all → determine "answer" from subject knowledge, "marked_answer_wrong": false, "no_mark": true.
+
+STEP 3 — EXPLANATION (write only after Step 1 + Step 2 are both settled, using their final result):
+- Use any ব্যাখ্যা text printed near this MCQ if present (copy verbatim, no rewrite). Otherwise self-write following the structure below.
+""" + _EXPLANATION_DEPTH_RULE_FMT_SAFE + """
+
+STEP 4 — FORMATTING (apply to question/options/explanation text from the steps above):
+""" + _MATH_UNICODE_RULE_FMT_SAFE + """
+
+No red-marked MCQ on any page -> return [].
+
+OUTPUT — ONLY valid JSON array covering ALL {n} pages together, nothing else, no markdown fences, no commentary:
+[{{"page_index":1,"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}]"""
+
 ONU2_CALL2_MISSCHECK_PROMPT_TMPL = """AUDIT PASS — this is a strict, independent re-check of the SAME page for the SOLE inclusion marker: a RED MARKING in the LEFT MARGIN around MCQ serial number(s) only (e.g. "১ক১", "1"). This marking can be a red boundary, red box, or red rectangle outline — all count as the same signal. The marking can be short (one number = one MCQ) or tall/vertical (spanning several consecutive numbers in the margin = all those consecutive MCQs included). Trace each margin marking's top/bottom edge carefully to see which numbers fall inside. A red mark NOT in the left margin (on question text, an option, a paragraph) does not count for inclusion.
 
 REMEMBER: the small red circle/dot marking one option's letter as the chosen answer is a COMPLETELY SEPARATE, unrelated mark from the left-margin inclusion marking. Never use it to decide inclusion, and never treat a missing/unclear option-mark as a reason an MCQ was correctly excluded — if its serial number is inside a left-margin marking, it belongs in the output regardless of its option-mark state.
@@ -18693,6 +18732,49 @@ def _onu2_filter_valid(mcqs: list) -> list:
     return valid
 
 
+async def _onu2_call1_extract_batch(imgs: list) -> dict:
+    """Call1 BATCHED (2026-08-20) -- same red-box detection rules as
+    _onu2_call1_extract, but scans MULTIPLE consecutive page images in
+    ONE model call (Gemini multi-image primary; Groq/OpenRouter fallback
+    only ever sees the FIRST image, same acceptable degradation pattern
+    /bio's multi-image scan uses for the rare full-Gemini-outage case).
+    Returns {page_index (1-based int): [mcq dicts]} -- caller maps
+    page_index back to its own real page_num. Call2 (full verification)
+    stays a SEPARATE, per-page single-image call exactly as before --
+    batching only ever applies to Call1's initial extraction."""
+    n = len(imgs)
+    if n == 0:
+        return {}
+    prompt = ONU2_CALL1_PROMPT_BATCHED_TMPL.format(n=n)
+    try:
+        gem_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+        gem = _onu2_parse_mcq_array(gem_txt) if gem_txt else []
+        provider = "Gemini"
+        if not gem:
+            txt = await _qbm_groq_call(imgs[0], prompt)
+            gem = _onu2_parse_mcq_array(txt) if txt else []
+            provider = "Groq"
+            if not gem:
+                or_txt = await _qbm_openrouter_call(imgs[0], prompt)
+                gem = _onu2_parse_mcq_array(or_txt) if or_txt else []
+                provider = "OpenRouter"
+        by_index = {}
+        for m in gem:
+            idx = m.get("page_index")
+            if not isinstance(idx, (int, float)) or not (1 <= int(idx) <= n):
+                continue
+            idx = int(idx)
+            m["_provider"] = provider
+            by_index.setdefault(idx, []).append(m)
+        for idx in list(by_index.keys()):
+            out = _onu2_filter_valid(_qbm_dedup_list(by_index[idx]))
+            by_index[idx] = out
+        return by_index
+    except Exception as e:
+        logger.warning(f"[ONU2 Call1 batch] failed: {e}")
+        return {}
+
+
 async def _onu2_call1_extract(img) -> list:
     """Call1 -- red-boundary/box region detect + extract + self-verify
     marked answer. Gemini primary / Groq fallback / OpenRouter last (same
@@ -18885,46 +18967,107 @@ async def _onu2_answer_key_check(img, mcqs: list) -> None:
         logger.warning(f"[ONU2 answer-key check] failed: {e}")
 
 
+async def _onu2_finish_page(img, call1: list) -> list:
+    """Shared tail of the /onu2 pipeline, given Call1's already-extracted
+    MCQs for this page (from either the single-image or the batched
+    Call1 path): Call2 (full-page audit -- finds any red-marked MCQ Call1
+    missed, single or grouped; ALSO re-confirms Call1's answer reads and
+    corrects genuine misreads in place) -> answer-key cross-check on this
+    same page -> final re-validation -> explanation safety-net fill."""
+    missed = await _onu2_call2_misscheck(img, call1)
+    combined = call1 + missed
+    if not combined:
+        return []
+    for m in combined:
+        opts = m.get("options")
+        if isinstance(opts, dict):
+            m["options"] = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
+    combined = _cap_mcq_options(combined)
+    await _onu2_answer_key_check(img, combined)
+    # Final strict re-validation: answer-key override or explanation
+    # fill could theoretically leave a field malformed -- never let a
+    # broken item reach the CSV.
+    combined = [m for m in combined if _onu2_validate_mcq(m) and not _onu_mcq_is_roman_combo(m) and not _onu_mcq_has_image(m)]
+    if not combined:
+        return []
+    for m in combined:
+        if not (m.get("explanation") or "").strip():
+            try:
+                m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m.get("answer", "A"))
+            except Exception as e:
+                logger.warning(f"[ONU2] explanation fallback failed: {e}")
+        exp = m.get("explanation", "") or ""
+        if len(exp) > 200:
+            m["explanation"] = exp[:197] + "..."
+    return combined
+
+
 async def _onu2_extract_from_image(img) -> list:
-    """/onu2's fully independent extraction pipeline for a single page.
-    Steps: Call1 (region-detect+extract, answer taken from red-circled
-    option by default, ~99% trusted) -> Call2 (full-page audit: finds any
-    red-marked MCQ Call1 missed, single or grouped; ALSO re-confirms
-    Call1's answer reads and corrects genuine misreads in place) ->
-    answer-key cross-check on this same page (further double-verifies
-    against উত্তরমালা if present, only overriding on an AI-verified genuine
-    mismatch) -> final re-validation -> explanation safety-net fill."""
+    """/onu2's fully independent extraction pipeline for a single page
+    (used for image-reply /onu2 calls, and as a fallback path). Steps:
+    Call1 (region-detect+extract, answer taken from red-circled option by
+    default, ~99% trusted) -> _onu2_finish_page (Call2 audit + answer-key
+    check + validation + explanation fill)."""
     await _qbm_ram_aware_acquire()
     try:
         call1 = await _onu2_call1_extract(img)
-        missed = await _onu2_call2_misscheck(img, call1)
-        combined = call1 + missed
-        if not combined:
-            return []
-        for m in combined:
-            opts = m.get("options")
-            if isinstance(opts, dict):
-                m["options"] = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
-        combined = _cap_mcq_options(combined)
-        await _onu2_answer_key_check(img, combined)
-        # Final strict re-validation: answer-key override or explanation
-        # fill could theoretically leave a field malformed -- never let a
-        # broken item reach the CSV.
-        combined = [m for m in combined if _onu2_validate_mcq(m) and not _onu_mcq_is_roman_combo(m) and not _onu_mcq_has_image(m)]
-        if not combined:
-            return []
-        for m in combined:
-            if not (m.get("explanation") or "").strip():
-                try:
-                    m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m.get("answer", "A"))
-                except Exception as e:
-                    logger.warning(f"[ONU2] explanation fallback failed: {e}")
-            exp = m.get("explanation", "") or ""
-            if len(exp) > 200:
-                m["explanation"] = exp[:197] + "..."
-        return combined
+        return await _onu2_finish_page(img, call1)
     finally:
         _QBM_EXTRACT_HARD_CAP.release()
+
+
+async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_id: int = None) -> list:
+    """/onu2 PDF pipeline (2026-08-20): Call1 now runs on PAIRS of
+    consecutive pages in ONE batched multi-image call (same red-box
+    detection rules applied independently per page inside that call --
+    see ONU2_CALL1_PROMPT_BATCHED_TMPL), cutting Call1's page-level API
+    calls roughly in half. Call2 (full audit + answer-mark re-confirm)
+    stays a full, independent, PER-PAGE single-image call exactly as
+    before -- only Call1 is paired. Returns the same (page_num, img, mcqs)
+    tuple list shape the rest of /onu2's CSV/channel output already
+    expects."""
+    PAIR_SIZE = 2
+    pairs = [pages[i:i + PAIR_SIZE] for i in range(0, len(pages), PAIR_SIZE)]
+    results = [None] * len(pages)
+    _done = [0]
+    _lock = asyncio.Lock()
+
+    async def _status(extra=""):
+        if not status_msg_id:
+            return
+        try:
+            await edit_msg(chat_id, status_msg_id,
+                f"⏳ MCQ Extraction হচ্ছে... ({_done[0]}/{len(pages)} page){extra}")
+        except Exception:
+            pass
+
+    await _status()
+
+    async def _process_pair(pair_idx, pair):
+        await _qbm_ram_aware_acquire()
+        try:
+            imgs = [img for _, img in pair]
+            by_index = await _onu2_call1_extract_batch(imgs)
+            for i, (page_num, img) in enumerate(pair, start=1):
+                call1 = by_index.get(i, [])
+                mcqs = await _onu2_finish_page(img, call1)
+                global_idx = pair_idx * PAIR_SIZE + (i - 1)
+                results[global_idx] = (page_num, img, mcqs)
+                async with _lock:
+                    _done[0] += 1
+                await _status()
+        finally:
+            _QBM_EXTRACT_HARD_CAP.release()
+
+    await asyncio.gather(*[_process_pair(pi, pair) for pi, pair in enumerate(pairs)], return_exceptions=True)
+
+    # Any slot that failed outright (exception in _process_pair before its
+    # per-page results were set) still needs a placeholder so downstream
+    # code iterating `pages` order never crashes on a None entry.
+    for i, (page_num, img) in enumerate(pages):
+        if results[i] is None:
+            results[i] = (page_num, img, [])
+    return results
 
 
 async def handle_onu2(msg: dict):
@@ -19062,10 +19205,7 @@ async def _handle_onu2_impl(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে...")
 
-        extracted_pages = await qbm_extract_all_pages(
-            chat_id, pages, topic, file_name, status_msg_id,
-            extractor=_onu2_extract_from_image
-        )
+        extracted_pages = await _onu2_extract_all_pages_paired(chat_id, pages, status_msg_id)
 
         # ── Cross-page উত্তরমালা sweep ──
         # The answer-key table usually sits on a LATER page, right after
