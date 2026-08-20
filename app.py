@@ -13339,7 +13339,15 @@ def _is_sane_chem_heading(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
-    if len(t) > 100:
+    # 100 was too tight -- a real heading is Bangla text + " — " + its full
+    # English translation combined (e.g. "১.৩ ল্যাবরেটরি, যন্ত্রপাতি ও
+    # গ্লাসসামগ্রী পরিষ্কার করার কৌশল — Techniques to Clean Equipments,
+    # Glass Apparatus and Laboratory" = 125 chars), which silently failed
+    # this check and made the whole topic vanish from detection with zero
+    # log trace (this exact heading was the root cause of a reported
+    # missing-topic case). 200 comfortably covers real headings while still
+    # rejecting genuine OCR run-on garbage.
+    if len(t) > 200:
         return False
     if len(t) < 2:
         return False
