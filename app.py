@@ -19469,22 +19469,15 @@ async def _handle_onu2_impl(msg: dict):
 
         extracted_pages = await _onu2_extract_all_pages_paired(chat_id, pages, status_msg_id, file_name, topic)
 
-        # ── Cross-page উত্তরমালা sweep ──
-        # The answer-key table usually sits on a LATER page, right after
-        # the MCQ set ends (not beside/adjacent to each MCQ) -- the
-        # per-page check inside _onu2_extract_from_image only catches a
-        # same-page key, so this sweep re-checks every extracted MCQ
-        # (that still has an mcq_no) against every page's image, in case
-        # its key entry lives on a different page than the MCQ itself.
-        all_mcqs_with_no = [m for _, _, mcqs in extracted_pages for m in mcqs if (m.get("mcq_no") or "").strip()]
-        if all_mcqs_with_no:
-            try:
-                for _, page_img in pages:
-                    if not all_mcqs_with_no:
-                        break
-                    await _onu2_answer_key_check(page_img, all_mcqs_with_no)
-            except Exception as e:
-                logger.warning(f"[ONU2] cross-page answer-key sweep failed: {e}")
+        # Cross-page উত্তরমালা sweep removed (2026-08-20): Call2's Task 4
+        # (per-pair batched answer-key check) already covers the common
+        # case of the key sitting on the SAME pair (or a page checked
+        # within that pair's 2-image call). A full extra sweep here re-ran
+        # _onu2_answer_key_check as a SEPARATE single-image call per page
+        # (up to 19 sequential calls for a 19-page PDF, each with its own
+        # 35-60s timeout/key-rotation retries) with NO status update during
+        # that phase -- this was the actual cause of the "stuck at 100%"
+        # hang. Call1+Call2 batched per pair is now the complete pipeline.
 
         total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
 
