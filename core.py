@@ -1129,6 +1129,27 @@ async def _get_shared_http_client():
 
 _pyro_flood_wait_until = 0.0  # unix timestamp; skip start() attempts until this passes
 
+async def _load_pyro_flood_wait_from_d1():
+    """Rehydrate the flood-wait cooldown from D1 at startup -- without this,
+    a process restart happening DURING an active flood-wait window forgets
+    the cooldown entirely (RAM-only state wiped), so the very next
+    large-file request immediately retries start() -> another
+    auth.ImportBotAuthorization call while still flood-limited, which can
+    extend/refresh the wait instead of letting it expire. Best-effort: any
+    D1 error just leaves the cooldown at 0 (no worse than before this existed)."""
+    global _pyro_flood_wait_until
+    try:
+        val = await d1_get("pyro_flood_wait_until")
+        if isinstance(val, dict):
+            ts = val.get("until")
+        else:
+            ts = val
+        if isinstance(ts, (int, float)) and ts > time.time():
+            _pyro_flood_wait_until = float(ts)
+            logger.warning(f"[pyrogram] Restored active FLOOD_WAIT cooldown from D1, {ts - time.time():.0f}s remaining")
+    except Exception as e:
+        logger.warning(f"[pyrogram] flood-wait D1 restore failed (starting with no cooldown): {e}")
+
 async def _get_pyro_client():
     global _pyro_client, _pyro_flood_wait_until
     if _pyro_client is None and TELEGRAM_API_ID and TELEGRAM_API_HASH:
@@ -1160,6 +1181,12 @@ async def _get_pyro_client():
                 # and get flood-waited again.
                 _pyro_flood_wait_until = time.time() + wait_s + 10
                 logger.warning(f"[pyrogram] FLOOD_WAIT — pausing all pyrogram start() attempts for {wait_s+10}s (falls back to Bot API getFile meanwhile): {e}")
+                # Persist so a restart mid-cooldown doesn't forget this and
+                # immediately re-trigger another flood-wait extension.
+                try:
+                    await d1_set("pyro_flood_wait_until", {"until": _pyro_flood_wait_until}, ttl=wait_s + 60)
+                except Exception:
+                    pass
             else:
                 logger.warning(f"[pyrogram] start() failed, will retry next call: {e}")
             return None

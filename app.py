@@ -24620,18 +24620,28 @@ async def startup():
     BOT_START_TIME = time.time()
     logger.info("[App] ATLAS BOT v4.1 starting...")
 
-    # SPEED: Pyrogram client cold-start (connect+auth handshake) prothom
-    # download request-ei hoile user wait kore. Startup-e pre-warm kore rakhle
-    # first real download-e ei latency lage na.
+    # SPEED vs FLOOD-WAIT TRADEOFF: pre-warming pyrogram here used to call
+    # client.start() (-> auth.ImportBotAuthorization) unconditionally on
+    # EVERY app startup, purely to save first-download latency. That's fine
+    # for occasional restarts, but on frequent restarts (crash-loops, HF
+    # Space sleep/wake cycles) it burns one ImportBotAuthorization call per
+    # restart -- exactly the pattern that trips Telegram's FLOOD_WAIT on
+    # that method (observed: FLOOD_WAIT_919s blocking /cut's large-file
+    # fallback entirely until the cooldown passed). _get_pyro_client()
+    # already lazy-inits + self-throttles via _pyro_flood_wait_until, so
+    # skip the eager call here and let the FIRST real large-file request
+    # trigger start() naturally -- a small one-time latency hit on that
+    # first request is far cheaper than risking a 900+s flood-wait that
+    # blocks every large-file download bot-wide until it clears. Still
+    # restore any ALREADY-ACTIVE flood-wait cooldown from D1 (no start()
+    # call involved) so a restart mid-cooldown doesn't forget it and
+    # immediately retry into another flood-wait.
     try:
-        from core import _get_pyro_client
-        pc = await _get_pyro_client()
-        if pc:
-            logger.info("[App] Pyrogram client pre-warmed at startup")
-        else:
-            logger.info("[App] Pyrogram not configured (TELEGRAM_API_ID/HASH missing), skip pre-warm")
+        from core import _load_pyro_flood_wait_from_d1
+        await _load_pyro_flood_wait_from_d1()
     except Exception as e:
-        logger.warning(f"[App] Pyrogram pre-warm failed (will lazy-init later): {e}")
+        logger.warning(f"[App] Pyrogram flood-wait D1 restore failed: {e}")
+    logger.info("[App] Pyrogram pre-warm skipped (lazy-init on first large-file request instead, avoids flood-wait risk from frequent restarts)")
 
     # SPEED: pre-warm the shared httpx client's connection to the CF Worker
     # (used by every send_msg/tg_post call) and the Supabase client, so the
