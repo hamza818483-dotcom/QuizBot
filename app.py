@@ -12444,12 +12444,11 @@ def _is_sane_bio_heading(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
-    # Too long to plausibly be a heading (a real sentence/paragraph leaked
-    # through) -- genuine headings incl. English parenthetical rarely
-    # exceed ~80 chars.
-    if len(t) > 90:
-        return False
-    # Too short to be meaningful (a stray digit/punctuation mark).
+    # No upper length cap: this exact style of cap (was 90 here, 100 in
+    # /chem's twin function) silently killed a real /chem heading whose
+    # combined Bangla+English text ran to 125 chars, with zero log trace --
+    # see git history. Length alone isn't a reliable garbage signal; the
+    # sub-point/fragment checks below already catch real garbage shapes.
     if len(t) < 2:
         return False
     # A left-margin bracketed sub-point leaking through despite the
@@ -13339,16 +13338,16 @@ def _is_sane_chem_heading(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
-    # 100 was too tight -- a real heading is Bangla text + " — " + its full
-    # English translation combined (e.g. "১.৩ ল্যাবরেটরি, যন্ত্রপাতি ও
-    # গ্লাসসামগ্রী পরিষ্কার করার কৌশল — Techniques to Clean Equipments,
-    # Glass Apparatus and Laboratory" = 125 chars), which silently failed
-    # this check and made the whole topic vanish from detection with zero
-    # log trace (this exact heading was the root cause of a reported
-    # missing-topic case). 200 comfortably covers real headings while still
-    # rejecting genuine OCR run-on garbage.
-    if len(t) > 200:
+    if len(t) < 2:
         return False
+    # No upper length cap: a real heading is Bangla text + " — " + its full
+    # English translation, and topic names vary in length -- ANY fixed cap
+    # risks silently killing a real heading with zero log trace (a 100-char
+    # cap already did exactly this once, see git history). Genuine garbage
+    # (run-on OCR noise, enumerated lists) is already rejected upstream by
+    # the strict hierarchical-number regex and multi-number check, and by
+    # the ending-punctuation heuristic below -- length alone is not a
+    # reliable signal of "not a real heading".
     if len(t) < 2:
         return False
     if t.endswith(("।", "এবং", "কারণ", "যেহেতু")) and len(t) > 40:
