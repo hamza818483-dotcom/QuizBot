@@ -13747,30 +13747,47 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         """Generate MCQs from a (possibly cropped) image using the same
         3-provider fallback chain /chem always used (Gemini -> Groq ->
         OpenRouter), with WARNING-level stage logging kept from the
-        debug pass so genuinely-empty results stay diagnosable."""
+        debug pass so genuinely-empty results stay diagnosable.
+
+        2026-08-20: added a 2-full-cycle retry ladder (was single-shot).
+        A single Gemini->Groq->OpenRouter chain with NO retry meant one
+        transient failure (Gemini 429 landing on an exhausted key AND Groq/
+        OpenRouter also momentarily failing) permanently killed that
+        segment's real topic with zero recovery attempt -- unlike /pdf's
+        4-attempt + relaxed-pass ladder. Now retries the whole 3-provider
+        chain up to 3 times with backoff before conceding empty."""
         _current_job_chat_id_ctx.set(chat_id)
         if is_cancelled(chat_id):
             return []
-        try:
-            gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
-            mcqs = _qbm_dedup_list(gem) if gem else []
-            if not mcqs:
-                txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
-                mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
-            if not mcqs:
-                txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
-                mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
-            if not mcqs:
-                logger.warning(f"[CHEM-GEN v2] page {page_num}: ALL 3 providers returned 0 MCQ for this segment/page.")
-            return mcqs
-        except Exception as e:
-            # A provider error on one segment (e.g. a near-empty crop) must
-            # never kill the whole page/batch -- previously this exception
-            # propagated up through _run_single_page/_run_paired_pages into
-            # the outer asyncio.gather, silently wiping out sibling pages'
-            # results too (this is what caused whole topics to go missing).
-            logger.warning(f"[CHEM-GEN v2] page {page_num}: segment generation raised {type(e).__name__}: {e} -- treating as 0 MCQ, continuing.")
-            return []
+        last_err = None
+        for _attempt in range(3):
+            if is_cancelled(chat_id):
+                return []
+            try:
+                gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
+                mcqs = _qbm_dedup_list(gem) if gem else []
+                if not mcqs:
+                    txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
+                    mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
+                if not mcqs:
+                    txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
+                    mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
+                if mcqs:
+                    return mcqs
+                last_err = "all 3 providers returned 0 MCQ"
+                logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 -- ALL 3 providers returned 0 MCQ for this segment/page.")
+            except Exception as e:
+                # A provider error on one segment (e.g. a near-empty crop) must
+                # never kill the whole page/batch -- previously this exception
+                # propagated up through _run_single_page/_run_paired_pages into
+                # the outer asyncio.gather, silently wiping out sibling pages'
+                # results too (this is what caused whole topics to go missing).
+                last_err = f"{type(e).__name__}: {e}"
+                logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 raised {last_err} -- retrying." if _attempt < 2 else f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 raised {last_err} -- giving up, treating as 0 MCQ.")
+            if _attempt < 2:
+                await asyncio.sleep(2.0 * (_attempt + 1))  # backoff: 2s, 4s
+        logger.warning(f"[CHEM-GEN v2] page {page_num}: segment produced 0 MCQ after 3 full attempts ({last_err}).")
+        return []
 
     def _mark_done(idx, page_num, mcqs, img):
         nonlocal total_mcq
