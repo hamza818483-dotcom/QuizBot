@@ -14691,6 +14691,18 @@ def _qbm_parse_json(text: str) -> list:
                 **({"yellow_highlight": mc.get("yellow_highlight")} if "yellow_highlight" in mc else {}),
                 **({"qsn_no": mc.get("qsn_no")} if "qsn_no" in mc else {}),
                 **({"topic_hint": mc.get("topic_hint")} if "topic_hint" in mc else {}),
+                # SOURCE-GROUNDING fields (2026-08-20): /chem's generation
+                # prompt asks Gemini to self-report these per MCQ so a
+                # code-level gate (_chem_filter_verified_mcqs) can enforce
+                # them -- but this parser used to build a fixed whitelist
+                # dict that silently dropped ANY key not explicitly listed,
+                # so source_verbatim/verified never survived parsing even
+                # when Gemini output them correctly. That made 100% of
+                # /chem MCQs look "unverified" regardless of Gemini's real
+                # compliance, a false-positive mass-drop unrelated to key
+                # health. Must be carried through here.
+                **({"source_verbatim": mc.get("source_verbatim")} if "source_verbatim" in mc else {}),
+                **({"verified": mc.get("verified")} if "verified" in mc else {}),
             })
         except Exception:
             continue
