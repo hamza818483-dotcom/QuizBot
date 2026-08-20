@@ -9871,101 +9871,167 @@ async def extra_generate_all_pages(
     chat_id: int, pages: list, topic: str,
     file_name: str, status_msg_id: int = None
 ) -> list:
-    """/extra's OWN page-loop — TRUE batching (2026-08-20): pages are
-    grouped into pairs and EACH PAIR gets exactly ONE Gemini call via
-    _extra_gen_from_images_batch (same idea as /onu2's Call1 batching),
-    instead of 2 separate parallel single-image calls. Cuts API calls
-    roughly in half. Falls back to the old single-image path per-page
-    only if a pair's batched call returns nothing at all (technical
-    failure) as a safety net. Up to 2 pairs run concurrently."""
-    PAIR_SIZE = 2
-    pairs = [pages[i:i + PAIR_SIZE] for i in range(0, len(pages), PAIR_SIZE)]
-
+    """/extra's OWN page-loop — TRUE batching with a shared QUEUE
+    (2026-08-20): instead of fixed static pairs, workers pull pages
+    one-at-a-time from a shared queue and build their OWN pair on the
+    fly. If the FIRST page in a worker's pair comes back with 0 MCQs
+    (figure-only/no-content page -- a fully legit, expected case), that
+    page is finalized on its own and the worker immediately pulls the
+    NEXT page from the queue to pair with instead, retrying the batched
+    call so every call still tries to cover 2 CONTENT pages. This keeps
+    API-call savings intact even when the PDF has content-sparse pages
+    mixed in, instead of wasting a call-slot pairing a blank page with a
+    real one. Up to 2 workers run concurrently."""
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
     start_time = time.time()
     results_by_idx = [None] * len(pages)
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
     clear_cancel(chat_id)
     new_job_id(chat_id)
-    set_active_job(chat_id, f"EXTRA MCQ generation ({file_name}, batched)")
+    set_active_job(chat_id, f"EXTRA MCQ generation ({file_name}, batched-queue)")
 
-    MAX_CONCURRENT_PAIRS = 2
-    pair_sem = asyncio.Semaphore(MAX_CONCURRENT_PAIRS)
+    queue = asyncio.Queue()
+    for p in pages:
+        queue.put_nowait(p)
+
+    MAX_WORKERS = 2
     lock = asyncio.Lock()
     total_mcq_box = {"n": 0}
 
-    async def _mark_current(pair):
+    def _idx_of(page_num):
+        return next(i for i, (p, _) in enumerate(pages) if p == page_num)
+
+    async def _mark_current(page_num):
         async with lock:
-            for pg, _ in pair:
-                idx = next(i for i, (p, _) in enumerate(pages) if p == pg)
-                page_status[idx]["current"] = True
+            page_status[_idx_of(page_num)]["current"] = True
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id,
                     _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
 
-    async def _mark_done(pair_results):
+    async def _mark_done(page_num, img, mcqs):
         async with lock:
-            for page_num, img, mcqs in pair_results:
-                idx = next(i for i, (p, _) in enumerate(pages) if p == page_num)
-                results_by_idx[idx] = (page_num, img, mcqs)
-                total_mcq_box["n"] += len(mcqs)
-                page_status[idx]["current"] = False
-                page_status[idx]["done"] = True
-                page_status[idx]["mcq"] = len(mcqs)
+            idx = _idx_of(page_num)
+            results_by_idx[idx] = (page_num, img, mcqs)
+            total_mcq_box["n"] += len(mcqs)
+            page_status[idx]["current"] = False
+            page_status[idx]["done"] = True
+            page_status[idx]["mcq"] = len(mcqs)
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id,
                     _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
 
-    async def _process_pair(pair):
-        async with pair_sem:
+    async def _audited(mcqs, img, page_num):
+        if not mcqs:
+            return mcqs
+        try:
+            mcqs = await _extra_marking_audit(mcqs, img, topic, page_num)
+            return _validate_mcq_structure(mcqs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"[Extra Generate] audit page {page_num} skipped: {e}")
+            return mcqs
+
+    async def _fallback_single(img, page_num):
+        try:
+            mcqs, _, _ = await _extra_gen_from_image(img, topic, page_num)
+            return mcqs
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[Extra Generate] fallback single-page {page_num} failed: {e}")
+            return []
+
+    async def _worker():
+        while True:
             if is_cancelled(chat_id):
                 return
-            await _mark_current(pair)
-            imgs = [img for _, img in pair]
-            n = len(pair)
             try:
-                by_index = await _extra_gen_from_images_batch(imgs, topic)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(f"[Extra Generate] batch pair error: {e}")
-                by_index = {}
-
-            pair_results = []
-            for i, (page_num, img) in enumerate(pair, start=1):
-                mcqs = by_index.get(i, [])
-                if not by_index and n > 0:
-                    # Whole batched call had a technical failure (no
-                    # provider answered at all) -- fall back to the old
-                    # single-image path for this page as a safety net.
-                    # (This path already runs _extra_marking_audit inside
-                    # _extra_gen_from_image, so no need to audit again.)
-                    try:
-                        mcqs, _, _ = await _extra_gen_from_image(img, topic, page_num)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        logger.error(f"[Extra Generate] fallback single-page {page_num} failed: {e}")
-                        mcqs = []
-                elif mcqs:
-                    # Batch path succeeded -- still run the SAME strict
-                    # second-pass marking audit the single-page path uses,
-                    # so both paths enforce identical rules (drop any MCQ
-                    # traced to unmarked/plain text).
-                    try:
-                        mcqs = await _extra_marking_audit(mcqs, img, topic, page_num)
-                        mcqs = _validate_mcq_structure(mcqs)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        logger.warning(f"[Extra Generate] audit page {page_num} skipped: {e}")
-                pair_results.append((page_num, img, mcqs))
-
-            if is_cancelled(chat_id):
+                page_num, img = queue.get_nowait()
+            except asyncio.QueueEmpty:
                 return
-            await _mark_done(pair_results)
+            await _mark_current(page_num)
 
-    async def _watch_cancel(tasks):
+            # Try to grab a SECOND page from the queue right away so this
+            # call covers 2 pages when possible (queue may be empty near
+            # the end -- that's fine, single-page batch call still works).
+            second = None
+            try:
+                second = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                second = None
+            if second:
+                await _mark_current(second[0])
+
+            first_page_num, first_img = page_num, img
+            pending = [(first_page_num, first_img)]
+            if second:
+                pending.append(second)
+
+            while pending and not is_cancelled(chat_id):
+                imgs = [im for _, im in pending]
+                n = len(imgs)
+                try:
+                    by_index = await _extra_gen_from_images_batch(imgs, topic)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[Extra Generate] batch error: {e}")
+                    by_index = {}
+
+                if not by_index and n > 0:
+                    # Whole batched call technically failed (no provider
+                    # answered at all) -- fall back to old single-image
+                    # path for every pending page, then we're done.
+                    for pg, im in pending:
+                        mcqs = await _fallback_single(im, pg)
+                        await _mark_done(pg, im, mcqs)
+                    pending = []
+                    break
+
+                # First page in this attempt: finalize it either way --
+                # 0 MCQs here is a fully legit "figure-only/no-content
+                # page" result, not a failure.
+                first_pg, first_im = pending[0]
+                first_mcqs = await _audited(by_index.get(1, []), first_im, first_pg)
+                await _mark_done(first_pg, first_im, first_mcqs)
+
+                if n == 1:
+                    pending = []
+                    break
+
+                second_pg, second_im = pending[1]
+                if first_mcqs:
+                    # Both pages had a fair shot in the same call and the
+                    # first page genuinely had content -- finalize the
+                    # second page's result from this same call too.
+                    second_mcqs = await _audited(by_index.get(2, []), second_im, second_pg)
+                    await _mark_done(second_pg, second_im, second_mcqs)
+                    pending = []
+                else:
+                    # First page came back empty (no marks / figure-only)
+                    # -- its own MCQ count is already finalized above.
+                    # Re-pair the SECOND page with a fresh page (if any
+                    # left in the queue) and retry, so the batched call
+                    # still gets a real shot at covering 2 content pages.
+                    try:
+                        third = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        third = None
+                    if third:
+                        await _mark_current(third[0])
+                        pending = [(second_pg, second_im), third]
+                    else:
+                        # No more pages left -- just finalize the second
+                        # page alone (its own extraction from this call
+                        # is still valid, whatever it found).
+                        second_mcqs = await _audited(by_index.get(2, []), second_im, second_pg)
+                        await _mark_done(second_pg, second_im, second_mcqs)
+                        pending = []
+
+    tasks = [_spawn_task(_worker()) for _ in range(MAX_WORKERS)]
+
+    async def _watch_cancel():
         while not all(t.done() for t in tasks):
             if is_cancelled(chat_id):
                 for t in tasks:
@@ -9978,8 +10044,7 @@ async def extra_generate_all_pages(
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0), reply_markup=_cancel_kb(chat_id))
-        tasks = [_spawn_task(_process_pair(pair)) for pair in pairs]
-        watcher = _spawn_task(_watch_cancel(tasks))
+        watcher = _spawn_task(_watch_cancel())
         await asyncio.gather(*tasks, return_exceptions=True)
         watcher.cancel()
     finally:
