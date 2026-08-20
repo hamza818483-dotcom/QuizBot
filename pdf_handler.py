@@ -414,6 +414,20 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
         raise RuntimeError("PDF conversion queue busy -- try again in a moment")
     try:
         from pdf2image import convert_from_bytes
+        def _convert_batch(first: int, last: int):
+            """Convert a whole page range in ONE convert_from_bytes call
+            (single poppler subprocess) instead of one call per page --
+            was the actual bottleneck causing long stalls after download
+            hit 100% (19 pages = 19 separate subprocess spins). Falls back
+            to per-page conversion only if the batch call itself fails."""
+            try:
+                imgs = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150, thread_count=4)
+                if imgs and len(imgs) == (last - first + 1):
+                    return imgs
+            except Exception as _conv_e:
+                logger.warning(f"[PDF] Batch convert pages {first}-{last} (dpi=150) raised: {_conv_e}")
+            return None
+
         def _convert_one_page(p):
             # PERMANENT FIX: a page must never be silently dropped just
             # because a convert_from_bytes call returned empty (transient
@@ -449,6 +463,14 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                 raise ValueError(
                     f"PDF_RANGE_TOO_LARGE:{first}:{last}:{_PDF_MAX_PAGES_PER_CALL}"
                 )
+            batch = _convert_batch(first, last)
+            if batch is not None:
+                result = list(zip(range(first, last + 1), batch))
+                logger.info(f"[PDF] Converted {len(result)} pages (single batch call)")
+                return result
+            # Batch failed -- fall back to the slower but bulletproof
+            # per-page path (with its own retry/dpi-fallback) so no page
+            # is ever silently dropped.
             result = []
             missing_pages = []
             for p in range(first, last + 1):
@@ -461,16 +483,25 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                     result.append((p, Image.new("RGB", (1240, 1754), "white")))
             if missing_pages:
                 logger.error(f"[PDF] UNRECOVERABLE render failure (placeholder inserted) for pages: {missing_pages} (out of range {first}-{last})")
-            logger.info(f"[PDF] Converted {len(result)} pages")
+            logger.info(f"[PDF] Converted {len(result)} pages (per-page fallback)")
             return result
         else:
+            total_pages = get_pdf_page_count(pdf_bytes)
+            if total_pages:
+                cap = min(total_pages, _PDF_MAX_PAGES_PER_CALL)
+                batch = _convert_batch(1, cap)
+                if batch is not None:
+                    result = list(zip(range(1, cap + 1), batch))
+                    if total_pages > _PDF_MAX_PAGES_PER_CALL:
+                        raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
+                    logger.info(f"[PDF] Converted {len(result)} pages (single batch call)")
+                    return result
             # REAL BUG FIX: previously an empty convert_from_bytes result on
             # page N was treated as "end of document" via break — but empty
             # can also mean a TRANSIENT failure on a page that is NOT actually
             # the last page, silently truncating the rest of the PDF. Now we
             # retry+dpi-fallback per page, and only treat it as true
             # end-of-document once confirmed against the real page count.
-            total_pages = get_pdf_page_count(pdf_bytes)
             result = []
             missing_pages = []
             p = 1
@@ -493,7 +524,7 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                     raise ValueError(f"PDF_TRUNCATED_AT:{_PDF_MAX_PAGES_PER_CALL}")
             if missing_pages:
                 logger.error(f"[PDF] UNRECOVERABLE render failure (placeholder inserted) for pages: {missing_pages} (total_pages={total_pages})")
-            logger.info(f"[PDF] Converted {len(result)} pages")
+            logger.info(f"[PDF] Converted {len(result)} pages (per-page fallback)")
             return result
     except Exception as e:
         logger.error(f"[PDF] Convert error: {e}")
