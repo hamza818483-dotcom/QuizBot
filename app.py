@@ -1752,12 +1752,24 @@ def _build_mcq_prompt(topic: str, count) -> str:
 
         f"💥 ব্যাখ্যা (EXPLANATION) — ALL 4 options, mandatory\n"
         f"A one-liner confirming only the correct answer is INVALID. Every "
-        f"explanation must: (1) state the correct option + why, (2) give a short "
-        f"reason each of the other 3 is wrong (different term/value, common "
-        f"confusion, related-but-not-asked, etc.). SOURCE-FIRST — if the source "
-        f"explains why a wrong option is wrong, use that; otherwise use general "
-        f"knowledge, but never leave any option unaddressed. Keep each option's "
-        f"reasoning to a short clause. Length ~150-280 characters total, no filler.\n\n"
+        f"explanation must: (1) state the correct option's content + why, "
+        f"(2) give a short reason each of the other 3 is wrong (different "
+        f"term/value, common confusion, related-but-not-asked, etc.). "
+        f"SOURCE-GROUNDED ONLY — every reason given for why an option is "
+        f"right or wrong must come from what this page actually says, never "
+        f"invented/general reasoning not traceable to the page's own content "
+        f"(same SOURCE-GROUNDING LOCK as the MCQ itself — if the page doesn't "
+        f"support a clean reason for an option, keep that option's reasoning "
+        f"minimal/direct rather than inventing an elaborate but unsupported one). "
+        f"Keep each option's reasoning to a short clause. Length ~150-280 "
+        f"characters total, no filler.\n"
+        f"🚫 NEVER refer to options by their letter (A/B/C/D) in the "
+        f"explanation text — the letter can shuffle after generation, so "
+        f"'A ভুল কারণ...'/'B সঠিক কারণ...' becomes wrong/misleading. Always "
+        f"name the option's actual content directly instead, e.g. "
+        f"'রি-এজেন্ট বোতল শেলফে রাখা সঠিক কারণ...' / '...(the wrong option's "
+        f"own term) এটি সঠিক নয় কারণ...' — every option is identified by "
+        f"what it says, never by its position letter.\n\n"
 
         f"🟩 STRICT LANGUAGE: question/options/explanation all in the source "
         f"image's language — never translate.\n\n"
@@ -13703,6 +13715,33 @@ def _chem_filter_verified_mcqs(mcqs: list, page_num) -> list:
     return kept
 
 
+# Matches an explanation referring to an option by its LETTER instead of its
+# content -- e.g. "A ভুল কারণ", "B সঠিক কারণ", "C ও D ভুল কারণ", "A, C ও D
+# ভুল". The prompt instructs against this, but a model can still slip into
+# it under generation pressure -- this is the code-level safety net.
+_OPTION_LETTER_REF_RE = re.compile(
+    r'(?:^|[,।\s])([A-D])(?:\s*(?:,|ও|এবং|/)\s*[A-D])*\s*(সঠিক|ভুল|নয়|হয়)\b'
+)
+
+
+def _chem_flag_letter_ref_explanations(mcqs: list, page_num) -> None:
+    """CODE-LEVEL check (logging only, never auto-edits/drops -- unlike the
+    source-grounding filter, rewriting explanation prose correctly is not
+    something a regex can safely do) for explanations that still reference
+    options by A/B/C/D letter despite the prompt's explicit rule against it.
+    Flags loudly so a recurring pattern is visible in logs even though the
+    prompt-level fix should already prevent most cases."""
+    for m in mcqs:
+        exp = m.get("explanation") or ""
+        if _OPTION_LETTER_REF_RE.search(exp):
+            logger.warning(
+                f"[CHEM LETTER-REF explanation] page {page_num}: explanation "
+                f"still refers to option by letter (A/B/C/D) despite prompt "
+                f"rule -- question: '{(m.get('question') or '')[:50]}', "
+                f"explanation: '{exp[:100]}'"
+            )
+
+
 async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None) -> list:
     """/chem GENERATION pipeline, rebuilt 2026-08-20 to mirror /bio's
     _bio_generate_per_topic_pages architecture exactly: Call 1 (batched
@@ -13896,6 +13935,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 gem = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2)
                 mcqs = _qbm_dedup_list(gem) if gem else []
                 mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
+                _chem_flag_letter_ref_explanations(mcqs, page_num)
                 if mcqs:
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini ({len(mcqs)} MCQ)")
                     return mcqs
@@ -13903,6 +13943,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
                 mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
                 mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
+                _chem_flag_letter_ref_explanations(mcqs, page_num)
                 if mcqs:
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Groq ({len(mcqs)} MCQ)")
                     return mcqs
@@ -13910,6 +13951,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
                 mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
                 mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
+                _chem_flag_letter_ref_explanations(mcqs, page_num)
                 if mcqs:
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via OpenRouter ({len(mcqs)} MCQ)")
                     return mcqs
