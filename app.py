@@ -18587,13 +18587,20 @@ TASK 3a — SPELLING/WORD-MISMATCH AUDIT: for each entry in each page's existing
 TASK 3b — EXPLANATION (for any MISSED MCQ from Task 1, written after its Task 1 + Task 2 result is settled): use any ব্যাখ্যা text printed near it if present (verbatim, no rewrite), otherwise self-write following this structure:
 """ + _EXPLANATION_DEPTH_RULE_FMT_SAFE + """
 
-If nothing was missed and no answer mismatches or text corrections found on ANY page, return the empty-array structure shown below.
+TASK 4 — ANSWER-KEY CROSS-CHECK: any of these {n} pages may ALSO contain an ANSWER KEY / উত্তরমালা section — a small table/grid appearing AFTER an entire MCQ set ends (not beside individual MCQs), mapping question numbers to correct option letters (e.g. "১।(ক) ২।(খ)..." or numbered cells like "১ (ক)"). This key may sit on a DIFFERENT page_index than the MCQs it covers -- check every page's table (if any) against every MCQ listed above (existing list + anything found in Task 1), matching by mcq_no AND question-content sanity check (numbers can repeat across pages). The red-circled option is the DEFAULT trusted answer (~99% correct) -- only report a GENUINE mismatch:
+1. Find the MCQ's matching key-table row (any page_index).
+2. Compare the key's letter to that MCQ's answer (current_answer, or Task 2's corrected answer if any, or the Task-1-found answer for a missed item).
+3. If they MATCH -> do not report.
+4. If they DIFFER -> use your own subject knowledge to independently verify which letter is factually correct, then report ONLY after this verification, with your verified letter as "key_answer" and the MCQ's own page_index (not the key table's page).
+If no answer-key table exists on any page, or no genuine mismatches found, report nothing for this task.
+
+If nothing was missed and no answer mismatches, text corrections, or answer-key mismatches found on ANY page, return the empty-array structure shown below.
 
 FORMATTING (apply to all question/option/explanation text above):
 """ + _MATH_UNICODE_RULE_FMT_SAFE + """
 
 OUTPUT — ONLY valid JSON object covering ALL {n} pages together, nothing else, no markdown fences:
-{{"missed": [{{"page_index":1,"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}], "answer_corrections": [{{"page_index":1,"mcq_no":"...","correct_answer":"A/B/C/D"}}], "text_corrections": [{{"page_index":1,"mcq_no":"...","corrected_question":"...","corrected_options":{{"B":"..."}}}}]}}"""
+{{"missed": [{{"page_index":1,"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}], "answer_corrections": [{{"page_index":1,"mcq_no":"...","correct_answer":"A/B/C/D"}}], "text_corrections": [{{"page_index":1,"mcq_no":"...","corrected_question":"...","corrected_options":{{"B":"..."}}}}], "answer_key_overrides": [{{"page_index":1,"mcq_no":"...","key_answer":"A/B/C/D"}}]}}"""
 
 ONU2_ANSWER_KEY_PROMPT_TMPL = """This page may contain an ANSWER KEY / উত্তরমালা section — this is a small table or grid that appears AFTER an entire MCQ set ends (not beside or next to individual MCQs), mapping question numbers to their correct option letter (e.g. "১।(ক) ২।(খ) ৩।(খ)..." or a table with numbered cells each showing "১ (ক)" style entries). It is often on a LATER page than the MCQs it covers -- if this page has no MCQs at all but has such a table, that's expected, still check it.
 
@@ -18686,7 +18693,7 @@ def _onu2_parse_call2_object(text: str) -> dict:
     """Dedicated parser for Call2's {"missed": [...], "answer_corrections": [...],
     "text_corrections": [...]} object output. Returns all three keys empty on
     any parse failure so callers never need extra None-checks."""
-    empty = {"missed": [], "answer_corrections": [], "text_corrections": []}
+    empty = {"missed": [], "answer_corrections": [], "text_corrections": [], "answer_key_overrides": []}
     if not text:
         return empty
     t = text.strip()
@@ -18704,10 +18711,12 @@ def _onu2_parse_call2_object(text: str) -> dict:
     missed = raw.get("missed", [])
     corrections = raw.get("answer_corrections", [])
     text_corrections = raw.get("text_corrections", [])
+    key_overrides = raw.get("answer_key_overrides", [])
     return {
         "missed": [mc for mc in missed if isinstance(mc, dict)] if isinstance(missed, list) else [],
         "answer_corrections": [c for c in corrections if isinstance(c, dict)] if isinstance(corrections, list) else [],
         "text_corrections": [c for c in text_corrections if isinstance(c, dict)] if isinstance(text_corrections, list) else [],
+        "answer_key_overrides": [c for c in key_overrides if isinstance(c, dict)] if isinstance(key_overrides, list) else [],
     }
 
 
@@ -19064,6 +19073,24 @@ async def _onu2_call2_misscheck_batch(imgs: list, existing_by_index: dict) -> di
                                     m["_text_corrected"] = True
                 break
 
+        # Apply answer-key table overrides in place, same page_index+
+        # mcq_no matching (Task 4 -- merged into Call2 so no separate
+        # answer-key API call is needed).
+        for ov in parsed.get("answer_key_overrides", []):
+            if not _valid_idx(ov.get("page_index")):
+                continue
+            idx = int(ov["page_index"])
+            no = (ov.get("mcq_no") or "").strip()
+            key_ans = _onu2_letter_from_bengali_option(ov.get("key_answer", ""))
+            if not no or key_ans not in ("A", "B", "C", "D"):
+                continue
+            for m in existing_by_index.get(idx, []):
+                if (m.get("mcq_no") or "").strip() == no and m.get("answer") != key_ans:
+                    logger.warning(f"[ONU2 batch] Call2 answer-key override: page_index={idx} mcq_no={no} {m.get('answer')} -> {key_ans}")
+                    m["answer"] = key_ans
+                    m["marked_answer_wrong"] = False
+                    m["_answer_source"] = "answer_key_verified_override"
+
         missed = _onu2_filter_valid(parsed["missed"])
         by_index_missed = {}
         for m in missed:
@@ -19134,58 +19161,6 @@ async def _onu2_answer_key_check(img, mcqs: list) -> None:
                     m["_answer_source"] = "answer_key_verified_override"
     except Exception as e:
         logger.warning(f"[ONU2 answer-key check] failed: {e}")
-
-
-async def _onu2_answer_key_check_batch(imgs: list, mcqs_by_index: dict) -> None:
-    """Batched version of _onu2_answer_key_check: audits the answer-key
-    table (if any) across ALL pages in the pair in ONE call, applying
-    overrides in-place to the mcqs already in mcqs_by_index (keyed by
-    page_index, matching Call1/Call2's convention)."""
-    all_candidates = []
-    for idx, mcqs in mcqs_by_index.items():
-        for m in mcqs:
-            if (m.get("mcq_no") or "").strip():
-                all_candidates.append((idx, m))
-    if not all_candidates:
-        return
-    try:
-        mcq_list = json.dumps(
-            [{"page_index": idx, "mcq_no": m.get("mcq_no", ""),
-              "question_snippet": (m.get("question") or "")[:80],
-              "current_answer": m.get("answer", "")} for idx, m in all_candidates],
-            ensure_ascii=False
-        )
-        prompt = ONU2_ANSWER_KEY_PROMPT_BATCHED_TMPL.format(n=len(imgs), mcq_list=mcq_list)
-        txt = await _qbm_gemini_raw_multi(imgs, prompt) if len(imgs) > 1 else await _qbm_gemini_raw(imgs[0], prompt)
-        if not txt:
-            txt = await _qbm_groq_call(imgs[0], prompt)
-        if not txt:
-            txt = await _qbm_openrouter_call(imgs[0], prompt)
-        if not txt:
-            return
-        found = _onu2_parse_mcq_array(txt)
-        if not found:
-            return
-        key_map = {}
-        for entry in found:
-            idx = entry.get("page_index")
-            no = (entry.get("mcq_no") or "").strip()
-            ans = _onu2_letter_from_bengali_option(entry.get("key_answer", ""))
-            if idx is not None and no and ans:
-                key_map[(int(idx), no)] = ans
-        if not key_map:
-            return
-        for idx, m in all_candidates:
-            no = (m.get("mcq_no") or "").strip()
-            k = (idx, no)
-            if k in key_map:
-                key_ans = key_map[k]
-                if m.get("answer") != key_ans:
-                    m["answer"] = key_ans
-                    m["marked_answer_wrong"] = False
-                    m["_answer_source"] = "answer_key_verified_override"
-    except Exception as e:
-        logger.warning(f"[ONU2 answer-key check batch] failed: {e}")
 
 
 async def _onu2_finish_from_missed(img, call1: list, missed: list, skip_key_check: bool = False) -> list:
@@ -19285,20 +19260,10 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
             for i in range(1, len(pair) + 1):
                 call1_by_index.setdefault(i, [])
             missed_by_index = await _onu2_call2_misscheck_batch(imgs, call1_by_index)
-            # Merge call1+missed per page BEFORE the batched answer-key
-            # check so it audits the pair's full combined MCQ set in one
-            # call (matching Call1/Call2's per-pair batching).
-            combined_by_index = {}
-            for i in range(1, len(pair) + 1):
-                combined = call1_by_index.get(i, []) + missed_by_index.get(i, [])
-                for m in combined:
-                    opts = m.get("options")
-                    if isinstance(opts, dict):
-                        m["options"] = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
-                combined_by_index[i] = _cap_mcq_options(combined)
-            await _onu2_answer_key_check_batch(imgs, combined_by_index)
             for i, (page_num, img) in enumerate(pair, start=1):
-                mcqs = await _onu2_finish_from_missed(img, combined_by_index.get(i, []), [], skip_key_check=True)
+                call1 = call1_by_index.get(i, [])
+                missed = missed_by_index.get(i, [])
+                mcqs = await _onu2_finish_from_missed(img, call1, missed, skip_key_check=True)
                 global_idx = pair_idx * PAIR_SIZE + (i - 1)
                 results[global_idx] = (page_num, img, mcqs)
                 async with _lock:
