@@ -34,6 +34,28 @@ def _clean_topic_name_for_copy(name: str) -> str:
     # Latin letter, or digit (covers ✪, *, -, •, #, emoji, punctuation, etc.)
     s = re.sub(r'^[^\w\u0980-\u09FF]+', '', s, flags=re.UNICODE)
     return s.strip() or (name or "").strip()
+
+
+def _split_topic_number_and_bangla_name(name: str) -> tuple:
+    """Splits a /chem-style topic heading ('১.৩ লিভার ... — Liver ...') into
+    (numbering, bangla_only_name) for captions where the numbering must
+    render OUTSIDE the copyable <code> block (so a tap-to-copy only grabs
+    the Bangla name) and the English translation after the em/en-dash must
+    be dropped entirely. Falls back gracefully (numbering="") for names
+    with no leading Bangla-digit hierarchical prefix, e.g. plain /bio/
+    /topic groups that were never numbered to begin with -- unaffected."""
+    s = _clean_topic_name_for_copy(name)
+    m = re.match(r'^([০-৯]+(?:\.[০-৯]+)*)\s*[।.]?\s*(.*)$', s)
+    if m:
+        numbering, rest = m.group(1), m.group(2).strip()
+    else:
+        numbering, rest = "", s
+    # Drop the English translation half -- always the part after a dash
+    # separator (—, –, or plain -) once one appears, since that's exactly
+    # where /chem's heading-scan places it (Bangla — English).
+    rest = re.split(r'\s*[—–]\s*|\s+-\s+', rest, maxsplit=1)[0].strip()
+    return numbering, (rest or s)
+
 import difflib
 import hashlib
 import base64
@@ -17048,9 +17070,11 @@ async def _handle_topic_impl(msg: dict):
                 page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
             else:
                 page_range_text = "N/A"
+            _num, _bn_name = _split_topic_number_and_bangla_name(name)
+            _num_prefix = f"{_html_escape(_num)} " if _num else ""
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
-                caption=(f"📂 <code>{_html_escape(_clean_topic_name_for_copy(name))}</code>\n"
+                caption=(f"📂 {_num_prefix}<code>{_html_escape(_bn_name)}</code>\n"
                          f"📄 PDF Page: {page_range_text}\n"
                          f"🔢 MCQ Range: {range_start}–{range_end}\n"
                          f"💎 Total: {len(mcqs)}"),
@@ -17197,9 +17221,11 @@ async def _handle_bio_impl(msg: dict):
                 page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
             else:
                 page_range_text = "N/A"
+            _num, _bn_name = _split_topic_number_and_bangla_name(name)
+            _num_prefix = f"{_html_escape(_num)} " if _num else ""
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
-                caption=(f"📂 <code>{_html_escape(_clean_topic_name_for_copy(name))}</code>\n"
+                caption=(f"📂 {_num_prefix}<code>{_html_escape(_bn_name)}</code>\n"
                          f"📄 PDF Page: {page_range_text}\n"
                          f"🔢 MCQ Range: {range_start}–{range_end}\n"
                          f"💎 Total: {len(mcqs)}"),
@@ -17344,9 +17370,11 @@ async def _handle_unmesh_impl(msg: dict):
                 page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
             else:
                 page_range_text = "N/A"
+            _num, _bn_name = _split_topic_number_and_bangla_name(name)
+            _num_prefix = f"{_html_escape(_num)} " if _num else ""
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
-                caption=(f"📂 <code>{_html_escape(_clean_topic_name_for_copy(name))}</code>\n"
+                caption=(f"📂 {_num_prefix}<code>{_html_escape(_bn_name)}</code>\n"
                          f"📄 PDF Page: {page_range_text}\n"
                          f"🔢 MCQ Range: {range_start}–{range_end}\n"
                          f"💎 Total: {len(mcqs)}"),
@@ -17505,9 +17533,11 @@ async def _handle_chem_impl(msg: dict):
                 page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
             else:
                 page_range_text = "N/A"
+            _num, _bn_name = _split_topic_number_and_bangla_name(name)
+            _num_prefix = f"{_html_escape(_num)} " if _num else ""
             await send_document(chat_id, buf.getvalue().encode("utf-8"),
                 f"{safe_name}.csv",
-                caption=(f"📂 <code>{_html_escape(_clean_topic_name_for_copy(name))}</code>\n"
+                caption=(f"📂 {_num_prefix}<code>{_html_escape(_bn_name)}</code>\n"
                          f"📄 PDF Page: {page_range_text}\n"
                          f"🔢 MCQ Range: {range_start}–{range_end}\n"
                          f"💎 Total: {len(mcqs)}"),
