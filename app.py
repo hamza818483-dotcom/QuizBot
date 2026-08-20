@@ -14126,15 +14126,21 @@ def _chem_group_mcqs(extracted_pages: list) -> list:
             prev_g[1].append(m)
     groups = [g for g in groups if g[1]]
 
-    name_counts = {}
+    # 2026-08-20: MERGE (not number) groups sharing the exact same topic
+    # name, same fix/behavior as /bio's _topic_group_mcqs. Previously any
+    # group whose name recurred (same topic split across non-adjacent
+    # pages/segments) got numbered "টপিক (1)", "টপিক (2)" and sent as
+    # separate CSVs -- now they combine into ONE group/CSV, in first-
+    # occurrence order, each occurrence's MCQs appended in encounter order.
+    _merged = {}
+    _merged_order = []
     for g in groups:
-        name_counts[g[0]] = name_counts.get(g[0], 0) + 1
-    seen = {}
-    for g in groups:
-        base = g[0]
-        if name_counts[base] > 1:
-            seen[base] = seen.get(base, 0) + 1
-            g[0] = f"{base} ({seen[base]})"
+        name = g[0]
+        if name not in _merged:
+            _merged[name] = []
+            _merged_order.append(name)
+        _merged[name].extend(g[1])
+    groups = [[name, _merged[name]] for name in _merged_order]
 
     return [(g[0], g[1]) for g in groups]
 
