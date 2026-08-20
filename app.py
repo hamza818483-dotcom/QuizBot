@@ -11612,8 +11612,20 @@ def _check_segment_topic_consistency(mcqs: list, context: str = "", forced_bound
             continue
         distinct = set(non_empty)
         if len(distinct) > 1:
-            counts = {h: non_empty.count(h) for h in distinct}
-            majority = max(counts, key=counts.get)
+            # Real numbered-heading hints must win over carried/fallback
+            # hints outright -- a minority real-heading topic (fewer MCQs)
+            # must NOT be majority-voted away by a larger carried-hint
+            # group, since that silently deletes the real topic entirely.
+            real_hints = {
+                (m.get("topic_hint") or m.get("_effective_hint") or "").strip()
+                for m in seg if not m.get("_carried_hint")
+            } & distinct
+            if real_hints:
+                counts = {h: non_empty.count(h) for h in real_hints}
+                majority = max(counts, key=counts.get)
+            else:
+                counts = {h: non_empty.count(h) for h in distinct}
+                majority = max(counts, key=counts.get)
             nums = [m.get("qsn_no") for m in seg]
             logger.warning(
                 f"[TOPIC segment-check{(' ' + context) if context else ''}] "
@@ -11621,6 +11633,12 @@ def _check_segment_topic_consistency(mcqs: list, context: str = "", forced_bound
                 f"{counts} — applying majority '{majority[:30]}' to outliers"
             )
             for m in seg:
+                if not m.get("_carried_hint") and \
+                   (m.get("topic_hint") or m.get("_effective_hint") or "").strip() != majority:
+                    # A real-heading MCQ disagreeing with the chosen winner
+                    # is a genuine topic change, not noise -- never silently
+                    # overwrite it.
+                    continue
                 h = (m.get("topic_hint") or m.get("_effective_hint") or "").strip()
                 if h and h != majority:
                     if "topic_hint" in m:
@@ -13709,16 +13727,17 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             for i, h in enumerate(ordered):
                 start_frac = h["vertical_position"]
                 end_frac = ordered[i + 1]["vertical_position"] if i + 1 < len(ordered) else 1.0
-                segments.append((h["heading_text"].strip(), start_frac, end_frac))
+                # False = real detected heading (not carried/fallback)
+                segments.append((h["heading_text"].strip(), start_frac, end_frac, False))
             _carry = _carry_topic_by_page.get(page_num)
             _MIN_SEG_FRAC = 0.06  # below this the crop is near-blank (just the
             # next heading's line) -- skip it: not worth a call, and an empty
             # crop is more likely to trip a provider error that (pre-fix) could
             # kill the whole page/batch via an unguarded gather.
             if _carry and segments[0][1] > _MIN_SEG_FRAC:
-                segments.insert(0, (_carry, 0.0, segments[0][1]))
+                segments.insert(0, (_carry, 0.0, segments[0][1], True))
         elif _carry_topic_by_page.get(page_num):
-            segments = [(_carry_topic_by_page[page_num], 0.0, 1.0)]
+            segments = [(_carry_topic_by_page[page_num], 0.0, 1.0, True)]
         return segments
 
     async def _gen_segment(crop, page_num):
@@ -13766,7 +13785,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             PAD_FRAC = 0.015
             LAST_SEG_EXTRA_PAD = 0.03
             all_mcqs = []
-            for seg_i, (heading_text, s, e) in enumerate(segments):
+            for seg_i, (heading_text, s, e, is_carried) in enumerate(segments):
                 top = max(0.0, s - PAD_FRAC)
                 extra = LAST_SEG_EXTRA_PAD if seg_i == len(segments) - 1 else 0.0
                 bottom = min(1.0, e + PAD_FRAC + extra)
@@ -13776,6 +13795,11 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 seg_mcqs = await _gen_segment(crop, page_num)
                 for m in seg_mcqs:
                     m["topic_hint"] = heading_text
+                    # Real heading-sourced hints must never be majority-vote
+                    # overwritten by a carried/fallback hint elsewhere in the
+                    # same segment run -- only carried hints are "weak".
+                    if is_carried:
+                        m["_carried_hint"] = True
                 all_mcqs.extend(seg_mcqs)
             mcqs = all_mcqs
         else:
@@ -13806,6 +13830,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         pairs always fall back to the original safe per-page calls."""
         heading1 = seg1[0][0]
         heading2 = seg2[0][0]
+        is_carried = bool(seg1[0][3]) or bool(seg2[0][3])
 
         if heading1 != heading2:
             # Different topics -- no reliable deterministic split exists
@@ -13834,6 +13859,8 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         mcqs = await _gen_segment(composite, f"{page_num1}-{page_num2}")
         for m in mcqs:
             m["topic_hint"] = heading1
+            if is_carried:
+                m["_carried_hint"] = True
         _renumber_by_topic(mcqs)
         _mark_done(idx1, page_num1, mcqs, img1)
         _mark_done(idx2, page_num2, [], img2)
