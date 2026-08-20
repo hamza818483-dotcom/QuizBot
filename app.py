@@ -13866,11 +13866,13 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             # Different topics -- no reliable deterministic split exists
             # for a combined-call result, so don't combine: this is the
             # ONLY topic-detection-safe choice, not a fallback-after-try.
+            logger.info(f"[CHEM-PAIR] pages {page_num1}+{page_num2}: confirmed different headings at combine-time ('{heading1[:40]}' vs '{heading2[:40]}') -- falling back to separate per-page calls")
             await asyncio.gather(
                 _run_single_page(idx1, page_num1, img1, seg1),
                 _run_single_page(idx2, page_num2, img2, seg2),
             )
             return
+        logger.info(f"[CHEM-PAIR] pages {page_num1}+{page_num2}: confirmed same heading at combine-time ('{heading1[:40]}') -- combining into one call")
 
         page_status[idx1]["current"] = True
         page_status[idx2]["current"] = True
@@ -13921,6 +13923,20 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             pn2, img2 = pages[i + 1]
             seg2 = _all_segs[i + 1]
             if seg2 is not None and len(seg2) == 1:
+                # DEBUG (2026-08-20): a reported case showed pages with
+                # visibly DIFFERENT headings still getting pair-combined
+                # (log showed "page 1-2: SUCCESS" for a Call1 scan that
+                # found two distinct headings). Log both headings HERE,
+                # right at the pairing decision, so if this ever recurs
+                # the log itself proves whether seg1/seg2 already carried
+                # identical text at this point (a data bug upstream) or
+                # whether _run_paired_pages's own heading1==heading2 check
+                # is somehow not firing (a logic bug in that function).
+                h1, h2 = seg1[0][0], seg2[0][0]
+                if h1 == h2:
+                    logger.info(f"[CHEM-PAIR] pages {pn1}+{pn2}: SAME heading '{h1[:40]}' -> combining into one call")
+                else:
+                    logger.warning(f"[CHEM-PAIR] pages {pn1}+{pn2}: DIFFERENT headings ('{h1[:40]}' vs '{h2[:40]}') -> pairing unit built, _run_paired_pages must fall back to per-page calls")
                 _units.append(("pair", i, pn1, img1, seg1, i + 1, pn2, img2, seg2))
                 i += 2
                 continue
