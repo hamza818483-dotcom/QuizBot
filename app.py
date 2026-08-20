@@ -13945,6 +13945,65 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     for _u, _r in zip(_units, _gather_results):
         if isinstance(_r, Exception):
             logger.warning(f"[CHEM-GEN v2] unit {_u[0]} pages={_u[1:3]}: unit-level exception {type(_r).__name__}: {_r} -- results for this unit may be incomplete, other pages unaffected.")
+
+    # RECONCILIATION: heading-scan (Call1) detected N distinct topics --
+    # the final output must contain MCQs for every one of them, never
+    # silently fewer. Without this, a topic whose generation returned 0
+    # MCQ (even after _gen_segment's internal 3-attempt retry) just
+    # vanishes from the dashboard/CSV with no visible trace, and the user
+    # sees "detected 3, got 2" with no way to tell why or recover it.
+    if not is_cancelled(chat_id):
+        _present_topics = set()
+        for _r in results:
+            if _r:
+                _, _, _mcqs = _r
+                for _m in _mcqs:
+                    _h = (_m.get("topic_hint") or "").strip()
+                    if _h:
+                        _present_topics.add(_h)
+        _missing_topics = [(p, t) for p, t in _detected_topics if t not in _present_topics]
+        if _missing_topics:
+            logger.warning(f"[CHEM-GEN v2] RECONCILE: {len(_missing_topics)} detected topic(s) missing from output, forcing extra retry pass: {[t for _, t in _missing_topics]}")
+            if status_msg_id:
+                try:
+                    await edit_msg(chat_id, status_msg_id,
+                        f"⚠️ {len(_missing_topics)}টি detected topic-এ MCQ পাওয়া যায়নি — আবার চেষ্টা করা হচ্ছে...")
+                except Exception:
+                    pass
+            for p, t in _missing_topics:
+                idx = next((i for i, (pn, _) in enumerate(pages) if pn == p), None)
+                if idx is None:
+                    continue
+                pn, img = pages[idx]
+                segs = _all_segs[idx] or []
+                seg = next((s for s in segs if s[0] == t), None)
+                if seg is None:
+                    continue
+                heading_text, s, e, is_carried = seg
+                PAD_FRAC = 0.015
+                top = max(0.0, s - PAD_FRAC)
+                bottom = min(1.0, e + PAD_FRAC + 0.03)
+                y0 = int(top * img.height)
+                y1 = max(y0 + 1, int(bottom * img.height))
+                crop = img.crop((0, y0, img.width, y1))
+                retry_mcqs = await _gen_segment(crop, pn)
+                if retry_mcqs:
+                    for m in retry_mcqs:
+                        m["topic_hint"] = heading_text
+                        if is_carried:
+                            m["_carried_hint"] = True
+                    _renumber_by_topic(retry_mcqs)
+                    existing = results[idx][2] if results[idx] else []
+                    merged = existing + retry_mcqs
+                    results[idx] = (pn, img, merged)
+                    total_mcq += len(retry_mcqs)
+                    page_status[idx]["mcq"] = len(merged)
+                    logger.warning(f"[CHEM-GEN v2] RECONCILE: recovered topic '{t[:40]}' on page {pn} with {len(retry_mcqs)} MCQ on retry")
+                else:
+                    logger.warning(f"[CHEM-GEN v2] RECONCILE: topic '{t[:40]}' on page {pn} STILL 0 MCQ after forced retry -- genuinely empty or unreadable content.")
+            if status_msg_id:
+                await _chem_safe_dash_edit()
+
     clear_active_job(chat_id)
     if is_cancelled(chat_id) and status_msg_id:
         # Keep the dashboard's last state visible (stats intact) instead of
