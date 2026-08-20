@@ -14262,19 +14262,28 @@ def _topic_group_mcqs(extracted_pages: list) -> list:
             groups[target_idx][1].append(m)
     groups = [g for g in groups if g[1]]  # drop any group emptied by reroute
 
-    # Distinguish same-named groups (same chapter banner can legitimately
-    # recur for a different qsn_no==1 restart elsewhere) by numbering them
-    # in output, so the caller/CSV filenames don't collide or silently
-    # overwrite each other.
-    name_counts = {}
+    # Distinguish same-named groups... (see below — MERGED, not numbered)
+    #
+    # 2026-08-20: CHANGED behavior per explicit instruction -- previously,
+    # when the SAME topic name recurred on non-consecutive pages (its
+    # content split across pages that aren't adjacent in the qsn_no==1
+    # restart sequence -- e.g. a topic's questions appear on page 2, then
+    # again on page 5 after another topic's content in between), each
+    # occurrence became its own numbered group ("টপিক (1)", "টপিক (2)") and
+    # therefore its own separate CSV file. That's no longer wanted: any
+    # group sharing the exact same topic name must be MERGED into ONE
+    # single group (one CSV), regardless of how many separate pages/
+    # qsn_no-restarts its content came from. Order of first appearance is
+    # kept; each occurrence's MCQs are appended in the order encountered.
+    _merged = {}
+    _merged_order = []
     for g in groups:
-        name_counts[g[0]] = name_counts.get(g[0], 0) + 1
-    seen = {}
-    for g in groups:
-        base = g[0]
-        if name_counts[base] > 1:
-            seen[base] = seen.get(base, 0) + 1
-            g[0] = f"{base} ({seen[base]})"
+        name = g[0]
+        if name not in _merged:
+            _merged[name] = []
+            _merged_order.append(name)
+        _merged[name].extend(g[1])
+    groups = [[name, _merged[name]] for name in _merged_order]
 
     # CODE-LEVEL SAFETY NET: normally do NOT sort each group's MCQs by
     # qsn_no — the flat list built in Pass 1 is meant to already be in
