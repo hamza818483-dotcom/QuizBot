@@ -18613,6 +18613,22 @@ If this page has no answer-key table at all, or no genuine mismatches were found
 OUTPUT — ONLY valid JSON array of genuine, verified mismatches only, nothing else:
 [{{"mcq_no":"...","key_answer":"A/B/C/D"}}]"""
 
+ONU2_ANSWER_KEY_PROMPT_BATCHED_TMPL = """You are given {n} pages (page_index 1..{n}, in the SAME order as the images). Each page may independently contain an ANSWER KEY / উত্তরমালা section — a small table/grid appearing AFTER an entire MCQ set ends (not beside individual MCQs), mapping question numbers to correct option letters (e.g. "১।(ক) ২।(খ)..." or numbered cells like "১ (ক)"). The key for a page's MCQs may sit on a LATER page than the MCQs themselves -- check ALL pages' tables against ALL MCQs below, matching by mcq_no AND page context.
+
+Already-extracted MCQs (mcq_no, question snippet, current answer, and which page_index they came from):
+{mcq_list}
+
+Task per MCQ: the red-circled option is the DEFAULT trusted answer (~99% correct). Only report a GENUINE, independently-verified mismatch:
+1. Find the MATCHING answer-key row (any page) for each MCQ by mcq_no + question-content sanity check (numbers can repeat across pages).
+2. Compare key's letter to "current_answer".
+3. If MATCH -> skip (no output for this MCQ).
+4. If DIFFER -> use your own subject knowledge to independently verify which letter (red-circled OR key) is factually correct. Only report after this verification, with your verified correct letter as "key_answer".
+
+If no answer-key tables exist anywhere, or no genuine mismatches found, return exactly: []
+
+OUTPUT — ONLY valid JSON array, nothing else:
+[{{"page_index":1,"mcq_no":"...","key_answer":"A/B/C/D"}}]"""
+
 
 def _onu2_clean_mcq_fields(mc: dict) -> dict:
     """Strips any leading numbering the model may have echoed into the
@@ -19068,6 +19084,7 @@ async def _onu2_call2_misscheck_batch(imgs: list, existing_by_index: dict) -> di
 
 
 
+async def _onu2_answer_key_check(img, mcqs: list) -> None:
     """Cross-checks extracted MCQs against a উত্তরমালা/answer-key table on
     the SAME page (if one exists). The red-circled option is the DEFAULT
     trusted answer (~99% of cases correct) -- this only overrides on a
@@ -19119,13 +19136,67 @@ async def _onu2_call2_misscheck_batch(imgs: list, existing_by_index: dict) -> di
         logger.warning(f"[ONU2 answer-key check] failed: {e}")
 
 
-async def _onu2_finish_from_missed(img, call1: list, missed: list) -> list:
+async def _onu2_answer_key_check_batch(imgs: list, mcqs_by_index: dict) -> None:
+    """Batched version of _onu2_answer_key_check: audits the answer-key
+    table (if any) across ALL pages in the pair in ONE call, applying
+    overrides in-place to the mcqs already in mcqs_by_index (keyed by
+    page_index, matching Call1/Call2's convention)."""
+    all_candidates = []
+    for idx, mcqs in mcqs_by_index.items():
+        for m in mcqs:
+            if (m.get("mcq_no") or "").strip():
+                all_candidates.append((idx, m))
+    if not all_candidates:
+        return
+    try:
+        mcq_list = json.dumps(
+            [{"page_index": idx, "mcq_no": m.get("mcq_no", ""),
+              "question_snippet": (m.get("question") or "")[:80],
+              "current_answer": m.get("answer", "")} for idx, m in all_candidates],
+            ensure_ascii=False
+        )
+        prompt = ONU2_ANSWER_KEY_PROMPT_BATCHED_TMPL.format(n=len(imgs), mcq_list=mcq_list)
+        txt = await _qbm_gemini_raw_multi(imgs, prompt) if len(imgs) > 1 else await _qbm_gemini_raw(imgs[0], prompt)
+        if not txt:
+            txt = await _qbm_groq_call(imgs[0], prompt)
+        if not txt:
+            txt = await _qbm_openrouter_call(imgs[0], prompt)
+        if not txt:
+            return
+        found = _onu2_parse_mcq_array(txt)
+        if not found:
+            return
+        key_map = {}
+        for entry in found:
+            idx = entry.get("page_index")
+            no = (entry.get("mcq_no") or "").strip()
+            ans = _onu2_letter_from_bengali_option(entry.get("key_answer", ""))
+            if idx is not None and no and ans:
+                key_map[(int(idx), no)] = ans
+        if not key_map:
+            return
+        for idx, m in all_candidates:
+            no = (m.get("mcq_no") or "").strip()
+            k = (idx, no)
+            if k in key_map:
+                key_ans = key_map[k]
+                if m.get("answer") != key_ans:
+                    m["answer"] = key_ans
+                    m["marked_answer_wrong"] = False
+                    m["_answer_source"] = "answer_key_verified_override"
+    except Exception as e:
+        logger.warning(f"[ONU2 answer-key check batch] failed: {e}")
+
+
+async def _onu2_finish_from_missed(img, call1: list, missed: list, skip_key_check: bool = False) -> list:
     """Tail of the /onu2 pipeline given Call1's MCQs AND Call2's
     already-computed missed-list for this page (used by both the
     single-page and the batched-Call2 paths, so the post-Call2 steps
     -- answer-key check, validation, explanation fill -- are never
     duplicated): answer-key cross-check on this same page -> final
-    re-validation -> explanation safety-net fill."""
+    re-validation -> explanation safety-net fill. skip_key_check=True
+    when the caller already ran the batched answer-key check for the
+    whole pair (paired-pipeline path)."""
     combined = call1 + missed
     if not combined:
         return []
@@ -19134,7 +19205,8 @@ async def _onu2_finish_from_missed(img, call1: list, missed: list) -> list:
         if isinstance(opts, dict):
             m["options"] = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
     combined = _cap_mcq_options(combined)
-    await _onu2_answer_key_check(img, combined)
+    if not skip_key_check:
+        await _onu2_answer_key_check(img, combined)
     # Final strict re-validation: answer-key override or explanation
     # fill could theoretically leave a field malformed -- never let a
     # broken item reach the CSV.
@@ -19213,10 +19285,20 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
             for i in range(1, len(pair) + 1):
                 call1_by_index.setdefault(i, [])
             missed_by_index = await _onu2_call2_misscheck_batch(imgs, call1_by_index)
+            # Merge call1+missed per page BEFORE the batched answer-key
+            # check so it audits the pair's full combined MCQ set in one
+            # call (matching Call1/Call2's per-pair batching).
+            combined_by_index = {}
+            for i in range(1, len(pair) + 1):
+                combined = call1_by_index.get(i, []) + missed_by_index.get(i, [])
+                for m in combined:
+                    opts = m.get("options")
+                    if isinstance(opts, dict):
+                        m["options"] = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
+                combined_by_index[i] = _cap_mcq_options(combined)
+            await _onu2_answer_key_check_batch(imgs, combined_by_index)
             for i, (page_num, img) in enumerate(pair, start=1):
-                call1 = call1_by_index.get(i, [])
-                missed = missed_by_index.get(i, [])
-                mcqs = await _onu2_finish_from_missed(img, call1, missed)
+                mcqs = await _onu2_finish_from_missed(img, combined_by_index.get(i, []), [], skip_key_check=True)
                 global_idx = pair_idx * PAIR_SIZE + (i - 1)
                 results[global_idx] = (page_num, img, mcqs)
                 async with _lock:
