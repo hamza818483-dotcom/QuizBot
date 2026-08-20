@@ -15925,11 +15925,11 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
             if is_cancelled():
                 return ""
             try:
-                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=35)
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=60)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
             except asyncio.TimeoutError:
-                logger.warning(f"[QBM] Gemini key {key[:12]}... multi-image call timed out (35s), trying next key")
+                logger.warning(f"[QBM] Gemini key {key[:12]}... multi-image call timed out (60s), trying next key")
                 continue
             except Exception as e:
                 msg = str(e)
