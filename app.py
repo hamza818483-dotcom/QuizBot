@@ -21886,8 +21886,8 @@ async def handle_pdf_page_regen(session_id: str, page_num: int, dm_chat_id: int,
     # Update this page's channel caption (image caption) with the new first-poll link
     try:
         if image_msg_id:
-            new_caption = (f"🟥ATLAS Special MCQ System\n🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n"
-                            f"🔗Poll Link:\n{first_poll_link or '(লিংক পাওয়া যায়নি)'}")
+            new_caption = (f"🟥ATLAS Special MCQ System\n🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n\n"
+                            f"👉 এই page-এর poll practice করতে ক্লিক করুন:\n{first_poll_link or '(লিংক পাওয়া যায়নি)'}")
             await edit_msg_caption(channel_id, image_msg_id, new_caption)
     except Exception as e:
         logger.warning(f"[PdfPageRegen] caption update failed: {e}")
