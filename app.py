@@ -734,11 +734,8 @@ def _img_to_data_url_groq(img, mcq_count_hint=None, prompt_len_hint=None) -> str
             # Measured from the compacted static QBM_EXTRACT_PROMPT_DEFAULT
             # (~8k chars / 3.5) + margin. Only accurate for that fixed prompt.
             PROMPT_TOKENS = 2400
-        SAFETY_MARGIN = 3000  # 2026-08-19: /bio 413 logs showed Requested
-        # 9422/8000 even with the 2000 margin — raised 2000->3000 (extra 1000
-        # headroom) so the image gets squeezed harder BEFORE the request is
-        # sent, instead of relying on the 413 shrink-retry path to recover
-        # after the fact.
+        SAFETY_MARGIN = 3300  # 2026-08-22: still observed Requested 8166/8000
+        # (166 over) even at 3000 margin — raised 3000->3300 for extra headroom.
         if isinstance(mcq_count_hint, (tuple, list)) and len(mcq_count_hint) == 2:
             est_count = mcq_count_hint[1]
         elif isinstance(mcq_count_hint, (int, float)) and mcq_count_hint:
