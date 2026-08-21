@@ -10212,9 +10212,9 @@ def _dagano_hard_mark_gate(mcqs: list, img, page_num) -> list:
     legitimately produces 2+ MCQs (main + related, per /dagano's own
     rule) and pen-only marks (no highlighter ink) are invisible to CV,
     count is NOT used as a blocking signal here -- only logged for
-    visibility. No MCQs are dropped by count; actual content-fidelity
-    dropping is handled by _dagano_marking_audit /
-    _dagano_source_fidelity_audit (LLM-verified, per-MCQ)."""
+    visibility. Content-fidelity/marking self-verification happens
+    INSIDE the single generation prompt itself (no separate audit call),
+    to keep /dagano at exactly one API call per 2-page batch."""
     if not mcqs:
         return mcqs
     try:
@@ -10224,73 +10224,6 @@ def _dagano_hard_mark_gate(mcqs: list, img, page_num) -> list:
         return mcqs
     except Exception as e:
         logger.warning(f"[DaganoHardGate] page {page_num} check failed, fail-open: {e}")
-        return mcqs
-
-
-async def _dagano_source_fidelity_audit(mcqs: list, img, topic: str, page_num) -> list:
-    """/dagano's STRICT source-fidelity audit -- separate check from
-    _dagano_marking_audit (which checks WHERE on the page/whether
-    marked). This one checks WHAT: does every fact in the question,
-    options, and explanation actually appear on THIS page image, with
-    nothing invented, assumed, pulled from general knowledge, or pulled
-    from a different topic than what's shown here? Any MCQ containing
-    even one fact not traceable to this exact page is rejected."""
-    if not mcqs:
-        return mcqs
-    try:
-        numbered = "\n".join(
-            f"{idx+1}. Q: {m.get('question','')[:200]}\n"
-            f"   Options: {m.get('options')}\n"
-            f"   Explanation: {(m.get('explanation') or '')[:300]}"
-            for idx, m in enumerate(mcqs)
-        )
-        audit_prompt = (
-            f"You are STRICTLY fact-checking each MCQ below against ONLY "
-            f"this exact page image (Topic: {topic}).\n\n"
-            f"For EACH numbered MCQ, verify: is EVERY fact in the "
-            f"question, all 4 options, AND the explanation text actually "
-            f"present/derivable from THIS page's content? \n\n"
-            f"FAIL the check if ANY of these are true:\n"
-            f"- Any fact, number, name, or detail was invented / not "
-            f"actually on this page\n"
-            f"- Any fact came from general/outside knowledge rather than "
-            f"this page's own text\n"
-            f"- The MCQ is actually about a DIFFERENT topic/subject than "
-            f"what appears on this page\n"
-            f"- The explanation adds claims that go beyond what this page "
-            f"states\n\n"
-            f"MCQs to audit:\n{numbered}\n\n"
-            f"Return a STRICT JSON array of the numbers (1-indexed) that "
-            f"FAILED this check. Format: [2, 5] (or [] if all pass). No "
-            f"prose, JSON only."
-        )
-        txt = await _gen_groq_raw_text(img, audit_prompt)
-        if not txt:
-            return mcqs
-        import json as _json
-        cleaned = txt.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.strip("`")
-            if cleaned.lower().startswith("json"):
-                cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-        try:
-            bad_indices = _json.loads(cleaned)
-        except Exception:
-            m = re.search(r'\[[\d,\s]*\]', cleaned)
-            bad_indices = _json.loads(m.group(0)) if m else []
-        if not isinstance(bad_indices, list) or not bad_indices:
-            return mcqs
-        bad_set = {int(x) for x in bad_indices if isinstance(x, (int, float)) or (isinstance(x, str) and x.strip().isdigit())}
-        if not bad_set:
-            return mcqs
-        kept = [m for idx, m in enumerate(mcqs) if (idx + 1) not in bad_set]
-        removed = len(mcqs) - len(kept)
-        if removed:
-            logger.info(f"[DaganoFidelityAudit] page {page_num}: removed {removed} MCQ(s) with invented/off-page/outside-topic content")
-        return kept
-    except Exception as e:
-        logger.warning(f"[DaganoFidelityAudit] page {page_num} skipped: {e}")
         return mcqs
 
 
@@ -10346,65 +10279,6 @@ def _dagano_code_level_3pass_verify(mcqs: list, page_num=None) -> list:
     if total_dropped:
         logger.info(f"[Dagano3Pass] page {page_num}: {total_dropped}/{len(mcqs)} MCQ(s) dropped across 3 code-level passes")
     return stage3
-
-
-async def _dagano_marking_audit(mcqs: list, img, topic: str, page_num) -> list:
-    """/dagano's OWN second-pass marking audit -- fully independent copy
-    of the /extra pattern (no shared call). Re-verifies each MCQ was
-    genuinely sourced from a hand-marked/highlighted/colored/boxed line,
-    also re-affirms the no-page-reference rule wasn't violated."""
-    if not mcqs:
-        return mcqs
-    try:
-        numbered = "\n".join(f"{idx+1}. {m.get('question','')[:150]}" for idx, m in enumerate(mcqs))
-        audit_prompt = (
-            f"You are STRICTLY auditing whether each MCQ below was really "
-            f"sourced from a MARKED/HIGHLIGHTED/COLORED/BOXED line on this "
-            f"page (Topic: {topic}) -- marked = highlighter color (any "
-            f"color), pen underline, hand-drawn circle/box/bracket, or "
-            f"star/tick pointing to it, added ON TOP of the book's "
-            f"original printing. Plain/unmarked text (even if bold/italic "
-            f"in the original printing, or definitions/important-looking "
-            f"facts) does NOT count as marked.\n\n"
-            f"Also check: does the question or explanation wording "
-            f"reference a page number, roman/serial layout label, or "
-            f"source-citation phrasing (\"as stated on this page\", "
-            f"\"বর্ণিত আছে\", \"এই পৃষ্ঠায়\")? That also FAILS the check.\n\n"
-            f"MCQs to audit:\n{numbered}\n\n"
-            f"For EACH numbered MCQ, check both conditions above.\n\n"
-            f"Return a STRICT JSON array of the numbers (1-indexed, matching "
-            f"the list above) that FAILED either check and should be "
-            f"removed. Format: [2, 5] (just the numbers, or [] if every "
-            f"MCQ above passes). No prose, JSON only."
-        )
-        txt = await _gen_groq_raw_text(img, audit_prompt)
-        if not txt:
-            return mcqs
-        import json as _json
-        cleaned = txt.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.strip("`")
-            if cleaned.lower().startswith("json"):
-                cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-        try:
-            bad_indices = _json.loads(cleaned)
-        except Exception:
-            m = re.search(r'\[[\d,\s]*\]', cleaned)
-            bad_indices = _json.loads(m.group(0)) if m else []
-        if not isinstance(bad_indices, list) or not bad_indices:
-            return mcqs
-        bad_set = {int(x) for x in bad_indices if isinstance(x, (int, float)) or (isinstance(x, str) and x.strip().isdigit())}
-        if not bad_set:
-            return mcqs
-        kept = [m for idx, m in enumerate(mcqs) if (idx + 1) not in bad_set]
-        removed = len(mcqs) - len(kept)
-        if removed:
-            logger.info(f"[DaganoMarkingAudit] page {page_num}: removed {removed} MCQ(s) traced to unmarked text or page-reference violation")
-        return kept
-    except Exception as e:
-        logger.warning(f"[DaganoMarkingAudit] page {page_num} skipped: {e}")
-        return mcqs
 
 
 def _build_dagano_prompt_standalone(topic: str) -> str:
@@ -10501,6 +10375,26 @@ def _build_dagano_prompt_standalone(topic: str) -> str:
         f"Detect the language of the marked source text (Bengali or "
         f"English) and write the question, ALL options, and both "
         f"explanation parts in that exact same language. Never translate.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟥 SELF-VERIFICATION (do this internally before writing the "
+        f"final JSON — do not show this work, just apply it)\n"
+        f"═══════════════════════════════\n"
+        f"Before outputting, silently re-check EVERY drafted MCQ against "
+        f"all of these, and FIX or DROP any that fail:\n"
+        f"1. Is the question's source line genuinely marked/highlighted/"
+        f"boxed/colored (not plain/original-bold text)?\n"
+        f"2. Does the question/explanation avoid ALL page-number, roman/"
+        f"serial-layout, or source-citation wording (\"as stated on this "
+        f"page\", \"বর্ণিত আছে\", \"এই পৃষ্ঠায়\")?\n"
+        f"3. Is every fact in the question, options, main_explanation, "
+        f"and extra_info actually present/derivable from this page's "
+        f"content — nothing invented, nothing from outside/general "
+        f"knowledge, nothing from an unrelated topic?\n"
+        f"4. Does the answer letter correctly match the actually-correct "
+        f"option?\n"
+        f"5. Is main_explanation within the 165-word limit?\n"
+        f"Only after this internal check passes for every item, write "
+        f"the final JSON.\n\n"
         f"═══════════════════════════════\n"
         f"🟩 OUTPUT\n"
         f"═══════════════════════════════\n"
@@ -10613,6 +10507,29 @@ def _build_dagano_prompt_batched(topic: str, n: int) -> str:
         f"═══════════════════════════════\n"
         f"Detect the language of the marked source text and write "
         f"everything in that exact same language. Never translate.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟥 SELF-VERIFICATION (do this internally PER PAGE before "
+        f"writing the final JSON — do not show this work, just apply it)\n"
+        f"═══════════════════════════════\n"
+        f"Before outputting, silently re-check EVERY drafted MCQ (on its "
+        f"own page_index) against all of these, and FIX or DROP any that "
+        f"fail:\n"
+        f"1. Is the question's source line genuinely marked/highlighted/"
+        f"boxed/colored on THAT SAME page (not plain/original-bold text, "
+        f"not borrowed from another page_index)?\n"
+        f"2. Does the question/explanation avoid ALL page-number, roman/"
+        f"serial-layout, or source-citation wording (\"as stated on this "
+        f"page\", \"বর্ণিত আছে\", \"এই পৃষ্ঠায়\")?\n"
+        f"3. Is every fact in the question, options, main_explanation, "
+        f"and extra_info actually present/derivable from that page's own "
+        f"content (or the paired page for cross-page topic continuity in "
+        f"extra_info only) — nothing invented, nothing from outside/"
+        f"general knowledge, nothing from an unrelated topic?\n"
+        f"4. Does the answer letter correctly match the actually-correct "
+        f"option?\n"
+        f"5. Is main_explanation within the 165-word limit?\n"
+        f"Only after this internal check passes for every item on every "
+        f"page, write the final JSON.\n\n"
         f"═══════════════════════════════\n"
         f"🟩 OUTPUT\n"
         f"═══════════════════════════════\n"
@@ -10735,13 +10652,6 @@ async def _dagano_gen_from_image(img, topic, page_num):
     out = _dagano_hard_mark_gate(out, img, page_num=page_num)
     out = _dagano_apply_topic_reuse(out)
 
-    if out:
-        out = await _dagano_marking_audit(out, img, topic, page_num)
-        out = _dagano_apply_topic_reuse(_validate_mcq_structure(out))
-    if out:
-        out = await _dagano_source_fidelity_audit(out, img, topic, page_num)
-        out = _dagano_apply_topic_reuse(_validate_mcq_structure(out))
-
     return out
 
 
@@ -10793,12 +10703,7 @@ async def dagano_generate_all_pages(
         if not mcqs:
             return mcqs
         try:
-            mcqs = await _dagano_marking_audit(mcqs, img, topic, page_num)
-            mcqs = _dagano_apply_topic_reuse(_validate_mcq_structure(mcqs))
-            if mcqs:
-                mcqs = await _dagano_source_fidelity_audit(mcqs, img, topic, page_num)
-                mcqs = _dagano_apply_topic_reuse(_validate_mcq_structure(mcqs))
-            return mcqs
+            return _dagano_apply_topic_reuse(_validate_mcq_structure(mcqs))
         except asyncio.CancelledError:
             raise
         except Exception as e:
