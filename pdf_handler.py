@@ -1198,6 +1198,44 @@ async def generate_mcq_from_image(
                     valid = _mcq_hallucination_filter(valid, img)
                 key_rotator.mark_healthy(key)
                 logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name})")
+                # CODE-LEVEL MIN-10 ENFORCEMENT: prompt already targets 15+
+                # (min 10 if sparse, min 5 if very sparse) but that's a soft
+                # LLM instruction with no guarantee. If no explicit mcq_count
+                # was requested and we got a non-empty but under-10 result,
+                # retry ONCE with an explicit strengthened min-count push
+                # before accepting it -- catches under-extraction without
+                # burning retries on pages that are genuinely near-empty
+                # (accepts whatever the retry returns, even if still <10).
+                if not mcq_count and 0 < len(valid) < 10 and not locals().get("_min10_retried"):
+                    _min10_retried = True
+                    try:
+                        _boost_prompt = (
+                            prompt
+                            + f"\n\n🔴 CODE-LEVEL RE-CHECK: প্রথম pass এ মাত্র {len(valid)}টি MCQ পাওয়া গেছে যা টার্গেটের (কমপক্ষে ১০) নিচে। "
+                            "পেইজটি আবার স্ক্যান করো -- প্রতিটি লাইন/বক্স/ছক থেকে আরও MCQ বের করার সুযোগ আছে কিনা দেখো, "
+                            "under-extract করা যাবে না। সত্যিই content sparse হলে যা সম্ভব দাও, কিন্তু আগে পুরো পেইজ আবার ভালোভাবে দেখো।"
+                        )
+
+                        def _call_gemini_retry():
+                            return client.models.generate_content(
+                                model=model_name,
+                                contents=[
+                                    types.Part.from_text(text=_boost_prompt),
+                                    types.Part.from_bytes(
+                                        data=base64.b64decode(img_b64),
+                                        mime_type="image/jpeg"
+                                    )
+                                ]
+                            )
+                        _retry_resp = await asyncio.wait_for(asyncio.to_thread(_call_gemini_retry), timeout=45)
+                        _retry_valid = _parse_mcq_json(_retry_resp.text)
+                        if _retry_valid:
+                            _retry_valid = _mcq_hallucination_filter(_retry_valid, img)
+                            if len(_retry_valid) > len(valid):
+                                logger.info(f"[Gemini] Page {page}: min-10 retry improved {len(valid)} -> {len(_retry_valid)} MCQs")
+                                valid = _retry_valid
+                    except Exception as _retry_e:
+                        logger.warning(f"[Gemini] Page {page}: min-10 retry failed, keeping original {len(valid)}: {_retry_e}")
                 return valid
             except Exception as e:
                 last_exc = e
