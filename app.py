@@ -11704,6 +11704,33 @@ async def handle_pdf(msg: dict):
 # ============================================================
 # FEATURE 9: PROCESS PDF PAGES
 # ============================================================
+# ── /pdf live regen-button registry ─────────────────────────────
+# Maps chat_id -> {"queue": asyncio.Queue, "pages": pages, "page_status": page_status}
+# so the callback handler (fired from a Telegram button click, outside
+# pdf_generate_all_pages's own scope) can push a regen request into the
+# SAME queue that worker is draining after each page slot finishes.
+_pdf_regen_registry: dict = {}
+
+def _register_pdf_regen_queue(chat_id, queue, pages, page_status):
+    _pdf_regen_registry[chat_id] = {"queue": queue, "pages": pages, "page_status": page_status}
+
+def _unregister_pdf_regen_queue(chat_id):
+    _pdf_regen_registry.pop(chat_id, None)
+
+def _pdf_dashboard_kb(chat_id, pages, page_status):
+    """Existing per-job Cancel button + one small 'regen' button per
+    already-DONE page (3 per row), so the user can flag a page for
+    re-generation mid-run without interrupting whatever is currently in
+    flight."""
+    rows = list(_cancel_kb(chat_id)["inline_keyboard"])
+    done_buttons = []
+    for i, s in enumerate(page_status):
+        if s["done"]:
+            done_buttons.append({"text": f"🔁 {fmt_page(s['page'])}", "callback_data": f"pdflive_regen_{chat_id}_{i}"})
+    for i in range(0, len(done_buttons), 3):
+        rows.append(done_buttons[i:i+3])
+    return {"inline_keyboard": rows}
+
 def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls):
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
@@ -11810,6 +11837,46 @@ async def pdf_generate_all_pages(
     total_mcq_box = {"n": 0}
     _slot_counter = {"n": 0}
 
+    # PAGE-BUTTON REGEN QUEUE: while processing is live, the dashboard shows
+    # a per-page inline button under each ✅ Done page. Clicking it does NOT
+    # interrupt whatever page is currently running -- it enqueues a regen
+    # request for that page. Once the CURRENTLY-RUNNING page(s) finish their
+    # in-flight generation, the next free worker slot picks up the queued
+    # regen request before moving on to the next new page in the original
+    # serial order. So: 2,3 running -> click regen on 2 -> 3 finishes first
+    # -> then queued regen-2 runs -> then normal serial continues (4,5,...).
+    regen_queue = asyncio.Queue()
+    _register_pdf_regen_queue(chat_id, regen_queue, pages, page_status)
+
+    async def _do_generate(page_num, img, slot):
+        mcqs = []
+        try:
+            mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=slot)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[PDF Generate] Page {page_num} error: {e}; retrying once")
+
+        # Strict no-page-miss guarantee: a page landing empty (crash or
+        # every provider returned nothing) gets ONE retry before being
+        # accepted as genuinely empty — protects against a single
+        # transient failure silently dropping a whole page's MCQs.
+        # Carries forward the Groq keys already tried in the first call
+        # (via _LAST_TRIED_GROQ_KEYS) so this retry doesn't get a fresh
+        # 5-key budget — without this, one fully-empty page could touch
+        # up to 6 generation cycles (inner 3-attempt loop x this outer
+        # retry), re-trying already-cooling keys each time.
+        if not mcqs and not is_cancelled(chat_id):
+            first_call_tried = set(_LAST_TRIED_GROQ_KEYS.get("keys") or set())
+            try:
+                await asyncio.sleep(1)
+                mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count, exclude_groq_keys=first_call_tried, key_offset=slot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[PDF Generate] Page {page_num} retry also failed: {e}")
+        return mcqs
+
     async def _run_one(idx, page_num, img):
         if is_cancelled(chat_id):
             return
@@ -11822,34 +11889,9 @@ async def pdf_generate_all_pages(
                 page_status[idx]["current"] = True
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
 
-            mcqs = []
-            try:
-                mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=slot)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(f"[PDF Generate] Page {page_num} error: {e}; retrying once")
-
-            # Strict no-page-miss guarantee: a page landing empty (crash or
-            # every provider returned nothing) gets ONE retry before being
-            # accepted as genuinely empty — protects against a single
-            # transient failure silently dropping a whole page's MCQs.
-            # Carries forward the Groq keys already tried in the first call
-            # (via _LAST_TRIED_GROQ_KEYS) so this retry doesn't get a fresh
-            # 5-key budget — without this, one fully-empty page could touch
-            # up to 6 generation cycles (inner 3-attempt loop x this outer
-            # retry), re-trying already-cooling keys each time.
-            if not mcqs and not is_cancelled(chat_id):
-                first_call_tried = set(_LAST_TRIED_GROQ_KEYS.get("keys") or set())
-                try:
-                    await asyncio.sleep(1)
-                    mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count, exclude_groq_keys=first_call_tried, key_offset=slot)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logger.error(f"[PDF Generate] Page {page_num} retry also failed: {e}")
+            mcqs = await _do_generate(page_num, img, slot)
 
             if is_cancelled(chat_id):
                 return
@@ -11867,7 +11909,39 @@ async def pdf_generate_all_pages(
                     page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
+
+            # After finishing this page's slot, drain ONE pending regen
+            # request (if any) before this worker moves to the next fresh
+            # page — this is what makes a mid-run regen click land right
+            # after the currently-running pages finish, not immediately.
+            while True:
+                try:
+                    regen_idx = regen_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if is_cancelled(chat_id):
+                    break
+                r_page_num, r_img = pages[regen_idx]
+                async with lock:
+                    page_status[regen_idx]["current"] = True
+                    page_status[regen_idx]["done"] = False
+                    if status_msg_id:
+                        await edit_msg(chat_id, status_msg_id,
+                            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
+                new_mcqs = await _do_generate(r_page_num, r_img, slot)
+                if is_cancelled(chat_id):
+                    break
+                async with lock:
+                    old_mcqs = results_by_idx[regen_idx][2] if results_by_idx[regen_idx] else []
+                    total_mcq_box["n"] += len(new_mcqs) - len(old_mcqs)
+                    results_by_idx[regen_idx] = (r_page_num, r_img, new_mcqs)
+                    page_status[regen_idx]["current"] = False
+                    page_status[regen_idx]["done"] = True
+                    page_status[regen_idx]["mcq"] = len(new_mcqs)
+                    if status_msg_id:
+                        await edit_msg(chat_id, status_msg_id,
+                            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
 
     async def _watch_cancel(tasks):
         # Polls the cancel flag while pages are in flight; the moment /cancel
@@ -11900,6 +11974,7 @@ async def pdf_generate_all_pages(
     finally:
         _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
         clear_active_job(chat_id)
+        _unregister_pdf_regen_queue(chat_id)
 
     results = [r for r in results_by_idx if r is not None]
     return results
@@ -25586,6 +25661,27 @@ async def handle_callback(query: dict):
             if not sess_part or not page_part.isdigit():
                 return
             _spawn_task(handle_pdf_page_regen(sess_part, int(page_part), chat_id, uid))
+            return
+        if data.startswith("pdflive_regen_"):
+            # Mid-run regen click from the /pdf live dashboard. Does NOT
+            # touch the currently-running page(s) -- just enqueues this
+            # page's index so the worker picks it up right after finishing
+            # its current in-flight page, before moving on to fresh pages.
+            rest = data[len("pdflive_regen_"):]
+            regen_chat_part, _, idx_part = rest.rpartition("_")
+            if not regen_chat_part or not idx_part.isdigit():
+                return
+            regen_chat_id = int(regen_chat_part)
+            reg = _pdf_regen_registry.get(regen_chat_id)
+            if not reg:
+                await send_msg(chat_id, "❌ এই PDF job আর active নেই — regenerate করা যাচ্ছে না।")
+                return
+            idx = int(idx_part)
+            if idx < 0 or idx >= len(reg["page_status"]) or not reg["page_status"][idx]["done"]:
+                return
+            page_num = reg["pages"][idx][0]
+            reg["queue"].put_nowait(idx)
+            await send_msg(chat_id, f"🔁 Page {fmt_page(page_num)} regenerate queue-তে যোগ হলো — চলমান page শেষ হলেই শুরু হবে।")
             return
         if data.startswith("fwm_"):
             idx = int(data[len("fwm_"):])
