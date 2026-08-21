@@ -1111,6 +1111,52 @@ async def generate_mcq_from_image(
     return []
 
 
+async def detect_page_topic(img: Image.Image, fallback: str) -> str:
+    """/pdfs only: identify this page's actual sub-topic name from its content,
+    self-verifying spelling/context (page-header text can be misspelled/garbled),
+    using the same Gemini key-rotation pool as MCQ generation. Falls back to the
+    provided default topic name on any failure."""
+    prompt = (
+        "এই page-এর মূল topic/sub-topic-এর নাম কী তা identify করো। page-এর উপরে/"
+        "কোথাও topic-এর নাম লেখা থাকতে পারে, কিন্তু সেই লেখায় বানান ভুল বা OCR-misread "
+        "থাকতে পারে — তাই শুধু লেখা name-টা copy না করে, page-এর প্রকৃত content পড়ে "
+        "context দিয়ে verify করো সেই নামটা সঠিক কিনা। ভুল/অস্পষ্ট মনে হলে content থেকে "
+        "বুঝে সঠিক topic name নিজে ঠিক করে দাও (বানান শুদ্ধ করে)। খুব ছোট, স্পষ্ট নাম দাও "
+        "(২-৫ শব্দ, ভাষা source-এর ভাষায়)। এই page-এ কোনো নির্দিষ্ট topic name খুঁজে না "
+        f"পেলে, শুধু \"{fallback}\" রিটার্ন করো।\n\n"
+        "Return ONLY the topic name as plain text, no explanation, no markdown, no quotes."
+    )
+    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+    _ordered = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
+    if not _ordered:
+        return fallback
+    for key in _ordered[:3]:
+        try:
+            from google import genai as gai
+            from google.genai import types
+            client = gai.Client(api_key=key)
+            img_b64 = image_to_base64(img)
+
+            def _call():
+                return client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=[
+                        types.Part.from_text(text=prompt),
+                        types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                    ]
+                )
+            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=25)
+            name = (response.text or "").strip().strip('"').strip("'")
+            name = name.split("\n")[0].strip()[:60]
+            if name:
+                key_rotator.mark_healthy(key)
+                return name
+        except Exception as e:
+            logger.warning(f"[TopicDetect] key attempt failed: {e}")
+            continue
+    return fallback
+
+
 async def generate_mcq_from_text(text: str, topic: str = "MCQ", count: int = 15) -> list:
     """Queued wrapper: only one MCQ-generation job runs at a time across the bot."""
     async with MCQ_PROCESSING_QUEUE_LOCK:

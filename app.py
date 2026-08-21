@@ -802,6 +802,7 @@ async def _safe_error_reply(chat_id, e: Exception, context: str = ""):
 
 import contextvars
 _CHOK_MODE = contextvars.ContextVar("chok_mode", default=False)
+_PDFS_MODE = contextvars.ContextVar("pdfs_mode", default=False)
 _TF_MODE = contextvars.ContextVar("tf_mode", default=False)
 _EXTRA_MODE = contextvars.ContextVar("extra_mode", default=False)
 
@@ -8663,11 +8664,64 @@ def _adapt_mcqs_for_print(mcqs: list) -> list:
         })
     return data
 
+def _build_topicwise_pdf_html(topics_ordered: list, topic_mcqs: dict, main_title: str) -> str:
+    """/pdfs only: single combined PDF, first page has a greenish boundary box
+    with the overall title, then each topic section starts with its own
+    (lighter blue) topic-name box, followed by that topic's MCQs (Q+options+
+    answer+explanation, style1-like layout), average ~15 MCQ/page-worth of
+    content per topic section, all topics in one continuous PDF."""
+    body_parts = [f'<div class="exam-header"><h1>{main_title}</h1></div>']
+    qn = 1
+    for t in topics_ordered:
+        mcqs = topic_mcqs.get(t, [])
+        if not mcqs:
+            continue
+        body_parts.append(f'<div class="topic-header-blue"><h3>🎯 {t}</h3></div>')
+        data = _adapt_mcqs_for_print(mcqs)
+        for d in data:
+            opts_html = "".join(
+                f'<li class="option-with-answer"><span>{chr(65+i)}. {o}</span></li>'
+                for i, o in enumerate(d["opts"]) if o
+            )
+            body_parts.append(
+                f'<div class="question">'
+                f'<div class="question-header"><span class="question-num">{qn}.</span>'
+                f'<span class="question-text">{d["q"]}</span></div>'
+                f'<ul class="options-list">{opts_html}</ul>'
+                f'<div class="explanation"><span class="explanation-label">উত্তর: {d["al"]} — </span>{d["exp"]}</div>'
+                f'</div>'
+            )
+            qn += 1
+    return f"<html><head>{_PRINT_CSS}</head><body><div class=\"content-columns\">{''.join(body_parts)}</div></body></html>"
+
+
+def _build_topicwise_csv_rows(topics_ordered: list, topic_mcqs: dict) -> list:
+    """/pdfs only: CSV rows grouped topic-by-topic (topic name as a section
+    marker row before that topic's MCQs) so /sheet output stays topic-sorted."""
+    rows = []
+    for t in topics_ordered:
+        mcqs = topic_mcqs.get(t, [])
+        if not mcqs:
+            continue
+        rows.append([f"### {t} ###", "", "", "", "", "", "", "", "topic_header"])
+        for q in mcqs:
+            opts = (q.get("options", []) + ["", "", "", ""])[:4]
+            rows.append([
+                q.get("question", ""), opts[0], opts[1], opts[2], opts[3],
+                q.get("answer", "A"), q.get("explanation", ""), "mcq", t
+            ])
+    return rows
+
+
 _PRINT_CSS = """<style>
 @page{size:A4 portrait;margin:10mm 10mm;@top-center{content:none}@bottom-center{content:none}}
 body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:12pt;line-height:1.2;color:#000;margin:0;padding:10px;width:210mm;max-width:210mm}
 .exam-header{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:10px;margin-bottom:15px}
 .exam-header h1{color:#166534;margin:0;font-size:15pt;font-weight:bold}
+.topic-header-green{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:8px;margin:14px 0 10px 0;break-inside:avoid;page-break-inside:avoid}
+.topic-header-green h2{color:#166534;margin:0;font-size:13pt;font-weight:bold}
+.topic-header-blue{text-align:center;border:2px solid #3b82f6;background-color:#EFF6FF;border-radius:6px;padding:6px;margin:10px 0 8px 0;break-inside:avoid;page-break-inside:avoid}
+.topic-header-blue h3{color:#1e40af;margin:0;font-size:12pt;font-weight:bold}
 .content-columns{column-count:2;column-gap:15px;column-fill:balance;column-rule:1px solid #ddd}
 .question{margin-bottom:7px;break-inside:avoid;page-break-inside:avoid}
 .question-header{margin-bottom:4px;display:flex;align-items:flex-start}
@@ -11843,6 +11897,7 @@ async def _process_pdf_pages_inner(
     all_mcqs_csv = []
     all_mcqs_raw = []
     first_image_msg_id = None
+    _pdfs_page_topics = {}
 
     async def _gen_with_retry(img_, page_num_):
         """
@@ -11950,11 +12005,20 @@ async def _process_pdf_pages_inner(
             else:
                 image_msg_id = None
                 image_file_id = None
+                page_topic_name = topic
+                if _PDFS_MODE.get():
+                    try:
+                        from pdf_handler import detect_page_topic
+                        page_topic_name = await asyncio.wait_for(detect_page_topic(img, topic), timeout=30)
+                    except Exception as _td_e:
+                        logger.warning(f"[PDFS] topic detect failed page {page_num}: {_td_e}")
+                        page_topic_name = topic
+                    _pdfs_page_topics[page_num] = page_topic_name
                 if with_image:
                     caption = ""
                     if tag:
                         caption = f"{tag}\n\n"
-                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}"
+                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n🌟Page No: {fmt_page(page_num)}"
 
                     photo_r = await send_photo(channel_id, img_bytes, caption, message_thread_id=thread_id)
                     if photo_r.get("ok"):
@@ -12016,6 +12080,9 @@ async def _process_pdf_pages_inner(
                     await db_update_cache(cache_id, {"poll_msg_ids": poll_msg_ids})
                 except Exception as e:
                     logger.warning(f"[PDF] poll_msg_ids save failed (may need migration): {e}")
+                if _PDFS_MODE.get():
+                    for _m in mcqs:
+                        _m["_pdfs_topic"] = page_topic_name
                 all_mcqs_raw.extend(mcqs)
 
                 # FIX: summary_pages was declared but never populated — this is
@@ -12075,6 +12142,9 @@ async def _process_pdf_pages_inner(
                         await notify_owner(f"⚠️ End message failed for page {fmt_page(page_num)}, topic: {topic}\nReason: {err_desc}")
 
                 # Auto Style1+Style3 PDF এখন সব page শেষে একবারই পাঠানো হবে (নিচে)
+                if _PDFS_MODE.get():
+                    for _m in mcqs:
+                        _m["_pdfs_topic"] = page_topic_name
                 all_mcqs_raw.extend(mcqs)
 
                 for m in mcqs:
@@ -12126,8 +12196,20 @@ async def _process_pdf_pages_inner(
         buf = io.StringIO()
         writer = csv_mod.writer(buf)
         writer.writerow(["questions","option1","option2","option3","option4","answer","explanation","type","section"])
-        for row in all_mcqs_csv:
-            writer.writerow(row)
+        if _PDFS_MODE.get() and all_mcqs_raw:
+            _topics_order = []
+            _topic_map = {}
+            for _m in all_mcqs_raw:
+                _t = _m.get("_pdfs_topic", topic)
+                if _t not in _topic_map:
+                    _topic_map[_t] = []
+                    _topics_order.append(_t)
+                _topic_map[_t].append(_m)
+            for row in _build_topicwise_csv_rows(_topics_order, _topic_map):
+                writer.writerow(row)
+        else:
+            for row in all_mcqs_csv:
+                writer.writerow(row)
         await send_document(chat_id, buf.getvalue().encode("utf-8"), f"{topic}_mcq.csv",
             caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ", mime_type="text/csv")
 
@@ -12165,12 +12247,24 @@ async def _process_pdf_pages_inner(
     # first pre-msg (first_image_msg_id) কে reply করে, auto-pin
     if not csv_only and channel_id and all_mcqs_raw and await should_autosend_pdf(channel_id):
         try:
-            data_adapted = _adapt_mcqs_for_print(all_mcqs_raw)
             safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
             _wm_saved = (await db_get_settings()).get("watermark", "")
             _autosend_pdf_msg_ids = {}
-            for style_key in ("style1", "style3"):
-                html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
+            _pdfs_topics_order, _pdfs_topic_map = [], {}
+            if _PDFS_MODE.get():
+                for _m in all_mcqs_raw:
+                    _t = _m.get("_pdfs_topic", topic)
+                    if _t not in _pdfs_topic_map:
+                        _pdfs_topic_map[_t] = []
+                        _pdfs_topics_order.append(_t)
+                    _pdfs_topic_map[_t].append(_m)
+            _pdfs_styles = ("topicwise",) if _PDFS_MODE.get() else ("style1", "style3")
+            for style_key in _pdfs_styles:
+                data_adapted = _adapt_mcqs_for_print(all_mcqs_raw)
+                if style_key == "topicwise":
+                    html_s = _build_topicwise_pdf_html(_pdfs_topics_order, _pdfs_topic_map, topic)
+                else:
+                    html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
                 pdf_bytes = await _html_to_pdf(html_s)
                 if not pdf_bytes:
                     logger.error(f"[PDF-AUTOSEND] {style_key} generation returned empty, topic: {topic}")
@@ -12181,7 +12275,7 @@ async def _process_pdf_pages_inner(
                         pdf_bytes = add_watermark_to_pdf(pdf_bytes, _wm_saved)
                     except Exception as _wm_e:
                         logger.warning(f"[PDF-AUTOSEND] watermark apply failed: {_wm_e}")
-                style_name = PRINT_STYLE_NAMES[style_key]
+                style_name = "🖨️ Topic-wise Practice Sheet" if style_key == "topicwise" else PRINT_STYLE_NAMES[style_key]
                 doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_{style_key}.pdf",
                     caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n📝 মোট MCQ: {len(all_mcqs_raw)}\n🚀 ATLAS APP",
                     message_thread_id=thread_id, reply_to_message_id=first_image_msg_id)
@@ -24836,7 +24930,7 @@ async def handle_message(msg: dict):
         quiz_id = text.split()[1] if len(text.split()) > 1 else text.replace("/start ", "")
         _spawn_command_task(uid, start_d1_quiz(chat_id, quiz_id, msg["from"]))
         return
-    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm")) or text.startswith("/bangla"):
+    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm") and not text.startswith("/pdfs")) or text.startswith("/bangla"):
         if not is_auth:
             if is_private:
                 await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
@@ -24860,6 +24954,18 @@ async def handle_message(msg: dict):
             await handle_pdf(msg)
         finally:
             _CHOK_MODE.reset(token)
+        return
+    if text.startswith("/pdfs"):
+        if not is_auth:
+            if is_private:
+                await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
+            return
+        clear_cancel(chat_id)
+        token = _PDFS_MODE.set(True)
+        try:
+            await handle_pdf(msg)
+        finally:
+            _PDFS_MODE.reset(token)
         return
     if text.startswith("/extra"):
         if not is_auth:
