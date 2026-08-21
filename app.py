@@ -9995,6 +9995,576 @@ async def _extra_gen_from_images_batch(imgs: list, topic: str) -> dict:
         return {}
 
 
+def _build_dagano_prompt_standalone(topic: str) -> str:
+    """/dagano's prompt builder -- same STRICT hand-mark/highlight-only
+    filter as /extra, PLUS: (1) never reference page numbers, roman
+    numbering, or "source"/"stated on this page" wording in question or
+    explanation -- must read as standalone knowledge; (2) explanation is
+    split into main_explanation (<=165 words, source-grounded) and
+    extra_info (full topic context beyond the 4 options, still from page
+    content only); (3) every MCQ carries a topic_key so same-topic MCQs on
+    this page can reuse one shared extra_info (set by caller, not model)."""
+    return (
+        f"You are an expert MCQ-extraction engine for Bengali/English academic "
+        f"textbook pages (medical/HSC/admission-standard quality).\n"
+        f"Topic: {topic}\n\n"
+        f"═══════════════════════════════\n"
+        f"🟥 STRICT FILTER — ONLY MARKED/HIGHLIGHTED CONTENT, NOTHING ELSE\n"
+        f"═══════════════════════════════\n"
+        f"This page may contain a LOT of printed text, but you must generate "
+        f"MCQs ONLY from the specific lines/words/paragraphs that have an "
+        f"EXTRA mark added on top of the book's original printing:\n"
+        f"- Highlighter color over the text (any color — yellow, green, "
+        f"orange, pink, blue, etc.)\n"
+        f"- Pen underline drawn under the text (any ink color)\n"
+        f"- A box, circle, bracket, or other hand-drawn boundary around the text\n"
+        f"- A star, tick, arrow, or other hand-drawn mark next to the text "
+        f"pointing to it\n\n"
+        f"🚫 DO NOT generate any MCQ from plain/unmarked text, even if it "
+        f"looks important, is a definition, or is bold/italic in the "
+        f"ORIGINAL book printing. Bold/italic that is part of the book's "
+        f"own original typesetting is NOT a mark.\n\n"
+        f"If NO marks exist anywhere on this page, return exactly [] — "
+        f"zero MCQs is a completely valid and expected result.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟥 NEVER REFERENCE THE PAGE/SOURCE\n"
+        f"═══════════════════════════════\n"
+        f"The question and explanation must read as standalone academic "
+        f"knowledge. NEVER write things like page numbers, roman/serial "
+        f"numbering labels from the page layout, or phrases like \"as "
+        f"stated on this page\", \"বর্ণিত আছে\", \"এই পৃষ্ঠায়\", \"উপরে "
+        f"উল্লেখিত অনুযায়ী\", or any similar source-citation wording. "
+        f"Write the question and explanation as direct, self-contained "
+        f"academic facts.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 SOURCE FIDELITY (STRICT)\n"
+        f"═══════════════════════════════\n"
+        f"100% of question text, options, and explanation content must "
+        f"come from the marked source text on the page — never invent or "
+        f"assume outside facts.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 EXPLANATION — TWO PARTS\n"
+        f"═══════════════════════════════\n"
+        f"1) \"main_explanation\": the direct answer explanation, justifying "
+        f"the correct option and briefly why the other 3 are wrong — "
+        f"STRICT MAXIMUM 165 words, from the marked page content only.\n"
+        f"2) \"extra_info\": additional relevant info about the SAME broader "
+        f"topic (not just the 4 options) — other facts, related points, "
+        f"context about that topic that also appears on this page (from "
+        f"marked OR nearby content of the same topic) — so a student who "
+        f"studies this explanation learns the topic more broadly, not "
+        f"just this one question's answer. If no extra topic content "
+        f"exists on the page, use an empty string \"\".\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 TOPIC KEY\n"
+        f"═══════════════════════════════\n"
+        f"Every MCQ must include \"topic_key\": a short 2-5 word label "
+        f"identifying the specific sub-topic this question belongs to "
+        f"(e.g. \"Newton's 2nd Law\", \"রক্তের গ্রুপ\"). If two MCQs from "
+        f"this page are about the exact same sub-topic, give them the "
+        f"EXACT SAME topic_key string.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 STRICT LANGUAGE RULE\n"
+        f"═══════════════════════════════\n"
+        f"Detect the language of the marked source text (Bengali or "
+        f"English) and write the question, ALL options, and both "
+        f"explanation parts in that exact same language. Never translate.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 OUTPUT\n"
+        f"═══════════════════════════════\n"
+        f"JSON array only, no markdown fences, no preamble. Output must "
+        f"start IMMEDIATELY with '['. Format:\n"
+        f'[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},'
+        f'"answer":"A/B/C/D","main_explanation":"...","extra_info":"...",'
+        f'"topic_key":"..."}}]'
+    )
+
+
+def _build_dagano_prompt_batched(topic: str, n: int) -> str:
+    """/dagano's batched prompt -- same rules as
+    _build_dagano_prompt_standalone, applied INDEPENDENTLY to n SEPARATE
+    page images given in this SAME call. Each output item carries
+    page_index so the caller can split results per page."""
+    return (
+        f"You are an expert MCQ-extraction engine for Bengali/English academic "
+        f"textbook pages (medical/HSC/admission-standard quality).\n"
+        f"Topic: {topic}\n\n"
+        f"You are given {n} SEPARATE page images in this SAME call, in order "
+        f"(page_index 1, 2, ... {n}). Treat each page COMPLETELY "
+        f"INDEPENDENTLY -- never mix or borrow marked content between "
+        f"pages, each page's MCQs must come strictly from that page's own "
+        f"marks.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟥 STRICT FILTER — ONLY MARKED/HIGHLIGHTED CONTENT, NOTHING ELSE\n"
+        f"═══════════════════════════════\n"
+        f"Each page may contain a LOT of printed text, but you must generate "
+        f"MCQs ONLY from lines/words/paragraphs that have an EXTRA mark "
+        f"added on top of the book's original printing:\n"
+        f"- Highlighter color over the text (any color — yellow, green, "
+        f"orange, pink, blue, etc.)\n"
+        f"- Pen underline drawn under the text (any ink color)\n"
+        f"- A box, circle, bracket, or other hand-drawn boundary around the text\n"
+        f"- A star, tick, arrow, or other hand-drawn mark next to the text\n\n"
+        f"🚫 DO NOT generate any MCQ from plain/unmarked text, even if "
+        f"important or bold/italic in the ORIGINAL book printing.\n\n"
+        f"⚠️ A page may have VERY FEW marks — even just 1-2 lines. That is "
+        f"normal: extract exactly what is marked on THAT page. If NO marks "
+        f"exist on a given page, that page contributes zero items.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟥 NEVER REFERENCE THE PAGE/SOURCE\n"
+        f"═══════════════════════════════\n"
+        f"Question and explanation must read as standalone academic "
+        f"knowledge. NEVER write page numbers, roman/serial layout labels, "
+        f"or phrases like \"as stated on this page\", \"বর্ণিত আছে\", "
+        f"\"এই পৃষ্ঠায়\". Write as direct, self-contained facts.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 SOURCE FIDELITY (STRICT)\n"
+        f"═══════════════════════════════\n"
+        f"100% of question, options, and explanation content must come "
+        f"from the marked source text — never invent outside facts.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 EXPLANATION — TWO PARTS\n"
+        f"═══════════════════════════════\n"
+        f"1) \"main_explanation\": justifies the correct option + briefly "
+        f"why other 3 are wrong — STRICT MAXIMUM 165 words, from marked "
+        f"content only.\n"
+        f"2) \"extra_info\": additional relevant info about the SAME "
+        f"broader topic (beyond just the 4 options), from that page's "
+        f"content, so the student learns the topic more broadly. Empty "
+        f"string \"\" if nothing extra exists.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 TOPIC KEY\n"
+        f"═══════════════════════════════\n"
+        f"Every MCQ includes \"topic_key\": a short 2-5 word sub-topic "
+        f"label. Same sub-topic on the SAME page -> EXACT SAME topic_key "
+        f"string. topic_key is always scoped to its own page (never share "
+        f"across different page_index).\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 STRICT LANGUAGE RULE\n"
+        f"═══════════════════════════════\n"
+        f"Detect the language of the marked source text and write "
+        f"everything in that exact same language. Never translate.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 OUTPUT\n"
+        f"═══════════════════════════════\n"
+        f"JSON array only, no markdown/preamble. EVERY item MUST include "
+        f"\"page_index\" (1-based int matching image order above):\n"
+        f'[{{"page_index":1,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},'
+        f'"answer":"A/B/C/D","main_explanation":"...","extra_info":"...",'
+        f'"topic_key":"..."}}]'
+    )
+
+
+def _dagano_apply_topic_reuse(mcqs: list) -> list:
+    """Within one page's MCQ list: if 2+ MCQs share the same topic_key,
+    reuse the FIRST one's extra_info for all later same-topic MCQs
+    (copy verbatim) instead of trusting each MCQ's own possibly-drifted
+    extra_info -- saves nothing on tokens already spent, but keeps the
+    topic-wide info CONSISTENT across same-topic MCQs. Also merges
+    final explanation = main_explanation + ('\\n\\n' + extra_info if any)."""
+    seen_extra = {}
+    for m in mcqs:
+        tk = (m.get("topic_key") or "").strip()
+        extra = (m.get("extra_info") or "").strip()
+        if tk:
+            if tk in seen_extra:
+                extra = seen_extra[tk]
+            elif extra:
+                seen_extra[tk] = extra
+        main = (m.get("main_explanation") or m.get("explanation") or "").strip()
+        m["explanation"] = f"{main}\n\n{extra}" if extra else main
+    return mcqs
+
+
+async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
+    """/dagano's BATCHED generation call -- Gemini primary, Groq/OpenRouter
+    fallback only on true technical failure (mirrors /extra's proven-safe
+    2-page-per-call pattern). Returns {page_index (1-based int): [mcq]}."""
+    n = len(imgs)
+    if n == 0:
+        return {}
+    prompt = _build_dagano_prompt_batched(topic, n)
+    try:
+        gem_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+        provider = "Gemini"
+        if gem_txt:
+            gem = _onu2_parse_mcq_array(gem_txt)
+        else:
+            gem = []
+            txt = await _qbm_groq_call(imgs[0], prompt)
+            provider = "Groq"
+            if txt:
+                gem = _onu2_parse_mcq_array(txt)
+            else:
+                or_txt = await _qbm_openrouter_call(imgs[0], prompt)
+                gem = _onu2_parse_mcq_array(or_txt) if or_txt else []
+                provider = "OpenRouter"
+        by_index = {}
+        for m in gem:
+            idx = m.get("page_index")
+            if not isinstance(idx, (int, float)) or not (1 <= int(idx) <= n):
+                continue
+            idx = int(idx)
+            m["_provider"] = provider
+            by_index.setdefault(idx, []).append(m)
+        for idx in list(by_index.keys()):
+            out = _cap_mcq_options(by_index[idx], 4)
+            out = _validate_mcq_structure(out)
+            out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
+            out = _extra_code_level_3pass_verify(out, page_num=idx)
+            out = _dagano_apply_topic_reuse(out)
+            by_index[idx] = out
+        return by_index
+    except Exception as e:
+        logger.warning(f"[Dagano batch] failed: {e}")
+        return {}
+
+
+async def _dagano_gen_from_image(img, topic, page_num):
+    """/dagano's single-page fallback generation call."""
+    prompt = _build_dagano_prompt_standalone(topic)
+    gemini_ok = False
+    try:
+        txt = await _gemini_verify_raw_text(img, prompt)
+        if txt:
+            out = _qbm_parse_json(txt)
+            gemini_ok = True
+        else:
+            out = []
+    except Exception as e:
+        logger.warning(f"[Dagano-Standalone] gemini failed page {page_num}: {e}")
+        out = []
+
+    if not out and not gemini_ok:
+        try:
+            groq_keys = groq_key_rotator.ordered_keys()
+            data_url = None
+            for key in groq_keys[:5]:
+                if data_url is None:
+                    data_url = _img_to_data_url_groq(img, prompt_len_hint=prompt)
+                txt, status = await _post_openai_compat(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    key, "qwen/qwen3.6-27b", data_url, prompt
+                )
+                if txt:
+                    out = _qbm_parse_json(txt)
+                    groq_key_rotator.mark_healthy(key)
+                    break
+                if status == 429:
+                    groq_key_rotator.mark_rate_limited(key)
+        except Exception as e:
+            logger.warning(f"[Dagano-Standalone] groq failed page {page_num}: {e}")
+            out = []
+
+    out = _cap_mcq_options(out, 4)
+    out = _validate_mcq_structure(out)
+    out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
+    out = _extra_code_level_3pass_verify(out, page_num=page_num)
+    out = _dagano_apply_topic_reuse(out)
+
+    if out:
+        out = await _extra_marking_audit(out, img, topic, page_num)
+        out = _dagano_apply_topic_reuse(_validate_mcq_structure(out))
+
+    return out
+
+
+async def dagano_generate_all_pages(
+    chat_id: int, pages: list, topic: str,
+    file_name: str, status_msg_id: int = None
+) -> list:
+    """/dagano's page-loop -- 2-pages-per-call batched queue, same
+    proven-safe pattern as extra_generate_all_pages."""
+    page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
+    start_time = time.time()
+    results_by_idx = [None] * len(pages)
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    clear_cancel(chat_id)
+    new_job_id(chat_id)
+    set_active_job(chat_id, f"DAGANO MCQ generation ({file_name}, batched-queue)")
+
+    queue = asyncio.Queue()
+    for p in pages:
+        queue.put_nowait(p)
+
+    MAX_WORKERS = 2
+    lock = asyncio.Lock()
+    total_mcq_box = {"n": 0}
+
+    def _idx_of(page_num):
+        return next(i for i, (p, _) in enumerate(pages) if p == page_num)
+
+    async def _mark_current(page_num):
+        async with lock:
+            page_status[_idx_of(page_num)]["current"] = True
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+
+    async def _mark_done(page_num, img, mcqs):
+        async with lock:
+            idx = _idx_of(page_num)
+            results_by_idx[idx] = (page_num, img, mcqs)
+            total_mcq_box["n"] += len(mcqs)
+            page_status[idx]["current"] = False
+            page_status[idx]["done"] = True
+            page_status[idx]["mcq"] = len(mcqs)
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+
+    async def _audited(mcqs, img, page_num):
+        if not mcqs:
+            return mcqs
+        try:
+            mcqs = await _extra_marking_audit(mcqs, img, topic, page_num)
+            return _dagano_apply_topic_reuse(_validate_mcq_structure(mcqs))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"[Dagano Generate] audit page {page_num} skipped: {e}")
+            return mcqs
+
+    async def _fallback_single(img, page_num):
+        try:
+            return await _dagano_gen_from_image(img, topic, page_num)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[Dagano Generate] fallback single-page {page_num} failed: {e}")
+            return []
+
+    async def _worker():
+        while True:
+            if is_cancelled(chat_id):
+                return
+            try:
+                page_num, img = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            await _mark_current(page_num)
+
+            second = None
+            try:
+                second = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                second = None
+            if second:
+                await _mark_current(second[0])
+
+            first_page_num, first_img = page_num, img
+            pending = [(first_page_num, first_img)]
+            if second:
+                pending.append(second)
+
+            while pending and not is_cancelled(chat_id):
+                imgs = [im for _, im in pending]
+                n = len(imgs)
+                try:
+                    by_index = await _dagano_gen_from_images_batch(imgs, topic)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[Dagano Generate] batch error: {e}")
+                    by_index = {}
+
+                if not by_index and n > 0:
+                    for pg, im in pending:
+                        mcqs = await _fallback_single(im, pg)
+                        await _mark_done(pg, im, mcqs)
+                    pending = []
+                    break
+
+                first_pg, first_im = pending[0]
+                first_mcqs = await _audited(by_index.get(1, []), first_im, first_pg)
+                await _mark_done(first_pg, first_im, first_mcqs)
+
+                if n == 1:
+                    pending = []
+                    break
+
+                second_pg, second_im = pending[1]
+                if first_mcqs:
+                    second_mcqs = await _audited(by_index.get(2, []), second_im, second_pg)
+                    await _mark_done(second_pg, second_im, second_mcqs)
+                    pending = []
+                else:
+                    try:
+                        third = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        third = None
+                    if third:
+                        await _mark_current(third[0])
+                        pending = [(second_pg, second_im), third]
+                    else:
+                        second_mcqs = await _audited(by_index.get(2, []), second_im, second_pg)
+                        await _mark_done(second_pg, second_im, second_mcqs)
+                        pending = []
+
+    tasks = [_spawn_task(_worker()) for _ in range(MAX_WORKERS)]
+
+    async def _watch_cancel():
+        while not all(t.done() for t in tasks):
+            if is_cancelled(chat_id):
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                return
+            await asyncio.sleep(0.3)
+
+    try:
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                _build_dashboard(file_name, topic, pages, page_status, start_time, 0, 0), reply_markup=_cancel_kb(chat_id))
+        watcher = _spawn_task(_watch_cancel())
+        await asyncio.gather(*tasks, return_exceptions=True)
+        watcher.cancel()
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+    return [r for r in results_by_idx if r is not None]
+
+
+async def handle_dagano(msg: dict):
+    """/dagano -- reply to a PDF. STRICT FILTER: only highlighted/marked/
+    boxed/colored (red/yellow/green/pink/orange etc.) page content is used
+    to generate NEW MCQs (never plain unmarked text). Gemini primary.
+    Question/explanation never reference page numbers or "source" wording.
+    Explanation = main_explanation (<=165 words) + extra_info (full
+    topic context), same-topic MCQs on a page reuse one shared extra_info."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _handle_dagano_impl(msg)
+
+
+async def _handle_dagano_impl(msg: dict):
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    uname = msg["from"].get("first_name", "User")
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF ফাইলে reply করে <code>/dagano</code> দাও!\n\n"
+            "<b>Example:</b>\n"
+            "<code>/dagano -p 1-5 -c @channel -m \"Topic\"</code>\n"
+            "<code>/dagano -p 2 -c -100xxx -t 447 -m \"Group Topic\"</code>\n\n"
+            "শুধুমাত্র হাইলাইট/দাগ/মার্ক/বক্স/রঙ করা (লাল, হলুদ, সবুজ, "
+            "গোলাপি, কমলা ইত্যাদি) অংশ থেকেই নতুন MCQ বানাবে — বাকি সব "
+            "অংশ সম্পূর্ণ বাদ যাবে। কোনো মার্ক না থাকলে সেই পেজে ০টা "
+            "MCQ হবে।\n"
+            "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে",
+            parse_mode="HTML"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    params = parse_pdf_command(text)
+    topic = params["topic"]
+    if not topic:
+        m_t = re.search(r'-t\s+"([^"]+)"', text) or re.search(r"-t\s+'([^']+)'", text) or re.search(r'-t\s+(\S+)', text)
+        if m_t:
+            topic = m_t.group(1)
+    topic = topic or DEFAULT_TOPIC
+    page_range = params["page_range"]
+    channel_id = params["channel_id"]
+    thread_id = params.get("thread_id")
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+
+    status_r = await send_msg(chat_id, "⏳ PDF download হচ্ছে...")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            await send_msg(chat_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ মার্ক করা content থেকে নতুন MCQ generate হচ্ছে...")
+
+        generated_pages = await dagano_generate_all_pages(chat_id, pages, topic, file_name, status_msg_id)
+        pdf_bytes = None
+
+        if channel_id:
+            await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, None,
+                channel_id, False, file_name, status_msg_id, thread_id=thread_id, skip_generate=True)
+            return
+
+        channels = await db_get_channels()
+        if not channels:
+            await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, None,
+                None, True, file_name, status_msg_id, thread_id=thread_id, skip_generate=True)
+            return
+
+        app.state.pdf_cache = getattr(app.state, "pdf_cache", {})
+        app.state.pdf_cache[f"pdf_img_{uid}"] = generated_pages
+        _cap_page_cache(app.state.pdf_cache)
+        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
+            "key": f"pdf_pending_{uid}",
+            "data": json.dumps({"topic": topic, "mcq_count": None, "file_name": file_name, "status_msg_id": status_msg_id, "thread_id": thread_id, "file_id": file_id, "page_range": page_range}),
+            "updated_at": int(time.time())
+        }).execute())
+
+        total_mcq_found = sum(len(mcqs) for _, _, mcqs in generated_pages)
+
+        try:
+            all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
+            if all_mcqs_flat:
+                csv_bytes = _mcqs_to_csv_bytes(all_mcqs_flat)
+                await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
+                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv")
+        except Exception as csv_err:
+            logger.warning(f"[Dagano] CSV auto-send failed: {csv_err}")
+
+        page_breakdown = "\n".join(
+            f"✅ Page {fmt_page(p)}: {len(mcqs)} MCQ ✓" for p, _, mcqs in generated_pages
+        )
+        kb = {"inline_keyboard": []}
+        for ch in channels:
+            ch_id = ch.get("channel_id", "")
+            ch_name = ch.get("channel_name", ch_id)
+            kb["inline_keyboard"].append([{"text": f"📢 {ch_name}", "callback_data": f"pdfch_{ch_id}_{uid}"}])
+        kb["inline_keyboard"].append([{"text": "📄 CSV File Only", "callback_data": f"pdfch_csv_{uid}"}])
+        await send_msg(chat_id,
+            f"✅ <b>Dagano Extraction Complete!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📝 Total MCQ: {total_mcq_found}  |  📋 Pages: {len(generated_pages)}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{page_breakdown}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 Topic: {topic}\n\nChannel select করো:",
+            reply_markup=kb)
+
+    except Exception as e:
+        logger.error(f"[Dagano] Handle error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+        await notify_owner(f"[Dagano] Error for user {uid}:\n{e}")
+
+
 async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclude_groq_keys: set = None):
     """/extra's OWN generation call — completely standalone, does not go
     through generate_mcq_from_image/_generate_mcq_from_image_raw or the
@@ -24028,6 +24598,18 @@ async def handle_message(msg: dict):
             return
         clear_cancel(chat_id)
         _spawn_command_task(uid, handle_extra(msg))
+        return
+    if text.startswith("/dagano"):
+        # /dagano = generates NEW MCQs, STRICTLY from highlighted/marked/
+        # boxed/colored page content only (like /extra), with 165-word
+        # main explanation + shared topic-wide extra_info, no page/source
+        # references in output. Gemini primary.
+        if not is_auth:
+            if is_private:
+                await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
+            return
+        clear_cancel(chat_id)
+        _spawn_command_task(uid, handle_dagano(msg))
         return
     if text.startswith("/tf"):
         if not is_auth:
