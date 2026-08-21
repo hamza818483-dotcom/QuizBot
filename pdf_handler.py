@@ -1075,11 +1075,16 @@ def _mcq_hallucination_filter(mcqs: list, img) -> list:
         overlap = mcq_words & page_words
         ratio = len(overlap) / len(mcq_words)
         # Lenient threshold: genuine page-derived content (even paraphrased/
-        # OCR-noisy) reliably shares >=20% of its distinct words with the
-        # page; a fully invented question typically shares under that
-        # (mostly just common function words, which are usually short and
-        # filtered by the >=2-char token rule above only partially).
-        if ratio >= 0.20:
+        # OCR-noisy) reliably shares >=12% of its distinct words with the
+        # page; a fully invented question typically shares far less (mostly
+        # just common function words). Originally 20%, but Bangla local
+        # Tesseract OCR (pytesseract) is unreliable enough on conjuncts/
+        # numerals/dates that genuinely page-sourced date/fact questions
+        # (e.g. "জুলাই বিপ্লব কবে", "সংবিধান কার্যকর হয় কোন তারিখে") were
+        # getting misdetected as hallucinated and wrongly dropped — lowered
+        # to reduce false-positives on real content while still catching
+        # outright fabrication (near-0% overlap).
+        if ratio >= 0.12:
             kept.append(m)
         else:
             dropped += 1
@@ -1171,25 +1176,16 @@ async def generate_mcq_from_image(
                         ]
                     )
 
-                # 2026-08-19: Gemini is now the primary provider for ALL
-                # modes (explicit preference) -- it must get a real chance
-                # to succeed even under Google-side slow/high-demand
-                # conditions rather than failing fast to Groq. Raised
-                # 35s/25s -> 60s/45s/45s/45s/45s (across up to 5 attempts)
-                # so genuinely slow-but-successful generations aren't
-                # killed early; only truly hung/dead keys will still hit
-                # the ceiling and rotate to the next key.
-                # 2026-08-20: kept attempt 0 at 60s (first-try, give it the
-                # best chance) but trimmed subsequent attempts 45s -> 30s --
-                # a request that's going to succeed on a healthy key
-                # normally returns well under 30s (seen consistently in
-                # logs, ~1-40s), so a hang past 30s on a RETRY attempt is
-                # almost always a genuinely dead/throttled key, not a slow
-                # success in progress. Cuts wasted time on the TimeoutError
-                # case specifically without touching the SSL/503/429 paths
-                # (those fail near-instantly already, this timeout ceiling
-                # was never their bottleneck).
-                _attempt_timeout = 60 if attempt == 0 else 30
+                # 2026-08-22: user requirement — minimize wasted timeout on
+                # dead/slow keys at any cost (token+time burn matters more
+                # than rare marginal success). Logs consistently show
+                # successful Gemini calls landing well under 30s; a hang
+                # past that on ANY attempt (including the first) is almost
+                # always a genuinely dead/throttled key, not a slow success
+                # in progress. Cut 60s/30s -> 35s/20s so failed keys rotate
+                # to the next key much faster instead of stalling the whole
+                # page for 60-90s across 2-3 dead-key attempts.
+                _attempt_timeout = 35 if attempt == 0 else 20
                 response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 valid = _parse_mcq_json(response.text)
                 if not valid:
@@ -1203,44 +1199,6 @@ async def generate_mcq_from_image(
                     valid = _mcq_hallucination_filter(valid, img)
                 key_rotator.mark_healthy(key)
                 logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name})")
-                # CODE-LEVEL MIN-10 ENFORCEMENT: prompt already targets 15+
-                # (min 10 if sparse, min 5 if very sparse) but that's a soft
-                # LLM instruction with no guarantee. If no explicit mcq_count
-                # was requested and we got a non-empty but under-10 result,
-                # retry ONCE with an explicit strengthened min-count push
-                # before accepting it -- catches under-extraction without
-                # burning retries on pages that are genuinely near-empty
-                # (accepts whatever the retry returns, even if still <10).
-                if not mcq_count and 0 < len(valid) < 10 and not locals().get("_min10_retried"):
-                    _min10_retried = True
-                    try:
-                        _boost_prompt = (
-                            prompt
-                            + f"\n\n🔴 CODE-LEVEL RE-CHECK: প্রথম pass এ মাত্র {len(valid)}টি MCQ পাওয়া গেছে যা টার্গেটের (কমপক্ষে ১০) নিচে। "
-                            "পেইজটি আবার স্ক্যান করো -- প্রতিটি লাইন/বক্স/ছক থেকে আরও MCQ বের করার সুযোগ আছে কিনা দেখো, "
-                            "under-extract করা যাবে না। সত্যিই content sparse হলে যা সম্ভব দাও, কিন্তু আগে পুরো পেইজ আবার ভালোভাবে দেখো।"
-                        )
-
-                        def _call_gemini_retry():
-                            return client.models.generate_content(
-                                model=model_name,
-                                contents=[
-                                    types.Part.from_text(text=_boost_prompt),
-                                    types.Part.from_bytes(
-                                        data=base64.b64decode(img_b64),
-                                        mime_type="image/jpeg"
-                                    )
-                                ]
-                            )
-                        _retry_resp = await asyncio.wait_for(asyncio.to_thread(_call_gemini_retry), timeout=45)
-                        _retry_valid = _parse_mcq_json(_retry_resp.text)
-                        if _retry_valid:
-                            _retry_valid = _mcq_hallucination_filter(_retry_valid, img)
-                            if len(_retry_valid) > len(valid):
-                                logger.info(f"[Gemini] Page {page}: min-10 retry improved {len(valid)} -> {len(_retry_valid)} MCQs")
-                                valid = _retry_valid
-                    except Exception as _retry_e:
-                        logger.warning(f"[Gemini] Page {page}: min-10 retry failed, keeping original {len(valid)}: {_retry_e}")
                 return valid
             except Exception as e:
                 last_exc = e
