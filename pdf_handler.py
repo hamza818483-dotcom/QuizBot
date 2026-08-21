@@ -306,7 +306,8 @@ openrouter_rotator = OpenRouterKeyRotator()
 MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 
 🟥Overall Instructions:
--Image এ আগে থেকে MCQ বানানো থাকুক বা Information থাকুক,সকল জায়গা থেকেই প্রশ্ন বানাবে
+-🔒 TWO-MODE RULE (check first): যদি Image-এ আগে থেকেই MCQ (question+options ফরম্যাটে) থাকে, সেগুলো 100% VERBATIM/হুবহু extract করবে — নতুন কোনো MCQ generate করবে না, question/option-এর wording পরিবর্তন করবে না। যদি Image-এ কোনো MCQ না থেকে শুধু Information/text থাকে, তখনই সেই content থেকে নতুন MCQ বানাবে।
+-একই পেইজে MCQ থাকলে সেই পেইজ পুরোটাই MODE A (verbatim extract) — পাশের সাধারণ টেক্সট থেকে অতিরিক্ত নতুন MCQ বানানো যাবে না।
 -যেসব লাইন থেকে MCQ বানানো MISS করা যাবে না (MUST PRIORITY):
   • কোনো পেইজ/লাইন যেকোনো কালার দিয়ে দাগানো বা হাইলাইটেড থাকলে (সবুজ, লাল, কমলা, হলুদ — সবচেয়ে কমন হাইলাইটার কালার)
   • কোনো প্যারা/লাইন বক্স করা থাকলে বা কালার দিয়ে মার্ক করা থাকলে
@@ -349,7 +350,8 @@ MUST Return ONLY valid JSON array, no markdown:
 MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 
 🟥Overall Instructions:
--Image এ আগে থেকে MCQ বানানো থাকুক বা Information থাকুক,সকল জায়গা থেকেই প্রশ্ন বানাবে
+-🔒 TWO-MODE RULE (check first): যদি Image-এ আগে থেকেই MCQ (question+options ফরম্যাটে) থাকে, সেগুলো 100% VERBATIM/হুবহু extract করবে — নতুন কোনো MCQ generate করবে না, question/option-এর wording পরিবর্তন করবে না। যদি Image-এ কোনো MCQ না থেকে শুধু Information/text থাকে, তখনই সেই content থেকে নতুন MCQ বানাবে।
+-একই পেইজে MCQ থাকলে সেই পেইজ পুরোটাই MODE A (verbatim extract) — পাশের সাধারণ টেক্সট থেকে অতিরিক্ত নতুন MCQ বানানো যাবে না।
 -যেসব লাইন থেকে MCQ বানানো MISS করা যাবে না (MUST PRIORITY):
   • কোনো পেইজ/লাইন যেকোনো কালার দিয়ে দাগানো বা হাইলাইটেড থাকলে (সবুজ, লাল, কমলা, হলুদ — সবচেয়ে কমন হাইলাইটার কালার)
   • কোনো প্যারা/লাইন বক্স করা থাকলে বা কালার দিয়ে মার্ক করা থাকলে
