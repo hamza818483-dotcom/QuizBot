@@ -892,6 +892,10 @@ async def generate_mcq_from_image(
     # reaching the OpenRouter fallback. Cap attempts at 3 keys max, and use a
     # shorter timeout on the 2nd/3rd attempt so a bad/slow key fails fast.
     _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+    # Only attempt keys not already known-exhausted/banned today — retrying
+    # a dead key wastes a full timeout slot for nothing, and skipping them
+    # lets us cycle through ALL live keys within max_retries.
+    _ordered = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
 
     # If every key is already known daily-exhausted (Pacific-day), skip Gemini
     # entirely instead of burning 429 round-trips we already know will fail —
@@ -900,7 +904,13 @@ async def generate_mcq_from_image(
         logger.warning(f"[Gemini] All {len(key_rotator.keys)} keys already daily-exhausted for today — returning empty (caller will try Groq/other fallbacks)")
         return []
 
-    max_retries = min(len(key_rotator.keys), 5) if key_rotator.keys else 5
+    # 2026-08-22: user requirement — do NOT fall back to other models/providers
+    # until ALL Gemini keys are exhausted. Previously capped at 5 keys even
+    # with 44 configured, so a run of bad luck (503/timeout/SSL on the first
+    # 5) fell through to Groq while 39 healthy keys sat unused. Now tries
+    # every configured key once per page before giving up to the fallback
+    # chain.
+    max_retries = len(_ordered) if _ordered else 5
     # Model fallback chain: try the latest model first, and if the WHOLE
     # Gemini backend for it is overloaded (503 UNAVAILABLE — this is a
     # server-side capacity issue, not a per-key problem, so it hits every
