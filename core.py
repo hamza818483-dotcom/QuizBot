@@ -865,7 +865,12 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
 
     # Large files risk CF Worker CPU/memory limits (base64 decode doubles
     # payload in-memory) → skip straight to direct upload for big docs.
-    SKIP_CF_THRESHOLD = 18 * 1024 * 1024  # ~18MB raw
+    # NOTE: direct api.telegram.org is network-unreachable from this host
+    # (observed: ConnectError on every direct attempt) — CF Worker is the
+    # ONLY path that actually works here, so keep this threshold close to
+    # Telegram's own 50MB bot upload ceiling rather than bailing out early
+    # into a direct-upload path that can never succeed.
+    SKIP_CF_THRESHOLD = 45 * 1024 * 1024  # ~45MB raw (base64 ~60MB, under CF's 100MB body limit)
     skip_cf = len(file_bytes) > SKIP_CF_THRESHOLD
     if skip_cf:
         logger.warning(f"[sendDoc] file {len(file_bytes)}B exceeds CF threshold, skipping CF Worker paths")
