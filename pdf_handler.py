@@ -500,7 +500,11 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
     if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
         logger.warning(f"[PDFS] All {len(key_rotator.keys)} Gemini keys daily-exhausted — returning empty (caller tries Groq/other fallbacks)")
         return []
-    max_retries = len(_ordered) if _ordered else 5
+    # 2026-08-22: capped at 8 keys (was uncapped) -- same fix as /pdf's
+    # generate_mcq_from_image, matching cap for consistent worst-case wait
+    # time and to avoid a single page stalling for many minutes if early
+    # keys hit a bad-luck run of timeouts/SSL errors.
+    max_retries = min(len(_ordered), 8) if _ordered else 5
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
         key_rotator.record_call(key)
@@ -518,7 +522,9 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
                         types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
                     ]
                 )
-            _attempt_timeout = 60 if attempt == 0 else 30
+            # 2026-08-22: matches /pdf's timeout fix -- logs show successful
+            # calls land well under 30s, so a hang past that is a dead key.
+            _attempt_timeout = 35 if attempt == 0 else 20
             response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
             valid = _parse_mcq_json(response.text)
             if not valid:

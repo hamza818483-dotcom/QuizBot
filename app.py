@@ -10120,11 +10120,15 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
+        # 2026-08-22: capped at 8 keys (was uncapped) + reduced timeout
+        # 60s -> 35s, matching /pdf and /pdfs fixes -- avoids a single
+        # batch stalling for many minutes on a bad-luck run of dead keys.
+        keys_to_try = keys_to_try[:8]
         for key in keys_to_try:
             if is_cancelled():
                 return ""
             try:
-                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=60)
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=35)
                 key_rotator.mark_healthy(key)
                 finish_reason = None
                 try:
