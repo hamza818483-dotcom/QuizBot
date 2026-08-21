@@ -9995,6 +9995,119 @@ async def _extra_gen_from_images_batch(imgs: list, topic: str) -> dict:
         return {}
 
 
+def _dagano_code_level_3pass_verify(mcqs: list, page_num=None) -> list:
+    """/dagano's OWN code-level 3-pass verification -- fully independent
+    copy of the /extra pattern (no shared call), so changes to /extra
+    never affect /dagano. Pass 1: structural sanity. Pass 2: answer/option
+    self-consistency. Pass 3: content-integrity."""
+    if not mcqs:
+        return mcqs
+
+    stage1 = _validate_mcq_structure(mcqs)
+    if not stage1:
+        return stage1
+
+    stage2 = []
+    dropped_p2 = 0
+    for m in stage1:
+        opts = m.get("options") or []
+        ans = str(m.get("answer", "")).strip().upper()
+        letter_to_idx = {"A": 0, "B": 1, "C": 2, "D": 3}
+        idx = letter_to_idx.get(ans)
+        if idx is None or idx >= len(opts):
+            dropped_p2 += 1
+            continue
+        answer_text = str(opts[idx]).strip()
+        if not answer_text:
+            dropped_p2 += 1
+            continue
+        stage2.append(m)
+    if dropped_p2:
+        logger.info(f"[Dagano3Pass] page {page_num}: pass2 dropped {dropped_p2} (answer/option mismatch)")
+    if not stage2:
+        return stage2
+
+    stage3 = []
+    dropped_p3 = 0
+    _placeholder = {"", "...", "n/a", "na", "none", "-", "?"}
+    for m in stage2:
+        q = (m.get("question") or "").strip()
+        opts = [str(o).strip() for o in (m.get("options") or [])]
+        if q.lower() in _placeholder:
+            dropped_p3 += 1
+            continue
+        if any(q.lower() == o.lower() for o in opts if o):
+            dropped_p3 += 1
+            continue
+        stage3.append(m)
+    if dropped_p3:
+        logger.info(f"[Dagano3Pass] page {page_num}: pass3 dropped {dropped_p3} (content-integrity)")
+
+    total_dropped = len(mcqs) - len(stage3)
+    if total_dropped:
+        logger.info(f"[Dagano3Pass] page {page_num}: {total_dropped}/{len(mcqs)} MCQ(s) dropped across 3 code-level passes")
+    return stage3
+
+
+async def _dagano_marking_audit(mcqs: list, img, topic: str, page_num) -> list:
+    """/dagano's OWN second-pass marking audit -- fully independent copy
+    of the /extra pattern (no shared call). Re-verifies each MCQ was
+    genuinely sourced from a hand-marked/highlighted/colored/boxed line,
+    also re-affirms the no-page-reference rule wasn't violated."""
+    if not mcqs:
+        return mcqs
+    try:
+        numbered = "\n".join(f"{idx+1}. {m.get('question','')[:150]}" for idx, m in enumerate(mcqs))
+        audit_prompt = (
+            f"You are STRICTLY auditing whether each MCQ below was really "
+            f"sourced from a MARKED/HIGHLIGHTED/COLORED/BOXED line on this "
+            f"page (Topic: {topic}) -- marked = highlighter color (any "
+            f"color), pen underline, hand-drawn circle/box/bracket, or "
+            f"star/tick pointing to it, added ON TOP of the book's "
+            f"original printing. Plain/unmarked text (even if bold/italic "
+            f"in the original printing, or definitions/important-looking "
+            f"facts) does NOT count as marked.\n\n"
+            f"Also check: does the question or explanation wording "
+            f"reference a page number, roman/serial layout label, or "
+            f"source-citation phrasing (\"as stated on this page\", "
+            f"\"বর্ণিত আছে\", \"এই পৃষ্ঠায়\")? That also FAILS the check.\n\n"
+            f"MCQs to audit:\n{numbered}\n\n"
+            f"For EACH numbered MCQ, check both conditions above.\n\n"
+            f"Return a STRICT JSON array of the numbers (1-indexed, matching "
+            f"the list above) that FAILED either check and should be "
+            f"removed. Format: [2, 5] (just the numbers, or [] if every "
+            f"MCQ above passes). No prose, JSON only."
+        )
+        txt = await _gen_groq_raw_text(img, audit_prompt)
+        if not txt:
+            return mcqs
+        import json as _json
+        cleaned = txt.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+        try:
+            bad_indices = _json.loads(cleaned)
+        except Exception:
+            m = re.search(r'\[[\d,\s]*\]', cleaned)
+            bad_indices = _json.loads(m.group(0)) if m else []
+        if not isinstance(bad_indices, list) or not bad_indices:
+            return mcqs
+        bad_set = {int(x) for x in bad_indices if isinstance(x, (int, float)) or (isinstance(x, str) and x.strip().isdigit())}
+        if not bad_set:
+            return mcqs
+        kept = [m for idx, m in enumerate(mcqs) if (idx + 1) not in bad_set]
+        removed = len(mcqs) - len(kept)
+        if removed:
+            logger.info(f"[DaganoMarkingAudit] page {page_num}: removed {removed} MCQ(s) traced to unmarked text or page-reference violation")
+        return kept
+    except Exception as e:
+        logger.warning(f"[DaganoMarkingAudit] page {page_num} skipped: {e}")
+        return mcqs
+
+
 def _build_dagano_prompt_standalone(topic: str) -> str:
     """/dagano's prompt builder -- same STRICT hand-mark/highlight-only
     filter as /extra, PLUS: (1) never reference page numbers, roman
@@ -10211,7 +10324,7 @@ async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
             out = _cap_mcq_options(by_index[idx], 4)
             out = _validate_mcq_structure(out)
             out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
-            out = _extra_code_level_3pass_verify(out, page_num=idx)
+            out = _dagano_code_level_3pass_verify(out, page_num=idx)
             out = _dagano_apply_topic_reuse(out)
             by_index[idx] = out
         return by_index
@@ -10259,11 +10372,11 @@ async def _dagano_gen_from_image(img, topic, page_num):
     out = _cap_mcq_options(out, 4)
     out = _validate_mcq_structure(out)
     out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
-    out = _extra_code_level_3pass_verify(out, page_num=page_num)
+    out = _dagano_code_level_3pass_verify(out, page_num=page_num)
     out = _dagano_apply_topic_reuse(out)
 
     if out:
-        out = await _extra_marking_audit(out, img, topic, page_num)
+        out = await _dagano_marking_audit(out, img, topic, page_num)
         out = _dagano_apply_topic_reuse(_validate_mcq_structure(out))
 
     return out
@@ -10317,7 +10430,7 @@ async def dagano_generate_all_pages(
         if not mcqs:
             return mcqs
         try:
-            mcqs = await _extra_marking_audit(mcqs, img, topic, page_num)
+            mcqs = await _dagano_marking_audit(mcqs, img, topic, page_num)
             return _dagano_apply_topic_reuse(_validate_mcq_structure(mcqs))
         except asyncio.CancelledError:
             raise
