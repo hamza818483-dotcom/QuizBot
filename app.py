@@ -10032,24 +10032,20 @@ def _dagano_page_has_marks(img) -> bool:
 
 
 def _dagano_hard_mark_gate(mcqs: list, img, page_num) -> list:
-    """/dagano's STRICT code-level HARD gate (no LLM, deterministic):
-    if this page has ZERO colored/highlighter/pen-mark pixels detected
-    by pure CV AND the MCQ count is suspiciously high (>=3) for a page
-    that shows no visible marking at all, this is treated as a strong
-    signal the model likely pulled from unmarked/plain text -- the
-    entire batch for this page is DROPPED (not just logged) as a hard
-    safety enforcement, since /dagano's core rule is mark-only content.
-    Pen-only marks (no highlighter ink) can't be reliably seen by CV, so
-    a LOW mcq count (1-2) with no detected color is allowed through
-    (pen-underline/circle case) -- only an implausibly high count with
-    zero visible color is hard-blocked."""
+    """/dagano's STRICT code-level check (no LLM, deterministic): pure CV
+    color-pixel detection on this page image. Since a single marked line
+    legitimately produces 2+ MCQs (main + related, per /dagano's own
+    rule) and pen-only marks (no highlighter ink) are invisible to CV,
+    count is NOT used as a blocking signal here -- only logged for
+    visibility. No MCQs are dropped by count; actual content-fidelity
+    dropping is handled by _dagano_marking_audit /
+    _dagano_source_fidelity_audit (LLM-verified, per-MCQ)."""
     if not mcqs:
         return mcqs
     try:
         has_marks = _dagano_page_has_marks(img)
-        if not has_marks and len(mcqs) >= 3:
-            logger.warning(f"[DaganoHardGate] page {page_num}: {len(mcqs)} MCQ(s) but ZERO color/mark pixels detected -- HARD BLOCKED (likely unmarked-text leakage)")
-            return []
+        if not has_marks:
+            logger.info(f"[DaganoHardGate] page {page_num}: {len(mcqs)} MCQ(s), no highlighter-color pixels detected (likely pen-only marks -- not blocked, LLM audits still apply)")
         return mcqs
     except Exception as e:
         logger.warning(f"[DaganoHardGate] page {page_num} check failed, fail-open: {e}")
@@ -10268,6 +10264,18 @@ def _build_dagano_prompt_standalone(topic: str) -> str:
         f"If NO marks exist anywhere on this page, return exactly [] — "
         f"zero MCQs is a completely valid and expected result.\n\n"
         f"═══════════════════════════════\n"
+        f"🟩 MINIMUM COVERAGE PER MARK\n"
+        f"═══════════════════════════════\n"
+        f"For EACH distinct marked line/phrase found on this page, "
+        f"generate AT LEAST 2 MCQs from it: one MCQ directly on that "
+        f"marked line itself, plus at least one more MCQ from content "
+        f"immediately around/related to that same marked line (still "
+        f"strictly from this page's own text, in the same topic area — "
+        f"never from outside knowledge). If a marked line is too short "
+        f"to reasonably support a second distinct MCQ from nearby page "
+        f"content, one MCQ for it is acceptable — but always try for 2 "
+        f"first.\n\n"
+        f"═══════════════════════════════\n"
         f"🟥 NEVER REFERENCE THE PAGE/SOURCE\n"
         f"═══════════════════════════════\n"
         f"The question and explanation must read as standalone academic "
@@ -10351,6 +10359,17 @@ def _build_dagano_prompt_batched(topic: str, n: int) -> str:
         f"⚠️ A page may have VERY FEW marks — even just 1-2 lines. That is "
         f"normal: extract exactly what is marked on THAT page. If NO marks "
         f"exist on a given page, that page contributes zero items.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 MINIMUM COVERAGE PER MARK\n"
+        f"═══════════════════════════════\n"
+        f"For EACH distinct marked line/phrase found on a page, generate "
+        f"AT LEAST 2 MCQs from it: one MCQ directly on that marked line "
+        f"itself, plus at least one more MCQ from content immediately "
+        f"around/related to that same marked line (still strictly from "
+        f"that SAME page's own text, same topic area — never from "
+        f"outside knowledge or another page). If a marked line is too "
+        f"short to reasonably support a second distinct MCQ, one MCQ for "
+        f"it is acceptable — but always try for 2 first.\n\n"
         f"═══════════════════════════════\n"
         f"🟥 NEVER REFERENCE THE PAGE/SOURCE\n"
         f"═══════════════════════════════\n"
