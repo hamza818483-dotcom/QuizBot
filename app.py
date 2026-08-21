@@ -3218,6 +3218,77 @@ def _chok_box_coverage_note(img, mcqs: list) -> str:
     )
 
 
+def _extra_code_level_3pass_verify(mcqs: list, page_num=None) -> list:
+    """/extra CODE-LEVEL 3-pass verification -- runs entirely in Python on
+    the SAME call's already-returned MCQs, no extra API call. Three
+    distinct, independent checks, each dropping bad items before the next
+    stage sees them:
+
+    Pass 1 (structural sanity): question/options/answer/explanation are
+    well-formed, no duplicate options, no gibberish -- via the shared
+    _validate_mcq_structure.
+
+    Pass 2 (self-consistency): the "answer" letter must point to an
+    option that is actually present and non-empty, and that option text
+    must be non-empty (guards against a mis-copied answer letter).
+
+    Pass 3 (content-integrity): question must not be empty/placeholder
+    text, and question must not be a verbatim duplicate of any option (a
+    sign the model echoed the wrong field) -- catches malformed items
+    that passed pass 1's looser checks but are still low-quality.
+    """
+    if not mcqs:
+        return mcqs
+
+    # ---- Pass 1: structural sanity (shared validator) ----
+    stage1 = _validate_mcq_structure(mcqs)
+    if not stage1:
+        return stage1
+
+    # ---- Pass 2: answer/option self-consistency ----
+    stage2 = []
+    dropped_p2 = 0
+    for m in stage1:
+        opts = m.get("options") or []
+        ans = str(m.get("answer", "")).strip().upper()
+        letter_to_idx = {"A": 0, "B": 1, "C": 2, "D": 3}
+        idx = letter_to_idx.get(ans)
+        if idx is None or idx >= len(opts):
+            dropped_p2 += 1
+            continue
+        answer_text = str(opts[idx]).strip()
+        if not answer_text:
+            dropped_p2 += 1
+            continue
+        stage2.append(m)
+    if dropped_p2:
+        logger.info(f"[Extra3Pass] page {page_num}: pass2 dropped {dropped_p2} (answer/option mismatch)")
+    if not stage2:
+        return stage2
+
+    # ---- Pass 3: content-integrity ----
+    stage3 = []
+    dropped_p3 = 0
+    _placeholder = {"", "...", "n/a", "na", "none", "-", "?"}
+    for m in stage2:
+        q = (m.get("question") or "").strip()
+        opts = [str(o).strip() for o in (m.get("options") or [])]
+        if q.lower() in _placeholder:
+            dropped_p3 += 1
+            continue
+        if any(q.lower() == o.lower() for o in opts if o):
+            dropped_p3 += 1
+            continue
+        stage3.append(m)
+    if dropped_p3:
+        logger.info(f"[Extra3Pass] page {page_num}: pass3 dropped {dropped_p3} (content-integrity)")
+
+    total_dropped = len(mcqs) - len(stage3)
+    if total_dropped:
+        logger.info(f"[Extra3Pass] page {page_num}: {total_dropped}/{len(mcqs)} MCQ(s) dropped across 3 code-level passes")
+    return stage3
+
+
 async def _extra_marking_audit(mcqs: list, img, topic: str, page_num) -> list:
     """
     Final code-level safety net for /extra. The Call-1 prompt already says
@@ -9812,6 +9883,7 @@ async def _extra_gen_from_images_batch(imgs: list, topic: str) -> dict:
             out = _cap_mcq_options(by_index[idx], 4)
             out = _validate_mcq_structure(out)
             out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
+            out = _extra_code_level_3pass_verify(out, page_num=idx)
             by_index[idx] = out
         return by_index
     except Exception as e:
@@ -9877,6 +9949,7 @@ async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclu
     out = _cap_mcq_options(out, 4)
     out = _validate_mcq_structure(out)
     out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
+    out = _extra_code_level_3pass_verify(out, page_num=page_num)
 
     if out:
         out = await _extra_marking_audit(out, img, topic, page_num)
