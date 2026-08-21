@@ -309,11 +309,12 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 -🔒 TWO-MODE RULE (check first): যদি Image-এ আগে থেকেই MCQ (question+options ফরম্যাটে) থাকে, সেগুলো 100% VERBATIM/হুবহু extract করবে — নতুন কোনো MCQ generate করবে না, question/option-এর wording পরিবর্তন করবে না। যদি Image-এ কোনো MCQ না থেকে শুধু Information/text থাকে, তখনই সেই content থেকে নতুন MCQ বানাবে।
 -একই পেইজে MCQ থাকলে সেই পেইজ পুরোটাই MODE A (verbatim extract) — পাশের সাধারণ টেক্সট থেকে অতিরিক্ত নতুন MCQ বানানো যাবে না।
 -🔒 SOURCE-LOCK (absolute): question ও ৪টি option-এর মূল তথ্য অবশ্যই এই page-এর actual content থেকে আসতে হবে — বাইরের সাধারণ জ্ঞান/knowledge দিয়ে question/option বানানো সম্পূর্ণ নিষিদ্ধ। শুধু answer letter (প্রমাণ না পেলে) আর explanation-এর extra detail-এই সীমিত পরিমাণে own knowledge ব্যবহার করা যাবে, question/option কখনো না।
--যেসব লাইন থেকে MCQ বানানো MISS করা যাবে না (MUST PRIORITY):
+-🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST, checked/processed before any other normal content on the page):
   • কোনো পেইজ/লাইন যেকোনো কালার দিয়ে দাগানো বা হাইলাইটেড থাকলে (সবুজ, লাল, কমলা, হলুদ — সবচেয়ে কমন হাইলাইটার কালার)
   • কোনো প্যারা/লাইন বক্স করা থাকলে বা কালার দিয়ে মার্ক করা থাকলে
   • কোনো লাইনের নিচে কলমের কালি দিয়ে আন্ডারলাইন করা থাকলে (লাল, কালো, নীল, সবুজ — যেকোনো কালার)
   • বইয়ের মূল লাইনের সাথে হাতে/কলমে এক্সট্রা কোনো কালার, দাগ, মার্ক, আন্ডারলাইন দেখা গেলেই MUST তা থেকে MCQ বানাতে হবে, মিস করা যাবে না
+  PROCESSING ORDER (strict, never skip/reorder): প্রথমে পুরো page স্ক্যান করে সব highlighted/marked/underlined লাইন identify করবে এবং সেগুলো থেকে MCQ বানাবে সবার আগে (guaranteed, zero miss) — তারপরই বাকি normal (মার্ক না করা) content থেকে MCQ বানাবে। মার্ক করা অংশ থেকে MCQ বাদ দিয়ে শুধু normal content থেকে MCQ বানানো সম্পূর্ণ নিষিদ্ধ।
 -কোয়ালিটিফুল প্রশ্ন বানাতে হবে
 -ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
 -🟥 বক্স/ছক STYLE তথ্য থাকলে (bordered box, info-card, ছক/সারণির প্রতিটি সেল): প্রতিটি বক্স/ছক থেকে MUST কমপক্ষে ১টি MCQ বানাতে হবে, সর্বোচ্চ ২-৩টি একেবারে তুচ্ছ/খালি বক্স বাদ দেওয়া যাবে — এর বেশি বাদ দেওয়া যাবে না। কোনো বক্সে তথ্য বেশি/ঘন থাকলে সেই একটি বক্স থেকেই একাধিক MCQ (সর্বোচ্চ ১৫টি পর্যন্ত) বানাতে হবে।
@@ -354,11 +355,12 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 -🔒 TWO-MODE RULE (check first): যদি Image-এ আগে থেকেই MCQ (question+options ফরম্যাটে) থাকে, সেগুলো 100% VERBATIM/হুবহু extract করবে — নতুন কোনো MCQ generate করবে না, question/option-এর wording পরিবর্তন করবে না। যদি Image-এ কোনো MCQ না থেকে শুধু Information/text থাকে, তখনই সেই content থেকে নতুন MCQ বানাবে।
 -একই পেইজে MCQ থাকলে সেই পেইজ পুরোটাই MODE A (verbatim extract) — পাশের সাধারণ টেক্সট থেকে অতিরিক্ত নতুন MCQ বানানো যাবে না।
 -🔒 SOURCE-LOCK (absolute): question ও ৪টি option-এর মূল তথ্য অবশ্যই এই page-এর actual content থেকে আসতে হবে — বাইরের সাধারণ জ্ঞান/knowledge দিয়ে question/option বানানো সম্পূর্ণ নিষিদ্ধ। শুধু answer letter (প্রমাণ না পেলে) আর explanation-এর extra detail-এই সীমিত পরিমাণে own knowledge ব্যবহার করা যাবে, question/option কখনো না।
--যেসব লাইন থেকে MCQ বানানো MISS করা যাবে না (MUST PRIORITY):
+-🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST, checked/processed before any other normal content on the page):
   • কোনো পেইজ/লাইন যেকোনো কালার দিয়ে দাগানো বা হাইলাইটেড থাকলে (সবুজ, লাল, কমলা, হলুদ — সবচেয়ে কমন হাইলাইটার কালার)
   • কোনো প্যারা/লাইন বক্স করা থাকলে বা কালার দিয়ে মার্ক করা থাকলে
   • কোনো লাইনের নিচে কলমের কালি দিয়ে আন্ডারলাইন করা থাকলে (লাল, কালো, নীল, সবুজ — যেকোনো কালার)
   • বইয়ের মূল লাইনের সাথে হাতে/কলমে এক্সট্রা কোনো কালার, দাগ, মার্ক, আন্ডারলাইন দেখা গেলেই MUST তা থেকে MCQ বানাতে হবে, মিস করা যাবে না
+  PROCESSING ORDER (strict, never skip/reorder): প্রথমে পুরো page স্ক্যান করে সব highlighted/marked/underlined লাইন identify করবে এবং সেগুলো থেকে MCQ বানাবে সবার আগে (guaranteed, zero miss) — তারপরই বাকি normal (মার্ক না করা) content থেকে MCQ বানাবে। মার্ক করা অংশ থেকে MCQ বাদ দিয়ে শুধু normal content থেকে MCQ বানানো সম্পূর্ণ নিষিদ্ধ।
 -কোয়ালিটিফুল প্রশ্ন বানাতে হবে
 -এমনভাবে সকল প্রশ্ন বানাবে যাতে সকল লাইন থেকে MCQ কিভাবে আসতে পারে আইডিয়া হয়ে যাবে
 -ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
@@ -863,6 +865,83 @@ async def _attach_explanation_images(mcqs: list, img: Image.Image) -> list:
     return mcqs
 
 
+def _detect_page_text_for_hallucination_check(img) -> str:
+    """OCR the page (pytesseract, zero AI cost) into a single lowercase blob
+    for word-overlap checking. Best-effort: returns "" on any failure so
+    callers treat that as 'unknown/can't verify' and fail OPEN (never block
+    generation just because OCR itself is unavailable/broken)."""
+    try:
+        import pytesseract
+        try:
+            txt = pytesseract.image_to_string(img, lang="ben+eng")
+        except pytesseract.TesseractError:
+            txt = pytesseract.image_to_string(img, lang="eng")
+        return (txt or "").strip()
+    except Exception as e:
+        logger.warning(f"[HallucinationCheck] OCR failed, skipping check (fail-open): {e}")
+        return ""
+
+
+def _mcq_hallucination_filter(mcqs: list, img) -> list:
+    """CODE-LEVEL enforcement (not just prompt-level trust) of the
+    page-content-only rule: for each generated MCQ, verify its question text
+    has meaningful word-overlap with the page's actual OCR'd text. An MCQ
+    whose question shares almost no words with anything on the page is very
+    likely hallucinated (made up from the model's own knowledge instead of
+    the page) and gets dropped rather than silently shipped.
+
+    Deliberately LENIENT (word-overlap ratio, not exact match) because OCR
+    itself is imperfect and MCQ wording legitimately paraphrases/cleans up
+    source text (numbering stripped, spelling-corrected, উদ্দীপক prepended,
+    Mode-B-generated MCQs built FROM page facts in different phrasing). The
+    goal is only to catch OUTRIGHT fabrication (a question about content
+    that plainly never appears anywhere on the page), not to demand
+    verbatim substring matches.
+
+    Fails OPEN: if OCR text is empty/unavailable, returns mcqs unchanged
+    (never blocks legitimate output just because local OCR had an issue)."""
+    page_text = _detect_page_text_for_hallucination_check(img)
+    if not page_text or not mcqs:
+        return mcqs
+
+    import re as _re
+    def _words(s: str) -> set:
+        # Keep Bangla + Latin word characters, drop punctuation/numbers-only noise
+        toks = _re.findall(r"[\w\u0980-\u09FF]{2,}", (s or "").lower())
+        return set(toks)
+
+    page_words = _words(page_text)
+    if len(page_words) < 5:
+        # OCR found almost nothing usable — too unreliable to judge against, fail open
+        return mcqs
+
+    kept = []
+    dropped = 0
+    for m in mcqs:
+        q = m.get("question", "") or ""
+        opts = m.get("options", []) or []
+        combined = q + " " + " ".join(str(o) for o in opts)
+        mcq_words = _words(combined)
+        if not mcq_words:
+            kept.append(m)  # nothing to check, don't punish malformed-but-otherwise-fine entries
+            continue
+        overlap = mcq_words & page_words
+        ratio = len(overlap) / len(mcq_words)
+        # Lenient threshold: genuine page-derived content (even paraphrased/
+        # OCR-noisy) reliably shares >=20% of its distinct words with the
+        # page; a fully invented question typically shares under that
+        # (mostly just common function words, which are usually short and
+        # filtered by the >=2-char token rule above only partially).
+        if ratio >= 0.20:
+            kept.append(m)
+        else:
+            dropped += 1
+            logger.warning(f"[HallucinationCheck] Dropped likely-fabricated MCQ (word-overlap {ratio:.0%} < 20%): {q[:80]}")
+    if dropped:
+        logger.warning(f"[HallucinationCheck] {dropped}/{len(mcqs)} MCQ(s) dropped as likely not from page content")
+    return kept
+
+
 async def generate_mcq_from_image(
     img: Image.Image,
     topic: str,
@@ -973,6 +1052,8 @@ async def generate_mcq_from_image(
                     except Exception:
                         pass
                     logger.warning(f"[Gemini] Page {page}: response OK but 0 valid MCQs parsed (attempt {attempt+1}, model={model_name}) — likely malformed/truncated JSON, not a real 'page has no content'")
+                else:
+                    valid = _mcq_hallucination_filter(valid, img)
                 key_rotator.mark_healthy(key)
                 logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name})")
                 return valid
