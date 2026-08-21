@@ -2,3 +2,11 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+.env.*
+*.env
+*session*.txt
+*.session
+secrets.json
+credentials.json
+*.pem
+*.key

@@ -23204,6 +23204,11 @@ async def webhook(request: Request):
     if WEBHOOK_SECRET:
         if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
             return Response(status_code=403)
+    else:
+        # No WEBHOOK_SECRET configured -- endpoint is fully unauthenticated
+        # (anyone can POST fake Telegram updates). Log loudly on every
+        # request so this misconfiguration can't go unnoticed silently.
+        logger.warning("[Webhook] SECURITY: WEBHOOK_SECRET not set -- endpoint accepting unauthenticated requests!")
     try:
         update = await request.json()
         _spawn_task(process_update(update))
