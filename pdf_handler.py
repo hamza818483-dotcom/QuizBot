@@ -308,6 +308,7 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 🟥Overall Instructions:
 -🔒 TWO-MODE RULE (check first): যদি Image-এ আগে থেকেই MCQ (question+options ফরম্যাটে) থাকে, সেগুলো 100% VERBATIM/হুবহু extract করবে — নতুন কোনো MCQ generate করবে না, question/option-এর wording পরিবর্তন করবে না। যদি Image-এ কোনো MCQ না থেকে শুধু Information/text থাকে, তখনই সেই content থেকে নতুন MCQ বানাবে।
 -একই পেইজে MCQ থাকলে সেই পেইজ পুরোটাই MODE A (verbatim extract) — পাশের সাধারণ টেক্সট থেকে অতিরিক্ত নতুন MCQ বানানো যাবে না।
+-🔒 SOURCE-LOCK (absolute): question ও ৪টি option-এর মূল তথ্য অবশ্যই এই page-এর actual content থেকে আসতে হবে — বাইরের সাধারণ জ্ঞান/knowledge দিয়ে question/option বানানো সম্পূর্ণ নিষিদ্ধ। শুধু answer letter (প্রমাণ না পেলে) আর explanation-এর extra detail-এই সীমিত পরিমাণে own knowledge ব্যবহার করা যাবে, question/option কখনো না।
 -যেসব লাইন থেকে MCQ বানানো MISS করা যাবে না (MUST PRIORITY):
   • কোনো পেইজ/লাইন যেকোনো কালার দিয়ে দাগানো বা হাইলাইটেড থাকলে (সবুজ, লাল, কমলা, হলুদ — সবচেয়ে কমন হাইলাইটার কালার)
   • কোনো প্যারা/লাইন বক্স করা থাকলে বা কালার দিয়ে মার্ক করা থাকলে
@@ -338,7 +339,7 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 -অপশনে সঠিক উত্তর অবশ্যই একটিই থাকবে
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position (A, B, C, or D) — vary them naturally across questions.
-💥ব্যাখ্যা (STRICT — MUST FOLLOW): শুধু সঠিক উত্তর কেন সঠিক তা বললেই হবে না — উত্তর + বাকি ৩টি ভুল অপশন সম্পর্কিত অতিরিক্ত তথ্য মিলিয়ে মোট ৪-৫ লাইনের একটি সম্পূর্ণ তথ্যবহুল ব্যাখ্যা লিখতে হবে। এই তথ্য অবশ্যই source image-এর মধ্যেই থাকা কনটেন্ট থেকে নিতে হবে (image-এ যা নেই তা বানিয়ে লেখা যাবে না)। প্রতিটি অপশন নিয়ে সংক্ষেপে বলবে কেনো সেটি সঠিক/ভুল, যাতে পুরো প্রশ্নের বিষয়টি সম্পর্কে একটি সম্পূর্ণ ধারণা পাওয়া যায়। ভাষা source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)। STRICTLY NISHIDDHO: "টেক্সট অনুসারে", "টপিক অনুসারে", "ছবিতে দেখা যাচ্ছে", "উপরের তথ্য অনুযায়ী", "উক্ত অংশে উল্লেখ আছে" — এমন কোনো source-reference কথা explanation-এ লেখা যাবে না, সরাসরি fact বলবে।
+💥ব্যাখ্যা (STRICT — MUST FOLLOW, MAX 165 WORDS FOR MAIN PART): সঠিক উত্তর কেন সঠিক + বাকি ৩টি ভুল অপশন কেন ভুল তা মিলিয়ে একটি সম্পূর্ণ তথ্যবহুল ব্যাখ্যা লিখতে হবে — এই মূল অংশ অবশ্যই সর্বোচ্চ ১৬৫ শব্দের মধ্যে শেষ করতে হবে। মূল অংশ (correct+wrong options কেন ভুল) ১৬৫ শব্দে না আঁটলে, অতিরিক্ত/extra detail (bonus fact, deeper context) মূল অংশের নিচে আলাদা লাইনে যোগ করবে, কখনো মূল অংশকে কেটে/truncate করবে না। এই তথ্য অবশ্যই source image-এর মধ্যেই থাকা কনটেন্ট থেকে নিতে হবে (image-এ যা নেই তা বানিয়ে লেখা যাবে না — outside general knowledge ব্যবহার নিষিদ্ধ)। ভাষা source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)। STRICTLY NISHIDDHO: "টেক্সট অনুসারে", "টপিক অনুসারে", "ছবিতে দেখা যাচ্ছে", "উপরের তথ্য অনুযায়ী", "উক্ত অংশে উল্লেখ আছে" — এমন কোনো source-reference কথা explanation-এ লেখা যাবে না, সরাসরি fact বলবে।
 💥exp_bbox: যদি ব্যাখ্যার প্রমাণ সরাসরি image-এর কোনো নির্দিষ্ট অংশে (প্যারাগ্রাফ/লাইন/ছক) visible থাকে, সেই অংশের bounding box দাও [x_min,y_min,x_max,y_max] হিসেবে, image-এর প্রস্থ/উচ্চতার 0-1000 scale-এ normalize করে। প্রমাণ visible না থাকলে বা নিশ্চিত না হলে null দাও।
 
 Topic: {topic}
@@ -352,6 +353,7 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 🟥Overall Instructions:
 -🔒 TWO-MODE RULE (check first): যদি Image-এ আগে থেকেই MCQ (question+options ফরম্যাটে) থাকে, সেগুলো 100% VERBATIM/হুবহু extract করবে — নতুন কোনো MCQ generate করবে না, question/option-এর wording পরিবর্তন করবে না। যদি Image-এ কোনো MCQ না থেকে শুধু Information/text থাকে, তখনই সেই content থেকে নতুন MCQ বানাবে।
 -একই পেইজে MCQ থাকলে সেই পেইজ পুরোটাই MODE A (verbatim extract) — পাশের সাধারণ টেক্সট থেকে অতিরিক্ত নতুন MCQ বানানো যাবে না।
+-🔒 SOURCE-LOCK (absolute): question ও ৪টি option-এর মূল তথ্য অবশ্যই এই page-এর actual content থেকে আসতে হবে — বাইরের সাধারণ জ্ঞান/knowledge দিয়ে question/option বানানো সম্পূর্ণ নিষিদ্ধ। শুধু answer letter (প্রমাণ না পেলে) আর explanation-এর extra detail-এই সীমিত পরিমাণে own knowledge ব্যবহার করা যাবে, question/option কখনো না।
 -যেসব লাইন থেকে MCQ বানানো MISS করা যাবে না (MUST PRIORITY):
   • কোনো পেইজ/লাইন যেকোনো কালার দিয়ে দাগানো বা হাইলাইটেড থাকলে (সবুজ, লাল, কমলা, হলুদ — সবচেয়ে কমন হাইলাইটার কালার)
   • কোনো প্যারা/লাইন বক্স করা থাকলে বা কালার দিয়ে মার্ক করা থাকলে
@@ -386,7 +388,7 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 -অপশনে সঠিক উত্তর একটিই
 -৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
 💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position — vary them naturally so answers are spread across A, B, C, D positions.
-💥ব্যাখ্যা (STRICT — MUST FOLLOW): শুধু সঠিক উত্তর কেন সঠিক তা বললেই হবে না — উত্তর + বাকি ৩টি ভুল অপশন সম্পর্কিত অতিরিক্ত তথ্য মিলিয়ে মোট ৪-৫ লাইনের একটি সম্পূর্ণ তথ্যবহুল ব্যাখ্যা লিখতে হবে। এই তথ্য অবশ্যই source image-এর মধ্যেই থাকা কনটেন্ট থেকে নিতে হবে (image-এ যা নেই তা বানিয়ে লেখা যাবে না)। প্রতিটি অপশন নিয়ে সংক্ষেপে বলবে কেনো সেটি সঠিক/ভুল, যাতে পুরো প্রশ্নের বিষয়টি সম্পর্কে একটি সম্পূর্ণ ধারণা পাওয়া যায়। ভাষা source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)। STRICTLY NISHIDDHO: "টেক্সট অনুসারে", "টপিক অনুসারে", "ছবিতে দেখা যাচ্ছে", "উপরের তথ্য অনুযায়ী", "উক্ত অংশে উল্লেখ আছে" — এমন কোনো source-reference কথা explanation-এ লেখা যাবে না, সরাসরি fact বলবে।
+💥ব্যাখ্যা (STRICT — MUST FOLLOW, MAX 165 WORDS FOR MAIN PART): সঠিক উত্তর কেন সঠিক + বাকি ৩টি ভুল অপশন কেন ভুল তা মিলিয়ে একটি সম্পূর্ণ তথ্যবহুল ব্যাখ্যা লিখতে হবে — এই মূল অংশ অবশ্যই সর্বোচ্চ ১৬৫ শব্দের মধ্যে শেষ করতে হবে। মূল অংশ (correct+wrong options কেন ভুল) ১৬৫ শব্দে না আঁটলে, অতিরিক্ত/extra detail (bonus fact, deeper context) মূল অংশের নিচে আলাদা লাইনে যোগ করবে, কখনো মূল অংশকে কেটে/truncate করবে না। এই তথ্য অবশ্যই source image-এর মধ্যেই থাকা কনটেন্ট থেকে নিতে হবে (image-এ যা নেই তা বানিয়ে লেখা যাবে না — outside general knowledge ব্যবহার নিষিদ্ধ)। ভাষা source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)। STRICTLY NISHIDDHO: "টেক্সট অনুসারে", "টপিক অনুসারে", "ছবিতে দেখা যাচ্ছে", "উপরের তথ্য অনুযায়ী", "উক্ত অংশে উল্লেখ আছে" — এমন কোনো source-reference কথা explanation-এ লেখা যাবে না, সরাসরি fact বলবে।
 💥exp_bbox: যদি ব্যাখ্যার প্রমাণ সরাসরি image-এর কোনো নির্দিষ্ট অংশে (প্যারাগ্রাফ/লাইন/ছক) visible থাকে, সেই অংশের bounding box দাও [x_min,y_min,x_max,y_max] হিসেবে, image-এর প্রস্থ/উচ্চতার 0-1000 scale-এ normalize করে। প্রমাণ visible না থাকলে বা নিশ্চিত না হলে null দাও।
 
 Topic: {topic}
