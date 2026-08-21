@@ -10562,6 +10562,71 @@ def _dagano_apply_topic_reuse(mcqs: list) -> list:
     return mcqs
 
 
+async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> list:
+    """/dagano's CONDITIONAL 2nd call -- fires ONLY when code-level checks
+    show the model's self-verification in the 1st call likely failed
+    badly (>25% of raw MCQs dropped by _dagano_code_level_3pass_verify).
+    In the normal case (<=25% drop, i.e. self-verification worked), this
+    is NEVER called -- /dagano stays at exactly 1 API call per 2-page
+    batch. This is a single consolidated audit over ALL surviving MCQs
+    for this page in ONE call (not one call per MCQ), re-checking marking
+    source + fact-fidelity + page-reference wording together."""
+    if not mcqs:
+        return mcqs
+    try:
+        numbered = "\n".join(
+            f"{idx+1}. Q: {m.get('question','')[:200]}\n"
+            f"   Options: {m.get('options')}\n"
+            f"   Explanation: {(m.get('explanation') or '')[:300]}"
+            for idx, m in enumerate(mcqs)
+        )
+        audit_prompt = (
+            f"You are STRICTLY re-auditing these MCQs against ONLY this "
+            f"exact page image (Topic: {topic}). The first-pass generation "
+            f"showed signs of rule violations, so re-verify carefully.\n\n"
+            f"For EACH numbered MCQ, FAIL it if ANY of these are true:\n"
+            f"- Its source line is NOT genuinely marked/highlighted/boxed/"
+            f"colored on this page (plain/original-bold text does not count)\n"
+            f"- Any fact in question/options/explanation was invented, "
+            f"pulled from outside/general knowledge, or is about a "
+            f"different topic than what's on this page\n"
+            f"- The question or explanation references a page number, "
+            f"roman/serial layout label, or source-citation phrasing "
+            f"(\"as stated on this page\", \"বর্ণিত আছে\", \"এই পৃষ্ঠায়\")\n\n"
+            f"MCQs to audit:\n{numbered}\n\n"
+            f"Return a STRICT JSON array of the numbers (1-indexed) that "
+            f"FAILED. Format: [2, 5] (or [] if all pass). No prose, JSON only."
+        )
+        txt = await _gen_groq_raw_text(img, audit_prompt)
+        if not txt:
+            return mcqs
+        import json as _json
+        cleaned = txt.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+        try:
+            bad_indices = _json.loads(cleaned)
+        except Exception:
+            m = re.search(r'\[[\d,\s]*\]', cleaned)
+            bad_indices = _json.loads(m.group(0)) if m else []
+        if not isinstance(bad_indices, list) or not bad_indices:
+            return mcqs
+        bad_set = {int(x) for x in bad_indices if isinstance(x, (int, float)) or (isinstance(x, str) and x.strip().isdigit())}
+        if not bad_set:
+            return mcqs
+        kept = [m for idx, m in enumerate(mcqs) if (idx + 1) not in bad_set]
+        removed = len(mcqs) - len(kept)
+        if removed:
+            logger.info(f"[DaganoSecondPass] page {page_num}: removed {removed} more MCQ(s) on conditional 2nd-call audit")
+        return kept
+    except Exception as e:
+        logger.warning(f"[DaganoSecondPass] page {page_num} skipped: {e}")
+        return mcqs
+
+
 async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
     """/dagano's BATCHED generation call -- Gemini primary (own dedicated
     caller with explicit output-token cap), Groq/OpenRouter fallback only
@@ -10595,12 +10660,24 @@ async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
             m["_provider"] = provider
             by_index.setdefault(idx, []).append(m)
         for idx in list(by_index.keys()):
-            out = _cap_mcq_options(by_index[idx], 4)
+            raw = by_index[idx]
+            raw_count = len(raw)
+            out = _cap_mcq_options(raw, 4)
             out = _validate_mcq_structure(out)
             out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
             out = _dagano_code_level_3pass_verify(out, page_num=idx)
             if out and idx - 1 < len(imgs):
                 out = _dagano_hard_mark_gate(out, imgs[idx - 1], page_num=idx)
+            # Conditional 2nd call: only if >25% of raw MCQs were dropped
+            # by code-level checks -- signals the 1st call's internal
+            # self-verification likely didn't hold up well, so a focused
+            # re-audit is worth the extra call. Normal case (<=25% drop)
+            # never triggers this -- stays at exactly 1 call/batch.
+            if raw_count > 0 and out:
+                drop_ratio = 1 - (len(out) / raw_count)
+                if drop_ratio > 0.25 and idx - 1 < len(imgs):
+                    logger.info(f"[Dagano] page {idx}: {drop_ratio:.0%} dropped by code checks -- firing conditional 2nd-pass audit call")
+                    out = await _dagano_second_pass_audit(out, imgs[idx - 1], topic, idx)
             out = _dagano_apply_topic_reuse(out)
             by_index[idx] = out
         return by_index
@@ -10646,10 +10723,16 @@ async def _dagano_gen_from_image(img, topic, page_num):
             out = []
 
     out = _cap_mcq_options(out, 4)
+    raw_count = len(out)
     out = _validate_mcq_structure(out)
     out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
     out = _dagano_code_level_3pass_verify(out, page_num=page_num)
     out = _dagano_hard_mark_gate(out, img, page_num=page_num)
+    if raw_count > 0 and out:
+        drop_ratio = 1 - (len(out) / raw_count)
+        if drop_ratio > 0.25:
+            logger.info(f"[Dagano-Standalone] page {page_num}: {drop_ratio:.0%} dropped by code checks -- firing conditional 2nd-pass audit call")
+            out = await _dagano_second_pass_audit(out, img, topic, page_num)
     out = _dagano_apply_topic_reuse(out)
 
     return out
