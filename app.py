@@ -11328,6 +11328,7 @@ async def _process_pdf_pages_inner(
             data_adapted = _adapt_mcqs_for_print(all_mcqs_raw)
             safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
             _wm_saved = (await db_get_settings()).get("watermark", "")
+            _autosend_pdf_msg_ids = {}
             for style_key in ("style1", "style3"):
                 html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
                 pdf_bytes = await _html_to_pdf(html_s)
@@ -11348,10 +11349,20 @@ async def _process_pdf_pages_inner(
                     doc_msg_id = doc_r.get("result", {}).get("message_id")
                     if doc_msg_id:
                         await try_pin_message(channel_id, doc_msg_id)
+                        _autosend_pdf_msg_ids[style_key] = doc_msg_id
                 else:
                     err_desc = (doc_r or {}).get("description", "no response")
                     logger.error(f"[PDF-AUTOSEND] send_document failed ({style_key}): {err_desc}")
                     await notify_owner(f"⚠️ Auto-PDF ({style_key}) পাঠাতে ব্যর্থ — topic: {topic}\nReason: {err_desc}")
+            if _autosend_pdf_msg_ids:
+                try:
+                    await sb_exec(lambda: sb.table("pdf_sessions").update({
+                        "autosend_pdf_msg_ids": _autosend_pdf_msg_ids,
+                        "autosend_pdf_thread_id": thread_id,
+                        "autosend_pdf_first_image_msg_id": first_image_msg_id,
+                    }).eq("id", session_id).execute())
+                except Exception as e:
+                    logger.warning(f"[PDF-AUTOSEND] session pdf msg id save failed (may need migration): {e}")
         except Exception as e:
             logger.error(f"[PDF-AUTOSEND] Error: {e}")
             await notify_owner(f"⚠️ Auto-PDF সিস্টেমে error — topic: {topic}\nReason: {e}")
@@ -21912,6 +21923,57 @@ async def handle_pdf_page_regen(session_id: str, page_num: int, dm_chat_id: int,
             f"🗑️ পুরনো poll মুছে ফেলা হয়েছে: {deleted}"
             + (f" (ব্যর্থ: {failed_del})" if failed_del else "") +
             f"\n📝 নতুন MCQ: {len(new_mcqs)}\n🔗 {first_poll_link or '(লিংক পাওয়া যায়নি)'}")
+
+    # ── Part 5: rebuild combined PDF from ALL pages' latest cache (new serial) ──
+    autosend_ids = sess.get("autosend_pdf_msg_ids") or {}
+    if autosend_ids and channel_id:
+        try:
+            all_mcqs_latest = []
+            for p in sorted(summary_pages, key=lambda x: x.get("page", 0)):
+                pc = await db_get_mcq_cache(p.get("cache_id"))
+                if pc and pc.get("mcq_data"):
+                    all_mcqs_latest.extend(pc["mcq_data"])
+            if all_mcqs_latest:
+                data_adapted = _adapt_mcqs_for_print(all_mcqs_latest)
+                safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                _wm_saved = (await db_get_settings()).get("watermark", "")
+                new_autosend_ids = {}
+                for style_key, old_doc_msg_id in autosend_ids.items():
+                    html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
+                    pdf_bytes = await _html_to_pdf(html_s)
+                    if not pdf_bytes:
+                        logger.error(f"[PdfPageRegen] PDF rebuild {style_key} empty")
+                        continue
+                    if _wm_saved:
+                        try:
+                            pdf_bytes = add_watermark_to_pdf(pdf_bytes, _wm_saved)
+                        except Exception:
+                            pass
+                    style_name = PRINT_STYLE_NAMES.get(style_key, style_key)
+                    doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_{style_key}.pdf",
+                        caption=f"📖 Practice Sheet ({style_name}) — Updated\n🎯 Topic: {topic}\n📝 মোট MCQ: {len(all_mcqs_latest)}\n🚀 ATLAS APP",
+                        message_thread_id=sess.get("autosend_pdf_thread_id"),
+                        reply_to_message_id=sess.get("autosend_pdf_first_image_msg_id"))
+                    if doc_r and doc_r.get("ok"):
+                        new_msg_id = doc_r["result"]["message_id"]
+                        new_autosend_ids[style_key] = new_msg_id
+                        await try_pin_message(channel_id, new_msg_id)
+                        # delete the OLD pdf message now that the new one is up
+                        try:
+                            await tg_post("deleteMessage", {"chat_id": channel_id, "message_id": old_doc_msg_id})
+                        except Exception:
+                            pass
+                    else:
+                        logger.error(f"[PdfPageRegen] PDF rebuild send failed {style_key}: {(doc_r or {}).get('description')}")
+                        new_autosend_ids[style_key] = old_doc_msg_id  # keep old ref if resend failed
+                try:
+                    await sb_exec(lambda: sb.table("pdf_sessions").update({
+                        "autosend_pdf_msg_ids": new_autosend_ids
+                    }).eq("id", session_id).execute())
+                except Exception as e:
+                    logger.warning(f"[PdfPageRegen] autosend_pdf_msg_ids update failed: {e}")
+        except Exception as e:
+            logger.error(f"[PdfPageRegen] combined PDF rebuild error: {e}")
 
 
 # ============================================================
