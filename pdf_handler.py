@@ -1111,25 +1111,32 @@ async def generate_mcq_from_image(
     return []
 
 
-async def detect_page_topic(img: Image.Image, fallback: str) -> str:
-    """/pdfs only: identify this page's actual sub-topic name from its content,
-    self-verifying spelling/context (page-header text can be misspelled/garbled),
-    using the same Gemini key-rotation pool as MCQ generation. Falls back to the
-    provided default topic name on any failure."""
+async def detect_page_topic(img: Image.Image, fallback: str) -> dict:
+    """/pdfs only: identify this page's main-topic and (optional) sub-topic
+    from visual/positional cues, self-verifying spelling/context (page-header
+    text can be misspelled/garbled), using the same Gemini key-rotation pool
+    as MCQ generation. Falls back to the provided default topic on failure.
+    Returns {"main": str, "sub": str|None}."""
     prompt = (
-        "এই page-এর মূল topic/sub-topic-এর নাম কী তা identify করো। page-এর উপরে/"
-        "কোথাও topic-এর নাম লেখা থাকতে পারে, কিন্তু সেই লেখায় বানান ভুল বা OCR-misread "
-        "থাকতে পারে — তাই শুধু লেখা name-টা copy না করে, page-এর প্রকৃত content পড়ে "
-        "context দিয়ে verify করো সেই নামটা সঠিক কিনা। ভুল/অস্পষ্ট মনে হলে content থেকে "
-        "বুঝে সঠিক topic name নিজে ঠিক করে দাও (বানান শুদ্ধ করে)। খুব ছোট, স্পষ্ট নাম দাও "
-        "(২-৫ শব্দ, ভাষা source-এর ভাষায়)। এই page-এ কোনো নির্দিষ্ট topic name খুঁজে না "
-        f"পেলে, শুধু \"{fallback}\" রিটার্ন করো।\n\n"
-        "Return ONLY the topic name as plain text, no explanation, no markdown, no quotes."
+        "এই page থেকে MAIN TOPIC এবং (থাকলে) SUB TOPIC আলাদা করে identify করো, এই "
+        "visual cue গুলো দিয়ে চিনবে:\n"
+        "MAIN TOPIC: content-এর উপরে/মাঝখানে (top-center) থাকে, bold + অন্য টেক্সট থেকে "
+        "বড় ফন্টে লেখা, প্রায়ই একটা আলাদা background color/box বা boundary দিয়ে ঘেরা "
+        "থাকে, এর আগে কোনো special marker/symbol/chihno থাকতে পারে।\n"
+        "SUB TOPIC (optional, অনেক সময় নাও থাকতে পারে): main topic-এর ঠিক নিচে, "
+        "main topic-এর ফন্ট থেকে ছোট ফন্টে, background সাধারণত হালকা ভিন্ন color "
+        "(full-white না) হতে পারে, এর আগে প্রায়ই একটা colon (: বা ঃ) থাকে, এর আগেও "
+        "কোনো special marker/symbol/chihno থাকতে পারে।\n"
+        "পাওয়া নামে বানান ভুল/OCR-misread মনে হলে, শুধু লেখা name copy না করে page-এর "
+        "প্রকৃত content পড়ে context দিয়ে verify করো এবং ভুল হলে content বুঝে সঠিক নাম "
+        f"নিজে ঠিক করে দাও। কোনো clear main topic না পেলে main-এ শুধু \"{fallback}\" দাও। "
+        "sub topic না থাকলে sub-এ null দাও।\n\n"
+        'Return ONLY valid JSON, no markdown: {"main":"...","sub":"..." or null}'
     )
     _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
     _ordered = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
     if not _ordered:
-        return fallback
+        return {"main": fallback, "sub": None}
     for key in _ordered[:3]:
         try:
             from google import genai as gai
@@ -1146,15 +1153,19 @@ async def detect_page_topic(img: Image.Image, fallback: str) -> str:
                     ]
                 )
             response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=25)
-            name = (response.text or "").strip().strip('"').strip("'")
-            name = name.split("\n")[0].strip()[:60]
-            if name:
-                key_rotator.mark_healthy(key)
-                return name
+            raw = (response.text or "").strip()
+            raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+            import json as _json
+            parsed = _json.loads(raw)
+            main_t = (parsed.get("main") or fallback).strip()[:60] or fallback
+            sub_t = parsed.get("sub")
+            sub_t = sub_t.strip()[:60] if isinstance(sub_t, str) and sub_t.strip() else None
+            key_rotator.mark_healthy(key)
+            return {"main": main_t, "sub": sub_t}
         except Exception as e:
             logger.warning(f"[TopicDetect] key attempt failed: {e}")
             continue
-    return fallback
+    return {"main": fallback, "sub": None}
 
 
 async def generate_mcq_from_text(text: str, topic: str = "MCQ", count: int = 15) -> list:

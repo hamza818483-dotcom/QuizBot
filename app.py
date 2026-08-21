@@ -8666,51 +8666,85 @@ def _adapt_mcqs_for_print(mcqs: list) -> list:
 
 def _build_topicwise_pdf_html(topics_ordered: list, topic_mcqs: dict, main_title: str) -> str:
     """/pdfs only: single combined PDF, first page has a greenish boundary box
-    with the overall title, then each topic section starts with its own
-    (lighter blue) topic-name box, followed by that topic's MCQs (Q+options+
-    answer+explanation, style1-like layout), average ~15 MCQ/page-worth of
-    content per topic section, all topics in one continuous PDF."""
+    with the overall title, then each MAIN topic section starts with its own
+    green box, followed by (optional) lighter-blue SUB topic boxes grouping
+    that sub-topic's MCQs, else MCQs directly under the main-topic box if no
+    sub-topic was detected on that page. topics_ordered is a list of main
+    topic names; topic_mcqs[main] is a dict {sub_or_None: [mcqs]} preserving
+    encounter order via a helper list stored under '__order__'."""
     body_parts = [f'<div class="exam-header"><h1>{main_title}</h1></div>']
     qn = 1
-    for t in topics_ordered:
-        mcqs = topic_mcqs.get(t, [])
-        if not mcqs:
+    for main_t in topics_ordered:
+        sub_map = topic_mcqs.get(main_t, {})
+        sub_order = sub_map.get("__order__", [])
+        if not sub_order:
             continue
-        body_parts.append(f'<div class="topic-header-blue"><h3>🎯 {t}</h3></div>')
-        data = _adapt_mcqs_for_print(mcqs)
-        for d in data:
-            opts_html = "".join(
-                f'<li class="option-with-answer"><span>{chr(65+i)}. {o}</span></li>'
-                for i, o in enumerate(d["opts"]) if o
-            )
-            body_parts.append(
-                f'<div class="question">'
-                f'<div class="question-header"><span class="question-num">{qn}.</span>'
-                f'<span class="question-text">{d["q"]}</span></div>'
-                f'<ul class="options-list">{opts_html}</ul>'
-                f'<div class="explanation"><span class="explanation-label">উত্তর: {d["al"]} — </span>{d["exp"]}</div>'
-                f'</div>'
-            )
-            qn += 1
+        body_parts.append(f'<div class="topic-header-green"><h2>📗 {main_t}</h2></div>')
+        for sub_t in sub_order:
+            mcqs = sub_map.get(sub_t, [])
+            if not mcqs:
+                continue
+            if sub_t:
+                body_parts.append(f'<div class="topic-header-blue"><h3>🎯 {sub_t}</h3></div>')
+            data = _adapt_mcqs_for_print(mcqs)
+            for d in data:
+                opts_html = "".join(
+                    f'<li class="option-with-answer"><span>{chr(65+i)}. {o}</span></li>'
+                    for i, o in enumerate(d["opts"]) if o
+                )
+                body_parts.append(
+                    f'<div class="question">'
+                    f'<div class="question-header"><span class="question-num">{qn}.</span>'
+                    f'<span class="question-text">{d["q"]}</span></div>'
+                    f'<ul class="options-list">{opts_html}</ul>'
+                    f'<div class="explanation"><span class="explanation-label">উত্তর: {d["al"]} — </span>{d["exp"]}</div>'
+                    f'</div>'
+                )
+                qn += 1
     return f"<html><head>{_PRINT_CSS}</head><body><div class=\"content-columns\">{''.join(body_parts)}</div></body></html>"
 
 
 def _build_topicwise_csv_rows(topics_ordered: list, topic_mcqs: dict) -> list:
-    """/pdfs only: CSV rows grouped topic-by-topic (topic name as a section
-    marker row before that topic's MCQs) so /sheet output stays topic-sorted."""
+    """/pdfs only: CSV rows grouped main-topic -> sub-topic -> MCQs (section
+    marker rows before each) so /sheet output stays topic-sorted."""
     rows = []
-    for t in topics_ordered:
-        mcqs = topic_mcqs.get(t, [])
-        if not mcqs:
+    for main_t in topics_ordered:
+        sub_map = topic_mcqs.get(main_t, {})
+        sub_order = sub_map.get("__order__", [])
+        if not sub_order:
             continue
-        rows.append([f"### {t} ###", "", "", "", "", "", "", "", "topic_header"])
-        for q in mcqs:
-            opts = (q.get("options", []) + ["", "", "", ""])[:4]
-            rows.append([
-                q.get("question", ""), opts[0], opts[1], opts[2], opts[3],
-                q.get("answer", "A"), q.get("explanation", ""), "mcq", t
-            ])
+        rows.append([f"### {main_t} ###", "", "", "", "", "", "", "", "main_topic_header"])
+        for sub_t in sub_order:
+            mcqs = sub_map.get(sub_t, [])
+            if not mcqs:
+                continue
+            if sub_t:
+                rows.append([f"—— {sub_t} ——", "", "", "", "", "", "", "", "sub_topic_header"])
+            for q in mcqs:
+                opts = (q.get("options", []) + ["", "", "", ""])[:4]
+                rows.append([
+                    q.get("question", ""), opts[0], opts[1], opts[2], opts[3],
+                    q.get("answer", "A"), q.get("explanation", ""), "mcq", sub_t or main_t
+                ])
     return rows
+
+
+def _group_pdfs_mcqs(all_mcqs_raw: list, fallback_main: str) -> tuple:
+    """Group MCQs by (main_topic -> sub_topic -> [mcqs]), preserving first-seen
+    order at both levels. Returns (main_topics_ordered, topic_map)."""
+    topics_order, topic_map = [], {}
+    for _m in all_mcqs_raw:
+        main_t = _m.get("_pdfs_topic") or fallback_main
+        sub_t = _m.get("_pdfs_subtopic")
+        if main_t not in topic_map:
+            topic_map[main_t] = {"__order__": []}
+            topics_order.append(main_t)
+        sub_map = topic_map[main_t]
+        if sub_t not in sub_map:
+            sub_map["__order__"].append(sub_t)
+            sub_map[sub_t] = []
+        sub_map[sub_t].append(_m)
+    return topics_order, topic_map
 
 
 _PRINT_CSS = """<style>
@@ -12114,14 +12148,18 @@ async def _process_pdf_pages_inner(
                 image_msg_id = None
                 image_file_id = None
                 page_topic_name = topic
+                page_topic_sub = None
                 if _PDFS_MODE.get():
                     try:
                         from pdf_handler import detect_page_topic
-                        page_topic_name = await asyncio.wait_for(detect_page_topic(img, topic), timeout=30)
+                        _td = await asyncio.wait_for(detect_page_topic(img, "প্রাক্টিস প্রশ্ন"), timeout=30)
+                        page_topic_name = _td.get("main") or "প্রাক্টিস প্রশ্ন"
+                        page_topic_sub = _td.get("sub")
                     except Exception as _td_e:
                         logger.warning(f"[PDFS] topic detect failed page {page_num}: {_td_e}")
-                        page_topic_name = topic
-                    _pdfs_page_topics[page_num] = page_topic_name
+                        page_topic_name = "প্রাক্টিস প্রশ্ন"
+                        page_topic_sub = None
+                    _pdfs_page_topics[page_num] = {"main": page_topic_name, "sub": page_topic_sub}
                 if with_image:
                     caption = ""
                     if tag:
@@ -12190,7 +12228,7 @@ async def _process_pdf_pages_inner(
                     logger.warning(f"[PDF] poll_msg_ids save failed (may need migration): {e}")
                 if _PDFS_MODE.get():
                     for _m in mcqs:
-                        _m["_pdfs_topic"] = page_topic_name
+                        _m["_pdfs_topic"] = page_topic_name; _m["_pdfs_subtopic"] = page_topic_sub
                 all_mcqs_raw.extend(mcqs)
 
                 # FIX: summary_pages was declared but never populated — this is
@@ -12252,7 +12290,7 @@ async def _process_pdf_pages_inner(
                 # Auto Style1+Style3 PDF এখন সব page শেষে একবারই পাঠানো হবে (নিচে)
                 if _PDFS_MODE.get():
                     for _m in mcqs:
-                        _m["_pdfs_topic"] = page_topic_name
+                        _m["_pdfs_topic"] = page_topic_name; _m["_pdfs_subtopic"] = page_topic_sub
                 all_mcqs_raw.extend(mcqs)
 
                 for m in mcqs:
@@ -12305,14 +12343,7 @@ async def _process_pdf_pages_inner(
         writer = csv_mod.writer(buf)
         writer.writerow(["questions","option1","option2","option3","option4","answer","explanation","type","section"])
         if _PDFS_MODE.get() and all_mcqs_raw:
-            _topics_order = []
-            _topic_map = {}
-            for _m in all_mcqs_raw:
-                _t = _m.get("_pdfs_topic", topic)
-                if _t not in _topic_map:
-                    _topic_map[_t] = []
-                    _topics_order.append(_t)
-                _topic_map[_t].append(_m)
+            _topics_order, _topic_map = _group_pdfs_mcqs(all_mcqs_raw, "প্রাক্টিস প্রশ্ন")
             for row in _build_topicwise_csv_rows(_topics_order, _topic_map):
                 writer.writerow(row)
         else:
@@ -12360,12 +12391,7 @@ async def _process_pdf_pages_inner(
             _autosend_pdf_msg_ids = {}
             _pdfs_topics_order, _pdfs_topic_map = [], {}
             if _PDFS_MODE.get():
-                for _m in all_mcqs_raw:
-                    _t = _m.get("_pdfs_topic", topic)
-                    if _t not in _pdfs_topic_map:
-                        _pdfs_topic_map[_t] = []
-                        _pdfs_topics_order.append(_t)
-                    _pdfs_topic_map[_t].append(_m)
+                _pdfs_topics_order, _pdfs_topic_map = _group_pdfs_mcqs(all_mcqs_raw, "প্রাক্টিস প্রশ্ন")
             _pdfs_styles = ("topicwise",) if _PDFS_MODE.get() else ("style1", "style3")
             for style_key in _pdfs_styles:
                 data_adapted = _adapt_mcqs_for_print(all_mcqs_raw)
