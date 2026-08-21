@@ -11873,16 +11873,28 @@ def _get_bd_time() -> str:
 # qbm_get_active_prompt() auto-detect a stale DB-cached prompt from before
 # the code update and self-heal to the new default, without needing a manual
 # `DELETE FROM quiz_sessions WHERE key='qbm_active_prompt'` after every edit.
-QBM_PROMPT_VERSION = 3
+QBM_PROMPT_VERSION = 4
 
-QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR — PERMANENT MODE. Extract ONLY MCQs already on this page. Never invent new ones. Follow every rule below, always.
+QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR — PERMANENT MODE. Follow every rule below, always.
+
+🔒 TWO-MODE RULE (check FIRST, decide which mode applies to this page):
+MODE A — Page ALREADY has MCQ(s) (question + options, in any format): extract them 100% VERBATIM/hubohu — no rewriting, no new MCQ, no invented questions. This is the default/expected case.
+MODE B — Page has NO MCQ at all (only plain text/paragraph/notes/facts, no question+options structure): then and ONLY then, generate NEW MCQ(s) from that page's actual content/facts — question and options must be built strictly from what's written on this page, not from outside general knowledge, and not copied from a different page.
+Never mix modes on one page: if even one real MCQ exists on the page, that page is MODE A entirely — do not additionally invent extra MCQs from surrounding text on the same page.
+
+🔒 ABSOLUTE SOURCE-LOCK (overrides everything below, zero exceptions):
+- In MODE A: question TEXT and all 4 OPTION TEXTS must come 100% from what is literally printed/visible on THIS page. Never substitute, add, or generate a different question/option from your own knowledge, even if you think the page's version is wrong, incomplete, or low-quality.
+- In MODE B: question/options must be built from THIS page's actual text/facts only — never from outside general knowledge, never from a different page.
+- "Own knowledge" may ONLY be used for: (a) the ANSWER letter when no proof exists anywhere on/near the page (fallback rule below), and (b) the EXPLANATION text (rule 3 in EXPLANATION section) — NEVER for inventing/altering question or option wording in MODE A.
+- If a question or option is genuinely illegible even after 3+ close read-throughs, still transcribe your best-effort reading of the ACTUAL glyphs on the page (per the hard-to-read clause below) — do not swap in a plausible-sounding question on the same topic from memory.
+- This page's image is the single source of truth for question+options. No cross-page or external substitution.
 
 FORBIDDEN (zero tolerance):
 - Never create/add extra MCQs from page text/facts; never skip any — extract ALL, exact page order
 - MULTI-COLUMN ORDER: 2+ columns → COLUMN-MAJOR — finish ENTIRE left column top-to-bottom first, then next column. Never zigzag (left-Q1,right-Q1,left-Q2... is WRONG). Verify: every left-column question number precedes every right-column number in output.
-- Never guess an answer without source proof; never modify question/option wording (only strip numbering like ১./1./Q1./ক.)
+- Never guess an answer without source proof; never modify question/option wording (only strip numbering like ১./1./Q1./ক.) — applies to MODE A
 - Never translate — keep source language exactly
-- 0 MCQs → []. N MCQs → exactly N.
+- MODE A: N existing MCQs → exactly N extracted. MODE B: page has real text/facts but no MCQ → generate MCQ(s) from that content (do not force output if page is truly blank/irrelevant, e.g. cover page with no usable facts) → []
 
 EXTRACTION & COMPLETENESS (zero-tolerance):
 - Extract all: Bangla/English/mixed, any font/quality. 3+ internal read-throughs, cross-check before finalizing — don't miss the LAST MCQ on page/column; verify count matches visible MCQs.
