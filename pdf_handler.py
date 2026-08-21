@@ -1135,13 +1135,15 @@ async def generate_mcq_from_image(
         logger.warning(f"[Gemini] All {len(key_rotator.keys)} keys already daily-exhausted for today — returning empty (caller will try Groq/other fallbacks)")
         return []
 
-    # 2026-08-22: user requirement — do NOT fall back to other models/providers
-    # until ALL Gemini keys are exhausted. Previously capped at 5 keys even
-    # with 44 configured, so a run of bad luck (503/timeout/SSL on the first
-    # 5) fell through to Groq while 39 healthy keys sat unused. Now tries
-    # every configured key once per page before giving up to the fallback
-    # chain.
-    max_retries = len(_ordered) if _ordered else 5
+    # 2026-08-22: capped at 8 keys (was uncapped -> up to all 44 configured
+    # keys, each with a 20-35s timeout -- a bad-luck run of timeouts/SSL
+    # errors on early keys could stall a single page for 10+ minutes before
+    # ever reaching the Groq/OpenRouter fallback chain below). 8 keys still
+    # gives Gemini a strong chance to succeed (healthy keys normally return
+    # well under 30s) while guaranteeing a hard ceiling on worst-case wait
+    # time per page, per the "minimize timeout/token waste at any cost"
+    # requirement -- Groq/fallback chain picks up from here if all 8 fail.
+    max_retries = min(len(_ordered), 8) if _ordered else 5
     # Model fallback chain: try the latest model first, and if the WHOLE
     # Gemini backend for it is overloaded (503 UNAVAILABLE — this is a
     # server-side capacity issue, not a per-key problem, so it hits every

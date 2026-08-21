@@ -3738,15 +3738,14 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         else:
             _rng_min, _rng_max = MIN_MCQ, MAX_MCQ
 
-        # AtlasBot-style count-enforcement retry loop — up to 2 extra attempts
-        # if the page came back thin, instead of a mandatory verify call.
-        # exclude_groq_keys accumulates across attempts so a thin-page retry
-        # never re-tries a Groq key already tried in an earlier attempt on
-        # this SAME page — without this, a 3-attempt page could touch up to
-        # 15 key-slots (3 attempts x 5-key cap) even though there are only
-        # 12 keys total, effectively burning every key at least once per page.
+        # AtlasBot-style count-enforcement retry loop. Capped at 1 extra
+        # attempt (was 2) -- each retry re-runs the FULL provider chain
+        # (Gemini up to 8 keys x 20-35s timeout each, then Groq/fallback),
+        # so 2 retries could roughly triple total page time on a bad-luck
+        # run. 1 retry still gives a real second chance at hitting MIN_MCQ
+        # without compounding worst-case wait time further.
         attempts = 0
-        while len(out) < _rng_min and attempts < 2:
+        while len(out) < _rng_min and attempts < 1:
             attempts += 1
             logger.info(f"[MCQGen] page {page_num}: only {len(out)} MCQs (attempt {attempts}) — retrying for more")
             retry_out, retry_tried = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=tried_groq_keys)
@@ -3756,7 +3755,7 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
             if _TF_MODE.get():
                 retry_out = _tf_validate_and_filter(retry_out)
             retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
-            if len(retry_out) > len(out):
+            if retry_out and len(retry_out) >= len(out):
                 out = retry_out
 
         if _rng_max and len(out) > _rng_max:
