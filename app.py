@@ -10049,6 +10049,93 @@ async def _extra_gen_from_images_batch(imgs: list, topic: str) -> dict:
         return {}
 
 
+async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
+    """/dagano's OWN multi-image Gemini caller -- fully independent of
+    _qbm_gemini_raw_multi (no shared call), so /dagano's token-limit and
+    behavior can't be changed by edits elsewhere. Sets an EXPLICIT
+    max_output_tokens (32768) -- safely within Gemini 3.6 Flash free-tier
+    output limits -- so a page with many MCQs + full main_explanation +
+    extra_info text never gets silently truncated mid-JSON. Same
+    key-rotation/quota-exhaustion/Groq-fallback pattern as the shared
+    QBM caller, reimplemented standalone."""
+    try:
+        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
+        if not key_rotator.keys:
+            return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+        if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
+            logger.warning("[Dagano] all Gemini keys already known daily-exhausted — skipping straight to Groq")
+            return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+        from google import genai as gai
+        from google.genai import types
+        img_bytes_list = []
+        for img in imgs:
+            b64 = image_to_base64(img)
+            img_bytes_list.append(base64.b64decode(b64))
+
+        def _call(key):
+            client = gai.Client(api_key=key)
+            parts = [types.Part.from_text(text=prompt)]
+            for ib in img_bytes_list:
+                parts.append(types.Part.from_bytes(data=ib, mime_type="image/jpeg"))
+            return client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=parts,
+                config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=32768)
+            )
+
+        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
+        if _live:
+            keys_to_try = _live
+        for key in keys_to_try:
+            if is_cancelled():
+                return ""
+            try:
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=60)
+                key_rotator.mark_healthy(key)
+                finish_reason = None
+                try:
+                    finish_reason = response.candidates[0].finish_reason
+                except Exception:
+                    pass
+                if finish_reason is not None and str(finish_reason).upper().find("MAX_TOKENS") >= 0:
+                    logger.warning(f"[Dagano] Gemini response hit max_output_tokens (truncated) for key {key[:12]}... -- treating as technical failure, trying next key")
+                    continue
+                return response.text or ""
+            except asyncio.TimeoutError:
+                logger.warning(f"[Dagano] Gemini key {key[:12]}... multi-image call timed out (60s), trying next key")
+                continue
+            except Exception as e:
+                msg = str(e)
+                extra = ""
+                try:
+                    resp_obj = getattr(e, "response", None)
+                    if resp_obj is not None:
+                        extra = getattr(resp_obj, "text", "") or ""
+                except Exception:
+                    pass
+                full_msg = msg + " " + extra
+                if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                    daily = "PerDay" in full_msg
+                    retry_s = None
+                    try:
+                        rd_match = re.search(r"'retryDelay':\s*'(\d+)s'", full_msg)
+                        if rd_match:
+                            retry_s = int(rd_match.group(1))
+                    except Exception:
+                        pass
+                    key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
+                    logger.warning(f"[Dagano] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
+                    continue
+                logger.warning(f"[Dagano] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
+                continue
+        logger.warning("[Dagano] All Gemini keys exhausted — falling back to Groq vision (first image only)")
+        return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+    except Exception as e:
+        logger.warning(f"[Dagano] Gemini multi-image raw call failed: {e}")
+        return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+
+
 def _dagano_page_has_marks(img) -> bool:
     """/dagano's own deterministic (non-LLM) code-level check: does this
     page image contain ANY highlighter/colored-ink pixels at all (yellow,
@@ -10357,7 +10444,10 @@ def _build_dagano_prompt_standalone(topic: str) -> str:
         f"marked OR nearby content of the same topic) — so a student who "
         f"studies this explanation learns the topic more broadly, not "
         f"just this one question's answer. If no extra topic content "
-        f"exists on the page, use an empty string \"\".\n\n"
+        f"exists on the page, use an empty string \"\". extra_info must "
+        f"stay RELEVANT to the question's own topic/sub-topic -- never "
+        f"drift into an unrelated topic just because it's on the same "
+        f"page.\n\n"
         f"═══════════════════════════════\n"
         f"🟩 TOPIC KEY\n"
         f"═══════════════════════════════\n"
@@ -10393,10 +10483,24 @@ def _build_dagano_prompt_batched(topic: str, n: int) -> str:
         f"textbook pages (medical/HSC/admission-standard quality).\n"
         f"Topic: {topic}\n\n"
         f"You are given {n} SEPARATE page images in this SAME call, in order "
-        f"(page_index 1, 2, ... {n}). Treat each page COMPLETELY "
-        f"INDEPENDENTLY -- never mix or borrow marked content between "
-        f"pages, each page's MCQs must come strictly from that page's own "
-        f"marks.\n\n"
+        f"(page_index 1, 2, ... {n}). Treat each page's MARKED CONTENT "
+        f"SELECTION independently -- never pull a question from marks on "
+        f"one page and tag it under a different page_index, and never "
+        f"borrow marked content from one page to build a question for "
+        f"another.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 CROSS-PAGE TOPIC CONTINUITY (EXPLANATION ONLY)\n"
+        f"═══════════════════════════════\n"
+        f"If the SAME topic continues across these {n} pages (e.g. starts "
+        f"on page_index 1 and continues on page_index 2), then when "
+        f"writing \"extra_info\" for a marked-line MCQ from that topic, "
+        f"you MAY pull additional relevant context for that topic from "
+        f"BOTH pages combined (not just the page the question came from) "
+        f"-- so the explanation covers the FULL topic, not just a partial "
+        f"view from a single page. The question itself still comes ONLY "
+        f"from its own page's marked line. If the topic does NOT continue "
+        f"across pages, keep extra_info scoped to that single page as "
+        f"usual.\n\n"
         f"═══════════════════════════════\n"
         f"🟥 STRICT FILTER — ONLY MARKED/HIGHLIGHTED CONTENT, NOTHING ELSE\n"
         f"═══════════════════════════════\n"
@@ -10444,8 +10548,11 @@ def _build_dagano_prompt_batched(topic: str, n: int) -> str:
         f"content only.\n"
         f"2) \"extra_info\": additional relevant info about the SAME "
         f"broader topic (beyond just the 4 options), from that page's "
-        f"content, so the student learns the topic more broadly. Empty "
-        f"string \"\" if nothing extra exists.\n\n"
+        f"content (see CROSS-PAGE TOPIC CONTINUITY above for multi-page "
+        f"topics), so the student learns the topic more broadly. Must "
+        f"stay RELEVANT to the question's own topic/sub-topic -- never "
+        f"drift into an unrelated topic. Empty string \"\" if nothing "
+        f"extra exists.\n\n"
         f"═══════════════════════════════\n"
         f"🟩 TOPIC KEY\n"
         f"═══════════════════════════════\n"
@@ -10491,15 +10598,16 @@ def _dagano_apply_topic_reuse(mcqs: list) -> list:
 
 
 async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
-    """/dagano's BATCHED generation call -- Gemini primary, Groq/OpenRouter
-    fallback only on true technical failure (mirrors /extra's proven-safe
-    2-page-per-call pattern). Returns {page_index (1-based int): [mcq]}."""
+    """/dagano's BATCHED generation call -- Gemini primary (own dedicated
+    caller with explicit output-token cap), Groq/OpenRouter fallback only
+    on true technical failure (mirrors /extra's proven-safe 2-page-per-
+    call pattern). Returns {page_index (1-based int): [mcq]}."""
     n = len(imgs)
     if n == 0:
         return {}
     prompt = _build_dagano_prompt_batched(topic, n)
     try:
-        gem_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+        gem_txt = await _dagano_gemini_raw_multi(imgs, prompt)
         provider = "Gemini"
         if gem_txt:
             gem = _onu2_parse_mcq_array(gem_txt)
