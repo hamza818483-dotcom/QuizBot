@@ -7718,11 +7718,15 @@ async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str, mess
         out_name = orig_filename or "watermarked.pdf"
         if not out_name.lower().endswith(".pdf"):
             out_name += ".pdf"
-        await send_document(chat_id, wm_bytes,
+        send_res = await send_document(chat_id, wm_bytes,
             out_name,
             caption=f"✅ Watermark applied: <b>{footer_text or wm_text}</b>",
             mime_type="application/pdf"
         )
+        if not send_res.get("ok"):
+            err = send_res.get("error") or send_res.get("description") or "unknown error"
+            logger.error(f"[WM] send_document failed: {err}")
+            await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
     except Exception as e:
         await send_msg(chat_id, f"❌ Watermark error: {e}")
 async def handle_info2(msg: dict):
@@ -23126,7 +23130,11 @@ async def handle_watermark_document(msg: dict) -> bool:
         loading = await send_msg(chat_id, "⏳ Watermark বসানো হচ্ছে...")
         try:
             watermarked = add_watermark_to_pdf(pdf_bytes, text)
-            await send_document(chat_id, watermarked, filename="watermarked.pdf", caption="✅ Watermark বসানো হয়েছে!")
+            send_res = await send_document(chat_id, watermarked, filename="watermarked.pdf", caption="✅ Watermark বসানো হয়েছে!")
+            if not send_res.get("ok"):
+                err = send_res.get("error") or send_res.get("description") or "unknown error"
+                logger.error(f"[Watermark] send_document failed: {err}")
+                await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
         except Exception as e:
             logger.error(f"[Watermark] process error: {e}")
             await send_msg(chat_id, f"❌ Watermark বসাতে সমস্যা হয়েছে: {e}")
