@@ -11130,6 +11130,7 @@ async def _process_pdf_pages_inner(
 
                 poll_links = []
                 first_poll_link = ""
+                poll_msg_ids = []
                 for i, mcq in enumerate(mcqs):
                   try:
                     opts = mcq.get("options", [])[:4]
@@ -11153,13 +11154,15 @@ async def _process_pdf_pages_inner(
                             break
                         logger.warning(f"[Poll] MCQ {i+1} attempt {_attempt+1} failed, retrying...")
                         await asyncio.sleep(2)
-                    if poll_r.get("ok") and i == 0:
+                    if poll_r.get("ok"):
                         msg_id = poll_r["result"]["message_id"]
-                        if str(channel_id).startswith("-100"):
-                            first_poll_link = f"https://t.me/c/{str(channel_id)[4:]}/{msg_id}"
-                        else:
-                            first_poll_link = f"https://t.me/{str(channel_id).lstrip('@')}/{msg_id}"
-                        poll_links.append(first_poll_link)
+                        poll_msg_ids.append(msg_id)
+                        if i == 0:
+                            if str(channel_id).startswith("-100"):
+                                first_poll_link = f"https://t.me/c/{str(channel_id)[4:]}/{msg_id}"
+                            else:
+                                first_poll_link = f"https://t.me/{str(channel_id).lstrip('@')}/{msg_id}"
+                            poll_links.append(first_poll_link)
                     total_polls += 1
                     # Telegram allows ~1 message/sec to the same chat —
                     # 0.25s was too fast, causing real 429s.
@@ -11169,6 +11172,10 @@ async def _process_pdf_pages_inner(
                     continue
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
+                try:
+                    await db_update_cache(cache_id, {"poll_msg_ids": poll_msg_ids})
+                except Exception as e:
+                    logger.warning(f"[PDF] poll_msg_ids save failed (may need migration): {e}")
                 all_mcqs_raw.extend(mcqs)
 
                 # FIX: summary_pages was declared but never populated — this is
@@ -21758,6 +21765,156 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
         await send_msg(chat_id, end_text, reply_markup=end_kb)
 
 # ============================================================
+# FEATURE: /pdf page-button regenerate (from DM completion buttons)
+# ============================================================
+async def handle_pdf_page_regen(session_id: str, page_num: int, dm_chat_id: int, uid: int):
+    """Triggered by the 'Page N' inline button under the /pdf DM completion
+    message. Deletes that page's old channel polls, generates a fresh set
+    from the SAME page image/content, posts them as a reply to the page's
+    image message, updates the page's channel caption with the new first-poll
+    link, and refreshes the channel summary + DM's own record so future
+    clicks stay in sync."""
+    sess_r = await sb_exec(lambda: sb.table("pdf_sessions").select("*").eq("id", session_id).execute())
+    if not sess_r.data:
+        await send_msg(dm_chat_id, "❌ Session পাওয়া যায়নি (পুরনো/মুছে ফেলা হয়েছে)।")
+        return
+    sess = sess_r.data[0]
+    summary_pages = sess.get("summary_pages") or []
+    channel_id = sess.get("channel_id")
+    topic = sess.get("topic") or "ATLAS MCQ"
+    summary_msg_id = sess.get("summary_msg_id")
+    page_entry = next((p for p in summary_pages if p.get("page") == page_num), None)
+    if not page_entry or not page_entry.get("cache_id"):
+        await send_msg(dm_chat_id, f"❌ Page {fmt_page(page_num)}-এর data পাওয়া যায়নি।")
+        return
+
+    cache = await db_get_mcq_cache(page_entry["cache_id"])
+    if not cache:
+        await send_msg(dm_chat_id, f"❌ Page {fmt_page(page_num)}-এর cache পাওয়া যায়নি।")
+        return
+    image_file_id = cache.get("image_file_id")
+    image_msg_id = cache.get("image_msg_id")
+    old_poll_msg_ids = cache.get("poll_msg_ids") or []
+    if not image_file_id or not channel_id:
+        await send_msg(dm_chat_id, f"❌ Page {fmt_page(page_num)}-এর original image/channel পাওয়া যায়নি।")
+        return
+
+    status_r = await send_msg(dm_chat_id, f"⏳ Page {fmt_page(page_num)} regenerate হচ্ছে...")
+    status_id = status_r.get("result", {}).get("message_id")
+
+    try:
+        img_bytes = await download_tg_file(image_file_id)
+        from PIL import Image as PILImage
+        img = PILImage.open(BytesIO(img_bytes))
+        new_mcqs = _cap_mcq_options(await asyncio.wait_for(
+            generate_new_mcq(img, topic, page_num, mcq_count=15), timeout=90))
+    except Exception as e:
+        logger.error(f"[PdfPageRegen] generation failed page {page_num}: {e}")
+        if status_id:
+            await edit_msg(dm_chat_id, status_id, "❌ MCQ generate করতে সমস্যা হয়েছে, আবার চেষ্টা করো।")
+        return
+    if not new_mcqs:
+        if status_id:
+            await edit_msg(dm_chat_id, status_id, "❌ নতুন MCQ generate হয়নি।")
+        return
+
+    # Delete OLD polls in the channel for this page
+    deleted, failed_del = 0, 0
+    for old_id in old_poll_msg_ids:
+        try:
+            r = await tg_post("deleteMessage", {"chat_id": channel_id, "message_id": old_id})
+            if r.get("ok"):
+                deleted += 1
+            else:
+                failed_del += 1
+        except Exception:
+            failed_del += 1
+        await asyncio.sleep(0.3)
+
+    settings = await db_get_settings()
+    tag = settings.get("tag", "")
+    exp_footer = settings.get("exp_footer", "")
+
+    new_cache_id = gen_session_id()
+    new_poll_msg_ids = []
+    first_poll_link = ""
+    for i, mcq in enumerate(new_mcqs):
+        opts = mcq.get("options", [])[:4]
+        ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
+        q_text = mcq["question"]
+        if tag:
+            q_text = f"{tag}\n\n{q_text}"
+        exp = mcq.get("explanation", "")
+        if exp_footer:
+            exp = f"{exp}\n{exp_footer}"
+        poll_r = {"ok": False}
+        for _attempt in range(3):
+            poll_r = await send_poll(channel_id, q_text, opts, ans_idx, explanation=exp,
+                                      reply_to_message_id=image_msg_id)
+            if poll_r.get("ok"):
+                break
+            await asyncio.sleep(2)
+        if poll_r.get("ok"):
+            msg_id = poll_r["result"]["message_id"]
+            new_poll_msg_ids.append(msg_id)
+            if i == 0:
+                if str(channel_id).startswith("-100"):
+                    first_poll_link = f"https://t.me/c/{str(channel_id)[4:]}/{msg_id}"
+                else:
+                    first_poll_link = f"https://t.me/{str(channel_id).lstrip('@')}/{msg_id}"
+        await asyncio.sleep(1.1)
+
+    await db_save_mcq_cache(new_cache_id, session_id, page_num, topic, new_mcqs,
+                             [first_poll_link] if first_poll_link else [],
+                             image_file_id, image_msg_id, channel_id)
+    try:
+        await db_update_cache(new_cache_id, {"poll_msg_ids": new_poll_msg_ids})
+    except Exception as e:
+        logger.warning(f"[PdfPageRegen] poll_msg_ids save failed: {e}")
+
+    # Update this page's channel caption (image caption) with the new first-poll link
+    try:
+        if image_msg_id:
+            new_caption = (f"🟥ATLAS Special MCQ System\n🎯Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n"
+                            f"🔗Poll Link:\n{first_poll_link or '(লিংক পাওয়া যায়নি)'}")
+            await edit_msg_caption(channel_id, image_msg_id, new_caption)
+    except Exception as e:
+        logger.warning(f"[PdfPageRegen] caption update failed: {e}")
+
+    # Update this page's entry in summary_pages + refresh channel summary text
+    for p in summary_pages:
+        if p.get("page") == page_num:
+            p["mcq_count"] = len(new_mcqs)
+            p["first_poll"] = first_poll_link or "(লিংক পাওয়া যায়নি)"
+            p["cache_id"] = new_cache_id
+            break
+    try:
+        await sb_exec(lambda: sb.table("pdf_sessions").update({"summary_pages": summary_pages}).eq("id", session_id).execute())
+    except Exception as e:
+        logger.warning(f"[PdfPageRegen] session summary_pages update failed: {e}")
+
+    if summary_msg_id and channel_id:
+        total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
+        new_summary = f"🟥ATLAS Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq_sum}\n\n"
+        for p in summary_pages:
+            new_summary += f"🌟Page-{fmt_page(p['page'])} ({p['mcq_count']} MCQ):\n{p['first_poll']}\n"
+        try:
+            await tg_post("editMessageText", {
+                "chat_id": channel_id, "message_id": summary_msg_id,
+                "text": new_summary, "disable_web_page_preview": True
+            })
+        except Exception as e:
+            logger.warning(f"[PdfPageRegen] summary msg update failed: {e}")
+
+    if status_id:
+        await edit_msg(dm_chat_id, status_id,
+            f"✅ Page {fmt_page(page_num)} regenerate সম্পন্ন!\n"
+            f"🗑️ পুরনো poll মুছে ফেলা হয়েছে: {deleted}"
+            + (f" (ব্যর্থ: {failed_del})" if failed_del else "") +
+            f"\n📝 নতুন MCQ: {len(new_mcqs)}\n🔗 {first_poll_link or '(লিংক পাওয়া যায়নি)'}")
+
+
+# ============================================================
 # FEATURE 11: POLL NEW
 # ============================================================
 async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int = None):
@@ -24240,6 +24397,13 @@ async def handle_callback(query: dict):
     uname = user.get("username") or user.get("first_name", "User")
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
+        if data.startswith("pdfpg_"):
+            rest = data[len("pdfpg_"):]
+            sess_part, _, page_part = rest.rpartition("_")
+            if not sess_part or not page_part.isdigit():
+                return
+            _spawn_task(handle_pdf_page_regen(sess_part, int(page_part), chat_id, uid))
+            return
         if data.startswith("fwm_"):
             idx = int(data[len("fwm_"):])
             history = _FOOTER_HISTORY_CACHE.get(chat_id) or await footer_history_list(10)
