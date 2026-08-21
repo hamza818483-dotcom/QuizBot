@@ -9995,6 +9995,67 @@ async def _extra_gen_from_images_batch(imgs: list, topic: str) -> dict:
         return {}
 
 
+def _dagano_page_has_marks(img) -> bool:
+    """/dagano's own deterministic (non-LLM) code-level check: does this
+    page image contain ANY highlighter/colored-ink pixels at all (yellow,
+    green, pink/magenta, orange, blue/cyan, red)? Pure OpenCV color
+    thresholding, no API call -- fully independent implementation."""
+    try:
+        import numpy as np
+        import cv2
+        from pdf_handler import image_to_base64
+        b64 = image_to_base64(img)
+        arr = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
+        cv_img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if cv_img is None:
+            return True  # fail-open
+        hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
+        ranges = [
+            ((0, 60, 120), (10, 255, 255)),    # red (low hue wrap)
+            ((170, 60, 120), (180, 255, 255)), # red (high hue wrap)
+            ((15, 60, 120), (45, 255, 255)),   # yellow/orange
+            ((45, 60, 120), (85, 255, 255)),   # green
+            ((85, 60, 120), (130, 255, 255)),  # cyan/blue
+            ((140, 60, 120), (170, 255, 255)), # pink/magenta
+        ]
+        total_mask = None
+        for lo, hi in ranges:
+            mask = cv2.inRange(hsv, np.array(lo), np.array(hi))
+            total_mask = mask if total_mask is None else (total_mask | mask)
+        if total_mask is None:
+            return True
+        marked_ratio = float((total_mask > 0).sum()) / float(total_mask.size)
+        return marked_ratio >= 0.0005
+    except Exception as e:
+        logger.warning(f"[DaganoMarkCheck] failed, fail-open: {e}")
+        return True
+
+
+def _dagano_hard_mark_gate(mcqs: list, img, page_num) -> list:
+    """/dagano's STRICT code-level HARD gate (no LLM, deterministic):
+    if this page has ZERO colored/highlighter/pen-mark pixels detected
+    by pure CV AND the MCQ count is suspiciously high (>=3) for a page
+    that shows no visible marking at all, this is treated as a strong
+    signal the model likely pulled from unmarked/plain text -- the
+    entire batch for this page is DROPPED (not just logged) as a hard
+    safety enforcement, since /dagano's core rule is mark-only content.
+    Pen-only marks (no highlighter ink) can't be reliably seen by CV, so
+    a LOW mcq count (1-2) with no detected color is allowed through
+    (pen-underline/circle case) -- only an implausibly high count with
+    zero visible color is hard-blocked."""
+    if not mcqs:
+        return mcqs
+    try:
+        has_marks = _dagano_page_has_marks(img)
+        if not has_marks and len(mcqs) >= 3:
+            logger.warning(f"[DaganoHardGate] page {page_num}: {len(mcqs)} MCQ(s) but ZERO color/mark pixels detected -- HARD BLOCKED (likely unmarked-text leakage)")
+            return []
+        return mcqs
+    except Exception as e:
+        logger.warning(f"[DaganoHardGate] page {page_num} check failed, fail-open: {e}")
+        return mcqs
+
+
 def _dagano_code_level_3pass_verify(mcqs: list, page_num=None) -> list:
     """/dagano's OWN code-level 3-pass verification -- fully independent
     copy of the /extra pattern (no shared call), so changes to /extra
@@ -10325,6 +10386,8 @@ async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
             out = _validate_mcq_structure(out)
             out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
             out = _dagano_code_level_3pass_verify(out, page_num=idx)
+            if out and idx - 1 < len(imgs):
+                out = _dagano_hard_mark_gate(out, imgs[idx - 1], page_num=idx)
             out = _dagano_apply_topic_reuse(out)
             by_index[idx] = out
         return by_index
@@ -10373,6 +10436,7 @@ async def _dagano_gen_from_image(img, topic, page_num):
     out = _validate_mcq_structure(out)
     out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
     out = _dagano_code_level_3pass_verify(out, page_num=page_num)
+    out = _dagano_hard_mark_gate(out, img, page_num=page_num)
     out = _dagano_apply_topic_reuse(out)
 
     if out:
