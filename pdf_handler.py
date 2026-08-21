@@ -524,7 +524,6 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
             if not valid:
                 logger.warning(f"[PDFS] Page {page}: 0 valid MCQs parsed (attempt {attempt+1}) — likely malformed/truncated JSON")
             else:
-                valid = _mcq_hallucination_filter(valid, img)
                 valid = _pdfs_reconcile_mcq_topics(valid, topic)
             key_rotator.mark_healthy(key)
             logger.info(f"[PDFS] Page {page}: {len(valid)} MCQs across "
@@ -1012,87 +1011,6 @@ async def _attach_explanation_images(mcqs: list, img: Image.Image) -> list:
     return mcqs
 
 
-def _detect_page_text_for_hallucination_check(img) -> str:
-    """OCR the page (pytesseract, zero AI cost) into a single lowercase blob
-    for word-overlap checking. Best-effort: returns "" on any failure so
-    callers treat that as 'unknown/can't verify' and fail OPEN (never block
-    generation just because OCR itself is unavailable/broken)."""
-    try:
-        import pytesseract
-        try:
-            txt = pytesseract.image_to_string(img, lang="ben+eng")
-        except pytesseract.TesseractError:
-            txt = pytesseract.image_to_string(img, lang="eng")
-        return (txt or "").strip()
-    except Exception as e:
-        logger.warning(f"[HallucinationCheck] OCR failed, skipping check (fail-open): {e}")
-        return ""
-
-
-def _mcq_hallucination_filter(mcqs: list, img) -> list:
-    """CODE-LEVEL enforcement (not just prompt-level trust) of the
-    page-content-only rule: for each generated MCQ, verify its question text
-    has meaningful word-overlap with the page's actual OCR'd text. An MCQ
-    whose question shares almost no words with anything on the page is very
-    likely hallucinated (made up from the model's own knowledge instead of
-    the page) and gets dropped rather than silently shipped.
-
-    Deliberately LENIENT (word-overlap ratio, not exact match) because OCR
-    itself is imperfect and MCQ wording legitimately paraphrases/cleans up
-    source text (numbering stripped, spelling-corrected, উদ্দীপক prepended,
-    Mode-B-generated MCQs built FROM page facts in different phrasing). The
-    goal is only to catch OUTRIGHT fabrication (a question about content
-    that plainly never appears anywhere on the page), not to demand
-    verbatim substring matches.
-
-    Fails OPEN: if OCR text is empty/unavailable, returns mcqs unchanged
-    (never blocks legitimate output just because local OCR had an issue)."""
-    page_text = _detect_page_text_for_hallucination_check(img)
-    if not page_text or not mcqs:
-        return mcqs
-
-    import re as _re
-    def _words(s: str) -> set:
-        # Keep Bangla + Latin word characters, drop punctuation/numbers-only noise
-        toks = _re.findall(r"[\w\u0980-\u09FF]{2,}", (s or "").lower())
-        return set(toks)
-
-    page_words = _words(page_text)
-    if len(page_words) < 5:
-        # OCR found almost nothing usable — too unreliable to judge against, fail open
-        return mcqs
-
-    kept = []
-    dropped = 0
-    for m in mcqs:
-        q = m.get("question", "") or ""
-        opts = m.get("options", []) or []
-        combined = q + " " + " ".join(str(o) for o in opts)
-        mcq_words = _words(combined)
-        if not mcq_words:
-            kept.append(m)  # nothing to check, don't punish malformed-but-otherwise-fine entries
-            continue
-        overlap = mcq_words & page_words
-        ratio = len(overlap) / len(mcq_words)
-        # Lenient threshold: genuine page-derived content (even paraphrased/
-        # OCR-noisy) reliably shares >=12% of its distinct words with the
-        # page; a fully invented question typically shares far less (mostly
-        # just common function words). Originally 20%, but Bangla local
-        # Tesseract OCR (pytesseract) is unreliable enough on conjuncts/
-        # numerals/dates that genuinely page-sourced date/fact questions
-        # (e.g. "জুলাই বিপ্লব কবে", "সংবিধান কার্যকর হয় কোন তারিখে") were
-        # getting misdetected as hallucinated and wrongly dropped — lowered
-        # to reduce false-positives on real content while still catching
-        # outright fabrication (near-0% overlap).
-        if ratio >= 0.12:
-            kept.append(m)
-        else:
-            dropped += 1
-            logger.warning(f"[HallucinationCheck] Dropped likely-fabricated MCQ (word-overlap {ratio:.0%} < 20%): {q[:80]}")
-    if dropped:
-        logger.warning(f"[HallucinationCheck] {dropped}/{len(mcqs)} MCQ(s) dropped as likely not from page content")
-    return kept
-
 
 async def generate_mcq_from_image(
     img: Image.Image,
@@ -1197,8 +1115,6 @@ async def generate_mcq_from_image(
                     except Exception:
                         pass
                     logger.warning(f"[Gemini] Page {page}: response OK but 0 valid MCQs parsed (attempt {attempt+1}, model={model_name}) — likely malformed/truncated JSON, not a real 'page has no content'")
-                else:
-                    valid = _mcq_hallucination_filter(valid, img)
                 key_rotator.mark_healthy(key)
                 logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name})")
                 return valid
