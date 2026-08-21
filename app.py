@@ -12114,13 +12114,63 @@ async def _process_pdf_pages_inner(
             _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
 
         try:
+            _page_segments = None  # /pdfs only: list of {"main","sub","content_desc","y_start","y_end"}
             if not skip_generate:
-                # Strictly serial by user request: each page's generation
-                # AND sending (polls or image+caption) must fully finish
-                # before the next page's generation even starts — no
-                # prefetch/overlap across pages, in ANY mode (/pdf, /qbm,
-                # /onu, /tf all funnel through this same function).
-                mcqs, gen_error = await _gen_with_retry(img, page_num)
+                if _PDFS_MODE.get():
+                    # STEP 1 (MUST run before any MCQ generation): identify
+                    # every main/sub topic on this page + verify each one +
+                    # lock its content boundary — so we know EXACTLY which
+                    # topic owns which portion of the page BEFORE a single
+                    # MCQ is generated. This prevents one topic's content
+                    # from ever leaking into another topic's MCQ set.
+                    try:
+                        from pdf_handler import detect_page_topics
+                        _td = await asyncio.wait_for(
+                            detect_page_topics(img, "প্রাক্টিস প্রশ্ন"), timeout=30)
+                        _page_segments = _td["segments"]
+                    except Exception as _td_e:
+                        logger.warning(f"[PDFS] topic detect failed page {page_num}: {_td_e}")
+                        _page_segments = [{"main": "প্রাক্টিস প্রশ্ন", "sub": None,
+                                            "content_desc": "পুরো page", "y_start": 0.0, "y_end": 1.0}]
+                    _pdfs_page_topics[page_num] = _page_segments
+
+                    # STEP 2: generate MCQs PER SEGMENT (not per page) — each
+                    # call is hard-locked (prompt segment-lock + y-band) to
+                    # only its own already-verified content, so one topic's
+                    # MCQs can never contain another topic's content on the
+                    # same page.
+                    mcqs = []
+                    gen_error = None
+                    _seg_count = max(1, len(_page_segments))
+                    # average ~15 MCQ per page total (per user spec) — split
+                    # roughly evenly across this page's detected segments so
+                    # multi-topic pages don't multiply total MCQ count.
+                    _per_seg_count = mcq_count if mcq_count else max(3, round(15 / _seg_count))
+                    for _seg in _page_segments:
+                        try:
+                            _seg_mcqs = await asyncio.wait_for(
+                                generate_mcq_from_image(
+                                    img, _seg["main"], page_num, _per_seg_count,
+                                    segment_desc=_seg.get("content_desc") or "পুরো page",
+                                    segment_y_start=_seg.get("y_start"),
+                                    segment_y_end=_seg.get("y_end"),
+                                ), timeout=90)
+                        except Exception as _seg_e:
+                            logger.warning(f"[PDFS] segment gen failed page {page_num} topic={_seg['main']}: {_seg_e}")
+                            _seg_mcqs = []
+                        for _m in (_seg_mcqs or []):
+                            _m["_pdfs_topic"] = _seg["main"]
+                            _m["_pdfs_subtopic"] = _seg.get("sub")
+                        mcqs.extend(_seg_mcqs or [])
+                    if not mcqs:
+                        gen_error = "সব topic segment-এই 0 MCQ এসেছে"
+                else:
+                    # Strictly serial by user request: each page's generation
+                    # AND sending (polls or image+caption) must fully finish
+                    # before the next page's generation even starts — no
+                    # prefetch/overlap across pages, in ANY mode (/pdf, /qbm,
+                    # /onu, /tf all funnel through this same function).
+                    mcqs, gen_error = await _gen_with_retry(img, page_num)
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
@@ -12149,19 +12199,13 @@ async def _process_pdf_pages_inner(
             else:
                 image_msg_id = None
                 image_file_id = None
-                page_topic_name = topic
-                page_topic_sub = None
-                if _PDFS_MODE.get():
-                    try:
-                        from pdf_handler import detect_page_topic
-                        _td = await asyncio.wait_for(detect_page_topic(img, "প্রাক্টিস প্রশ্ন"), timeout=30)
-                        page_topic_name = _td.get("main") or "প্রাক্টিস প্রশ্ন"
-                        page_topic_sub = _td.get("sub")
-                    except Exception as _td_e:
-                        logger.warning(f"[PDFS] topic detect failed page {page_num}: {_td_e}")
-                        page_topic_name = "প্রাক্টিস প্রশ্ন"
-                        page_topic_sub = None
-                    _pdfs_page_topics[page_num] = {"main": page_topic_name, "sub": page_topic_sub}
+                # Topic already detected+locked in STEP 1 above (before
+                # generation); just derive the caption label here — use the
+                # first segment's main topic as the page-level label (a page
+                # can have multiple segments/topics, but the image caption
+                # shows the primary one; each MCQ still carries its own
+                # exact _pdfs_topic/_pdfs_subtopic tag for grouping below).
+                page_topic_name = (_page_segments[0]["main"] if (_PDFS_MODE.get() and _page_segments) else topic)
                 if with_image:
                     caption = ""
                     if tag:
@@ -12228,9 +12272,9 @@ async def _process_pdf_pages_inner(
                     await db_update_cache(cache_id, {"poll_msg_ids": poll_msg_ids})
                 except Exception as e:
                     logger.warning(f"[PDF] poll_msg_ids save failed (may need migration): {e}")
-                if _PDFS_MODE.get():
-                    for _m in mcqs:
-                        _m["_pdfs_topic"] = page_topic_name; _m["_pdfs_subtopic"] = page_topic_sub
+                # each mcq already carries its own correct _pdfs_topic/
+                # _pdfs_subtopic tag set in STEP 2's per-segment generation
+                # loop above — do NOT overwrite with the page-level label.
                 all_mcqs_raw.extend(mcqs)
 
                 # FIX: summary_pages was declared but never populated — this is
@@ -12290,9 +12334,8 @@ async def _process_pdf_pages_inner(
                         await notify_owner(f"⚠️ End message failed for page {fmt_page(page_num)}, topic: {topic}\nReason: {err_desc}")
 
                 # Auto Style1+Style3 PDF এখন সব page শেষে একবারই পাঠানো হবে (নিচে)
-                if _PDFS_MODE.get():
-                    for _m in mcqs:
-                        _m["_pdfs_topic"] = page_topic_name; _m["_pdfs_subtopic"] = page_topic_sub
+                # each mcq already carries its own correct _pdfs_topic/
+                # _pdfs_subtopic tag from STEP 2's per-segment generation.
                 all_mcqs_raw.extend(mcqs)
 
                 for m in mcqs:

@@ -949,6 +949,9 @@ async def generate_mcq_from_image(
     topic: str,
     page: int,
     mcq_count: int = None,
+    segment_desc: str = None,
+    segment_y_start: float = None,
+    segment_y_end: float = None,
 ) -> list:
     if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
         c_min, c_max = mcq_count
@@ -966,6 +969,24 @@ async def generate_mcq_from_image(
         )
     else:
         prompt = MCQ_PROMPT_MAX.format(topic=topic, page=str(page).zfill(2))
+
+    if segment_desc:
+        # /pdfs multi-topic pages: MCQ generation must stay strictly inside
+        # this segment's already-verified content boundary (from
+        # detect_page_topics, STEP 1 — runs BEFORE this call) — never pull
+        # in another topic's content on the same page, and never generate
+        # anything from outside this segment even if the rest of the page
+        # has more/easier content.
+        _band = ""
+        if segment_y_start is not None and segment_y_end is not None:
+            _band = f" (page-এর উচ্চতার {segment_y_start:.2f}–{segment_y_end:.2f} অংশে, 0.0=উপর, 1.0=নিচ)"
+        prompt += (
+            f"\n\n🔒 SEGMENT-LOCK (ABSOLUTE, page-এ একাধিক topic থাকায় জরুরি): "
+            f"শুধুমাত্র এই নির্দিষ্ট অংশ থেকে MCQ বানাবে — {segment_desc}{_band}। "
+            f"এই page-এর অন্য topic/sub-topic-এর content থেকে কোনো MCQ বানানো "
+            f"সম্পূর্ণ নিষিদ্ধ, এমনকি সেই অংশে ভালো/সহজ content থাকলেও। Topic-এর "
+            f"boundary-এর বাইরের কোনো তথ্য এই MCQ set-এ মিশতে পারবে না।"
+        )
 
     # ── PRIMARY: Gemini ──────────────────────────────────────
     # v4.5: previously tried EVERY configured key at a full 45s timeout each —
@@ -1111,32 +1132,83 @@ async def generate_mcq_from_image(
     return []
 
 
-async def detect_page_topic(img: Image.Image, fallback: str) -> dict:
-    """/pdfs only: identify this page's main-topic and (optional) sub-topic
-    from visual/positional cues, self-verifying spelling/context (page-header
-    text can be misspelled/garbled), using the same Gemini key-rotation pool
-    as MCQ generation. Falls back to the provided default topic on failure.
-    Returns {"main": str, "sub": str|None}."""
+async def detect_page_topics(img: Image.Image, fallback: str) -> dict:
+    """/pdfs only, STEP 1 of the /pdfs pipeline — runs BEFORE MCQ generation.
+    Single call that both identifies every main/sub topic on this page AND
+    self-verifies each one with multiple internal checks, so MCQ generation
+    (which runs after this, per detected segment) never mixes one topic's
+    content into another's MCQs.
+
+    Visual cues used:
+      MAIN TOPIC: bold, larger font than surrounding text, positioned at the
+        top-center of its content block, often has a distinct
+        background/boundary box, may be preceded by a special marker/symbol.
+      SUB TOPIC (optional): smaller font than the main topic, background may
+        be lightly tinted (not full white), often preceded by a colon
+        (: or ঃ), may also be preceded by its own marker/symbol.
+
+    Internal multi-verification (all done within this ONE call, not extra
+    round-trips):
+      1. Visual pass — find every topic/sub-topic candidate by font-size/
+         boldness/position/box/color cues above.
+      2. Spelling/OCR self-check — page-header text can be misspelled or
+         OCR-garbled; re-read the actual body content under each candidate
+         and confirm the name matches the content's real subject before
+         trusting it. Fix the spelling itself if it's clearly wrong.
+      3. Content-boundary check — for each confirmed topic, determine which
+         paragraphs/lines/boxes on the page actually belong to it (start
+         line -> end line, or box/section reference) so that content is
+         never later attributed to the wrong topic.
+      4. Cross-check — if two candidates would end up claiming overlapping
+         content, resolve it: content belongs to the topic whose heading is
+         physically closest above/around it, never split or duplicated.
+
+    Returns:
+      {"segments": [{"main": str, "sub": str|None, "content_desc": str}, ...]}
+      content_desc is a short plain-text description of which part of the
+      page (top/middle/bottom, or box/paragraph reference) belongs to that
+      segment — passed into MCQ generation next so each topic's MCQs are
+      built ONLY from its own bounded content, never leaking into another
+      topic's MCQ set. If the page has one topic only, segments has 1 item.
+      If no topic is found at all, segments is [{"main": fallback, "sub":
+      None, "content_desc": "পুরো page"}]."""
     prompt = (
-        "এই page থেকে MAIN TOPIC এবং (থাকলে) SUB TOPIC আলাদা করে identify করো, এই "
-        "visual cue গুলো দিয়ে চিনবে:\n"
-        "MAIN TOPIC: content-এর উপরে/মাঝখানে (top-center) থাকে, bold + অন্য টেক্সট থেকে "
-        "বড় ফন্টে লেখা, প্রায়ই একটা আলাদা background color/box বা boundary দিয়ে ঘেরা "
-        "থাকে, এর আগে কোনো special marker/symbol/chihno থাকতে পারে।\n"
-        "SUB TOPIC (optional, অনেক সময় নাও থাকতে পারে): main topic-এর ঠিক নিচে, "
-        "main topic-এর ফন্ট থেকে ছোট ফন্টে, background সাধারণত হালকা ভিন্ন color "
-        "(full-white না) হতে পারে, এর আগে প্রায়ই একটা colon (: বা ঃ) থাকে, এর আগেও "
-        "কোনো special marker/symbol/chihno থাকতে পারে।\n"
-        "পাওয়া নামে বানান ভুল/OCR-misread মনে হলে, শুধু লেখা name copy না করে page-এর "
-        "প্রকৃত content পড়ে context দিয়ে verify করো এবং ভুল হলে content বুঝে সঠিক নাম "
-        f"নিজে ঠিক করে দাও। কোনো clear main topic না পেলে main-এ শুধু \"{fallback}\" দাও। "
-        "sub topic না থাকলে sub-এ null দাও।\n\n"
-        'Return ONLY valid JSON, no markdown: {"main":"...","sub":"..." or null}'
+        "STEP-BY-STEP TASK (একটাই call-এ সব শেষ করো, প্রতিটা ধাপ mentally পার হয়ে "
+        "তারপর ফলাফল দাও):\n\n"
+        "ধাপ ১ (VISUAL SCAN): পুরো page স্ক্যান করে সব MAIN TOPIC ও SUB TOPIC candidate "
+        "খুঁজে বের করো এই cue দিয়ে —\n"
+        "  MAIN TOPIC: content-এর উপরে/মাঝখানে (top-center) থাকে, bold + অন্য টেক্সট "
+        "থেকে বড় ফন্টে লেখা, প্রায়ই আলাদা background color/box বা boundary দিয়ে ঘেরা, "
+        "এর আগে special marker/symbol/chihno থাকতে পারে।\n"
+        "  SUB TOPIC (optional): main topic-এর নিচে, main topic-এর ফন্ট থেকে ছোট, "
+        "background হালকা ভিন্ন color হতে পারে (full-white না), এর আগে প্রায়ই colon "
+        "(: বা ঃ) থাকে, এর আগেও marker/symbol থাকতে পারে।\n\n"
+        "ধাপ ২ (SPELLING/CONTEXT SELF-VERIFY, প্রতিটা candidate-এর জন্য বাধ্যতামূলক): "
+        "প্রতিটা candidate name-এর নিচের actual body content পড়ো, দেখো name-টা "
+        "content-এর সাথে সত্যিই মেলে কিনা। নামে বানান ভুল/OCR-misread সন্দেহ হলে, "
+        "content পড়ে বুঝে সঠিক নাম নিজে ঠিক করে দাও (blind copy করবে না)।\n\n"
+        "ধাপ ৩ (CONTENT-BOUNDARY LOCK, প্রতিটা topic-এর জন্য বাধ্যতামূলক): প্রতিটা "
+        "confirmed topic-এর জন্য নির্ধারণ করো ঠিক কোন প্যারাগ্রাফ/লাইন/বক্স/সারণি তার "
+        "নিজের content, এবং সেই content-টুকু page-এর উচ্চতার কোন অংশে আছে তা "
+        "y_start–y_end হিসেবে দাও (0.0=page-এর একদম উপর, 1.0=একদম নিচ, দুটোই "
+        "0.0-1.0 scale-এর decimal) — একটা টপিকের content অন্য টপিকের boundary-তে "
+        "যেন কখনো মিশে না যায়, প্রতিটা segment-এর y-range আলাদা/non-overlapping হতে "
+        "হবে। দুইটা topic-এর content overlap মনে হলে, যে heading content-টার "
+        "সবচেয়ে কাছে/উপরে আছে সেটাই owner — কখনো split বা duplicate করবে না।\n\n"
+        "ধাপ ৪ (FINALIZE): প্রতিটা segment-এর জন্য main, sub (থাকলে), content_desc "
+        "(এক লাইনে — যেমন \"উপরের বক্স\", \"মাঝের ২টি প্যারা\", \"নিচের সারণি\"), "
+        "y_start, y_end দাও।\n\n"
+        f"পুরো page-এ কোনো clear topic/sub-topic না পেলে একটাই segment দাও: "
+        f'main="{fallback}", sub=null, content_desc="পুরো page", y_start=0.0, y_end=1.0।\n\n'
+        'Return ONLY valid JSON, no markdown:\n'
+        '{"segments":[{"main":"...","sub":"..." or null,"content_desc":"...",'
+        '"y_start":0.0,"y_end":1.0}]}'
     )
     _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
     _ordered = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
+    fallback_result = {"segments": [{"main": fallback, "sub": None, "content_desc": "পুরো page", "y_start": 0.0, "y_end": 1.0}]}
     if not _ordered:
-        return {"main": fallback, "sub": None}
+        return fallback_result
     for key in _ordered[:3]:
         try:
             from google import genai as gai
@@ -1152,20 +1224,42 @@ async def detect_page_topic(img: Image.Image, fallback: str) -> dict:
                         types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
                     ]
                 )
-            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=25)
+            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=30)
             raw = (response.text or "").strip()
             raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
             import json as _json
             parsed = _json.loads(raw)
-            main_t = (parsed.get("main") or fallback).strip()[:60] or fallback
-            sub_t = parsed.get("sub")
-            sub_t = sub_t.strip()[:60] if isinstance(sub_t, str) and sub_t.strip() else None
+            segs_raw = parsed.get("segments") or []
+            segments = []
+            for s in segs_raw:
+                main_t = (s.get("main") or fallback).strip()[:60] or fallback
+                sub_t = s.get("sub")
+                sub_t = sub_t.strip()[:60] if isinstance(sub_t, str) and sub_t.strip() else None
+                desc = (s.get("content_desc") or "").strip()[:120]
+                try:
+                    y0 = max(0.0, min(1.0, float(s.get("y_start", 0.0))))
+                    y1 = max(0.0, min(1.0, float(s.get("y_end", 1.0))))
+                    if y1 <= y0:
+                        y0, y1 = 0.0, 1.0
+                except Exception:
+                    y0, y1 = 0.0, 1.0
+                segments.append({"main": main_t, "sub": sub_t, "content_desc": desc, "y_start": y0, "y_end": y1})
+            if not segments:
+                segments = fallback_result["segments"]
             key_rotator.mark_healthy(key)
-            return {"main": main_t, "sub": sub_t}
+            return {"segments": segments}
         except Exception as e:
             logger.warning(f"[TopicDetect] key attempt failed: {e}")
             continue
-    return {"main": fallback, "sub": None}
+    return fallback_result
+
+
+async def detect_page_topic(img: Image.Image, fallback: str) -> dict:
+    """Back-compat wrapper: returns only the FIRST detected segment as
+    {"main":..., "sub":...} for callers not yet using multi-segment mode."""
+    result = await detect_page_topics(img, fallback)
+    first = result["segments"][0]
+    return {"main": first["main"], "sub": first["sub"]}
 
 
 async def generate_mcq_from_text(text: str, topic: str = "MCQ", count: int = 15) -> list:
