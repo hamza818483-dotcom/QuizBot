@@ -11177,7 +11177,8 @@ async def _process_pdf_pages_inner(
                 summary_pages.append({
                     "page": page_num,
                     "mcq_count": len(mcqs),
-                    "first_poll": first_poll_link or "(লিংক পাওয়া যায়নি)"
+                    "first_poll": first_poll_link or "(লিংক পাওয়া যায়নি)",
+                    "cache_id": cache_id
                 })
 
                 exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
@@ -11299,6 +11300,17 @@ async def _process_pdf_pages_inner(
         sum_r = await tg_post("sendMessage", summary_data)
         if sum_r.get("ok"):
             await try_pin_message(channel_id, sum_r["result"]["message_id"])
+            # persist so the DM page-button callback handler can find/update
+            # this channel summary message later (regen flow)
+            try:
+                await sb_exec(lambda: sb.table("pdf_sessions").update({
+                    "summary_msg_id": sum_r["result"]["message_id"],
+                    "summary_pages": summary_pages,
+                    "channel_id": channel_id,
+                    "topic": topic,
+                }).eq("id", session_id).execute())
+            except Exception as e:
+                logger.warning(f"[Summary] pdf_sessions column update failed (may need migration): {e}")
         else:
             logger.warning(f"[Summary] send failed: {sum_r.get('description')}")
 
@@ -11337,15 +11349,41 @@ async def _process_pdf_pages_inner(
             logger.error(f"[PDF-AUTOSEND] Error: {e}")
             await notify_owner(f"⚠️ Auto-PDF সিস্টেমে error — topic: {topic}\nReason: {e}")
 
-    await sb_exec(lambda: sb.table("pdf_sessions").update({"status": "done"}).eq("id", session_id).execute())
+    try:
+        await sb_exec(lambda: sb.table("pdf_sessions").update({
+            "status": "done",
+            "summary_pages": summary_pages,
+            "channel_id": channel_id,
+            "topic": topic,
+        }).eq("id", session_id).execute())
+    except Exception as e:
+        logger.warning(f"[PDF] pdf_sessions update with new columns failed (may need migration): {e}")
+        try:
+            await sb_exec(lambda: sb.table("pdf_sessions").update({"status": "done"}).eq("id", session_id).execute())
+        except Exception as e2:
+            logger.error(f"[PDF] pdf_sessions status update failed: {e2}")
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
+    # Page-number inline button grid (3 per row) in the bot's DM, under the
+    # completion stat — tapping a page regenerates that page's polls
+    # (delete old channel polls + post new ones + update caption/summary link).
+    page_btn_rows = []
+    row = []
+    for p in summary_pages:
+        row.append({"text": f"Page {fmt_page(p['page'])}", "callback_data": f"pdfpg_{session_id}_{p['page']}"})
+        if len(row) == 3:
+            page_btn_rows.append(row)
+            row = []
+    if row:
+        page_btn_rows.append(row)
+    complete_kb = {"inline_keyboard": page_btn_rows} if page_btn_rows else None
     await edit_msg(chat_id, status_msg_id,
         "✅ <b>Processing Complete!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📄 File: {file_name}\n🎯 Topic: {topic}\n"
         f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━")
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=complete_kb)
 
 # ============================================================
 # FEATURE: /pdfm — PDF pagewise MCQ to channel
