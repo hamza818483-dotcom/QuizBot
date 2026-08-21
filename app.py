@@ -6726,8 +6726,14 @@ async def _handle_cut_command_inner(msg: dict):
             out_name = f"{base_name}_p{start_page}-{end_page}.pdf"
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
-            await send_document(chat_id, out_bytes, out_name,
+            send_res = await send_document(chat_id, out_bytes, out_name,
                                  caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)")
+            if not send_res.get("ok"):
+                err = send_res.get("error") or send_res.get("description") or "unknown error"
+                logger.error(f"[Cut] send_document failed: {err}")
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+                return
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "✅ সম্পন্ন!")
         else:
@@ -6746,7 +6752,13 @@ async def _handle_cut_command_inner(msg: dict):
             img_bytes = img_io.getvalue()
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "⏳ Photo পাঠানো হচ্ছে...")
-            await send_photo(chat_id, img_bytes, caption=f"✂️ Page {single_page}/{num_pages}")
+            send_res = await send_photo(chat_id, img_bytes, caption=f"✂️ Page {single_page}/{num_pages}")
+            if not send_res.get("ok"):
+                err = send_res.get("error") or send_res.get("description") or "unknown error"
+                logger.error(f"[Cut] send_photo failed: {err}")
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+                return
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "✅ সম্পন্ন!")
     except Exception as e:
