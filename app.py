@@ -3218,6 +3218,57 @@ def _chok_box_coverage_note(img, mcqs: list) -> str:
     )
 
 
+def _extra_page_has_highlight_marks(img) -> bool:
+    """Simple, deterministic (non-LLM) code-level check: does this page
+    image contain ANY highlighter-colored pixels at all (yellow, green,
+    pink/magenta, orange, blue/cyan marker colors)? Uses HSV color
+    thresholding via OpenCV -- fast, no API call.
+
+    This is intentionally a COARSE page-level gate, not per-line OCR
+    matching (that would need a much heavier OCR+spatial-overlap
+    pipeline). It only answers: "is there highlighter ink anywhere on
+    this page?" -- used as a soft cross-check alongside the LLM's own
+    marking claim, since pen-only marking (no highlighter) is legitimate
+    and this check can't reliably see pen ink (too similar to normal
+    print/ruling lines).
+
+    Returns True if highlighter marks are detected OR if detection
+    itself fails/is unavailable (fail-open, never block valid pages).
+    """
+    try:
+        import numpy as np
+        import cv2
+        from pdf_handler import image_to_base64
+        b64 = image_to_base64(img)
+        arr = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
+        cv_img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if cv_img is None:
+            return True  # fail-open
+        hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
+        # Broad hue ranges covering common highlighter colors, with
+        # moderately high saturation+value (highlighter ink is bright and
+        # saturated, unlike printed grayscale text or faint pen ink).
+        ranges = [
+            ((15, 60, 120), (45, 255, 255)),   # yellow/orange
+            ((45, 60, 120), (85, 255, 255)),   # green
+            ((85, 60, 120), (130, 255, 255)),  # cyan/blue
+            ((140, 60, 120), (170, 255, 255)), # pink/magenta
+        ]
+        total_mask = None
+        for lo, hi in ranges:
+            mask = cv2.inRange(hsv, np.array(lo), np.array(hi))
+            total_mask = mask if total_mask is None else (total_mask | mask)
+        if total_mask is None:
+            return True
+        marked_ratio = float((total_mask > 0).sum()) / float(total_mask.size)
+        # Even a tiny fraction of highlighter pixels (>=0.05% of page) is
+        # enough to confirm SOME highlight exists somewhere on the page.
+        return marked_ratio >= 0.0005
+    except Exception as e:
+        logger.warning(f"[Extra HighlightCheck] failed, fail-open: {e}")
+        return True
+
+
 def _extra_code_level_3pass_verify(mcqs: list, page_num=None) -> list:
     """/extra CODE-LEVEL 3-pass verification -- runs entirely in Python on
     the SAME call's already-returned MCQs, no extra API call. Three
@@ -9884,6 +9935,8 @@ async def _extra_gen_from_images_batch(imgs: list, topic: str) -> dict:
             out = _validate_mcq_structure(out)
             out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
             out = _extra_code_level_3pass_verify(out, page_num=idx)
+            if out and idx - 1 < len(imgs) and not _extra_page_has_highlight_marks(imgs[idx - 1]):
+                logger.info(f"[Extra HighlightCheck] batch page_index {idx}: {len(out)} MCQ(s) but NO highlighter color detected -- likely pen-only marks (not blocked)")
             by_index[idx] = out
         return by_index
     except Exception as e:
@@ -9950,6 +10003,14 @@ async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclu
     out = _validate_mcq_structure(out)
     out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
     out = _extra_code_level_3pass_verify(out, page_num=page_num)
+
+    if out and not _extra_page_has_highlight_marks(img):
+        # No highlighter-colored ink detected anywhere on this page at
+        # all -- if the MCQs also aren't from pen-marks (can't check pen
+        # reliably here), flag it for visibility. Soft signal only: pen
+        # underline/circle marks are legitimate and this check can't see
+        # those, so we don't hard-drop, just log for review.
+        logger.info(f"[Extra HighlightCheck] page {page_num}: {len(out)} MCQ(s) generated but NO highlighter color detected on page -- likely pen-only marks (not blocked)")
 
     if out:
         out = await _extra_marking_audit(out, img, topic, page_num)
