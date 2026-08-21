@@ -307,6 +307,8 @@ MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
 
 🟥Overall Instructions:
 -🔒 TWO-MODE RULE (check first): যদি Image-এ আগে থেকেই MCQ (question+options ফরম্যাটে) থাকে, সেগুলো 100% VERBATIM/হুবহু extract করবে — নতুন কোনো MCQ generate করবে না, question/option-এর wording পরিবর্তন করবে না। যদি Image-এ কোনো MCQ না থেকে শুধু Information/text থাকে, তখনই সেই content থেকে নতুন MCQ বানাবে।
+-🔒 NO-DUPLICATE-FROM-EXISTING-MCQ (MODE A এ absolute): page-এ আগে থেকেই থাকা কোনো question-কে ভিন্নভাবে সাজিয়ে/rephrase করে আরেকটা নতুন MCQ বানানো সম্পূর্ণ নিষিদ্ধ — একই question দুইবার (verbatim বা reworded) থাকবে না।
+-🔒 NO-MCQ-FROM-ANSWER/EXPLANATION-TEXT: page-এ কোনো প্রশ্নের answer/explanation/ব্যাখ্যা অংশ (paragraph-style লেখা যা কোনো নির্দিষ্ট প্রশ্নের উত্তর ব্যাখ্যা করছে, নিজে MCQ ফরম্যাটে (question+options) না) থাকলে সেই ব্যাখ্যা টেক্সট থেকে সরাসরি নতুন MCQ generate করা নিষিদ্ধ — শুধু actual informational/content text (যা কোনো প্রশ্নের answer/explanation না) থেকেই নতুন MCQ বানানো যাবে।
 -একই পেইজে MCQ থাকলে সেই পেইজ পুরোটাই MODE A (verbatim extract) — পাশের সাধারণ টেক্সট থেকে অতিরিক্ত নতুন MCQ বানানো যাবে না।
 -🔒 SOURCE-LOCK (absolute): question ও ৪টি option-এর মূল তথ্য অবশ্যই এই page-এর actual content থেকে আসতে হবে — বাইরের সাধারণ জ্ঞান/knowledge দিয়ে question/option বানানো সম্পূর্ণ নিষিদ্ধ। শুধু answer letter (প্রমাণ না পেলে) আর explanation-এর extra detail-এই সীমিত পরিমাণে own knowledge ব্যবহার করা যাবে, question/option কখনো না।
 -🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST, checked/processed before any other normal content on the page):
@@ -354,6 +356,8 @@ MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
 
 🟥Overall Instructions:
 -🔒 TWO-MODE RULE (check first): যদি Image-এ আগে থেকেই MCQ (question+options ফরম্যাটে) থাকে, সেগুলো 100% VERBATIM/হুবহু extract করবে — নতুন কোনো MCQ generate করবে না, question/option-এর wording পরিবর্তন করবে না। যদি Image-এ কোনো MCQ না থেকে শুধু Information/text থাকে, তখনই সেই content থেকে নতুন MCQ বানাবে।
+-🔒 NO-DUPLICATE-FROM-EXISTING-MCQ (MODE A এ absolute): page-এ আগে থেকেই থাকা কোনো question-কে ভিন্নভাবে সাজিয়ে/rephrase করে আরেকটা নতুন MCQ বানানো সম্পূর্ণ নিষিদ্ধ — একই question দুইবার (verbatim বা reworded) থাকবে না।
+-🔒 NO-MCQ-FROM-ANSWER/EXPLANATION-TEXT: page-এ কোনো প্রশ্নের answer/explanation/ব্যাখ্যা অংশ (paragraph-style লেখা যা কোনো নির্দিষ্ট প্রশ্নের উত্তর ব্যাখ্যা করছে, নিজে MCQ ফরম্যাটে (question+options) না) থাকলে সেই ব্যাখ্যা টেক্সট থেকে সরাসরি নতুন MCQ generate করা নিষিদ্ধ — শুধু actual informational/content text (যা কোনো প্রশ্নের answer/explanation না) থেকেই নতুন MCQ বানানো যাবে।
 -একই পেইজে MCQ থাকলে সেই পেইজ পুরোটাই MODE A (verbatim extract) — পাশের সাধারণ টেক্সট থেকে অতিরিক্ত নতুন MCQ বানানো যাবে না।
 -🔒 SOURCE-LOCK (absolute): question ও ৪টি option-এর মূল তথ্য অবশ্যই এই page-এর actual content থেকে আসতে হবে — বাইরের সাধারণ জ্ঞান/knowledge দিয়ে question/option বানানো সম্পূর্ণ নিষিদ্ধ। শুধু answer letter (প্রমাণ না পেলে) আর explanation-এর extra detail-এই সীমিত পরিমাণে own knowledge ব্যবহার করা যাবে, question/option কখনো না।
 -🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST, checked/processed before any other normal content on the page):
@@ -434,6 +438,7 @@ PDFS_TOPIC_MCQ_PROMPT = """📝 Special MCQ TYPE: /pdfs Topic-wise Generation (S
 ═══ ধাপ B: প্রতিটা confirmed topic/sub-topic-এর জন্য আলাদা করে MCQ বানাও ═══
 🔒 SOURCE-LOCK + TOPIC-LOCK (ABSOLUTE): প্রতিটা MCQ শুধুমাত্র তার নিজের topic-এর ধাপ-A-তে lock করা content-boundary থেকেই বানাবে। একটা topic-এর MCQ-তে অন্য topic-এর content/fact কখনো মিশতে পারবে না, এমনকি অন্য topic-এ সহজ/ভালো content থাকলেও। প্রতিটা MCQ output-এ অবশ্যই সেটা কোন main_topic ও sub_topic থেকে এসেছে সেটা সঠিকভাবে লিখতে হবে (ধাপ A-তে ফাইনাল করা নাম অনুযায়ী, exact same spelling) — ভুল topic-এ MCQ tag করা কঠোরভাবে নিষিদ্ধ, কারণ এই ট্যাগ দিয়েই পরে output topic-wise ভাগ হবে।
 -🔒 TWO-MODE RULE: page-এ আগে থেকেই MCQ (question+options) থাকলে সেগুলো 100% VERBATIM extract করবে, নইলে content থেকে নতুন MCQ বানাবে।
+-🔒 NO-DUPLICATE-FROM-EXISTING-MCQ: existing question rephrase করে নতুন MCQ বানানো নিষিদ্ধ। NO-MCQ-FROM-ANSWER/EXPLANATION-TEXT: কোনো প্রশ্নের answer/explanation paragraph থেকে সরাসরি নতুন MCQ বানানো নিষিদ্ধ, শুধু actual info-content থেকেই বানাবে।
 -🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST): হাইলাইটেড/মার্ক করা/আন্ডারলাইন করা লাইন থেকে MCQ সবার আগে বানাবে (মিস করা যাবে না), তারপর বাকি normal content থেকে।
 -প্রতিটা topic থেকে গড়ে {per_topic_count} টি MCQ target করো (topic-এ content বেশি/কম থাকলে স্বাভাবিকভাবে কমবেশি হতে পারে, কিন্তু কোনো topic 0 রাখা যাবে না যদি তার নিজের content থাকে)।
 -টপিকের নাম/অধ্যায়ের নাম/হেডলাইন/পেইজ সংখ্যা/navigation label থেকে MCQ বানাবে না।
