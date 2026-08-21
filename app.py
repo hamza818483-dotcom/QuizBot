@@ -12114,56 +12114,40 @@ async def _process_pdf_pages_inner(
             _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
 
         try:
-            _page_segments = None  # /pdfs only: list of {"main","sub","content_desc","y_start","y_end"}
+            _page_segments = None  # /pdfs only: derived from returned MCQ tags, for caption/summary display
             if not skip_generate:
                 if _PDFS_MODE.get():
-                    # STEP 1 (MUST run before any MCQ generation): identify
-                    # every main/sub topic on this page + verify each one +
-                    # lock its content boundary — so we know EXACTLY which
-                    # topic owns which portion of the page BEFORE a single
-                    # MCQ is generated. This prevents one topic's content
-                    # from ever leaking into another topic's MCQ set.
+                    # /pdfs SINGLE-CALL pipeline: ONE Gemini call per page
+                    # does topic-detection + self-verification + content-
+                    # boundary lock + MCQ generation together (see
+                    # pdf_handler.PDFS_TOPIC_MCQ_PROMPT /
+                    # generate_pdfs_topic_mcqs). No image cropping, no
+                    # separate detect-then-generate calls — full page is
+                    # read once, and the model tags every MCQ with the
+                    # exact topic/sub-topic it verified that MCQ's content
+                    # against, so one topic's content can never end up
+                    # under another topic's MCQ set.
                     try:
-                        from pdf_handler import detect_page_topics
-                        _td = await asyncio.wait_for(
-                            detect_page_topics(img, "প্রাক্টিস প্রশ্ন"), timeout=30)
-                        _page_segments = _td["segments"]
-                    except Exception as _td_e:
-                        logger.warning(f"[PDFS] topic detect failed page {page_num}: {_td_e}")
-                        _page_segments = [{"main": "প্রাক্টিস প্রশ্ন", "sub": None,
-                                            "content_desc": "পুরো page", "y_start": 0.0, "y_end": 1.0}]
+                        from pdf_handler import generate_pdfs_topic_mcqs
+                        mcqs = await asyncio.wait_for(
+                            generate_pdfs_topic_mcqs(img, topic, page_num, mcq_count_hint=(mcq_count or 15)),
+                            timeout=120)
+                    except Exception as _pdfs_e:
+                        logger.warning(f"[PDFS] generation failed page {page_num}: {_pdfs_e}")
+                        mcqs = []
+                    gen_error = None if mcqs else "topic-wise generation থেকে 0 MCQ এসেছে"
+                    # derive the page's topic list (for caption/summary use)
+                    # straight from what the model actually tagged its own
+                    # MCQs with — single source of truth, no separate call.
+                    _seen = []
+                    _seen_set = set()
+                    for _m in mcqs:
+                        _key = (_m.get("_pdfs_topic"), _m.get("_pdfs_subtopic"))
+                        if _key not in _seen_set:
+                            _seen_set.add(_key)
+                            _seen.append({"main": _key[0], "sub": _key[1]})
+                    _page_segments = _seen or [{"main": topic, "sub": None}]
                     _pdfs_page_topics[page_num] = _page_segments
-
-                    # STEP 2: generate MCQs PER SEGMENT (not per page) — each
-                    # call is hard-locked (prompt segment-lock + y-band) to
-                    # only its own already-verified content, so one topic's
-                    # MCQs can never contain another topic's content on the
-                    # same page.
-                    mcqs = []
-                    gen_error = None
-                    _seg_count = max(1, len(_page_segments))
-                    # average ~15 MCQ per page total (per user spec) — split
-                    # roughly evenly across this page's detected segments so
-                    # multi-topic pages don't multiply total MCQ count.
-                    _per_seg_count = mcq_count if mcq_count else max(3, round(15 / _seg_count))
-                    for _seg in _page_segments:
-                        try:
-                            _seg_mcqs = await asyncio.wait_for(
-                                generate_mcq_from_image(
-                                    img, _seg["main"], page_num, _per_seg_count,
-                                    segment_desc=_seg.get("content_desc") or "পুরো page",
-                                    segment_y_start=_seg.get("y_start"),
-                                    segment_y_end=_seg.get("y_end"),
-                                ), timeout=90)
-                        except Exception as _seg_e:
-                            logger.warning(f"[PDFS] segment gen failed page {page_num} topic={_seg['main']}: {_seg_e}")
-                            _seg_mcqs = []
-                        for _m in (_seg_mcqs or []):
-                            _m["_pdfs_topic"] = _seg["main"]
-                            _m["_pdfs_subtopic"] = _seg.get("sub")
-                        mcqs.extend(_seg_mcqs or [])
-                    if not mcqs:
-                        gen_error = "সব topic segment-এই 0 MCQ এসেছে"
                 else:
                     # Strictly serial by user request: each page's generation
                     # AND sending (polls or image+caption) must fully finish

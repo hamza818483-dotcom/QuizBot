@@ -401,6 +401,146 @@ Page: {page}
 MUST Return ONLY valid JSON array, no markdown:
 [{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"...","exp_bbox":[100,200,900,350]}}]"""
 
+
+# ============================================================
+# /pdfs: SINGLE-CALL TOPIC-DETECT + SEGMENT-LOCKED MCQ GENERATION
+# ============================================================
+# Per user requirement: exactly ONE Gemini call per page must do everything —
+# detect every main/sub topic (with OCR+content-based self-verify), lock each
+# topic's content boundary, AND generate that topic's MCQs strictly from its
+# own content, all in one response. No image cropping (would risk losing
+# content at crop edges) — the model reads the FULL page image once and
+# self-organizes its own MCQ output by topic, tagging each MCQ with which
+# topic/sub-topic it came from. This makes leaking one topic's content into
+# another topic's MCQ set an internal-consistency failure the model itself
+# must avoid while writing the single JSON response, and the code-level
+# post-filter below (_pdfs_reconcile_mcq_topics) double-checks the tags
+# against the model's own detected topic list before anything is used.
+PDFS_TOPIC_MCQ_PROMPT = """📝 Special MCQ TYPE: /pdfs Topic-wise Generation (SINGLE CALL — topic detection + MCQ generation together)
+
+🎯 এই কাজটা ২টা ধাপে করবে, কিন্তু একটাই response-এ:
+
+═══ ধাপ A: TOPIC DETECTION + SELF-VERIFY (MCQ বানানোর আগে বাধ্যতামূলক) ═══
+পুরো page স্ক্যান করে সব MAIN TOPIC ও SUB TOPIC identify করো এই cue দিয়ে:
+- MAIN TOPIC: content-এর উপরে/মাঝখানে (top-center), bold + অন্য টেক্সট থেকে বড় ফন্ট, প্রায়ই আলাদা background/box/boundary দিয়ে ঘেরা, আগে special marker/symbol থাকতে পারে।
+- SUB TOPIC (optional): main topic-এর নিচে, ছোট ফন্ট, background হালকা ভিন্ন color হতে পারে (full-white না), আগে প্রায়ই colon (: বা ঃ), আগে marker/symbol থাকতে পারে।
+
+প্রতিটা candidate-এর জন্য বাধ্যতামূলক VERIFY (সন্দেহ থাকুক বা না থাকুক সবসময়): heading OCR/visual read করে raw name বের করো, তারপর সেই heading-এর নিচের/আশেপাশের actual body content সম্পূর্ণ পড়ে বুঝে নাও content আসলে কী বিষয়ে। raw name আর content-এর প্রকৃত বিষয় না মিললে (বানান ভুল/OCR-misread/garbled), content বুঝে সঠিক নাম নিজে ঠিক করে দাও — content-ই আসল সত্য, heading-এর লেখা শুধু hint, blind copy কখনো না।
+
+প্রতিটা confirmed topic-এর জন্য নির্ধারণ করো ঠিক কোন প্যারাগ্রাফ/লাইন/বক্স/সারণি তার নিজের content (content-boundary lock) — দুইটা topic-এর content কখনো overlap/split/duplicate করা যাবে না; overlap মনে হলে যে heading content-টার সবচেয়ে কাছে/উপরে সেটাই owner।
+
+কোনো clear topic/sub-topic না পেলে single virtual topic ধরো: main="{topic}", sub=null (পুরো page-ই তার content)।
+
+═══ ধাপ B: প্রতিটা confirmed topic/sub-topic-এর জন্য আলাদা করে MCQ বানাও ═══
+🔒 SOURCE-LOCK + TOPIC-LOCK (ABSOLUTE): প্রতিটা MCQ শুধুমাত্র তার নিজের topic-এর ধাপ-A-তে lock করা content-boundary থেকেই বানাবে। একটা topic-এর MCQ-তে অন্য topic-এর content/fact কখনো মিশতে পারবে না, এমনকি অন্য topic-এ সহজ/ভালো content থাকলেও। প্রতিটা MCQ output-এ অবশ্যই সেটা কোন main_topic ও sub_topic থেকে এসেছে সেটা সঠিকভাবে লিখতে হবে (ধাপ A-তে ফাইনাল করা নাম অনুযায়ী, exact same spelling) — ভুল topic-এ MCQ tag করা কঠোরভাবে নিষিদ্ধ, কারণ এই ট্যাগ দিয়েই পরে output topic-wise ভাগ হবে।
+-🔒 TWO-MODE RULE: page-এ আগে থেকেই MCQ (question+options) থাকলে সেগুলো 100% VERBATIM extract করবে, নইলে content থেকে নতুন MCQ বানাবে।
+-🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST): হাইলাইটেড/মার্ক করা/আন্ডারলাইন করা লাইন থেকে MCQ সবার আগে বানাবে (মিস করা যাবে না), তারপর বাকি normal content থেকে।
+-প্রতিটা topic থেকে গড়ে {per_topic_count} টি MCQ target করো (topic-এ content বেশি/কম থাকলে স্বাভাবিকভাবে কমবেশি হতে পারে, কিন্তু কোনো topic 0 রাখা যাবে না যদি তার নিজের content থাকে)।
+-টপিকের নাম/অধ্যায়ের নাম/হেডলাইন/পেইজ সংখ্যা/navigation label থেকে MCQ বানাবে না।
+-প্রতিটা অপশন actual factual content হতে হবে, হ্যাঁ/না/সত্য/মিথ্যা না।
+💥প্রশ্ন: ছোট (১/১.৫/২ লাইন)
+💥অপশন: ৪টি, সঠিক উত্তর একটিই
+💥উত্তর: A/B/C/D — বিভিন্ন position-এ ছড়িয়ে দিবে, সব একই letter না।
+🔒 ANSWER RELEVANCY SANITY CHECK: page-এ answer আগে থেকে marked থাকলে, সেটা question+options-এর সাথে logically সঠিক কিনা re-check করো; স্পষ্ট mismatch হলেই শুধু নিজের জ্ঞান দিয়ে override করবে।
+💥ব্যাখ্যা (MAX 165 WORDS মূল অংশ): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, সব মিলিয়ে ১৬৫ শব্দের মধ্যে; না আঁটলে extra detail নিচে আলাদা লাইনে, মূল অংশ কখনো truncate না। শুধু page content থেকে, বাইরের knowledge না। source-reference phrase ("টেক্সট অনুসারে" ইত্যাদি) নিষিদ্ধ।
+💥exp_bbox: প্রমাণ visible থাকলে bounding box [x_min,y_min,x_max,y_max], 0-1000 scale normalize করে, নইলে null।
+
+🌐 LANGUAGE RULE: source-এর ভাষায় (বাংলা হলে বাংলা, ইংরেজি হলে ইংরেজি — translate করবে না)।
+
+Page: {page}
+
+MUST Return ONLY valid JSON array, no markdown, EVERY item MUST include main_topic + sub_topic:
+[{{"main_topic":"...","sub_topic":"..." or null,"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"...","exp_bbox":[100,200,900,350]}}]"""
+
+
+def _pdfs_reconcile_mcq_topics(mcqs: list, fallback: str) -> list:
+    """Code-level backstop (not prompt-only) — runs on every /pdfs generation
+    result before it's used anywhere else. Ensures every MCQ has a clean,
+    non-empty main_topic (never silently dropped into the wrong bucket by a
+    blank/garbled tag), normalizes sub_topic (blank/whitespace -> None), and
+    strips the internal main_topic/sub_topic keys into the standard
+    _pdfs_topic/_pdfs_subtopic keys app.py's grouping code expects — so a
+    single point of truth decides the final topic bucket for every MCQ,
+    instead of trusting the raw model output directly."""
+    out = []
+    for m in (mcqs or []):
+        if not isinstance(m, dict) or not m.get("question"):
+            continue
+        main_t = (m.get("main_topic") or "").strip()
+        if not main_t:
+            main_t = fallback
+        sub_t = m.get("sub_topic")
+        sub_t = sub_t.strip() if isinstance(sub_t, str) and sub_t.strip() else None
+        m["_pdfs_topic"] = main_t[:60]
+        m["_pdfs_subtopic"] = sub_t[:60] if sub_t else None
+        m.pop("main_topic", None)
+        m.pop("sub_topic", None)
+        out.append(m)
+    return out
+
+
+async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_count_hint: int = 15) -> list:
+    """/pdfs SINGLE-CALL pipeline: exactly ONE Gemini call per page does
+    topic-detection + self-verification + content-boundary lock + MCQ
+    generation together (see PDFS_TOPIC_MCQ_PROMPT above). Falls through the
+    same Gemini key-rotation pool as the normal /pdf path — tries every live
+    key before returning empty (caller's normal Groq/OpenRouter fallback
+    chain then applies exactly as it does for /pdf). Returns a flat list of
+    MCQ dicts, each already carrying _pdfs_topic/_pdfs_subtopic (see
+    _pdfs_reconcile_mcq_topics) so app.py's per-page loop and end-of-job
+    topic grouping can use them directly with zero extra topic-detect calls."""
+    prompt = PDFS_TOPIC_MCQ_PROMPT.format(topic=topic, page=str(page).zfill(2), per_topic_count=mcq_count_hint)
+    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+    _ordered = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
+    if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
+        logger.warning(f"[PDFS] All {len(key_rotator.keys)} Gemini keys daily-exhausted — returning empty (caller tries Groq/other fallbacks)")
+        return []
+    max_retries = len(_ordered) if _ordered else 5
+    for attempt in range(max_retries):
+        key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+        key_rotator.record_call(key)
+        try:
+            from google import genai as gai
+            from google.genai import types
+            client = gai.Client(api_key=key)
+            img_b64 = image_to_base64(img)
+
+            def _call():
+                return client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=[
+                        types.Part.from_text(text=prompt),
+                        types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                    ]
+                )
+            _attempt_timeout = 60 if attempt == 0 else 30
+            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
+            valid = _parse_mcq_json(response.text)
+            if not valid:
+                logger.warning(f"[PDFS] Page {page}: 0 valid MCQs parsed (attempt {attempt+1}) — likely malformed/truncated JSON")
+            else:
+                valid = _mcq_hallucination_filter(valid, img)
+                valid = _pdfs_reconcile_mcq_topics(valid, topic)
+            key_rotator.mark_healthy(key)
+            logger.info(f"[PDFS] Page {page}: {len(valid)} MCQs across "
+                        f"{len(set(m['_pdfs_topic'] for m in valid))} topic(s) (attempt {attempt+1})")
+            return valid
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
+                key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
+            elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
+                key_rotator.mark_banned(key)
+            else:
+                logger.warning(f"[PDFS] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+            continue
+    logger.warning(f"[PDFS] All keys failed for page {page} — returning empty (caller will try Groq/other fallbacks)")
+    return []
+
+
 # ============================================================
 # PDF TO IMAGES
 # ============================================================
@@ -949,9 +1089,6 @@ async def generate_mcq_from_image(
     topic: str,
     page: int,
     mcq_count: int = None,
-    segment_desc: str = None,
-    segment_y_start: float = None,
-    segment_y_end: float = None,
 ) -> list:
     if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
         c_min, c_max = mcq_count
@@ -969,24 +1106,6 @@ async def generate_mcq_from_image(
         )
     else:
         prompt = MCQ_PROMPT_MAX.format(topic=topic, page=str(page).zfill(2))
-
-    if segment_desc:
-        # /pdfs multi-topic pages: MCQ generation must stay strictly inside
-        # this segment's already-verified content boundary (from
-        # detect_page_topics, STEP 1 — runs BEFORE this call) — never pull
-        # in another topic's content on the same page, and never generate
-        # anything from outside this segment even if the rest of the page
-        # has more/easier content.
-        _band = ""
-        if segment_y_start is not None and segment_y_end is not None:
-            _band = f" (page-এর উচ্চতার {segment_y_start:.2f}–{segment_y_end:.2f} অংশে, 0.0=উপর, 1.0=নিচ)"
-        prompt += (
-            f"\n\n🔒 SEGMENT-LOCK (ABSOLUTE, page-এ একাধিক topic থাকায় জরুরি): "
-            f"শুধুমাত্র এই নির্দিষ্ট অংশ থেকে MCQ বানাবে — {segment_desc}{_band}। "
-            f"এই page-এর অন্য topic/sub-topic-এর content থেকে কোনো MCQ বানানো "
-            f"সম্পূর্ণ নিষিদ্ধ, এমনকি সেই অংশে ভালো/সহজ content থাকলেও। Topic-এর "
-            f"boundary-এর বাইরের কোনো তথ্য এই MCQ set-এ মিশতে পারবে না।"
-        )
 
     # ── PRIMARY: Gemini ──────────────────────────────────────
     # v4.5: previously tried EVERY configured key at a full 45s timeout each —
@@ -1131,139 +1250,6 @@ async def generate_mcq_from_image(
     # before app.py ever got a chance to try Groq.
     return []
 
-
-async def detect_page_topics(img: Image.Image, fallback: str) -> dict:
-    """/pdfs only, STEP 1 of the /pdfs pipeline — runs BEFORE MCQ generation.
-    Single call that both identifies every main/sub topic on this page AND
-    self-verifies each one with multiple internal checks, so MCQ generation
-    (which runs after this, per detected segment) never mixes one topic's
-    content into another's MCQs.
-
-    Visual cues used:
-      MAIN TOPIC: bold, larger font than surrounding text, positioned at the
-        top-center of its content block, often has a distinct
-        background/boundary box, may be preceded by a special marker/symbol.
-      SUB TOPIC (optional): smaller font than the main topic, background may
-        be lightly tinted (not full white), often preceded by a colon
-        (: or ঃ), may also be preceded by its own marker/symbol.
-
-    Internal multi-verification (all done within this ONE call, not extra
-    round-trips):
-      1. Visual pass — find every topic/sub-topic candidate by font-size/
-         boldness/position/box/color cues above.
-      2. Spelling/OCR self-check — page-header text can be misspelled or
-         OCR-garbled; re-read the actual body content under each candidate
-         and confirm the name matches the content's real subject before
-         trusting it. Fix the spelling itself if it's clearly wrong.
-      3. Content-boundary check — for each confirmed topic, determine which
-         paragraphs/lines/boxes on the page actually belong to it (start
-         line -> end line, or box/section reference) so that content is
-         never later attributed to the wrong topic.
-      4. Cross-check — if two candidates would end up claiming overlapping
-         content, resolve it: content belongs to the topic whose heading is
-         physically closest above/around it, never split or duplicated.
-
-    Returns:
-      {"segments": [{"main": str, "sub": str|None, "content_desc": str}, ...]}
-      content_desc is a short plain-text description of which part of the
-      page (top/middle/bottom, or box/paragraph reference) belongs to that
-      segment — passed into MCQ generation next so each topic's MCQs are
-      built ONLY from its own bounded content, never leaking into another
-      topic's MCQ set. If the page has one topic only, segments has 1 item.
-      If no topic is found at all, segments is [{"main": fallback, "sub":
-      None, "content_desc": "পুরো page"}]."""
-    prompt = (
-        "STEP-BY-STEP TASK (একটাই call-এ সব শেষ করো, প্রতিটা ধাপ mentally পার হয়ে "
-        "তারপর ফলাফল দাও):\n\n"
-        "ধাপ ১ (VISUAL SCAN): পুরো page স্ক্যান করে সব MAIN TOPIC ও SUB TOPIC candidate "
-        "খুঁজে বের করো এই cue দিয়ে —\n"
-        "  MAIN TOPIC: content-এর উপরে/মাঝখানে (top-center) থাকে, bold + অন্য টেক্সট "
-        "থেকে বড় ফন্টে লেখা, প্রায়ই আলাদা background color/box বা boundary দিয়ে ঘেরা, "
-        "এর আগে special marker/symbol/chihno থাকতে পারে।\n"
-        "  SUB TOPIC (optional): main topic-এর নিচে, main topic-এর ফন্ট থেকে ছোট, "
-        "background হালকা ভিন্ন color হতে পারে (full-white না), এর আগে প্রায়ই colon "
-        "(: বা ঃ) থাকে, এর আগেও marker/symbol থাকতে পারে।\n\n"
-        "ধাপ ২ (OCR + CONTENT-BASED FINAL VERIFY, প্রতিটা candidate-এর জন্য বাধ্যতামূলক, "
-        "সন্দেহ থাকুক বা না থাকুক সবসময় করবে): প্রথমে candidate heading-টা OCR/visual "
-        "read করে যা পাও সেটাই raw name। এরপর সেই heading-এর নিচে/আশেপাশের actual body "
-        "content সম্পূর্ণ পড়ো এবং বুঝে নাও প্রকৃতপক্ষে content-টা কী বিষয়ে। raw OCR "
-        "name আর content-এর প্রকৃত বিষয় — এই দুটো মিলিয়ে ফাইনাল করবে: মিলে গেলে raw name-ই "
-        "রাখবে, না মিললে (বানান ভুল/OCR-misread/garbled) content পড়ে বুঝে সঠিক নাম "
-        "নিজে ঠিক করে দাও (blind copy কখনো করবে না — content-ই আসল সত্য, heading-এর "
-        "লেখা শুধু hint)।\n\n"
-        "ধাপ ৩ (CONTENT-BOUNDARY LOCK, প্রতিটা topic-এর জন্য বাধ্যতামূলক): প্রতিটা "
-        "confirmed topic-এর জন্য নির্ধারণ করো ঠিক কোন প্যারাগ্রাফ/লাইন/বক্স/সারণি তার "
-        "নিজের content, এবং সেই content-টুকু page-এর উচ্চতার কোন অংশে আছে তা "
-        "y_start–y_end হিসেবে দাও (0.0=page-এর একদম উপর, 1.0=একদম নিচ, দুটোই "
-        "0.0-1.0 scale-এর decimal) — একটা টপিকের content অন্য টপিকের boundary-তে "
-        "যেন কখনো মিশে না যায়, প্রতিটা segment-এর y-range আলাদা/non-overlapping হতে "
-        "হবে। দুইটা topic-এর content overlap মনে হলে, যে heading content-টার "
-        "সবচেয়ে কাছে/উপরে আছে সেটাই owner — কখনো split বা duplicate করবে না।\n\n"
-        "ধাপ ৪ (FINALIZE): প্রতিটা segment-এর জন্য main, sub (থাকলে), content_desc "
-        "(এক লাইনে — যেমন \"উপরের বক্স\", \"মাঝের ২টি প্যারা\", \"নিচের সারণি\"), "
-        "y_start, y_end দাও।\n\n"
-        f"পুরো page-এ কোনো clear topic/sub-topic না পেলে একটাই segment দাও: "
-        f'main="{fallback}", sub=null, content_desc="পুরো page", y_start=0.0, y_end=1.0।\n\n'
-        'Return ONLY valid JSON, no markdown:\n'
-        '{"segments":[{"main":"...","sub":"..." or null,"content_desc":"...",'
-        '"y_start":0.0,"y_end":1.0}]}'
-    )
-    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
-    _ordered = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
-    fallback_result = {"segments": [{"main": fallback, "sub": None, "content_desc": "পুরো page", "y_start": 0.0, "y_end": 1.0}]}
-    if not _ordered:
-        return fallback_result
-    for key in _ordered[:3]:
-        try:
-            from google import genai as gai
-            from google.genai import types
-            client = gai.Client(api_key=key)
-            img_b64 = image_to_base64(img)
-
-            def _call():
-                return client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=[
-                        types.Part.from_text(text=prompt),
-                        types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
-                    ]
-                )
-            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=30)
-            raw = (response.text or "").strip()
-            raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
-            import json as _json
-            parsed = _json.loads(raw)
-            segs_raw = parsed.get("segments") or []
-            segments = []
-            for s in segs_raw:
-                main_t = (s.get("main") or fallback).strip()[:60] or fallback
-                sub_t = s.get("sub")
-                sub_t = sub_t.strip()[:60] if isinstance(sub_t, str) and sub_t.strip() else None
-                desc = (s.get("content_desc") or "").strip()[:120]
-                try:
-                    y0 = max(0.0, min(1.0, float(s.get("y_start", 0.0))))
-                    y1 = max(0.0, min(1.0, float(s.get("y_end", 1.0))))
-                    if y1 <= y0:
-                        y0, y1 = 0.0, 1.0
-                except Exception:
-                    y0, y1 = 0.0, 1.0
-                segments.append({"main": main_t, "sub": sub_t, "content_desc": desc, "y_start": y0, "y_end": y1})
-            if not segments:
-                segments = fallback_result["segments"]
-            key_rotator.mark_healthy(key)
-            return {"segments": segments}
-        except Exception as e:
-            logger.warning(f"[TopicDetect] key attempt failed: {e}")
-            continue
-    return fallback_result
-
-
-async def detect_page_topic(img: Image.Image, fallback: str) -> dict:
-    """Back-compat wrapper: returns only the FIRST detected segment as
-    {"main":..., "sub":...} for callers not yet using multi-segment mode."""
-    result = await detect_page_topics(img, fallback)
-    first = result["segments"][0]
-    return {"main": first["main"], "sub": first["sub"]}
 
 
 async def generate_mcq_from_text(text: str, topic: str = "MCQ", count: int = 15) -> list:
