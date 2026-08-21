@@ -4597,6 +4597,42 @@ UNAUTH_MSG = (
     "🚀 WhatsApp: wa.me/8801999681290"
 )
 
+# SECURITY: tracks repeated unauthorized restricted-command attempts per uid
+# so a burst of probing (someone trying many admin-only commands quickly,
+# possibly automated) triggers an owner alert instead of silently blending
+# into normal "unauthorized user tried a paid command" noise. Bounded,
+# in-memory, resets naturally (no unbounded growth risk -- old uids just
+# stop getting touched and their entries go stale/unused).
+_unauth_attempt_log = {}  # uid -> [timestamps]
+_UNAUTH_ALERT_THRESHOLD = 5   # attempts
+_UNAUTH_ALERT_WINDOW = 60     # seconds
+_unauth_alerted_recently = {}  # uid -> last alert timestamp (avoid alert spam)
+_UNAUTH_ALERT_COOLDOWN = 600  # 10 min between repeat alerts for same uid
+
+async def _send_unauth_and_track(chat_id: int, uid: int, uname: str = "", command: str = ""):
+    """Sends the standard UNAUTH_MSG, and separately tracks attempt volume
+    per uid -- if the same uid crosses the threshold within the window,
+    alerts the owner once (then cools down) so a probing/brute-force
+    pattern against restricted commands doesn't go unnoticed."""
+    try:
+        now = time.time()
+        hist = _unauth_attempt_log.setdefault(uid, [])
+        hist.append(now)
+        # keep only recent attempts in the window
+        hist[:] = [t for t in hist if now - t <= _UNAUTH_ALERT_WINDOW]
+        if len(hist) >= _UNAUTH_ALERT_THRESHOLD:
+            last_alert = _unauth_alerted_recently.get(uid, 0)
+            if now - last_alert >= _UNAUTH_ALERT_COOLDOWN:
+                _unauth_alerted_recently[uid] = now
+                logger.warning(f"[SECURITY] uid={uid} ({uname}) made {len(hist)} unauthorized restricted-command attempts in {_UNAUTH_ALERT_WINDOW}s (last: {command})")
+                try:
+                    await notify_owner(f"🚨 Suspicious activity: user {uid} ({uname}) made {len(hist)} unauthorized attempts on restricted commands in the last {_UNAUTH_ALERT_WINDOW}s (last command: {command}). Possible probing/brute-force.")
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning(f"[SECURITY] unauth tracking failed: {e}")
+    await send_msg(chat_id, UNAUTH_MSG)
+
 # ============================================================
 # FEATURE 3: /permit + /remove
 # ============================================================
@@ -4620,6 +4656,7 @@ async def handle_permit(msg: dict):
     await sb_exec(lambda: sb.table("admins").upsert({"user_id": target}).execute())
     from core import _admin_check_cache
     _admin_check_cache.pop(target, None)
+    logger.warning(f"[SECURITY] Admin ADDED: {target} by owner {uid}")
     await send_msg(chat_id, f"✅ Admin added: {target}")
 
 async def handle_remove(msg: dict):
@@ -4637,6 +4674,7 @@ async def handle_remove(msg: dict):
     await sb_exec(lambda: sb.table("admins").delete().eq("user_id", target).execute())
     from core import _admin_check_cache
     _admin_check_cache.pop(target, None)
+    logger.warning(f"[SECURITY] Admin REMOVED: {target} by owner {uid}")
     await send_msg(chat_id, f"✅ Admin removed: {target}")
 
 # ============================================================
@@ -23687,7 +23725,7 @@ async def handle_message(msg: dict):
     if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm")) or text.startswith("/bangla"):
         if not is_auth:
             if is_private:
-                await send_msg(chat_id, UNAUTH_MSG)
+                await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _cmd_prefix = "/bangla" if text.startswith("/bangla") else "/pdf"
         arg = text.replace(_cmd_prefix, "").strip().lower()
@@ -23700,7 +23738,7 @@ async def handle_message(msg: dict):
     if text.startswith("/chok"):
         if not is_auth:
             if is_private:
-                await send_msg(chat_id, UNAUTH_MSG)
+                await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         clear_cancel(chat_id)
         token = _CHOK_MODE.set(True)
@@ -23712,7 +23750,7 @@ async def handle_message(msg: dict):
     if text.startswith("/extra"):
         if not is_auth:
             if is_private:
-                await send_msg(chat_id, UNAUTH_MSG)
+                await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         clear_cancel(chat_id)
         _spawn_command_task(uid, handle_extra(msg))
@@ -23720,7 +23758,7 @@ async def handle_message(msg: dict):
     if text.startswith("/tf"):
         if not is_auth:
             if is_private:
-                await send_msg(chat_id, UNAUTH_MSG)
+                await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         clear_cancel(chat_id)
         await handle_tf(msg)
@@ -23728,7 +23766,7 @@ async def handle_message(msg: dict):
     if text.startswith("/bangla"):
         if not is_auth:
             if is_private:
-                await send_msg(chat_id, UNAUTH_MSG)
+                await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         clear_cancel(chat_id)
         token = _BANGLA_MODE.set(True)
@@ -23748,7 +23786,7 @@ async def handle_message(msg: dict):
         return
     if not is_auth:
         if is_private:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
         return
     if text.startswith("/permit"):
         await handle_permit(msg)
@@ -23847,7 +23885,7 @@ async def handle_message(msg: dict):
         # labels (one per line), screenshots the final page, runs it
         # through the QBM AI-extraction pipeline, returns CSV.
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_auto_command(msg))
     elif text.startswith("/autolms"):
@@ -23855,7 +23893,7 @@ async def handle_message(msg: dict):
         # sending back a CSV, uploads the extracted MCQs directly into
         # the LMS (atlascourses.com) Supabase as a new Readymade exam.
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_autolms_command(msg))
     elif text.startswith("/savelabel"):
@@ -23864,40 +23902,40 @@ async def handle_message(msg: dict):
         # Saves the click-step lines under <name> so future /autolms
         # runs can just do "use:<name>" instead of retyping them.
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_savelabel_command(msg))
     elif text.startswith("/labels"):
         # /labels = list all saved shortcut names from /savelabel
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_list_labels_command(msg))
     elif text.startswith("/dellabel"):
         # /dellabel <name> = delete a saved shortcut
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_dellabel_command(msg))
     elif text.startswith("/pdfm"):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         clear_cancel(chat_id)
         await handle_pdfm(msg)
     elif text.startswith("/g") and (text == "/g" or text.startswith("/g ") or text.startswith("/g\n")):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_gallery_command(msg))
     elif text.startswith("/img"):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         await handle_img_command(msg)
     elif text.startswith("/txt"):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         await handle_txt_command(msg)
     elif text.startswith("/cancel"):
@@ -23910,12 +23948,12 @@ async def handle_message(msg: dict):
         _spawn_command_task(uid, handle_slide_command(msg))
     elif text.startswith("/qpdf"):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_qpdf_command(msg))
     elif text.startswith("/clean"):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_clean_command(msg))
     elif text.startswith("/cut"):
@@ -23923,45 +23961,45 @@ async def handle_message(msg: dict):
     elif text.startswith("/split"):
 
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_split_command(msg))
     elif text.startswith("/csvS"):
         # /csvS অবশ্যই /csv এর আগে check করতে হবে
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_csvs_command(msg))
     elif text.startswith("/csv"):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_csv_command(msg))
     elif text.startswith("/rapid ") or text == "/rapid":
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_rapid_command(msg))
     elif text.startswith("/wm"):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_wm_command(msg))
     elif text.startswith("/live") and not text.startswith("/livetime"):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_live_command(msg))
 
     elif text.startswith("/pollcsv") or text.startswith("/pcsv"):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_poll_extract(msg))
 
     elif text.startswith("/ok") and re.search(r"/ok\s+(\d+)\s*-\s*(\d+)", text) and "t.me/" in text:
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _m = re.search(r"/ok\s+(\d+)\s*-\s*(\d+)", text)
         _start_n, _end_n = int(_m.group(1)), int(_m.group(2))
@@ -23971,7 +24009,7 @@ async def handle_message(msg: dict):
 
     elif text.startswith("/ok") and "\n" in text and "t.me/" in text:
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _ok_links = [l.strip() for l in text.splitlines() if "t.me/" in l]
         if len(_ok_links) == 1:
@@ -23990,18 +24028,18 @@ async def handle_message(msg: dict):
     elif text.startswith("/poll") and "\n" in text and "t.me/" in text:
         if not is_auth:
             logger.warning(f"[UNAUTH] /poll blocked for uid={uid} (type={type(uid).__name__}), OWNER_ID={OWNER_ID} (type={type(OWNER_ID).__name__}), chat_id={chat_id}")
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_poll_extract(msg))
 
     elif text.startswith("/livetime"):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         await handle_livetime(msg)
     elif text == "/pin" or text.startswith("/pin "):
         if not is_auth:
-            await send_msg(chat_id, UNAUTH_MSG)
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         await handle_pin(msg)
     elif text in ("/pdfc", "/pdf_collect", "/done", "/cancel"):
@@ -25677,6 +25715,20 @@ async def startup():
     global BOT_START_TIME
     BOT_START_TIME = time.time()
     logger.info("[App] ATLAS BOT v4.1 starting...")
+
+    # SECURITY GUARD: warn loudly (never crash -- a crash-on-detect here
+    # would itself be a DoS vector if triggered by a false positive) if a
+    # secret-looking file exists in the deployed working directory. This
+    # is a startup-time sanity check, not a hard block, so ops can see it
+    # in logs/owner-alert without the bot going down.
+    try:
+        _secret_patterns = [".env", ".env.local", ".env.production", "secrets.json", "credentials.json"]
+        _found = [f for f in _secret_patterns if os.path.isfile(f)]
+        if _found:
+            logger.warning(f"[App] SECURITY: secret-looking file(s) present in working directory: {_found} -- ensure these are not committed to git / are excluded from the deployed image.")
+            await notify_owner(f"⚠️ Security check: found secret-looking file(s) in bot's working directory: {_found}. Please confirm these aren't tracked in git.")
+    except Exception as e:
+        logger.warning(f"[App] Startup secret-file check failed (non-fatal): {e}")
 
     # SPEED vs FLOOD-WAIT TRADEOFF: pre-warming pyrogram here used to call
     # client.start() (-> auth.ImportBotAuthorization) unconditionally on
