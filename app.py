@@ -9537,12 +9537,23 @@ async def handle_sheet_command(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 import asyncio as _asyncio_sheet
-_sheet_lock = _asyncio_sheet.Lock()
+# 2026-08-22 BUGFIX: was a single global lock wrapping the entire HTML+PDF
+# render for every /sheet request, serializing ALL users' sheet exports
+# one-at-a-time bot-wide. Switched to per-user locks so users don't queue
+# behind each other; each uid still serializes its own repeated taps.
+_SHEET_USER_LOCKS: dict = {}
+def _get_sheet_lock(uid: int) -> _asyncio_sheet.Lock:
+    lock = _SHEET_USER_LOCKS.get(uid)
+    if lock is None:
+        lock = _asyncio_sheet.Lock()
+        _SHEET_USER_LOCKS[uid] = lock
+    return lock
 
 async def handle_sheet_style_callback(callback_query: dict):
     data = callback_query.get("data", "")
     chat_id = callback_query["message"]["chat"]["id"]
     message_id = callback_query["message"]["message_id"]
+    uid = callback_query.get("from", {}).get("id", chat_id)
     parts = data.split(":", 2)
     if len(parts) != 3:
         return
@@ -9570,7 +9581,7 @@ async def handle_sheet_style_callback(callback_query: dict):
             pass
 
     try:
-        async with _sheet_lock:
+        async with _get_sheet_lock(uid):
             await _progress(10)
             if style_key.startswith("format_"):
                 am_data = _am_build_mcq_data(mcqs)
