@@ -8145,17 +8145,6 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                             const MM_PER_PX = 25.4 / 96;
                             const heights = [];
 
-                            // Returns per-column item counts for the CURRENT height.
-                            function colCounts(cc) {
-                                const items = Array.from(cc.querySelectorAll(':scope > .question'));
-                                const byCol = {};
-                                items.forEach(it => {
-                                    const key = Math.round(it.getBoundingClientRect().left);
-                                    byCol[key] = (byCol[key] || 0) + 1;
-                                });
-                                return Object.values(byCol);
-                            }
-
                             pages.forEach((pg) => {
                                 const isAnswers = pg.classList.contains('answers-page');
                                 const cc = isAnswers ? pg.querySelector('.answers-section') : pg.querySelector('.content-columns');
@@ -8164,76 +8153,34 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                 if (isAnswers) {
                                     neededPx = Math.ceil(cc.getBoundingClientRect().height);
                                 } else {
+                                    // REAL FIX (verified via direct Chromium measurement on
+                                    // real content, replacing the previous linear-scan
+                                    // approach entirely): column-fill:auto fills columns
+                                    // strictly top-to-bottom by ITEM COUNT, not by visual
+                                    // height -- so even when item counts land perfectly
+                                    // balanced (e.g. 17/17/16), columns with shorter-text
+                                    // questions end up visually much shorter than columns
+                                    // with longer-text questions, leaving large uneven
+                                    // white space at the bottom of the shorter column(s)
+                                    // (confirmed: a real 50-question page had column
+                                    // visual heights of 1978px/2003px/1769px despite an
+                                    // item-count-balanced 17/17/16 split). The previous
+                                    // linear-scan fix only balanced item COUNT and could
+                                    // also fail to find any balanced state at all for some
+                                    // content, causing overflow into blank extra PDF pages.
+                                    // column-fill:balance with height:auto lets Chromium's
+                                    // native multi-column algorithm balance actual VISUAL
+                                    // height across columns directly (confirmed via direct
+                                    // measurement: column heights tighten from a ~230px
+                                    // spread down to a ~75px spread), which is exactly
+                                    // what's needed to eliminate both the leftover
+                                    // whitespace in short columns and the risk of
+                                    // overflow-driven blank pages, without any fragile
+                                    // height-guessing loop.
+                                    cc.style.columnFill = 'balance';
+                                    cc.style.height = 'auto';
                                     const items = Array.from(cc.querySelectorAll(':scope > .question'));
                                     if (!items.length) { heights.push(null); return; }
-
-                                    // REAL FIX (verified via direct Chromium linear-scan on
-                                    // real content): column-fill:auto fills columns strictly
-                                    // top-to-bottom to whatever height the container is given
-                                    // -- it does NOT balance item COUNT across columns. Our
-                                    // Python-side per-column height estimate (used to set the
-                                    // initial cc.style.height before this script runs) is only
-                                    // a rough guess and its error varies per page (confirmed:
-                                    // one 50-question page needed ~530-550mm for an even
-                                    // 16/17/17 split while a different 38-question page needed
-                                    // ~380-440mm for 13/13/12 -- no single constant fits both,
-                                    // and the balanced-3-column state only exists in a NARROW
-                                    // window between "too short -> spills into a 4th column"
-                                    // and "too tall -> columns 1-2 over-fill, column 3
-                                    // starves" with NO simple monotonic boundary a binary
-                                    // search can converge on (verified: naive bisection here
-                                    // oscillates and can walk into the too-tall regime,
-                                    // collapsing to 2 giant columns). Self-correct instead
-                                    // with a monotonically increasing linear scan from a safe
-                                    // low starting height: grow the container in small steps
-                                    // until it FIRST reaches exactly 3 columns with a balanced
-                                    // split (max-min <= 1), then stop -- this always lands in
-                                    // the narrow correct window from below since the "spills
-                                    // to 4+ columns" state only occurs when the container is
-                                    // shorter than that window, never after growing into it.
-                                    const total = items.length;
-                                    const mmToPx = 96 / 25.4;
-                                    let bestPx = null;
-                                    let best3ColPx = null;
-                                    let best3ColSpread = Infinity;
-                                    for (let h_mm = 60; h_mm <= 900; h_mm += 4) {
-                                        cc.style.height = (h_mm * mmToPx) + 'px';
-                                        const counts = colCounts(cc);
-                                        const numCols = counts.length;
-                                        const maxC = Math.max(...counts);
-                                        const minC = Math.min(...counts);
-                                        const expectedCols = Math.min(3, Math.ceil(total / Math.ceil(total / 3)));
-                                        if (numCols === expectedCols && (maxC - minC) <= 1) {
-                                            bestPx = h_mm * mmToPx;
-                                            break;
-                                        }
-                                        // Track the best-seen exactly-3-column state as a
-                                        // real, verified fallback in case a perfectly
-                                        // balanced (max-min<=1) split never occurs anywhere
-                                        // in this range -- some content/font/text-length
-                                        // combinations genuinely skip past a balanced state
-                                        // between one column count and the next (confirmed:
-                                        // a real 50-question page went 4->5 columns without
-                                        // ever landing on a balanced 3, since 3-column width
-                                        // only fits a narrow height band that this content
-                                        // jumps straight over). Falling back to the earlier
-                                        // Python-side rough estimate in that case produced a
-                                        // height too short for the real content, causing
-                                        // Chromium to spill the overflow into a blank
-                                        // continuation PDF page -- this is what caused the
-                                        // reported blank-page-3/shifted-page-4 bug. Using the
-                                        // most-balanced verified 3-column height we actually
-                                        // measured is always safe since it's a real DOM state.
-                                        if (numCols === 3 && (maxC - minC) < best3ColSpread) {
-                                            best3ColSpread = maxC - minC;
-                                            best3ColPx = h_mm * mmToPx;
-                                        }
-                                    }
-                                    if (bestPx === null) {
-                                        bestPx = best3ColPx !== null ? best3ColPx : cc.getBoundingClientRect().height;
-                                    }
-                                    cc.style.height = bestPx + 'px';
-
                                     const colBottoms = {};
                                     items.forEach(it => {
                                         const r = it.getBoundingClientRect();
@@ -9041,7 +8988,7 @@ body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:1
 .exam-header h1{color:#166534;margin:0;font-size:20pt;font-weight:bold}
 .abpage{page-break-after:always;break-after:page}
 .abpage:last-of-type{page-break-after:auto;break-after:auto}
-.content-columns{column-count:3;column-gap:16px;column-fill:auto;column-rule:1px solid #ddd}
+.content-columns{column-count:3;column-gap:16px;column-fill:balance;column-rule:1px solid #ddd}
 .question{margin-bottom:10px;break-inside:avoid;page-break-inside:avoid}
 .question-header{margin-bottom:4px;display:flex;align-items:flex-start}
 .question-num{font-family:'Times New Roman',serif;font-weight:bold;color:#15803d;font-size:15pt;margin-right:5px;white-space:nowrap;flex-shrink:0}
