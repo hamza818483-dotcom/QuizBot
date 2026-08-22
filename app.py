@@ -12816,6 +12816,17 @@ async def _process_pdf_pages_inner(
         await send_document(chat_id, buf.getvalue().encode("utf-8"), f"{topic}_mcq.csv",
             caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ", mime_type="text/csv")
 
+        # CSV file-এর নিচে একটা "📢 Channel List" বাটন — click করলে channel
+        # list দেখাবে, poll পাঠানোর জন্য (existing csvchannel_ callback
+        # reuse করা হচ্ছে)।
+        if all_mcqs_raw:
+            _csv_cache_id = gen_session_id()
+            await db_save_mcq_cache(_csv_cache_id, _csv_cache_id, 0, topic, all_mcqs_raw)
+            await send_msg(chat_id, "📢 Poll আকারে channel-এ পাঠাতে চাও?",
+                reply_markup={"inline_keyboard": [[
+                    {"text": "📢 Channel List", "callback_data": f"csvpdflist_{_csv_cache_id}_{uid}"}
+                ]]})
+
     if not csv_only and not summary_pages and is_cancelled(chat_id):
         await send_msg(chat_id, "🛑 কাজ বাতিল করা হয়েছে — কোনো পেজ শেষ হওয়ার আগেই থামানো হয়েছে, তাই কোনো ফলাফল নেই।")
 
@@ -13398,6 +13409,14 @@ async def _process_pdfs_pages_inner(
                 writer.writerow(row)
         await send_document(chat_id, buf.getvalue().encode("utf-8"), f"{topic}_mcq.csv",
             caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ", mime_type="text/csv")
+
+        if all_mcqs_raw:
+            _csv_cache_id = gen_session_id()
+            await db_save_mcq_cache(_csv_cache_id, _csv_cache_id, 0, topic, all_mcqs_raw)
+            await send_msg(chat_id, "📢 Poll আকারে channel-এ পাঠাতে চাও?",
+                reply_markup={"inline_keyboard": [[
+                    {"text": "📢 Channel List", "callback_data": f"csvpdflist_{_csv_cache_id}_{uid}"}
+                ]]})
 
     if not csv_only and not summary_pages and is_cancelled(chat_id):
         await send_msg(chat_id, "🛑 কাজ বাতিল করা হয়েছে — কোনো পেজ শেষ হওয়ার আগেই থামানো হয়েছে, তাই কোনো ফলাফল নেই।")
@@ -27100,6 +27119,35 @@ async def handle_callback(query: dict):
                     kb2["inline_keyboard"].append(_csv3_row)
                 kb2["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}])
                 await send_msg(chat_id, "📢 Channel select করো:", reply_markup=kb2)
+
+        elif data.startswith("csvpdflist_"):
+            # csvpdflist_{cache_id}_{uid} — /pdf বা /pdfs job শেষে CSV-এর নিচে
+            # দেখানো "📢 Channel List" বাটন, click করলে channel list দেখাবে
+            # (poll পাঠানোর জন্য), csvchannel_ callback-এই reuse করে।
+            rest = data[len("csvpdflist_"):]
+            rest_parts = rest.rsplit("_", 1)
+            c_id = rest_parts[0] if len(rest_parts) > 1 else rest
+            orig_uid = int(rest_parts[1]) if len(rest_parts) > 1 else uid
+            if uid != orig_uid:
+                return
+            channels = await db_get_channels()
+            if not channels:
+                await send_msg(chat_id, "❌ Channel নেই! /channel দিয়ে add করো।")
+                return
+            kb_pdflist = {"inline_keyboard": []}
+            _pdflist_row = []
+            for ch in channels:
+                _pdflist_row.append({
+                    "text": f"📢 {ch.get('channel_name', ch.get('channel_id'))}",
+                    "callback_data": f"csvchannel_{ch['channel_id']}_{c_id}_{uid}"
+                })
+                if len(_pdflist_row) == 2:
+                    kb_pdflist["inline_keyboard"].append(_pdflist_row)
+                    _pdflist_row = []
+            if _pdflist_row:
+                kb_pdflist["inline_keyboard"].append(_pdflist_row)
+            kb_pdflist["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}])
+            await send_msg(chat_id, "📢 Channel select করো:", reply_markup=kb_pdflist)
 
         elif data.startswith("csvchannel_"):
             # csvchannel_{channel_id}_{cache_id}_{uid}
