@@ -8097,7 +8097,7 @@ async def _apply_saved_watermark(pdf_bytes: bytes) -> bytes:
         logger.warning(f"[AutoWatermark] apply failed: {e}")
     return pdf_bytes
 
-async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = False) -> bytes:
+async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = False, page_width_mm: int = 420) -> bytes:
     """Playwright-based HTML->PDF, ported 1:1 from AtlasMasterBot's
     AsyncPDFExporter.html_to_pdf (proven working in production there).
     use_css_page_size=True lets the page's own @page{size:...} CSS rule
@@ -8421,7 +8421,7 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                             part_paths.append(part_path)
                             await asyncio.wait_for(page.pdf(
                                 path=part_path,
-                                width="420mm", height=f"{h_mm}mm",
+                                width=f"{page_width_mm}mm", height=f"{h_mm}mm",
                                 landscape=False,
                                 margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"},
                                 print_background=True
@@ -9141,6 +9141,15 @@ img{max-width:30%!important;height:auto!important;vertical-align:middle}
 @media print{@page{size:420mm 594mm;margin:10mm 10mm 10mm 10mm;@top-center{content:none}@bottom-center{content:none}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:420mm;max-width:420mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
 </style>"""
 
+# ---- Print Style-08 (Exam Book Style2): same 3-column/50-per-page design
+# as style7, but A4 width (210mm) by default -- page height still shrinks
+# to fit actual content, exactly like style7. If 50 MCQ in 3 columns can't
+# fit within A4's height, the page grows taller automatically (same real-
+# content-height measurement _html_to_pdf already does for style7), so
+# nothing is ever clipped -- it just stops being "A4-sized" once content
+# genuinely needs more room, and stays A4-sized whenever it fits.
+_PRINT_STYLE8_CSS = _PRINT_STYLE7_CSS.replace("420mm", "210mm")
+
 def _build_print_style7(data, heading):
     """Format P7: Exam Book Style — page size shrinks to fit actual content
     per page (width fixed 420mm, height computed from real MCQ count so no
@@ -9223,6 +9232,79 @@ def _build_print_style7(data, heading):
         # estimate forced column-fill:balance to compute against an
         # undersized box before the real-height correction ran, producing
         # the same leftover-whitespace bug from the opposite direction.
+        est_mm = max(40, round(tallest_mm * 1.03 + 4))
+        header_html = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>' if page_idx == 1 else ''
+        body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}">{header_html}<div class="content-columns" style="height:{est_mm}mm">'
+        for d in chunk:
+            body += _render_question(d)
+        body += '</div></div>'
+
+    ans_page_num = total_pages + 1
+    body += f'<div class="abpage answers-page" id="abpage-{ans_page_num}" style="page:pans"><div class="answers-section"><table class="answer-table"><thead><tr><th class="qno-col">Q.No.</th><th class="ans-col">Ans</th><th class="exp-col">Explanation</th></tr></thead><tbody>'
+    for d in data:
+        body += f'<tr><td class="qno-col">{d["n"]}</td><td class="ans-col">{d["al"]}</td><td class="exp-col">{d["exp"] if d["exp"] else "-"}</td></tr>'
+    body += '</tbody></table></div></div>'
+    return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
+
+def _build_print_style8(data, heading):
+    """Format P8: Exam Book Style2 — same 3-column/50-per-page design as
+    style7 (page height shrinks to fit real content, binary-search
+    balanced columns, 50 MCQ/page target), but A4 width (210mm) by
+    default instead of style7's large 420mm sheet. If a page's real
+    content can't fit within A4's 297mm height at 3 columns, the page
+    just grows taller automatically (same real-content-height measurement
+    _html_to_pdf already does) -- it stops being A4-sized only when
+    content genuinely needs more room, and stays A4-sized whenever it
+    fits. Char-per-line estimates below are halved vs style7's since A4's
+    210mm page (3 narrower columns) fits roughly half as many characters
+    per line as style7's 420mm sheet -- keeps the pre-render height guess
+    close, so the binary-search real-height correction in _html_to_pdf
+    needs fewer iterations to converge."""
+    css = _PRINT_STYLE8_CSS
+    PER_PAGE = 50
+    import math as _math
+
+    def _render_question(d):
+        is_short = _check_short_option(d["opts"])
+        h = f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
+        if is_short:
+            h += f'<table class="options-table-short"><tr><td>ⓐ {d["opts"][0]}{d["oimgs"][0]}</td><td>ⓑ {d["opts"][1]}{d["oimgs"][1]}</td></tr><tr><td>ⓒ {d["opts"][2]}{d["oimgs"][2]}</td><td>ⓓ {d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
+        else:
+            h += f'<ul class="options-list"><li>ⓐ {d["opts"][0]}{d["oimgs"][0]}</li><li>ⓑ {d["opts"][1]}{d["oimgs"][1]}</li><li>ⓒ {d["opts"][2]}{d["oimgs"][2]}</li><li>ⓓ {d["opts"][3]}{d["oimgs"][3]}</li></ul>'
+        h += '</div>'
+        return h
+
+    def _est_item_height_mm(d):
+        # Halved chars-per-line vs style7 (A4/210mm columns are roughly
+        # half as wide as style7's 420mm columns).
+        qlen = len(d.get("q", "") or "")
+        q_lines = max(1, _math.ceil(qlen / 23))
+        base = 6.5 + q_lines * 7.2
+        is_short = _check_short_option(d["opts"])
+        if is_short:
+            base += 2 * 7.2
+        else:
+            for opt in d["opts"]:
+                olen = len(opt or "")
+                o_lines = max(1, _math.ceil(olen / 20))
+                base += o_lines * 6.6
+        base += 3.5
+        return base
+
+    body = ''
+    page_idx = 0
+    total_pages = _math.ceil(len(data) / PER_PAGE) if data else 0
+    for pg_start in range(0, len(data), PER_PAGE):
+        chunk = data[pg_start:pg_start + PER_PAGE]
+        page_idx += 1
+        n = len(chunk)
+        page_cols = 3
+        per_col = _math.ceil(n / page_cols) if n else 1
+        col_heights = []
+        for c in range(page_cols):
+            seg = chunk[c * per_col:(c + 1) * per_col]
+            col_heights.append(sum(_est_item_height_mm(d) for d in seg))
+        tallest_mm = max(col_heights) if col_heights else 40
         est_mm = max(40, round(tallest_mm * 1.03 + 4))
         header_html = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>' if page_idx == 1 else ''
         body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}">{header_html}<div class="content-columns" style="height:{est_mm}mm">'
@@ -9540,6 +9622,7 @@ PRINT_STYLE_BUILDERS = {
     "style5": _build_print2_style2,
     "style6": _build_print2_style3,
     "style7": _build_print_style7,
+    "style8": _build_print_style8,
 }
 PRINT_STYLE_NAMES = {
     "style1": "🖨️ Revision Style (প্রশ্ন + উত্তর + ব্যাখ্যা একসাথে)",
@@ -9549,6 +9632,7 @@ PRINT_STYLE_NAMES = {
     "style5": "🖨️ Preparation Style (উত্তর + ব্যাখ্যা inline)",
     "style6": "🖨️ Preparation Style-02 (English + Bengali)",
     "style7": "🖨️ Exam Book Style",
+    "style8": "🖨️ Exam Book Style2 (A4)",
 }
 
 # ============================================================
@@ -9905,7 +9989,7 @@ async def handle_sheet_style_callback(callback_query: dict):
                 html_out = _am_build_html(am_data, title, fmt_num, title)
             elif style_key == "default":
                 html_out = _build_solve_sheet_html(title, 1, mcqs)
-            elif style_key in ("style1", "style2", "style7") and any(m.get("_pdfs_topic") for m in mcqs):
+            elif style_key in ("style1", "style2", "style7", "style8") and any(m.get("_pdfs_topic") for m in mcqs):
                 # CSV re-uploaded from /pdfs's topicwise export -- carries
                 # _pdfs_topic/_pdfs_subtopic (parsed from the ### header
                 # rows) -- render with topic headings preserved instead of
@@ -9916,8 +10000,13 @@ async def handle_sheet_style_callback(callback_query: dict):
                 data_adapted = _adapt_mcqs_for_print(mcqs)
                 html_out = PRINT_STYLE_BUILDERS[style_key](data_adapted, title)
 
-            _is_topicwise_fallback = style_key in ("style1", "style2", "style7") and any(m.get("_pdfs_topic") for m in mcqs)
-            pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress, use_css_page_size=(style_key == "style7" and not _is_topicwise_fallback))
+            _is_topicwise_fallback = style_key in ("style1", "style2", "style7", "style8") and any(m.get("_pdfs_topic") for m in mcqs)
+            _uses_dynamic_page = style_key in ("style7", "style8") and not _is_topicwise_fallback
+            pdf_bytes = await _html_to_pdf(
+                html_out, progress_cb=_progress,
+                use_css_page_size=_uses_dynamic_page,
+                page_width_mm=(210 if style_key == "style8" else 420)
+            )
             pdf_bytes = await _apply_saved_watermark(pdf_bytes)
 
         if not pdf_bytes:
