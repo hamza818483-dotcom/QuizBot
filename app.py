@@ -9060,9 +9060,19 @@ def _build_print_style7(data, heading):
         # the same way column-fill:auto would, so our height estimate
         # matches the TALLEST column, not the average.
         n = len(chunk)
-        per_col = _math.ceil(n / 3) if n else 1
+        # FIX (right/bottom extra white-space on sparse pages, e.g. last
+        # page of a set): forcing column-count:3 unconditionally meant a
+        # page with few MCQs (e.g. n=6-15) still spanned the full 420mm
+        # width in 3 columns, leaving a large empty right-side gap once
+        # each column's few items ran out well before the tallest column's
+        # natural balance point. Real content should only ever use as many
+        # columns as it can meaningfully fill: 1 column for very few items,
+        # 2 for a moderate count, 3 only once there's enough content to
+        # actually populate all three side-by-side.
+        page_cols = 3 if n >= 12 else (2 if n >= 5 else 1)
+        per_col = _math.ceil(n / page_cols) if n else 1
         col_heights = []
-        for c in range(3):
+        for c in range(page_cols):
             seg = chunk[c * per_col:(c + 1) * per_col]
             col_heights.append(sum(_est_item_height_mm(d) for d in seg))
         tallest_mm = max(col_heights) if col_heights else 40
@@ -9084,7 +9094,7 @@ def _build_print_style7(data, heading):
         # far from the true balance point.
         est_mm = max(40, min(560, round(tallest_mm * 1.03 + 4)))  # tight buffer; real height gets measured+shrunk in _html_to_pdf before final render
         header_html = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>' if page_idx == 1 else ''
-        body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}">{header_html}<div class="content-columns" style="height:{est_mm}mm">'
+        body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}">{header_html}<div class="content-columns" style="height:{est_mm}mm;column-count:{page_cols}">'
         for d in chunk:
             body += _render_question(d)
         body += '</div></div>'
