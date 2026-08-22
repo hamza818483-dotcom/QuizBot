@@ -8208,30 +8208,46 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                     const naturalTotalPx = cc.getBoundingClientRect().height;
                                     const nCols = 3;
                                     cc.style.columnCount = String(nCols);
-                                    // FIX: a too-tight explicit height combined with
-                                    // break-inside:avoid on .question items can force
-                                    // Chromium to add an EXTRA overflow column beyond
-                                    // column-count:3 (per spec, unbreakable content
-                                    // that doesn't fit in the given height pushes into
-                                    // additional columns) -- this is what produced the
-                                    // observed 4-column page with a large trailing
-                                    // white area. Fix: start with a generous buffer
-                                    // and verify the real column count after layout;
-                                    // if more than nCols columns actually appeared,
-                                    // grow the height and re-check until it settles
-                                    // at exactly nCols columns (bounded iterations).
-                                    let guessPx = Math.ceil((naturalTotalPx / nCols) * 1.15);
-                                    let items = [];
-                                    for (let attempt = 0; attempt < 8; attempt++) {
-                                        cc.style.height = guessPx + 'px';
+                                    // FIX: the previous grow-only search could overshoot
+                                    // far past the true minimum balanced height and never
+                                    // come back down, leaving large leftover white space
+                                    // (confirmed via user screenshot: correct 3-column
+                                    // count but a much-too-tall box). Replaced with a
+                                    // binary search between a safe lower bound (perfect
+                                    // 1/nCols average, likely too tight -> causes overflow
+                                    // columns) and a safe upper bound (the full natural
+                                    // single-column height, guaranteed to fit in nCols
+                                    // columns), converging on the TIGHTEST height that
+                                    // still yields exactly nCols rendered columns.
+                                    function columnsAtHeight(px) {
+                                        cc.style.height = px + 'px';
                                         cc.style.columnFill = 'balance';
                                         void cc.offsetHeight;
-                                        items = Array.from(cc.querySelectorAll(':scope > .question'));
-                                        if (!items.length) break;
-                                        const cols = new Set(items.map(it => Math.round(it.getBoundingClientRect().left)));
-                                        if (cols.size <= nCols) break;
-                                        guessPx = Math.ceil(guessPx * 1.12);
+                                        const its = Array.from(cc.querySelectorAll(':scope > .question'));
+                                        if (!its.length) return {count: 0, items: its};
+                                        const cols = new Set(its.map(it => Math.round(it.getBoundingClientRect().left)));
+                                        return {count: cols.size, items: its};
                                     }
+                                    let lo = Math.ceil(naturalTotalPx / nCols);
+                                    let hi = Math.ceil(naturalTotalPx) + 20;
+                                    let items = columnsAtHeight(hi).items;
+                                    // hi must yield <= nCols columns (it's the full
+                                    // natural height, so this always holds) -- confirm,
+                                    // then binary search downward for the tightest fit.
+                                    for (let iter = 0; iter < 14 && (hi - lo) > 3; iter++) {
+                                        const mid = Math.floor((lo + hi) / 2);
+                                        const res = columnsAtHeight(mid);
+                                        if (res.count > 0 && res.count <= nCols) {
+                                            hi = mid;
+                                            items = res.items;
+                                        } else {
+                                            lo = mid + 1;
+                                        }
+                                    }
+                                    // Settle on the final winning height (hi) so the DOM
+                                    // state used for the bottom measurement below matches.
+                                    const finalRes = columnsAtHeight(hi);
+                                    items = finalRes.items;
                                     if (!items.length) { heights.push(null); return; }
                                     const colBottoms = {};
                                     items.forEach(it => {
