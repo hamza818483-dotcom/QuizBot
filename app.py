@@ -12047,7 +12047,7 @@ def _pdf_dashboard_kb(chat_id, pages, page_status):
         rows.append(done_buttons[i:i+3])
     return {"inline_keyboard": rows}
 
-def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls):
+def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=None):
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
     done = sum(1 for s in page_status if s["done"])
@@ -12084,6 +12084,8 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
         f"📝 MCQ done: {total_mcq}",
         f"🔄 Polls sent: {total_polls}"
     ]
+    if ai_calls is not None:
+        lines.append(f"🤖 AI calls: {ai_calls}")
     return "\n".join(lines)
 
 def _pair_pages_for_extra(pages: list) -> list:
@@ -16374,10 +16376,12 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     BATCH_SIZE = 2
     batches = [pages[i:i + BATCH_SIZE] for i in range(0, len(pages), BATCH_SIZE)]
     headings_by_page = {}
+    _ai_call_count = [0]
 
     async def _scan_batch(batch):
         page_nums = [pn for pn, _ in batch]
         imgs = [img for _, img in batch]
+        _ai_call_count[0] += 1
         try:
             prompt = _build_chem_heading_scan_prompt_v2_batched(len(batch))
             scan_txt = await _qbm_gemini_raw_multi(imgs, prompt)
@@ -16478,7 +16482,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         if not status_msg_id:
             return
         async with _chem_dash_lock:
-            text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0)
+            text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_ai_call_count[0])
             if _topics_block:
                 text = text + "\n━━━━━━━━━━━━━━━━━━━━━━\n" + _topics_block
             if text == _chem_last_dash_text[0]:
@@ -16543,6 +16547,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             if is_cancelled(chat_id):
                 return []
             try:
+                _ai_call_count[0] += 1
                 gem, _gem_marker_only = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True)
                 mcqs = _qbm_dedup_list(gem) if gem else []
                 mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
@@ -16559,6 +16564,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                     # burning Groq/OpenRouter quota on it. Adds ~2-3s but is
                     # far cheaper than OpenRouter's scarce 11-key quota.
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini 0 MCQ, no marker (ambiguous) -- retrying Gemini once on next key before Groq")
+                    _ai_call_count[0] += 1
                     gem_retry, _ = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True)
                     mcqs = _qbm_dedup_list(gem_retry) if gem_retry else []
                     mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
@@ -16567,6 +16573,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                         logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini retry ({len(mcqs)} MCQ)")
                         return mcqs
                 logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini returned 0 MCQ, trying Groq")
+                _ai_call_count[0] += 1
                 txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
                 mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
                 mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
@@ -16575,6 +16582,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Groq ({len(mcqs)} MCQ)")
                     return mcqs
                 logger.warning(f"[CHEM-GEN v2] page {page_num}: Groq returned 0 MCQ, trying OpenRouter")
+                _ai_call_count[0] += 1
                 txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
                 mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
                 mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
@@ -16844,7 +16852,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         # clear "stopped" notice so the numbers the user was watching stay
         # on screen exactly as they were when Cancel was pressed.
         try:
-            text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0)
+            text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_ai_call_count[0])
             if _topics_block:
                 text = text + "\n━━━━━━━━━━━━━━━━━━━━━━\n" + _topics_block
             text = text + "\n\n🛑 এই কাজ বাতিল করা হয়েছে।"
