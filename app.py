@@ -551,10 +551,18 @@ def _render_pdf_cached(file_id: str, pdf_bytes: bytes, page_range: str = None):
     cached = _pdf_render_cache.get(key)
     if cached is not None:
         logger.info(f"[Render Cache] hit for hash={content_hash[:12]}...:{key[1]} — skipping rasterization")
-        return True, cached
+        # BUGFIX: return a shallow copy, never the cached list itself.
+        # Callers do in-place RAM cleanup like `pages[idx] = (page_num, None)`
+        # after finishing each page -- if we handed back the SAME list object
+        # stored in _pdf_render_cache, that cleanup permanently poisoned the
+        # cache entry (images replaced with None), so every future cache hit
+        # on this file+range returned all-None images -> every page failed
+        # with "'NoneType' object has no attribute 'save'" forever until the
+        # entry got evicted.
+        return True, list(cached)
     ok, pages = pdf_to_images_safe(pdf_bytes, page_range)
     if ok and pages:
-        _pdf_render_cache[key] = pages
+        _pdf_render_cache[key] = list(pages)
         _cap_pdf_render_cache()
     return ok, pages
 
