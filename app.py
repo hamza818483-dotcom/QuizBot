@@ -13858,6 +13858,8 @@ async def _process_pdfm_pages_impl(
     clear_cancel(chat_id)
     new_job_id(chat_id)
     set_active_job(chat_id, f"PDFM MCQ generation + Poll posting ({file_name}, page-by-page)")
+    _reset_ai_call_count(chat_id)
+    _current_job_chat_id_ctx.set(chat_id)
 
     for idx, (page_num, img) in enumerate(pages):
         if is_cancelled(chat_id):
@@ -13865,7 +13867,7 @@ async def _process_pdfm_pages_impl(
             break
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
 
         try:
             mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count)
@@ -14032,7 +14034,7 @@ async def _process_pdfm_pages_impl(
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
 
             if job_id:
                 next_page = pages[idx + 1][0] if idx + 1 < len(pages) else -1
@@ -14091,6 +14093,8 @@ async def _process_pdfm_pages_impl(
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📄 {file_name}\n🎯 {topic}\n"
         f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ {mins}:{secs:02d}\n"
+        f"🤖 AI calls: {_get_ai_call_count(chat_id)}"
+        + (f" ({_get_ai_call_breakdown_str(chat_id)})" if _get_ai_call_breakdown_str(chat_id) else "") + "\n"
         "━━━━━━━━━━━━━━━━━━━━━━")
 
 def _get_bd_time() -> str:
@@ -17398,6 +17402,7 @@ async def _qbm_groq_call(img, prompt: str) -> str:
     already-extracted MCQ JSON) get correctly budgeted instead of assuming
     the fixed static-prompt size -- fixes the 429 TPM errors these calls hit
     on pages with many MCQs (large embedded JSON)."""
+    _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
     keys = groq_key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
     if not keys:
         return ""
@@ -17478,6 +17483,7 @@ async def _qbm_openrouter_call(img, prompt: str) -> str:
     same strict extraction prompt used for Gemini/Groq. Only reached when both
     Gemini (all keys) and Groq (all keys) are exhausted/rate-limited, so pages
     keep flowing instead of stalling on quota errors."""
+    _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="OpenRouter")
     data_url = _img_to_data_url(img)
     if not data_url:
         return ""
@@ -18465,6 +18471,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
     any other key in the pool is still usable. If every Gemini key is
     exhausted/failing, falls back to Groq vision (qwen) so the caller still
     gets a result instead of an empty string."""
+    _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
     try:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
@@ -18551,6 +18558,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
     the single-image version; Groq fallback here only ever uses the FIRST
     image (Groq vision path is single-image), which is an acceptable
     degradation for the rare full-Gemini-outage case."""
+    _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
     try:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
@@ -22354,6 +22362,7 @@ async def qbm_extract_all_pages(
     clear_cancel(chat_id)
     new_job_id(chat_id)
     set_active_job(chat_id, f"QBM extraction ({file_name}, page-by-page)")
+    _reset_ai_call_count(chat_id)
 
     # Live ticker: QBM's 2-call pipeline (full Call1+Call2, no shortcuts)
     # can take 30-90s per page, and the dashboard previously only refreshed on
@@ -22374,7 +22383,7 @@ async def qbm_extract_all_pages(
         # call entirely when the text is unchanged (avoids Telegram's
         # "message is not modified" error burning a request for nothing).
         async with _qbm_dash_lock:
-            text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0)
+            text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id))
             if text == _qbm_last_dash_text[0]:
                 return
             try:
