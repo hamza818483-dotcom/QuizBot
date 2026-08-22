@@ -3672,12 +3672,9 @@ def _chok_ratio_gap_note(mcqs: list) -> str:
     return "\n" + "\n".join(notes)
 
 
-from pdf_handler import MCQ_PROCESSING_QUEUE_LOCK as _MCQ_PROCESSING_QUEUE_LOCK
-# All MCQ generation (image and text) funnels through generate_mcq_from_image /
-# generate_mcq_from_text below, both of which acquire this lock — so every
-# /img, /pdf, /csv, quiz-master MCQ job runs strictly one-at-a-time (queued),
-# while unrelated commands (menu, settings, admin, etc.) are completely
-# unaffected and continue running in parallel.
+# NOTE: MCQ_PROCESSING_QUEUE_LOCK (pdf_handler.py) is now unused — removed from
+# generate_mcq_from_image/generate_mcq_from_text on 2026-08-22 to allow
+# concurrent multi-user MCQ generation (was serializing all users globally).
 
 MIN_MCQ = 10
 MAX_MCQ = 20
