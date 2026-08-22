@@ -23085,9 +23085,24 @@ async def handle_pdf_page_regen(session_id: str, page_num: int, dm_chat_id: int,
         poll_url = f"https://t.me/{bot_un}?start=poll_{new_cache_id}"
         new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{new_cache_id}"
         new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{new_cache_id}"
+
+        # Find the NEXT page (numerically) in this session's summary and
+        # append its first-poll link, so the regenerated end message keeps
+        # the reader chained forward to the next page like the original
+        # end messages do.
+        _next_page_line = ""
+        _future_pages = sorted(
+            (p for p in summary_pages if isinstance(p.get("page"), int) and p.get("page") > page_num),
+            key=lambda p: p["page"]
+        )
+        if _future_pages:
+            _next = _future_pages[0]
+            _next_link = _next.get("first_poll") or "(লিংক পাওয়া যায়নি)"
+            _next_page_line = f"\n➡️ পরের Page ({fmt_page(_next['page'])}) Poll Link:\n{_next_link}"
+
         end_data = {
             "chat_id": channel_id,
-            "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(new_mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
+            "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(new_mcqs)}\n🔗First Poll Link:\n{first_poll_link}{_next_page_line}",
             "reply_markup": {"inline_keyboard": [
                 [{"text": "📝 Quiz Solve", "url": quiz_url},
                  {"text": "🆕 New Quiz", "url": new_quiz_url}],
