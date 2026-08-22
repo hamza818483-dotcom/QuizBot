@@ -8894,13 +8894,13 @@ def _build_topicwise_csv_rows(topics_ordered: list, topic_mcqs: dict) -> list:
         sub_order = sub_map.get("__order__", [])
         if not sub_order:
             continue
-        rows.append([f"### {main_t} ###", "", "", "", "", "", "", "", "main_topic_header"])
+        rows.append([f"### {main_t} ###", "", "", "", "", "", "", "main_topic_header", ""])
         for sub_t in sub_order:
             mcqs = sub_map.get(sub_t, [])
             if not mcqs:
                 continue
             if sub_t:
-                rows.append([f"—— {sub_t} ——", "", "", "", "", "", "", "", "sub_topic_header"])
+                rows.append([f"—— {sub_t} ——", "", "", "", "", "", "", "sub_topic_header", ""])
             for q in mcqs:
                 opts = (q.get("options", []) + ["", "", "", ""])[:4]
                 rows.append([
