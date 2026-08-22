@@ -6342,23 +6342,33 @@ async def handle_csv_command(msg: dict):
 
         if loading_id:
             await edit_msg(chat_id, loading_id,
-                f"✅ {len(mcqs)} MCQ পাওয়া গেছে!\n📢 কী করতে চাও?")
+                f"✅ {len(mcqs)} MCQ পাওয়া গেছে!\n📢 Channel select করো:")
 
-        # Action buttons — Quiz Solve, Poll Solve, Web Exam, Premium PDF
-        kb = {"inline_keyboard": [
-            [
-                {"text": "🎯 Quiz Solve", "callback_data": f"csvact_quiz_{cache_id}_{uid}"},
-                {"text": "📊 Poll Solve", "callback_data": f"csvact_poll_{cache_id}_{uid}"},
-            ],
-            [
-                {"text": "🌐 Web Exam", "callback_data": f"csvact_web_{cache_id}_{uid}"},
-                {"text": "📄 Premium PDF", "callback_data": f"csvact_pdf_{cache_id}_{uid}"},
-            ],
-            [{"text": "📢 Channel এ পাঠাও", "callback_data": f"csvact_channel_{cache_id}_{uid}"}],
-            [{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}],
-        ]}
+        # Channel list দেখানো হচ্ছে সরাসরি — আগে "কী করতে চাও?" action-menu
+        # (Quiz/Poll/Web/PDF/Channel) দেখিয়ে extra click লাগত, এখন সরাসরি
+        # channel button-এই যাবে (2 per row)।
+        channels = await db_get_channels()
+        if not channels:
+            await send_msg(chat_id, "✅ CSV পাওয়া গেছে। কোনো channel নেই তাই poll পাঠানো যাবে না। /channel দিয়ে add করো।")
+            return
+
+        kb = {"inline_keyboard": []}
+        _csv1_row = []
+        for ch in channels:
+            ch_id = ch.get("channel_id", "")
+            ch_name = ch.get("channel_name", ch_id)
+            _csv1_row.append({
+                "text": f"📢 {ch_name}",
+                "callback_data": f"csvchannel_{ch_id}_{cache_id}_{uid}"
+            })
+            if len(_csv1_row) == 2:
+                kb["inline_keyboard"].append(_csv1_row)
+                _csv1_row = []
+        if _csv1_row:
+            kb["inline_keyboard"].append(_csv1_row)
+        kb["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}])
         await send_msg(chat_id,
-            f"✅ <b>{len(mcqs)} MCQ</b> | 🔥 {topic or 'N/A'}\n\nএকটা option select করো:",
+            f"✅ <b>{len(mcqs)} MCQ</b> | 🔥 {topic or 'N/A'}\n\nChannel select করো:",
             reply_markup=kb,
             parse_mode="HTML"
         )
