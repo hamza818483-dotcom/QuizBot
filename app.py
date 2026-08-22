@@ -8197,6 +8197,39 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                     merger = _PdfWriter()
                     part_paths = []
                     try:
+                        # REAL FIX (root cause, verified by direct reproduction): the
+                        # `@media print{@page{size:420mm 594mm;...}}` rule inside
+                        # _PRINT_STYLE7_CSS is what Chromium's headless print engine
+                        # actually reads for its page-size/orientation model when
+                        # print_background is used -- NOT the base @page rule. Since
+                        # 594mm > 420mm that rule's implied portrait-vs-landscape shape
+                        # doesn't match our target aspect ratio for short pages, and
+                        # Chromium silently swaps our explicit numeric width/height to
+                        # fit that stylesheet-declared shape. Deleting only top-level
+                        # @page rules (previous attempt) missed this one since it lives
+                        # nested inside an @media rule. Fix: delete BOTH top-level @page
+                        # rules AND any @page rule nested inside an @media block before
+                        # each per-page export.
+                        await page.evaluate("""
+                            () => {
+                                for (const sheet of document.styleSheets) {
+                                    try {
+                                        for (let i = sheet.cssRules.length - 1; i >= 0; i--) {
+                                            const rule = sheet.cssRules[i];
+                                            if (rule.type === CSSRule.PAGE_RULE) {
+                                                sheet.deleteRule(i);
+                                            } else if (rule.type === CSSRule.MEDIA_RULE) {
+                                                for (let j = rule.cssRules.length - 1; j >= 0; j--) {
+                                                    if (rule.cssRules[j].type === CSSRule.PAGE_RULE) {
+                                                        rule.deleteRule(j);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } catch (e) {}
+                                }
+                            }
+                        """)
                         for i, h_mm in enumerate(page_heights_mm):
                             if h_mm is None:
                                 continue
@@ -8213,6 +8246,7 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                             await asyncio.wait_for(page.pdf(
                                 path=part_path,
                                 width="420mm", height=f"{h_mm}mm",
+                                landscape=False,
                                 margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"},
                                 print_background=True
                             ), timeout=20)
