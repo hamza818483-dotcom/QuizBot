@@ -446,12 +446,12 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
     if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
         logger.warning(f"[PDFS] All {len(key_rotator.keys)} Gemini keys daily-exhausted — returning empty (caller tries Groq/other fallbacks)")
         return []
-    # 2026-08-22: try ALL live keys (uncapped, no 8-key ceiling) -- each
-    # key has its own daily/rate quota, so any single key could be the one
-    # that succeeds. Timeout tightened instead (35s/20s -> 20s/12s) so a
-    # dead/slow key gets skipped fast, keeping total worst-case wait
-    # reasonable even across all ~44 keys.
-    max_retries = len(_ordered) if _ordered else 5
+    # 2026-08-22 FIX: capped at 6 keys (was uncapped) -- when Gemini's whole
+    # backend is down, every key times out identically, so trying all ~44
+    # keys just delays the multi-provider fallback for many minutes with
+    # zero chance of success. 6 keys still covers per-key quota/rate issues
+    # while failing fast when the backend itself is the problem.
+    max_retries = min(len(_ordered), 6) if _ordered else 5
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
         key_rotator.record_call(key)
@@ -980,7 +980,14 @@ async def generate_mcq_from_image(
     # any single key's own quota could be the one that succeeds -- cap
     # removed. Timeout tightened instead (35s/20s -> 20s/12s) to keep
     # total worst-case wait bounded even across the full ~44-key pool.
-    max_retries = len(_ordered) if _ordered else 5
+    # 2026-08-22 FIX: uncapped was fine for per-key quota issues, but when
+    # Gemini's whole backend is down (network/service outage), EVERY key
+    # times out the same way -- burning 40+ keys x 25-40s each stalls a
+    # single page for 15-25+ minutes before Groq/OpenRouter ever get a
+    # chance. Cap attempts at 6 keys: enough to route around a few bad/
+    # rate-limited keys, but fails fast to the next provider when the
+    # whole backend (not just one key) is the problem.
+    max_retries = min(len(_ordered), 6) if _ordered else 5
     # Model fallback chain: try the latest model first, and if the WHOLE
     # Gemini backend for it is overloaded (503 UNAVAILABLE — this is a
     # server-side capacity issue, not a per-key problem, so it hits every

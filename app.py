@@ -13142,7 +13142,10 @@ async def _process_pdfs_pages_inner(
                 if not mcqs:
                     logger.warning(f"[PDFS] Page {page_num}: Gemini topic-pipeline empty after retries — falling back to multi-provider generation (topic-detect skipped for this page).")
                     try:
-                        _fb_mcqs, _fb_err = await _gen_with_retry(img, page_num)
+                        _fb_mcqs, _fb_err = await asyncio.wait_for(_gen_with_retry(img, page_num), timeout=150)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"[PDFS] Page {page_num}: fallback generation timed out after 150s — skipping page.")
+                        _fb_mcqs, _fb_err = [], "fallback generation timeout (150s)"
                     except Exception as _fb_e:
                         _fb_mcqs, _fb_err = [], str(_fb_e)
                     if _fb_mcqs:
