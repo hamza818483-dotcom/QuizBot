@@ -320,13 +320,12 @@ MCQ_PROMPT_WITH_COUNT = """📝 এই page-টা থেকে MCQ বানা
 💥উত্তর: A/B/C/D — সব প্রশ্নে একই letter না, ছড়িয়ে দাও
 -MUST বানাতে হবে exactly {count} টি MCQ, কম বেশি নয়
 💥ব্যাখ্যা (MAX 165 শব্দ): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, শুধু page content থেকে (বাইরের knowledge না), source-reference phrase ("টেক্সট অনুসারে" ইত্যাদি) ছাড়া সরাসরি fact আকারে।
-💥exp_bbox: ব্যাখ্যার প্রমাণ page-এ visible থাকলে bounding box [x_min,y_min,x_max,y_max] (0-1000 scale), না থাকলে null।
 
 Topic: {topic}
 Page: {page}
 
 MUST Return ONLY valid JSON array, no markdown:
-[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"...","exp_bbox":[100,200,900,350]}}]"""
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
 
 MCQ_PROMPT_MAX = """📝 এই page-টা থেকে MCQ বানাও।
 
@@ -346,13 +345,12 @@ MCQ_PROMPT_MAX = """📝 এই page-টা থেকে MCQ বানাও।
 💥অপশন: ৪টি, সবগুলোই factual, একটাই সঠিক উত্তর (হ্যাঁ/না/সত্য/মিথ্যা না)
 💥উত্তর: A/B/C/D — সব প্রশ্নে একই letter না, ছড়িয়ে দাও
 💥ব্যাখ্যা (MAX 165 শব্দ): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, শুধু page content থেকে (বাইরের knowledge না), source-reference phrase ("টেক্সট অনুসারে" ইত্যাদি) ছাড়া সরাসরি fact আকারে।
-💥exp_bbox: ব্যাখ্যার প্রমাণ page-এ visible থাকলে bounding box [x_min,y_min,x_max,y_max] (0-1000 scale), না থাকলে null।
 
 Topic: {topic}
 Page: {page}
 
 MUST Return ONLY valid JSON array, no markdown:
-[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"...","exp_bbox":[100,200,900,350]}}]"""
+[{{"question":"...","options":["option1","option2","option3","option4"],"answer":"C","explanation":"..."}}]"""
 
 
 # ============================================================
@@ -397,14 +395,13 @@ PDFS_TOPIC_MCQ_PROMPT = """📝 Special MCQ TYPE: /pdfs Topic-wise Generation (S
 💥উত্তর: A/B/C/D — বিভিন্ন position-এ ছড়িয়ে দিবে, সব একই letter না।
 🔒 ANSWER RELEVANCY SANITY CHECK: page-এ answer আগে থেকে marked থাকলে, সেটা question+options-এর সাথে logically সঠিক কিনা re-check করো; স্পষ্ট mismatch হলেই শুধু নিজের জ্ঞান দিয়ে override করবে।
 💥ব্যাখ্যা (MAX 165 WORDS মূল অংশ): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, সব মিলিয়ে ১৬৫ শব্দের মধ্যে; না আঁটলে extra detail নিচে আলাদা লাইনে, মূল অংশ কখনো truncate না। শুধু page content থেকে, বাইরের knowledge না। source-reference phrase ("টেক্সট অনুসারে" ইত্যাদি) নিষিদ্ধ।
-💥exp_bbox: প্রমাণ visible থাকলে bounding box [x_min,y_min,x_max,y_max], 0-1000 scale normalize করে, নইলে null।
 
 🌐 LANGUAGE RULE: source-এর ভাষায় (বাংলা হলে বাংলা, ইংরেজি হলে ইংরেজি — translate করবে না)।
 
 Page: {page}
 
 MUST Return ONLY valid JSON array, no markdown, EVERY item MUST include main_topic + sub_topic:
-[{{"main_topic":"...","sub_topic":"..." or null,"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"...","exp_bbox":[100,200,900,350]}}]"""
+[{{"main_topic":"...","sub_topic":"..." or null,"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
 
 
 def _pdfs_reconcile_mcq_topics(mcqs: list, fallback: str) -> list:
@@ -734,12 +731,6 @@ def _parse_mcq_json(text: str) -> list:
                 if any(_nav_label_re.match(str(o).strip()) for o in m["options"]):
                     logger.warning(f"[MCQ] Rejected — nav-label option detected: {m['options']}")
                     continue
-                bbox = m.get("exp_bbox")
-                if (isinstance(bbox, list) and len(bbox) == 4
-                        and all(isinstance(v, (int, float)) for v in bbox)):
-                    m["exp_bbox"] = [max(0, min(1000, int(v))) for v in bbox]
-                else:
-                    m["exp_bbox"] = None
                 valid.append(m)
 
     # Post-process: answer গুলো সব একই হলে shuffle করো
@@ -943,32 +934,6 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
 # ============================================================
 # GENERATE MCQ FROM IMAGE — Gemini primary + OpenRouter fallback
 # ============================================================
-async def _attach_explanation_images(mcqs: list, img: Image.Image) -> list:
-    """প্রতিটি MCQ-এর exp_bbox থাকলে crop করে upload করে explanation-এ <img> tag জুড়ে দেয়।
-    crop_explanation_image() now returns {url, top_pct, bottom_pct} (single-upload,
-    CSS-crop design) — must match index.html's renderExpWithImg() which reads
-    data-crop-top / data-crop-bottom, NOT the old data-full contract."""
-    for m in mcqs:
-        bbox = m.get("exp_bbox")
-        if not bbox:
-            continue
-        try:
-            result = await asyncio.to_thread(crop_explanation_image, img, bbox)
-            url = (result or {}).get("url", "")
-            if url:
-                exp = m.get("explanation", "") or ""
-                top_pct = (result or {}).get("top_pct", 0)
-                bot_pct = (result or {}).get("bottom_pct", 100)
-                m["explanation"] = (
-                    f'{exp} <img src="{url}" data-crop-top="{top_pct}" '
-                    f'data-crop-bottom="{bot_pct}">'
-                ).strip()
-        except Exception as e:
-            logger.warning(f"[ExplanationCrop] Attach failed: {e}")
-    return mcqs
-
-
-
 async def generate_mcq_from_image(
     img: Image.Image,
     topic: str,
