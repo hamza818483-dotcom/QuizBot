@@ -6467,13 +6467,19 @@ async def handle_csvs_command(msg: dict):
             return
 
         kb = {"inline_keyboard": []}
+        _csv_ch_row = []
         for ch in channels:
             ch_id = ch.get("channel_id", "")
             ch_name = ch.get("channel_name", ch_id)
-            kb["inline_keyboard"].append([{
+            _csv_ch_row.append({
                 "text": f"📢 {ch_name}",
                 "callback_data": f"csvchannel_{ch_id}_{cache_id}_{uid}"
-            }])
+            })
+            if len(_csv_ch_row) == 2:
+                kb["inline_keyboard"].append(_csv_ch_row)
+                _csv_ch_row = []
+        if _csv_ch_row:
+            kb["inline_keyboard"].append(_csv_ch_row)
         kb["inline_keyboard"].append([{
             "text": "❌ Cancel",
             "callback_data": f"csvcancel_{uid}"
@@ -27033,11 +27039,17 @@ async def handle_callback(query: dict):
                     await send_msg(chat_id, "❌ Channel নেই! /channel দিয়ে add করো।")
                     return
                 kb2 = {"inline_keyboard": []}
+                _csv2_row = []
                 for ch in channels:
-                    kb2["inline_keyboard"].append([{
+                    _csv2_row.append({
                         "text": f"📢 {ch.get('channel_name', ch.get('channel_id'))}",
                         "callback_data": f"csvchannel_{ch['channel_id']}_{c_id}_{uid}"
-                    }])
+                    })
+                    if len(_csv2_row) == 2:
+                        kb2["inline_keyboard"].append(_csv2_row)
+                        _csv2_row = []
+                if _csv2_row:
+                    kb2["inline_keyboard"].append(_csv2_row)
                 kb2["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}])
                 await send_msg(chat_id, "📢 Channel select করো:", reply_markup=kb2)
 
@@ -27075,11 +27087,17 @@ async def handle_callback(query: dict):
                     await send_msg(chat_id, "❌ Channel নেই!")
                     return
                 kb2 = {"inline_keyboard": []}
+                _csv3_row = []
                 for ch in channels:
-                    kb2["inline_keyboard"].append([{
+                    _csv3_row.append({
                         "text": f"📢 {ch.get('channel_name', ch.get('channel_id'))}",
                         "callback_data": f"csvchannel_{ch['channel_id']}_{c_id}_{uid}"
-                    }])
+                    })
+                    if len(_csv3_row) == 2:
+                        kb2["inline_keyboard"].append(_csv3_row)
+                        _csv3_row = []
+                if _csv3_row:
+                    kb2["inline_keyboard"].append(_csv3_row)
                 kb2["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}])
                 await send_msg(chat_id, "📢 Channel select করো:", reply_markup=kb2)
 
