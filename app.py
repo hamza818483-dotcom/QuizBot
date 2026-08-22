@@ -12144,6 +12144,9 @@ async def _process_pdf_pages_inner(
     all_mcqs_raw = []
     first_image_msg_id = None
     _pdfs_page_topics = {}
+    clear_cancel(chat_id)
+    new_job_id(chat_id)
+    set_active_job(chat_id, f"PDF MCQ generation + Poll posting ({file_name}, page-by-page)")
 
     async def _gen_with_retry(img_, page_num_):
         """
@@ -12207,6 +12210,9 @@ async def _process_pdf_pages_inner(
         return last_mcqs, last_error
 
     for idx, page_tuple in enumerate(pages):
+        if is_cancelled(chat_id):
+            clear_active_job(chat_id)
+            break
         if skip_generate:
             page_num, img, mcqs = page_tuple
         else:
@@ -12462,6 +12468,7 @@ async def _process_pdf_pages_inner(
                 pass
             img = None
 
+    clear_active_job(chat_id)
     _dash_stop.set()
     try:
         await asyncio.wait_for(_dash_ticker_task, timeout=2)
@@ -12483,11 +12490,16 @@ async def _process_pdf_pages_inner(
         await send_document(chat_id, buf.getvalue().encode("utf-8"), f"{topic}_mcq.csv",
             caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ", mime_type="text/csv")
 
+    if not csv_only and not summary_pages and is_cancelled(chat_id):
+        await send_msg(chat_id, "🛑 কাজ বাতিল করা হয়েছে — কোনো পেজ শেষ হওয়ার আগেই থামানো হয়েছে, তাই কোনো ফলাফল নেই।")
+
     if not csv_only and summary_pages:
         total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
         summary = f"🟥ATLAS Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq_sum}\n\n"
         for p in summary_pages:
             summary += f"🌟Page-{fmt_page(p['page'])} ({p['mcq_count']} MCQ):\n{p['first_poll']}\n"
+        if is_cancelled(chat_id):
+            summary = f"🛑 কাজ বাতিল করা হয়েছে — যতটুকু হয়েছে তার ফলাফল:\n\n" + summary
         summary += (
             f"\n💥শুভকামনা প্রিয় শিক্ষার্থী {uname}...\n"
             '"যেকোনো প্রশ্ন থাকলে মেসেজ দাও "Ask Your Mentor" গ্রুপে।\n'
@@ -14305,6 +14317,9 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
     (page_num, img, mcqs) tuple list shape as pdf_generate_all_pages so the
     rest of the /bio pipeline (topic grouping, CSV/poll output) is unchanged.
     """
+    clear_cancel(chat_id)
+    new_job_id(chat_id)
+    set_active_job(chat_id, "/bio MCQ generation")
     BATCH_SIZE = 3
     batches = [pages[i:i + BATCH_SIZE] for i in range(0, len(pages), BATCH_SIZE)]
     headings_by_page = {}
@@ -14420,7 +14435,8 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
                 pass
 
     async def _run_page(idx, page_num, img):
-
+        if is_cancelled(chat_id):
+            return
         nonlocal total_mcq
         page_status[idx]["current"] = True
         await _bio_safe_dash_edit()
@@ -14538,6 +14554,12 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
             await _run_page(idx, page_num, img)
 
     await asyncio.gather(*[_guarded(i, pn, img) for i, (pn, img) in enumerate(pages)])
+    clear_active_job(chat_id)
+    if is_cancelled(chat_id) and status_msg_id:
+        try:
+            await edit_msg(chat_id, status_msg_id, "🛑 কাজ বাতিল করা হয়েছে — যতটুকু পেজ শেষ হয়েছে তার ফলাফল নিচে।")
+        except Exception:
+            pass
     return results
 
 
@@ -20932,6 +20954,9 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
     results = [None] * len(pages)
     _lock = asyncio.Lock()
     start_time = time.time()
+    clear_cancel(chat_id)
+    new_job_id(chat_id)
+    set_active_job(chat_id, f"ONU2 extraction ({file_name}, page-by-page)")
     page_status = [{"page": p, "current": False, "done": False, "mcq": 0, "model": "", "failed": False, "error": ""}
                    for p, _ in pages]
 
@@ -20972,7 +20997,7 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
         if not status_msg_id:
             return
         try:
-            await edit_msg(chat_id, status_msg_id, _dashboard())
+            await edit_msg(chat_id, status_msg_id, _dashboard(), reply_markup=_cancel_kb(chat_id))
         except Exception:
             pass
 
@@ -20989,7 +21014,11 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
     _pair_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PAIRS)
 
     async def _process_pair(pair_idx, pair):
+        if is_cancelled(chat_id):
+            return
         async with _pair_semaphore:
+            if is_cancelled(chat_id):
+                return
             await _qbm_ram_aware_acquire()
             try:
                 imgs = [img for _, img in pair]
@@ -21028,6 +21057,12 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
             page_status[i]["done"] = True
             page_status[i]["failed"] = True
     await _status()
+    clear_active_job(chat_id)
+    if is_cancelled(chat_id) and status_msg_id:
+        try:
+            await edit_msg(chat_id, status_msg_id, "🛑 কাজ বাতিল করা হয়েছে — যতটুকু পেজ শেষ হয়েছে তার ফলাফল নিচে।")
+        except Exception:
+            pass
     return results
 
 
@@ -21606,6 +21641,7 @@ async def process_qbm_pages(
     page_provider_tally = {}  # page_num -> {"Gemini": n, "Groq": n} for final model-usage summary (post-verify)
     page_call1_tally = {}  # page_num -> {"Gemini": n, "Groq": n} -- ORIGINAL Call1 extraction provider, before Call2 verify relabels it
     new_job_id(chat_id)
+    clear_cancel(chat_id)
     set_active_job(chat_id, f"QBM Poll posting ({file_name}, page-by-page)")
 
     iterable = page_tuples if skip_extract else [(p, img, None) for p, img in pages]
