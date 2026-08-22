@@ -3698,7 +3698,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     Smart wrapper: Gemini first (primary), then Groq fallback (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
     Missing API keys are skipped silently. Never raises.
-    Queued: only one MCQ-generation job runs at a time across the whole bot.
+    Concurrent: multiple users' MCQ-generation jobs run in parallel (see
+    2026-08-22 bugfix note below — the old global queue lock was removed).
     Always generates fresh — no same-image cache reuse.
     AtlasBot-style: single generation call, retry only if under MIN_MCQ
     (max 2 extra attempts) — no mandatory per-page verify/repair call.
