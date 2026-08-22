@@ -12517,15 +12517,42 @@ async def _process_pdf_pages_inner(
                     # exact topic/sub-topic it verified that MCQ's content
                     # against, so one topic's content can never end up
                     # under another topic's MCQ set.
-                    try:
-                        from pdf_handler import generate_pdfs_topic_mcqs
-                        mcqs = await asyncio.wait_for(
-                            generate_pdfs_topic_mcqs(img, topic, page_num, mcq_count_hint=(mcq_count or 15)),
-                            timeout=120)
-                    except Exception as _pdfs_e:
-                        logger.warning(f"[PDFS] generation failed page {page_num}: {_pdfs_e}")
-                        mcqs = []
-                    gen_error = None if mcqs else "topic-wise generation থেকে 0 MCQ এসেছে"
+                    # FIX (topic-detect reliability): generate_pdfs_topic_mcqs
+                    # only rotates Gemini keys -- if ALL Gemini keys are
+                    # exhausted/failing for a page, it silently returns []
+                    # and that page's topic never gets detected (unlike /pdf
+                    # which races Groq/OpenRouter/etc too). Now: retry the
+                    # Gemini single-call pipeline up to 2x, then fall back to
+                    # the same multi-provider _gen_with_retry used by /pdf so
+                    # a page is never dropped just because Gemini was down --
+                    # fallback MCQs get tagged with the page's default topic
+                    # so grouping still works (just without sub-topic split).
+                    mcqs = []
+                    for _pdfs_attempt in range(2):
+                        try:
+                            from pdf_handler import generate_pdfs_topic_mcqs
+                            mcqs = await asyncio.wait_for(
+                                generate_pdfs_topic_mcqs(img, topic, page_num, mcq_count_hint=(mcq_count or 15)),
+                                timeout=120)
+                        except Exception as _pdfs_e:
+                            logger.warning(f"[PDFS] generation attempt {_pdfs_attempt+1} failed page {page_num}: {_pdfs_e}")
+                            mcqs = []
+                        if mcqs:
+                            break
+                        if _pdfs_attempt == 0:
+                            await asyncio.sleep(2)
+                    if not mcqs:
+                        logger.warning(f"[PDFS] Page {page_num}: Gemini topic-pipeline empty after retries — falling back to multi-provider generation (topic-detect skipped for this page).")
+                        try:
+                            _fb_mcqs, _fb_err = await _gen_with_retry(img, page_num)
+                        except Exception as _fb_e:
+                            _fb_mcqs, _fb_err = [], str(_fb_e)
+                        if _fb_mcqs:
+                            for _m in _fb_mcqs:
+                                _m["_pdfs_topic"] = topic
+                                _m["_pdfs_subtopic"] = None
+                            mcqs = _fb_mcqs
+                    gen_error = None if mcqs else "topic-wise generation থেকে 0 MCQ এসেছে (Gemini + fallback providers সব ব্যর্থ)"
                     # derive the page's topic list (for caption/summary use)
                     # straight from what the model actually tagged its own
                     # MCQs with — single source of truth, no separate call.
