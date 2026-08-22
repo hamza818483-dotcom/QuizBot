@@ -6516,7 +6516,7 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
                 continue
             opts_raw = [
                 row.get("option1", ""), row.get("option2", ""),
-                row.get("option3", ""), row.get("option4", "")
+                row.get("option3", ""), row.get("option4", ""), row.get("option5", "")
             ]
             opts = [o.strip() for o in opts_raw if o.strip()]
             if len(opts) < 2:
@@ -6542,13 +6542,13 @@ def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
     import io, csv as csv_mod_local
     buf = io.StringIO()
     w = csv_mod_local.writer(buf)
-    w.writerow(["questions", "option1", "option2", "option3", "option4", "answer", "explanation"])
+    w.writerow(["questions", "option1", "option2", "option3", "option4", "option5", "answer", "explanation", "type", "section"])
     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
     for m in mcqs:
         opts = (m.get("options", []) + ["", "", "", ""])[:4]
         w.writerow([
-            m.get("question", ""), opts[0], opts[1], opts[2], opts[3],
-            ans_map.get(m.get("answer", "A"), "1"), _strip_img_tag(m.get("explanation", ""))
+            m.get("question", ""), opts[0], opts[1], opts[2], opts[3], "",
+            ans_map.get(m.get("answer", "A"), "1"), _strip_img_tag(m.get("explanation", "")), "1", "1"
         ])
     return buf.getvalue().encode("utf-8-sig")
 
