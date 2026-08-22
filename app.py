@@ -6491,15 +6491,28 @@ async def handle_csvs_command(msg: dict):
 # SHARED CSV PARSER
 # ============================================================
 def _parse_csv_bytes(csv_bytes: bytes) -> list:
-    """CSV bytes থেকে MCQ list বানাও."""
+    """CSV bytes থেকে MCQ list বানাও. /pdfs-এর topicwise CSV export করা
+    '### Main Topic ###' / '—— Sub Topic ——' header rows (type column:
+    main_topic_header / sub_topic_header) থাকলে সেগুলো real MCQ হিসেবে না
+    ঢুকিয়ে প্রতিটা পরবর্তী MCQ-তে _topic_main/_topic_sub হিসেবে carry-forward
+    করে, যাতে /sheet দিয়ে সেই CSV আবার PDF বানালে topic info হারিয়ে না যায়।"""
     import io, csv as csv_mod_local
     try:
         content = csv_bytes.decode("utf-8-sig")
         reader = csv_mod_local.DictReader(io.StringIO(content))
         mcqs = []
+        _cur_main, _cur_sub = None, None
         for row in reader:
             q = row.get("questions") or row.get("question", "")
             if not q:
+                continue
+            row_type = (row.get("type") or "").strip()
+            if row_type == "main_topic_header":
+                _cur_main = re.sub(r'^#+\s*|\s*#+$', '', q).strip()
+                _cur_sub = None
+                continue
+            if row_type == "sub_topic_header":
+                _cur_sub = re.sub(r'^—+\s*|\s*—+$', '', q).strip()
                 continue
             opts_raw = [
                 row.get("option1", ""), row.get("option2", ""),
@@ -6511,10 +6524,14 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
             ans_raw = str(row.get("answer", "1")).strip().upper()
             ans_map = {"1": "A", "2": "B", "3": "C", "4": "D", "A": "A", "B": "B", "C": "C", "D": "D"}
             ans = ans_map.get(ans_raw, "A")
-            mcqs.append({
+            mcq = {
                 "question": _strip_q_numbering(q.strip()), "options": opts, "answer": ans,
                 "explanation": row.get("explanation", "").strip()
-            })
+            }
+            if _cur_main:
+                mcq["_pdfs_topic"] = _cur_main
+                mcq["_pdfs_subtopic"] = _cur_sub
+            mcqs.append(mcq)
         return mcqs
     except Exception as e:
         logger.error(f"[CSV Parse] Error: {e}")
@@ -9650,11 +9667,19 @@ async def handle_sheet_style_callback(callback_query: dict):
                 html_out = _am_build_html(am_data, title, fmt_num, title)
             elif style_key == "default":
                 html_out = _build_solve_sheet_html(title, 1, mcqs)
+            elif style_key in ("style1", "style2", "style7") and any(m.get("_pdfs_topic") for m in mcqs):
+                # CSV re-uploaded from /pdfs's topicwise export -- carries
+                # _pdfs_topic/_pdfs_subtopic (parsed from the ### header
+                # rows) -- render with topic headings preserved instead of
+                # flattening into one generic list.
+                _topics_order, _topic_map = _group_pdfs_mcqs(mcqs, title)
+                html_out = _build_topicwise_pdf_html(_topics_order, _topic_map, title)
             else:
                 data_adapted = _adapt_mcqs_for_print(mcqs)
                 html_out = PRINT_STYLE_BUILDERS[style_key](data_adapted, title)
 
-            pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress, use_css_page_size=(style_key == "style7"))
+            _is_topicwise_fallback = style_key in ("style1", "style2", "style7") and any(m.get("_pdfs_topic") for m in mcqs)
+            pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress, use_css_page_size=(style_key == "style7" and not _is_topicwise_fallback))
             pdf_bytes = await _apply_saved_watermark(pdf_bytes)
 
         if not pdf_bytes:
