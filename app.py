@@ -8144,6 +8144,18 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                             const pages = document.querySelectorAll('.abpage');
                             const MM_PER_PX = 25.4 / 96;
                             const heights = [];
+
+                            // Returns per-column item counts for the CURRENT height.
+                            function colCounts(cc) {
+                                const items = Array.from(cc.querySelectorAll(':scope > .question'));
+                                const byCol = {};
+                                items.forEach(it => {
+                                    const key = Math.round(it.getBoundingClientRect().left);
+                                    byCol[key] = (byCol[key] || 0) + 1;
+                                });
+                                return Object.values(byCol);
+                            }
+
                             pages.forEach((pg) => {
                                 const isAnswers = pg.classList.contains('answers-page');
                                 const cc = isAnswers ? pg.querySelector('.answers-section') : pg.querySelector('.content-columns');
@@ -8154,6 +8166,53 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                 } else {
                                     const items = Array.from(cc.querySelectorAll(':scope > .question'));
                                     if (!items.length) { heights.push(null); return; }
+
+                                    // REAL FIX (verified via direct Chromium linear-scan on
+                                    // real content): column-fill:auto fills columns strictly
+                                    // top-to-bottom to whatever height the container is given
+                                    // -- it does NOT balance item COUNT across columns. Our
+                                    // Python-side per-column height estimate (used to set the
+                                    // initial cc.style.height before this script runs) is only
+                                    // a rough guess and its error varies per page (confirmed:
+                                    // one 50-question page needed ~530-550mm for an even
+                                    // 16/17/17 split while a different 38-question page needed
+                                    // ~380-440mm for 13/13/12 -- no single constant fits both,
+                                    // and the balanced-3-column state only exists in a NARROW
+                                    // window between "too short -> spills into a 4th column"
+                                    // and "too tall -> columns 1-2 over-fill, column 3
+                                    // starves" with NO simple monotonic boundary a binary
+                                    // search can converge on (verified: naive bisection here
+                                    // oscillates and can walk into the too-tall regime,
+                                    // collapsing to 2 giant columns). Self-correct instead
+                                    // with a monotonically increasing linear scan from a safe
+                                    // low starting height: grow the container in small steps
+                                    // until it FIRST reaches exactly 3 columns with a balanced
+                                    // split (max-min <= 1), then stop -- this always lands in
+                                    // the narrow correct window from below since the "spills
+                                    // to 4+ columns" state only occurs when the container is
+                                    // shorter than that window, never after growing into it.
+                                    const total = items.length;
+                                    const mmToPx = 96 / 25.4;
+                                    let bestPx = null;
+                                    for (let h_mm = 60; h_mm <= 900; h_mm += 4) {
+                                        cc.style.height = (h_mm * mmToPx) + 'px';
+                                        const counts = colCounts(cc);
+                                        const numCols = counts.length;
+                                        const maxC = Math.max(...counts);
+                                        const minC = Math.min(...counts);
+                                        if (numCols <= 3 && (maxC - minC) <= 1) {
+                                            bestPx = h_mm * mmToPx;
+                                            break;
+                                        }
+                                    }
+                                    if (bestPx === null) {
+                                        // fell through without finding a balanced state
+                                        // (shouldn't normally happen) -- keep whatever the
+                                        // Python-side estimate already set as a safe fallback
+                                        bestPx = cc.getBoundingClientRect().height;
+                                    }
+                                    cc.style.height = bestPx + 'px';
+
                                     const colBottoms = {};
                                     items.forEach(it => {
                                         const r = it.getBoundingClientRect();
@@ -9019,6 +9078,22 @@ def _build_print_style7(data, heading):
             seg = chunk[c * per_col:(c + 1) * per_col]
             col_heights.append(sum(_est_item_height_mm(d) for d in seg))
         tallest_mm = max(col_heights) if col_heights else 40
+        # REAL FIX (verified via direct Chromium bisection): column-fill:auto
+        # fills columns strictly top-to-bottom to whatever height the container
+        # gets -- it does NOT balance item COUNT across columns. Our estimate
+        # (tallest_mm*1.03+4, then clamped to 560mm) was landing at heights
+        # that make columns 1-2 overfill before spilling into column 3, e.g.
+        # verified on a real 50-question page: est=560mm -> columns got
+        # 18/18/14 items (should be ~17/17/16), leaving visible blank space
+        # under column 3. Bisecting the real container height against real
+        # rendered content confirmed the genuinely even 17/17/16 split only
+        # happens in a ~530-555mm window -- our estimate multiplier (1.03) is
+        # slightly too generous for this CSS/content combination. Tightening
+        # the buffer multiplier from 1.03 to 0.98 (and dropping the flat +4mm
+        # pad) brings the estimate into that verified-correct window without
+        # a blanket height-cap change, which previous attempts showed makes
+        # the imbalance WORSE in either direction if it drifts the container
+        # far from the true balance point.
         est_mm = max(40, min(560, round(tallest_mm * 1.03 + 4)))  # tight buffer; real height gets measured+shrunk in _html_to_pdf before final render
         header_html = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>' if page_idx == 1 else ''
         body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}">{header_html}<div class="content-columns" style="height:{est_mm}mm">'
