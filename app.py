@@ -8911,7 +8911,7 @@ def _check_short_option(opts):
     for v in opts:
         if v:
             clean = re.sub(r'<[^>]+>', '', str(v)).strip()
-            if len(clean) > 16:
+            if len(clean) > 18:
                 return False
     return True
 
