@@ -1085,9 +1085,14 @@ async def generate_mcq_from_image(
 
 
 async def generate_mcq_from_text(text: str, topic: str = "MCQ", count: int = 15) -> list:
-    """Queued wrapper: only one MCQ-generation job runs at a time across the bot."""
-    async with MCQ_PROCESSING_QUEUE_LOCK:
-        return await _generate_mcq_from_text_raw(text, topic, count)
+    # 2026-08-22 BUGFIX: previously wrapped in MCQ_PROCESSING_QUEUE_LOCK, a
+    # single global asyncio.Lock -- meant only ONE /txt job could run across
+    # THE WHOLE BOT at once, so User B's /txt request sat fully blocked
+    # behind User A's until A's finished, even though each call already uses
+    # its own independent Gemini/Groq API key + connection and has nothing
+    # that actually needs to be serialized. Removed: each call now runs
+    # concurrently, so multiple users' /txt jobs never queue behind each other.
+    return await _generate_mcq_from_text_raw(text, topic, count)
 
 
 async def _generate_mcq_from_text_raw(text: str, topic: str = "MCQ", count: int = 15) -> list:

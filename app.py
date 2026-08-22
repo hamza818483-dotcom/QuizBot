@@ -3710,83 +3710,90 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     can skip keys already burned in this call instead of getting a fresh
     5-key budget as if nothing happened.
     """
-    async with _MCQ_PROCESSING_QUEUE_LOCK:
-        out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=exclude_groq_keys, key_offset=key_offset)
-        out = _cap_mcq_options(out, 4)
-        out = _validate_mcq_structure(out)
+    # 2026-08-22 BUGFIX: previously wrapped in _MCQ_PROCESSING_QUEUE_LOCK, a
+    # single global asyncio.Lock -- meant EVERY image-based MCQ generation
+    # across the ENTIRE BOT (/pdf, /qbm, /bio, /chem, /extra, /onu, everything)
+    # ran ONE AT A TIME. User B's command queued fully behind User A's until
+    # A's finished, even on a completely different chat/topic/PDF. Removed --
+    # each call already uses its own independent API key + Gemini/Groq request
+    # and has nothing that actually needs global serialization. Multiple users'
+    # jobs now run concurrently instead of queuing behind one another.
+    out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=exclude_groq_keys, key_offset=key_offset)
+    out = _cap_mcq_options(out, 4)
+    out = _validate_mcq_structure(out)
+    if _TF_MODE.get():
+        out = _tf_validate_and_filter(out)
+    out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
+
+    if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
+        _rng_min, _rng_max = mcq_count[0], mcq_count[1]
+    elif isinstance(mcq_count, (int, float)) and mcq_count:
+        _rng_min = _rng_max = int(mcq_count)
+    elif _EXTRA_MODE.get():
+        # /extra output is entirely content-driven by how much is
+        # actually hand-marked on the page -- could legitimately be 0
+        # (unmarked page) or just 1-2 (a single marked phrase). No
+        # floor to retry toward, unlike the normal MIN_MCQ target.
+        _rng_min, _rng_max = 0, None
+    elif _BIO_MODE.get():
+        # /bio, like /bangla, is maximum-source-utilization with no cap
+        # -- topic-wise full coverage, not a fixed page target.
+        # 2026-08-20: floor dropped MIN_MCQ(10) -> 1. /bio crops the
+        # page PER TOPIC SEGMENT (see _bio_generate_per_topic_pages),
+        # so a single call here is often just ONE small topic's worth
+        # of content -- genuinely 3-9 MCQs for a short topic, not a
+        # full page. The old MIN_MCQ=10 floor forced up to 2 extra
+        # retry calls (3x key usage) on every small segment trying to
+        # pad it up to 10, even though the segment simply doesn't have
+        # 10 facts worth covering. Model already extracts max possible
+        # from the given crop (that instruction lives in the /bio
+        # prompt itself) -- the floor was pure wasted key spend, not
+        # improving coverage.
+        _rng_min, _rng_max = 1, None
+    else:
+        _rng_min, _rng_max = MIN_MCQ, MAX_MCQ
+
+    # AtlasBot-style count-enforcement retry loop. Capped at 1 extra
+    # attempt (was 2) -- each retry re-runs the FULL provider chain
+    # (Gemini up to 8 keys x 20-35s timeout each, then Groq/fallback),
+    # so 2 retries could roughly triple total page time on a bad-luck
+    # run. 1 retry still gives a real second chance at hitting MIN_MCQ
+    # without compounding worst-case wait time further.
+    attempts = 0
+    while len(out) < _rng_min and attempts < 1:
+        attempts += 1
+        logger.info(f"[MCQGen] page {page_num}: only {len(out)} MCQs (attempt {attempts}) — retrying for more")
+        retry_out, retry_tried = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=tried_groq_keys)
+        tried_groq_keys = tried_groq_keys | retry_tried
+        retry_out = _cap_mcq_options(retry_out, 4)
+        retry_out = _validate_mcq_structure(retry_out)
         if _TF_MODE.get():
-            out = _tf_validate_and_filter(out)
-        out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
+            retry_out = _tf_validate_and_filter(retry_out)
+        retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
+        if retry_out and len(retry_out) >= len(out):
+            out = retry_out
 
-        if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
-            _rng_min, _rng_max = mcq_count[0], mcq_count[1]
-        elif isinstance(mcq_count, (int, float)) and mcq_count:
-            _rng_min = _rng_max = int(mcq_count)
-        elif _EXTRA_MODE.get():
-            # /extra output is entirely content-driven by how much is
-            # actually hand-marked on the page -- could legitimately be 0
-            # (unmarked page) or just 1-2 (a single marked phrase). No
-            # floor to retry toward, unlike the normal MIN_MCQ target.
-            _rng_min, _rng_max = 0, None
-        elif _BIO_MODE.get():
-            # /bio, like /bangla, is maximum-source-utilization with no cap
-            # -- topic-wise full coverage, not a fixed page target.
-            # 2026-08-20: floor dropped MIN_MCQ(10) -> 1. /bio crops the
-            # page PER TOPIC SEGMENT (see _bio_generate_per_topic_pages),
-            # so a single call here is often just ONE small topic's worth
-            # of content -- genuinely 3-9 MCQs for a short topic, not a
-            # full page. The old MIN_MCQ=10 floor forced up to 2 extra
-            # retry calls (3x key usage) on every small segment trying to
-            # pad it up to 10, even though the segment simply doesn't have
-            # 10 facts worth covering. Model already extracts max possible
-            # from the given crop (that instruction lives in the /bio
-            # prompt itself) -- the floor was pure wasted key spend, not
-            # improving coverage.
-            _rng_min, _rng_max = 1, None
-        else:
-            _rng_min, _rng_max = MIN_MCQ, MAX_MCQ
+    if _rng_max and len(out) > _rng_max:
+        out = out[:_rng_max]
 
-        # AtlasBot-style count-enforcement retry loop. Capped at 1 extra
-        # attempt (was 2) -- each retry re-runs the FULL provider chain
-        # (Gemini up to 8 keys x 20-35s timeout each, then Groq/fallback),
-        # so 2 retries could roughly triple total page time on a bad-luck
-        # run. 1 retry still gives a real second chance at hitting MIN_MCQ
-        # without compounding worst-case wait time further.
-        attempts = 0
-        while len(out) < _rng_min and attempts < 1:
-            attempts += 1
-            logger.info(f"[MCQGen] page {page_num}: only {len(out)} MCQs (attempt {attempts}) — retrying for more")
-            retry_out, retry_tried = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=tried_groq_keys)
-            tried_groq_keys = tried_groq_keys | retry_tried
-            retry_out = _cap_mcq_options(retry_out, 4)
-            retry_out = _validate_mcq_structure(retry_out)
-            if _TF_MODE.get():
-                retry_out = _tf_validate_and_filter(retry_out)
-            retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
-            if retry_out and len(retry_out) >= len(out):
-                out = retry_out
+    # chok/bangla are special coverage-audit modes — keep their dedicated
+    # verify/enforcement passes since they check literal box/line coverage,
+    # not just count. Normal mode skips all extra calls (AtlasBot parity).
+    if _CHOK_MODE.get():
+        out = await _chok_final_cv_enforcement(out, img, topic, page_num)
+    if _BANGLA_MODE.get():
+        out = await _bangla_verify_and_enforce(out, img, topic, page_num)
+    if _EXTRA_MODE.get():
+        out = await _extra_marking_audit(out, img, topic, page_num)
 
-        if _rng_max and len(out) > _rng_max:
-            out = out[:_rng_max]
-
-        # chok/bangla are special coverage-audit modes — keep their dedicated
-        # verify/enforcement passes since they check literal box/line coverage,
-        # not just count. Normal mode skips all extra calls (AtlasBot parity).
-        if _CHOK_MODE.get():
-            out = await _chok_final_cv_enforcement(out, img, topic, page_num)
-        if _BANGLA_MODE.get():
-            out = await _bangla_verify_and_enforce(out, img, topic, page_num)
-        if _EXTRA_MODE.get():
-            out = await _extra_marking_audit(out, img, topic, page_num)
-
-        out = _validate_mcq_structure(out)
-        # Side-channel for outer retry callers (pdf_generate_all_pages'
-        # _run_one) so a fully-empty-page outer retry doesn't get a fresh
-        # 5-key Groq budget as if nothing happened -- see docstring above.
-        # Kept out of the return signature to avoid touching the ~10+
-        # existing call sites that unpack a single value.
-        _LAST_TRIED_GROQ_KEYS["keys"] = tried_groq_keys
-        return out
+    out = _validate_mcq_structure(out)
+    # Side-channel for outer retry callers (pdf_generate_all_pages'
+    # _run_one) so a fully-empty-page outer retry doesn't get a fresh
+    # 5-key Groq budget as if nothing happened -- see docstring above.
+    # Kept out of the return signature to avoid touching the ~10+
+    # existing call sites that unpack a single value.
+    _LAST_TRIED_GROQ_KEYS["keys"] = tried_groq_keys
+    return out
 
 
 async def _verify_and_fix_page(mcqs: list, img, topic: str, page_num, mcq_count=None) -> list:
