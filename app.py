@@ -8154,7 +8154,7 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                 // match content height exactly, no leftover blank space.
                                 const heightMm = Math.max(40, Math.min(560, Math.ceil(totalPx * MM_PER_PX) + 1));
                                 const pageName = isAnswers ? 'pans' : `p${pageNum}`;
-                                rules.push(`@page ${pageName}{size:420mm ${heightMm}mm;margin:10mm 10mm 25mm 10mm;}`);
+                                rules.push(`@page ${pageName}{size:420mm ${heightMm}mm;margin:10mm 10mm 10mm 10mm;}`);
                             });
                             const styleEl = document.createElement('style');
                             styleEl.textContent = rules.join('\\n');
@@ -8825,7 +8825,7 @@ def _build_print_style1(data, heading):
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
 _PRINT_STYLE7_CSS = """<style>
-@page{size:420mm 60mm;margin:10mm 10mm 25mm 10mm;@top-center{content:none}@bottom-center{content:none}}
+@page{size:420mm 60mm;margin:10mm 10mm 10mm 10mm;@top-center{content:none}@bottom-center{content:none}}
 body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:15pt;line-height:1.35;color:#000;margin:0;padding:10px;width:420mm;max-width:420mm}
 .exam-header{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:10px;margin-bottom:15px}
 .exam-header h1{color:#166534;margin:0;font-size:20pt;font-weight:bold}
@@ -8852,7 +8852,7 @@ body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:1
 .answer-table th{background-color:#F0FDF4;font-weight:bold;text-align:center;font-size:14pt;color:#166534}
 .qno-col{width:8%;text-align:center}.ans-col{width:8%;text-align:center;font-weight:bold;font-size:14pt}.exp-col{width:84%;font-size:13pt}
 img{max-width:30%!important;height:auto!important;vertical-align:middle}
-@media print{@page{size:420mm 594mm;margin:10mm 10mm 25mm 10mm;@top-center{content:none}@bottom-center{content:none}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:420mm;max-width:420mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
+@media print{@page{size:420mm 594mm;margin:10mm 10mm 10mm 10mm;@top-center{content:none}@bottom-center{content:none}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:420mm;max-width:420mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
 </style>"""
 
 def _build_print_style7(data, heading):
@@ -8909,7 +8909,7 @@ def _build_print_style7(data, heading):
             seg = chunk[c * per_col:(c + 1) * per_col]
             col_heights.append(sum(_est_item_height_mm(d) for d in seg))
         tallest_mm = max(col_heights) if col_heights else 40
-        est_mm = max(40, min(560, round(tallest_mm * 1.15 + 15)))  # generous buffer; real height gets measured+shrunk in _html_to_pdf before final render
+        est_mm = max(40, min(560, round(tallest_mm * 1.03 + 4)))  # tight buffer; real height gets measured+shrunk in _html_to_pdf before final render
         header_html = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>' if page_idx == 1 else ''
         body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}">{header_html}<div class="content-columns" style="height:{est_mm}mm">'
         for d in chunk:
