@@ -8177,8 +8177,25 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                     // whitespace in short columns and the risk of
                                     // overflow-driven blank pages, without any fragile
                                     // height-guessing loop.
-                                    cc.style.columnFill = 'balance';
+                                    // FIX: previously cc still had the Python-side
+                                    // fixed est_mm height applied when column-fill:
+                                    // balance first computed layout -- if that
+                                    // estimate was too generous (common on sparse
+                                    // partial pages, e.g. last page of a set with
+                                    // <50 items), balance() distributed content
+                                    // across the OVERSIZED box, leaving real bottom/
+                                    // right white-space that the later height:auto
+                                    // re-measurement could only partially correct
+                                    // (browsers cache the balance result per layout
+                                    // pass). Now height:auto is forced FIRST, so the
+                                    // balance algorithm always computes against the
+                                    // content's true natural height from the start,
+                                    // then the neededPx measurement below reads that
+                                    // real natural layout, not a corrected estimate.
                                     cc.style.height = 'auto';
+                                    cc.style.columnFill = 'balance';
+                                    // Reflow before measuring bottoms.
+                                    void cc.offsetHeight;
                                     const items = Array.from(cc.querySelectorAll(':scope > .question'));
                                     if (!items.length) { heights.push(null); return; }
                                     const colBottoms = {};
