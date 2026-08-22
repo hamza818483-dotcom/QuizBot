@@ -500,11 +500,12 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
     if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
         logger.warning(f"[PDFS] All {len(key_rotator.keys)} Gemini keys daily-exhausted — returning empty (caller tries Groq/other fallbacks)")
         return []
-    # 2026-08-22: capped at 8 keys (was uncapped) -- same fix as /pdf's
-    # generate_mcq_from_image, matching cap for consistent worst-case wait
-    # time and to avoid a single page stalling for many minutes if early
-    # keys hit a bad-luck run of timeouts/SSL errors.
-    max_retries = min(len(_ordered), 8) if _ordered else 5
+    # 2026-08-22: try ALL live keys (uncapped, no 8-key ceiling) -- each
+    # key has its own daily/rate quota, so any single key could be the one
+    # that succeeds. Timeout tightened instead (35s/20s -> 20s/12s) so a
+    # dead/slow key gets skipped fast, keeping total worst-case wait
+    # reasonable even across all ~44 keys.
+    max_retries = len(_ordered) if _ordered else 5
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
         key_rotator.record_call(key)
@@ -522,9 +523,10 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
                         types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
                     ]
                 )
-            # 2026-08-22: matches /pdf's timeout fix -- logs show successful
-            # calls land well under 30s, so a hang past that is a dead key.
-            _attempt_timeout = 35 if attempt == 0 else 20
+            # 2026-08-22: 25-40s range across all keys (uncapped) -- gives
+            # each key a fair chance to succeed while still failing fast
+            # enough on genuinely dead/throttled keys.
+            _attempt_timeout = 40 if attempt == 0 else 25
             response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
             valid = _parse_mcq_json(response.text)
             if not valid:
@@ -1060,14 +1062,11 @@ async def generate_mcq_from_image(
         return []
 
     # 2026-08-22: capped at 8 keys (was uncapped -> up to all 44 configured
-    # keys, each with a 20-35s timeout -- a bad-luck run of timeouts/SSL
-    # errors on early keys could stall a single page for 10+ minutes before
-    # ever reaching the Groq/OpenRouter fallback chain below). 8 keys still
-    # gives Gemini a strong chance to succeed (healthy keys normally return
-    # well under 30s) while guaranteeing a hard ceiling on worst-case wait
-    # time per page, per the "minimize timeout/token waste at any cost"
-    # requirement -- Groq/fallback chain picks up from here if all 8 fail.
-    max_retries = min(len(_ordered), 8) if _ordered else 5
+    # 2026-08-22 (updated): user wants ALL keys tried (no ceiling) since
+    # any single key's own quota could be the one that succeeds -- cap
+    # removed. Timeout tightened instead (35s/20s -> 20s/12s) to keep
+    # total worst-case wait bounded even across the full ~44-key pool.
+    max_retries = len(_ordered) if _ordered else 5
     # Model fallback chain: try the latest model first, and if the WHOLE
     # Gemini backend for it is overloaded (503 UNAVAILABLE — this is a
     # server-side capacity issue, not a per-key problem, so it hits every
@@ -1102,16 +1101,10 @@ async def generate_mcq_from_image(
                         ]
                     )
 
-                # 2026-08-22: user requirement — minimize wasted timeout on
-                # dead/slow keys at any cost (token+time burn matters more
-                # than rare marginal success). Logs consistently show
-                # successful Gemini calls landing well under 30s; a hang
-                # past that on ANY attempt (including the first) is almost
-                # always a genuinely dead/throttled key, not a slow success
-                # in progress. Cut 60s/30s -> 35s/20s so failed keys rotate
-                # to the next key much faster instead of stalling the whole
-                # page for 60-90s across 2-3 dead-key attempts.
-                _attempt_timeout = 35 if attempt == 0 else 20
+                # 2026-08-22: 25-40s range across all keys (uncapped) --
+                # gives each key a fair chance to succeed while still
+                # failing fast enough on genuinely dead/throttled keys.
+                _attempt_timeout = 40 if attempt == 0 else 25
                 response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 valid = _parse_mcq_json(response.text)
                 if not valid:
