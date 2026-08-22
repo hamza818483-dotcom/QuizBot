@@ -8225,7 +8225,27 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                 // (uncapped) content still overflowed that box during
                                 // actual PDF render, forcing Chromium to auto-paginate
                                 // the single answers page into several extra pages.
-                                const cap = isAnswers ? 20000 : 560;
+                                // FIX (real root cause, confirmed by direct PDF
+                                // mediabox inspection): the 560mm cap was
+                                // clamping the REAL measured content height on
+                                // legitimately tall question pages (e.g. a real
+                                // 50-item/3-column page needing >560mm), so the
+                                // exported page height silently jumped from the
+                                // true content height (matches, say, 320mm on a
+                                // sparse page) up to the artificial 560mm
+                                // ceiling on a full page -- leaving a large,
+                                // genuinely empty gap below the real content
+                                // and to the right, exactly as observed. There
+                                // is no legitimate reason to cap question pages
+                                // at all: the real content height is already
+                                // being measured directly from rendered DOM
+                                // bounding boxes, so it can never runaway the
+                                // way an unmeasured estimate could. Removing
+                                // the artificial ceiling (matching the
+                                // answers-page's already-uncapped 20000mm)
+                                // lets every question page export at its true,
+                                // tight-fit content height.
+                                const cap = 20000;
                                 const heightMm = Math.max(40, Math.min(cap, Math.ceil(totalPx * MM_PER_PX) + 1));
                                 heights.push(heightMm);
                             });
@@ -9105,7 +9125,13 @@ def _build_print_style7(data, heading):
         # a blanket height-cap change, which previous attempts showed makes
         # the imbalance WORSE in either direction if it drifts the container
         # far from the true balance point.
-        est_mm = max(40, min(560, round(tallest_mm * 1.03 + 4)))  # tight buffer; real height gets measured+shrunk in _html_to_pdf before final render
+        # FIX: 560mm cap removed (matches the corresponding JS-side cap
+        # removal in _html_to_pdf) -- a real 50-item/3-column page can
+        # legitimately need more than 560mm, and capping this pre-render
+        # estimate forced column-fill:balance to compute against an
+        # undersized box before the real-height correction ran, producing
+        # the same leftover-whitespace bug from the opposite direction.
+        est_mm = max(40, round(tallest_mm * 1.03 + 4))
         header_html = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>' if page_idx == 1 else ''
         body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}">{header_html}<div class="content-columns" style="height:{est_mm}mm">'
         for d in chunk:
