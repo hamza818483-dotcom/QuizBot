@@ -22989,6 +22989,7 @@ async def handle_pdf_page_regen(session_id: str, page_num: int, dm_chat_id: int,
     image_file_id = cache.get("image_file_id")
     image_msg_id = cache.get("image_msg_id")
     old_poll_msg_ids = cache.get("poll_msg_ids") or []
+    old_end_msg_id = cache.get("end_msg_id")
     if not image_file_id or not channel_id:
         await send_msg(dm_chat_id, f"❌ Page {fmt_page(page_num)}-এর original image/channel পাওয়া যায়নি।")
         return
@@ -23024,6 +23025,14 @@ async def handle_pdf_page_regen(session_id: str, page_num: int, dm_chat_id: int,
         except Exception:
             failed_del += 1
         await asyncio.sleep(0.3)
+
+    # Delete OLD end message (poll-links summary msg) for this page — a new
+    # one gets created below with fresh links, old one must not linger.
+    if old_end_msg_id:
+        try:
+            await tg_post("deleteMessage", {"chat_id": channel_id, "message_id": old_end_msg_id})
+        except Exception as e:
+            logger.warning(f"[PdfPageRegen] old end_msg delete failed: {e}")
 
     settings = await db_get_settings()
     tag = settings.get("tag", "")
@@ -23065,6 +23074,42 @@ async def handle_pdf_page_regen(session_id: str, page_num: int, dm_chat_id: int,
         await db_update_cache(new_cache_id, {"poll_msg_ids": new_poll_msg_ids})
     except Exception as e:
         logger.warning(f"[PdfPageRegen] poll_msg_ids save failed: {e}")
+
+    # Recreate the per-page END MESSAGE (poll-links summary) with fresh
+    # links/buttons, same shape as the original /pdf end message.
+    try:
+        exam_url = f"{GH_PAGES_EXAM_URL}?id={new_cache_id}"
+        solve_pdf_url = f"{CF_WORKER_URL}/api/solve-pdf-view/{new_cache_id}"
+        bot_un = await get_bot_username()
+        quiz_url = f"https://t.me/{bot_un}?start=pdf_{new_cache_id}"
+        poll_url = f"https://t.me/{bot_un}?start=poll_{new_cache_id}"
+        new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{new_cache_id}"
+        new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{new_cache_id}"
+        end_data = {
+            "chat_id": channel_id,
+            "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(new_mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
+            "reply_markup": {"inline_keyboard": [
+                [{"text": "📝 Quiz Solve", "url": quiz_url},
+                 {"text": "🆕 New Quiz", "url": new_quiz_url}],
+                [{"text": "🔄 Poll Again", "url": poll_url},
+                 {"text": "🆕 New Poll", "url": new_poll_url}],
+                [{"text": "🌐 Website Exam", "url": exam_url},
+                 {"text": "📄 Solve PDF", "url": solve_pdf_url}]
+            ]},
+            "reply_to_message_id": image_msg_id
+        }
+        end_r = {"ok": False}
+        for _end_attempt in range(3):
+            end_r = await tg_post("sendMessage", end_data)
+            if end_r.get("ok"):
+                break
+            await asyncio.sleep(2)
+        if end_r.get("ok"):
+            await db_update_cache(new_cache_id, {"end_msg_id": end_r["result"]["message_id"]})
+        else:
+            logger.error(f"[PdfPageRegen] end msg send failed page {page_num}: {end_r.get('description') or end_r.get('error')}")
+    except Exception as e:
+        logger.warning(f"[PdfPageRegen] end msg recreate failed: {e}")
 
     # Update this page's channel caption (image caption) with the new first-poll link
     try:
