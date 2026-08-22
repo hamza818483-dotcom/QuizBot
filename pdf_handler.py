@@ -303,48 +303,24 @@ openrouter_rotator = OpenRouterKeyRotator()
 # ============================================================
 # MCQ GENERATION PROMPTS
 # ============================================================
-MCQ_PROMPT_WITH_COUNT = """📝 Special MCQ TYPE: Standard Easy
+MCQ_PROMPT_WITH_COUNT = """📝 এই page-টা থেকে MCQ বানাও।
 
-🟥Overall Instructions:
--🔒 TWO-MODE RULE (check first): যদি Image-এ আগে থেকেই MCQ (question+options ফরম্যাটে) থাকে, সেগুলো 100% VERBATIM/হুবহু extract করবে — নতুন কোনো MCQ generate করবে না, question/option-এর wording পরিবর্তন করবে না। যদি Image-এ কোনো MCQ না থেকে শুধু Information/text থাকে, তখনই সেই content থেকে নতুন MCQ বানাবে।
--🔒 NO-DUPLICATE-FROM-EXISTING-MCQ (MODE A এ absolute): page-এ আগে থেকেই থাকা কোনো question-কে ভিন্নভাবে সাজিয়ে/rephrase করে আরেকটা নতুন MCQ বানানো সম্পূর্ণ নিষিদ্ধ — একই question দুইবার (verbatim বা reworded) থাকবে না।
--🔒 NO-MCQ-FROM-ANSWER/EXPLANATION-TEXT: page-এ কোনো প্রশ্নের answer/explanation/ব্যাখ্যা অংশ (paragraph-style লেখা যা কোনো নির্দিষ্ট প্রশ্নের উত্তর ব্যাখ্যা করছে, নিজে MCQ ফরম্যাটে (question+options) না) থাকলে সেই ব্যাখ্যা টেক্সট থেকে সরাসরি নতুন MCQ generate করা নিষিদ্ধ — শুধু actual informational/content text (যা কোনো প্রশ্নের answer/explanation না) থেকেই নতুন MCQ বানানো যাবে।
--একই পেইজে MCQ থাকলে সেই পেইজ পুরোটাই MODE A (verbatim extract) — পাশের সাধারণ টেক্সট থেকে অতিরিক্ত নতুন MCQ বানানো যাবে না।
--🔒 SOURCE-LOCK (absolute): question ও ৪টি option-এর মূল তথ্য অবশ্যই এই page-এর actual content থেকে আসতে হবে — বাইরের সাধারণ জ্ঞান/knowledge দিয়ে question/option বানানো সম্পূর্ণ নিষিদ্ধ। শুধু answer letter (প্রমাণ না পেলে) আর explanation-এর extra detail-এই সীমিত পরিমাণে own knowledge ব্যবহার করা যাবে, question/option কখনো না।
--🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST, checked/processed before any other normal content on the page):
-  • কোনো পেইজ/লাইন যেকোনো কালার দিয়ে দাগানো বা হাইলাইটেড থাকলে (সবুজ, লাল, কমলা, হলুদ — সবচেয়ে কমন হাইলাইটার কালার)
-  • কোনো প্যারা/লাইন বক্স করা থাকলে বা কালার দিয়ে মার্ক করা থাকলে
-  • কোনো লাইনের নিচে কলমের কালি দিয়ে আন্ডারলাইন করা থাকলে (লাল, কালো, নীল, সবুজ — যেকোনো কালার)
-  • বইয়ের মূল লাইনের সাথে হাতে/কলমে এক্সট্রা কোনো কালার, দাগ, মার্ক, আন্ডারলাইন দেখা গেলেই MUST তা থেকে MCQ বানাতে হবে, মিস করা যাবে না
-  PROCESSING ORDER (strict, never skip/reorder): প্রথমে পুরো page স্ক্যান করে সব highlighted/marked/underlined লাইন identify করবে এবং সেগুলো থেকে MCQ বানাবে সবার আগে (guaranteed, zero miss) — তারপরই বাকি normal (মার্ক না করা) content থেকে MCQ বানাবে। মার্ক করা অংশ থেকে MCQ বাদ দিয়ে শুধু normal content থেকে MCQ বানানো সম্পূর্ণ নিষিদ্ধ।
--কোয়ালিটিফুল প্রশ্ন বানাতে হবে
--ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
--🟥 বক্স/ছক STYLE তথ্য থাকলে (bordered box, info-card, ছক/সারণির প্রতিটি সেল): প্রতিটি বক্স/ছক থেকে MUST কমপক্ষে ১টি MCQ বানাতে হবে, সর্বোচ্চ ২-৩টি একেবারে তুচ্ছ/খালি বক্স বাদ দেওয়া যাবে — এর বেশি বাদ দেওয়া যাবে না। কোনো বক্সে তথ্য বেশি/ঘন থাকলে সেই একটি বক্স থেকেই একাধিক MCQ (সর্বোচ্চ ১৫টি পর্যন্ত) বানাতে হবে।
--টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট এসব থেকে MCQ বানাবে না — না প্রশ্নে, না অপশনে। এগুলো শুধু structural/navigation elements, প্রকৃত জ্ঞান/তথ্য না।
--প্রতিটি অপশন অবশ্যই actual factual content হতে হবে (definition, cause, treatment, value, name of a real concept ইত্যাদি) — কখনোই কোনো section heading, card/page label, বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না
+🎯 MAIN RULE — MAXIMUM CONTENT USE: পুরো page-এর প্রতিটা অংশ (প্রতিটা প্যারাগ্রাফ, লাইন, বক্স/ছক, হাইলাইট/মার্ক করা অংশ) ভালোভাবে পড়ো এবং যত বেশি সম্ভব actual তথ্য থেকে MCQ বানাও — কোনো তথ্যবহুল অংশ বাদ দেওয়া যাবে না, পুরো page-এর content maximize করে ব্যবহার করবে।
+
+- Page-এ আগে থেকে MCQ (question+options) থাকলে হুবহু (verbatim) extract করো। না থাকলে, তথ্য থেকে নতুন MCQ বানাও।
+- হাইলাইট/মার্ক/আন্ডারলাইন করা লাইন থাকলে সেগুলো থেকে অবশ্যই MCQ বানাবে (সবার আগে, মিস করা যাবে না)।
+- বক্স/ছক/সারণিতে তথ্য থাকলে প্রতিটা থেকে অন্তত ১টা MCQ বানাও।
+- Question ও option-এর তথ্য অবশ্যই এই page-এর নিজের content থেকে আসবে — বাইরের knowledge দিয়ে বানানো যাবে না।
+- টপিকের নাম/হেডলাইন/পেইজ নম্বরের মতো navigation/label টেক্সট থেকে MCQ বানাবে না।
+- একই প্রশ্ন দুইবার (হুবহু বা ঘুরিয়ে) বানানো যাবে না।
+- ভাষা: source-এর ভাষায় লিখবে (বাংলা হলে বাংলা, ইংরেজি হলে ইংরেজি — translate করবে না)।
+
+💥প্রশ্ন: ছোট (১-২ লাইন)
+💥অপশন: ৪টি, সবগুলোই factual, একটাই সঠিক উত্তর (হ্যাঁ/না/সত্য/মিথ্যা না)
+💥উত্তর: A/B/C/D — সব প্রশ্নে একই letter না, ছড়িয়ে দাও
 -MUST বানাতে হবে exactly {count} টি MCQ, কম বেশি নয়
--Highest quality MCQ বানাবে
--মাঝে মাঝে একই তথ্যকে উল্টিয়েও প্রশ্ন করবে (যেমন "বাংলাদেশের রাজধানী কোথায়?" এর পাশাপাশি অন্য কোথাও "ঢাকা কোন দেশের রাজধানী?" ধরনের reverse angle প্রশ্নও রাখবে, যেখানে যুক্তিসঙ্গত)
--বারবার একই প্যাটার্নে টপিকের নাম ধরে প্রশ্ন শুরু করবে না (যেমন "X সম্পর্কে কোনটি সঠিক", "X এর গঠন কী" — বারবার একই স্টাইল) — বৈচিত্র্যপূর্ণ প্রশ্ন-গঠন ব্যবহার করবে (direct fact, definition, cause-effect, comparison, fill-in-the-blank, "কোনটি সঠিক নয়" ইত্যাদি মিক্স করে)
--জেনারেট করা MCQ-এর মধ্যে ৩-৫টি এমন হবে যেখানে একটি প্রশ্নেই একাধিক ভিন্ন তথ্য মিক্স করা থাকবে (যেমন option-গুলো ২-৩টা তথ্যের কম্বিনেশন, শুধু একটা option-ই সব তথ্য মিলিয়ে সঠিক) — মাঝারি কঠিন রাখবে, extreme hard না
-
-🚫 FORBIDDEN SOURCE-REFERENCE PHRASES (প্রশ্ন ও ব্যাখ্যা দুই জায়গাতেই, সবসময়):
-"টেক্সট অনুসারে", "টপিক অনুসারে", "টেক্সটে লিখা আছে", "ছবিতে দেখা যাচ্ছে", "উপরের তথ্য অনুযায়ী", "উক্ত অংশে উল্লেখ আছে", "টপিকে বলা হয়েছে", "দেখা যাচ্ছে", "লিখা আছে", "বর্ণিত আছে" — এই ধরনের কোনো source-reference কথা প্রশ্ন কিংবা ব্যাখ্যা কোথাও লেখা যাবে না, সরাসরি fact বলবে।
-
-🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
--Source image-এর মূল ভাষা যা থাকবে (Bengali বা English), Question + Options + Explanation সবকিছু সেই একই ভাষায় লিখতে হবে
--Source ইংরেজি হলে পুরো MCQ ইংরেজিতে লিখবে — বাংলায় translate করা সম্পূর্ণ নিষেধ
--Source বাংলা হলে পুরো MCQ বাংলায় লিখবে — ইংরেজিতে translate করা সম্পূর্ণ নিষেধ
--Mixed-language source হলে, যে অংশ থেকে প্রশ্ন বানাচ্ছো সেই অংশের ভাষা অনুসরণ করবে
-
-💥প্রশ্ন: (ছোট, ১/১.৫/২ লাইন)
-💥অপশন: (৪টি, ছোট+মিক্সড সোর্স থেকে)
--অপশনে সঠিক উত্তর অবশ্যই একটিই থাকবে
--৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ থাকবে। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
-💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position (A, B, C, or D) — vary them naturally across questions.
-🔒 ANSWER RELEVANCY SANITY CHECK (mandatory for MODE A / page already has answer marked): Page-এ MCQ-এর সাথে যদি answer আগে থেকেই mark করা/দেওয়া থাকে (circle, tick, underline, answer key ইত্যাদি), সেটা ব্যবহার করার আগে অবশ্যই re-check করবে — question + ৪টি option + ওই marked answer পড়ে দেখবে সেই answer সত্যিই question-টার সাথে logically/factually সঠিক কিনা। OCR/vision ভুল পড়ার কারণে (দাগ/mark ভুল জায়গায় পড়া, answer key-এর ভুল row মিলানো) marked answer ভুল option-এ পয়েন্ট করতে পারে। যদি marked answer স্পষ্টভাবে অপ্রাসঙ্গিক/ভুল মনে হয় (question-টার সাথে মেলে না), তাহলে সেটা ব্লাইন্ডলি ব্যবহার না করে নিজের জ্ঞান দিয়ে ৪টি option থেকে কোনটা প্রকৃতপক্ষে ১০০% সঠিক উত্তর তা analyze করে সেই option-ই দিবে। শুধু সন্দেহ হলেই override করবে না — mismatch স্পষ্ট/নিশ্চিত হলেই শুধু override করবে; marked answer সঠিক মনে হলে সেটাই রাখবে।
-💥ব্যাখ্যা (STRICT — MUST FOLLOW, MAX 165 WORDS FOR MAIN PART): সঠিক উত্তর কেন সঠিক + বাকি ৩টি ভুল অপশন কেন ভুল তা মিলিয়ে একটি সম্পূর্ণ তথ্যবহুল ব্যাখ্যা লিখতে হবে — এই মূল অংশ অবশ্যই সর্বোচ্চ ১৬৫ শব্দের মধ্যে শেষ করতে হবে। মূল অংশ (correct+wrong options কেন ভুল) ১৬৫ শব্দে না আঁটলে, অতিরিক্ত/extra detail (bonus fact, deeper context) মূল অংশের নিচে আলাদা লাইনে যোগ করবে, কখনো মূল অংশকে কেটে/truncate করবে না। এই তথ্য অবশ্যই source image-এর মধ্যেই থাকা কনটেন্ট থেকে নিতে হবে (image-এ যা নেই তা বানিয়ে লেখা যাবে না — outside general knowledge ব্যবহার নিষিদ্ধ)। ভাষা source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)। STRICTLY NISHIDDHO: "টেক্সট অনুসারে", "টপিক অনুসারে", "ছবিতে দেখা যাচ্ছে", "উপরের তথ্য অনুযায়ী", "উক্ত অংশে উল্লেখ আছে" — এমন কোনো source-reference কথা explanation-এ লেখা যাবে না, সরাসরি fact বলবে।
-💥exp_bbox: যদি ব্যাখ্যার প্রমাণ সরাসরি image-এর কোনো নির্দিষ্ট অংশে (প্যারাগ্রাফ/লাইন/ছক) visible থাকে, সেই অংশের bounding box দাও [x_min,y_min,x_max,y_max] হিসেবে, image-এর প্রস্থ/উচ্চতার 0-1000 scale-এ normalize করে। প্রমাণ visible না থাকলে বা নিশ্চিত না হলে null দাও।
+💥ব্যাখ্যা (MAX 165 শব্দ): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, শুধু page content থেকে (বাইরের knowledge না), source-reference phrase ("টেক্সট অনুসারে" ইত্যাদি) ছাড়া সরাসরি fact আকারে।
+💥exp_bbox: ব্যাখ্যার প্রমাণ page-এ visible থাকলে bounding box [x_min,y_min,x_max,y_max] (0-1000 scale), না থাকলে null।
 
 Topic: {topic}
 Page: {page}
@@ -352,52 +328,25 @@ Page: {page}
 MUST Return ONLY valid JSON array, no markdown:
 [{{"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"...","exp_bbox":[100,200,900,350]}}]"""
 
-MCQ_PROMPT_MAX = """📝 Special MCQ TYPE: Standard Easy
+MCQ_PROMPT_MAX = """📝 এই page-টা থেকে MCQ বানাও।
 
-🟥Overall Instructions:
--🔒 TWO-MODE RULE (check first): যদি Image-এ আগে থেকেই MCQ (question+options ফরম্যাটে) থাকে, সেগুলো 100% VERBATIM/হুবহু extract করবে — নতুন কোনো MCQ generate করবে না, question/option-এর wording পরিবর্তন করবে না। যদি Image-এ কোনো MCQ না থেকে শুধু Information/text থাকে, তখনই সেই content থেকে নতুন MCQ বানাবে।
--🔒 NO-DUPLICATE-FROM-EXISTING-MCQ (MODE A এ absolute): page-এ আগে থেকেই থাকা কোনো question-কে ভিন্নভাবে সাজিয়ে/rephrase করে আরেকটা নতুন MCQ বানানো সম্পূর্ণ নিষিদ্ধ — একই question দুইবার (verbatim বা reworded) থাকবে না।
--🔒 NO-MCQ-FROM-ANSWER/EXPLANATION-TEXT: page-এ কোনো প্রশ্নের answer/explanation/ব্যাখ্যা অংশ (paragraph-style লেখা যা কোনো নির্দিষ্ট প্রশ্নের উত্তর ব্যাখ্যা করছে, নিজে MCQ ফরম্যাটে (question+options) না) থাকলে সেই ব্যাখ্যা টেক্সট থেকে সরাসরি নতুন MCQ generate করা নিষিদ্ধ — শুধু actual informational/content text (যা কোনো প্রশ্নের answer/explanation না) থেকেই নতুন MCQ বানানো যাবে।
--একই পেইজে MCQ থাকলে সেই পেইজ পুরোটাই MODE A (verbatim extract) — পাশের সাধারণ টেক্সট থেকে অতিরিক্ত নতুন MCQ বানানো যাবে না।
--🔒 SOURCE-LOCK (absolute): question ও ৪টি option-এর মূল তথ্য অবশ্যই এই page-এর actual content থেকে আসতে হবে — বাইরের সাধারণ জ্ঞান/knowledge দিয়ে question/option বানানো সম্পূর্ণ নিষিদ্ধ। শুধু answer letter (প্রমাণ না পেলে) আর explanation-এর extra detail-এই সীমিত পরিমাণে own knowledge ব্যবহার করা যাবে, question/option কখনো না।
--🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST, checked/processed before any other normal content on the page):
-  • কোনো পেইজ/লাইন যেকোনো কালার দিয়ে দাগানো বা হাইলাইটেড থাকলে (সবুজ, লাল, কমলা, হলুদ — সবচেয়ে কমন হাইলাইটার কালার)
-  • কোনো প্যারা/লাইন বক্স করা থাকলে বা কালার দিয়ে মার্ক করা থাকলে
-  • কোনো লাইনের নিচে কলমের কালি দিয়ে আন্ডারলাইন করা থাকলে (লাল, কালো, নীল, সবুজ — যেকোনো কালার)
-  • বইয়ের মূল লাইনের সাথে হাতে/কলমে এক্সট্রা কোনো কালার, দাগ, মার্ক, আন্ডারলাইন দেখা গেলেই MUST তা থেকে MCQ বানাতে হবে, মিস করা যাবে না
-  PROCESSING ORDER (strict, never skip/reorder): প্রথমে পুরো page স্ক্যান করে সব highlighted/marked/underlined লাইন identify করবে এবং সেগুলো থেকে MCQ বানাবে সবার আগে (guaranteed, zero miss) — তারপরই বাকি normal (মার্ক না করা) content থেকে MCQ বানাবে। মার্ক করা অংশ থেকে MCQ বাদ দিয়ে শুধু normal content থেকে MCQ বানানো সম্পূর্ণ নিষিদ্ধ।
--কোয়ালিটিফুল প্রশ্ন বানাতে হবে
--এমনভাবে সকল প্রশ্ন বানাবে যাতে সকল লাইন থেকে MCQ কিভাবে আসতে পারে আইডিয়া হয়ে যাবে
--ছক থাকলে স্পেশাল প্রায়োরিটি পাবে (Use Every Information for Making MCQ)
--🟥 বক্স/ছক STYLE তথ্য থাকলে (bordered box, info-card, ছক/সারণির প্রতিটি সেল): প্রতিটি বক্স/ছক থেকে MUST কমপক্ষে ১টি MCQ বানাতে হবে, সর্বোচ্চ ২-৩টি একেবারে তুচ্ছ/খালি বক্স বাদ দেওয়া যাবে — এর বেশি বাদ দেওয়া যাবে না। কোনো বক্সে তথ্য বেশি/ঘন থাকলে সেই একটি বক্স থেকেই একাধিক MCQ (সর্বোচ্চ ১৫টি পর্যন্ত) বানাতে হবে।
--টপিকের নাম,অধ্যায়ের নাম,হেডলাইন,পেইজ সংখ্যা,সেকশনের নাম,"Card 1"/"Card 2" এর মতো navigation/label টেক্সট এসব থেকে MCQ বানাবে না — না প্রশ্নে, না অপশনে। এগুলো শুধু structural/navigation elements, প্রকৃত জ্ঞান/তথ্য না।
--প্রতিটি অপশন অবশ্যই actual factual content হতে হবে (definition, cause, treatment, value, name of a real concept ইত্যাদি) — কখনোই কোনো section heading, card/page label, বা navigation text কোনো option হিসেবে ব্যবহার করা যাবে না
--হাবিজাবি MCQ বানানো যাবে না,বেশি প্রশ্ন বানানোর প্রয়োজনে একটি MCQ কেই ঘুরিয়ে ফিরিয়ে দেওয়া যেতে পারে
--TARGET কমপক্ষে ১৫টি MCQ বানাবে (default target, user কোনো নির্দিষ্ট সংখ্যা না দিলে) — প্রতিটি লাইন, বক্স, তথ্য, সোর্স ব্যবহার করে; পেইজে তথ্য বেশি থাকলে ৩৫ পর্যন্ত যেতে পারো। "obvious" MCQ শেষ হয়ে গেছে ভেবে ৬-১০টায় থেমে যাওয়া UNDER-EXTRACTING, এটা করা যাবে না।
--তথ্য সত্যিই কম থাকলে minimum 10 টি, একদম sparse হলে minimum 5 টি
--মাঝে মাঝে একই তথ্যকে উল্টিয়েও প্রশ্ন করবে (যেমন "বাংলাদেশের রাজধানী কোথায়?" এর পাশাপাশি অন্য কোথাও "ঢাকা কোন দেশের রাজধানী?" ধরনের reverse angle প্রশ্নও রাখবে, যেখানে যুক্তিসঙ্গত)
--বারবার একই প্যাটার্নে টপিকের নাম ধরে প্রশ্ন শুরু করবে না (যেমন "X সম্পর্কে কোনটি সঠিক", "X এর গঠন কী" — বারবার একই স্টাইল) — বৈচিত্র্যপূর্ণ প্রশ্ন-গঠন ব্যবহার করবে (direct fact, definition, cause-effect, comparison, fill-in-the-blank, "কোনটি সঠিক নয়" ইত্যাদি মিক্স করে)
--জেনারেট করা MCQ-এর মধ্যে ৩-৫টি এমন হবে যেখানে একটি প্রশ্নেই একাধিক ভিন্ন তথ্য মিক্স করা থাকবে (যেমন option-গুলো ২-৩টা তথ্যের কম্বিনেশন, শুধু একটা option-ই সব তথ্য মিলিয়ে সঠিক) — মাঝারি কঠিন রাখবে, extreme hard না
+🎯 MAIN RULE — MAXIMUM CONTENT USE: পুরো page-এর প্রতিটা অংশ (প্রতিটা প্যারাগ্রাফ, লাইন, বক্স/ছক, হাইলাইট/মার্ক করা অংশ) ভালোভাবে পড়ো এবং page-এ যত তথ্য আছে তার maximum ব্যবহার করে MCQ বানাও — কোনো তথ্যবহুল অংশ বাদ দেওয়া যাবে না।
 
-🚫 FORBIDDEN SOURCE-REFERENCE PHRASES (প্রশ্ন ও ব্যাখ্যা দুই জায়গাতেই, সবসময়):
-"টেক্সট অনুসারে", "টপিক অনুসারে", "টেক্সটে লিখা আছে", "ছবিতে দেখা যাচ্ছে", "উপরের তথ্য অনুযায়ী", "উক্ত অংশে উল্লেখ আছে", "টপিকে বলা হয়েছে", "দেখা যাচ্ছে", "লিখা আছে", "বর্ণিত আছে" — এই ধরনের কোনো source-reference কথা প্রশ্ন কিংবা ব্যাখ্যা কোথাও লেখা যাবে না, সরাসরি fact বলবে।
+- Page-এ আগে থেকে MCQ (question+options) থাকলে হুবহু (verbatim) extract করো। না থাকলে, তথ্য থেকে নতুন MCQ বানাও।
+- হাইলাইট/মার্ক/আন্ডারলাইন করা লাইন থাকলে সেগুলো থেকে অবশ্যই MCQ বানাবে (সবার আগে, মিস করা যাবে না)।
+- বক্স/ছক/সারণিতে তথ্য থাকলে প্রতিটা থেকে অন্তত ১টা MCQ বানাও, তথ্য বেশি থাকলে একাধিক MCQ বানাও।
+- Question ও option-এর তথ্য অবশ্যই এই page-এর নিজের content থেকে আসবে — বাইরের knowledge দিয়ে বানানো যাবে না।
+- টপিকের নাম/হেডলাইন/পেইজ নম্বরের মতো navigation/label টেক্সট থেকে MCQ বানাবে না।
+- একই প্রশ্ন দুইবার (হুবহু বা ঘুরিয়ে) বানানো যাবে না; হাবিজাবি/মানহীন MCQ বানানো যাবে না।
+- ভাষা: source-এর ভাষায় লিখবে (বাংলা হলে বাংলা, ইংরেজি হলে ইংরেজি — translate করবে না)।
 
-🌐 LANGUAGE RULE (STRICT — MUST FOLLOW):
--Source image-এর মূল ভাষা যা থাকবে (Bengali বা English), Question + Options + Explanation সবকিছু সেই একই ভাষায় লিখতে হবে
--Source ইংরেজি হলে পুরো MCQ ইংরেজিতে লিখবে — বাংলায় translate করা সম্পূর্ণ নিষেধ
--Source বাংলা হলে পুরো MCQ বাংলায় লিখবে — ইংরেজিতে translate করা সম্পূর্ণ নিষেধ
--Mixed-language source হলে, যে অংশ থেকে প্রশ্ন বানাচ্ছো সেই অংশের ভাষা অনুসরণ করবে
+📊 COUNT: default target কমপক্ষে ১৫টি MCQ (user নির্দিষ্ট সংখ্যা না দিলে) — page-এ তথ্য বেশি থাকলে ৩৫ পর্যন্ত যেতে পারো, ৬-১০টায় থেমে যাওয়া চলবে না যতক্ষণ page-এ আরও extract-যোগ্য তথ্য আছে। তথ্য সত্যিই কম থাকলে minimum 10, একদম sparse হলে minimum 5।
 
-💥প্রশ্ন: (ছোট, ১/১.৫/২ লাইন)
--সোর্স থেকে সকল টাইপের প্রশ্ন
--যতভাবে প্রশ্ন আসতে পারে সব বানাবে
-💥অপশন: (৪টি, ছোট+20% বড়, মিক্সড সোর্স)
--অপশনে সঠিক উত্তর একটিই
--৪টি অপশনই তথ্য দ্বারা পরিপূর্ণ। হ্যাঁ,না,সত্য,মিথ্যা থাকবে না
-💥উত্তর: A/B/C/D — MUST be distributed across different options. STRICTLY FORBIDDEN: all answers being "A" or same option. Each MCQ's correct answer MUST be placed at a different position — vary them naturally so answers are spread across A, B, C, D positions.
-🔒 ANSWER RELEVANCY SANITY CHECK (mandatory for MODE A / page already has answer marked): Page-এ MCQ-এর সাথে যদি answer আগে থেকেই mark করা/দেওয়া থাকে (circle, tick, underline, answer key ইত্যাদি), সেটা ব্যবহার করার আগে অবশ্যই re-check করবে — question + ৪টি option + ওই marked answer পড়ে দেখবে সেই answer সত্যিই question-টার সাথে logically/factually সঠিক কিনা। OCR/vision ভুল পড়ার কারণে (দাগ/mark ভুল জায়গায় পড়া, answer key-এর ভুল row মিলানো) marked answer ভুল option-এ পয়েন্ট করতে পারে। যদি marked answer স্পষ্টভাবে অপ্রাসঙ্গিক/ভুল মনে হয় (question-টার সাথে মেলে না), তাহলে সেটা ব্লাইন্ডলি ব্যবহার না করে নিজের জ্ঞান দিয়ে ৪টি option থেকে কোনটা প্রকৃতপক্ষে ১০০% সঠিক উত্তর তা analyze করে সেই option-ই দিবে। শুধু সন্দেহ হলেই override করবে না — mismatch স্পষ্ট/নিশ্চিত হলেই শুধু override করবে; marked answer সঠিক মনে হলে সেটাই রাখবে।
-💥ব্যাখ্যা (STRICT — MUST FOLLOW, MAX 165 WORDS FOR MAIN PART): সঠিক উত্তর কেন সঠিক + বাকি ৩টি ভুল অপশন কেন ভুল তা মিলিয়ে একটি সম্পূর্ণ তথ্যবহুল ব্যাখ্যা লিখতে হবে — এই মূল অংশ অবশ্যই সর্বোচ্চ ১৬৫ শব্দের মধ্যে শেষ করতে হবে। মূল অংশ (correct+wrong options কেন ভুল) ১৬৫ শব্দে না আঁটলে, অতিরিক্ত/extra detail (bonus fact, deeper context) মূল অংশের নিচে আলাদা লাইনে যোগ করবে, কখনো মূল অংশকে কেটে/truncate করবে না। এই তথ্য অবশ্যই source image-এর মধ্যেই থাকা কনটেন্ট থেকে নিতে হবে (image-এ যা নেই তা বানিয়ে লেখা যাবে না — outside general knowledge ব্যবহার নিষিদ্ধ)। ভাষা source-এর ভাষায় (উপরের LANGUAGE RULE অনুযায়ী)। STRICTLY NISHIDDHO: "টেক্সট অনুসারে", "টপিক অনুসারে", "ছবিতে দেখা যাচ্ছে", "উপরের তথ্য অনুযায়ী", "উক্ত অংশে উল্লেখ আছে" — এমন কোনো source-reference কথা explanation-এ লেখা যাবে না, সরাসরি fact বলবে।
-💥exp_bbox: যদি ব্যাখ্যার প্রমাণ সরাসরি image-এর কোনো নির্দিষ্ট অংশে (প্যারাগ্রাফ/লাইন/ছক) visible থাকে, সেই অংশের bounding box দাও [x_min,y_min,x_max,y_max] হিসেবে, image-এর প্রস্থ/উচ্চতার 0-1000 scale-এ normalize করে। প্রমাণ visible না থাকলে বা নিশ্চিত না হলে null দাও।
+💥প্রশ্ন: ছোট (১-২ লাইন), সব ধরনের angle থেকে (direct fact, reverse, cause-effect, comparison, "কোনটি সঠিক নয়" ইত্যাদি মিক্স)
+💥অপশন: ৪টি, সবগুলোই factual, একটাই সঠিক উত্তর (হ্যাঁ/না/সত্য/মিথ্যা না)
+💥উত্তর: A/B/C/D — সব প্রশ্নে একই letter না, ছড়িয়ে দাও
+💥ব্যাখ্যা (MAX 165 শব্দ): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, শুধু page content থেকে (বাইরের knowledge না), source-reference phrase ("টেক্সট অনুসারে" ইত্যাদি) ছাড়া সরাসরি fact আকারে।
+💥exp_bbox: ব্যাখ্যার প্রমাণ page-এ visible থাকলে bounding box [x_min,y_min,x_max,y_max] (0-1000 scale), না থাকলে null।
 
 Topic: {topic}
 Page: {page}
