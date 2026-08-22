@@ -917,6 +917,21 @@ def _build_chok_prompt(topic: str) -> str:
 _BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
 _BIO_MODE = contextvars.ContextVar("bio_mode", default=False)
 _CHEM_MODE = contextvars.ContextVar("chem_mode", default=False)
+
+# Per-chat AI call counter for /pdf & /pdfs dashboards — incremented at every
+# provider attempt (Gemini/Groq/fallback) inside _generate_mcq_from_image_raw,
+# read by pdf_generate_all_pages / process_pdfs_pages when building the
+# dashboard text. Reset at the start of each job via _reset_ai_call_count.
+_PDF_AI_CALL_COUNTS = {}
+
+def _reset_ai_call_count(chat_id):
+    _PDF_AI_CALL_COUNTS[chat_id] = 0
+
+def _bump_ai_call_count(chat_id, n: int = 1):
+    _PDF_AI_CALL_COUNTS[chat_id] = _PDF_AI_CALL_COUNTS.get(chat_id, 0) + n
+
+def _get_ai_call_count(chat_id) -> int:
+    return _PDF_AI_CALL_COUNTS.get(chat_id, 0)
 # When set (non-None), _build_bio_prompt injects the already-detected topic
 # segment boundaries into the SAME single generation call, hard-locking each
 # segment's MCQs to only that segment's own content -- so the whole page
@@ -4172,7 +4187,9 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
     _gemini_primary_mode = True
     if _gemini_primary_mode:
         _gp_tag = "/extra" if _EXTRA_MODE.get() else ("/bio" if _BIO_MODE.get() else ("/chem" if _CHEM_MODE.get() else "default"))
+        _ai_call_chat_id = _current_job_chat_id_ctx.get()
         try:
+            _bump_ai_call_count(_ai_call_chat_id)
             gemini_out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
         except Exception as e:
             _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"
@@ -4189,6 +4206,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
 
         logger.warning(f"[AI-ROT] {_gp_tag} gemini empty (page {page_num}); trying groq")
         try:
+            _bump_ai_call_count(_ai_call_chat_id)
             groq_out, groq_tried = await _gen_groq(img, topic, mcq_count, exclude_keys=exclude_groq_keys, key_offset=key_offset)
         except Exception as e:
             _LAST_GROQ_ERROR["reason"] = f"{type(e).__name__}: {e}"
@@ -4206,7 +4224,9 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
         # (groq_tried already set from the attempt above, either branch)
 
     else:
+        _ai_call_chat_id = _current_job_chat_id_ctx.get()
         try:
+            _bump_ai_call_count(_ai_call_chat_id)
             groq_out, groq_tried = await _gen_groq(img, topic, mcq_count, exclude_keys=exclude_groq_keys, key_offset=key_offset)
         except Exception as e:
             _LAST_GROQ_ERROR["reason"] = f"{type(e).__name__}: {e}"
@@ -4223,6 +4243,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
 
         logger.warning(f"[AI-ROT] groq empty (page {page_num}); trying gemini")
         try:
+            _bump_ai_call_count(_ai_call_chat_id)
             gemini_out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
         except Exception as e:
             _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"
@@ -4246,6 +4267,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
         if not fn:
             continue
         try:
+            _bump_ai_call_count(_current_job_chat_id_ctx.get())
             out = await fn(img, topic, mcq_count)
             if out:
                 logger.info(f"[AI-ROT] page {page_num} satisfied by provider={prov}")
@@ -11083,7 +11105,7 @@ async def dagano_generate_all_pages(
             page_status[_idx_of(page_num)]["current"] = True
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
 
     async def _mark_done(page_num, img, mcqs):
         async with lock:
@@ -11095,7 +11117,7 @@ async def dagano_generate_all_pages(
             page_status[idx]["mcq"] = len(mcqs)
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
 
     async def _audited(mcqs, img, page_num):
         if not mcqs:
@@ -11466,7 +11488,7 @@ async def extra_generate_all_pages(
             page_status[_idx_of(page_num)]["current"] = True
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
 
     async def _mark_done(page_num, img, mcqs):
         async with lock:
@@ -11478,7 +11500,7 @@ async def extra_generate_all_pages(
             page_status[idx]["mcq"] = len(mcqs)
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_cancel_kb(chat_id))
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
 
     async def _audited(mcqs, img, page_num):
         if not mcqs:
@@ -12140,6 +12162,7 @@ async def pdf_generate_all_pages(
     clear_cancel(chat_id)
     new_job_id(chat_id)
     set_active_job(chat_id, f"PDF MCQ generation ({file_name}, parallel)")
+    _reset_ai_call_count(chat_id)
 
     # 2 pages in parallel: each concurrent slot uses a key_offset so they
     # start from different Groq keys (round-robin, see ordered_keys(offset=))
@@ -12167,6 +12190,7 @@ async def pdf_generate_all_pages(
     _register_pdf_regen_queue(chat_id, regen_queue, pages, page_status)
 
     async def _do_generate(page_num, img, slot):
+        _current_job_chat_id_ctx.set(chat_id)
         mcqs = []
         try:
             mcqs = await generate_mcq_from_image(img, topic, page_num, mcq_count, key_offset=slot)
@@ -12207,7 +12231,7 @@ async def pdf_generate_all_pages(
                 page_status[idx]["current"] = True
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
 
             mcqs = await _do_generate(page_num, img, slot)
 
@@ -12227,7 +12251,7 @@ async def pdf_generate_all_pages(
                     page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
+                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
 
             # After finishing this page's slot, drain ONE pending regen
             # request (if any) before this worker moves to the next fresh
@@ -12246,7 +12270,7 @@ async def pdf_generate_all_pages(
                     page_status[regen_idx]["done"] = False
                     if status_msg_id:
                         await edit_msg(chat_id, status_msg_id,
-                            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
+                            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
                 new_mcqs = await _do_generate(r_page_num, r_img, slot)
                 if is_cancelled(chat_id):
                     break
@@ -12259,7 +12283,7 @@ async def pdf_generate_all_pages(
                     page_status[regen_idx]["mcq"] = len(new_mcqs)
                     if status_msg_id:
                         await edit_msg(chat_id, status_msg_id,
-                            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
+                            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
 
     async def _watch_cancel(tasks):
         # Polls the cancel flag while pages are in flight; the moment /cancel
@@ -12414,7 +12438,7 @@ async def _process_pdf_pages_inner(
         status_msg_id = r.get("result", {}).get("message_id")
 
     await edit_msg(chat_id, status_msg_id,
-        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
 
     # PERMANENT FIX: dashboard previously only updated on page start/finish —
     # if one page's generation takes 30-90s, "Elapsed" looked frozen the
@@ -12436,7 +12460,7 @@ async def _process_pdf_pages_inner(
                 break
             try:
                 await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
             except Exception:
                 pass
     _dash_ticker_task = _spawn_task(_dashboard_ticker())
@@ -12521,7 +12545,7 @@ async def _process_pdf_pages_inner(
             page_num, img = page_tuple
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
 
         try:
             _page_segments = None  # /pdfs only: derived from returned MCQ tags, for caption/summary display
@@ -12777,7 +12801,7 @@ async def _process_pdf_pages_inner(
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
             await sb_exec(lambda: sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute())
 
         except Exception as e:
@@ -12951,6 +12975,7 @@ async def _process_pdf_pages_inner(
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📄 File: {file_name}\n🎯 Topic: {topic}\n"
         f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}\n"
+        f"🤖 AI calls: {_get_ai_call_count(chat_id)}\n"
         "━━━━━━━━━━━━━━━━━━━━━━",
         reply_markup=complete_kb)
 
@@ -13010,13 +13035,15 @@ async def _process_pdfs_pages_inner(
     start_time = time.time()
     total_mcq = sum(len(p[2]) for p in pages) if skip_generate else 0
     total_polls = 0
+    _reset_ai_call_count(chat_id)
+    _current_job_chat_id_ctx.set(chat_id)
 
     if not status_msg_id:
         r = await send_msg(chat_id, "⏳ Processing শুরু হচ্ছে...")
         status_msg_id = r.get("result", {}).get("message_id")
 
     await edit_msg(chat_id, status_msg_id,
-        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
 
     # PERMANENT FIX: dashboard previously only updated on page start/finish —
     # if one page's generation takes 30-90s, "Elapsed" looked frozen the
@@ -13038,7 +13065,7 @@ async def _process_pdfs_pages_inner(
                 break
             try:
                 await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
             except Exception:
                 pass
     _dash_ticker_task = _spawn_task(_dashboard_ticker())
@@ -13123,7 +13150,7 @@ async def _process_pdfs_pages_inner(
             page_num, img = page_tuple
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
 
         try:
             _page_segments = None  # /pdfs only: derived from returned MCQ tags, for caption/summary display
@@ -13371,7 +13398,7 @@ async def _process_pdfs_pages_inner(
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id)), reply_markup=_cancel_kb(chat_id))
             await sb_exec(lambda: sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute())
 
         except Exception as e:
@@ -13540,6 +13567,7 @@ async def _process_pdfs_pages_inner(
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📄 File: {file_name}\n🎯 Topic: {topic}\n"
         f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}\n"
+        f"🤖 AI calls: {_get_ai_call_count(chat_id)}\n"
         "━━━━━━━━━━━━━━━━━━━━━━",
         reply_markup=complete_kb)
 
