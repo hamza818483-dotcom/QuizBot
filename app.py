@@ -12354,6 +12354,17 @@ async def process_pdf_pages(
     with_image: bool = True,
     skip_generate: bool = False
 ):
+    # 2026-08-22: /pdfs is now a fully separate pipeline
+    # (_process_pdfs_pages_inner, defined below handle_pdfm) with its own
+    # generation, caption, CSV-grouping and auto-PDF logic -- no more
+    # _PDFS_MODE branches inside the shared /pdf pipeline. This dispatch is
+    # the only remaining shared touchpoint (call sites don't need to change).
+    if _PDFS_MODE.get():
+        return await process_pdfs_pages(
+            chat_id, uid, uname, pages, topic, mcq_count,
+            channel_id, csv_only, file_name, status_msg_id,
+            thread_id, with_image, skip_generate
+        )
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
     try:
         return await _process_pdf_pages_inner(
@@ -12927,6 +12938,585 @@ async def _process_pdf_pages_inner(
 # FEATURE: /pdfm — PDF pagewise MCQ to channel
 # Usage: /pdfm -p 1-5 -c @channel -m "Topic" -t topicId 10
 # ============================================================
+# ============================================================
+# FEATURE: /pdfs — standalone topic-wise MCQ pipeline
+# Forked from the shared /pdf pipeline (2026-08-22) so /pdfs no longer
+# depends on the _PDFS_MODE contextvar or shares control flow with
+# /pdf, /chok, /bangla, /tf, /extra — this function only ever runs the
+# single-call Gemini topic-detect+generate pipeline (with multi-provider
+# fallback) and always outputs the topic-wise grouped CSV/PDF.
+# ============================================================
+async def process_pdfs_pages(
+    chat_id: int, uid: int, uname: str,
+    pages: list, topic: str, mcq_count: int,
+    channel_id: str, csv_only: bool,
+    file_name: str = "document.pdf",
+    status_msg_id: int = None,
+    thread_id: int = None,
+    with_image: bool = True,
+    skip_generate: bool = False
+):
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    try:
+        return await _process_pdfs_pages_inner(
+            chat_id, uid, uname, pages, topic, mcq_count,
+            channel_id, csv_only, file_name, status_msg_id,
+            thread_id, with_image, skip_generate
+        )
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+async def _process_pdfs_pages_inner(
+    chat_id: int, uid: int, uname: str,
+    pages: list, topic: str, mcq_count: int,
+    channel_id: str, csv_only: bool,
+    file_name: str = "document.pdf",
+    status_msg_id: int = None,
+    thread_id: int = None,
+    with_image: bool = True,
+    skip_generate: bool = False
+):
+    settings = await db_get_settings()
+    tag = settings.get("tag", "")
+    exp_footer = settings.get("exp_footer", "")
+    session_id = gen_session_id()
+    await db_save_session(session_id, {
+        "user_id": uid, "user_name": uname, "topic": topic,
+        "channel_id": channel_id or "", "total_pages": len(pages),
+        "processed_pages": 0, "status": "processing"
+    })
+
+    page_status = [{"page": p[0], "done": False, "current": False, "mcq": (len(p[2]) if skip_generate else 0)} for p in pages]
+    start_time = time.time()
+    total_mcq = sum(len(p[2]) for p in pages) if skip_generate else 0
+    total_polls = 0
+
+    if not status_msg_id:
+        r = await send_msg(chat_id, "⏳ Processing শুরু হচ্ছে...")
+        status_msg_id = r.get("result", {}).get("message_id")
+
+    await edit_msg(chat_id, status_msg_id,
+        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+
+    # PERMANENT FIX: dashboard previously only updated on page start/finish —
+    # if one page's generation takes 30-90s, "Elapsed" looked frozen the
+    # whole time, making the bot look stuck. A lightweight background ticker
+    # refreshes the same message every few seconds purely for the live clock/
+    # progress bar, independent of page completion events.
+    _dash_stop = asyncio.Event()
+    async def _dashboard_ticker():
+        # Safety cap: even if the explicit stop call is missed due to an
+        # unexpected exception path, this ticker auto-terminates after 30
+        # minutes so it can never leak/run forever editing a dead job's message.
+        _ticker_deadline = time.time() + 1800
+        while not _dash_stop.is_set() and time.time() < _ticker_deadline:
+            try:
+                await asyncio.wait_for(_dash_stop.wait(), timeout=4)
+            except asyncio.TimeoutError:
+                pass
+            if _dash_stop.is_set():
+                break
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+            except Exception:
+                pass
+    _dash_ticker_task = _spawn_task(_dashboard_ticker())
+
+    summary_pages = []
+    all_mcqs_csv = []
+    all_mcqs_raw = []
+    first_image_msg_id = None
+    _pdfs_page_topics = {}
+    clear_cancel(chat_id)
+    new_job_id(chat_id)
+    set_active_job(chat_id, f"PDF MCQ generation + Poll posting ({file_name}, page-by-page)")
+
+    async def _gen_with_retry(img_, page_num_):
+        """
+        PERMANENT FIX — a page must NEVER be silently skipped/dropped just
+        because generation returned empty on the first couple of tries.
+        Multi-stage, always-active retry ladder before we ever accept zero:
+          Stage 1: up to 4 full-pipeline attempts (was 2), with backoff,
+                    each attempt independently races/rotates ALL providers
+                    (Groq, Gemini, NVIDIA, OpenRouter, etc. via
+                    generate_mcq_from_image -> _generate_mcq_from_image_raw).
+          Stage 2: if ALL 4 attempts still return empty, run one final
+                    RELAXED extraction pass with a loosened prompt (in case
+                    the strict generation prompt itself rejected valid page
+                    content) before conceding the page has nothing.
+        Only after both stages fail does the page get marked 0 MCQ — and
+        even then it's clearly flagged (⚠️) and the owner is alerted with
+        the EXACT reason (last exception / "all providers returned empty"),
+        never a vague "failed" with no cause.
+
+        Groq-key economy: accumulated_tried_keys carries forward across all
+        4 Stage-1 attempts (via _LAST_TRIED_GROQ_KEYS side-channel) so a
+        thin/empty page doesn't get a fresh 5-key Groq budget on every
+        attempt — without this, one stubborn empty page could touch the
+        same handful of already-cooling keys up to ~60 times (4 outer
+        attempts x up to 3 inner retries x 5-key cap each) before falling
+        through to the relaxed pass, needlessly starving other pages/users
+        of those keys in the meantime.
+        """
+        last_mcqs = []
+        last_error = ""
+        # Now safe to accumulate: prefetch/overlap was removed (pages are
+        # strictly serial in this function now), so this is never called
+        # concurrently with another _gen_with_retry — no race on the
+        # _LAST_TRIED_GROQ_KEYS side-channel. Carrying tried keys forward
+        # across all 4 Stage-1 attempts means a stubborn empty page doesn't
+        # get a fresh 5-key Groq budget every attempt.
+        accumulated_tried_keys = set()
+        for _pg_attempt in range(4):
+            try:
+                _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count, exclude_groq_keys=accumulated_tried_keys)
+                accumulated_tried_keys = accumulated_tried_keys | set(_LAST_TRIED_GROQ_KEYS.get("keys") or set())
+                if _mcqs:
+                    return _mcqs, None
+                last_mcqs = _mcqs
+                last_error = _get_last_generation_error()
+            except Exception as _pg_e:
+                last_error = f"{type(_pg_e).__name__}: {_pg_e}"
+                logger.warning(f"[PDF] Page {page_num_} gen attempt {_pg_attempt+1} failed: {_pg_e}")
+            await asyncio.sleep(1.5 * (_pg_attempt + 1))  # backoff: 1.5s, 3s, 4.5s, 6s
+
+        logger.warning(f"[PDF] Page {page_num_} empty after 4 full attempts ({last_error}) — running relaxed last-resort pass.")
+        try:
+            relaxed = await _pdf_relaxed_last_resort_extract(img_, topic, page_num_, mcq_count)
+            if relaxed:
+                logger.info(f"[PDF] Page {page_num_} recovered via relaxed last-resort pass ({len(relaxed)} MCQ).")
+                return relaxed, None
+        except Exception as _relaxed_e:
+            last_error = f"{last_error} | Relaxed-pass {type(_relaxed_e).__name__}: {_relaxed_e}"
+            logger.warning(f"[PDF] Page {page_num_} relaxed pass crashed: {_relaxed_e}")
+
+        return last_mcqs, last_error
+
+    for idx, page_tuple in enumerate(pages):
+        if is_cancelled(chat_id):
+            clear_active_job(chat_id)
+            break
+        if skip_generate:
+            page_num, img, mcqs = page_tuple
+        else:
+            page_num, img = page_tuple
+        page_status[idx]["current"] = True
+        await edit_msg(chat_id, status_msg_id,
+            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+
+        try:
+            _page_segments = None  # /pdfs only: derived from returned MCQ tags, for caption/summary display
+            if not skip_generate:
+                # /pdfs SINGLE-CALL pipeline: ONE Gemini call per page does
+                # topic-detection + self-verification + content-boundary lock
+                # + MCQ generation together (see pdf_handler.PDFS_TOPIC_MCQ_PROMPT
+                # / generate_pdfs_topic_mcqs). No image cropping, no separate
+                # detect-then-generate calls — full page is read once, and the
+                # model tags every MCQ with the exact topic/sub-topic it
+                # verified that MCQ's content against, so one topic's content
+                # can never end up under another topic's MCQ set.
+                # FIX (topic-detect reliability): generate_pdfs_topic_mcqs only
+                # rotates Gemini keys -- if ALL Gemini keys are exhausted/
+                # failing for a page, it silently returns [] and that page's
+                # topic never gets detected. Retry the Gemini single-call
+                # pipeline up to 2x, then fall back to the same multi-provider
+                # _gen_with_retry used by /pdf so a page is never dropped just
+                # because Gemini was down -- fallback MCQs get tagged with the
+                # page's default topic so grouping still works (just without
+                # sub-topic split).
+                mcqs = []
+                for _pdfs_attempt in range(2):
+                    try:
+                        from pdf_handler import generate_pdfs_topic_mcqs
+                        mcqs = await asyncio.wait_for(
+                            generate_pdfs_topic_mcqs(img, topic, page_num, mcq_count_hint=(mcq_count or 15)),
+                            timeout=120)
+                    except Exception as _pdfs_e:
+                        logger.warning(f"[PDFS] generation attempt {_pdfs_attempt+1} failed page {page_num}: {_pdfs_e}")
+                        mcqs = []
+                    if mcqs:
+                        break
+                    if _pdfs_attempt == 0:
+                        await asyncio.sleep(2)
+                if not mcqs:
+                    logger.warning(f"[PDFS] Page {page_num}: Gemini topic-pipeline empty after retries — falling back to multi-provider generation (topic-detect skipped for this page).")
+                    try:
+                        _fb_mcqs, _fb_err = await _gen_with_retry(img, page_num)
+                    except Exception as _fb_e:
+                        _fb_mcqs, _fb_err = [], str(_fb_e)
+                    if _fb_mcqs:
+                        for _m in _fb_mcqs:
+                            _m["_pdfs_topic"] = topic
+                            _m["_pdfs_subtopic"] = None
+                        mcqs = _fb_mcqs
+                gen_error = None if mcqs else "topic-wise generation থেকে 0 MCQ এসেছে (Gemini + fallback providers সব ব্যর্থ)"
+                # derive the page's topic list (for caption/summary use)
+                # straight from what the model actually tagged its own MCQs
+                # with — single source of truth, no separate call.
+                _seen = []
+                _seen_set = set()
+                for _m in mcqs:
+                    _key = (_m.get("_pdfs_topic"), _m.get("_pdfs_subtopic"))
+                    if _key not in _seen_set:
+                        _seen_set.add(_key)
+                        _seen.append({"main": _key[0], "sub": _key[1]})
+                _page_segments = _seen or [{"main": topic, "sub": None}]
+                _pdfs_page_topics[page_num] = _page_segments
+            if not mcqs:
+                page_status[idx]["current"] = False
+                page_status[idx]["done"] = True
+                page_status[idx]["mcq"] = 0
+                page_status[idx]["failed"] = True
+                page_status[idx]["error"] = gen_error or "Unknown"
+                logger.warning(f"[PDF] Page {page_num} produced 0 MCQ after retries — reason: {gen_error}")
+                await notify_owner(
+                    f"⚠️ [PDF] Page {fmt_page(page_num)} ({file_name}) থেকে 0 MCQ।\n"
+                    f"কারণ: {gen_error or 'অজানা — সব provider খালি ফলাফল দিয়েছে'}"
+                )
+                continue
+
+            cache_id = gen_session_id()
+            img_bytes = image_to_bytes(img)
+
+            if csv_only:
+                for m in mcqs:
+                    opts = m.get("options", ["", "", "", ""])
+                    opts = [re.sub(r'^[A-Da-dক-ঘ][)\.।]\s*', '', str(o)) for o in opts]
+                    ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                    ans_num = ans_map.get(m.get("answer", "A"), "1")
+                    exp = m.get("explanation", "")
+                    all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, _strip_img_tag(exp), "1", "1"])
+                await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs)
+            else:
+                image_msg_id = None
+                image_file_id = None
+                # Topic already detected+locked in STEP 1 above (before
+                # generation); just derive the caption label here — use the
+                # first segment's main topic as the page-level label (a page
+                # can have multiple segments/topics, but the image caption
+                # shows the primary one; each MCQ still carries its own
+                # exact _pdfs_topic/_pdfs_subtopic tag for grouping below).
+                page_topic_name = (_page_segments[0]["main"] if _page_segments else topic)
+                if with_image:
+                    caption = ""
+                    if tag:
+                        caption = f"{tag}\n\n"
+                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {page_topic_name}\n🌟Page No: {fmt_page(page_num)}"
+
+                    photo_r = await send_photo(channel_id, img_bytes, caption, message_thread_id=thread_id)
+                    if photo_r.get("ok"):
+                        image_msg_id = photo_r["result"]["message_id"]
+                        image_file_id = photo_r["result"]["photo"][-1]["file_id"]
+                        if first_image_msg_id is None:
+                            first_image_msg_id = image_msg_id
+                            # Item 3: auto-pin the very first image of the job
+                            await try_pin_message(channel_id, image_msg_id)
+
+                # repair already ran inside generate_mcq_from_image() — a
+                # second call here was pure redundant duplicate work on every page
+
+                poll_links = []
+                first_poll_link = ""
+                poll_msg_ids = []
+                for i, mcq in enumerate(mcqs):
+                  try:
+                    opts = mcq.get("options", [])[:4]
+                    ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
+                    q_text = mcq["question"]
+                    if tag:
+                        q_text = f"{tag}\n\n{q_text}"
+                    exp = mcq.get("explanation", "")
+                    if exp_footer:
+                        exp = f"{exp}\n{exp_footer}"
+                    # Retry logic — poll অবশ্যই যেতে হবে
+                    poll_r = {"ok": False}
+                    for _attempt in range(3):
+                        poll_r = await send_poll(
+                            channel_id, q_text, opts, ans_idx,
+                            explanation=exp,
+                            reply_to_message_id=image_msg_id,
+                            message_thread_id=thread_id
+                        )
+                        if poll_r.get("ok"):
+                            break
+                        logger.warning(f"[Poll] MCQ {i+1} attempt {_attempt+1} failed, retrying...")
+                        await asyncio.sleep(2)
+                    if poll_r.get("ok"):
+                        msg_id = poll_r["result"]["message_id"]
+                        poll_msg_ids.append(msg_id)
+                        if i == 0:
+                            if str(channel_id).startswith("-100"):
+                                first_poll_link = f"https://t.me/c/{str(channel_id)[4:]}/{msg_id}"
+                            else:
+                                first_poll_link = f"https://t.me/{str(channel_id).lstrip('@')}/{msg_id}"
+                            poll_links.append(first_poll_link)
+                    total_polls += 1
+                    # Telegram allows ~1 message/sec to the same chat —
+                    # 0.25s was too fast, causing real 429s.
+                    await asyncio.sleep(1.1)
+                  except Exception as _mcq_e:
+                    logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
+                    continue
+
+                await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
+                try:
+                    await db_update_cache(cache_id, {"poll_msg_ids": poll_msg_ids})
+                except Exception as e:
+                    logger.warning(f"[PDF] poll_msg_ids save failed (may need migration): {e}")
+                # each mcq already carries its own correct _pdfs_topic/
+                # _pdfs_subtopic tag set in STEP 2's per-segment generation
+                # loop above — do NOT overwrite with the page-level label.
+                all_mcqs_raw.extend(mcqs)
+
+                # FIX: summary_pages was declared but never populated — this is
+                # what feeds the end-of-job summary message + its auto-pin
+                # further down. Without this, the summary never sent.
+                summary_pages.append({
+                    "page": page_num,
+                    "mcq_count": len(mcqs),
+                    "first_poll": first_poll_link or "(লিংক পাওয়া যায়নি)",
+                    "cache_id": cache_id
+                })
+
+                exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+                solve_pdf_url = f"{CF_WORKER_URL}/api/solve-pdf-view/{cache_id}"
+                bot_un = await get_bot_username()
+                quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+                poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+                new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{cache_id}"
+                new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
+
+                end_data = {
+                    "chat_id": channel_id,
+                    "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
+                    "reply_markup": {"inline_keyboard": [
+                        [{"text": "📝 Quiz Solve", "url": quiz_url},
+                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
+                        [{"text": "🔄 Poll Again", "url": poll_url},
+                         {"text": "🆕 New Poll", "url": new_poll_url}],
+                        [{"text": "🌐 Website Exam", "url": exam_url},
+                         {"text": "📄 Solve PDF", "url": solve_pdf_url}]
+                    ]},
+                    "reply_to_message_id": image_msg_id
+                }
+                if thread_id:
+                    end_data["message_thread_id"] = thread_id
+                end_r = {"ok": False}
+                for _end_attempt in range(3):
+                    end_r = await tg_post("sendMessage", end_data)
+                    if end_r.get("ok"):
+                        break
+                    logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
+                    await asyncio.sleep(2)
+                if end_r.get("ok"):
+                    await db_update_cache(cache_id, {"end_msg_id": end_r["result"]["message_id"]})
+                else:
+                    err_desc = end_r.get("description") or end_r.get("error") or "unknown"
+                    logger.error(f"[EndMsg] Page {page_num} FINAL FAIL: {err_desc}")
+                    if "reply" in str(err_desc).lower() or "not found" in str(err_desc).lower():
+                        # Reply target message missing/deleted -> retry once without reply_to_message_id
+                        end_data.pop("reply_to_message_id", None)
+                        retry_r = await tg_post("sendMessage", end_data)
+                        if retry_r.get("ok"):
+                            await db_update_cache(cache_id, {"end_msg_id": retry_r["result"]["message_id"]})
+                        else:
+                            await notify_owner(f"⚠️ End message failed for page {fmt_page(page_num)}, topic: {topic}\nReason: {err_desc}")
+                    else:
+                        await notify_owner(f"⚠️ End message failed for page {fmt_page(page_num)}, topic: {topic}\nReason: {err_desc}")
+
+                # Auto Style1+Style3 PDF এখন সব page শেষে একবারই পাঠানো হবে (নিচে)
+                # each mcq already carries its own correct _pdfs_topic/
+                # _pdfs_subtopic tag from STEP 2's per-segment generation.
+                all_mcqs_raw.extend(mcqs)
+
+                for m in mcqs:
+                    opts = m.get("options", ["", "", "", ""])
+                    opts = [re.sub(r'^[A-Da-dক-ঘ][)\.।]\s*', '', str(o)) for o in opts]
+                    ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+                    ans_num = ans_map.get(m.get("answer", "A"), "1")
+                    all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, _strip_img_tag(m.get("explanation", "")), "1", "1"])
+
+            total_mcq += len(mcqs)
+            page_status[idx]["done"] = True
+            page_status[idx]["current"] = False
+            page_status[idx]["mcq"] = len(mcqs)
+            _model_counts = {}
+            for _m in (mcqs or []):
+                _prov = _m.get("_provider", "Unknown")
+                _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
+            if _model_counts:
+                page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
+            await edit_msg(chat_id, status_msg_id,
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls), reply_markup=_cancel_kb(chat_id))
+            await sb_exec(lambda: sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute())
+
+        except Exception as e:
+            logger.error(f"[PDF] Page {page_num} error: {e}", exc_info=True)
+            page_status[idx]["current"] = False
+            page_status[idx]["done"] = True
+            await notify_owner(f"[PDF] Page {page_num} error:\n{e}")
+        finally:
+            # RAM fix: each page's decoded PIL image (dpi=150) can be several MB.
+            # Holding all pages of a batch in memory for the whole poll-sending
+            # duration was causing OOM kills mid-send on low-RAM instances
+            # (looked like the bot dying / auto-restarting mid-channel-post).
+            # Drop this page's image the moment we're done with it.
+            try:
+                pages[idx] = (page_num, None, None) if skip_generate else (page_num, None)
+            except Exception:
+                pass
+            img = None
+
+    clear_active_job(chat_id)
+    _dash_stop.set()
+    try:
+        await asyncio.wait_for(_dash_ticker_task, timeout=2)
+    except Exception:
+        pass
+
+    if all_mcqs_csv:
+        import io, csv as csv_mod
+        buf = io.StringIO()
+        writer = csv_mod.writer(buf)
+        writer.writerow(["questions","option1","option2","option3","option4","answer","explanation","type","section"])
+        if all_mcqs_raw:
+            _topics_order, _topic_map = _group_pdfs_mcqs(all_mcqs_raw, "প্রাক্টিস প্রশ্ন")
+            for row in _build_topicwise_csv_rows(_topics_order, _topic_map):
+                writer.writerow(row)
+        else:
+            for row in all_mcqs_csv:
+                writer.writerow(row)
+        await send_document(chat_id, buf.getvalue().encode("utf-8"), f"{topic}_mcq.csv",
+            caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ", mime_type="text/csv")
+
+    if not csv_only and not summary_pages and is_cancelled(chat_id):
+        await send_msg(chat_id, "🛑 কাজ বাতিল করা হয়েছে — কোনো পেজ শেষ হওয়ার আগেই থামানো হয়েছে, তাই কোনো ফলাফল নেই।")
+
+    if not csv_only and summary_pages:
+        total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
+        summary = f"🟥ATLAS Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq_sum}\n\n"
+        for p in summary_pages:
+            summary += f"🌟Page-{fmt_page(p['page'])} ({p['mcq_count']} MCQ):\n{p['first_poll']}\n"
+        if is_cancelled(chat_id):
+            summary = f"🛑 কাজ বাতিল করা হয়েছে — যতটুকু হয়েছে তার ফলাফল:\n\n" + summary
+        summary += (
+            f"\n💥শুভকামনা প্রিয় শিক্ষার্থী {uname}...\n"
+            '"যেকোনো প্রশ্ন থাকলে মেসেজ দাও "Ask Your Mentor" গ্রুপে।\n'
+            "🚀Whatsapp Helpline: wa.me/8801999681290\n🔗Website: Atlascourses.com"
+        )
+        summary_data = {"chat_id": channel_id, "text": summary, "disable_web_page_preview": True}
+        if first_image_msg_id:
+            summary_data["reply_to_message_id"] = first_image_msg_id
+        sum_r = await tg_post("sendMessage", summary_data)
+        if sum_r.get("ok"):
+            await try_pin_message(channel_id, sum_r["result"]["message_id"])
+            # persist so the DM page-button callback handler can find/update
+            # this channel summary message later (regen flow)
+            try:
+                await sb_exec(lambda: sb.table("pdf_sessions").update({
+                    "summary_msg_id": sum_r["result"]["message_id"],
+                    "summary_pages": summary_pages,
+                    "channel_id": channel_id,
+                    "topic": topic,
+                }).eq("id", session_id).execute())
+            except Exception as e:
+                logger.warning(f"[Summary] pdf_sessions column update failed (may need migration): {e}")
+        else:
+            logger.warning(f"[Summary] send failed: {sum_r.get('description')}")
+
+    # সব poll শেষে combined Style1+Style3 PDF (সব page/poll মিলিয়ে) —
+    # first pre-msg (first_image_msg_id) কে reply করে, auto-pin
+    if not csv_only and channel_id and all_mcqs_raw and await should_autosend_pdf(channel_id):
+        try:
+            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+            _wm_saved = (await db_get_settings()).get("watermark", "")
+            _autosend_pdf_msg_ids = {}
+            _pdfs_topics_order, _pdfs_topic_map = _group_pdfs_mcqs(all_mcqs_raw, "প্রাক্টিস প্রশ্ন")
+            _pdfs_styles = ("topicwise",)
+            for style_key in _pdfs_styles:
+                data_adapted = _adapt_mcqs_for_print(all_mcqs_raw)
+                if style_key == "topicwise":
+                    html_s = _build_topicwise_pdf_html(_pdfs_topics_order, _pdfs_topic_map, topic)
+                else:
+                    html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
+                pdf_bytes = await _html_to_pdf(html_s)
+                if not pdf_bytes:
+                    logger.error(f"[PDF-AUTOSEND] {style_key} generation returned empty, topic: {topic}")
+                    await notify_owner(f"⚠️ Auto-PDF ({style_key}) generate হয়নি — topic: {topic}")
+                    continue
+                if _wm_saved:
+                    try:
+                        pdf_bytes = add_watermark_to_pdf(pdf_bytes, _wm_saved)
+                    except Exception as _wm_e:
+                        logger.warning(f"[PDF-AUTOSEND] watermark apply failed: {_wm_e}")
+                style_name = "🖨️ Topic-wise Practice Sheet" if style_key == "topicwise" else PRINT_STYLE_NAMES[style_key]
+                doc_r = await send_document(channel_id, pdf_bytes, f"{safe_title}_{style_key}.pdf",
+                    caption=f"📖 Practice Sheet ({style_name})\n🎯 Topic: {topic}\n📝 মোট MCQ: {len(all_mcqs_raw)}\n🚀 ATLAS APP",
+                    message_thread_id=thread_id, reply_to_message_id=first_image_msg_id)
+                if doc_r and doc_r.get("ok"):
+                    doc_msg_id = doc_r.get("result", {}).get("message_id")
+                    if doc_msg_id:
+                        await try_pin_message(channel_id, doc_msg_id)
+                        _autosend_pdf_msg_ids[style_key] = doc_msg_id
+                else:
+                    err_desc = (doc_r or {}).get("description", "no response")
+                    logger.error(f"[PDF-AUTOSEND] send_document failed ({style_key}): {err_desc}")
+                    await notify_owner(f"⚠️ Auto-PDF ({style_key}) পাঠাতে ব্যর্থ — topic: {topic}\nReason: {err_desc}")
+            if _autosend_pdf_msg_ids:
+                try:
+                    await sb_exec(lambda: sb.table("pdf_sessions").update({
+                        "autosend_pdf_msg_ids": _autosend_pdf_msg_ids,
+                        "autosend_pdf_thread_id": thread_id,
+                        "autosend_pdf_first_image_msg_id": first_image_msg_id,
+                    }).eq("id", session_id).execute())
+                except Exception as e:
+                    logger.warning(f"[PDF-AUTOSEND] session pdf msg id save failed (may need migration): {e}")
+        except Exception as e:
+            logger.error(f"[PDF-AUTOSEND] Error: {e}")
+            await notify_owner(f"⚠️ Auto-PDF সিস্টেমে error — topic: {topic}\nReason: {e}")
+
+    try:
+        await sb_exec(lambda: sb.table("pdf_sessions").update({
+            "status": "done",
+            "summary_pages": summary_pages,
+            "channel_id": channel_id,
+            "topic": topic,
+        }).eq("id", session_id).execute())
+    except Exception as e:
+        logger.warning(f"[PDF] pdf_sessions update with new columns failed (may need migration): {e}")
+        try:
+            await sb_exec(lambda: sb.table("pdf_sessions").update({"status": "done"}).eq("id", session_id).execute())
+        except Exception as e2:
+            logger.error(f"[PDF] pdf_sessions status update failed: {e2}")
+    elapsed = int(time.time() - start_time)
+    mins, secs = divmod(elapsed, 60)
+    # Page-number inline button grid (3 per row) in the bot's DM, under the
+    # completion stat — tapping a page regenerates that page's polls
+    # (delete old channel polls + post new ones + update caption/summary link).
+    page_btn_rows = []
+    row = []
+    for p in summary_pages:
+        row.append({"text": f"Page {fmt_page(p['page'])}", "callback_data": f"pdfpg_{session_id}_{p['page']}"})
+        if len(row) == 3:
+            page_btn_rows.append(row)
+            row = []
+    if row:
+        page_btn_rows.append(row)
+    complete_kb = {"inline_keyboard": page_btn_rows} if page_btn_rows else None
+    await edit_msg(chat_id, status_msg_id,
+        "✅ <b>Processing Complete!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 File: {file_name}\n🎯 Topic: {topic}\n"
+        f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=complete_kb)
+
+# ============================================================
+# FEATURE: /pdfm — PDF pagewise MCQ to channel
+# Usage: /pdfm -p 1-5 -c @channel -m "Topic" -t topicId 10
+# ============================================================
+
 async def handle_pdfm(msg: dict):
     """
     /pdfm -p (pages) -c (channel) -m (topic) -t (thread_id) [mcq_count]
