@@ -8139,7 +8139,7 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                 # slower (N export calls instead of 1) but the only way to get
                 # genuinely different page sizes in one Chromium-generated PDF.
                 try:
-                    page_heights_mm = await page.evaluate("""
+                    page_heights_mm = await asyncio.wait_for(page.evaluate("""
                         () => {
                             const pages = document.querySelectorAll('.abpage');
                             const MM_PER_PX = 25.4 / 96;
@@ -8302,7 +8302,7 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                             });
                             return heights;
                         }
-                    """)
+                    """), timeout=25)
                     await asyncio.sleep(0.15)
                 except Exception as _e:
                     logger.warning(f"[PDF Gen] style7 real-height measurement failed, falling back to fixed page size: {_e}")
