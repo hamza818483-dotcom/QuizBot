@@ -8177,24 +8177,48 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                     // whitespace in short columns and the risk of
                                     // overflow-driven blank pages, without any fragile
                                     // height-guessing loop.
-                                    // FIX: previously cc still had the Python-side
-                                    // fixed est_mm height applied when column-fill:
-                                    // balance first computed layout -- if that
-                                    // estimate was too generous (common on sparse
-                                    // partial pages, e.g. last page of a set with
-                                    // <50 items), balance() distributed content
-                                    // across the OVERSIZED box, leaving real bottom/
-                                    // right white-space that the later height:auto
-                                    // re-measurement could only partially correct
-                                    // (browsers cache the balance result per layout
-                                    // pass). Now height:auto is forced FIRST, so the
-                                    // balance algorithm always computes against the
-                                    // content's true natural height from the start,
-                                    // then the neededPx measurement below reads that
-                                    // real natural layout, not a corrected estimate.
+                                    // REAL FIX (root cause of the right/bottom
+                                    // white-space bug across all previous
+                                    // attempts): column-fill:balance ONLY
+                                    // balances columns when the container has an
+                                    // EXPLICIT/constrained height per the CSS
+                                    // spec -- with height:auto (which the
+                                    // previous fix set believing it would force
+                                    // balance against "natural" height), Chromium
+                                    // has no fixed height to balance against and
+                                    // silently behaves like column-fill:auto
+                                    // instead (sequential top-to-bottom fill),
+                                    // which is exactly the old bug: one column
+                                    // (usually the last) ends up much shorter
+                                    // than the others, leaving real right/bottom
+                                    // white-space. Confirmed via direct PDF
+                                    // mediabox inspection on real generated
+                                    // output. Fix: first measure the content's
+                                    // TRUE natural total height with columns
+                                    // fully disabled (column-count:1), then
+                                    // apply that as an explicit fixed height
+                                    // divided by column count as the starting
+                                    // point for balance -- giving balance() a
+                                    // real, tight, explicit height to balance
+                                    // columns within, instead of no height at all.
+                                    const origColumnCount = cc.style.columnCount;
+                                    cc.style.columnCount = '1';
                                     cc.style.height = 'auto';
+                                    void cc.offsetHeight;
+                                    const naturalTotalPx = cc.getBoundingClientRect().height;
+                                    cc.style.columnCount = origColumnCount || '3';
+                                    const nCols = parseInt(origColumnCount || '3', 10);
+                                    // Divide by column count as the initial guess,
+                                    // then add a small buffer since column-fill:
+                                    // balance needs a LITTLE headroom above the
+                                    // theoretical perfect average to actually
+                                    // achieve a tight balance (an exact average
+                                    // height often forces an extra near-empty
+                                    // column instead of balancing within the
+                                    // given count).
+                                    const balancedGuessPx = Math.ceil((naturalTotalPx / nCols) * 1.08);
+                                    cc.style.height = balancedGuessPx + 'px';
                                     cc.style.columnFill = 'balance';
-                                    // Reflow before measuring bottoms.
                                     void cc.offsetHeight;
                                     const items = Array.from(cc.querySelectorAll(':scope > .question'));
                                     if (!items.length) { heights.push(null); return; }
