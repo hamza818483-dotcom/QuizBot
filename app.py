@@ -8200,7 +8200,8 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                         const numCols = counts.length;
                                         const maxC = Math.max(...counts);
                                         const minC = Math.min(...counts);
-                                        if (numCols <= 3 && (maxC - minC) <= 1) {
+                                        const expectedCols = Math.min(3, Math.ceil(total / Math.ceil(total / 3)));
+                                        if (numCols === expectedCols && (maxC - minC) <= 1) {
                                             bestPx = h_mm * mmToPx;
                                             break;
                                         }
@@ -8296,6 +8297,16 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                 () => {{
                                     document.querySelectorAll('.abpage').forEach((pg, idx) => {{
                                         pg.style.display = (idx === {i}) ? '' : 'none';
+                                        // isolating one .abpage at a time still leaves
+                                        // page-break-after:always on it, which forces
+                                        // Chromium to emit a 2nd (blank) physical PDF
+                                        // page whenever content is even 1px taller than
+                                        // the exact box -- strip page-break rules on the
+                                        // sole visible page for this single-page export.
+                                        if (idx === {i}) {{
+                                            pg.style.pageBreakAfter = 'auto';
+                                            pg.style.breakAfter = 'auto';
+                                        }}
                                     }});
                                 }}
                             """)
