@@ -11989,12 +11989,13 @@ async def handle_pdf(msg: dict):
             page_breakdown = "\n".join(
                 f"✅ Page {fmt_page(p)}: {len(mcqs)} MCQ ✓" for p, _, mcqs in generated_pages
             )
-            kb = {"inline_keyboard": []}
-            for ch in channels:
-                ch_id = ch.get("channel_id", "")
-                ch_name = ch.get("channel_name", ch_id)
-                kb["inline_keyboard"].append([{"text": f"📢 {ch_name}", "callback_data": f"pdfch_{ch_id}_{uid}"}])
-            kb["inline_keyboard"].append([{"text": "📄 CSV File Only", "callback_data": f"pdfch_csv_{uid}"}])
+            # ✅ Direct channel-list এর বদলে single "Channel List" বাটন —
+            # click করলেই channel list খুলবে (csvpdflist_ callback reuse)।
+            _pdf_csv_cache_id = gen_session_id()
+            await db_save_mcq_cache(_pdf_csv_cache_id, _pdf_csv_cache_id, 0, topic, all_mcqs_flat)
+            kb = {"inline_keyboard": [[
+                {"text": "📢 Channel List", "callback_data": f"csvpdflist_{_pdf_csv_cache_id}_{uid}"}
+            ]]}
             await send_msg(chat_id,
                 f"✅ <b>Generation Complete!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -12002,7 +12003,7 @@ async def handle_pdf(msg: dict):
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{page_breakdown}\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎯 Topic: {topic}\n\nChannel select করো:",
+                f"🎯 Topic: {topic}\n\n📢 Poll আকারে channel-এ পাঠাতে চাও?",
                 reply_markup=kb)
             return
 
