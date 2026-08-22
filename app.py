@@ -8232,7 +8232,17 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                 // margin top+bottom (10mm+10mm=20mm) added on the Python
                                 // side per-page-export below via Playwright's margin
                                 // option, so only real content height goes here.
-                                const heightMm = Math.max(40, Math.min(560, Math.ceil(totalPx * MM_PER_PX) + 1));
+                                // The 560mm cap only makes sense for question pages,
+                                // which target ~50 items/page and never legitimately
+                                // need more. The single-column answers-page table can
+                                // hold up to 50 rows of full explanation text and
+                                // regularly needs 1500-3000mm+ -- capping it at 560mm
+                                // silently truncated the export height while the real
+                                // (uncapped) content still overflowed that box during
+                                // actual PDF render, forcing Chromium to auto-paginate
+                                // the single answers page into several extra pages.
+                                const cap = isAnswers ? 20000 : 560;
+                                const heightMm = Math.max(40, Math.min(cap, Math.ceil(totalPx * MM_PER_PX) + 1));
                                 heights.push(heightMm);
                             });
                             return heights;
