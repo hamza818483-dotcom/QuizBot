@@ -537,6 +537,14 @@ async def tg_post(method: str, data: dict) -> dict:
                     retry_after = result.get("parameters", {}).get("retry_after", 5)
                     logger.warning(f"[TG] {method} proxy 429, waiting {retry_after}s")
                     await asyncio.sleep(min(retry_after, 30) + 0.5)
+                    # BUGFIX: previously fell through to `return result, False`
+                    # right after this sleep -- so the whole wait was wasted
+                    # and the 429 was handed back to the caller as a final
+                    # failure instead of actually retrying the request. Now
+                    # retry on the SAME endpoint once more (if this was the
+                    # first attempt) before giving up on primary.
+                    if _proxy_attempt == 0:
+                        continue
                 logger.warning(f"[TG] {method} proxy failed: {desc}")
                 return result, False  # real response, don't retry
             except Exception as e:
