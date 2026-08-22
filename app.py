@@ -23001,7 +23001,7 @@ async def handle_pdf_page_regen(session_id: str, page_num: int, dm_chat_id: int,
         from PIL import Image as PILImage
         img = PILImage.open(BytesIO(img_bytes))
         new_mcqs = _cap_mcq_options(await asyncio.wait_for(
-            generate_new_mcq(img, topic, page_num, mcq_count=15), timeout=90))
+            generate_new_mcq(img, topic, page_num, mcq_count=15), timeout=150))
     except Exception as e:
         logger.error(f"[PdfPageRegen] generation failed page {page_num}: {e}")
         if status_id:
@@ -23210,7 +23210,7 @@ async def handle_poll_new(cache_id: str, user: dict, chat_id: int, msg_id: int =
     progress_task = _spawn_task(update_progress())
     try:
         new_mcqs = _cap_mcq_options(await asyncio.wait_for(
-            generate_new_mcq(img, topic, page, mcq_count=15), timeout=90))
+            generate_new_mcq(img, topic, page, mcq_count=15), timeout=150))
     except Exception as e:
         progress_task.cancel()
         logger.error(f"[PollNew] generation failed: {e}")
@@ -23773,7 +23773,7 @@ async def handle_quiz_new(cache_id: str, user: dict, chat_id: int):
     progress_task = _spawn_task(update_progress())
     try:
         new_mcqs = _cap_mcq_options(await asyncio.wait_for(
-            generate_new_mcq(img, cache["topic"], cache["page_number"], mcq_count=15), timeout=90))
+            generate_new_mcq(img, cache["topic"], cache["page_number"], mcq_count=15), timeout=150))
     except Exception as e:
         progress_task.cancel()
         logger.error(f"[QuizNew] generation failed: {e}")
