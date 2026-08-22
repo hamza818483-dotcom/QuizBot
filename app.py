@@ -8106,32 +8106,37 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                 await progress_cb(70)
 
             if use_css_page_size:
-                # Measure REAL rendered height of each .abpage's tallest column
-                # (actual browser layout, not a character-count guess), then
-                # inject a NAMED @page rule per page (Chromium print-to-PDF
-                # supports different page sizes per page ONLY via CSS named
-                # pages — a single unnamed @page{size:...} rule applies the
-                # SAME size to every page in the PDF, which was the earlier
-                # bug: our inline .content-columns height was being measured
-                # correctly but the actual PDF page (paper size) never
-                # shrank to match it, leaving the same blank space).
+                # REAL FIX (2026-08-22): Chromium's print-to-PDF engine does NOT
+                # support CSS Named Pages (`@page pagename{...}`) -- only a single
+                # unnamed `@page{size:...}` rule is honored, and it applies to
+                # EVERY page uniformly. The previous approach injected per-page
+                # named @page rules expecting each .abpage to get its own PDF
+                # page size -- Chromium silently ignored all of them and fell
+                # back to the one static @page rule (420mm x 594mm), which is
+                # why every exported page came out full-size with large blank
+                # space regardless of real content height. Fix: measure each
+                # .abpage's real content height in the browser, then render
+                # EACH page as its own separate single-page PDF (Playwright's
+                # page.pdf() DOES accept numeric width/height per call, just not
+                # per-page within one call), and merge them with pypdf. This is
+                # slower (N export calls instead of 1) but the only way to get
+                # genuinely different page sizes in one Chromium-generated PDF.
                 try:
-                    await page.evaluate("""
+                    page_heights_mm = await page.evaluate("""
                         () => {
                             const pages = document.querySelectorAll('.abpage');
-                            const rules = [];
                             const MM_PER_PX = 25.4 / 96;
-                            pages.forEach((pg, idx) => {
-                                const pageNum = idx + 1;
+                            const heights = [];
+                            pages.forEach((pg) => {
                                 const isAnswers = pg.classList.contains('answers-page');
                                 const cc = isAnswers ? pg.querySelector('.answers-section') : pg.querySelector('.content-columns');
-                                if (!cc) return;
+                                if (!cc) { heights.push(null); return; }
                                 let neededPx;
                                 if (isAnswers) {
                                     neededPx = Math.ceil(cc.getBoundingClientRect().height);
                                 } else {
                                     const items = Array.from(cc.querySelectorAll(':scope > .question'));
-                                    if (!items.length) return;
+                                    if (!items.length) { heights.push(null); return; }
                                     const colBottoms = {};
                                     items.forEach(it => {
                                         const r = it.getBoundingClientRect();
@@ -8144,26 +8149,80 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                     neededPx = Math.ceil(maxBottom - ccTop);
                                     cc.style.height = neededPx + 'px';
                                 }
-                                // header block (only present inside page 1's .abpage) is
-                                // already part of pg's flow height above content-columns.
                                 const header = pg.querySelector(':scope > .exam-header');
                                 const headerPx = header ? header.getBoundingClientRect().height : 0;
                                 const totalPx = neededPx + headerPx;
-                                // single minimal safety margin (~1mm) to avoid clipping the
-                                // very last pixel row -- no stacked buffers, page height must
-                                // match content height exactly, no leftover blank space.
+                                // margin top+bottom (10mm+10mm=20mm) added on the Python
+                                // side per-page-export below via Playwright's margin
+                                // option, so only real content height goes here.
                                 const heightMm = Math.max(40, Math.min(560, Math.ceil(totalPx * MM_PER_PX) + 1));
-                                const pageName = isAnswers ? 'pans' : `p${pageNum}`;
-                                rules.push(`@page ${pageName}{size:420mm ${heightMm}mm;margin:10mm 10mm 10mm 10mm;}`);
+                                heights.push(heightMm);
                             });
-                            const styleEl = document.createElement('style');
-                            styleEl.textContent = rules.join('\\n');
-                            document.head.appendChild(styleEl);
+                            return heights;
                         }
                     """)
                     await asyncio.sleep(0.15)
                 except Exception as _e:
-                    logger.warning(f"[PDF Gen] style7 real-height measurement failed, falling back to estimated height: {_e}")
+                    logger.warning(f"[PDF Gen] style7 real-height measurement failed, falling back to fixed page size: {_e}")
+                    page_heights_mm = None
+
+                if page_heights_mm:
+                    # Render each .abpage as its own single-page PDF at its
+                    # exact needed height, then merge -- this is what actually
+                    # produces a compact, per-page-sized final PDF.
+                    # NOTE: page_ranges alone is unreliable here since without
+                    # per-page CSS sizing every .abpage still flows through the
+                    # single static @page rule and may not land on a clean
+                    # page boundary. Instead, isolate one .abpage at a time by
+                    # hiding all others (display:none) before each export --
+                    # guarantees exactly one page's content is ever printed.
+                    from pypdf import PdfWriter as _PdfWriter, PdfReader as _PdfReader
+                    merger = _PdfWriter()
+                    part_paths = []
+                    try:
+                        for i, h_mm in enumerate(page_heights_mm):
+                            if h_mm is None:
+                                continue
+                            await page.evaluate(f"""
+                                () => {{
+                                    document.querySelectorAll('.abpage').forEach((pg, idx) => {{
+                                        pg.style.display = (idx === {i}) ? '' : 'none';
+                                    }});
+                                }}
+                            """)
+                            with tempfile.NamedTemporaryFile(suffix=f".part{i}.pdf", delete=False) as ppf:
+                                part_path = ppf.name
+                            part_paths.append(part_path)
+                            await asyncio.wait_for(page.pdf(
+                                path=part_path,
+                                width="420mm", height=f"{h_mm}mm",
+                                margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"},
+                                print_background=True
+                            ), timeout=20)
+                            reader = _PdfReader(part_path)
+                            for pg_obj in reader.pages:
+                                merger.add_page(pg_obj)
+                        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as pf:
+                            output_path = pf.name
+                        with open(output_path, "wb") as out_f:
+                            merger.write(out_f)
+                        if progress_cb:
+                            await progress_cb(95)
+                        with open(output_path, "rb") as f:
+                            pdf_bytes = f.read()
+                        if progress_cb:
+                            await progress_cb(100)
+                        return pdf_bytes
+                    finally:
+                        for p in part_paths:
+                            if os.path.exists(p):
+                                try:
+                                    os.unlink(p)
+                                except Exception:
+                                    pass
+                # page_heights_mm measurement failed -- fall through to the
+                # single fixed-size export below (594mm, old behavior) so a
+                # PDF is still always produced, just not compact this time.
 
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as pf:
                 output_path = pf.name
