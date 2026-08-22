@@ -9148,7 +9148,49 @@ img{max-width:30%!important;height:auto!important;vertical-align:middle}
 # content-height measurement _html_to_pdf already does for style7), so
 # nothing is ever clipped -- it just stops being "A4-sized" once content
 # genuinely needs more room, and stays A4-sized whenever it fits.
-_PRINT_STYLE8_CSS = _PRINT_STYLE7_CSS.replace("420mm", "210mm")
+#
+# BUGFIX (2026-08-23): a naive 420mm->210mm string-replace on style7's CSS
+# kept style7's 15pt font/16px gaps/10mm margins as-is -- those sizes were
+# tuned for 420mm-wide columns (~130mm each). At A4's 210mm width, usable
+# column space after 10mm margins + 2x16px gaps is only ~55-60mm per
+# column, so 15pt text wrapped after just 2-3 words per line, ballooning
+# the real per-item height far beyond the pre-render estimate and forcing
+# the binary-search real-height correction to settle on a page many times
+# taller than A4 (exactly the "vertically onek lomba" bug reported) while
+# each column still stayed narrow. Fixed with a dedicated, properly-scaled
+# CSS: smaller font (8.5pt), tighter margins/gaps/padding so 3 real columns
+# fit A4's width without absurd wrapping, and the height-estimate formula
+# in _build_print_style8 below is scaled to match this smaller font.
+_PRINT_STYLE8_CSS = """<style>
+@page{size:210mm 60mm;margin:8mm 8mm 8mm 8mm;@top-center{content:none}@bottom-center{content:none}}
+body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:8.5pt;line-height:1.3;color:#000;margin:0;padding:4px;width:210mm;max-width:210mm}
+.exam-header{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:6px;margin-bottom:8px}
+.exam-header h1{color:#166534;margin:0;font-size:13pt;font-weight:bold}
+.abpage{page-break-after:always;break-after:page}
+.abpage:last-of-type{page-break-after:auto;break-after:auto}
+.content-columns{column-count:3;column-gap:6px;column-fill:balance;column-rule:1px solid #ddd}
+.question{margin-bottom:5px;break-inside:avoid;page-break-inside:avoid}
+.question-header{margin-bottom:2px;display:flex;align-items:flex-start}
+.question-num{font-family:'Times New Roman',serif;font-weight:bold;color:#15803d;font-size:8.5pt;margin-right:3px;white-space:nowrap;flex-shrink:0}
+.question-text{flex:1;line-height:1.3;font-size:8.5pt;color:#000;word-wrap:break-word}
+.options-table-short{width:100%;border-collapse:collapse;margin:2px 0 2px 4px;table-layout:fixed}
+.options-table-short td{border:none;padding:1px 3px 1px 0;vertical-align:top;font-size:8.5pt;color:#000;width:40%}
+.options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;vertical-align:middle;font-family:'Poppins',sans-serif;font-weight:600;font-size:8.5pt;color:#000;padding-left:5px}
+.answer-circle{font-weight:300;font-family:'Poppins',sans-serif;font-size:8.5pt;line-height:1}
+.options-list{margin:2px 0 2px 4px;padding:0;list-style:none}
+.options-list li{margin:1px 0;font-size:8.5pt;color:#000;word-wrap:break-word}
+.option-with-answer{display:flex;justify-content:space-between;align-items:flex-start}
+.explanation{margin:2px 0 1px 4px;padding:2px;color:#000;background-color:rgba(22,163,74,0.1);border-left:2px solid #16a34a;font-size:7.5pt;font-style:italic;break-inside:avoid}
+.explanation-label{font-weight:bold;color:#166534}
+.page-break{page-break-before:always;break-before:page}
+.answers-section{column-count:1;margin-top:0}
+.answer-table{width:100%;border-collapse:collapse;margin-top:0;border:1px solid #16a34a}
+.answer-table th,.answer-table td{border:1px solid #86efac;padding:4px;text-align:left;vertical-align:top;word-wrap:break-word;font-size:8pt}
+.answer-table th{background-color:#F0FDF4;font-weight:bold;text-align:center;font-size:9pt;color:#166534}
+.qno-col{width:8%;text-align:center}.ans-col{width:8%;text-align:center;font-weight:bold;font-size:9pt}.exp-col{width:84%;font-size:8pt}
+img{max-width:30%!important;height:auto!important;vertical-align:middle}
+@media print{@page{size:210mm 297mm;margin:8mm 8mm 8mm 8mm;@top-center{content:none}@bottom-center{content:none}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:210mm;max-width:210mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
+</style>"""
 
 def _build_print_style7(data, heading):
     """Format P7: Exam Book Style — page size shrinks to fit actual content
@@ -9255,11 +9297,10 @@ def _build_print_style8(data, heading):
     just grows taller automatically (same real-content-height measurement
     _html_to_pdf already does) -- it stops being A4-sized only when
     content genuinely needs more room, and stays A4-sized whenever it
-    fits. Char-per-line estimates below are halved vs style7's since A4's
-    210mm page (3 narrower columns) fits roughly half as many characters
-    per line as style7's 420mm sheet -- keeps the pre-render height guess
-    close, so the binary-search real-height correction in _html_to_pdf
-    needs fewer iterations to converge."""
+    fits. Height-estimate constants below are tuned for style8's own 8.5pt
+    font and ~60mm column width (A4 210mm minus margins/gaps over 3
+    columns) -- NOT copied from style7's 15pt/420mm numbers, which badly
+    overestimated height for this narrower/smaller-font layout."""
     css = _PRINT_STYLE8_CSS
     PER_PAGE = 50
     import math as _math
@@ -9275,20 +9316,19 @@ def _build_print_style8(data, heading):
         return h
 
     def _est_item_height_mm(d):
-        # Halved chars-per-line vs style7 (A4/210mm columns are roughly
-        # half as wide as style7's 420mm columns).
+        # ~28 chars/line fit a 60mm-wide column at 8.5pt Bengali.
         qlen = len(d.get("q", "") or "")
-        q_lines = max(1, _math.ceil(qlen / 23))
-        base = 6.5 + q_lines * 7.2
+        q_lines = max(1, _math.ceil(qlen / 28))
+        base = 3.5 + q_lines * 4.1  # header row + question wrapped lines
         is_short = _check_short_option(d["opts"])
         if is_short:
-            base += 2 * 7.2
+            base += 2 * 4.1  # two option rows (A/B, C/D)
         else:
             for opt in d["opts"]:
                 olen = len(opt or "")
-                o_lines = max(1, _math.ceil(olen / 20))
-                base += o_lines * 6.6
-        base += 3.5
+                o_lines = max(1, _math.ceil(olen / 24))
+                base += o_lines * 3.8
+        base += 2.0  # question block bottom margin
         return base
 
     body = ''
