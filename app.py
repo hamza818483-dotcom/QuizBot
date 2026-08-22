@@ -8194,6 +8194,8 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                     const total = items.length;
                                     const mmToPx = 96 / 25.4;
                                     let bestPx = null;
+                                    let best3ColPx = null;
+                                    let best3ColSpread = Infinity;
                                     for (let h_mm = 60; h_mm <= 900; h_mm += 4) {
                                         cc.style.height = (h_mm * mmToPx) + 'px';
                                         const counts = colCounts(cc);
@@ -8205,12 +8207,30 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                             bestPx = h_mm * mmToPx;
                                             break;
                                         }
+                                        // Track the best-seen exactly-3-column state as a
+                                        // real, verified fallback in case a perfectly
+                                        // balanced (max-min<=1) split never occurs anywhere
+                                        // in this range -- some content/font/text-length
+                                        // combinations genuinely skip past a balanced state
+                                        // between one column count and the next (confirmed:
+                                        // a real 50-question page went 4->5 columns without
+                                        // ever landing on a balanced 3, since 3-column width
+                                        // only fits a narrow height band that this content
+                                        // jumps straight over). Falling back to the earlier
+                                        // Python-side rough estimate in that case produced a
+                                        // height too short for the real content, causing
+                                        // Chromium to spill the overflow into a blank
+                                        // continuation PDF page -- this is what caused the
+                                        // reported blank-page-3/shifted-page-4 bug. Using the
+                                        // most-balanced verified 3-column height we actually
+                                        // measured is always safe since it's a real DOM state.
+                                        if (numCols === 3 && (maxC - minC) < best3ColSpread) {
+                                            best3ColSpread = maxC - minC;
+                                            best3ColPx = h_mm * mmToPx;
+                                        }
                                     }
                                     if (bestPx === null) {
-                                        // fell through without finding a balanced state
-                                        // (shouldn't normally happen) -- keep whatever the
-                                        // Python-side estimate already set as a safe fallback
-                                        bestPx = cc.getBoundingClientRect().height;
+                                        bestPx = best3ColPx !== null ? best3ColPx : cc.getBoundingClientRect().height;
                                     }
                                     cc.style.height = bestPx + 'px';
 
