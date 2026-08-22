@@ -8419,11 +8419,23 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                             with tempfile.NamedTemporaryFile(suffix=f".part{i}.pdf", delete=False) as ppf:
                                 part_path = ppf.name
                             part_paths.append(part_path)
+                            # FIX (extra whitespace outside content, style8):
+                            # per-page numeric-size export was ALSO applying a
+                            # 10mm Playwright page.pdf() margin on top of the
+                            # page's own CSS `@page{margin:8mm}` rule, so the
+                            # true content box shrank by 2*10mm each axis
+                            # while h_mm was computed to fit the CSS-margin
+                            # box only -- net effect: a visible band of extra
+                            # blank space along the page edges outside the
+                            # real content. The CSS @page rule already owns
+                            # margins for every custom-size style (style7's
+                            # 8mm, style8's 8mm), so the Playwright-level
+                            # margin here must be zero to avoid double-margining.
                             await asyncio.wait_for(page.pdf(
                                 path=part_path,
                                 width=f"{page_width_mm}mm", height=f"{h_mm}mm",
                                 landscape=False,
-                                margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"},
+                                margin={"top": "0mm", "bottom": "0mm", "left": "0mm", "right": "0mm"},
                                 print_background=True
                             ), timeout=20)
                             reader = _PdfReader(part_path)
