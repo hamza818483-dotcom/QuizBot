@@ -8206,21 +8206,32 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                                     cc.style.height = 'auto';
                                     void cc.offsetHeight;
                                     const naturalTotalPx = cc.getBoundingClientRect().height;
-                                    cc.style.columnCount = origColumnCount || '3';
-                                    const nCols = parseInt(origColumnCount || '3', 10);
-                                    // Divide by column count as the initial guess,
-                                    // then add a small buffer since column-fill:
-                                    // balance needs a LITTLE headroom above the
-                                    // theoretical perfect average to actually
-                                    // achieve a tight balance (an exact average
-                                    // height often forces an extra near-empty
-                                    // column instead of balancing within the
-                                    // given count).
-                                    const balancedGuessPx = Math.ceil((naturalTotalPx / nCols) * 1.08);
-                                    cc.style.height = balancedGuessPx + 'px';
-                                    cc.style.columnFill = 'balance';
-                                    void cc.offsetHeight;
-                                    const items = Array.from(cc.querySelectorAll(':scope > .question'));
+                                    const nCols = 3;
+                                    cc.style.columnCount = String(nCols);
+                                    // FIX: a too-tight explicit height combined with
+                                    // break-inside:avoid on .question items can force
+                                    // Chromium to add an EXTRA overflow column beyond
+                                    // column-count:3 (per spec, unbreakable content
+                                    // that doesn't fit in the given height pushes into
+                                    // additional columns) -- this is what produced the
+                                    // observed 4-column page with a large trailing
+                                    // white area. Fix: start with a generous buffer
+                                    // and verify the real column count after layout;
+                                    // if more than nCols columns actually appeared,
+                                    // grow the height and re-check until it settles
+                                    // at exactly nCols columns (bounded iterations).
+                                    let guessPx = Math.ceil((naturalTotalPx / nCols) * 1.15);
+                                    let items = [];
+                                    for (let attempt = 0; attempt < 8; attempt++) {
+                                        cc.style.height = guessPx + 'px';
+                                        cc.style.columnFill = 'balance';
+                                        void cc.offsetHeight;
+                                        items = Array.from(cc.querySelectorAll(':scope > .question'));
+                                        if (!items.length) break;
+                                        const cols = new Set(items.map(it => Math.round(it.getBoundingClientRect().left)));
+                                        if (cols.size <= nCols) break;
+                                        guessPx = Math.ceil(guessPx * 1.12);
+                                    }
                                     if (!items.length) { heights.push(null); return; }
                                     const colBottoms = {};
                                     items.forEach(it => {
