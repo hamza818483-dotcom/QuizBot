@@ -15296,6 +15296,7 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
     clear_cancel(chat_id)
     new_job_id(chat_id)
     set_active_job(chat_id, "/bio MCQ generation")
+    _reset_ai_call_count(chat_id)
     BATCH_SIZE = 3
     batches = [pages[i:i + BATCH_SIZE] for i in range(0, len(pages), BATCH_SIZE)]
     headings_by_page = {}
@@ -15399,7 +15400,7 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
         if not status_msg_id:
             return
         async with _bio_dash_lock:
-            text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0)
+            text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id))
             if _topics_block:
                 text = text + "\n━━━━━━━━━━━━━━━━━━━━━━\n" + _topics_block
             if text == _bio_last_dash_text[0]:
@@ -15411,6 +15412,7 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
                 pass
 
     async def _run_page(idx, page_num, img):
+        _current_job_chat_id_ctx.set(chat_id)
         if is_cancelled(chat_id):
             return
         nonlocal total_mcq
@@ -21948,6 +21950,7 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
     clear_cancel(chat_id)
     new_job_id(chat_id)
     set_active_job(chat_id, f"ONU2 extraction ({file_name}, page-by-page)")
+    _reset_ai_call_count(chat_id)
     page_status = [{"page": p, "current": False, "done": False, "mcq": 0, "model": "", "failed": False, "error": ""}
                    for p, _ in pages]
 
@@ -21982,6 +21985,9 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
             f"⏱️ Elapsed: {mins}:{secs:02d}",
             f"📝 MCQ done: {total_mcq}"
         ]
+        _ai_calls = _get_ai_call_count(chat_id)
+        _breakdown = _get_ai_call_breakdown_str(chat_id)
+        lines.append(f"🤖 AI calls: {_ai_calls}" + (f" ({_breakdown})" if _breakdown else ""))
         return "\n".join(lines)
 
     async def _status():
@@ -22005,6 +22011,7 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
     _pair_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PAIRS)
 
     async def _process_pair(pair_idx, pair):
+        _current_job_chat_id_ctx.set(chat_id)
         if is_cancelled(chat_id):
             return
         async with _pair_semaphore:
