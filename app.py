@@ -9222,8 +9222,8 @@ PRINT_STYLE_BUILDERS = {
     "style7": _build_print_style7,
 }
 PRINT_STYLE_NAMES = {
-    "style1": "🖨️ Study Material (প্রশ্ন + উত্তর + ব্যাখ্যা)",
-    "style2": "🖨️ Exam Style (প্রশ্ন + Answer Table)",
+    "style1": "🖨️ Revision Style (প্রশ্ন + উত্তর + ব্যাখ্যা একসাথে)",
+    "style2": "🖨️ Practice Style (প্রশ্নের শেষে উত্তর + ব্যাখ্যা)",
     "style3": "🖨️ Compact Exam (Horizontal Answer Key)",
     "style4": "🖨️ Practice Style (প্রশ্ন + Answer Table)",
     "style5": "🖨️ Preparation Style (উত্তর + ব্যাখ্যা inline)",
@@ -12507,7 +12507,7 @@ async def _process_pdf_pages_inner(
             _pdfs_topics_order, _pdfs_topic_map = [], {}
             if _PDFS_MODE.get():
                 _pdfs_topics_order, _pdfs_topic_map = _group_pdfs_mcqs(all_mcqs_raw, "প্রাক্টিস প্রশ্ন")
-            _pdfs_styles = ("topicwise",) if _PDFS_MODE.get() else ("style1", "style3")
+            _pdfs_styles = ("topicwise",) if _PDFS_MODE.get() else ("style1", "style2")
             for style_key in _pdfs_styles:
                 data_adapted = _adapt_mcqs_for_print(all_mcqs_raw)
                 if style_key == "topicwise":
@@ -12977,7 +12977,7 @@ async def _process_pdfm_pages_impl(
                         reply_target = first_image_msg_id or image_msg_id
                         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
                         _wm_saved = (await db_get_settings()).get("watermark", "")
-                        for style_key in ("style1", "style3"):
+                        for style_key in ("style1", "style2"):
                             html_s = PRINT_STYLE_BUILDERS[style_key](data_adapted, topic)
                             pdf_bytes = await _html_to_pdf(html_s)
                             if not pdf_bytes:
