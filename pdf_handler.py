@@ -1008,7 +1008,21 @@ async def generate_mcq_from_image(
             try:
                 from google import genai as gai
                 from google.genai import types
-                client = gai.Client(api_key=key)
+                # FIX (2026-08-23): the client had no HTTP-level timeout, so
+                # asyncio.wait_for() only stopped *waiting* on the outer
+                # coroutine -- the underlying request in the background
+                # thread kept running for the SDK's own (much larger)
+                # default, meaning every attempt silently burned its full
+                # 40s/25s budget instead of failing fast. Setting an
+                # explicit http_options timeout (slightly under our
+                # asyncio timeout, in ms) lets the real network call give
+                # up on its own so the retry loop can move to the next key
+                # promptly instead of stalling on a dead/slow connection.
+                _http_timeout_ms = 35000 if attempt == 0 else 20000
+                client = gai.Client(
+                    api_key=key,
+                    http_options=types.HttpOptions(timeout=_http_timeout_ms)
+                )
                 img_b64 = image_to_base64(img)
 
                 def _call_gemini():
