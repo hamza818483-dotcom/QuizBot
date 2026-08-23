@@ -10030,10 +10030,14 @@ async def handle_sheet_command(msg: dict):
         cache_key = f"{chat_id}:{loading_id}"
         _sheet_cache[cache_key] = {"mcqs": mcqs, "title": title}
 
+        # 2026-08-23: /sheet style menu trimmed to only style1, style2,
+        # style3, style7 per request. _AM_FORMAT_NAMES (format_01..05) and
+        # the other PRINT_STYLE_NAMES entries (style4/5/6/8) are still fully
+        # functional (PRINT_STYLE_BUILDERS untouched) -- just no longer
+        # offered as buttons here.
+        _allowed_sheet_styles = ("style1", "style2", "style3", "style7")
         buttons = [[{"text": name, "callback_data": f"sheetstyle:{key}:{cache_key}"}]
-                   for key, name in _AM_FORMAT_NAMES.items()]
-        buttons += [[{"text": name, "callback_data": f"sheetstyle:{key}:{cache_key}"}]
-                   for key, name in PRINT_STYLE_NAMES.items()]
+                   for key, name in PRINT_STYLE_NAMES.items() if key in _allowed_sheet_styles]
         buttons.append([{"text": "📄 Default Style", "callback_data": f"sheetstyle:default:{cache_key}"}])
 
         if loading_id:
