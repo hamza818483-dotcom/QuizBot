@@ -21015,20 +21015,19 @@ async def _onu_call1_extract(img) -> list:
 
 async def _onu_verify_pass(img, mcqs: list) -> list:
     """/onu-ONLY verify pass — fully independent from QBM's miss-check
-    pipeline (_qbm_call2_miss_check). /onu never needs QBM's "find MCQs
-    Call1 missed" logic, since a missed MCQ that also happens to be
-    highlighted would simply not exist in call1 to begin with, and /onu's
-    filter already drops anything without yellow_highlight -- so there's
-    nothing for a miss-check pass to usefully add here, only risk (it can
-    add/rewrite/split MCQs from a codepath that has no concept of the
-    yellow_highlight field).
+    pipeline (_qbm_call2_miss_check). /onu never needs QBM's generic
+    "find MCQs Call1 missed" logic (which has no concept of the
+    yellow_highlight field), so this pass instead just re-confirms, for
+    the SAME list Call1 already found: option text accuracy, answer-letter
+    correctness, and exact source wording -- a light proofreading pass,
+    never adding or removing MCQs. yellow_highlight is carried through
+    untouched (same list, same order, same length always) so there is no
+    restore/re-map step needed anywhere in this path.
 
-    This pass instead just re-confirms, for the SAME list Call1 already
-    found: option text accuracy, answer-letter correctness, and exact
-    source wording -- a light proofreading pass, never adding or removing
-    MCQs. yellow_highlight is carried through untouched (same list, same
-    order, same length always) so there is no restore/re-map step needed
-    anywhere in this path."""
+    2026-08-23: a SEPARATE, narrowly-scoped miss-check for highlighted-only
+    MCQs Call1 might have skipped now runs right after this (see
+    _onu_misscheck_pass, "Call3") -- that one is additive-only and never
+    touches what this function already verified."""
     if not mcqs:
         return mcqs
     try:
@@ -21037,7 +21036,7 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
 
 For each MCQ, verify against the image:
 - question and option text match the source exactly (fix only if you spot a typo/OCR error)
-- answer letter is correct (re-check the marked option: red circle/box, or other clear mark)
+- answer letter is correct (re-check the marked option: a RED or ORANGE circle/box, or other clear mark)
 - explanation is a short, correct 1-2 sentence reason for the answer (fix if wrong/missing; keep Bangla if the MCQ is Bangla)
 
 EXISTING LIST:
@@ -21070,6 +21069,62 @@ OUTPUT — ONLY a JSON array of exactly {len(mcqs)} items, same order, corrected
         return mcqs
 
 
+async def _onu_misscheck_pass(img, mcqs: list) -> list:
+    """/onu-ONLY highlighted-MCQ miss-check (Call3) — added 2026-08-23 per
+    request to make sure NO highlighted MCQ on the page gets silently
+    dropped by Call1. Unlike QBM's miss-check (which hunts for any MCQ at
+    all that Call1 missed), this one is narrowly scoped: it only looks for
+    MCQ blocks that are YELLOW/GREEN/ORANGE highlighted AND are not already
+    present in `mcqs`. Never touches or re-verifies existing entries --
+    pure addition, so it cannot regress anything Call1+Call2 already got
+    right. If nothing is missed, returns mcqs unchanged."""
+    try:
+        existing_qs = [m.get("question", "") for m in mcqs]
+        existing_json = json.dumps(existing_qs, ensure_ascii=False)
+        prompt = f"""MISS-CHECK — HIGHLIGHTED MCQs ONLY. This is a re-scan of a page image after an already-extracted list. Your ONLY job: find any MCQ block on this page that is YELLOW, GREEN, or ORANGE highlighter-marked (question + its 4 options) but is NOT already present in the ALREADY-EXTRACTED list below (matched by question text). Do not re-list anything already extracted — only output genuinely NEW highlighted MCQs that were missed.
+
+Scan every MCQ block on the page one at a time, check if its background has ANY yellow/green/orange highlighter tint (even faint/pale counts), and check if its question text is already in the ALREADY-EXTRACTED list. If both "is highlighted" AND "not already extracted" are true, include it in the output.
+
+ALREADY-EXTRACTED (question text only, for de-dup matching):
+{existing_json}
+
+For each MISSED highlighted MCQ you find, also find its marked option (RED or ORANGE circle/box around A/B/C/D by position) and independently verify with your own subject knowledge whether that mark is factually correct — same rule as before: if the mark is wrong, output the actually correct option as "answer" and set "marked_answer_wrong":true; otherwise "marked_answer_wrong":false. Write a short correct explanation (Bangla if the MCQ is Bangla).
+
+If there are NO missed highlighted MCQs, output an empty array [].
+
+OUTPUT — ONLY a JSON array (empty if nothing missed), same shape as before, no commentary:
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"explanation":"...","yellow_highlight":true}}]"""
+        txt = await _qbm_gemini_raw(img, prompt)
+        if not txt:
+            txt = await _qbm_groq_call(img, prompt)
+        if not txt:
+            txt = await _qbm_openrouter_call(img, prompt)
+        if not txt:
+            return mcqs  # miss-check failed entirely -- keep what we have, don't block the pipeline
+        missed = _qbm_parse_json(txt)
+        if not missed:
+            return mcqs
+        # De-dup against existing by normalized question text before appending
+        existing_norm = {re.sub(r"\s+", " ", q).strip().lower() for q in existing_qs if q}
+        added = 0
+        for m in missed:
+            q_norm = re.sub(r"\s+", " ", (m.get("question") or "")).strip().lower()
+            if not q_norm or q_norm in existing_norm:
+                continue
+            if not (m.get("options") and m.get("answer")):
+                continue
+            m["yellow_highlight"] = True  # miss-check only ever finds highlighted MCQs by construction
+            mcqs.append(m)
+            existing_norm.add(q_norm)
+            added += 1
+        if added:
+            logger.info(f"[ONU-misscheck] recovered {added} highlighted MCQ(s) Call1 missed")
+        return mcqs
+    except Exception as e:
+        logger.warning(f"[ONU-misscheck] failed: {e} — keeping list as-is, not blocking the pipeline")
+        return mcqs
+
+
 async def _onu_extract_from_image(img) -> list:
     """/onu's fully independent extraction pipeline — does NOT call into
     any QBM pipeline function (_qbm_call2_miss_check, _qbm_repair_order,
@@ -21081,18 +21136,20 @@ async def _onu_extract_from_image(img) -> list:
     just JSON/text/image helpers, so sharing them carries no cross-command
     behavior risk.
 
-    Steps (exactly 2 API calls per page): Call1 (extract — highlighted MCQs
+    Steps (3 API calls per page): Call1 (extract — highlighted MCQs
     ONLY, non-highlighted blocks are skipped directly inside the extraction
     prompt itself) -> Call2 (_onu_verify_pass — full proofread/verification
-    of exactly what Call1 found, never adds/removes MCQs). _onu_filter_mcqs
-    (caller-side, no API call) then drops anything without
-    yellow_highlight=true plus image-attached/roman-combo MCQs."""
+    of exactly what Call1 found, never adds/removes MCQs) -> Call3
+    (_onu_misscheck_pass — additive-only re-scan that recovers any
+    highlighted MCQ Call1 skipped; 2026-08-23)."""
     await _qbm_ram_aware_acquire()
     try:
         call1 = await _onu_call1_extract(img)
         if not call1:
             return []
         verified = await _onu_verify_pass(img, call1)
+        # Call3: miss-check — recover any highlighted MCQ Call1 skipped.
+        verified = await _onu_misscheck_pass(img, verified)
         verified = _cap_mcq_options(verified)
         # Safety net: if either call still left explanation empty (model
         # skipped the field despite the prompt asking for it), never post an
