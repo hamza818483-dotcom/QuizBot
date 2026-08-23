@@ -9300,7 +9300,7 @@ _PRINT_STYLE7_CSS = """<style>
 body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:12pt;line-height:1.2;color:#000;margin:0 auto;padding:10px;width:210mm;max-width:210mm}
 .exam-header{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:10px;margin-bottom:15px}
 .exam-header h1{color:#166534;margin:0;font-size:15pt;font-weight:bold}
-.content-columns-3{column-count:3;column-gap:8px;column-fill:auto;column-rule:1px solid #ddd}
+.content-columns-3{column-count:3;column-gap:8px;column-fill:auto;column-rule:1px solid #888}
 .question-s3{margin-bottom:7px;break-inside:avoid;page-break-inside:avoid;font-size:8.3pt;line-height:1.15}
 .question-s3 .question-header{margin-bottom:1px;display:flex;align-items:center}
 .question-s3 .question-num{font-family:'Times New Roman',serif;font-weight:bold;color:#15803d;font-size:8.3pt;margin-right:3px;white-space:nowrap;flex-shrink:0}
