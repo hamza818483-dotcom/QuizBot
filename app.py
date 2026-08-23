@@ -20932,12 +20932,12 @@ _MATH_UNICODE_RULE_FMT_SAFE = _MATH_UNICODE_RULE.replace("{", "{{").replace("}",
 
 _EXPLANATION_DEPTH_RULE_FMT_SAFE = _EXPLANATION_DEPTH_RULE.replace("{", "{{").replace("}", "}}")
 
-ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY. Scan every MCQ block on this page (question + 4 options), one block at a time. For EACH block, look specifically at the pixels directly behind its question line AND its 4 options. If ANY yellow marker-pen color OR ANY green marker-pen color is visible there (a light/pale/faint tint of either still counts, not just bright/saturated), INCLUDE this MCQ in the output — this is a MUST-TAKE rule, never miss a highlighted MCQ even if faint. If the background is plain white/no-color for this block, SKIP it entirely — do NOT include it in the output at all. Do not assume based on other MCQs on the page — each block gets its own independent check, since a page can mix highlighted and non-highlighted blocks. Never invent new MCQs, exact order, exact wording (Bangla stays Bangla, English stays English). 0 highlighted MCQs → return [].
+ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY. Scan every MCQ block on this page (question + 4 options), one block at a time. For EACH block, look specifically at the pixels directly behind its question line AND its 4 options. If ANY yellow marker-pen color OR ANY green marker-pen color OR ANY orange marker-pen color is visible there (a light/pale/faint tint of any of these still counts, not just bright/saturated), INCLUDE this MCQ in the output — this is a MUST-TAKE rule, never miss a highlighted MCQ even if faint. If the background is plain white/no-color for this block, SKIP it entirely — do NOT include it in the output at all. Do not assume based on other MCQs on the page — each block gets its own independent check, since a page can mix highlighted and non-highlighted blocks. Never invent new MCQs, exact order, exact wording (Bangla stays Bangla, English stays English). 0 highlighted MCQs → return [].
 
-For each INCLUDED MCQ, find the RED-MARKED option: the option with a RED CIRCLE or RED BOX drawn around its letter/text (A/B/C/D by position, 1st option=A...4th=D). This red mark is ONLY a visual pointer to what someone marked — it is NOT automatically correct. You must INDEPENDENTLY VERIFY using your own subject knowledge which option is actually, factually correct:
-- If the red-marked option IS the factually correct answer → output that as "answer", set "marked_answer_wrong":false.
-- If the red-marked option is NOT the factually correct answer (the mark is wrong) → output the ACTUALLY CORRECT option as "answer" (not the red-marked one), set "marked_answer_wrong":true, and in the explanation clearly state the red-marked option was wrong and give the correct one.
-- If no red mark is visible at all, determine the correct answer purely from subject knowledge, set "marked_answer_wrong":false.
+For each INCLUDED MCQ, find the MARKED option: the option with a RED or ORANGE CIRCLE, or a RED or ORANGE BOX/HIGHLIGHT, drawn/painted around or over its letter/text (A/B/C/D by position, 1st option=A...4th=D). This mark is ONLY a visual pointer to what someone marked — it is NOT automatically correct. You must INDEPENDENTLY VERIFY using your own subject knowledge which option is actually, factually correct:
+- If the marked option IS the factually correct answer → output that as "answer", set "marked_answer_wrong":false.
+- If the marked option is NOT the factually correct answer (the mark is wrong) → output the ACTUALLY CORRECT option as "answer" (not the marked one), set "marked_answer_wrong":true, and in the explanation clearly state the marked option was wrong and give the correct one.
+- If no red/orange mark is visible at all, determine the correct answer purely from subject knowledge, set "marked_answer_wrong":false.
 
 Also write a short explanation (Bangla if the MCQ is in Bangla) for why the correct answer is correct — from any ব্যাখ্যা text physically printed on the page near this MCQ if present (copy verbatim, no rewrite), otherwise self-write following the structure below. If marked_answer_wrong is true, the explanation MUST also mention the marked option was incorrect and state the correct one.
 """ + _EXPLANATION_DEPTH_RULE + """
@@ -20961,17 +20961,18 @@ STEP 1 — First, list every MCQ block on the page in order (question + its 4 op
 STEP 2 — Now go back through that list ONE MCQ AT A TIME and, for EACH one individually, zoom your attention onto ONLY the background area directly behind that MCQ's question line and its 4 options (ignore the rest of the page while judging this one block):
    - Is there ANY yellow marker/highlighter tint behind this specific block? (bright yellow, pale yellow, faded yellow — all count)
    - Is there ANY green marker/highlighter tint behind this specific block? (bright green, pale green, faded green — all count)
-   - If either is present, even faintly, this block IS highlighted — KEEP it for the output. This is a MUST-TAKE rule — never skip a highlighted MCQ even by mistake.
+   - Is there ANY orange marker/highlighter tint behind this specific block? (bright orange, pale orange, faded orange — all count)
+   - If any of these is present, even faintly, this block IS highlighted — KEEP it for the output. This is a MUST-TAKE rule — never skip a highlighted MCQ even by mistake.
    - If the background is genuinely plain white/uncolored paper behind THIS block, this block is NOT highlighted — DROP it, do not include it in the output at all.
    - A page can legitimately mix highlighted and non-highlighted blocks — never copy the previous block's verdict for the next one; judge each block completely independently, as if it were the only MCQ on the page.
    - Faint/light highlighter marks are the most commonly missed case — when in doubt about a pale tint, look again before deciding it's not highlighted.
 
-STEP 3 — For each KEPT (highlighted) MCQ, find the RED-MARKED option: the option with a RED CIRCLE or RED BOX drawn around its letter/text (A/B/C/D by position, 1st option=A...4th=D). This red mark only shows what someone marked — it can be WRONG. Independently verify with your own subject knowledge which option is actually, factually correct:
-   - Red-marked option IS factually correct → "answer" = that option, "marked_answer_wrong":false.
-   - Red-marked option is NOT factually correct → "answer" = the ACTUALLY correct option (ignore the wrong red mark), "marked_answer_wrong":true.
-   - No red mark visible at all → determine correct answer from subject knowledge, "marked_answer_wrong":false.
+STEP 3 — For each KEPT (highlighted) MCQ, find the MARKED option: the option with a RED or ORANGE CIRCLE, or a RED or ORANGE BOX/HIGHLIGHT, drawn/painted around or over its letter/text (A/B/C/D by position, 1st option=A...4th=D). This mark only shows what someone marked — it can be WRONG. Independently verify with your own subject knowledge which option is actually, factually correct:
+   - Marked option IS factually correct → "answer" = that option, "marked_answer_wrong":false.
+   - Marked option is NOT factually correct → "answer" = the ACTUALLY correct option (ignore the wrong mark), "marked_answer_wrong":true.
+   - No red/orange mark visible at all → determine correct answer from subject knowledge, "marked_answer_wrong":false.
 
-STEP 4 — For each KEPT MCQ, write a short explanation (Bangla if the MCQ is in Bangla) for why the correct answer is correct — use any ব্যাখ্যা text physically printed on the page near this MCQ if present (copy verbatim, no rewrite), otherwise self-write following the structure below. If marked_answer_wrong is true, the explanation MUST also state the red-marked option was wrong and give the correct one.
+STEP 4 — For each KEPT MCQ, write a short explanation (Bangla if the MCQ is in Bangla) for why the correct answer is correct — use any ব্যাখ্যা text physically printed on the page near this MCQ if present (copy verbatim, no rewrite), otherwise self-write following the structure below. If marked_answer_wrong is true, the explanation MUST also state the marked option was wrong and give the correct one.
 """ + _EXPLANATION_DEPTH_RULE + """
 """ + _MATH_UNICODE_RULE + """
 
