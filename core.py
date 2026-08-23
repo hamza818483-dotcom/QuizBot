@@ -2190,13 +2190,6 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
             c.drawCentredString(0, 0, watermark_text)
             c.restoreState()
 
-            # Small "ATLAS" tag, top-right corner, scales with page size
-            corner_font_size = max(8, min(page_width, page_height) * 0.018)
-            c.setFont("Helvetica-Bold", corner_font_size)
-            c.setFillColor(Color(0, 0, 0, alpha=0.35))
-            margin = min(page_width, page_height) * 0.03
-            c.drawRightString(page_width - margin, page_height - margin - corner_font_size, "ATLAS")
-
             # Footer: red bg box with white bold Bengali text, bottom of page
             # (opt-in only now — see include_footer param docstring above)
             if include_footer:
