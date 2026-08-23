@@ -9345,7 +9345,12 @@ def _build_print_style7(data, heading):
     for pidx, chunk in enumerate(pages):
         page_break_style = ' style="page-break-before:always"' if pidx > 0 else ''
         body += f'<div class="s3-page"{page_break_style}>'
-        body += f'<div class="exam-header"><h1>{heading} - Practice Sheet</h1></div><div class="content-columns-3">'
+        # 2026-08-23 FIX: topic-name header was repeating on every 50-MCQ
+        # page because it sat inside this per-page loop unconditionally.
+        # Now only rendered for the first page (pidx == 0).
+        if pidx == 0:
+            body += f'<div class="exam-header"><h1>{heading} - Practice Sheet</h1></div>'
+        body += '<div class="content-columns-3">'
         for d in chunk:
             qcounter += 1
             body += _render_question(d, qcounter)
