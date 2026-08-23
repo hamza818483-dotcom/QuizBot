@@ -9123,183 +9123,67 @@ def _build_print_style1(data, heading):
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
 
 _PRINT_STYLE7_CSS = """<style>
-@page{size:420mm 60mm;margin:10mm 10mm 10mm 10mm;@top-center{content:none}@bottom-center{content:none}}
-body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:15pt;line-height:1.35;color:#000;margin:0;padding:10px;width:420mm;max-width:420mm}
+@page{size:A4 portrait;margin:8mm 8mm}
+body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:12pt;line-height:1.2;color:#000;margin:0 auto;padding:10px;width:210mm;max-width:210mm}
 .exam-header{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:10px;margin-bottom:15px}
-.exam-header h1{color:#166534;margin:0;font-size:20pt;font-weight:bold}
-.abpage{page-break-after:always;break-after:page}
-.abpage:last-of-type{page-break-after:auto;break-after:auto}
-.content-columns{column-count:3;column-gap:16px;column-fill:balance;column-rule:1px solid #ddd}
-.question{margin-bottom:10px;break-inside:avoid;page-break-inside:avoid}
-.question-header{margin-bottom:4px;display:flex;align-items:flex-start}
-.question-num{font-family:'Times New Roman',serif;font-weight:bold;color:#15803d;font-size:15pt;margin-right:5px;white-space:nowrap;flex-shrink:0}
-.question-text{flex:1;line-height:1.35;font-size:15pt;color:#000;word-wrap:break-word}
-.options-table-short{width:100%;border-collapse:collapse;margin:4px 0 4px 8px;table-layout:fixed}
-.options-table-short td{border:none;padding:2px 8px 2px 0;vertical-align:top;font-size:15pt;color:#000;width:40%}
-.options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;vertical-align:middle;font-family:'Poppins',sans-serif;font-weight:600;font-size:15pt;color:#000;padding-left:10px}
-.answer-circle{font-weight:300;font-family:'Poppins',sans-serif;font-size:15pt;line-height:1}
-.options-list{margin:4px 0 4px 8px;padding:0;list-style:none}
-.options-list li{margin:2px 0;font-size:15pt;color:#000;word-wrap:break-word;display:flex;align-items:center}
-.opt-letter{display:inline-flex;align-items:center;justify-content:center;width:15pt;height:15pt;border-radius:50%;border:1.2px solid #000;font-size:9pt;font-weight:600;margin-right:6px;flex-shrink:0}
-.option-with-answer{display:flex;justify-content:space-between;align-items:flex-start}
-.explanation{margin:4px 0 2px 8px;padding:4px;color:#000;background-color:rgba(22,163,74,0.1);border-left:3px solid #16a34a;font-size:13pt;font-style:italic;break-inside:avoid}
-.explanation-label{font-weight:bold;color:#166534}
+.exam-header h1{color:#166534;margin:0;font-size:15pt;font-weight:bold}
+.content-columns-3{column-count:3;column-gap:8px;column-fill:auto;column-rule:1px solid #ddd}
+.question-s3{margin-bottom:4px;break-inside:avoid;page-break-inside:avoid;font-size:8.3pt;line-height:1.15}
+.question-s3 .question-header{margin-bottom:1px;display:flex;align-items:flex-start}
+.question-s3 .question-num{font-family:'Times New Roman',serif;font-weight:bold;color:#15803d;font-size:8.3pt;margin-right:3px;white-space:nowrap;flex-shrink:0}
+.question-s3 .question-text{flex:1;line-height:1.15;font-size:8.3pt;color:#000;word-wrap:break-word;white-space:pre-line}
+.options-list-s3{margin:1px 0 2px 10px;padding:0;list-style:none}
+.options-list-s3 li{display:flex;align-items:center;margin:0;font-size:8pt;color:#000;word-wrap:break-word}
+.opt-letter-s3{display:inline-flex;align-items:center;justify-content:center;width:7pt;height:7pt;border-radius:50%;border:0.6px solid #000;font-size:5pt;font-weight:600;margin-right:3px;flex-shrink:0}
+.options-table-s3{width:100%;border-collapse:collapse;margin:1px 0 2px 10px;table-layout:fixed}
+.options-table-s3 td{border:none;padding:0 4px 0 0;vertical-align:top;font-size:8pt;color:#000;width:50%}
 .page-break{page-break-before:always;break-before:page}
 .answers-section{column-count:1;margin-top:0}
 .answer-table{width:100%;border-collapse:collapse;margin-top:0;border:1px solid #16a34a}
 .answer-table th,.answer-table td{border:1px solid #86efac;padding:6px;text-align:left;vertical-align:top;word-wrap:break-word}
-.answer-table th{background-color:#F0FDF4;font-weight:bold;text-align:center;font-size:14pt;color:#166534}
-.qno-col{width:8%;text-align:center}.ans-col{width:8%;text-align:center;font-weight:bold;font-size:14pt}.exp-col{width:84%;font-size:13pt}
-img{max-width:30%!important;height:auto!important;vertical-align:middle}
-@media print{@page{size:420mm 594mm;margin:10mm 10mm 10mm 10mm;@top-center{content:none}@bottom-center{content:none}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:420mm;max-width:420mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
-</style>"""
-
-# ---- Print Style-08 (Exam Book Style2): same 3-column/50-per-page design
-# as style7, but A4 width (210mm) by default -- page height still shrinks
-# to fit actual content, exactly like style7. If 50 MCQ in 3 columns can't
-# fit within A4's height, the page grows taller automatically (same real-
-# content-height measurement _html_to_pdf already does for style7), so
-# nothing is ever clipped -- it just stops being "A4-sized" once content
-# genuinely needs more room, and stays A4-sized whenever it fits.
-#
-# BUGFIX (2026-08-23): a naive 420mm->210mm string-replace on style7's CSS
-# kept style7's 15pt font/16px gaps/10mm margins as-is -- those sizes were
-# tuned for 420mm-wide columns (~130mm each). At A4's 210mm width, usable
-# column space after 10mm margins + 2x16px gaps is only ~55-60mm per
-# column, so 15pt text wrapped after just 2-3 words per line, ballooning
-# the real per-item height far beyond the pre-render estimate and forcing
-# the binary-search real-height correction to settle on a page many times
-# taller than A4 (exactly the "vertically onek lomba" bug reported) while
-# each column still stayed narrow. Fixed with a dedicated, properly-scaled
-# CSS: smaller font (8.5pt), tighter margins/gaps/padding so 3 real columns
-# fit A4's width without absurd wrapping, and the height-estimate formula
-# in _build_print_style8 below is scaled to match this smaller font.
-_PRINT_STYLE8_CSS = """<style>
-@page{size:210mm 60mm;margin:8mm 8mm 8mm 8mm;@top-center{content:none}@bottom-center{content:none}}
-body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:8.5pt;line-height:1.3;color:#000;margin:0;padding:4px;width:210mm;max-width:210mm}
-.exam-header{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:6px;margin-bottom:8px}
-.exam-header h1{color:#166534;margin:0;font-size:13pt;font-weight:bold}
-.abpage{page-break-after:always;break-after:page}
-.abpage:last-of-type{page-break-after:auto;break-after:auto}
-.content-columns{column-count:3;column-gap:6px;column-fill:balance;column-rule:1px solid #ddd}
-.question{margin-bottom:5px;break-inside:avoid;page-break-inside:avoid}
-.question-header{margin-bottom:2px;display:flex;align-items:flex-start}
-.question-num{font-family:'Times New Roman',serif;font-weight:bold;color:#15803d;font-size:8.5pt;margin-right:3px;white-space:nowrap;flex-shrink:0}
-.question-text{flex:1;line-height:1.3;font-size:8.5pt;color:#000;word-wrap:break-word}
-.options-table-short{width:100%;border-collapse:collapse;margin:2px 0 2px 4px;table-layout:fixed}
-.options-table-short td{border:none;padding:1px 3px 1px 0;vertical-align:top;font-size:8.5pt;color:#000;width:40%}
-.options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;vertical-align:middle;font-family:'Poppins',sans-serif;font-weight:600;font-size:8.5pt;color:#000;padding-left:5px}
-.answer-circle{font-weight:300;font-family:'Poppins',sans-serif;font-size:8.5pt;line-height:1}
-.options-list{margin:2px 0 2px 4px;padding:0;list-style:none}
-.options-list li{margin:1px 0;font-size:8.5pt;color:#000;word-wrap:break-word}
-.option-with-answer{display:flex;justify-content:space-between;align-items:flex-start}
-.explanation{margin:2px 0 1px 4px;padding:2px;color:#000;background-color:rgba(22,163,74,0.1);border-left:2px solid #16a34a;font-size:7.5pt;font-style:italic;break-inside:avoid}
-.explanation-label{font-weight:bold;color:#166534}
-.page-break{page-break-before:always;break-before:page}
-.answers-section{column-count:1;margin-top:0}
-.answer-table{width:100%;border-collapse:collapse;margin-top:0;border:1px solid #16a34a}
-.answer-table th,.answer-table td{border:1px solid #86efac;padding:4px;text-align:left;vertical-align:top;word-wrap:break-word;font-size:8pt}
-.answer-table th{background-color:#F0FDF4;font-weight:bold;text-align:center;font-size:9pt;color:#166534}
-.qno-col{width:8%;text-align:center}.ans-col{width:8%;text-align:center;font-weight:bold;font-size:9pt}.exp-col{width:84%;font-size:8pt}
-img{max-width:30%!important;height:auto!important;vertical-align:middle}
-@media print{@page{size:210mm 297mm;margin:8mm 8mm 8mm 8mm;@top-center{content:none}@bottom-center{content:none}}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:210mm;max-width:210mm}.question{break-inside:avoid;page-break-inside:avoid}.explanation{break-inside:avoid;page-break-inside:avoid}.content-columns{column-rule:1px solid #ddd}}
+.answer-table th{background-color:#F0FDF4;font-weight:bold;text-align:center;font-size:13pt;color:#166534}
+.qno-col{width:8%;text-align:center}.ans-col{width:8%;text-align:center;font-weight:bold;font-size:14pt}.exp-col{width:84%;font-size:12pt;white-space:pre-line}
+img{max-width:35%!important;height:auto!important;vertical-align:middle}
+@media print{@page{size:A4 portrait;margin:8mm 8mm}body{-webkit-print-color-adjust:exact;color-adjust:exact;width:210mm;max-width:210mm}.question-s3{break-inside:avoid;page-break-inside:avoid}}
 </style>"""
 
 def _build_print_style7(data, heading):
-    """Format P7: Exam Book Style — page size shrinks to fit actual content
-    per page (width fixed 420mm, height computed from real MCQ count so no
-    large blank area is left on the right/bottom when content doesn't fill
-    a full 594mm page), 3 columns, left-to-right vertical fill (col1
-    top-to-bottom, then col2, then col3), 50 MCQ per page target."""
+    """Format P7: Exam Book Style — ported 1:1 from LMS's style3 (Compact
+    Style): fixed A4 page, 3-column layout, flat 50 MCQ/page pagination
+    (no dynamic per-page height measurement), small circle letter badges
+    (A/B/C/D)."""
     css = _PRINT_STYLE7_CSS
     PER_PAGE = 50
-    import math as _math
 
-    def _render_question(d):
+    def _render_question(d, n):
         is_short = _check_short_option(d["opts"])
-        h = f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
+        qnum = f'{n:02d}'
+        h = f'<div class="question-s3"><div class="question-header"><span class="question-num">{qnum}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
         if is_short:
-            h += f'<table class="options-table-short"><tr><td><span class="opt-letter">A</span>{d["opts"][0]}{d["oimgs"][0]}</td><td><span class="opt-letter">B</span>{d["opts"][1]}{d["oimgs"][1]}</td></tr><tr><td><span class="opt-letter">C</span>{d["opts"][2]}{d["oimgs"][2]}</td><td><span class="opt-letter">D</span>{d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
+            h += f'<table class="options-table-s3"><tr><td><span class="opt-letter-s3">A</span>{d["opts"][0]}{d["oimgs"][0]}</td><td><span class="opt-letter-s3">B</span>{d["opts"][1]}{d["oimgs"][1]}</td></tr><tr><td><span class="opt-letter-s3">C</span>{d["opts"][2]}{d["oimgs"][2]}</td><td><span class="opt-letter-s3">D</span>{d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
         else:
-            h += f'<ul class="options-list"><li><span class="opt-letter">A</span>{d["opts"][0]}{d["oimgs"][0]}</li><li><span class="opt-letter">B</span>{d["opts"][1]}{d["oimgs"][1]}</li><li><span class="opt-letter">C</span>{d["opts"][2]}{d["oimgs"][2]}</li><li><span class="opt-letter">D</span>{d["opts"][3]}{d["oimgs"][3]}</li></ul>'
+            h += f'<ul class="options-list-s3"><li><span class="opt-letter-s3">A</span>{d["opts"][0]}{d["oimgs"][0]}</li><li><span class="opt-letter-s3">B</span>{d["opts"][1]}{d["oimgs"][1]}</li><li><span class="opt-letter-s3">C</span>{d["opts"][2]}{d["oimgs"][2]}</li><li><span class="opt-letter-s3">D</span>{d["opts"][3]}{d["oimgs"][3]}</li></ul>'
         h += '</div>'
         return h
 
-    def _est_item_height_mm(d):
-        # Estimate this ONE MCQ's rendered height in mm at 15pt/1.35 line-height.
-        # Question text: ~48 chars/line in a ~130mm-wide column at 15pt Bengali.
-        qlen = len(d.get("q", "") or "")
-        q_lines = max(1, _math.ceil(qlen / 46))
-        base = 6.5 + q_lines * 7.2  # header row + question wrapped lines
-        is_short = _check_short_option(d["opts"])
-        if is_short:
-            base += 2 * 7.2  # two option rows (A/B on one row, C/D on next)
-        else:
-            # 4 stacked option lines, each may itself wrap once if long
-            for opt in d["opts"]:
-                olen = len(opt or "")
-                o_lines = max(1, _math.ceil(olen / 40))
-                base += o_lines * 6.6
-        base += 3.5  # question block bottom margin
-        return base
-
     body = ''
-    page_idx = 0
-    total_pages = _math.ceil(len(data) / PER_PAGE) if data else 0
-    for pg_start in range(0, len(data), PER_PAGE):
-        chunk = data[pg_start:pg_start + PER_PAGE]
-        page_idx += 1
-        # Distribute chunk into 3 columns left-to-right (col1 filled first)
-        # the same way column-fill:auto would, so our height estimate
-        # matches the TALLEST column, not the average.
-        n = len(chunk)
-        # Always 3 columns (per user requirement: 50 MCQ/page target
-        # balanced across 3 columns even on a partial last page) -- the
-        # per-page HEIGHT (and thus width usage within the fixed 420mm) is
-        # what gets tightened to actual content via the real-height
-        # measurement in _html_to_pdf, not the column count itself.
-        page_cols = 3
-        per_col = _math.ceil(n / page_cols) if n else 1
-        col_heights = []
-        for c in range(page_cols):
-            seg = chunk[c * per_col:(c + 1) * per_col]
-            col_heights.append(sum(_est_item_height_mm(d) for d in seg))
-        tallest_mm = max(col_heights) if col_heights else 40
-        # REAL FIX (verified via direct Chromium bisection): column-fill:auto
-        # fills columns strictly top-to-bottom to whatever height the container
-        # gets -- it does NOT balance item COUNT across columns. Our estimate
-        # (tallest_mm*1.03+4, then clamped to 560mm) was landing at heights
-        # that make columns 1-2 overfill before spilling into column 3, e.g.
-        # verified on a real 50-question page: est=560mm -> columns got
-        # 18/18/14 items (should be ~17/17/16), leaving visible blank space
-        # under column 3. Bisecting the real container height against real
-        # rendered content confirmed the genuinely even 17/17/16 split only
-        # happens in a ~530-555mm window -- our estimate multiplier (1.03) is
-        # slightly too generous for this CSS/content combination. Tightening
-        # the buffer multiplier from 1.03 to 0.98 (and dropping the flat +4mm
-        # pad) brings the estimate into that verified-correct window without
-        # a blanket height-cap change, which previous attempts showed makes
-        # the imbalance WORSE in either direction if it drifts the container
-        # far from the true balance point.
-        # FIX: 560mm cap removed (matches the corresponding JS-side cap
-        # removal in _html_to_pdf) -- a real 50-item/3-column page can
-        # legitimately need more than 560mm, and capping this pre-render
-        # estimate forced column-fill:balance to compute against an
-        # undersized box before the real-height correction ran, producing
-        # the same leftover-whitespace bug from the opposite direction.
-        est_mm = max(40, round(tallest_mm * 1.03 + 4))
-        header_html = f'<div class="exam-header"><h1>{heading} - Questions</h1></div>' if page_idx == 1 else ''
-        body += f'<div class="abpage" id="abpage-{page_idx}" style="page:p{page_idx}">{header_html}<div class="content-columns" style="height:{est_mm}mm">'
+    pages = [data[i:i + PER_PAGE] for i in range(0, len(data), PER_PAGE)]
+    qcounter = 0
+    for pidx, chunk in enumerate(pages):
+        page_break_style = ' style="page-break-before:always"' if pidx > 0 else ''
+        body += f'<div class="s3-page"{page_break_style}>'
+        body += f'<div class="exam-header"><h1>{heading} - Practice Sheet</h1></div><div class="content-columns-3">'
         for d in chunk:
-            body += _render_question(d)
+            qcounter += 1
+            body += _render_question(d, qcounter)
         body += '</div></div>'
 
-    ans_page_num = total_pages + 1
-    body += f'<div class="abpage answers-page" id="abpage-{ans_page_num}" style="page:pans"><div class="answers-section"><table class="answer-table"><thead><tr><th class="qno-col">Q.No.</th><th class="ans-col">Ans</th><th class="exp-col">Explanation</th></tr></thead><tbody>'
+    body += '<div class="page-break"></div><div class="answers-section"><table class="answer-table"><thead><tr><th class="qno-col">Q.No.</th><th class="ans-col">Ans</th><th class="exp-col">Explanation</th></tr></thead><tbody>'
     for d in data:
         body += f'<tr><td class="qno-col">{d["n"]}</td><td class="ans-col">{d["al"]}</td><td class="exp-col">{d["exp"] if d["exp"] else "-"}</td></tr>'
-    body += '</tbody></table></div></div>'
+    body += '</tbody></table></div>'
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
+
 
 def _build_print_style8(data, heading):
     """Format P8: Exam Book Style2 — same 3-column/50-per-page design as
@@ -10054,7 +9938,7 @@ async def handle_sheet_style_callback(callback_query: dict):
                 html_out = PRINT_STYLE_BUILDERS[style_key](data_adapted, title)
 
             _is_topicwise_fallback = style_key in ("style1", "style2", "style7", "style8") and any(m.get("_pdfs_topic") for m in mcqs)
-            _uses_dynamic_page = style_key in ("style7", "style8") and not _is_topicwise_fallback
+            _uses_dynamic_page = style_key in ("style8",) and not _is_topicwise_fallback
             pdf_bytes = await _html_to_pdf(
                 html_out, progress_cb=_progress,
                 use_css_page_size=_uses_dynamic_page,
