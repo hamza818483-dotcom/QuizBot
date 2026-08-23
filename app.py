@@ -20983,7 +20983,7 @@ OUTPUT FORMAT — ONLY valid JSON array of the KEPT (highlighted) MCQs only, exa
 
 
 async def _onu_call1_extract(img) -> list:
-    """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field, which covers yellow OR green marker color).
+    """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field, which covers yellow, green, OR orange marker color).
     Gemini primary / Groq fallback (matches /qbm's provider order) -- Gemini
     generally reads highlight color/marks more reliably than Groq's vision
     model, so it's tried first; Groq only kicks in if Gemini fails/is
