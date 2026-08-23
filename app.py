@@ -21014,36 +21014,38 @@ async def _onu_call1_extract(img) -> list:
 
 
 async def _onu_verify_pass(img, mcqs: list) -> list:
-    """/onu-ONLY verify pass — fully independent from QBM's miss-check
-    pipeline (_qbm_call2_miss_check). /onu never needs QBM's "find MCQs
-    Call1 missed" logic, since a missed MCQ that also happens to be
-    highlighted would simply not exist in call1 to begin with, and /onu's
-    filter already drops anything without yellow_highlight -- so there's
-    nothing for a miss-check pass to usefully add here, only risk (it can
-    add/rewrite/split MCQs from a codepath that has no concept of the
-    yellow_highlight field).
+    """/onu-ONLY Call2 — two jobs only, per request:
+    1) Did Call1 catch EVERY highlighted MCQ on the page? (miss-check --
+       re-scans the page for yellow/green/orange-highlighted blocks not
+       already in the list, adds any it finds)
+    2) Is the MARKED answer on each MCQ correctly identified? (re-checks
+       the red/orange circle/box mark for every MCQ, independently
+       verifies with subject knowledge whether that mark is factually
+       right, corrects "answer" if the visual mark was misread)
 
-    This pass instead just re-confirms, for the SAME list Call1 already
-    found: option text accuracy, answer-letter correctness, and exact
-    source wording -- a light proofreading pass, never adding or removing
-    MCQs. yellow_highlight is carried through untouched (same list, same
-    order, same length always) so there is no restore/re-map step needed
-    anywhere in this path."""
+    Question/option text and explanation are NOT touched by this pass --
+    Call1 already extracts those; this pass only affects completeness
+    (job 1) and answer-correctness (job 2). Output stays a plain JSON
+    array (same shape _qbm_parse_json already parses). Newly-recovered
+    MCQs get yellow_highlight:true automatically since job 1 only ever
+    finds highlighted blocks by construction."""
     if not mcqs:
         return mcqs
     try:
-        mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("question", "options", "answer", "explanation")} for m in mcqs], ensure_ascii=False)
-        prompt = f"""Re-check this already-extracted MCQ list against the page image ONE more time. Do NOT add or remove any MCQ -- output exactly {len(mcqs)} items, same order.
+        mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("question", "options", "answer")} for m in mcqs], ensure_ascii=False)
+        prompt = f"""Re-check this page image against an already-extracted MCQ list. Two jobs only:
 
-For each MCQ, verify against the image:
-- question and option text match the source exactly (fix only if you spot a typo/OCR error)
-- answer letter is correct (re-check the marked option: a RED or ORANGE circle/box, or other clear mark)
-- explanation is a short, correct 1-2 sentence reason for the answer (fix if wrong/missing; keep Bangla if the MCQ is Bangla)
+JOB 1 — COMPLETENESS: scan every MCQ block on the page (question + 4 options) one at a time. Check its background for ANY yellow, green, or orange highlighter tint (even faint/pale counts). If a block IS highlighted but its question text is NOT already present in the EXISTING LIST below, it was MISSED — add it to the output as a new item (with correct question/options/answer/explanation, Bangla stays Bangla).
 
-EXISTING LIST:
+JOB 2 — MARKED ANSWER ACCURACY: for every MCQ already in the EXISTING LIST, look again at its 4 options and find the one with a RED or ORANGE circle/box drawn around/over its letter or text (A/B/C/D by position). Independently verify with your own subject knowledge whether that marked option is factually correct:
+- If the mark IS on the factually correct option, keep "answer" as that option.
+- If the mark is on the WRONG option, correct "answer" to the actually correct option instead.
+- If no red/orange mark is visible for that MCQ, leave "answer" as-is (already extracted).
+
+EXISTING LIST (question text used for matching in Job 1, current answer used for re-checking in Job 2):
 {mcq_json}
 
-OUTPUT — ONLY a JSON array of exactly {len(mcqs)} items, same order, corrected if needed:
+OUTPUT — a single JSON array containing ALL MCQs: every item from EXISTING LIST (answer corrected per Job 2 if needed) PLUS any new items found in Job 1. Same question/option wording as the source page. No commentary, no markdown fences:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
         txt = await _qbm_gemini_raw(img, prompt)
         if not txt:
@@ -21051,23 +21053,47 @@ OUTPUT — ONLY a JSON array of exactly {len(mcqs)} items, same order, corrected
         if not txt:
             txt = await _qbm_openrouter_call(img, prompt)
         if not txt:
-            return mcqs  # verify failed entirely -- keep Call1's result as-is rather than losing highlighted MCQs
-        fixed = _qbm_parse_json(txt)
-        if not fixed or len(fixed) != len(mcqs):
-            return mcqs  # length mismatch -- untrustworthy, keep Call1's result
-        for orig, corrected in zip(mcqs, fixed):
-            if corrected.get("question"):
-                orig["question"] = corrected["question"]
-            if corrected.get("options"):
-                orig["options"] = corrected["options"]
-            if corrected.get("answer"):
-                orig["answer"] = corrected["answer"]
-            if corrected.get("explanation"):
-                orig["explanation"] = corrected["explanation"]
-        return mcqs
+            return mcqs  # Call2 failed entirely -- keep Call1's result as-is rather than losing highlighted MCQs
+        result = _qbm_parse_json(txt)
+        if not result:
+            return mcqs  # parse failed -- untrustworthy, keep Call1's result
+
+        # Job 2: merge corrected answers back onto Call1's items by matching
+        # normalized question text (order/count from the model isn't
+        # guaranteed to exactly mirror the input, so match by content).
+        def _norm_q(q):
+            return re.sub(r"\s+", " ", (q or "")).strip().lower()
+
+        orig_by_q = {_norm_q(m.get("question")): m for m in mcqs}
+        result_qs_norm = set()
+        final = []
+        for r in result:
+            q_norm = _norm_q(r.get("question"))
+            if not q_norm:
+                continue
+            result_qs_norm.add(q_norm)
+            orig = orig_by_q.get(q_norm)
+            if orig is not None:
+                # Existing MCQ -- only let Job 2 touch the answer field.
+                if r.get("answer"):
+                    orig["answer"] = r["answer"]
+                final.append(orig)
+            else:
+                # Job 1 -- genuinely new, previously-missed highlighted MCQ.
+                if r.get("options") and r.get("answer"):
+                    r["yellow_highlight"] = True
+                    final.append(r)
+        # Safety net: if the model accidentally dropped an original MCQ
+        # from its output (didn't intend to remove it, just omitted while
+        # focusing on Job 1/2), keep it rather than silently losing it.
+        for q_norm, orig in orig_by_q.items():
+            if q_norm not in result_qs_norm:
+                final.append(orig)
+        return final if final else mcqs
     except Exception as e:
         logger.warning(f"[ONU-verify] failed: {e} — keeping Call1 result unverified rather than dropping it")
         return mcqs
+
 
 
 async def _onu_extract_from_image(img) -> list:
@@ -21083,8 +21109,8 @@ async def _onu_extract_from_image(img) -> list:
 
     Steps (exactly 2 API calls per page): Call1 (extract — highlighted MCQs
     ONLY, non-highlighted blocks are skipped directly inside the extraction
-    prompt itself) -> Call2 (_onu_verify_pass — full proofread/verification
-    of exactly what Call1 found, never adds/removes MCQs). _onu_filter_mcqs
+    prompt itself) -> Call2 (_onu_verify_pass — completeness miss-check +
+    marked-answer re-check, see that function's docstring). _onu_filter_mcqs
     (caller-side, no API call) then drops anything without
     yellow_highlight=true plus image-attached/roman-combo MCQs."""
     await _qbm_ram_aware_acquire()
