@@ -9302,7 +9302,7 @@ body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:1
 .exam-header h1{color:#166534;margin:0;font-size:15pt;font-weight:bold}
 .content-columns-3{column-count:3;column-gap:8px;column-fill:auto;column-rule:1px solid #ddd}
 .question-s3{margin-bottom:7px;break-inside:avoid;page-break-inside:avoid;font-size:8.3pt;line-height:1.15}
-.question-s3 .question-header{margin-bottom:1px;display:flex;align-items:flex-start}
+.question-s3 .question-header{margin-bottom:1px;display:flex;align-items:center}
 .question-s3 .question-num{font-family:'Times New Roman',serif;font-weight:bold;color:#15803d;font-size:8.3pt;margin-right:3px;white-space:nowrap;flex-shrink:0}
 .question-s3 .question-text{flex:1;line-height:1.15;font-size:8.3pt;color:#000;word-wrap:break-word;white-space:pre-line}
 .options-list-s3{margin:1px 0 2px 10px;padding:0;list-style:none}
