@@ -9139,7 +9139,8 @@ body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:1
 .options-table-short td.answer-col{display:flex;justify-content:center;align-items:center;vertical-align:middle;font-family:'Poppins',sans-serif;font-weight:600;font-size:15pt;color:#000;padding-left:10px}
 .answer-circle{font-weight:300;font-family:'Poppins',sans-serif;font-size:15pt;line-height:1}
 .options-list{margin:4px 0 4px 8px;padding:0;list-style:none}
-.options-list li{margin:2px 0;font-size:15pt;color:#000;word-wrap:break-word}
+.options-list li{margin:2px 0;font-size:15pt;color:#000;word-wrap:break-word;display:flex;align-items:center}
+.opt-letter{display:inline-flex;align-items:center;justify-content:center;width:15pt;height:15pt;border-radius:50%;border:1.2px solid #000;font-size:9pt;font-weight:600;margin-right:6px;flex-shrink:0}
 .option-with-answer{display:flex;justify-content:space-between;align-items:flex-start}
 .explanation{margin:4px 0 2px 8px;padding:4px;color:#000;background-color:rgba(22,163,74,0.1);border-left:3px solid #16a34a;font-size:13pt;font-style:italic;break-inside:avoid}
 .explanation-label{font-weight:bold;color:#166534}
@@ -9218,9 +9219,9 @@ def _build_print_style7(data, heading):
         is_short = _check_short_option(d["opts"])
         h = f'<div class="question"><div class="question-header"><span class="question-num">{d["n"]:02d}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
         if is_short:
-            h += f'<table class="options-table-short"><tr><td>ⓐ {d["opts"][0]}{d["oimgs"][0]}</td><td>ⓑ {d["opts"][1]}{d["oimgs"][1]}</td></tr><tr><td>ⓒ {d["opts"][2]}{d["oimgs"][2]}</td><td>ⓓ {d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
+            h += f'<table class="options-table-short"><tr><td><span class="opt-letter">A</span>{d["opts"][0]}{d["oimgs"][0]}</td><td><span class="opt-letter">B</span>{d["opts"][1]}{d["oimgs"][1]}</td></tr><tr><td><span class="opt-letter">C</span>{d["opts"][2]}{d["oimgs"][2]}</td><td><span class="opt-letter">D</span>{d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
         else:
-            h += f'<ul class="options-list"><li>ⓐ {d["opts"][0]}{d["oimgs"][0]}</li><li>ⓑ {d["opts"][1]}{d["oimgs"][1]}</li><li>ⓒ {d["opts"][2]}{d["oimgs"][2]}</li><li>ⓓ {d["opts"][3]}{d["oimgs"][3]}</li></ul>'
+            h += f'<ul class="options-list"><li><span class="opt-letter">A</span>{d["opts"][0]}{d["oimgs"][0]}</li><li><span class="opt-letter">B</span>{d["opts"][1]}{d["oimgs"][1]}</li><li><span class="opt-letter">C</span>{d["opts"][2]}{d["oimgs"][2]}</li><li><span class="opt-letter">D</span>{d["opts"][3]}{d["oimgs"][3]}</li></ul>'
         h += '</div>'
         return h
 
