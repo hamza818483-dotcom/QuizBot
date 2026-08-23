@@ -21293,6 +21293,11 @@ async def _handle_onu_impl(msg: dict):
             filtered_pages.append((page_num, img, kept))
         extracted_pages = filtered_pages
         skipped_count = total_before - total_after
+        # 2026-08-23 FIX: don't overwrite the live per-page dashboard --
+        # the person wants it to stay visible (full page-by-page + AI
+        # call stats) after extraction finishes. The skip-summary now
+        # goes out as its own message REPLYING to the dashboard instead
+        # of edit_msg()-ing over it.
         if status_msg_id and skipped_count:
             reason_lines = []
             if agg_reasons["no_highlight"]:
@@ -21302,10 +21307,11 @@ async def _handle_onu_impl(msg: dict):
             if agg_reasons["roman_combo"]:
                 reason_lines.append(f"🔢 Roman/combination-type: {agg_reasons['roman_combo']}টি")
             reason_text = "\n".join(reason_lines)
-            await edit_msg(chat_id, status_msg_id,
+            await send_msg(chat_id,
                 f"✅ Extraction সম্পূর্ণ! {total_before} MCQ পাওয়া গেছে, {skipped_count}টি বাদ দেওয়া হলো:\n"
                 f"{reason_text}\n\n"
-                f"বাকি {total_after}টি এগোচ্ছে...")
+                f"বাকি {total_after}টি এগোচ্ছে...",
+                reply_to_message_id=status_msg_id)
 
         # ── /onu always ends with CSV-only output — no channel list/keyboard,
         # no posting to any channel, regardless of -c flag or saved channels. ──
@@ -21343,9 +21349,11 @@ async def _handle_onu_impl(msg: dict):
             await send_document(chat_id, _buf_onu.getvalue().encode("utf-8"),
                 f"{topic}_ONU.csv",
                 caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted, filtered)",
-                mime_type="text/csv")
+                mime_type="text/csv",
+                reply_to_message_id=status_msg_id)
         else:
-            await send_msg(chat_id, "❌ কোনো yellow-highlighted MCQ পাওয়া যায়নি।")
+            await send_msg(chat_id, "❌ কোনো yellow-highlighted MCQ পাওয়া যায়নি।",
+                            reply_to_message_id=status_msg_id)
         return
 
     except Exception as e:
