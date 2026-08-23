@@ -99,6 +99,8 @@ from core import (
     build_back_url, source_msg_id,
     get_recent_errors, clear_error_logs,
     add_watermark_to_pdf,
+    add_header_box_to_pdf,
+    add_footer_box_to_pdf,
     get_bot_username,
     BD_TZ,
 )
@@ -7797,6 +7799,104 @@ async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str, mess
             await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
     except Exception as e:
         await send_msg(chat_id, f"❌ Watermark error: {e}")
+
+
+async def handle_header_command(msg: dict):
+    """/h (name) — reply to a PDF with a name to stamp a full-width GREEN
+    bg box at the very TOP of every page with WHITE bold text."""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+    name_text = re.sub(r"^/h\s*", "", text, flags=re.IGNORECASE).strip()
+    reply = msg.get("reply_to_message")
+
+    if not name_text:
+        await send_msg(chat_id,
+            "📌 Usage: PDF-e reply করে <code>/h YourName</code> দিলে page-এর "
+            "একদম উপরে green bg box-এ white text-এ নাম বসবে।",
+            parse_mode="HTML")
+        return
+
+    if not (reply and reply.get("document")):
+        await send_msg(chat_id, "❌ যেই PDF-এ header বসাতে চাও, সেটাতে reply করে <code>/h নাম</code> দাও।",
+                        parse_mode="HTML")
+        return
+
+    file_id = reply["document"]["file_id"]
+    orig_filename = reply["document"].get("file_name")
+    await send_msg(chat_id, f"⏳ Header বসছে: <b>{name_text}</b>", parse_mode="HTML")
+    _spawn_task(_apply_header_to_pdf(chat_id, file_id, name_text, reply["message_id"], orig_filename))
+
+
+async def _apply_header_to_pdf(chat_id: int, file_id: str, name_text: str, message_id: int = None,
+                                 orig_filename: str = None):
+    try:
+        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
+        out_bytes = add_header_box_to_pdf(pdf_bytes, name_text)
+        out_name = orig_filename or "header.pdf"
+        if not out_name.lower().endswith(".pdf"):
+            out_name += ".pdf"
+        send_res = await send_document(chat_id, out_bytes,
+            out_name,
+            caption=f"✅ Header applied: <b>{name_text}</b>",
+            mime_type="application/pdf"
+        )
+        if not send_res.get("ok"):
+            err = send_res.get("error") or send_res.get("description") or "unknown error"
+            logger.error(f"[Header] send_document failed: {err}")
+            await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+    except Exception as e:
+        await send_msg(chat_id, f"❌ Header error: {e}")
+
+
+async def handle_footer_command(msg: dict):
+    """/f (name) — reply to a PDF with a name/text to stamp the existing
+    footer system (red bg box, bottom of page, white bold text) — this is
+    the SAME visual /wm used to auto-attach, now split out as its own
+    opt-in command so /wm and /sheet output stay footer-free by default."""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+    footer_text = re.sub(r"^/f\s*", "", text, flags=re.IGNORECASE).strip()
+    reply = msg.get("reply_to_message")
+
+    if not footer_text:
+        await send_msg(chat_id,
+            "📌 Usage: PDF-e reply করে <code>/f YourText</code> দিলে page-এর "
+            "একদম নিচে red bg box-এ white text-এ footer বসবে।",
+            parse_mode="HTML")
+        return
+
+    if not (reply and reply.get("document")):
+        await send_msg(chat_id, "❌ যেই PDF-এ footer বসাতে চাও, সেটাতে reply করে <code>/f টেক্সট</code> দাও।",
+                        parse_mode="HTML")
+        return
+
+    file_id = reply["document"]["file_id"]
+    orig_filename = reply["document"].get("file_name")
+    await send_msg(chat_id, f"⏳ Footer বসছে: <b>{footer_text}</b>", parse_mode="HTML")
+    _spawn_task(_apply_footer_to_pdf(chat_id, file_id, footer_text, reply["message_id"], orig_filename))
+
+
+async def _apply_footer_to_pdf(chat_id: int, file_id: str, footer_text: str, message_id: int = None,
+                                 orig_filename: str = None):
+    try:
+        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
+        out_bytes = add_footer_box_to_pdf(pdf_bytes, footer_text)
+        out_name = orig_filename or "footer.pdf"
+        if not out_name.lower().endswith(".pdf"):
+            out_name += ".pdf"
+        send_res = await send_document(chat_id, out_bytes,
+            out_name,
+            caption=f"✅ Footer applied: <b>{footer_text}</b>",
+            mime_type="application/pdf"
+        )
+        if not send_res.get("ok"):
+            err = send_res.get("error") or send_res.get("description") or "unknown error"
+            logger.error(f"[Footer] send_document failed: {err}")
+            await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+    except Exception as e:
+        await send_msg(chat_id, f"❌ Footer error: {e}")
+
+
 async def handle_info2(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
@@ -26603,6 +26703,16 @@ async def handle_message(msg: dict):
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_wm_command(msg))
+    elif text.startswith("/h") and (text == "/h" or text.startswith("/h ") or text.startswith("/h\n")):
+        if not is_auth:
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
+            return
+        _spawn_command_task(uid, handle_header_command(msg))
+    elif text.startswith("/f") and (text == "/f" or text.startswith("/f ") or text.startswith("/f\n")):
+        if not is_auth:
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
+            return
+        _spawn_command_task(uid, handle_footer_command(msg))
     elif text.startswith("/live") and not text.startswith("/livetime"):
         if not is_auth:
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])

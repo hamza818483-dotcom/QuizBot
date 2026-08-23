@@ -2122,10 +2122,16 @@ async def footer_history_list(limit: int = 10) -> list:
         return []
 
 
-def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str = None, title: str = None) -> bytes:
+def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str = None, title: str = None,
+                          include_footer: bool = False) -> bytes:
     """Add a diagonal, semi-transparent text watermark to every page of a PDF,
-    plus a small top-right 'ATLAS' tag and a red-box white-text footer.
-    footer_text: jodi None hoy, active/default footer text (settings theke) use hoy."""
+    plus a small top-right 'ATLAS' tag.
+    footer_text: jodi None hoy, active/default footer text (settings theke) use hoy.
+    include_footer: 2026-08-23 FIX — /wm was auto-stamping a red-box footer on
+    EVERY watermarked PDF (including plain /sheet output), even though the
+    user only asked for the diagonal watermark. Footer is now a fully
+    separate, opt-in feature (see /f command) and defaults to OFF here so
+    /wm and every _apply_saved_watermark() caller only adds the watermark."""
     try:
         import io as _io
         import base64 as _b64_wm
@@ -2136,7 +2142,7 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
         # Footer text needs proper Bengali conjunct shaping (raqm) — reportlab's
         # native text drawing can't do this, so render it as a PIL image instead
         # (same technique used for slide generation elsewhere in this codebase).
-        if not footer_text:
+        if include_footer and not footer_text:
             footer_text = _ACTIVE_FOOTER_TEXT_CACHE.get("text") or \
                 "সেরা গাইডলাইনে গোছানো প্রস্তুতি-এটলাস(Whatsapp:01999681290)"
 
@@ -2192,22 +2198,24 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
             c.drawRightString(page_width - margin, page_height - margin - corner_font_size, "ATLAS")
 
             # Footer: red bg box with white bold Bengali text, bottom of page
-            footer_box_h = min(page_width, page_height) * 0.035
-            c.setFillAlpha(1.0)
-            c.setStrokeAlpha(1.0)
-            try:
-                px_scale = 4  # render at higher res for crisp text
-                footer_png = _render_footer_image(int(page_width * px_scale), int(footer_box_h * px_scale))
-                from reportlab.lib.utils import ImageReader
-                c.setFillColorRGB(1, 0, 0)
-                c.rect(0, 0, page_width, footer_box_h, fill=1, stroke=0)
-                c.drawImage(ImageReader(_io.BytesIO(footer_png)), 0, 0,
-                            width=page_width, height=footer_box_h, mask=None,
-                            preserveAspectRatio=False)
-            except Exception as fe:
-                logger.warning(f"[Watermark] footer image render failed, falling back to plain box: {fe}")
-                c.setFillColor(Color(1, 0, 0, alpha=1.0))
-                c.rect(0, 0, page_width, footer_box_h, fill=1, stroke=0)
+            # (opt-in only now — see include_footer param docstring above)
+            if include_footer:
+                footer_box_h = min(page_width, page_height) * 0.035
+                c.setFillAlpha(1.0)
+                c.setStrokeAlpha(1.0)
+                try:
+                    px_scale = 4  # render at higher res for crisp text
+                    footer_png = _render_footer_image(int(page_width * px_scale), int(footer_box_h * px_scale))
+                    from reportlab.lib.utils import ImageReader
+                    c.setFillColorRGB(1, 0, 0)
+                    c.rect(0, 0, page_width, footer_box_h, fill=1, stroke=0)
+                    c.drawImage(ImageReader(_io.BytesIO(footer_png)), 0, 0,
+                                width=page_width, height=footer_box_h, mask=None,
+                                preserveAspectRatio=False)
+                except Exception as fe:
+                    logger.warning(f"[Watermark] footer image render failed, falling back to plain box: {fe}")
+                    c.setFillColor(Color(1, 0, 0, alpha=1.0))
+                    c.rect(0, 0, page_width, footer_box_h, fill=1, stroke=0)
 
             c.save()
             packet.seek(0)
@@ -2227,5 +2235,150 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
         return buf.getvalue()
     except Exception as e:
         logger.error(f"[Watermark] error: {e}")
+        return pdf_bytes
+
+
+def _render_bg_text_box_image(text: str, px_width: int, px_height: int,
+                               bg_rgb: tuple, fg_rgb: tuple = (255, 255, 255)) -> bytes:
+    """Shared helper for /h and /f: renders `text` centered on a solid-color
+    box as a PNG (proper Bengali conjunct shaping via raqm/PIL, same
+    technique as the watermark footer) so it can be drawn onto a PDF page
+    with reportlab's drawImage."""
+    import io as _io
+    import base64 as _b64
+    from PIL import Image as _PILImage, ImageDraw as _PILImageDraw, ImageFont as _PILImageFont, features as _PILFeatures
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    bold_path = os.path.join(base_dir, "fonts", "NotoSansBengali-Bold.ttf.b64")
+    with open(bold_path, "r") as f:
+        font_bytes = _b64.b64decode(f.read())
+    layout = _PILImageFont.Layout.RAQM if _PILFeatures.check("raqm") else _PILImageFont.Layout.BASIC
+    img = _PILImage.new("RGB", (px_width, px_height), bg_rgb)
+    draw = _PILImageDraw.Draw(img)
+    font_size = int(px_height * 0.55)
+    font = _PILImageFont.truetype(_io.BytesIO(font_bytes), font_size, layout_engine=layout)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    while text_w > px_width * 0.96 and font_size > 6:
+        font_size -= 1
+        font = _PILImageFont.truetype(_io.BytesIO(font_bytes), font_size, layout_engine=layout)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    draw.text(((px_width - text_w) / 2 - bbox[0], (px_height - text_h) / 2 - bbox[1]),
+               text, font=font, fill=fg_rgb)
+    out = _io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
+def add_header_box_to_pdf(pdf_bytes: bytes, name_text: str) -> bytes:
+    """/h (name) — full-width GREEN bg box at the very TOP of every page,
+    WHITE bold Bengali/English text centered in it."""
+    try:
+        import io as _io
+        from pypdf import PdfReader, PdfWriter
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.utils import ImageReader
+
+        reader = PdfReader(_io.BytesIO(pdf_bytes))
+        writer = PdfWriter()
+        GREEN = (0, 128, 0)  # solid green bg, per spec ("pure green bg box")
+
+        for page in reader.pages:
+            page_width = float(page.mediabox.width)
+            page_height = float(page.mediabox.height)
+            packet = _io.BytesIO()
+            c = canvas.Canvas(packet, pagesize=(page_width, page_height))
+
+            box_h = min(page_width, page_height) * 0.035
+            try:
+                px_scale = 4
+                box_png = _render_bg_text_box_image(
+                    name_text, int(page_width * px_scale), int(box_h * px_scale),
+                    bg_rgb=GREEN, fg_rgb=(255, 255, 255)
+                )
+                c.setFillColorRGB(0, 128 / 255, 0)
+                c.rect(0, page_height - box_h, page_width, box_h, fill=1, stroke=0)
+                c.drawImage(ImageReader(_io.BytesIO(box_png)), 0, page_height - box_h,
+                            width=page_width, height=box_h, mask=None,
+                            preserveAspectRatio=False)
+            except Exception as be:
+                logger.warning(f"[Header] box image render failed, falling back to plain box: {be}")
+                c.setFillColorRGB(0, 128 / 255, 0)
+                c.rect(0, page_height - box_h, page_width, box_h, fill=1, stroke=0)
+
+            c.save()
+            packet.seek(0)
+            overlay = PdfReader(packet)
+            page.merge_page(overlay.pages[0])
+            writer.add_page(page)
+
+        buf = _io.BytesIO()
+        try:
+            if reader.metadata:
+                writer.add_metadata(reader.metadata)
+        except Exception as me:
+            logger.warning(f"[Header] metadata copy failed: {me}")
+        writer.write(buf)
+        return buf.getvalue()
+    except Exception as e:
+        logger.error(f"[Header] error: {e}")
+        return pdf_bytes
+
+
+def add_footer_box_to_pdf(pdf_bytes: bytes, footer_text: str) -> bytes:
+    """/f (name) — the standalone footer feature, split out of /wm so it's
+    opt-in only. Same visual as the old auto-attached watermark footer
+    (red bg box, bottom of page, white bold text) but now only applied
+    when the user explicitly runs /f."""
+    try:
+        import io as _io
+        from pypdf import PdfReader, PdfWriter
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.utils import ImageReader
+
+        reader = PdfReader(_io.BytesIO(pdf_bytes))
+        writer = PdfWriter()
+        RED = (255, 0, 0)
+
+        for page in reader.pages:
+            page_width = float(page.mediabox.width)
+            page_height = float(page.mediabox.height)
+            packet = _io.BytesIO()
+            c = canvas.Canvas(packet, pagesize=(page_width, page_height))
+
+            box_h = min(page_width, page_height) * 0.035
+            try:
+                px_scale = 4
+                box_png = _render_bg_text_box_image(
+                    footer_text, int(page_width * px_scale), int(box_h * px_scale),
+                    bg_rgb=RED, fg_rgb=(255, 255, 255)
+                )
+                c.setFillColorRGB(1, 0, 0)
+                c.rect(0, 0, page_width, box_h, fill=1, stroke=0)
+                c.drawImage(ImageReader(_io.BytesIO(box_png)), 0, 0,
+                            width=page_width, height=box_h, mask=None,
+                            preserveAspectRatio=False)
+            except Exception as fe:
+                logger.warning(f"[Footer] box image render failed, falling back to plain box: {fe}")
+                c.setFillColorRGB(1, 0, 0)
+                c.rect(0, 0, page_width, box_h, fill=1, stroke=0)
+
+            c.save()
+            packet.seek(0)
+            overlay = PdfReader(packet)
+            page.merge_page(overlay.pages[0])
+            writer.add_page(page)
+
+        buf = _io.BytesIO()
+        try:
+            if reader.metadata:
+                writer.add_metadata(reader.metadata)
+        except Exception as me:
+            logger.warning(f"[Footer] metadata copy failed: {me}")
+        writer.write(buf)
+        return buf.getvalue()
+    except Exception as e:
+        logger.error(f"[Footer] error: {e}")
         return pdf_bytes
 
