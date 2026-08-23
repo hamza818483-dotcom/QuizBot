@@ -10036,8 +10036,10 @@ async def handle_sheet_command(msg: dict):
         # functional (PRINT_STYLE_BUILDERS untouched) -- just no longer
         # offered as buttons here.
         _allowed_sheet_styles = ("style1", "style2", "style3", "style7")
-        buttons = [[{"text": name, "callback_data": f"sheetstyle:{key}:{cache_key}"}]
-                   for key, name in PRINT_STYLE_NAMES.items() if key in _allowed_sheet_styles]
+        _style_buttons_flat = [{"text": name, "callback_data": f"sheetstyle:{key}:{cache_key}"}
+                                for key, name in PRINT_STYLE_NAMES.items() if key in _allowed_sheet_styles]
+        # 2 buttons per row
+        buttons = [_style_buttons_flat[i:i + 2] for i in range(0, len(_style_buttons_flat), 2)]
         buttons.append([{"text": "📄 Default Style", "callback_data": f"sheetstyle:default:{cache_key}"}])
 
         if loading_id:
