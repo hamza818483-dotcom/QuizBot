@@ -1174,7 +1174,16 @@ Return ONLY valid JSON array, no markdown, no extra text:
             key_rotator.record_call(key)
             from google import genai as gai
             from google.genai import types
-            client = gai.Client(api_key=key)
+            # FIX (same class of bug as the image-path _call_gemini): no
+            # client-level HTTP timeout meant asyncio.wait_for(timeout=45)
+            # only stopped the outer await -- the background thread's real
+            # request kept running on the SDK's own default, so a slow/dead
+            # connection burned the full 45s every attempt instead of
+            # failing fast into the next key.
+            client = gai.Client(
+                api_key=key,
+                http_options=types.HttpOptions(timeout=38000)
+            )
 
             def _call_gemini():
                 return client.models.generate_content(
