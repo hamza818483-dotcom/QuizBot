@@ -7897,6 +7897,79 @@ async def _apply_footer_to_pdf(chat_id: int, file_id: str, footer_text: str, mes
         await send_msg(chat_id, f"❌ Footer error: {e}")
 
 
+def _parse_wm_h_f_combo(text: str) -> dict:
+    """Parses a multi-line message like:
+        /wm এটলাস
+        /h রফি ক্লাস
+        /f সেরা গাইডলাইনে...
+    into {"wm": "এটলাস", "h": "রফি ক্লাস", "f": "সেরা গাইডলাইনে..."}.
+    Only /wm, /h, /f are recognized; any other line is ignored so this
+    doesn't misfire on unrelated multi-line captions. Returns {} if no
+    recognized command line is found."""
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        m = re.match(r"^/(wm|watermark|h|f)\s+(.+)$", line, flags=re.IGNORECASE)
+        if not m:
+            continue
+        cmd, val = m.group(1).lower(), m.group(2).strip()
+        if not val:
+            continue
+        if cmd in ("wm", "watermark"):
+            out["wm"] = val
+        elif cmd == "h":
+            out["h"] = val
+        elif cmd == "f":
+            out["f"] = val
+    return out
+
+
+async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
+    """Applies any of watermark (/wm), header (/h), footer (/f) present in
+    `combo` to the replied-to PDF, all stacked onto ONE output PDF, so the
+    user doesn't need three separate reply round-trips."""
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+    file_id = reply["document"]["file_id"]
+    orig_filename = reply["document"].get("file_name")
+
+    parts_desc = []
+    if "wm" in combo:
+        parts_desc.append(f"watermark: <b>{combo['wm']}</b>")
+    if "h" in combo:
+        parts_desc.append(f"header: <b>{combo['h']}</b>")
+    if "f" in combo:
+        parts_desc.append(f"footer: <b>{combo['f']}</b>")
+    await send_msg(chat_id, "⏳ বসছে — " + ", ".join(parts_desc), parse_mode="HTML")
+
+    try:
+        pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
+        if "wm" in combo:
+            pdf_bytes = add_watermark_to_pdf(
+                pdf_bytes, combo["wm"],
+                title=(orig_filename.rsplit(".", 1)[0] if orig_filename else None)
+            )
+        if "h" in combo:
+            pdf_bytes = add_header_box_to_pdf(pdf_bytes, combo["h"])
+        if "f" in combo:
+            pdf_bytes = add_footer_box_to_pdf(pdf_bytes, combo["f"])
+
+        out_name = orig_filename or "stamped.pdf"
+        if not out_name.lower().endswith(".pdf"):
+            out_name += ".pdf"
+        send_res = await send_document(chat_id, pdf_bytes,
+            out_name,
+            caption="✅ Applied — " + ", ".join(parts_desc),
+            mime_type="application/pdf"
+        )
+        if not send_res.get("ok"):
+            err = send_res.get("error") or send_res.get("description") or "unknown error"
+            logger.error(f"[ComboWMHF] send_document failed: {err}")
+            await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+    except Exception as e:
+        await send_msg(chat_id, f"❌ Combo error: {e}")
+
+
 async def handle_info2(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
@@ -26224,6 +26297,20 @@ async def handle_message(msg: dict):
     # এই ২টা network round-trip বাদ পড়ে (fire-and-forget)
     _spawn_task(db_track_user(uid, uname))
     is_auth = await db_is_owner_or_admin(uid)
+
+    # Combo /wm + /h + /f (multi-line, single reply-to-PDF message): user can
+    # send all three commands in one message (each on its own line) while
+    # replying to a PDF, and get ONE output with watermark + header + footer
+    # all stacked, instead of doing three separate reply round-trips.
+    # Must run before the individual /wm, /h, /f dispatch branches below
+    # (those only look at the first line's command) and only when it's
+    # actually a multi-command combo -- a lone /wm, /h, or /f still falls
+    # through untouched to its normal single-feature handler.
+    if is_auth and msg.get("reply_to_message", {}).get("document") and text.startswith("/"):
+        _combo = _parse_wm_h_f_combo(text)
+        if _combo and len(_combo) >= 2:
+            _spawn_command_task(uid, handle_combo_wm_h_f_command(msg, _combo))
+            return
 
     # /special group word-moderation — checked for every group/supergroup
     # message before anything else, so a banned word is deleted/warned
