@@ -21227,41 +21227,180 @@ OUTPUT — a single JSON array containing ALL MCQs: every item from EXISTING LIS
 
 
 async def _onu_extract_from_image(img) -> list:
-    """/onu's fully independent extraction pipeline — does NOT call into
-    any QBM pipeline function (_qbm_call2_miss_check, _qbm_repair_order,
-    _qbm_restore_opt_bboxes, _qbm_final_safety_net, _qbm_final_empty_page_scan
-    are all QBM-only and never invoked from here). /onu only shares pure,
-    stateless utilities with QBM (_qbm_parse_json, _qbm_dedup_list,
-    _qbm_ram_aware_acquire, _cap_mcq_options, _qbm_groq_call, _qbm_gemini_raw)
-    -- none of these know or care about "MCQ pipeline" semantics, they're
-    just JSON/text/image helpers, so sharing them carries no cross-command
-    behavior risk.
+    """/onu Call1 ONLY (per-page) — 2026-08-23: Call2 (verify/miss-check)
+    was moved OUT of here into a separate batched pass
+    (_onu_batch_verify_pages) that runs across ALL pages afterward, 2
+    pages per Call2 request instead of 1, per request. This function is
+    what qbm_extract_all_pages calls per-page in its normal parallel
+    extraction loop -- it now only does Call1, so the live dashboard
+    still shows real per-page Call1 progress exactly as before; Call2
+    then runs as a second pass over the whole page set.
 
-    Steps (exactly 2 API calls per page): Call1 (extract — highlighted MCQs
-    ONLY, non-highlighted blocks are skipped directly inside the extraction
-    prompt itself) -> Call2 (_onu_verify_pass — completeness miss-check +
-    marked-answer re-check, see that function's docstring). _onu_filter_mcqs
-    (caller-side, no API call) then drops anything without
-    yellow_highlight=true plus image-attached/roman-combo MCQs."""
+    Does NOT call into any QBM pipeline function (_qbm_call2_miss_check,
+    _qbm_repair_order, _qbm_restore_opt_bboxes, _qbm_final_safety_net,
+    _qbm_final_empty_page_scan are all QBM-only and never invoked from
+    here). /onu only shares pure, stateless utilities with QBM
+    (_qbm_parse_json, _qbm_dedup_list, _qbm_ram_aware_acquire,
+    _cap_mcq_options, _qbm_groq_call, _qbm_gemini_raw) -- none of these
+    know or care about "MCQ pipeline" semantics, they're just
+    JSON/text/image helpers, so sharing them carries no cross-command
+    behavior risk."""
     await _qbm_ram_aware_acquire()
     try:
         call1 = await _onu_call1_extract(img)
         if not call1:
             return []
-        verified = await _onu_verify_pass(img, call1)
-        verified = _cap_mcq_options(verified)
-        # Safety net: if either call still left explanation empty (model
-        # skipped the field despite the prompt asking for it), never post an
-        # MCQ with a blank explanation — build one from the known answer.
-        for m in verified:
-            if not (m.get("explanation") or "").strip():
-                try:
-                    m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m.get("answer", "A"))
-                except Exception as e:
-                    logger.warning(f"[ONU] explanation fallback failed: {e}")
-        return verified
+        return _cap_mcq_options(call1)
     finally:
         _QBM_EXTRACT_HARD_CAP.release()
+
+
+async def _onu_batch_verify_pages(extracted_pages: list) -> list:
+    """/onu Call2, BATCHED 2-pages-per-call (2026-08-23, per request).
+    Takes the (page_num, img, mcqs) tuples qbm_extract_all_pages already
+    produced (Call1 done for every page) and runs _onu_verify_pass's same
+    completeness+answer-accuracy logic, but with TWO page images sent in
+    ONE Gemini request instead of one Call2 per page -- halves Call2's API
+    call count while keeping the same 3-pass strict-completeness /
+    marked-answer-recheck prompt discipline (delegates to
+    _onu_verify_pass_batched, which mirrors _onu_verify_pass's prompt
+    exactly, just addressed at 2 pages at once with a page-index tag on
+    every MCQ so corrections/misses land on the right page).
+
+    Returns a NEW list of (page_num, img, mcqs) tuples, same order, same
+    length, with each page's mcqs list replaced by its verified result
+    (or left as Call1's result if this page's batch call failed --
+    matches _onu_verify_pass's existing safe-fallback behavior)."""
+    if not extracted_pages:
+        return extracted_pages
+    out = list(extracted_pages)  # shallow copy; we replace mcqs per-index below
+    for i in range(0, len(out), 2):
+        pair = out[i:i + 2]
+        try:
+            if len(pair) == 2:
+                (pn1, img1, mcqs1), (pn2, img2, mcqs2) = pair
+                v1, v2 = await _onu_verify_pass_batched(
+                    [img1, img2], [mcqs1, mcqs2]
+                )
+                out[i] = (pn1, img1, v1)
+                out[i + 1] = (pn2, img2, v2)
+            else:
+                # Odd page out at the end -- falls back to the normal
+                # single-page Call2 (same prompt content, just 1 image).
+                pn1, img1, mcqs1 = pair[0]
+                v1 = await _onu_verify_pass(img1, mcqs1)
+                out[i] = (pn1, img1, v1)
+        except Exception as e:
+            logger.warning(f"[ONU batch-verify] pair starting at index {i} failed: {e} — keeping Call1 result for these pages")
+    return out
+
+
+async def _onu_verify_pass_batched(imgs: list, mcqs_list: list) -> list:
+    """Runs _onu_verify_pass's exact completeness (3-pass) + marked-answer
+    re-check logic, but against 2 page images in ONE model call. Each
+    page's MCQs are tagged with a page_index (1 or 2) in both the prompt
+    payload and the expected output, so Job 1 (new/missed MCQs) and Job 2
+    (answer corrections) land on the correct page's list. Returns
+    [verified_mcqs_page1, verified_mcqs_page2] -- same order as `imgs`/
+    `mcqs_list` in, always a 2-element list out (falls back to the
+    original per-page mcqs list for any page whose batch call fails)."""
+    n = len(imgs)
+    if n != 2:
+        # Shouldn't happen given the caller's pairing logic, but stay safe.
+        return mcqs_list
+    try:
+        payload = {
+            str(idx + 1): [{k: v for k, v in m.items() if k in ("question", "options", "answer")} for m in mcqs_list[idx]]
+            for idx in range(n)
+        }
+        mcq_json = json.dumps(payload, ensure_ascii=False)
+        prompt = f"""Re-check these {n} page images (page_index 1 = first image, page_index 2 = second image) against their already-extracted MCQ lists below. Two jobs only, applied INDEPENDENTLY to each page_index — never mix MCQs between the two pages. JOB 1 (completeness) is the MOST CRITICAL job here — a single missed MCQ on either page is a serious failure, so follow every step below exactly, no shortcuts, for BOTH pages separately.
+
+JOB 1 — COMPLETENESS (exhaustive, mandatory multi-pass procedure, run separately for page_index 1 and page_index 2):
+PASS A — Build a complete inventory first, before judging anything else:
+  - Find every MCQ's printed serial number on that page (Bangla digit or English digit, e.g. ২৪, ২৫, ২৬... or 24, 25, 26...). List them out in your own reasoning as a continuous sequence.
+  - If the serial numbers have a gap (e.g. you see ২৪, ২৫, ২৭ but no ২৬), that means you missed locating MCQ ২৬ on that page — go back and find it before continuing. A page's MCQ numbers are ALWAYS consecutive with no gaps; a gap in your list is proof of a missed block, not proof the number doesn't exist.
+
+PASS B — For EVERY single serial number in that complete, gap-free sequence, one at a time, in order:
+  - Locate that exact MCQ block (question + its 4 options) on that specific page image.
+  - Check its background for ANY highlighter tint — yellow, green, orange, pink, blue, or any other color, even a single faint/pale patch behind just the question line or just one option counts, not just a fully, evenly-colored block. A highlight can be PARTIAL (only question OR only options tinted) — either case still counts.
+  - Make this decision using ONLY that MCQ's own pixels — never infer it from neighboring MCQs, from being near/inside a red-pen box, or from any pattern you noticed on the page. Each MCQ is judged completely alone.
+  - A large red-pen rectangle drawn around a GROUP of several MCQs is ONLY a grouping/annotation mark — it carries ZERO information about which MCQs inside it are highlighted. Treat being inside/outside such a box as completely irrelevant to your highlight decision.
+  - Isolated single highlighted MCQs (one highlighted MCQ surrounded by non-highlighted neighbors, or sitting just beside a red-circled cluster of OTHER MCQs) are the single most common miss — deliberately slow down and re-examine any MCQ like this before deciding.
+  - If highlighted AND its question text is NOT already present in that page's EXISTING LIST below, it was MISSED — add it to the output as a new item for that page_index (correct question/options/answer/explanation, Bangla stays Bangla).
+
+PASS C — FINAL VERIFICATION (mandatory, do not skip, for EACH page separately): after finishing Pass B, go through that page's gap-free serial-number sequence from Pass A one more time, purely as a checklist — for every number, confirm you made an explicit highlight decision for it. If you find any serial number you never actually judged, judge it now before producing the final output.
+
+STRICT NEGATIVE RULE (equally important as finding misses): only add a NEW item if that specific MCQ block is genuinely, visibly highlighted by your Pass B check. Never add a plain white/non-highlighted MCQ just because it's near a highlighted one, near a red-pen box, or because you're trying to be thorough.
+
+JOB 2 — MARKED ANSWER ACCURACY (run separately for each page_index): for every MCQ already in that page's EXISTING LIST, look again at its 4 options and find the one with a RED or ORANGE circle/box drawn around/over its letter or text (A/B/C/D by position). Independently verify with your own subject knowledge whether that marked option is factually correct:
+- If the mark IS on the factually correct option, keep "answer" as that option.
+- If the mark is on the WRONG option, correct "answer" to the actually correct option instead.
+- If no red/orange mark is visible for that MCQ, leave "answer" as-is (already extracted).
+
+EXISTING LISTS, keyed by page_index (question text used for matching in Job 1, current answer used for re-checking in Job 2):
+{mcq_json}
+
+OUTPUT — a single JSON object with keys "1" and "2" (one per page_index), each value a JSON array containing ALL MCQs for that page: every item from that page's EXISTING LIST (answer corrected per Job 2 if needed) PLUS any new items found in Job 1 for that page. Same question/option wording as the source page. No commentary, no markdown fences:
+{{"1":[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}],"2":[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]}}"""
+        txt = await _qbm_gemini_raw_multi(imgs, prompt)
+        _call2_provider = "Gemini"
+        if not txt:
+            txt = await _qbm_groq_call(imgs[0], prompt)
+            _call2_provider = "Groq"
+        if not txt:
+            txt = await _qbm_openrouter_call(imgs[0], prompt)
+            _call2_provider = "OpenRouter"
+        if not txt:
+            return mcqs_list  # both pages' Call2 failed -- keep Call1 results
+
+        # Parse a JSON object ({"1":[...],"2":[...]}), not the plain-array
+        # shape _qbm_parse_json expects -- extract via regex + json.loads
+        # directly here since this is the only /onu path using this shape.
+        m = re.search(r"\{.*\}", txt, re.DOTALL)
+        if not m:
+            return mcqs_list
+        try:
+            parsed = json.loads(m.group(0))
+        except Exception:
+            return mcqs_list
+
+        def _norm_q(q):
+            return re.sub(r"\s+", " ", (q or "")).strip().lower()
+
+        results = []
+        for idx in range(n):
+            page_result = parsed.get(str(idx + 1))
+            orig_mcqs = mcqs_list[idx]
+            if not isinstance(page_result, list) or not page_result:
+                results.append(orig_mcqs)  # this page's half of the batch failed -- keep Call1
+                continue
+            orig_by_q = {_norm_q(m2.get("question")): m2 for m2 in orig_mcqs}
+            result_qs_norm = set()
+            final = []
+            for r in page_result:
+                q_norm = _norm_q(r.get("question"))
+                if not q_norm:
+                    continue
+                result_qs_norm.add(q_norm)
+                orig = orig_by_q.get(q_norm)
+                if orig is not None:
+                    if r.get("answer"):
+                        orig["answer"] = r["answer"]
+                    final.append(orig)
+                else:
+                    if r.get("options") and r.get("answer"):
+                        r["yellow_highlight"] = True
+                        r["_provider"] = _call2_provider
+                        final.append(r)
+            for q_norm, orig in orig_by_q.items():
+                if q_norm not in result_qs_norm:
+                    final.append(orig)
+            results.append(final if final else orig_mcqs)
+        return results
+    except Exception as e:
+        logger.warning(f"[ONU batch-verify-pass] failed: {e} — keeping Call1 results unverified")
+        return mcqs_list
 
 
 async def handle_onu(msg: dict):
@@ -21407,6 +21546,27 @@ async def _handle_onu_impl(msg: dict):
             chat_id, pages, topic, file_name, status_msg_id,
             extractor=_onu_extract_from_image
         )
+
+        # ── /onu Call2, batched 2-pages-per-call (2026-08-23 per request) ──
+        # Call1 (above) already ran per-page via qbm_extract_all_pages, so
+        # the live dashboard already showed real progress. This runs
+        # AFTER extraction finishes, as its own pass over every page's
+        # Call1 result, pairing pages 2-at-a-time into a single Call2
+        # request instead of 1 Call2 per page.
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ Extraction (Call1) সম্পূর্ণ!\n⏳ Verification (Call2, 2 page/call) চলছে...")
+        extracted_pages = await _onu_batch_verify_pages(extracted_pages)
+        # Same explanation-fallback safety net _onu_extract_from_image used
+        # to run per-page inline -- now runs once here across all pages,
+        # since Call2 is no longer per-page.
+        for _pn, _img, _mcqs in extracted_pages:
+            for m in _mcqs:
+                if not (m.get("explanation") or "").strip():
+                    try:
+                        m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m.get("answer", "A"))
+                    except Exception as e:
+                        logger.warning(f"[ONU] explanation fallback failed: {e}")
 
         # ── /onu-specific step: keep ONLY yellow-highlighted questions, ──
         # ── also excluding image-attached & roman-combo MCQs ──
