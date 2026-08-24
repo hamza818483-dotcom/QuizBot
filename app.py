@@ -6930,7 +6930,8 @@ async def _handle_cut_command_inner(msg: dict):
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]"))
 
     try:
-        csv_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_cut)
+        csv_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_cut,
+                                            chat_id=chat_id, message_id=reply["message_id"])
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
@@ -7018,7 +7019,8 @@ async def _handle_split_command_inner(msg: dict):
         _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]"))
 
     try:
-        csv_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_split)
+        csv_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_split,
+                                            chat_id=chat_id, message_id=reply["message_id"])
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
@@ -10160,7 +10162,8 @@ async def handle_sheet_command(msg: dict):
         _spawn_task(edit_msg(chat_id, loading_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]"))
 
     try:
-        csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress_sheet)
+        csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress_sheet,
+                                            chat_id=chat_id, message_id=reply["message_id"])
         if loading_id:
             await edit_msg(chat_id, loading_id, f"✅ Download সম্পূর্ণ!\n📄 {file_name}\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
