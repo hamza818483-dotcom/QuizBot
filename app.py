@@ -13397,6 +13397,41 @@ async def _process_pdfs_pages_inner(
     new_job_id(chat_id)
     set_active_job(chat_id, f"PDF MCQ generation + Poll posting ({file_name}, page-by-page)")
 
+    # /pdfs Call1: batched heading-scan across ALL pages upfront (reuses
+    # /bio's 4-signal heading-scan prompt+parser as-is). Call2 (per-page
+    # loop below) then generates MCQs using each page's pre-detected
+    # topic, replacing /pdfs's old single combined detect+generate call.
+    _pdfs_detected_headings = {}  # page_num -> [{"main":..,"sub":None}, ...] top-to-bottom
+    if _PDFS_MODE.get() and not skip_generate:
+        try:
+            _PDFS_SCAN_BATCH = 3
+            _scan_batches = [pages[i:i + _PDFS_SCAN_BATCH] for i in range(0, len(pages), _PDFS_SCAN_BATCH)]
+
+            async def _pdfs_scan_batch(batch):
+                page_nums = [pt[0] for pt in batch]
+                imgs = [pt[1] for pt in batch]
+                try:
+                    prompt = _build_bio_heading_scan_prompt_batched(len(batch))
+                    scan_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+                    all_headings = _parse_bio_heading_scan(scan_txt)
+                except Exception as _scan_e:
+                    logger.warning(f"[PDFS] Call1 heading-scan batch {page_nums} failed: {_scan_e}")
+                    return
+                by_index = {}
+                for h in all_headings:
+                    idx = h.get("page_index")
+                    if isinstance(idx, (int, float)) and 1 <= int(idx) <= len(batch):
+                        by_index.setdefault(int(idx), []).append(h)
+                for i, pn in enumerate(page_nums, start=1):
+                    hs = [h for h in by_index.get(i, []) if (h.get("heading_text") or "").strip()]
+                    if hs:
+                        _pdfs_detected_headings[pn] = [{"main": h["heading_text"].strip(), "sub": None} for h in hs]
+
+            await asyncio.gather(*[_pdfs_scan_batch(b) for b in _scan_batches], return_exceptions=True)
+            logger.info(f"[PDFS] Call1 done — {sum(len(v) for v in _pdfs_detected_headings.values())} heading(s) across {len(_pdfs_detected_headings)} page(s)")
+        except Exception as _c1_e:
+            logger.warning(f"[PDFS] Call1 heading-scan stage failed entirely, falling back to per-page default topic: {_c1_e}")
+
     async def _gen_with_retry(img_, page_num_):
         """
         PERMANENT FIX — a page must NEVER be silently skipped/dropped just
@@ -13471,65 +13506,50 @@ async def _process_pdfs_pages_inner(
             _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
 
         try:
-            _page_segments = None  # /pdfs only: derived from returned MCQ tags, for caption/summary display
+            _page_segments = None  # /pdfs only: derived from Call1 headings + MCQ tags, for caption/summary display
             if not skip_generate:
-                # /pdfs SINGLE-CALL pipeline: ONE Gemini call per page does
-                # topic-detection + self-verification + content-boundary lock
-                # + MCQ generation together (see pdf_handler.PDFS_TOPIC_MCQ_PROMPT
-                # / generate_pdfs_topic_mcqs). No image cropping, no separate
-                # detect-then-generate calls — full page is read once, and the
-                # model tags every MCQ with the exact topic/sub-topic it
-                # verified that MCQ's content against, so one topic's content
-                # can never end up under another topic's MCQ set.
-                # FIX (topic-detect reliability): generate_pdfs_topic_mcqs only
-                # rotates Gemini keys -- if ALL Gemini keys are exhausted/
-                # failing for a page, it silently returns [] and that page's
-                # topic never gets detected. Retry the Gemini single-call
-                # pipeline up to 2x, then fall back to the same multi-provider
-                # _gen_with_retry used by /pdf so a page is never dropped just
-                # because Gemini was down -- fallback MCQs get tagged with the
-                # page's default topic so grouping still works (just without
-                # sub-topic split).
+                # /pdfs TWO-CALL pipeline (matches /topic's/bio's pattern):
+                # Call1 (batched heading-scan, run once upfront for ALL pages
+                # — see _pdfs_detected_headings above) already determined
+                # this page's topic segment(s). Call2 here just generates
+                # MCQs for the page and tags them with Call1's result — no
+                # more per-page combined detect+generate call, so topic
+                # detection no longer depends on generation succeeding (or
+                # vice versa) and each concern gets its own dedicated call.
+                _page_headings = _pdfs_detected_headings.get(page_num) or [{"main": topic, "sub": None}]
+                _primary_topic = _page_headings[0]["main"]
                 mcqs = []
-                for _pdfs_attempt in range(2):
-                    try:
-                        from pdf_handler import generate_pdfs_topic_mcqs
-                        mcqs = await asyncio.wait_for(
-                            generate_pdfs_topic_mcqs(img, topic, page_num, mcq_count_hint=(mcq_count or 15)),
-                            timeout=120)
-                    except Exception as _pdfs_e:
-                        logger.warning(f"[PDFS] generation attempt {_pdfs_attempt+1} failed page {page_num}: {_pdfs_e}")
-                        mcqs = []
-                    if mcqs:
-                        break
-                    if _pdfs_attempt == 0:
-                        await asyncio.sleep(2)
+                gen_error = None
+                try:
+                    mcqs = await asyncio.wait_for(
+                        generate_mcq_from_image(img, _primary_topic, page_num, mcq_count),
+                        timeout=150)
+                except asyncio.TimeoutError:
+                    logger.warning(f"[PDFS] Page {page_num}: Call2 generation timed out after 150s.")
+                    gen_error = "MCQ generation timeout (150s)"
+                except Exception as _pdfs_e:
+                    logger.warning(f"[PDFS] Page {page_num}: Call2 generation failed: {_pdfs_e}")
+                    gen_error = str(_pdfs_e)
                 if not mcqs:
-                    logger.warning(f"[PDFS] Page {page_num}: Gemini topic-pipeline empty after retries — falling back to multi-provider generation (topic-detect skipped for this page).")
                     try:
-                        _fb_mcqs, _fb_err = await asyncio.wait_for(_gen_with_retry(img, page_num), timeout=150)
+                        mcqs, _fb_err = await asyncio.wait_for(_gen_with_retry(img, page_num), timeout=150)
+                        if not mcqs:
+                            gen_error = _fb_err or gen_error
                     except asyncio.TimeoutError:
                         logger.warning(f"[PDFS] Page {page_num}: fallback generation timed out after 150s — skipping page.")
-                        _fb_mcqs, _fb_err = [], "fallback generation timeout (150s)"
+                        gen_error = "fallback generation timeout (150s)"
                     except Exception as _fb_e:
-                        _fb_mcqs, _fb_err = [], str(_fb_e)
-                    if _fb_mcqs:
-                        for _m in _fb_mcqs:
-                            _m["_pdfs_topic"] = topic
-                            _m["_pdfs_subtopic"] = None
-                        mcqs = _fb_mcqs
-                gen_error = None if mcqs else "topic-wise generation থেকে 0 MCQ এসেছে (Gemini + fallback providers সব ব্যর্থ)"
-                # derive the page's topic list (for caption/summary use)
-                # straight from what the model actually tagged its own MCQs
-                # with — single source of truth, no separate call.
-                _seen = []
-                _seen_set = set()
+                        gen_error = str(_fb_e)
+                # Tag every generated MCQ with Call1's topic result — single
+                # main topic per page for now (multi-segment pages fall back
+                # to the first detected heading; sub_topic split can be
+                # added later without touching Call1).
                 for _m in mcqs:
-                    _key = (_m.get("_pdfs_topic"), _m.get("_pdfs_subtopic"))
-                    if _key not in _seen_set:
-                        _seen_set.add(_key)
-                        _seen.append({"main": _key[0], "sub": _key[1]})
-                _page_segments = _seen or [{"main": topic, "sub": None}]
+                    _m["_pdfs_topic"] = _primary_topic
+                    _m["_pdfs_subtopic"] = None
+                if not gen_error and not mcqs:
+                    gen_error = "topic-wise generation থেকে 0 MCQ এসেছে (সব provider ব্যর্থ)"
+                _page_segments = _page_headings
                 _pdfs_page_topics[page_num] = _page_segments
             if not mcqs:
                 page_status[idx]["current"] = False
