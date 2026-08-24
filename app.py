@@ -21026,12 +21026,12 @@ _MATH_UNICODE_RULE_FMT_SAFE = _MATH_UNICODE_RULE.replace("{", "{{").replace("}",
 
 _EXPLANATION_DEPTH_RULE_FMT_SAFE = _EXPLANATION_DEPTH_RULE.replace("{", "{{").replace("}", "}}")
 
-ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY. Scan every MCQ block on this page (question + 4 options), one block at a time. For EACH block, look specifically at the pixels directly behind its question line AND its 4 options. If ANY yellow marker-pen color OR ANY green marker-pen color OR ANY orange marker-pen color is visible there (a light/pale/faint tint of any of these still counts, not just bright/saturated), INCLUDE this MCQ in the output — this is a MUST-TAKE rule, never miss a highlighted MCQ even if faint. If the background is plain white/no-color for this block, SKIP it entirely — do NOT include it in the output at all. Do not assume based on other MCQs on the page — each block gets its own independent check, since a page can mix highlighted and non-highlighted blocks. Never invent new MCQs, exact order, exact wording (Bangla stays Bangla, English stays English). 0 highlighted MCQs → return [].
+ONU_EXTRACT_PROMPT = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY. Scan every MCQ block on this page (question + 4 options), one block at a time. For EACH block, look specifically at the pixels directly behind its question line AND its 4 options. If ANY marker-pen/highlighter color is visible there — yellow, green, orange, pink, blue, or any other highlighter color, a light/pale/faint tint still counts, not just bright/saturated — INCLUDE this MCQ in the output — this is a MUST-TAKE rule, never miss a highlighted MCQ even if faint, regardless of which color it is. If the background is plain white/no-color for this block, SKIP it entirely — do NOT include it in the output at all. Do not assume based on other MCQs on the page — each block gets its own independent check, since a page can mix highlighted and non-highlighted blocks. Never invent new MCQs, exact order, exact wording (Bangla stays Bangla, English stays English). 0 highlighted MCQs → return [].
 
-For each INCLUDED MCQ, find the MARKED option: the option with a RED or ORANGE CIRCLE, or a RED or ORANGE BOX/HIGHLIGHT, drawn/painted around or over its letter/text (A/B/C/D by position, 1st option=A...4th=D). This mark is ONLY a visual pointer to what someone marked — it is NOT automatically correct. You must INDEPENDENTLY VERIFY using your own subject knowledge which option is actually, factually correct:
+For each INCLUDED (highlighted) MCQ, ALSO check separately whether it has a MARKED option: the option with a RED or ORANGE CIRCLE, or a RED or ORANGE BOX/HIGHLIGHT, drawn/painted around or over its letter/text (A/B/C/D by position, 1st option=A...4th=D). This mark is completely OPTIONAL and independent of the highlight check above — an MCQ is included as long as its question is highlighted, whether or not it also has a red/orange mark. When a mark IS present, it is ONLY a visual pointer to what someone marked — it is NOT automatically correct. You must INDEPENDENTLY VERIFY using your own subject knowledge which option is actually, factually correct:
 - If the marked option IS the factually correct answer → output that as "answer", set "marked_answer_wrong":false.
 - If the marked option is NOT the factually correct answer (the mark is wrong) → output the ACTUALLY CORRECT option as "answer" (not the marked one), set "marked_answer_wrong":true, and in the explanation clearly state the marked option was wrong and give the correct one.
-- If no red/orange mark is visible at all, determine the correct answer purely from subject knowledge, set "marked_answer_wrong":false.
+- If no red/orange mark is visible at all (this is a NORMAL, EXPECTED case, not an error), determine the correct answer purely from subject knowledge, set "marked_answer_wrong":false.
 
 Also write a short explanation (Bangla if the MCQ is in Bangla) for why the correct answer is correct — from any ব্যাখ্যা text physically printed on the page near this MCQ if present (copy verbatim, no rewrite), otherwise self-write following the structure below. If marked_answer_wrong is true, the explanation MUST also mention the marked option was incorrect and state the correct one.
 """ + _EXPLANATION_DEPTH_RULE + """
@@ -21053,18 +21053,16 @@ ONU_EXTRACT_PROMPT_GEMINI = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY, with c
 STEP 1 — First, list every MCQ block on the page in order (question + its 4 options), without judging highlight yet.
 
 STEP 2 — Now go back through that list ONE MCQ AT A TIME and, for EACH one individually, zoom your attention onto ONLY the background area directly behind that MCQ's question line and its 4 options (ignore the rest of the page while judging this one block):
-   - Is there ANY yellow marker/highlighter tint behind this specific block? (bright yellow, pale yellow, faded yellow — all count)
-   - Is there ANY green marker/highlighter tint behind this specific block? (bright green, pale green, faded green — all count)
-   - Is there ANY orange marker/highlighter tint behind this specific block? (bright orange, pale orange, faded orange — all count)
-   - If any of these is present, even faintly, this block IS highlighted — KEEP it for the output. This is a MUST-TAKE rule — never skip a highlighted MCQ even by mistake.
+   - Is there ANY highlighter/marker-pen tint behind this specific block — yellow, green, orange, pink, blue, or any other color? (bright, pale, or faded — all count, and ANY color counts, not just yellow/green/orange)
+   - If any highlighter color is present, even faintly, this block IS highlighted — KEEP it for the output. This is a MUST-TAKE rule — never skip a highlighted MCQ even by mistake, regardless of which color was used.
    - If the background is genuinely plain white/uncolored paper behind THIS block, this block is NOT highlighted — DROP it, do not include it in the output at all.
    - A page can legitimately mix highlighted and non-highlighted blocks — never copy the previous block's verdict for the next one; judge each block completely independently, as if it were the only MCQ on the page.
    - Faint/light highlighter marks are the most commonly missed case — when in doubt about a pale tint, look again before deciding it's not highlighted.
 
-STEP 3 — For each KEPT (highlighted) MCQ, find the MARKED option: the option with a RED or ORANGE CIRCLE, or a RED or ORANGE BOX/HIGHLIGHT, drawn/painted around or over its letter/text (A/B/C/D by position, 1st option=A...4th=D). This mark only shows what someone marked — it can be WRONG. Independently verify with your own subject knowledge which option is actually, factually correct:
+STEP 3 — For each KEPT (highlighted) MCQ, ALSO separately check whether it has a MARKED option: the option with a RED or ORANGE CIRCLE, or a RED or ORANGE BOX/HIGHLIGHT, drawn/painted around or over its letter/text (A/B/C/D by position, 1st option=A...4th=D). This mark is completely OPTIONAL — a highlighted MCQ is kept whether or not it also has a red/orange mark; do not drop or skip an otherwise-highlighted MCQ just because it lacks this mark. When a mark IS present, it only shows what someone marked — it can be WRONG. Independently verify with your own subject knowledge which option is actually, factually correct:
    - Marked option IS factually correct → "answer" = that option, "marked_answer_wrong":false.
    - Marked option is NOT factually correct → "answer" = the ACTUALLY correct option (ignore the wrong mark), "marked_answer_wrong":true.
-   - No red/orange mark visible at all → determine correct answer from subject knowledge, "marked_answer_wrong":false.
+   - No red/orange mark visible at all (this is normal and expected — most highlighted MCQs may have no mark) → determine correct answer from subject knowledge, "marked_answer_wrong":false.
 
 STEP 4 — For each KEPT MCQ, write a short explanation (Bangla if the MCQ is in Bangla) for why the correct answer is correct — use any ব্যাখ্যা text physically printed on the page near this MCQ if present (copy verbatim, no rewrite), otherwise self-write following the structure below. If marked_answer_wrong is true, the explanation MUST also state the marked option was wrong and give the correct one.
 """ + _EXPLANATION_DEPTH_RULE + """
@@ -21077,7 +21075,7 @@ OUTPUT FORMAT — ONLY valid JSON array of the KEPT (highlighted) MCQs only, exa
 
 
 async def _onu_call1_extract(img) -> list:
-    """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field, which covers yellow, green, OR orange marker color).
+    """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field, which covers ANY highlighter color — yellow, green, orange, pink, blue, etc).
     Gemini primary / Groq fallback (matches /qbm's provider order) -- Gemini
     generally reads highlight color/marks more reliably than Groq's vision
     model, so it's tried first; Groq only kicks in if Gemini fails/is
@@ -21113,10 +21111,10 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
        miss-check — 2026-08-23: strengthened after real-world misses of
        isolated highlighted MCQs sitting near/beside a red-circled cluster
        of other non-highlighted MCQs; re-scans the page for
-       yellow/green/orange-highlighted blocks not already in the list,
-       with an explicit double-pass instruction so isolated single-MCQ
-       highlights aren't overlooked in favor of the more visually obvious
-       red-circled groups nearby)
+       ANY-color-highlighted blocks not already in the list, with an
+       explicit double-pass instruction so isolated single-MCQ highlights
+       aren't overlooked in favor of the more visually obvious red-circled
+       groups nearby)
     2) Is the MARKED answer on each MCQ correctly identified? (re-checks
        the red/orange circle/box mark for every MCQ, independently
        verifies with subject knowledge whether that mark is factually
@@ -21136,7 +21134,7 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
 
 JOB 1 — COMPLETENESS (do this VERY carefully, MCQs are easy to miss here):
 - First, count the TOTAL number of MCQ blocks on the entire page (question + 4 options), top to bottom, left to right, numbering them by their printed serial number if visible.
-- Then go through that same list ONE MCQ AT A TIME, in order, and for EACH ONE independently check its background for ANY yellow, green, or orange highlighter tint — even a single faint/pale patch behind just the question line or just one option counts as highlighted, not just a fully-colored block.
+- Then go through that same list ONE MCQ AT A TIME, in order, and for EACH ONE independently check its background for ANY highlighter tint — yellow, green, orange, pink, blue, or any other color — even a single faint/pale patch behind just the question line or just one option counts as highlighted, not just a fully-colored block, and the color doesn't matter as long as SOME highlighter color is present.
 - Pay EXTRA attention to MCQs that are ISOLATED: a single highlighted MCQ sitting between non-highlighted MCQs, or a highlighted MCQ that sits just outside/beside a red-pen circled cluster of OTHER (non-highlighted) MCQs — these are the ones most often missed because attention drifts to the more visually obvious red-circled group nearby. Do not let a red circle around neighboring MCQs distract you from checking every individual MCQ's own highlight color independently.
 - Never skip a block because the ones immediately above/below it were not highlighted, or because it's the only highlighted one in its area — every single block gets its own independent check.
 - If a highlighted block's question text is NOT already present in the EXISTING LIST below, it was MISSED — add it to the output as a new item (with correct question/options/answer/explanation, Bangla stays Bangla).
