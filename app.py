@@ -6838,6 +6838,100 @@ async def _handle_cut_command_inner(msg: dict):
         return
 
 
+async def handle_cut_command(msg: dict):
+    _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+    try:
+        return await _handle_cut_command_inner(msg)
+    finally:
+        _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+
+async def _handle_cut_command_inner(msg: dict):
+    """/cut <start>-<end> — reply to a CSV file, keeps only MCQ rows
+    start..end (1-indexed against the MCQ list, i.e. "1" = the first
+    actual MCQ row, NOT the header row -- header is never counted),
+    outputs a new CSV with just that slice."""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+    reply = msg.get("reply_to_message")
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id, "❌ CSV ফাইলে reply করে <code>/cut 1-5</code> দাও", parse_mode="HTML")
+        return
+
+    parts = text.split(maxsplit=1)
+    range_str = parts[1].strip() if len(parts) > 1 else ""
+    m = re.match(r"^(\d+)\s*-\s*(\d+)$", range_str)
+    if not m:
+        await send_msg(chat_id, "❌ সঠিক ফরম্যাটে দাও! যেমন: <code>/cut 1-5</code>\n"
+                                  "(১ মানে প্রথম MCQ row, header বাদে)", parse_mode="HTML")
+        return
+    start_no, end_no = int(m.group(1)), int(m.group(2))
+    if start_no < 1 or end_no < start_no:
+        await send_msg(chat_id, "❌ Range ভুল! start ≥ 1 এবং end ≥ start হতে হবে।")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_name = reply["document"].get("file_name", "file.csv")
+    file_size = reply["document"].get("file_size", 0)
+    size_kb = round(file_size / 1024, 1) if file_size else "?"
+
+    status_r = await send_msg(chat_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[░░░░░░░░░░ 0%]")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    _last_pct_cut = {"v": -1}
+    def _dl_progress_cut(done, total):
+        if not status_msg_id or not total:
+            return
+        pct = int(done * 100 / total)
+        if pct - _last_pct_cut["v"] < 15 and pct != 100:
+            return
+        _last_pct_cut["v"] = pct
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        _spawn_task(edit_msg(chat_id, status_msg_id, f"⏳ CSV download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB\n[{bar} {pct}%]"))
+
+    try:
+        csv_bytes = await download_tg_file(file_id, progress_cb=_dl_progress_cut)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
+        mcqs = _parse_csv_bytes(csv_bytes)
+    except Exception as e:
+        logger.error(f"[Cut] error: {e}", exc_info=True)
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
+        return
+    if not mcqs:
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, "❌ ফাইলে কোনো MCQ পাওয়া যায়নি!")
+        return
+
+    total = len(mcqs)
+    if start_no > total:
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"❌ ফাইলে মোট {total}টি MCQ আছে, {start_no} number পর্যন্ত নেই।")
+        return
+    end_no_clamped = min(end_no, total)
+
+    # start_no/end_no are 1-indexed against the MCQ list (row 1 = first
+    # actual MCQ, header row is never part of this count) -- so slicing
+    # is [start_no-1 : end_no_clamped].
+    cut_slice = mcqs[start_no - 1:end_no_clamped]
+
+    if status_msg_id:
+        await edit_msg(chat_id, status_msg_id,
+            f"✅ {total}টি MCQ পাওয়া গেছে!\n⏳ {start_no}-{end_no_clamped} range কাটা হচ্ছে...")
+
+    base_name = re.sub(r'\.(csv|json)$', '', file_name, flags=re.I)
+    out_bytes = _mcqs_to_csv_bytes(cut_slice)
+    out_name = f"{base_name}_cut{start_no}-{end_no_clamped}.csv"
+    r = await send_document(chat_id, out_bytes, out_name,
+        caption=f"✂️ Cut: {start_no}-{end_no_clamped} | 📊 {len(cut_slice)}টি MCQ",
+        reply_to_message_id=status_msg_id)
+    if not r.get("ok"):
+        err = r.get("error") or r.get("description") or "unknown error"
+        logger.error(f"[Cut] send_document failed: {err}")
+        await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
+
+
 async def handle_split_command(msg: dict):
 
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
@@ -26825,6 +26919,11 @@ async def handle_message(msg: dict):
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_split_command(msg))
+    elif text.startswith("/cut"):
+        if not is_auth:
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
+            return
+        _spawn_command_task(uid, handle_cut_command(msg))
     elif text.startswith("/csvS"):
         # /csvS অবশ্যই /csv এর আগে check করতে হবে
         if not is_auth:
