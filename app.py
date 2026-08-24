@@ -21109,14 +21109,18 @@ async def _onu_call1_extract(img) -> list:
 
 async def _onu_verify_pass(img, mcqs: list) -> list:
     """/onu-ONLY Call2 — two jobs only, per request:
-    1) Did Call1 catch EVERY highlighted MCQ on the page? (STRICT
-       miss-check — 2026-08-23: strengthened after real-world misses of
-       isolated highlighted MCQs sitting near/beside a red-circled cluster
-       of other non-highlighted MCQs; re-scans the page for
-       ANY-color-highlighted blocks not already in the list, with an
-       explicit double-pass instruction so isolated single-MCQ highlights
-       aren't overlooked in favor of the more visually obvious red-circled
-       groups nearby)
+    1) Did Call1 catch EVERY highlighted MCQ on the page? (MAXIMALLY STRICT
+       miss-check — 2026-08-23: rebuilt as a mandatory 3-pass procedure
+       after a real miss (an isolated highlighted MCQ on an otherwise
+       mostly non-highlighted page) slipped through even the previous
+       strengthened version. Pass A builds a gap-free serial-number
+       inventory of every MCQ on the page (a numbering gap = a missed
+       block, since page MCQ numbers are always consecutive); Pass B
+       judges each MCQ in that inventory strictly on its own pixels; Pass
+       C re-walks the same inventory as a checklist to catch any number
+       that was never actually judged. This call count stays at exactly
+       2 total (Call1 + Call2) -- the extra rigor is all prompt-side
+       within this single Call2 request, no extra API calls added.)
     2) Is the MARKED answer on each MCQ correctly identified? (re-checks
        the red/orange circle/box mark for every MCQ, independently
        verifies with subject knowledge whether that mark is factually
@@ -21132,16 +21136,24 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
         return mcqs
     try:
         mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("question", "options", "answer")} for m in mcqs], ensure_ascii=False)
-        prompt = f"""Re-check this page image against an already-extracted MCQ list. Two jobs only:
+        prompt = f"""Re-check this page image against an already-extracted MCQ list. Two jobs only. JOB 1 (completeness) is the MOST CRITICAL job here — a single missed MCQ is a serious failure, so follow every step below exactly, no shortcuts.
 
-JOB 1 — COMPLETENESS (do this VERY carefully, MCQs are easy to miss here):
-- First, count the TOTAL number of MCQ blocks on the entire page (question + 4 options), top to bottom, left to right, numbering them by their printed serial number if visible.
-- Then go through that same list ONE MCQ AT A TIME, in order, and for EACH ONE independently check its background for ANY highlighter tint — yellow, green, orange, pink, blue, or any other color — even a single faint/pale patch behind just the question line or just one option counts as highlighted, not just a fully-colored block, and the color doesn't matter as long as SOME highlighter color is present.
-- Pay EXTRA attention to MCQs that are ISOLATED: a single highlighted MCQ sitting between non-highlighted MCQs, or a highlighted MCQ that sits just outside/beside a red-pen circled cluster of OTHER (non-highlighted) MCQs — these are the ones most often missed because attention drifts to the more visually obvious red-circled group nearby. Do not let a red circle around neighboring MCQs distract you from checking every individual MCQ's own highlight color independently.
-- IMPORTANT: a large red-pen rectangle drawn around a GROUP of several MCQs is just a grouping annotation, NOT a highlight — MCQs inside that red box can be a mix of highlighted and plain-white, judge each one's own background independently regardless of being inside/outside such a box (a red box is never itself a reason to include or exclude an MCQ).
-- Never skip a block because the ones immediately above/below it were not highlighted, or because it's the only highlighted one in its area — every single block gets its own independent check.
-- If a highlighted block's question text is NOT already present in the EXISTING LIST below, it was MISSED — add it to the output as a new item (with correct question/options/answer/explanation, Bangla stays Bangla).
-- Before finalizing your output, do ONE more full pass over the page specifically hunting for any small/isolated highlighted MCQ you might have skipped, and add it if found.
+JOB 1 — COMPLETENESS (exhaustive, mandatory multi-pass procedure):
+PASS A — Build a complete inventory first, before judging anything else:
+  - Find every MCQ's printed serial number on the page (Bangla digit or English digit, e.g. ২৪, ২৫, ২৬... or 24, 25, 26...). List them out in your own reasoning as a continuous sequence.
+  - If the serial numbers have a gap (e.g. you see ২৪, ২৫, ২৭ but no ২৬), that means you missed locating MCQ ২৬ on the page — go back and find it before continuing. A page's MCQ numbers are ALWAYS consecutive with no gaps; a gap in your list is proof of a missed block, not proof the number doesn't exist.
+  - This numbering check is your primary safety net — use it deliberately, don't skip it.
+
+PASS B — For EVERY single serial number in that complete, gap-free sequence, one at a time, in order:
+  - Locate that exact MCQ block (question + its 4 options) on the page.
+  - Check its background for ANY highlighter tint — yellow, green, orange, pink, blue, or any other color, even a single faint/pale patch behind just the question line or just one option counts, not just a fully, evenly-colored block.
+  - A highlight can be PARTIAL — sometimes only the question line is tinted and the options look white, or vice versa — either case still counts as highlighted for that MCQ.
+  - Make this decision using ONLY that MCQ's own pixels — never infer it from neighboring MCQs, from being near/inside a red-pen box, or from any pattern you noticed on the page. Each MCQ is judged completely alone, as if it were the only one on the page.
+  - A large red-pen rectangle drawn around a GROUP of several MCQs is ONLY a grouping/annotation mark — it carries ZERO information about which MCQs inside it are highlighted. MCQs inside such a box are very often a mix of highlighted and plain-white; treat being inside/outside such a box as completely irrelevant to your highlight decision.
+  - Isolated single highlighted MCQs (one highlighted MCQ surrounded by non-highlighted neighbors, or sitting just beside a red-circled cluster of OTHER MCQs) are the single most common miss — deliberately slow down and re-examine any MCQ like this before deciding.
+  - If highlighted AND its question text is NOT already present in the EXISTING LIST below, it was MISSED — add it to the output as a new item (correct question/options/answer/explanation, Bangla stays Bangla).
+
+PASS C — FINAL VERIFICATION (mandatory, do not skip): after finishing Pass B, go through your gap-free serial-number sequence from PASS A one more time, purely as a checklist — for every number, confirm you made an explicit highlight decision for it (either "highlighted, in output" or "not highlighted, correctly excluded"). If you find any serial number you never actually judged, judge it now before producing the final output.
 
 JOB 2 — MARKED ANSWER ACCURACY: for every MCQ already in the EXISTING LIST, look again at its 4 options and find the one with a RED or ORANGE circle/box drawn around/over its letter or text (A/B/C/D by position). Independently verify with your own subject knowledge whether that marked option is factually correct:
 - If the mark IS on the factually correct option, keep "answer" as that option.
