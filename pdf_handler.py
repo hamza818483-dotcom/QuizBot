@@ -530,7 +530,9 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
                 is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
                 key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
                 _consecutive_infra_fails = 0
-            elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
+            elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
+                  or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
+                  or "401" in err_str):
                 key_rotator.mark_banned(key)
                 _consecutive_infra_fails = 0
             else:
@@ -614,7 +616,9 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
                 is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
                 key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
                 _consecutive_infra_fails = 0
-            elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
+            elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
+                  or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
+                  or "401" in err_str):
                 key_rotator.mark_banned(key)
                 _consecutive_infra_fails = 0
             else:
@@ -1215,7 +1219,9 @@ async def generate_mcq_from_image(
                 logger.warning(f"[Gemini] Attempt {attempt+1} rate-limited (429), cooling down key for {key_rotator.COOLDOWN_SECONDS}s: {err_label}")
             key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
             _consecutive_infra_fails = 0  # quota issue is per-key, not backend-wide -- keep trying other live keys
-        elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
+        elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
+              or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
+              or "401" in err_str):
             logger.error(f"[Gemini] Attempt {attempt+1}: key permanently banned (suspended/invalid): {err_label}")
             key_rotator.mark_banned(key)
             _consecutive_infra_fails = 0  # per-key issue, not backend-wide
@@ -1342,7 +1348,9 @@ Return ONLY valid JSON array, no markdown, no extra text:
                 is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
                 key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
                 logger.warning(f"[Gemini-Text] Attempt {attempt+1} rate-limited (429){' [daily quota]' if is_daily else ''}, cooling down: {e}")
-            elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
+            elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
+                  or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
+                  or "401" in err_str):
                 logger.error(f"[Gemini-Text] Attempt {attempt+1}: key permanently banned (suspended/invalid): {e}")
                 key_rotator.mark_banned(key)
             else:

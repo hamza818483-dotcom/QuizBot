@@ -3053,7 +3053,9 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
         err_str = str(e)
         if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
             key_rotator.mark_rate_limited(key)
-        elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
+        elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
+              or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
+              or "401" in err_str):
             key_rotator.mark_banned(key)
         logger.warning(f"[GeminiVerify] failed: {e}")
         return ""
