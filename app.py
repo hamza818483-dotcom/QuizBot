@@ -579,6 +579,13 @@ import itertools
 CANCEL_FLAGS = {}  # chat_id -> bool, checked by long loops between steps
 ACTIVE_JOB_LABEL = {}  # chat_id -> human-readable label of the job currently running
 CURRENT_JOB_ID = {}  # chat_id -> int, id of the job currently running in that chat
+# chat_id -> asyncio.Task currently running a single page's generation call.
+# Cancel button uses this to .cancel() the in-flight HTTP call directly
+# instead of only setting CANCEL_FLAGS and waiting for the next between-
+# attempts check -- that alone still let the current network request run
+# to completion (could be up to ~40s) before cancel actually took effect.
+ACTIVE_GEN_TASK = {}
+
 _job_id_counter = itertools.count(1)
 _current_job_chat_id_ctx = contextvars.ContextVar("_current_job_chat_id_ctx", default=None)
 # Reuse pdf_handler's contextvar instance (not a new local one) so setting
@@ -13061,7 +13068,15 @@ async def _process_pdf_pages_inner(
                     # before the next page's generation even starts — no
                     # prefetch/overlap across pages, in ANY mode (/pdf, /qbm,
                     # /onu, /tf all funnel through this same function).
-                    mcqs, gen_error = await _gen_with_retry(img, page_num)
+                    _gen_task = _spawn_task(_gen_with_retry(img, page_num))
+                    ACTIVE_GEN_TASK[chat_id] = _gen_task
+                    try:
+                        mcqs, gen_error = await _gen_task
+                    except asyncio.CancelledError:
+                        mcqs, gen_error = [], "cancelled"
+                    finally:
+                        if ACTIVE_GEN_TASK.get(chat_id) is _gen_task:
+                            ACTIVE_GEN_TASK.pop(chat_id, None)
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
@@ -13659,19 +13674,31 @@ async def _process_pdfs_pages_inner(
                 _page_model = None
                 try:
                     from pdf_handler import generate_pdfs_call2_mcqs
-                    mcqs, _page_elapsed, _page_model = await asyncio.wait_for(
-                        generate_pdfs_call2_mcqs(img, _page_headings, _primary_topic, page_num, mcq_count_hint=(mcq_count or 15)),
-                        timeout=150)
+                    _gen_task = _spawn_task(generate_pdfs_call2_mcqs(img, _page_headings, _primary_topic, page_num, mcq_count_hint=(mcq_count or 15)))
+                    ACTIVE_GEN_TASK[chat_id] = _gen_task
+                    try:
+                        mcqs, _page_elapsed, _page_model = await asyncio.wait_for(_gen_task, timeout=150)
+                    finally:
+                        if ACTIVE_GEN_TASK.get(chat_id) is _gen_task:
+                            ACTIVE_GEN_TASK.pop(chat_id, None)
+                except asyncio.CancelledError:
+                    gen_error = "cancelled"
                 except asyncio.TimeoutError:
                     logger.warning(f"[PDFS] Page {page_num}: Call2 generation timed out after 150s.")
                     gen_error = "MCQ generation timeout (150s)"
                 except Exception as _pdfs_e:
                     logger.warning(f"[PDFS] Page {page_num}: Call2 generation failed: {_pdfs_e}")
                     gen_error = str(_pdfs_e)
-                if not mcqs:
+                if not mcqs and not is_cancelled(chat_id):
                     try:
                         _fb_t0 = time.time()
-                        mcqs, _fb_err = await asyncio.wait_for(_gen_with_retry(img, page_num), timeout=150)
+                        _gen_task = _spawn_task(_gen_with_retry(img, page_num))
+                        ACTIVE_GEN_TASK[chat_id] = _gen_task
+                        try:
+                            mcqs, _fb_err = await asyncio.wait_for(_gen_task, timeout=150)
+                        finally:
+                            if ACTIVE_GEN_TASK.get(chat_id) is _gen_task:
+                                ACTIVE_GEN_TASK.pop(chat_id, None)
                         _page_elapsed = round(time.time() - _fb_t0, 1)
                         _page_model = "Fallback"
                         if not mcqs:
@@ -13680,6 +13707,8 @@ async def _process_pdfs_pages_inner(
                             for _m in mcqs:
                                 _m["_pdfs_topic"] = _primary_topic
                                 _m["_pdfs_subtopic"] = None
+                    except asyncio.CancelledError:
+                        gen_error = "cancelled"
                     except asyncio.TimeoutError:
                         logger.warning(f"[PDFS] Page {page_num}: fallback generation timed out after 150s — skipping page.")
                         gen_error = "fallback generation timeout (150s)"
@@ -27761,6 +27790,9 @@ async def handle_callback(query: dict):
                 await send_msg(chat_id, "ℹ️ এই কাজটি ইতিমধ্যে শেষ হয়ে গেছে, তাই এই বাটন আর কার্যকর নয়।")
                 return
             CANCEL_FLAGS[target_chat] = True
+            _active_task = ACTIVE_GEN_TASK.get(target_chat)
+            if _active_task and not _active_task.done():
+                _active_task.cancel()  # kill the in-flight API call immediately, don't wait for it to finish naturally
             running_label = ACTIVE_JOB_LABEL.get(target_chat)
             await send_msg(chat_id, "🛑 বন্ধ করা হলো।" + (f"\nযে কাজ থামলো: {running_label}" if running_label else ""))
             return
