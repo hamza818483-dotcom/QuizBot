@@ -8055,23 +8055,26 @@ async def _apply_footer_to_pdf(chat_id: int, file_id: str, footer_text: str, mes
 
 def _parse_wm_h_f_combo(text: str) -> dict:
     """Parses a multi-line message like:
+        /rename NewName.pdf
         /wm এটলাস
         /h রফি ক্লাস
         /f সেরা গাইডলাইনে...
-    into {"wm": "এটলাস", "h": "রফি ক্লাস", "f": "সেরা গাইডলাইনে..."}.
-    Only /wm, /h, /f are recognized; any other line is ignored so this
-    doesn't misfire on unrelated multi-line captions. Returns {} if no
+    into {"rename": "NewName.pdf", "wm": "এটলাস", "h": "রফি ক্লাস", "f": "সেরা গাইডলাইনে..."}.
+    Only /rename, /wm, /h, /f are recognized; any other line is ignored so
+    this doesn't misfire on unrelated multi-line captions. Returns {} if no
     recognized command line is found."""
     out = {}
     for line in text.splitlines():
         line = line.strip()
-        m = re.match(r"^/(wm|watermark|h|f)\s+(.+)$", line, flags=re.IGNORECASE)
+        m = re.match(r"^/(rename|wm|watermark|h|f)\s+(.+)$", line, flags=re.IGNORECASE)
         if not m:
             continue
         cmd, val = m.group(1).lower(), m.group(2).strip()
         if not val:
             continue
-        if cmd in ("wm", "watermark"):
+        if cmd == "rename":
+            out["rename"] = val
+        elif cmd in ("wm", "watermark"):
             out["wm"] = val
         elif cmd == "h":
             out["h"] = val
@@ -8081,15 +8084,18 @@ def _parse_wm_h_f_combo(text: str) -> dict:
 
 
 async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
-    """Applies any of watermark (/wm), header (/h), footer (/f) present in
-    `combo` to the replied-to PDF, all stacked onto ONE output PDF, so the
-    user doesn't need three separate reply round-trips."""
+    """Applies any of rename (/rename), watermark (/wm), header (/h),
+    footer (/f) present in `combo` to the replied-to PDF, all stacked onto
+    ONE output PDF, so the user doesn't need multiple separate reply
+    round-trips."""
     chat_id = msg["chat"]["id"]
     reply = msg.get("reply_to_message")
     file_id = reply["document"]["file_id"]
     orig_filename = reply["document"].get("file_name")
 
     parts_desc = []
+    if "rename" in combo:
+        parts_desc.append(f"rename: <b>{combo['rename']}</b>")
     if "wm" in combo:
         parts_desc.append(f"watermark: <b>{combo['wm']}</b>")
     if "h" in combo:
@@ -8110,7 +8116,10 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
         if "f" in combo:
             pdf_bytes = add_footer_box_to_pdf(pdf_bytes, combo["f"])
 
-        out_name = orig_filename or "stamped.pdf"
+        if "rename" in combo:
+            out_name = re.sub(r'[\\/:*?"<>|]', '_', combo["rename"].strip())
+        else:
+            out_name = orig_filename or "stamped.pdf"
         if not out_name.lower().endswith(".pdf"):
             out_name += ".pdf"
         send_res = await send_document(chat_id, pdf_bytes,
