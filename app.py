@@ -12527,8 +12527,8 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 model_str = f" ({model_tag})" if model_tag else ""
                 page_topic = s.get("detected_topic", "")
                 topic_str = f" 📂{page_topic}" if page_topic else ""
-                secs = s.get("gen_seconds")
-                secs_str = f" ⏱{secs}s" if secs is not None else ""
+                secs_gen = s.get("gen_seconds")
+                secs_str = f" ⏱{secs_gen}s" if secs_gen is not None else ""
                 lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str} ✓")
         elif s["current"]:
             lines.append(f"⏳ Page {fmt_page(s['page'])}: Processing...")
