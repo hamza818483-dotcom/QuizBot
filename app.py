@@ -3056,7 +3056,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
         elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
               or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
               or "401" in err_str):
-            key_rotator.mark_banned(key)
+            key_rotator.mark_banned(key, reason=err_str[:200])
         logger.warning(f"[GeminiVerify] failed: {e}")
         return ""
 
@@ -27667,12 +27667,19 @@ async def handle_message(msg: dict):
             # Gemini — daily-exhaustion + short-cooldown/permanent-ban tracking
             from pdf_handler import _is_gemini_key_exhausted_today
             gemini_keys = key_rotator.keys
-            gem_banned = sum(1 for k in gemini_keys if key_rotator._cooldown_until.get(k, 0) == float("inf"))
+            gem_banned_set = key_rotator._banned  # banned keys are removed from .keys, so read the real set
+            gem_banned = len(gem_banned_set)
             gem_exhausted = sum(1 for k in gemini_keys if _is_gemini_key_exhausted_today(k))
             gem_cooling = sum(1 for k in gemini_keys if 0 < key_rotator._cooldown_until.get(k, 0) < float("inf") and key_rotator._cooldown_until.get(k, 0) > now and not _is_gemini_key_exhausted_today(k))
-            gem_healthy = len(gemini_keys) - gem_banned - gem_cooling - gem_exhausted
-            lines.append(f"\n🔵 <b>Gemini</b> (gemini-3.6-flash, free tier ~20 req/day/key): {len(gemini_keys)} key\n"
+            gem_healthy = len(gemini_keys) - gem_cooling - gem_exhausted
+            lines.append(f"\n🔵 <b>Gemini</b> (gemini-3.6-flash, free tier ~20 req/day/key): {len(gemini_keys) + gem_banned} key\n"
                          f"  ✅ Healthy: {gem_healthy} | ⏳ Cooldown: {gem_cooling} | 🔴 আজকে exhausted: {gem_exhausted} | 🚫 Banned: {gem_banned}")
+            if gem_banned_set:
+                reasons = key_rotator._ban_reasons
+                for bk in list(gem_banned_set)[:10]:  # cap listed reasons to avoid a huge message
+                    why = reasons.get(bk, "reason not recorded")
+                    lines.append(f"    🚫 <code>{bk[:12]}...</code> — {why}")
+
 
             # Generic rotators (NVIDIA, Nemotron, Gemma, OpenRouter-Qwen, HF)
             for rot in (nvidia_rotator, nemotron_rotator, gemma_rotator, or_qwen_rotator, hf_rotator):

@@ -116,6 +116,7 @@ def _mark_gemini_key_healthy_today(key: str):
 
 
 _BANNED_KEYS_FILE = "/tmp/atlas_banned_gemini_keys.json"
+_BANNED_REASONS_FILE = "/tmp/atlas_banned_gemini_reasons.json"
 
 def _load_banned_keys() -> set:
     try:
@@ -131,6 +132,20 @@ def _save_banned_keys(banned: set):
     except Exception as e:
         logger.warning(f"[Gemini] Failed to persist banned keys: {e}")
 
+def _load_banned_reasons() -> dict:
+    try:
+        with open(_BANNED_REASONS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_banned_reasons(reasons: dict):
+    try:
+        with open(_BANNED_REASONS_FILE, "w") as f:
+            json.dump(reasons, f)
+    except Exception as e:
+        logger.warning(f"[Gemini] Failed to persist banned reasons: {e}")
+
 
 class GeminiKeyRotator:
     COOLDOWN_SECONDS = 60
@@ -142,6 +157,7 @@ class GeminiKeyRotator:
         self.current = 0
         self._cooldown_until = {}
         self._banned = _load_banned_keys()
+        self._ban_reasons = _load_banned_reasons()  # key -> reason string, for /keys visibility
         self._call_times = {}  # key -> list[float] call timestamps (rolling 60s window)
         self._load_keys()
 
@@ -228,16 +244,20 @@ class GeminiKeyRotator:
         if daily_exhausted:
             _mark_gemini_key_exhausted_today(key)
 
-    def mark_banned(self, key: str):
-        """Permanently skip this key (e.g. 403 CONSUMER_SUSPENDED / invalid key)
-        — removed from the active pool immediately and persisted to disk so
-        restarts don't waste a retry cycle on a key that will keep failing
-        forever."""
+    def mark_banned(self, key: str, reason: str = ""):
+        """Permanently skip this key (e.g. 403 CONSUMER_SUSPENDED / invalid key,
+        401 UNAUTHENTICATED / ACCOUNT_STATE_INVALID) — removed from the active
+        pool immediately and persisted to disk so restarts don't waste a retry
+        cycle on a key that will keep failing forever. `reason` is stored so
+        /keys can show WHY each key was banned, not just that it was."""
         self._cooldown_until[key] = float("inf")
         self._banned.add(key)
+        if reason:
+            self._ban_reasons[key] = reason[:200]  # cap stored reason length
+            _save_banned_reasons(self._ban_reasons)
         self.keys = [k for k in self.keys if k != key]
         _save_banned_keys(self._banned)
-        logger.error(f"[Gemini] Key {key[:12]}... permanently banned and removed from rotation ({len(self.keys)} keys remain)")
+        logger.error(f"[Gemini] Key {key[:12]}... permanently banned and removed from rotation ({len(self.keys)} keys remain)" + (f" — reason: {reason}" if reason else ""))
 
     def mark_healthy(self, key: str):
         self._cooldown_until.pop(key, None)
@@ -533,7 +553,7 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
             elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
                   or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
                   or "401" in err_str):
-                key_rotator.mark_banned(key)
+                key_rotator.mark_banned(key, reason=err_str[:200])
                 _consecutive_infra_fails = 0
             else:
                 logger.warning(f"[PDFS] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
@@ -619,7 +639,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
             elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
                   or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
                   or "401" in err_str):
-                key_rotator.mark_banned(key)
+                key_rotator.mark_banned(key, reason=err_str[:200])
                 _consecutive_infra_fails = 0
             else:
                 logger.warning(f"[PDFS-C2] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
@@ -1223,7 +1243,7 @@ async def generate_mcq_from_image(
               or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
               or "401" in err_str):
             logger.error(f"[Gemini] Attempt {attempt+1}: key permanently banned (suspended/invalid): {err_label}")
-            key_rotator.mark_banned(key)
+            key_rotator.mark_banned(key, reason=err_str[:200])
             _consecutive_infra_fails = 0  # per-key issue, not backend-wide
         else:
             # Timeout / connection error / non-429-503 exception -- this is
@@ -1352,7 +1372,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
                   or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
                   or "401" in err_str):
                 logger.error(f"[Gemini-Text] Attempt {attempt+1}: key permanently banned (suspended/invalid): {e}")
-                key_rotator.mark_banned(key)
+                key_rotator.mark_banned(key, reason=err_str[:200])
             else:
                 logger.warning(f"[Gemini-Text] Attempt {attempt+1} failed: {e}")
             if attempt < max_retries - 1:
