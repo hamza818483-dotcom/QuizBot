@@ -836,7 +836,7 @@ def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 10
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",
-                        message_thread_id: int = None) -> dict:
+                        message_thread_id: int = None, reply_markup: dict = None) -> dict:
     if caption and len(caption) > 1024:
         caption = caption[:1021] + "..."
 
@@ -858,6 +858,7 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
     }
     if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
     if message_thread_id: data["message_thread_id"] = message_thread_id
+    if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
 
     def _parse_cf_resp(r, tag):
         """CF Worker/edge can return an EMPTY or non-JSON body (edge timeout,
@@ -934,6 +935,7 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
             fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode}
             if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
             if message_thread_id: fields["message_thread_id"] = str(message_thread_id)
+            if reply_markup: fields["reply_markup"] = json.dumps(reply_markup)
             c = await _get_shared_http_client()
             if filename.isascii():
                 # Plain ASCII filename — httpx's built-in multipart handling is fine.

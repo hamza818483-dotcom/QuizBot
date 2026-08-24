@@ -20186,7 +20186,10 @@ async def _handle_qbm_impl(msg: dict):
             )
 
             # Extraction শেষ হওয়ার সাথে সাথেই CSV auto-send — channel select
-            # এর জন্য অপেক্ষা করতে হবে না, সব MCQ সাথে সাথেই CSV আকারে হাতে পেয়ে যাবে
+            # এর জন্য অপেক্ষা করতে হবে না, সব MCQ সাথে সাথেই CSV আকারে হাতে পেয়ে যাবে।
+            # Channel list সরাসরি না দেখিয়ে, CSV message-এর সাথেই একটাই
+            # "📋 Channel List" button থাকবে -- চাপলে তখন actual channel
+            # buttons (2 per row) reveal হবে সেই একই CSV message-এ edit করে।
             if total_mcq_found:
                 _missing_exp_qbm = [m for _, _, mcqs in extracted_pages for m in mcqs if not (m.get("explanation") or "").strip()]
                 if _missing_exp_qbm:
@@ -20210,34 +20213,17 @@ async def _handle_qbm_impl(msg: dict):
                             _ans_map_qbm.get(m.get("answer", "A"), "1"),
                             _strip_img_tag(m.get("explanation", "")), "1", "1"
                         ])
+                _csv_kb = {"inline_keyboard": [[{
+                    "text": "📋 Channel List",
+                    "callback_data": f"qbmch_showlist_{uid}"
+                }]]}
                 await send_document(chat_id, _buf_qbm.getvalue().encode("utf-8"),
                     f"{topic}_QBM.csv",
                     caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted)",
-                    mime_type="text/csv")
-
-            kb = {"inline_keyboard": []}
-            for ch in channels:
-                ch_id = ch.get("channel_id", "")
-                ch_name = ch.get("channel_name", ch_id)
-                kb["inline_keyboard"].append([{
-                    "text": f"📢 {ch_name}",
-                    "callback_data": f"qbmch_{ch_id}_{uid}"
-                }])
-            kb["inline_keyboard"].append([{
-                "text": "📄 CSV Only",
-                "callback_data": f"qbmch_csv_{uid}"
-            }])
-            await send_msg(chat_id,
-                "✅ <b>Extraction Complete!</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📝 Total MCQ: {total_mcq_found}  |  📋 Pages: {len(pages)}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"{page_breakdown}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎯 Topic: {topic}\n\nChannel select করো:",
-                reply_markup=kb
-            )
+                    mime_type="text/csv",
+                    reply_markup=_csv_kb)
             return
+
 
         await process_qbm_pages(chat_id, uid, uname, extracted_pages, topic,
             channel_id, False, file_name, status_msg_id, thread_id, skip_extract=True)
@@ -28310,6 +28296,34 @@ async def handle_callback(query: dict):
                 file_id=pending.get("file_id"), page_range_str=pending.get("page_range")
             ))
             getattr(app.state,"pdf_cache",{}).pop(f"pdfm_img_{uid}", None)
+
+        elif data.startswith("qbmch_showlist_"):
+            # CSV message-এর "📋 Channel List" button চাপলে -- channel
+            # buttons (2 per row) সেই একই CSV message-এ reveal হবে,
+            # আলাদা কোনো নতুন message পাঠানো হবে না।
+            orig_uid = int(data[len("qbmch_showlist_"):])
+            if uid != orig_uid:
+                return
+            channels = await db_get_channels()
+            kb_rows = []
+            _row = []
+            for ch in channels:
+                ch_id = ch.get("channel_id", "")
+                ch_name = ch.get("channel_name", ch_id)
+                _row.append({"text": f"📢 {ch_name}", "callback_data": f"qbmch_{ch_id}_{uid}"})
+                if len(_row) == 2:
+                    kb_rows.append(_row)
+                    _row = []
+            if _row:
+                kb_rows.append(_row)
+            kb_rows.append([{"text": "📄 CSV Only", "callback_data": f"qbmch_csv_{uid}"}])
+            try:
+                await tg_post("editMessageReplyMarkup", {
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "reply_markup": {"inline_keyboard": kb_rows}
+                })
+            except Exception as e:
+                logger.warning(f"[QBM] channel list reveal failed: {e}")
 
         elif data.startswith("qbmch_"):
             parts = data.split("_")
