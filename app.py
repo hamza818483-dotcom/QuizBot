@@ -21226,6 +21226,163 @@ OUTPUT — a single JSON array containing ALL MCQs: every item from EXISTING LIS
 
 
 
+async def _onu_extract_all_pages_streaming(
+    chat_id: int, pages: list, topic: str, file_name: str, status_msg_id: int = None
+) -> list:
+    """/onu-ONLY pipeline (2026-08-24, per request) — Call1 runs per-page
+    (parallel, same WINDOW/dashboard pattern as qbm_extract_all_pages), but
+    Call2 no longer waits for ALL pages' Call1 to finish first: as soon as
+    BOTH pages of a pair (1&2, 3&4, ...) have finished Call1, that pair's
+    Call2 is kicked off immediately in the background, interleaved with
+    still-running Call1 calls for later pages. This keeps the live
+    dashboard progressing continuously through both Call1 and Call2 work
+    at once, instead of a visible "extraction phase" fully finishing
+    before a separate "verification phase" starts.
+
+    Returns list of (page_num, img, mcqs) tuples, same order as `pages`,
+    every page's mcqs list already fully Call1+Call2-verified.
+
+    Deliberately NOT built on top of qbm_extract_all_pages — that function
+    carries /qbm-specific machinery (cross-page answer-key lookahead,
+    web-resolve, an /onu-irrelevant page cache) that would add unrelated
+    complexity and risk here. This is a leaner, /onu-only loop."""
+    n = len(pages)
+    page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
+    start_time = time.time()
+    call1_results = [None] * n       # Call1 output per page index, filled as pages finish
+    final_mcqs = [None] * n          # Call2-verified output per page index
+    pair_started = [False] * ((n + 1) // 2)  # guards against double-triggering a pair's Call2
+    clear_cancel(chat_id)
+    new_job_id(chat_id)
+    set_active_job(chat_id, f"ONU extraction ({file_name}, streaming Call1+Call2)")
+    _reset_ai_call_count(chat_id)
+
+    _dash_lock = asyncio.Lock()
+    _last_dash_text = [None]
+
+    async def _safe_dash_edit():
+        async with _dash_lock:
+            text = _build_dashboard(file_name, topic, pages, page_status, start_time, sum(len(m or []) for m in final_mcqs), 0,
+                                     ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id))
+            if text == _last_dash_text[0]:
+                return
+            try:
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, text, reply_markup=_cancel_kb(chat_id))
+                _last_dash_text[0] = text
+            except Exception:
+                pass
+
+    _dash_stop = asyncio.Event()
+
+    async def _dashboard_ticker():
+        deadline = time.time() + 1800
+        while not _dash_stop.is_set() and time.time() < deadline:
+            try:
+                await asyncio.wait_for(_dash_stop.wait(), timeout=4)
+            except asyncio.TimeoutError:
+                pass
+            if _dash_stop.is_set():
+                break
+            await _safe_dash_edit()
+
+    if status_msg_id:
+        await _safe_dash_edit()
+    _ticker_task = _spawn_task(_dashboard_ticker())
+
+    async def _maybe_start_pair_call2(pair_idx: int):
+        """pair_idx covers page indices [2*pair_idx, 2*pair_idx+1] (or just
+        the single last page if n is odd). Only proceeds once ALL pages in
+        the pair have a non-None call1_results entry, and only once ever
+        per pair_idx (guarded so two concurrently-finishing pages in the
+        same pair can't both trigger it)."""
+        start = pair_idx * 2
+        end = min(start + 2, n)
+        idxs = list(range(start, end))
+        if any(call1_results[i] is None for i in idxs):
+            return  # pair not fully ready yet
+        if pair_started[pair_idx]:
+            return
+        pair_started[pair_idx] = True
+
+        try:
+            if len(idxs) == 2:
+                i1, i2 = idxs
+                img1, img2 = pages[i1][1], pages[i2][1]
+                v1, v2 = await _onu_verify_pass_batched([img1, img2], [call1_results[i1], call1_results[i2]])
+                final_mcqs[i1], final_mcqs[i2] = v1, v2
+            else:
+                i1 = idxs[0]
+                final_mcqs[i1] = await _onu_verify_pass(pages[i1][1], call1_results[i1])
+        except Exception as e:
+            logger.warning(f"[ONU streaming] Call2 for pair_idx={pair_idx} failed: {e} — keeping Call1 results")
+            for i in idxs:
+                if final_mcqs[i] is None:
+                    final_mcqs[i] = call1_results[i]
+
+        for i in idxs:
+            page_status[i]["done"] = True
+            page_status[i]["current"] = False
+            page_status[i]["mcq"] = len(final_mcqs[i] or [])
+            _model_counts = {}
+            for m in (final_mcqs[i] or []):
+                p = m.get("_provider", "Gemini")
+                _model_counts[p] = _model_counts.get(p, 0) + 1
+            if _model_counts:
+                page_status[i]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
+        if status_msg_id:
+            await _safe_dash_edit()
+
+    WINDOW = 4  # same concurrency window qbm_extract_all_pages uses
+
+    async def _run_call1_then_maybe_pair(idx: int, page_num, img):
+        _current_job_chat_id_ctx.set(chat_id)
+        if is_cancelled(chat_id):
+            call1_results[idx] = []
+            final_mcqs[idx] = []
+            page_status[idx]["done"] = True
+            return
+        page_status[idx]["current"] = True
+        if status_msg_id:
+            await _safe_dash_edit()
+        try:
+            mcqs = await _onu_extract_from_image(img)
+        except Exception as e:
+            logger.error(f"[ONU streaming] Call1 page {page_num} error: {e}")
+            mcqs = []
+        call1_results[idx] = mcqs
+        await _maybe_start_pair_call2(idx // 2)
+
+    sem = asyncio.Semaphore(WINDOW)
+
+    async def _guarded(idx, page_num, img):
+        async with sem:
+            await _run_call1_then_maybe_pair(idx, page_num, img)
+
+    tasks = [_spawn_task(_guarded(idx, page_num, img)) for idx, (page_num, img) in enumerate(pages)]
+    for t in tasks:
+        try:
+            await t
+        except Exception as e:
+            logger.error(f"[ONU streaming] task error: {e}")
+
+    _dash_stop.set()
+    try:
+        await _ticker_task
+    except Exception:
+        pass
+    if status_msg_id:
+        await _safe_dash_edit()
+
+    # Safety net: any page whose Call2 never ran (shouldn't happen given
+    # the pairing logic above, but never silently drop a page's MCQs).
+    for i in range(n):
+        if final_mcqs[i] is None:
+            final_mcqs[i] = call1_results[i] or []
+
+    return [(pages[i][0], pages[i][1], final_mcqs[i]) for i in range(n)]
+
+
 async def _onu_extract_from_image(img) -> list:
     """/onu Call1 ONLY (per-page) — 2026-08-23: Call2 (verify/miss-check)
     was moved OUT of here into a separate batched pass
@@ -21540,26 +21697,18 @@ async def _handle_onu_impl(msg: dict):
 
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
-                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে...")
+                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (Call1 per-page, Call2 প্রতি 2-page pair শেষেই)...")
 
-        extracted_pages = await qbm_extract_all_pages(
-            chat_id, pages, topic, file_name, status_msg_id,
-            extractor=_onu_extract_from_image
+        # 2026-08-24 (per request): Call1 runs per-page as pages finish;
+        # Call2 for a pair (page 1&2, 3&4, ...) starts the MOMENT both
+        # pages in that pair have finished Call1 -- interleaved with later
+        # pages' still-running Call1, instead of waiting for every single
+        # page's Call1 to finish first.
+        extracted_pages = await _onu_extract_all_pages_streaming(
+            chat_id, pages, topic, file_name, status_msg_id
         )
-
-        # ── /onu Call2, batched 2-pages-per-call (2026-08-23 per request) ──
-        # Call1 (above) already ran per-page via qbm_extract_all_pages, so
-        # the live dashboard already showed real progress. This runs
-        # AFTER extraction finishes, as its own pass over every page's
-        # Call1 result, pairing pages 2-at-a-time into a single Call2
-        # request instead of 1 Call2 per page.
-        if status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                f"✅ Extraction (Call1) সম্পূর্ণ!\n⏳ Verification (Call2, 2 page/call) চলছে...")
-        extracted_pages = await _onu_batch_verify_pages(extracted_pages)
-        # Same explanation-fallback safety net _onu_extract_from_image used
-        # to run per-page inline -- now runs once here across all pages,
-        # since Call2 is no longer per-page.
+        # Same explanation-fallback safety net -- runs once here across all
+        # pages after streaming extraction+verification completes.
         for _pn, _img, _mcqs in extracted_pages:
             for m in _mcqs:
                 if not (m.get("explanation") or "").strip():
