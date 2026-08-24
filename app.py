@@ -9377,10 +9377,10 @@ _PRINT_CSS = """<style>
 body{font-family:'Noto Sans Bengali','SolaimanLipi',Arial,sans-serif;font-size:12pt;line-height:1.2;color:#000;margin:0;padding:10px;width:210mm;max-width:210mm}
 .exam-header{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:10px;margin-bottom:15px}
 .exam-header h1{color:#166534;margin:0;font-size:15pt;font-weight:bold}
-.topic-header-green{text-align:center;border:2px solid #16a34a;background-color:#F0FDF4;border-radius:6px;padding:8px;margin:14px 0 10px 0;break-inside:avoid;page-break-inside:avoid}
-.topic-header-green h2{color:#166534;margin:0;font-size:13pt;font-weight:bold}
-.topic-header-blue{text-align:center;border:2px solid #3b82f6;background-color:#EFF6FF;border-radius:6px;padding:6px;margin:10px 0 8px 0;break-inside:avoid;page-break-inside:avoid}
-.topic-header-blue h3{color:#1e40af;margin:0;font-size:12pt;font-weight:bold}
+.topic-header-green{text-align:center;border:2px solid #3b82f6;background-color:#EFF6FF;border-radius:6px;padding:8px;margin:14px 0 10px 0;break-inside:avoid;page-break-inside:avoid}
+.topic-header-green h2{color:#1e40af;margin:0;font-size:13pt;font-weight:bold}
+.topic-header-blue{text-align:center;border:2px solid #dc2626;background-color:#FEF2F2;border-radius:6px;padding:6px;margin:10px 0 8px 0;break-inside:avoid;page-break-inside:avoid}
+.topic-header-blue h3{color:#991b1b;margin:0;font-size:12pt;font-weight:bold}
 .content-columns{column-count:2;column-gap:15px;column-fill:balance;column-rule:1px solid #ddd}
 .question{margin-bottom:7px;break-inside:avoid;page-break-inside:avoid}
 .question-header{margin-bottom:4px;display:flex;align-items:flex-start}
