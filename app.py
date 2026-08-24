@@ -6534,22 +6534,36 @@ async def handle_csvs_command(msg: dict):
 # SHARED CSV PARSER
 # ============================================================
 def _parse_csv_bytes(csv_bytes: bytes) -> list:
-    """CSV bytes থেকে MCQ list বানাও. /pdfs-এর topicwise CSV export করা
-    '### Main Topic ###' / '—— Sub Topic ——' header rows (type column:
-    main_topic_header / sub_topic_header) থাকলে সেগুলো real MCQ হিসেবে না
-    ঢুকিয়ে প্রতিটা পরবর্তী MCQ-তে _topic_main/_topic_sub হিসেবে carry-forward
-    করে, যাতে /sheet দিয়ে সেই CSV আবার PDF বানালে topic info হারিয়ে না যায়।"""
+    """CSV bytes থেকে MCQ list বানাও. দুইটা topic-tagging format support করে:
+
+    1) OLD /pdfs topicwise export style — '### Main Topic ###' /
+       '—— Sub Topic ——' header rows (type column: main_topic_header /
+       sub_topic_header), real MCQ না, carry-forward marker।
+
+    2) NEW dual-purpose column style — CSV-তে 'topic'/'subtopic' নামে
+       আলাদা column থাকে। কোনো row-এর topic/subtopic column-এ text থাকলে
+       সেই row (নিজেও একটা real MCQ) থেকে নতুন segment শুরু হয় — porer
+       row-গুলোতে column blank থাকলে আগের segment-ই carry-forward হয়,
+       আবার কোনো row-এ নতুন নাম পেলে সেখান থেকে নতুন segment শুরু হয়।
+       এভাবে পুরো CSV serial অনুযায়ী topic/subtopic-এ ভাগ হয়ে যায়।
+
+    উভয় format-এ প্রতিটা MCQ শেষে _pdfs_topic/_pdfs_subtopic ক্যারি করে,
+    যাতে /sheet দিয়ে PDF বানালে topic-wise গ্রুপিং সংরক্ষিত থাকে।"""
     import io, csv as csv_mod_local
     try:
         content = csv_bytes.decode("utf-8-sig")
         reader = csv_mod_local.DictReader(io.StringIO(content))
+        fieldnames = [f.strip().lower() for f in (reader.fieldnames or [])]
+        _has_topic_cols = "topic" in fieldnames or "subtopic" in fieldnames
         mcqs = []
         _cur_main, _cur_sub = None, None
         for row in reader:
-            q = row.get("questions") or row.get("question", "")
+            # DictReader keys keep original casing -- normalize lookup
+            row_norm = {k.strip().lower(): v for k, v in row.items() if k}
+            q = row_norm.get("questions") or row_norm.get("question", "")
             if not q:
                 continue
-            row_type = (row.get("type") or "").strip()
+            row_type = (row_norm.get("type") or "").strip()
             if row_type == "main_topic_header":
                 _cur_main = re.sub(r'^#+\s*|\s*#+$', '', q).strip()
                 _cur_sub = None
@@ -6557,19 +6571,32 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
             if row_type == "sub_topic_header":
                 _cur_sub = re.sub(r'^—+\s*|\s*—+$', '', q).strip()
                 continue
+            if _has_topic_cols:
+                # NEW style: this row's own topic/subtopic columns (if
+                # non-blank) start a new segment; blank means "still under
+                # whatever topic/subtopic was last set" -- serial order
+                # from the CSV itself decides grouping, not a separate
+                # header row.
+                _row_topic = (row_norm.get("topic") or "").strip()
+                _row_subtopic = (row_norm.get("subtopic") or "").strip()
+                if _row_topic:
+                    _cur_main = _row_topic
+                    _cur_sub = _row_subtopic or None
+                elif _row_subtopic:
+                    _cur_sub = _row_subtopic
             opts_raw = [
-                row.get("option1", ""), row.get("option2", ""),
-                row.get("option3", ""), row.get("option4", ""), row.get("option5", "")
+                row_norm.get("option1", ""), row_norm.get("option2", ""),
+                row_norm.get("option3", ""), row_norm.get("option4", ""), row_norm.get("option5", "")
             ]
             opts = [o.strip() for o in opts_raw if o.strip()]
             if len(opts) < 2:
                 continue
-            ans_raw = str(row.get("answer", "1")).strip().upper()
+            ans_raw = str(row_norm.get("answer", "1")).strip().upper()
             ans_map = {"1": "A", "2": "B", "3": "C", "4": "D", "A": "A", "B": "B", "C": "C", "D": "D"}
             ans = ans_map.get(ans_raw, "A")
             mcq = {
                 "question": _strip_q_numbering(q.strip()), "options": opts, "answer": ans,
-                "explanation": row.get("explanation", "").strip()
+                "explanation": row_norm.get("explanation", "").strip()
             }
             if _cur_main:
                 mcq["_pdfs_topic"] = _cur_main
@@ -6581,17 +6608,30 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
         return []
 
 def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
-    """MCQ list → CSV bytes, matching _parse_csv_bytes column layout."""
+    """MCQ list → CSV bytes. NEW dual-purpose style: writes 'topic'/
+    'subtopic' columns, filling them in only on the row where a segment
+    actually changes (blank on every row that continues the same
+    topic/subtopic) — matches _parse_csv_bytes's NEW-style reading and
+    keeps the file human-editable (person can just type a new topic name
+    into any row's topic/subtopic cell to re-split segments)."""
     import io, csv as csv_mod_local
     buf = io.StringIO()
     w = csv_mod_local.writer(buf)
-    w.writerow(["questions", "option1", "option2", "option3", "option4", "option5", "answer", "explanation", "type", "section"])
+    w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                "answer", "explanation", "type", "section", "topic", "subtopic"])
     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+    _last_main, _last_sub = None, None
     for m in mcqs:
         opts = (m.get("options", []) + ["", "", "", ""])[:4]
+        main_t = m.get("_pdfs_topic") or ""
+        sub_t = m.get("_pdfs_subtopic") or ""
+        topic_cell = main_t if main_t != _last_main else ""
+        subtopic_cell = sub_t if (sub_t != _last_sub or topic_cell) else ""
+        _last_main, _last_sub = main_t, sub_t
         w.writerow([
             m.get("question", ""), opts[0], opts[1], opts[2], opts[3], "",
-            ans_map.get(m.get("answer", "A"), "1"), _strip_img_tag(m.get("explanation", "")), "1", "1"
+            ans_map.get(m.get("answer", "A"), "1"), _strip_img_tag(m.get("explanation", "")), "1", "1",
+            topic_cell, subtopic_cell
         ])
     return buf.getvalue().encode("utf-8-sig")
 
@@ -9282,27 +9322,35 @@ def _build_topicwise_pdf_html(topics_ordered: list, topic_mcqs: dict, main_title
 
 
 def _build_topicwise_csv_rows(topics_ordered: list, topic_mcqs: dict) -> list:
-    """/pdfs only: CSV rows grouped main-topic -> sub-topic -> MCQs (section
-    marker rows before each) so /sheet output stays topic-sorted."""
+    """/pdfs only: CSV rows grouped main-topic -> sub-topic -> MCQs, using
+    dedicated topic/subtopic columns on each row (filled only where the
+    segment changes) instead of separate header marker rows -- matches
+    _parse_csv_bytes's NEW dual-purpose column format, so a person can
+    open the CSV, edit any row's topic/subtopic cell, and re-split
+    segments directly without touching header rows."""
     rows = []
     for main_t in topics_ordered:
         sub_map = topic_mcqs.get(main_t, {})
         sub_order = sub_map.get("__order__", [])
         if not sub_order:
             continue
-        rows.append([f"### {main_t} ###", "", "", "", "", "", "", "main_topic_header", ""])
+        _first_in_main = True
         for sub_t in sub_order:
             mcqs = sub_map.get(sub_t, [])
             if not mcqs:
                 continue
-            if sub_t:
-                rows.append([f"—— {sub_t} ——", "", "", "", "", "", "", "sub_topic_header", ""])
+            _first_in_sub = True
             for q in mcqs:
                 opts = (q.get("options", []) + ["", "", "", ""])[:4]
+                topic_cell = main_t if _first_in_main else ""
+                subtopic_cell = (sub_t or "") if _first_in_sub else ""
                 rows.append([
-                    q.get("question", ""), opts[0], opts[1], opts[2], opts[3],
-                    q.get("answer", "A"), q.get("explanation", ""), "mcq", sub_t or main_t
+                    q.get("question", ""), opts[0], opts[1], opts[2], opts[3], "",
+                    q.get("answer", "A"), q.get("explanation", ""), "1", "1",
+                    topic_cell, subtopic_cell
                 ])
+                _first_in_main = False
+                _first_in_sub = False
     return rows
 
 
@@ -13850,14 +13898,14 @@ async def _process_pdfs_pages_inner(
         import io, csv as csv_mod
         buf = io.StringIO()
         writer = csv_mod.writer(buf)
-        writer.writerow(["questions","option1","option2","option3","option4","answer","explanation","type","section"])
+        writer.writerow(["questions","option1","option2","option3","option4","option5","answer","explanation","type","section","topic","subtopic"])
         if all_mcqs_raw:
             _topics_order, _topic_map = _group_pdfs_mcqs(all_mcqs_raw, "প্রাক্টিস প্রশ্ন")
             for row in _build_topicwise_csv_rows(_topics_order, _topic_map):
                 writer.writerow(row)
         else:
             for row in all_mcqs_csv:
-                writer.writerow(row)
+                writer.writerow(row[:5] + [""] + row[5:] + ["", ""])
         await send_document(chat_id, buf.getvalue().encode("utf-8"), f"{topic}_mcq.csv",
             caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ", mime_type="text/csv",
             reply_to_message_id=status_msg_id)
