@@ -1283,6 +1283,15 @@ async def download_tg_file(file_id: str, progress_cb=None,
     # it has no Bot API 20MB ceiling and is a single consistent code path for
     # every file size. Falls back to Bot API getFile if pyrogram isn't
     # configured (no TELEGRAM_API_ID/HASH) or the call itself fails.
+    if chat_id is None or message_id is None:
+        # Call site didn't pass them (older call sites, or file_id-only
+        # commands) -- recover from the D1-persisted doc_file_cache instead
+        # of falling straight to Bot API getFile, which fails outright on
+        # files >20MB. This is what makes ALL download_tg_file call sites
+        # >20MB-capable, not just the ones manually updated to pass them.
+        cached = await doc_file_cache_lookup(file_id)
+        if cached and cached[0] and cached[1]:
+            chat_id, message_id = cached
     if chat_id is not None and message_id is not None:
         big = await download_large_file_pyrogram(chat_id, message_id, progress_cb=progress_cb)
         if big is not None:
@@ -1363,6 +1372,33 @@ async def _ensure_d1_table(name: str, create_sql: str):
         _D1_TABLES_ENSURED.add(name)
     except Exception as e:
         logger.warning(f"[D1] ensure {name} table warn: {e}")
+
+
+# ============================================================
+# DOCUMENT FILE_ID -> (chat_id, message_id) CACHE (D1-persisted)
+# Restart-survives, so download_tg_file can recover chat_id/message_id for
+# pyrogram (needed for files >20MB, past the Bot API getFile ceiling) even
+# at call sites that only ever had the bare file_id on hand. Metadata only
+# -- actual file bytes are never cached here (D1 rows/Worker body size make
+# that impractical for large PDFs); every download still re-fetches bytes
+# from Telegram, this cache only avoids losing the chat_id/message_id
+# needed to know HOW to fetch them.
+# ============================================================
+async def _ensure_doc_file_cache_table():
+    await _ensure_d1_table("doc_file_cache",
+        "CREATE TABLE IF NOT EXISTS doc_file_cache (file_id TEXT PRIMARY KEY, "
+        "chat_id INTEGER, message_id INTEGER, file_name TEXT, file_size INTEGER, cached_at INTEGER)")
+
+async def doc_file_cache_lookup(file_id: str) -> Optional[tuple]:
+    """Returns (chat_id, message_id) if this file_id was seen before, else None."""
+    try:
+        await _ensure_doc_file_cache_table()
+        rows = await d1_select("SELECT chat_id, message_id FROM doc_file_cache WHERE file_id = ?", [file_id])
+        if rows:
+            return rows[0].get("chat_id"), rows[0].get("message_id")
+    except Exception as e:
+        logger.warning(f"[DocCache] lookup warn: {e}")
+    return None
 
 # ============================================================
 # GEMINI DAILY-EXHAUSTED KEY PERSISTENCE

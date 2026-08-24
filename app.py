@@ -26746,6 +26746,28 @@ def _is_duplicate_update(update_id) -> bool:
     return False
 
 
+async def _cache_doc_metadata(msg: dict):
+    """Every incoming message with a document gets its file_id -> (chat_id,
+    message_id, size, name) recorded in D1 -- survives restarts. Lets
+    download_tg_file recover chat_id/message_id for pyrogram (>20MB files)
+    even at call sites that only pass file_id, and avoids re-resolving the
+    same lookup repeatedly. Fire-and-forget, never blocks message handling."""
+    try:
+        doc = msg.get("document")
+        if not doc or not doc.get("file_id"):
+            return
+        await d1_run(
+            "INSERT INTO doc_file_cache (file_id, chat_id, message_id, file_name, file_size, cached_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(file_id) DO UPDATE SET chat_id=excluded.chat_id, message_id=excluded.message_id, "
+            "file_name=excluded.file_name, file_size=excluded.file_size, cached_at=excluded.cached_at",
+            [doc["file_id"], msg["chat"]["id"], msg["message_id"],
+             doc.get("file_name", ""), doc.get("file_size", 0), int(time.time())],
+        )
+    except Exception as e:
+        logger.warning(f"[DocCache] record skip: {e}")
+
+
 async def process_update(update: dict):
     try:
         if _is_duplicate_update(update.get("update_id")):
@@ -26754,6 +26776,8 @@ async def process_update(update: dict):
         if "message" in update:
             uid = update["message"].get("from", {}).get("id")
             _msg = update.get("message", {})
+            if _msg.get("document"):
+                _spawn_task(_cache_doc_metadata(_msg))
             _txt_check = (_msg.get("text") or "").strip()
             # /csv, /csvS, /ping, /cancel, /merge + other stateless/quick
             # commands bypass the per-user serialize queue entirely. /csv
