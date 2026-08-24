@@ -405,6 +405,30 @@ MUST Return ONLY valid JSON array, no markdown, EVERY item MUST include main_top
 [{{"main_topic":"...","sub_topic":"..." or null,"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
 
 
+PDFS_CALL2_MCQ_ONLY_PROMPT = """📝 /pdfs Call2 — MCQ GENERATION ONLY (topic detection already done in Call1, DO NOT re-detect)
+
+🔒 CONFIRMED TOPICS FOR THIS PAGE (from Call1, already verified — use these EXACT names, do not rename/reinterpret):
+{topics_list}
+
+═══ প্রতিটা confirmed topic/sub-topic-এর জন্য আলাদা করে MCQ বানাও ═══
+🔒 SOURCE-LOCK + TOPIC-LOCK (ABSOLUTE): প্রতিটা MCQ শুধুমাত্র তার নিজের topic-এর content-boundary থেকেই বানাবে (উপরের list-এর যে heading-এর নিচে/কাছে সেই content, সেটাই তার topic)। একটা topic-এর MCQ-তে অন্য topic-এর content/fact কখনো মিশতে পারবে না। প্রতিটা MCQ output-এ অবশ্যই সেটা কোন main_topic (উপরের list থেকে exact same spelling) থেকে এসেছে সেটা লিখতে হবে — যদি page-এ উপরের কোনো topic-এর সাথে না মেলে এমন content থাকে, সেটাকে সবচেয়ে কাছের/প্রাসঙ্গিক topic-এর আন্ডারে রাখো।
+🔴 STRICT PAGE-ONLY CONTENT (ABSOLUTE, প্রশ্ন+অপশন+ব্যাখ্যা সবক্ষেত্রে): question, প্রতিটা option, ও ব্যাখ্যা — সব শুধুমাত্র এই page-এ visible content থেকে আসবে। বাইরের সাধারণ জ্ঞান/training data থেকে কোনো fact যোগ করা কঠোরভাবে নিষিদ্ধ। কোনো option-এর মধ্যে page-এ না থাকা তথ্য বসাতে হলে সেই MCQ-টাই বাদ দাও।
+-🔒 TWO-MODE RULE: page-এ আগে থেকেই MCQ থাকলে 100% VERBATIM extract করবে, নইলে content থেকে নতুন MCQ বানাবে।
+-🔒 NO-DUPLICATE-FROM-EXISTING-MCQ, NO-MCQ-FROM-ANSWER/EXPLANATION-TEXT.
+-🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST): হাইলাইটেড/মার্ক করা লাইন থেকে MCQ সবার আগে বানাবে।
+-প্রতিটা topic থেকে গড়ে {per_topic_count} টি MCQ target করো, কোনো topic 0 রাখা যাবে না যদি তার নিজের content থাকে।
+-টপিকের নাম/হেডলাইন/পেইজ সংখ্যা থেকে MCQ বানাবে না। প্রতিটা অপশন actual factual content, হ্যাঁ/না না।
+💥প্রশ্ন: ছোট (১/১.৫/২ লাইন) | 💥অপশন: ৪টি, সঠিক উত্তর একটিই | 💥উত্তর: A/B/C/D ছড়িয়ে দিবে।
+💥ব্যাখ্যা (MAX 165 WORDS): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, শুধু page content থেকে।
+
+🌐 LANGUAGE RULE: source-এর ভাষায় (translate করবে না)।
+
+Page: {page}
+
+MUST Return ONLY valid JSON array, EVERY item MUST include main_topic + sub_topic:
+[{{"main_topic":"...","sub_topic":"..." or null,"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
+
+
 def _pdfs_reconcile_mcq_topics(mcqs: list, fallback: str) -> list:
     """Code-level backstop (not prompt-only) — runs on every /pdfs generation
     result before it's used anywhere else. Ensures every MCQ has a clean,
@@ -498,6 +522,77 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
             continue
     logger.warning(f"[PDFS] All keys failed for page {page} — returning empty (caller will try Groq/other fallbacks)")
     return []
+
+
+async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str, page: int,
+                                    mcq_count_hint: int = 15, timing: dict = None) -> tuple:
+    """/pdfs Call2 (generation-only): headings is Call1's already-confirmed
+    list of [{"main":..., "sub":...}] for this page — this function does
+    NOT re-detect topics, it just generates MCQs and tags each with one of
+    the given topic names (see PDFS_CALL2_MCQ_ONLY_PROMPT). Splitting
+    detection (Call1) and generation (Call2) into separate calls means
+    topic-detect never depends on generation succeeding and vice versa —
+    same two-call shape as /topic and /bio use elsewhere in this file.
+    Returns (mcqs, elapsed_seconds, model_used) so the caller can show
+    per-page timing + model in the live dashboard. If timing dict is
+    passed, also records timing['start']/['end'] for external use."""
+    import time as _time
+    _t0 = _time.time()
+    topics_list = "\n".join(
+        f"- main: \"{h.get('main')}\"" + (f", sub: \"{h.get('sub')}\"" if h.get('sub') else "")
+        for h in (headings or [{"main": topic, "sub": None}])
+    )
+    prompt = PDFS_CALL2_MCQ_ONLY_PROMPT.format(
+        topics_list=topics_list, page=str(page).zfill(2), per_topic_count=mcq_count_hint)
+    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+    _ordered = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
+    if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
+        logger.warning(f"[PDFS-C2] All {len(key_rotator.keys)} Gemini keys daily-exhausted — returning empty")
+        return [], round(_time.time() - _t0, 1), None
+    max_retries = min(len(_ordered), 6) if _ordered else 5
+    for attempt in range(max_retries):
+        key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+        key_rotator.record_call(key)
+        try:
+            from google import genai as gai
+            from google.genai import types
+            client = gai.Client(api_key=key)
+            img_b64 = image_to_base64(img)
+
+            def _call():
+                return client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=[
+                        types.Part.from_text(text=prompt),
+                        types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                    ]
+                )
+            _attempt_timeout = 40 if attempt == 0 else 25
+            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
+            valid = _parse_mcq_json(response.text)
+            elapsed = round(_time.time() - _t0, 1)
+            if not valid:
+                logger.warning(f"[PDFS-C2] Page {page}: 0 valid MCQs parsed (attempt {attempt+1})")
+            else:
+                valid = _pdfs_reconcile_mcq_topics(valid, topic)
+            key_rotator.mark_healthy(key)
+            logger.info(f"[PDFS-C2] Page {page}: {len(valid)} MCQs in {elapsed}s (attempt {attempt+1}, gemini-3.6-flash)")
+            return valid, elapsed, "Gemini" if valid else None
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
+                key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
+            elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
+                key_rotator.mark_banned(key)
+            else:
+                logger.warning(f"[PDFS-C2] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+            continue
+    elapsed = round(_time.time() - _t0, 1)
+    logger.warning(f"[PDFS-C2] All keys failed for page {page} after {elapsed}s")
+    return [], elapsed, None
 
 
 # ============================================================

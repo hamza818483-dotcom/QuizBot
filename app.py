@@ -10122,10 +10122,20 @@ async def handle_sheet_command(msg: dict):
                 await edit_msg(chat_id, loading_id, "❌ CSV থেকে কোনো MCQ পাওয়া যায়নি! Format ঠিক আছে কিনা দেখো।")
             return
 
+        title = custom_title or "ATLAS Special"
+
+        # /pdfs topicwise CSV (carries _pdfs_topic tags from the ### header
+        # rows) -- auto-generate style1 PDF directly, no button menu, since
+        # the whole point of that CSV is a ready-to-print topic-wise sheet.
+        if any(m.get("_pdfs_topic") for m in mcqs):
+            if loading_id:
+                await edit_msg(chat_id, loading_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে (topic-wise)!\n🎨 Style1 PDF বানানো হচ্ছে...")
+            await _sheet_auto_style1(chat_id, mcqs, title, loading_id)
+            return
+
         if loading_id:
             await edit_msg(chat_id, loading_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n🎨 Print Style বেছে নাও:")
 
-        title = custom_title or "ATLAS Special"
         cache_key = f"{chat_id}:{loading_id}"
         _sheet_cache[cache_key] = {"mcqs": mcqs, "title": title}
 
@@ -10150,6 +10160,46 @@ async def handle_sheet_command(msg: dict):
     except Exception as e:
         logger.error(f"[SHEET] Error: {e}")
         await _safe_error_reply(chat_id, e)
+
+
+async def _sheet_auto_style1(chat_id: int, mcqs: list, title: str, status_id: int = None):
+    """Auto-generate + send a style1 topic-wise PDF directly, no style menu
+    -- used when /sheet detects a /pdfs topicwise CSV (main_topic tags
+    present). Mirrors handle_sheet_style_callback's style1+topicwise
+    branch, just triggered automatically instead of via button tap."""
+    start_t = time.time()
+    try:
+        _topics_order, _topic_map = _group_pdfs_mcqs(mcqs, title)
+        html_out = _build_topicwise_pdf_html(_topics_order, _topic_map, title)
+
+        async def _progress(pct):
+            if not status_id:
+                return
+            elapsed = time.time() - start_t
+            try:
+                await edit_msg(chat_id, status_id, f"🎨 Style1 (Topic-wise)\n⏳ {pct}% — {elapsed:.1f}s")
+            except Exception:
+                pass
+
+        pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress, use_css_page_size=False, page_width_mm=420)
+        pdf_bytes = await _apply_saved_watermark(pdf_bytes)
+
+        if not pdf_bytes:
+            if status_id:
+                await edit_msg(chat_id, status_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
+            return
+
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Sheet"
+        await send_document(chat_id, pdf_bytes, f"{safe_title}_style1.pdf",
+            caption=f"📖 Practice Sheet (Style1, Topic-wise)\n📝 মোট MCQ: {len(mcqs)}\n📂 Topics: {len(_topics_order)}\n🚀 ATLAS APP")
+        if status_id:
+            await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_id})
+    except Exception as e:
+        logger.error(f"[SHEET AUTO] Error: {e}")
+        if status_id:
+            await edit_msg(chat_id, status_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
+
+
 
 import asyncio as _asyncio_sheet
 # 2026-08-22 BUGFIX: was a single global lock wrapping the entire HTML+PDF
@@ -12413,7 +12463,9 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 model_str = f" ({model_tag})" if model_tag else ""
                 page_topic = s.get("detected_topic", "")
                 topic_str = f" 📂{page_topic}" if page_topic else ""
-                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str} ✓")
+                secs = s.get("gen_seconds")
+                secs_str = f" ⏱{secs}s" if secs is not None else ""
+                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str} ✓")
         elif s["current"]:
             lines.append(f"⏳ Page {fmt_page(s['page'])}: Processing...")
         else:
@@ -13520,18 +13572,22 @@ async def _process_pdfs_pages_inner(
                 # /pdfs TWO-CALL pipeline (matches /topic's/bio's pattern):
                 # Call1 (batched heading-scan, run once upfront for ALL pages
                 # — see _pdfs_detected_headings above) already determined
-                # this page's topic segment(s). Call2 here just generates
-                # MCQs for the page and tags them with Call1's result — no
-                # more per-page combined detect+generate call, so topic
-                # detection no longer depends on generation succeeding (or
-                # vice versa) and each concern gets its own dedicated call.
+                # this page's topic segment(s). Call2 (generate_pdfs_call2_mcqs)
+                # generates MCQs using those pre-confirmed topics and tags
+                # each MCQ with its own main_topic/sub_topic — model does NOT
+                # re-detect, just assigns per Call1's confirmed list. Falls
+                # back to the plain multi-provider generator (tagged with the
+                # page's primary topic) only if Call2 itself returns empty.
                 _page_headings = _pdfs_detected_headings.get(page_num) or [{"main": topic, "sub": None}]
                 _primary_topic = _page_headings[0]["main"]
                 mcqs = []
                 gen_error = None
+                _page_elapsed = None
+                _page_model = None
                 try:
-                    mcqs = await asyncio.wait_for(
-                        generate_mcq_from_image(img, _primary_topic, page_num, mcq_count),
+                    from pdf_handler import generate_pdfs_call2_mcqs
+                    mcqs, _page_elapsed, _page_model = await asyncio.wait_for(
+                        generate_pdfs_call2_mcqs(img, _page_headings, _primary_topic, page_num, mcq_count_hint=(mcq_count or 15)),
                         timeout=150)
                 except asyncio.TimeoutError:
                     logger.warning(f"[PDFS] Page {page_num}: Call2 generation timed out after 150s.")
@@ -13541,28 +13597,37 @@ async def _process_pdfs_pages_inner(
                     gen_error = str(_pdfs_e)
                 if not mcqs:
                     try:
+                        _fb_t0 = time.time()
                         mcqs, _fb_err = await asyncio.wait_for(_gen_with_retry(img, page_num), timeout=150)
+                        _page_elapsed = round(time.time() - _fb_t0, 1)
+                        _page_model = "Fallback"
                         if not mcqs:
                             gen_error = _fb_err or gen_error
+                        else:
+                            for _m in mcqs:
+                                _m["_pdfs_topic"] = _primary_topic
+                                _m["_pdfs_subtopic"] = None
                     except asyncio.TimeoutError:
                         logger.warning(f"[PDFS] Page {page_num}: fallback generation timed out after 150s — skipping page.")
                         gen_error = "fallback generation timeout (150s)"
                     except Exception as _fb_e:
                         gen_error = str(_fb_e)
-                # Tag every generated MCQ with Call1's topic result — single
-                # main topic per page for now (multi-segment pages fall back
-                # to the first detected heading; sub_topic split can be
-                # added later without touching Call1).
-                for _m in mcqs:
-                    _m["_pdfs_topic"] = _primary_topic
-                    _m["_pdfs_subtopic"] = None
                 if not gen_error and not mcqs:
                     gen_error = "topic-wise generation থেকে 0 MCQ এসেছে (সব provider ব্যর্থ)"
                 _page_segments = _page_headings
                 _pdfs_page_topics[page_num] = _page_segments
                 page_status[idx]["detected_topic"] = _primary_topic
-                if mcqs:
-                    _pdfs_topic_breakdown[_primary_topic] = _pdfs_topic_breakdown.get(_primary_topic, 0) + len(mcqs)
+                page_status[idx]["gen_seconds"] = _page_elapsed
+                if _page_model:
+                    page_status[idx]["model"] = _page_model
+                # per (main_topic, sub_topic) running breakdown -- each MCQ
+                # already carries its own tag from Call2, so group by the
+                # actual tag on each MCQ, not just the page's primary topic.
+                for _m in mcqs:
+                    _key = _m.get("_pdfs_topic") or _primary_topic
+                    if _m.get("_pdfs_subtopic"):
+                        _key = f"{_key} › {_m['_pdfs_subtopic']}"
+                    _pdfs_topic_breakdown[_key] = _pdfs_topic_breakdown.get(_key, 0) + 1
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
@@ -13794,7 +13859,8 @@ async def _process_pdfs_pages_inner(
             for row in all_mcqs_csv:
                 writer.writerow(row)
         await send_document(chat_id, buf.getvalue().encode("utf-8"), f"{topic}_mcq.csv",
-            caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ", mime_type="text/csv")
+            caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ", mime_type="text/csv",
+            reply_to_message_id=status_msg_id)
 
         if all_mcqs_raw:
             _csv_cache_id = gen_session_id()
