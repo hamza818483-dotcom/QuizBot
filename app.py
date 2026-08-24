@@ -12952,6 +12952,8 @@ async def _process_pdf_pages_inner(
         # get a fresh 5-key Groq budget every attempt.
         accumulated_tried_keys = set()
         for _pg_attempt in range(4):
+            if is_cancelled(chat_id):
+                return last_mcqs, "cancelled"
             try:
                 _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count, exclude_groq_keys=accumulated_tried_keys)
                 accumulated_tried_keys = accumulated_tried_keys | set(_LAST_TRIED_GROQ_KEYS.get("keys") or set())
@@ -13594,6 +13596,8 @@ async def _process_pdfs_pages_inner(
         # get a fresh 5-key Groq budget every attempt.
         accumulated_tried_keys = set()
         for _pg_attempt in range(4):
+            if is_cancelled(chat_id):
+                return last_mcqs, "cancelled"
             try:
                 _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count, exclude_groq_keys=accumulated_tried_keys)
                 accumulated_tried_keys = accumulated_tried_keys | set(_LAST_TRIED_GROQ_KEYS.get("keys") or set())
