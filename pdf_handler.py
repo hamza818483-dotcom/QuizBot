@@ -558,9 +558,6 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
             else:
                 logger.warning(f"[PDFS] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
                 _consecutive_infra_fails += 1
-                if _consecutive_infra_fails >= 3:
-                    logger.warning(f"[PDFS] {_consecutive_infra_fails} consecutive non-quota failures (page {page}) — backend appears down, stopping early.")
-                    break
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
@@ -644,9 +641,6 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
             else:
                 logger.warning(f"[PDFS-C2] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
                 _consecutive_infra_fails += 1
-                if _consecutive_infra_fails >= 3:
-                    logger.warning(f"[PDFS-C2] {_consecutive_infra_fails} consecutive non-quota failures (page {page}) — backend appears down, stopping early.")
-                    break
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
@@ -1246,14 +1240,14 @@ async def generate_mcq_from_image(
             key_rotator.mark_banned(key, reason=err_str[:200])
             _consecutive_infra_fails = 0  # per-key issue, not backend-wide
         else:
-            # Timeout / connection error / non-429-503 exception -- this is
-            # the "backend/network genuinely down" signature, not a per-key
-            # problem, since every key would hit the same failure.
+            # Timeout / connection error / non-429-503 exception. Previously
+            # this broke early after 3 consecutive failures assuming Gemini's
+            # backend was down entirely -- but per explicit instruction,
+            # Gemini must be exhausted key-by-key before ever falling to
+            # Groq/other providers, so we no longer short-circuit here and
+            # instead keep cycling through every remaining live key.
             logger.warning(f"[Gemini] Attempt {attempt+1} failed (both models): {err_label}")
             _consecutive_infra_fails += 1
-            if _consecutive_infra_fails >= 3:
-                logger.warning(f"[Gemini] {_consecutive_infra_fails} consecutive non-quota failures (page {page}) — Gemini backend/network appears down, stopping early instead of burning all {max_retries} keys. Falling to Groq/other fallbacks.")
-                break
         if attempt < max_retries - 1:
             await asyncio.sleep(1)
         continue

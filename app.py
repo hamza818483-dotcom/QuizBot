@@ -1396,7 +1396,10 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
     else:
         _ordered = key_rotator.ordered_keys()
     img_b64 = image_to_base64(img) if _ordered else None
-    max_retries = min(len(_ordered), 3) if _ordered else 0
+    # Try every live key before ever falling back to Groq/other providers --
+    # Gemini must be exhausted key-by-key first, per explicit instruction,
+    # not capped at 3 attempts while dozens of other keys sit unused.
+    max_retries = len(_ordered) if _ordered else 0
     gemini_quota_errors = 0
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)]
