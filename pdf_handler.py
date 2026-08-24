@@ -591,6 +591,11 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
             else:
                 valid = _pdfs_reconcile_mcq_topics(valid, topic, allowed_topics=_allowed_topics)
             key_rotator.mark_healthy(key)
+            try:
+                import app as _app_mod
+                _app_mod._bump_ai_call_count(_app_mod._current_job_chat_id_ctx.get(), model="Gemini")
+            except Exception:
+                pass
             logger.info(f"[PDFS-C2] Page {page}: {len(valid)} MCQs in {elapsed}s (attempt {attempt+1}, gemini-3.6-flash)")
             return valid, elapsed, "Gemini" if valid else None
         except Exception as e:

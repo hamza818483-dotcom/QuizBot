@@ -12529,7 +12529,9 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 topic_str = f" 📂{page_topic}" if page_topic else ""
                 secs_gen = s.get("gen_seconds")
                 secs_str = f" ⏱{secs_gen}s" if secs_gen is not None else ""
-                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str} ✓")
+                calls_n = s.get("ai_calls")
+                calls_str = f" 🤖{calls_n}" if calls_n is not None else ""
+                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str} ✓")
         elif s["current"]:
             lines.append(f"⏳ Page {fmt_page(s['page'])}: Processing...")
         else:
@@ -12989,6 +12991,7 @@ async def _process_pdf_pages_inner(
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
             _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
+        _page_ai_calls_before = _get_ai_call_count(chat_id)
 
         try:
             _page_segments = None  # /pdfs only: derived from returned MCQ tags, for caption/summary display
@@ -13243,6 +13246,7 @@ async def _process_pdf_pages_inner(
                 _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
+            page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
             await sb_exec(lambda: sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute())
@@ -13633,6 +13637,7 @@ async def _process_pdfs_pages_inner(
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
             _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), topic_breakdown=_pdfs_topic_breakdown), reply_markup=_cancel_kb(chat_id))
+        _page_ai_calls_before = _get_ai_call_count(chat_id)
 
         try:
             _page_segments = None  # /pdfs only: derived from Call1 headings + MCQ tags, for caption/summary display
@@ -13688,6 +13693,7 @@ async def _process_pdfs_pages_inner(
                 page_status[idx]["gen_seconds"] = _page_elapsed
                 if _page_model:
                     page_status[idx]["model"] = _page_model
+                page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
                 # per (main_topic, sub_topic) running breakdown -- each MCQ
                 # already carries its own tag from Call2, so group by the
                 # actual tag on each MCQ, not just the page's primary topic.
