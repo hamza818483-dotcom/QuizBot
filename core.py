@@ -890,7 +890,18 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
             r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=60)
             result = _parse_cf_resp(r, "CF primary")
             if result.get("ok"): return result
-            logger.warning(f"[sendDoc] CF primary non-ok: {result.get('description') or result.get('error')}")
+            _err_desc = result.get("description") or result.get("error") or ""
+            logger.warning(f"[sendDoc] CF primary non-ok: {_err_desc}")
+            if "message to be replied not found" in str(_err_desc).lower() and "reply_to_message_id" in data:
+                # Reply target (e.g. the job's status/dashboard message) is
+                # gone -- retrying with the same reply_to_message_id will
+                # never succeed. Drop it and send as a standalone message
+                # instead of failing the whole document send outright.
+                logger.warning("[sendDoc] reply target gone — retrying without reply_to_message_id")
+                data = {k: v for k, v in data.items() if k != "reply_to_message_id"}
+                r = await c.post(f"{CF_WORKER_URL}/tg-senddoc", json=data, timeout=60)
+                result = _parse_cf_resp(r, "CF primary (no-reply retry)")
+                if result.get("ok"): return result
         except Exception as e:
             logger.warning(f"[sendDoc] CF failed: {e}")
 
@@ -903,7 +914,14 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
             r = await c.post(f"{CF_WORKER_URL_2}/tg-senddoc", json=data, timeout=60)
             result = _parse_cf_resp(r, "CF secondary")
             if result.get("ok"): return result
-            logger.warning(f"[sendDoc] CF secondary non-ok: {result.get('description') or result.get('error')}")
+            _err_desc = result.get("description") or result.get("error") or ""
+            logger.warning(f"[sendDoc] CF secondary non-ok: {_err_desc}")
+            if "message to be replied not found" in str(_err_desc).lower() and "reply_to_message_id" in data:
+                logger.warning("[sendDoc] reply target gone — retrying without reply_to_message_id (secondary)")
+                data = {k: v for k, v in data.items() if k != "reply_to_message_id"}
+                r = await c.post(f"{CF_WORKER_URL_2}/tg-senddoc", json=data, timeout=60)
+                result = _parse_cf_resp(r, "CF secondary (no-reply retry)")
+                if result.get("ok"): return result
         except Exception as e:
             logger.warning(f"[sendDoc] CF secondary failed: {e}")
 

@@ -13221,6 +13221,11 @@ async def _process_pdf_pages_inner(
                     end_r = await tg_post("sendMessage", end_data)
                     if end_r.get("ok"):
                         break
+                    _end_err = (end_r.get("description") or end_r.get("error") or "")
+                    if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
+                        logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
+                        end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
+                        continue
                     logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
                     await asyncio.sleep(2)
                 if end_r.get("ok"):
@@ -13335,6 +13340,11 @@ async def _process_pdf_pages_inner(
         if first_image_msg_id:
             summary_data["reply_to_message_id"] = first_image_msg_id
         sum_r = await tg_post("sendMessage", summary_data)
+        if not sum_r.get("ok") and "reply_to_message_id" in summary_data:
+            _sd = (sum_r.get("description") or "").lower()
+            if "message to be replied not found" in _sd:
+                summary_data = {k: v for k, v in summary_data.items() if k != "reply_to_message_id"}
+                sum_r = await tg_post("sendMessage", summary_data)
         if sum_r.get("ok"):
             await try_pin_message(channel_id, sum_r["result"]["message_id"])
             # persist so the DM page-button callback handler can find/update
@@ -13881,6 +13891,11 @@ async def _process_pdfs_pages_inner(
                     end_r = await tg_post("sendMessage", end_data)
                     if end_r.get("ok"):
                         break
+                    _end_err = (end_r.get("description") or end_r.get("error") or "")
+                    if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
+                        logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
+                        end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
+                        continue
                     logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
                     await asyncio.sleep(2)
                 if end_r.get("ok"):
@@ -13992,6 +14007,11 @@ async def _process_pdfs_pages_inner(
         if first_image_msg_id:
             summary_data["reply_to_message_id"] = first_image_msg_id
         sum_r = await tg_post("sendMessage", summary_data)
+        if not sum_r.get("ok") and "reply_to_message_id" in summary_data:
+            _sd = (sum_r.get("description") or "").lower()
+            if "message to be replied not found" in _sd:
+                summary_data = {k: v for k, v in summary_data.items() if k != "reply_to_message_id"}
+                sum_r = await tg_post("sendMessage", summary_data)
         if sum_r.get("ok"):
             await try_pin_message(channel_id, sum_r["result"]["message_id"])
             # persist so the DM page-button callback handler can find/update
