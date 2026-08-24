@@ -12386,7 +12386,7 @@ def _pdf_dashboard_kb(chat_id, pages, page_status):
         rows.append(done_buttons[i:i+3])
     return {"inline_keyboard": rows}
 
-def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=None, ai_calls_breakdown=None):
+def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=None, ai_calls_breakdown=None, topic_breakdown=None):
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
     done = sum(1 for s in page_status if s["done"])
@@ -12411,7 +12411,9 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
             else:
                 model_tag = s.get("model", "")
                 model_str = f" ({model_tag})" if model_tag else ""
-                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str} ✓")
+                page_topic = s.get("detected_topic", "")
+                topic_str = f" 📂{page_topic}" if page_topic else ""
+                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str} ✓")
         elif s["current"]:
             lines.append(f"⏳ Page {fmt_page(s['page'])}: Processing...")
         else:
@@ -12423,6 +12425,11 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
         f"📝 MCQ done: {total_mcq}",
         f"🔄 Polls sent: {total_polls}"
     ]
+    if topic_breakdown:
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("📂 Topic-wise:")
+        for t_name, t_count in topic_breakdown.items():
+            lines.append(f"  • {t_name}: {t_count} MCQ")
     if ai_calls is not None:
         _breakdown_str = f" ({ai_calls_breakdown})" if ai_calls_breakdown else ""
         lines.append(f"🤖 AI calls: {ai_calls}{_breakdown_str}")
@@ -13360,8 +13367,10 @@ async def _process_pdfs_pages_inner(
         r = await send_msg(chat_id, "⏳ Processing শুরু হচ্ছে...")
         status_msg_id = r.get("result", {}).get("message_id")
 
+    _pdfs_topic_breakdown = {}  # topic name -> running MCQ count, for live dashboard (init early: used by pre-loop dashboard calls below)
+
     await edit_msg(chat_id, status_msg_id,
-        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
+        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), topic_breakdown=_pdfs_topic_breakdown), reply_markup=_cancel_kb(chat_id))
 
     # PERMANENT FIX: dashboard previously only updated on page start/finish —
     # if one page's generation takes 30-90s, "Elapsed" looked frozen the
@@ -13383,7 +13392,7 @@ async def _process_pdfs_pages_inner(
                 break
             try:
                 await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), topic_breakdown=_pdfs_topic_breakdown), reply_markup=_cancel_kb(chat_id))
             except Exception:
                 pass
     _dash_ticker_task = _spawn_task(_dashboard_ticker())
@@ -13503,7 +13512,7 @@ async def _process_pdfs_pages_inner(
             page_num, img = page_tuple
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
+            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), topic_breakdown=_pdfs_topic_breakdown), reply_markup=_cancel_kb(chat_id))
 
         try:
             _page_segments = None  # /pdfs only: derived from Call1 headings + MCQ tags, for caption/summary display
@@ -13551,6 +13560,9 @@ async def _process_pdfs_pages_inner(
                     gen_error = "topic-wise generation থেকে 0 MCQ এসেছে (সব provider ব্যর্থ)"
                 _page_segments = _page_headings
                 _pdfs_page_topics[page_num] = _page_segments
+                page_status[idx]["detected_topic"] = _primary_topic
+                if mcqs:
+                    _pdfs_topic_breakdown[_primary_topic] = _pdfs_topic_breakdown.get(_primary_topic, 0) + len(mcqs)
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
@@ -13742,7 +13754,7 @@ async def _process_pdfs_pages_inner(
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
             await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
+                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), topic_breakdown=_pdfs_topic_breakdown), reply_markup=_cancel_kb(chat_id))
             await sb_exec(lambda: sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute())
 
         except Exception as e:
