@@ -484,12 +484,11 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
     if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
         logger.warning(f"[PDFS] All {len(key_rotator.keys)} Gemini keys daily-exhausted — returning empty (caller tries Groq/other fallbacks)")
         return []
-    # 2026-08-22 FIX: capped at 6 keys (was uncapped) -- when Gemini's whole
-    # backend is down, every key times out identically, so trying all ~44
-    # keys just delays the multi-provider fallback for many minutes with
-    # zero chance of success. 6 keys still covers per-key quota/rate issues
-    # while failing fast when the backend itself is the problem.
-    max_retries = min(len(_ordered), 6) if _ordered else 5
+    # User instruction (2026-08-25): try every live key before Groq -- only
+    # stop early on a genuine backend/network outage (3 consecutive
+    # non-quota failures), never just because a key-count ceiling was hit.
+    max_retries = len(_ordered) if _ordered else 5
+    _consecutive_infra_fails = 0
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
         key_rotator.record_call(key)
@@ -526,10 +525,16 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                 is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
                 key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
+                _consecutive_infra_fails = 0
             elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
                 key_rotator.mark_banned(key)
+                _consecutive_infra_fails = 0
             else:
                 logger.warning(f"[PDFS] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
+                _consecutive_infra_fails += 1
+                if _consecutive_infra_fails >= 3:
+                    logger.warning(f"[PDFS] {_consecutive_infra_fails} consecutive non-quota failures (page {page}) — backend appears down, stopping early.")
+                    break
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
@@ -564,7 +569,8 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
     if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
         logger.warning(f"[PDFS-C2] All {len(key_rotator.keys)} Gemini keys daily-exhausted — returning empty")
         return [], round(_time.time() - _t0, 1), None
-    max_retries = min(len(_ordered), 6) if _ordered else 5
+    max_retries = len(_ordered) if _ordered else 5
+    _consecutive_infra_fails = 0
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
         key_rotator.record_call(key)
@@ -603,10 +609,16 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                 is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
                 key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
+                _consecutive_infra_fails = 0
             elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
                 key_rotator.mark_banned(key)
+                _consecutive_infra_fails = 0
             else:
                 logger.warning(f"[PDFS-C2] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
+                _consecutive_infra_fails += 1
+                if _consecutive_infra_fails >= 3:
+                    logger.warning(f"[PDFS-C2] {_consecutive_infra_fails} consecutive non-quota failures (page {page}) — backend appears down, stopping early.")
+                    break
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
@@ -1091,19 +1103,18 @@ async def generate_mcq_from_image(
         logger.warning(f"[Gemini] All {len(key_rotator.keys)} keys already daily-exhausted for today — returning empty (caller will try Groq/other fallbacks)")
         return []
 
-    # 2026-08-22: capped at 8 keys (was uncapped -> up to all 44 configured
-    # 2026-08-22 (updated): user wants ALL keys tried (no ceiling) since
-    # any single key's own quota could be the one that succeeds -- cap
-    # removed. Timeout tightened instead (35s/20s -> 20s/12s) to keep
-    # total worst-case wait bounded even across the full ~44-key pool.
-    # 2026-08-22 FIX: uncapped was fine for per-key quota issues, but when
-    # Gemini's whole backend is down (network/service outage), EVERY key
-    # times out the same way -- burning 40+ keys x 25-40s each stalls a
-    # single page for 15-25+ minutes before Groq/OpenRouter ever get a
-    # chance. Cap attempts at 6 keys: enough to route around a few bad/
-    # rate-limited keys, but fails fast to the next provider when the
-    # whole backend (not just one key) is the problem.
-    max_retries = min(len(_ordered), 6) if _ordered else 5
+    # User instruction (2026-08-25): Gemini has many live keys -- Groq
+    # should NEVER be touched while even one Gemini key is still alive
+    # (not daily-exhausted). Try every live key before falling through.
+    # Exception: if the Gemini BACKEND itself is down (not a per-key quota
+    # issue -- e.g. network/503 outage), every key fails the same way, so
+    # burning all of them (could be dozens) before falling back would stall
+    # a single page for many minutes. Detect that case specifically: if the
+    # first 3 consecutive attempts ALL fail with a timeout/connection/503
+    # error (not quota/429/invalid-key), treat it as a backend outage and
+    # stop early instead of exhausting the whole key list pointlessly.
+    max_retries = len(_ordered) if _ordered else 5
+    _consecutive_infra_fails = 0
     # Model fallback chain: try the latest model first, and if the WHOLE
     # Gemini backend for it is overloaded (503 UNAVAILABLE — this is a
     # server-side capacity issue, not a per-key problem, so it hits every
@@ -1199,11 +1210,20 @@ async def generate_mcq_from_image(
             else:
                 logger.warning(f"[Gemini] Attempt {attempt+1} rate-limited (429), cooling down key for {key_rotator.COOLDOWN_SECONDS}s: {err_label}")
             key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
+            _consecutive_infra_fails = 0  # quota issue is per-key, not backend-wide -- keep trying other live keys
         elif "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper():
             logger.error(f"[Gemini] Attempt {attempt+1}: key permanently banned (suspended/invalid): {err_label}")
             key_rotator.mark_banned(key)
+            _consecutive_infra_fails = 0  # per-key issue, not backend-wide
         else:
+            # Timeout / connection error / non-429-503 exception -- this is
+            # the "backend/network genuinely down" signature, not a per-key
+            # problem, since every key would hit the same failure.
             logger.warning(f"[Gemini] Attempt {attempt+1} failed (both models): {err_label}")
+            _consecutive_infra_fails += 1
+            if _consecutive_infra_fails >= 3:
+                logger.warning(f"[Gemini] {_consecutive_infra_fails} consecutive non-quota failures (page {page}) — Gemini backend/network appears down, stopping early instead of burning all {max_retries} keys. Falling to Groq/other fallbacks.")
+                break
         if attempt < max_retries - 1:
             await asyncio.sleep(1)
         continue
