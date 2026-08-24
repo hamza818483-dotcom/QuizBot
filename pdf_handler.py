@@ -429,7 +429,7 @@ MUST Return ONLY valid JSON array, EVERY item MUST include main_topic + sub_topi
 [{{"main_topic":"...","sub_topic":"..." or null,"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
 
 
-def _pdfs_reconcile_mcq_topics(mcqs: list, fallback: str) -> list:
+def _pdfs_reconcile_mcq_topics(mcqs: list, fallback: str, allowed_topics: list = None) -> list:
     """Code-level backstop (not prompt-only) — runs on every /pdfs generation
     result before it's used anywhere else. Ensures every MCQ has a clean,
     non-empty main_topic (never silently dropped into the wrong bucket by a
@@ -437,14 +437,27 @@ def _pdfs_reconcile_mcq_topics(mcqs: list, fallback: str) -> list:
     strips the internal main_topic/sub_topic keys into the standard
     _pdfs_topic/_pdfs_subtopic keys app.py's grouping code expects — so a
     single point of truth decides the final topic bucket for every MCQ,
-    instead of trusting the raw model output directly."""
+    instead of trusting the raw model output directly.
+
+    allowed_topics (Call2 only): the exact main_topic names Call1 already
+    confirmed for this page. If the model tags an MCQ with something NOT in
+    this list (hallucinated/garbled topic name), force it onto the single
+    allowed topic (if only one) or the page's fallback topic instead of
+    creating a stray bucket that never appeared in Call1 -- this is what
+    actually prevents one topic's MCQs from silently leaking into a wrong
+    bucket."""
     out = []
+    _allowed_norm = {t.strip().lower(): t.strip() for t in (allowed_topics or []) if t and t.strip()}
     for m in (mcqs or []):
         if not isinstance(m, dict) or not m.get("question"):
             continue
         main_t = (m.get("main_topic") or "").strip()
         if not main_t:
             main_t = fallback
+        if _allowed_norm and main_t.strip().lower() not in _allowed_norm:
+            main_t = next(iter(_allowed_norm.values())) if len(_allowed_norm) == 1 else fallback
+        else:
+            main_t = _allowed_norm.get(main_t.strip().lower(), main_t)
         sub_t = m.get("sub_topic")
         sub_t = sub_t.strip() if isinstance(sub_t, str) and sub_t.strip() else None
         m["_pdfs_topic"] = main_t[:60]
@@ -538,9 +551,11 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
     passed, also records timing['start']/['end'] for external use."""
     import time as _time
     _t0 = _time.time()
+    _headings_list = headings or [{"main": topic, "sub": None}]
+    _allowed_topics = [h.get("main") for h in _headings_list if h.get("main")]
     topics_list = "\n".join(
         f"- main: \"{h.get('main')}\"" + (f", sub: \"{h.get('sub')}\"" if h.get('sub') else "")
-        for h in (headings or [{"main": topic, "sub": None}])
+        for h in _headings_list
     )
     prompt = PDFS_CALL2_MCQ_ONLY_PROMPT.format(
         topics_list=topics_list, page=str(page).zfill(2), per_topic_count=mcq_count_hint)
@@ -574,7 +589,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
             if not valid:
                 logger.warning(f"[PDFS-C2] Page {page}: 0 valid MCQs parsed (attempt {attempt+1})")
             else:
-                valid = _pdfs_reconcile_mcq_topics(valid, topic)
+                valid = _pdfs_reconcile_mcq_topics(valid, topic, allowed_topics=_allowed_topics)
             key_rotator.mark_healthy(key)
             logger.info(f"[PDFS-C2] Page {page}: {len(valid)} MCQs in {elapsed}s (attempt {attempt+1}, gemini-3.6-flash)")
             return valid, elapsed, "Gemini" if valid else None
