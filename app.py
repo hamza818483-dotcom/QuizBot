@@ -13575,6 +13575,12 @@ async def _process_pdfs_pages_inner(
                     ans_num = ans_map.get(m.get("answer", "A"), "1")
                     exp = m.get("explanation", "")
                     all_mcqs_csv.append([m["question"], opts[0], opts[1], opts[2], opts[3], ans_num, _strip_img_tag(exp), "1", "1"])
+                # carry _pdfs_topic/_pdfs_subtopic through so the final CSV
+                # export below can detect all_mcqs_raw and write topic/
+                # subtopic header rows instead of a flat list -- without
+                # this, csv_only mode always fell back to the plain
+                # 9-column CSV even though every MCQ already had its tag.
+                all_mcqs_raw.extend(mcqs)
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs)
             else:
                 image_msg_id = None
