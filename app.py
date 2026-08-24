@@ -6533,6 +6533,19 @@ async def handle_csvs_command(msg: dict):
 # ============================================================
 # SHARED CSV PARSER
 # ============================================================
+def _decode_csv_bytes(csv_bytes: bytes) -> str:
+    """CSV bytes -> text, trying multiple encodings. Excel/Windows-exported
+    CSVs often aren't valid UTF-8 (cp1252/latin-1, or UTF-16 with BOM) —
+    utf-8-sig alone throws on those bytes. Try in order, last resort
+    replaces invalid bytes instead of crashing the whole parse."""
+    for enc in ("utf-8-sig", "utf-16", "cp1252", "latin-1"):
+        try:
+            return csv_bytes.decode(enc)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return csv_bytes.decode("utf-8", errors="replace")
+
+
 def _parse_csv_bytes(csv_bytes: bytes) -> list:
     """CSV bytes থেকে MCQ list বানাও. দুইটা topic-tagging format support করে:
 
@@ -6551,7 +6564,7 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
     যাতে /sheet দিয়ে PDF বানালে topic-wise গ্রুপিং সংরক্ষিত থাকে।"""
     import io, csv as csv_mod_local
     try:
-        content = csv_bytes.decode("utf-8-sig")
+        content = _decode_csv_bytes(csv_bytes)
         reader = csv_mod_local.DictReader(io.StringIO(content))
         fieldnames = [f.strip().lower() for f in (reader.fieldnames or [])]
         _has_topic_cols = "topic" in fieldnames or "subtopic" in fieldnames
@@ -7077,7 +7090,7 @@ async def _handle_split_command_inner(msg: dict):
     """
     import io, csv as csv_mod_local
     try:
-        content = csv_bytes.decode("utf-8-sig")
+        content = _decode_csv_bytes(csv_bytes)
         reader = csv_mod_local.DictReader(io.StringIO(content))
         mcqs = []
         for row in reader:
@@ -19278,7 +19291,7 @@ async def handle_ai(msg: dict):
 
     try:
         csv_bytes = await download_tg_file(file_id)
-        content = csv_bytes.decode("utf-8-sig")
+        content = _decode_csv_bytes(csv_bytes)
         import io as _io_ai, csv as _csv_mod_ai
         reader = _csv_mod_ai.DictReader(_io_ai.StringIO(content))
         fieldnames = reader.fieldnames or []
@@ -26385,7 +26398,7 @@ async def handle_merge_command(msg: dict):
 
         try:
             csv_bytes = await download_tg_file(doc["file_id"])
-            content = csv_bytes.decode("utf-8-sig")
+            content = _decode_csv_bytes(csv_bytes)
             row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"merge_{uid}").execute())
             files = json.loads(row.data[0]["data"]).get("files", []) if row.data else []
             files.append(content)
