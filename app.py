@@ -21048,10 +21048,13 @@ EXISTING LIST (question text used for matching in Job 1, current answer used for
 OUTPUT — a single JSON array containing ALL MCQs: every item from EXISTING LIST (answer corrected per Job 2 if needed) PLUS any new items found in Job 1. Same question/option wording as the source page. No commentary, no markdown fences:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
         txt = await _qbm_gemini_raw(img, prompt)
+        _call2_provider = "Gemini"
         if not txt:
             txt = await _qbm_groq_call(img, prompt)
+            _call2_provider = "Groq"
         if not txt:
             txt = await _qbm_openrouter_call(img, prompt)
+            _call2_provider = "OpenRouter"
         if not txt:
             return mcqs  # Call2 failed entirely -- keep Call1's result as-is rather than losing highlighted MCQs
         result = _qbm_parse_json(txt)
@@ -21082,6 +21085,13 @@ OUTPUT — a single JSON array containing ALL MCQs: every item from EXISTING LIS
                 # Job 1 -- genuinely new, previously-missed highlighted MCQ.
                 if r.get("options") and r.get("answer"):
                     r["yellow_highlight"] = True
+                    # 2026-08-23 FIX: without this, the dashboard's
+                    # (Gemini:N) breakdown undercounted vs the actual MCQ
+                    # total, since _model_counts (in the caller) tallies by
+                    # each MCQ's _provider field -- newly-recovered items
+                    # from this miss-check had none, so they were invisible
+                    # to that count even though they're included in len(mcqs).
+                    r["_provider"] = _call2_provider
                     final.append(r)
         # Safety net: if the model accidentally dropped an original MCQ
         # from its output (didn't intend to remove it, just omitted while
