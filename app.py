@@ -21628,7 +21628,18 @@ async def _handle_onu_impl(msg: dict):
             _ans_map_onu = {"A": "1", "B": "2", "C": "3", "D": "4"}
             for _, _, mcqs in extracted_pages:
                 for m in mcqs:
-                    opts = m.get("options", ["", "", "", ""])
+                    _raw_opts = m.get("options", {})
+                    # 2026-08-24 FIX: options is always a dict {"A":...,
+                    # "B":...,"C":...,"D":...} from every /onu prompt
+                    # (Call1 and Call2 both), never a list -- opts[0]
+                    # indexing below on a dict raised KeyError: 0. Convert
+                    # to an ordered A/B/C/D list here for the writerow call.
+                    if isinstance(_raw_opts, dict):
+                        opts = [_raw_opts.get(k, "") for k in ("A", "B", "C", "D")]
+                    elif isinstance(_raw_opts, list):
+                        opts = _raw_opts
+                    else:
+                        opts = ["", "", "", ""]
                     _w_onu.writerow([
                         m.get("question", ""), opts[0] if len(opts) > 0 else "",
                         opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
