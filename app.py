@@ -21155,6 +21155,8 @@ PASS B — For EVERY single serial number in that complete, gap-free sequence, o
 
 PASS C — FINAL VERIFICATION (mandatory, do not skip): after finishing Pass B, go through your gap-free serial-number sequence from PASS A one more time, purely as a checklist — for every number, confirm you made an explicit highlight decision for it (either "highlighted, in output" or "not highlighted, correctly excluded"). If you find any serial number you never actually judged, judge it now before producing the final output.
 
+STRICT NEGATIVE RULE (equally important as finding misses): only add a NEW item in Job 1 if that specific MCQ block is genuinely, visibly highlighted by your Pass B check. Never add a plain white/non-highlighted MCQ to the output just because it's near a highlighted one, near a red-pen box, or because you're trying to be thorough — being thorough means correctly INCLUDING every highlighted MCQ AND correctly EXCLUDING every non-highlighted one, not adding extra MCQs "just in case."
+
 JOB 2 — MARKED ANSWER ACCURACY: for every MCQ already in the EXISTING LIST, look again at its 4 options and find the one with a RED or ORANGE circle/box drawn around/over its letter or text (A/B/C/D by position). Independently verify with your own subject knowledge whether that marked option is factually correct:
 - If the mark IS on the factually correct option, keep "answer" as that option.
 - If the mark is on the WRONG option, correct "answer" to the actually correct option instead.
