@@ -3026,22 +3026,27 @@ def _parse_explanation_only_json(text: str) -> list:
 
 async def _gemini_verify_raw_text(img, prompt: str) -> str:
     """Same job as _gen_groq_raw_text but via Gemini — used to get a second,
-    provider-diverse opinion on missed-content verification. Best-effort:
-    empty string on any failure, never raises (caller treats empty as
-    'nothing extra found')."""
+    provider-diverse opinion on missed-content verification. Tries EVERY
+    live Gemini key before giving up (2026-08-26 fix: previously only
+    tried the first key in rotation order and fell to Groq immediately on
+    any single-key failure, even with 40+ other healthy Gemini keys still
+    available — /extra must never touch another model while Gemini is
+    alive). Best-effort: empty string only after all keys fail, never
+    raises (caller treats empty as 'nothing extra found' / triggers Groq
+    fallback)."""
     try:
         if not key_rotator.keys:
             return ""
         from google import genai as gai
         from google.genai import types
-        from pdf_handler import image_to_base64
-        _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
-        key = _ordered[0] if _ordered else key_rotator.get_key()
-        key_rotator.record_call(key)
-        client = gai.Client(api_key=key)
+        from pdf_handler import image_to_base64, _is_gemini_key_exhausted_today
         img_b64 = image_to_base64(img)
+        _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
+        keys_to_try = _live if _live else _ordered
 
-        def _call():
+        def _call(key):
+            client = gai.Client(api_key=key)
             return client.models.generate_content(
                 model="gemini-3.6-flash",
                 contents=[
@@ -3049,17 +3054,31 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
                     types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
                 ]
             )
-        response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=20)
-        key_rotator.mark_healthy(key)
-        return response.text or ""
+
+        for idx, key in enumerate(keys_to_try):
+            key_rotator.record_call(key)
+            try:
+                _timeout = 40 if idx == 0 else 20
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=_timeout)
+                key_rotator.mark_healthy(key)
+                return response.text or ""
+            except asyncio.TimeoutError:
+                logger.warning(f"[GeminiVerify] key {key[:12]}... timed out ({_timeout}s), trying next key")
+                continue
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                    daily = "PerDay" in err_str
+                    key_rotator.mark_rate_limited(key, daily_exhausted=daily)
+                elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
+                      or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
+                      or "401" in err_str):
+                    key_rotator.mark_banned(key, reason=err_str[:200])
+                logger.warning(f"[GeminiVerify] key {key[:12]}... failed, trying next key: {e}")
+                continue
+        logger.warning(f"[GeminiVerify] all {len(keys_to_try)} Gemini key(s) failed — returning empty")
+        return ""
     except Exception as e:
-        err_str = str(e)
-        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
-            key_rotator.mark_rate_limited(key)
-        elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
-              or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
-              or "401" in err_str):
-            key_rotator.mark_banned(key, reason=err_str[:200])
         logger.warning(f"[GeminiVerify] failed: {e}")
         return ""
 
@@ -11889,6 +11908,7 @@ async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclu
     prompt = _build_extra_prompt_standalone(topic)
     tried_keys = set()
     gemini_ok = False
+    _provider_used = "Gemini"
     try:
         txt = await _gemini_verify_raw_text(img, prompt)
         if txt:
@@ -11901,9 +11921,11 @@ async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclu
         out = []
 
     # Only fall to Groq on a TECHNICAL failure (Gemini gave nothing back at
-    # all) -- a genuine "[]" from Gemini is trusted as-is, no key burn.
+    # all, i.e. every live Gemini key failed) -- a genuine "[]" from Gemini
+    # is trusted as-is, no key burn, no other model touched.
     if not out and not gemini_ok:
         try:
+            _provider_used = "Groq"
             groq_keys = groq_key_rotator.ordered_keys(offset=key_offset)
             if exclude_groq_keys:
                 fresh = [k for k in groq_keys if k not in exclude_groq_keys]
@@ -11931,6 +11953,8 @@ async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclu
             logger.warning(f"[Extra-Standalone] groq failed page {page_num}: {e}")
             out = []
 
+    for _m in out:
+        _m["_provider"] = _provider_used
     out = _cap_mcq_options(out, 4)
     out = _validate_mcq_structure(out)
     out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
@@ -11996,7 +12020,7 @@ async def extra_generate_all_pages(
                 await edit_msg(chat_id, status_msg_id,
                     _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
 
-    async def _mark_done(page_num, img, mcqs):
+    async def _mark_done(page_num, img, mcqs, model_tag=None):
         async with lock:
             idx = _idx_of(page_num)
             results_by_idx[idx] = (page_num, img, mcqs)
@@ -12004,6 +12028,10 @@ async def extra_generate_all_pages(
             page_status[idx]["current"] = False
             page_status[idx]["done"] = True
             page_status[idx]["mcq"] = len(mcqs)
+            if model_tag:
+                page_status[idx]["model"] = model_tag
+            elif mcqs and mcqs[0].get("_provider"):
+                page_status[idx]["model"] = mcqs[0]["_provider"]
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id,
                     _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
@@ -12233,55 +12261,22 @@ async def _handle_extra_impl(msg: dict):
         generated_pages = await extra_generate_all_pages(chat_id, pages, topic, file_name, status_msg_id)
         pdf_bytes = None
 
-        if channel_id:
-            await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, None,
-                channel_id, False, file_name, status_msg_id, thread_id=thread_id, skip_generate=True)
-            return
-
-        channels = await db_get_channels()
-        if not channels:
-            await process_pdf_pages(chat_id, uid, uname, generated_pages, topic, None,
-                None, True, file_name, status_msg_id, thread_id=thread_id, skip_generate=True)
-            return
-
-        app.state.pdf_cache = getattr(app.state, "pdf_cache", {})
-        app.state.pdf_cache[f"pdf_img_{uid}"] = generated_pages
-        _cap_page_cache(app.state.pdf_cache)
-        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
-            "key": f"pdf_pending_{uid}",
-            "data": json.dumps({"topic": topic, "mcq_count": None, "file_name": file_name, "status_msg_id": status_msg_id, "thread_id": thread_id, "file_id": file_id, "page_range": page_range}),
-            "updated_at": int(time.time())
-        }).execute())
-
+        # /extra: CSV-only output, reply to the live dashboard message, no
+        # channel-list / channel-select flow at all (2026-08-26).
         total_mcq_found = sum(len(mcqs) for _, _, mcqs in generated_pages)
-
+        all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
         try:
-            all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
             if all_mcqs_flat:
                 csv_bytes = _mcqs_to_csv_bytes(all_mcqs_flat)
                 await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
-                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv")
+                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv",
+                    reply_to_message_id=status_msg_id)
+            else:
+                await send_msg(chat_id, "⚠️ কোনো hand-marked MCQ পাওয়া যায়নি।",
+                    reply_to_message_id=status_msg_id)
         except Exception as csv_err:
-            logger.warning(f"[Extra] CSV auto-send failed: {csv_err}")
-
-        page_breakdown = "\n".join(
-            f"✅ Page {fmt_page(p)}: {len(mcqs)} MCQ ✓" for p, _, mcqs in generated_pages
-        )
-        kb = {"inline_keyboard": []}
-        for ch in channels:
-            ch_id = ch.get("channel_id", "")
-            ch_name = ch.get("channel_name", ch_id)
-            kb["inline_keyboard"].append([{"text": f"📢 {ch_name}", "callback_data": f"pdfch_{ch_id}_{uid}"}])
-        kb["inline_keyboard"].append([{"text": "📄 CSV File Only", "callback_data": f"pdfch_csv_{uid}"}])
-        await send_msg(chat_id,
-            f"✅ <b>Extra Extraction Complete!</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📝 Total MCQ: {total_mcq_found}  |  📋 Pages: {len(generated_pages)}\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{page_breakdown}\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 Topic: {topic}\n\nChannel select করো:",
-            reply_markup=kb)
+            logger.warning(f"[Extra] CSV send failed: {csv_err}")
+            await notify_owner(f"[Extra] CSV send failed: {csv_err}")
 
     except Exception as e:
         logger.error(f"[Extra] Handle error: {e}", exc_info=True)
