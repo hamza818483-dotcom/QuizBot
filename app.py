@@ -4189,6 +4189,33 @@ def _strip_option_prefix(text: str) -> str:
         return text
     return re.sub(r'^\s*[A-Da-dক-ঘ]\s*[).।:]\s*', '', str(text)).strip()
 
+def _extra_strip_source_refs(mcqs: list) -> list:
+    """/extra safety net: strips common Bangla/English source-referencing
+    phrases from explanations (e.g. 'বইয়ে বলা আছে', 'হাইলাইট করা অংশ অনুযায়ী',
+    'চিহ্নিত অংশে', 'পৃষ্ঠায় উল্লেখ আছে', 'as marked/highlighted') in case the
+    model slips past the prompt instruction. Best-effort regex cleanup,
+    never raises."""
+    if not mcqs:
+        return mcqs
+    _patterns = [
+        r'বইয়ে\s*(বলা|উল্লেখ|লেখা)\s*(আছে|হয়েছে)[,।:]?\s*',
+        r'(হাইলাইট|মার্ক|চিহ্নিত)\s*করা\s*অংশ(টি|ে|টা)?\s*(অনুযায়ী|অনুসারে|থেকে)?[,।:]?\s*',
+        r'চিহ্নিত\s*(অংশ|লাইন|অংশে|লাইনে)[,।:]?\s*',
+        r'পৃষ্ঠায়\s*উল্লেখ\s*(আছে|করা\s*হয়েছে)[,।:]?\s*',
+        r'যেমনটি\s*(বইয়ে|পৃষ্ঠায়)\s*(বলা|উল্লেখ)\s*(আছে|হয়েছে)[,।:]?\s*',
+        r'(as\s+(marked|highlighted|mentioned\s+in\s+the\s+(book|text|page))[,:]?\s*)',
+        r'(according\s+to\s+the\s+(book|text|highlighted\s+(portion|part))[,:]?\s*)',
+    ]
+    for m in mcqs:
+        exp = m.get("explanation", "")
+        if not exp:
+            continue
+        for pat in _patterns:
+            exp = re.sub(pat, '', exp, flags=re.IGNORECASE)
+        m["explanation"] = exp.strip()
+    return mcqs
+
+
 def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
     """v4.4: some AI providers occasionally return 5 options (E) instead of 4.
     Trim every mcq down to max_opts here — single choke point so /img's
@@ -10811,7 +10838,22 @@ def _build_extra_prompt_standalone(topic: str) -> str:
         f"If NO hand-marks exist anywhere on this page, return exactly [] — "
         f"zero MCQs is a completely valid and expected result.\n\n"
         f"For each hand-marked line/phrase found, generate ONE high-quality "
-        f"MCQ (4 options, correct answer, short Bengali explanation).\n\n"
+        f"MCQ (4 options, correct answer, Bengali explanation).\n\n"
+        f"📝 EXPLANATION RULES (MUST follow exactly):\n"
+        f"- Write a DIRECT explanation of the answer itself — NEVER mention "
+        f"the source, e.g. never say things like 'বইয়ে বলা আছে', 'হাইলাইট করা "
+        f"অংশ অনুযায়ী', 'চিহ্নিত অংশে', 'পৃষ্ঠায় উল্লেখ আছে' or any similar "
+        f"reference to the book/page/highlight/mark. Just state the fact "
+        f"directly as if explaining the concept itself.\n"
+        f"- The explanation content MUST come from the book's own content "
+        f"(the marked text and its surrounding context on the page) — never "
+        f"invent facts not grounded in the page.\n"
+        f"- The explanation MUST include extra relevant info about the "
+        f"question/correct answer beyond just restating it (add depth: "
+        f"related facts, definition, mechanism, or context from the book).\n"
+        f"- The explanation MUST ALSO briefly cover the other 3 options — "
+        f"say why each is incorrect or how it relates/differs from the "
+        f"correct answer. This is mandatory, not optional.\n\n"
         f"🔁 SELF-VERIFICATION (do this internally, 3 passes, before writing "
         f"your final answer -- do not show this work, just apply it):\n"
         f"1st pass: identify every hand-mark on the page and draft MCQs.\n"
@@ -10820,7 +10862,8 @@ def _build_extra_prompt_standalone(topic: str) -> str:
         f"italic printing) -- drop any MCQ that fails this check.\n"
         f"3rd pass: re-verify each kept MCQ's correct answer against the "
         f"marked/underlined text itself (not assumption) -- fix the answer "
-        f"letter if it doesn't match what's actually marked.\n"
+        f"letter if it doesn't match what's actually marked. Also re-check "
+        f"the explanation follows all EXPLANATION RULES above.\n"
         f"Only after all 3 passes, output the final JSON.\n\n"
         f"OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown.\n"
         f'[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},'
@@ -10869,8 +10912,23 @@ def _build_extra_prompt_batched(topic: str, n: int) -> str:
         f"If NO hand-marks exist anywhere on a given page, that page "
         f"contributes zero items — do not force an MCQ onto it.\n\n"
         f"For each hand-marked line/phrase found on each page, generate ONE "
-        f"high-quality MCQ (4 options, correct answer, short Bengali "
+        f"high-quality MCQ (4 options, correct answer, Bengali "
         f"explanation), tagged with the page_index it came from.\n\n"
+        f"📝 EXPLANATION RULES (MUST follow exactly):\n"
+        f"- Write a DIRECT explanation of the answer itself — NEVER mention "
+        f"the source, e.g. never say things like 'বইয়ে বলা আছে', 'হাইলাইট করা "
+        f"অংশ অনুযায়ী', 'চিহ্নিত অংশে', 'পৃষ্ঠায় উল্লেখ আছে' or any similar "
+        f"reference to the book/page/highlight/mark. Just state the fact "
+        f"directly as if explaining the concept itself.\n"
+        f"- The explanation content MUST come from the book's own content "
+        f"(the marked text and its surrounding context on that page) — "
+        f"never invent facts not grounded in the page.\n"
+        f"- The explanation MUST include extra relevant info about the "
+        f"question/correct answer beyond just restating it (add depth: "
+        f"related facts, definition, mechanism, or context from the book).\n"
+        f"- The explanation MUST ALSO briefly cover the other 3 options — "
+        f"say why each is incorrect or how it relates/differs from the "
+        f"correct answer. This is mandatory, not optional.\n\n"
         f"🔁 SELF-VERIFICATION (do this internally, 3 passes PER PAGE, before "
         f"writing your final answer -- do not show this work, just apply "
         f"it):\n"
@@ -10881,7 +10939,8 @@ def _build_extra_prompt_batched(topic: str, n: int) -> str:
         f"bold/italic printing) -- drop any MCQ that fails this check.\n"
         f"3rd pass: re-verify each kept MCQ's correct answer against the "
         f"marked/underlined text itself (not assumption) -- fix the answer "
-        f"letter if it doesn't match what's actually marked.\n"
+        f"letter if it doesn't match what's actually marked. Also re-check "
+        f"the explanation follows all EXPLANATION RULES above.\n"
         f"Only after all 3 passes on every page, output the final JSON.\n\n"
         f"OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. "
         f"EVERY item MUST include \"page_index\" (1-based int matching the "
@@ -10932,6 +10991,7 @@ async def _extra_gen_from_images_batch(imgs: list, topic: str) -> dict:
             out = _validate_mcq_structure(out)
             out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
             out = _extra_code_level_3pass_verify(out, page_num=idx)
+            out = _extra_strip_source_refs(out)
             if out and idx - 1 < len(imgs) and not _extra_page_has_highlight_marks(imgs[idx - 1]):
                 logger.info(f"[Extra HighlightCheck] batch page_index {idx}: {len(out)} MCQ(s) but NO highlighter color detected -- likely pen-only marks (not blocked)")
             by_index[idx] = out
@@ -11959,6 +12019,7 @@ async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclu
     out = _validate_mcq_structure(out)
     out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
     out = _extra_code_level_3pass_verify(out, page_num=page_num)
+    out = _extra_strip_source_refs(out)
 
     if out and not _extra_page_has_highlight_marks(img):
         # No highlighter-colored ink detected anywhere on this page at
