@@ -447,7 +447,8 @@ PDFS_TOPIC_MCQ_PROMPT = """📝 Special MCQ TYPE: /pdfs Topic-wise Generation (S
 -🔒 TWO-MODE RULE: page-এ আগে থেকেই MCQ (question+options) থাকলে সেগুলো 100% VERBATIM extract করবে, নইলে content থেকে নতুন MCQ বানাবে।
 -🔒 NO-DUPLICATE-FROM-EXISTING-MCQ: existing question rephrase করে নতুন MCQ বানানো নিষিদ্ধ। NO-MCQ-FROM-ANSWER/EXPLANATION-TEXT: কোনো প্রশ্নের answer/explanation paragraph থেকে সরাসরি নতুন MCQ বানানো নিষিদ্ধ, শুধু actual info-content থেকেই বানাবে।
 -🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST): হাইলাইটেড/মার্ক করা/আন্ডারলাইন করা লাইন থেকে MCQ সবার আগে বানাবে (মিস করা যাবে না), তারপর বাকি normal content থেকে।
--প্রতিটা topic থেকে গড়ে {per_topic_count} টি MCQ target করো (topic-এ content বেশি/কম থাকলে স্বাভাবিকভাবে কমবেশি হতে পারে, কিন্তু কোনো topic 0 রাখা যাবে না যদি তার নিজের content থাকে)।
+🔴🔴 EXHAUSTIVE COVERAGE (MANDATORY): {per_topic_count} শুধু ন্যূনতম টার্গেট, ceiling না — প্রতিটা topic-এর content-এ যত fact/line/data থেকে valid MCQ বানানো সম্ভব সবগুলো থেকেই বানাও, content বেশি থাকলে সংখ্যাও বেশি হবে। মাত্র ৩-৪টা বানিয়ে থেমে যাওয়া ভুল যদি সেই topic-এ আরও extract-যোগ্য content বাকি থাকে।
+-প্রতিটা topic থেকে ন্যূনতম {per_topic_count} টি MCQ বানাও (topic-এ content বেশি থাকলে আরও বেশি বানাও, কিন্তু কোনো topic 0 রাখা যাবে না যদি তার নিজের content থাকে)।
 -টপিকের নাম/অধ্যায়ের নাম/হেডলাইন/পেইজ সংখ্যা/navigation label থেকে MCQ বানাবে না।
 -প্রতিটা অপশন actual factual content হতে হবে, হ্যাঁ/না/সত্য/মিথ্যা না।
 💥প্রশ্ন: ছোট (১/১.৫/২ লাইন)
@@ -476,7 +477,8 @@ PDFS_CALL2_MCQ_ONLY_PROMPT = """📝 /pdfs Call2 — MCQ GENERATION ONLY (topic 
 -🔒 TWO-MODE RULE: page-এ আগে থেকেই MCQ থাকলে 100% VERBATIM extract করবে, নইলে content থেকে নতুন MCQ বানাবে।
 -🔒 NO-DUPLICATE-FROM-EXISTING-MCQ, NO-MCQ-FROM-ANSWER/EXPLANATION-TEXT.
 -🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST): হাইলাইটেড/মার্ক করা লাইন থেকে MCQ সবার আগে বানাবে।
--প্রতিটা topic থেকে গড়ে {per_topic_count} টি MCQ target করো, কোনো topic 0 রাখা যাবে না যদি তার নিজের content থাকে।
+🔴🔴 EXHAUSTIVE COVERAGE (MANDATORY, NOT OPTIONAL): এই page-এ যত fact/definition/data/line আছে যেখান থেকে একটা valid MCQ বানানো সম্ভব — প্রতিটা থেকে MCQ বানাতে হবে। {per_topic_count} শুধু একটা TARGET/ন্যূনতম সংখ্যা, ceiling না — page-এ যদি তার চেয়ে বেশি বানানোর মতো content থাকে (বেশি বাক্য/fact/উপ-পয়েন্ট), তাহলে বেশি MCQ-ই বানাতে হবে। শুধু ৩-৪টা বানিয়ে থেমে যাওয়া ভুল, যদি page-এ আরও extractable content অবশিষ্ট থাকে। থামার আগে নিজেকে যাচাই করো: "এই page-এর প্রতিটা লাইন/fact কি আমি কভার করেছি?" — না করলে আরও MCQ যোগ করো।
+-প্রতিটা topic থেকে ন্যূনতম {per_topic_count} টি MCQ বানাও (content বেশি থাকলে আরও বেশি), কোনো topic 0 রাখা যাবে না যদি তার নিজের content থাকে।
 -টপিকের নাম/হেডলাইন/পেইজ সংখ্যা থেকে MCQ বানাবে না। প্রতিটা অপশন actual factual content, হ্যাঁ/না না।
 💥প্রশ্ন: ছোট (১/১.৫/২ লাইন) | 💥অপশন: ৪টি, সঠিক উত্তর একটিই | 💥উত্তর: A/B/C/D ছড়িয়ে দিবে।
 💥ব্যাখ্যা (MAX 165 WORDS): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, শুধু page content থেকে।
@@ -603,7 +605,7 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
 
 
 async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str, page: int,
-                                    mcq_count_hint: int = 15, timing: dict = None) -> tuple:
+                                    mcq_count_hint: int = 15, timing: dict = None, chat_id: int = None) -> tuple:
     """/pdfs Call2 (generation-only): headings is Call1's already-confirmed
     list of [{"main":..., "sub":...}] for this page — this function does
     NOT re-detect topics, it just generates MCQs and tags each with one of
@@ -659,9 +661,13 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
             key_rotator.mark_healthy(key)
             try:
                 import app as _app_mod
-                _app_mod._bump_ai_call_count(_app_mod._current_job_chat_id_ctx.get(), model="Gemini")
-            except Exception:
-                pass
+                _cid = chat_id if chat_id is not None else _app_mod._current_job_chat_id_ctx.get()
+                if _cid is None:
+                    logger.warning(f"[PDFS-C2] AI-call bump skipped: no chat_id available (page {page}) -- dashboard AI-call count will under-report")
+                else:
+                    _app_mod._bump_ai_call_count(_cid, model="Gemini")
+            except Exception as _bump_e:
+                logger.warning(f"[PDFS-C2] AI-call bump failed (page {page}): {type(_bump_e).__name__}: {_bump_e}")
             logger.info(f"[PDFS-C2] Page {page}: {len(valid)} MCQs in {elapsed}s (attempt {attempt+1}, gemini-3.6-flash)")
             return valid, elapsed, "Gemini" if valid else None
         except Exception as e:

@@ -13809,7 +13809,7 @@ async def _process_pdfs_pages_inner(
                 _page_model = None
                 try:
                     from pdf_handler import generate_pdfs_call2_mcqs
-                    _gen_task = _spawn_task(generate_pdfs_call2_mcqs(img, _page_headings, _primary_topic, page_num, mcq_count_hint=(mcq_count or 15)))
+                    _gen_task = _spawn_task(generate_pdfs_call2_mcqs(img, _page_headings, _primary_topic, page_num, mcq_count_hint=(mcq_count or 15), chat_id=chat_id))
                     ACTIVE_GEN_TASK[chat_id] = _gen_task
                     try:
                         mcqs, _page_elapsed, _page_model = await asyncio.wait_for(_gen_task, timeout=150)
