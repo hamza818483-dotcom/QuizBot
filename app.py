@@ -3066,7 +3066,8 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
                 logger.warning(f"[GeminiVerify] key {key[:12]}... timed out ({_timeout}s), trying next key")
                 continue
             except Exception as e:
-                err_str = str(e)
+                from pdf_handler import _gemini_full_error_text
+                err_str = _gemini_full_error_text(e)
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                     daily = "PerDay" in err_str
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily)

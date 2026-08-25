@@ -78,6 +78,8 @@ async def load_gemini_exhausted_keys_from_d1():
                 restored += 1
         if restored:
             logger.warning(f"[Gemini] Restored {restored} daily-exhausted key(s) from D1 after restart")
+        else:
+            logger.info(f"[Gemini] D1 rehydrate ran: 0 keys were marked exhausted-today in D1 (either all quotas are genuinely fresh, or D1 write never happened for yesterday's exhausted keys — check [D1] warnings in logs if this seems wrong)")
         _gemini_exhausted_d1_loaded = True
     except Exception as e:
         logger.warning(f"[Gemini] load_gemini_exhausted_keys_from_d1 failed (non-fatal, starts fresh): {e}")
@@ -93,6 +95,41 @@ def _is_gemini_key_exhausted_today(key: str) -> bool:
         _gemini_key_exhausted_day[key] = today
         _gemini_key_exhausted_flag[key] = False
     return _gemini_key_exhausted_flag.get(key, False)
+
+
+def _gemini_full_error_text(e: Exception) -> str:
+    """str(e) from the google-genai SDK often omits the nested quota-detail
+    JSON (quotaId/'PerDay' text lives in the raw HTTP response body, not
+    always in the exception's own __str__). Without the full body, the
+    'PerDay'/'generate_content_free_tier_requests' substring check below
+    can miss a genuine DAILY quota exhaustion and only apply the 60s
+    short-cooldown instead — meaning the key comes back on the next call
+    (and shows 'healthy' again after any restart) even though Google's
+    real daily quota for it is still exhausted for the rest of the day.
+    This pulls response.text/response.body (whichever the SDK's exception
+    exposes) and appends it so the daily-quota substring check has the
+    real data to match against, same pattern already used by
+    _qbm_gemini_raw_multi/_dagano_gemini_raw_multi in app.py."""
+    msg = str(e)
+    extra = ""
+    try:
+        resp_obj = getattr(e, "response", None)
+        if resp_obj is not None:
+            extra = getattr(resp_obj, "text", "") or ""
+            if not extra:
+                body = getattr(resp_obj, "body", None)
+                if body:
+                    extra = body if isinstance(body, str) else str(body)
+    except Exception:
+        pass
+    if not extra:
+        try:
+            args_text = " ".join(str(a) for a in getattr(e, "args", []))
+            if args_text and args_text != msg:
+                extra = args_text
+        except Exception:
+            pass
+    return (msg + " " + extra).strip() if extra else msg
 
 def _mark_gemini_key_exhausted_today(key: str):
     today = _gemini_quota_today_str()
@@ -545,7 +582,7 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
                         f"{len(set(m['_pdfs_topic'] for m in valid))} topic(s) (attempt {attempt+1})")
             return valid
         except Exception as e:
-            err_str = str(e)
+            err_str = _gemini_full_error_text(e)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                 is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
                 key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
@@ -628,7 +665,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
             logger.info(f"[PDFS-C2] Page {page}: {len(valid)} MCQs in {elapsed}s (attempt {attempt+1}, gemini-3.6-flash)")
             return valid, elapsed, "Gemini" if valid else None
         except Exception as e:
-            err_str = str(e)
+            err_str = _gemini_full_error_text(e)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                 is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
                 key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
@@ -1218,7 +1255,7 @@ async def generate_mcq_from_image(
         e = last_exc
         if e is None:
             continue  # shouldn't happen, but guard just in case
-        err_str = str(e)
+        err_str = _gemini_full_error_text(e)
         err_label = f"{type(e).__name__}: {err_str}" if err_str else f"{type(e).__name__} (no message — likely timeout)"
         try:
             from app import classify_ai_error
@@ -1357,7 +1394,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
                 logger.info(f"[Gemini-Text] {len(valid)} MCQs (attempt {attempt+1})")
                 return valid
         except Exception as e:
-            err_str = str(e)
+            err_str = _gemini_full_error_text(e)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                 is_daily = "PerDay" in err_str or "generate_content_free_tier_requests" in err_str
                 key_rotator.mark_rate_limited(key, daily_exhausted=is_daily)
