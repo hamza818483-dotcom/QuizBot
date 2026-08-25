@@ -6586,6 +6586,17 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
             # DictReader keys keep original casing -- normalize lookup
             row_norm = {k.strip().lower(): v for k, v in row.items() if k}
             q = row_norm.get("questions") or row_norm.get("question", "")
+            _opt1_chk = (row_norm.get("option1") or "").strip()
+            _opt2_chk = (row_norm.get("option2") or "").strip()
+            _ans_chk = (row_norm.get("answer") or "").strip()
+            _exp_chk = (row_norm.get("explanation") or "").strip()
+            # Subtopic marker row: 'questions' blank, options2+/answer/
+            # explanation blank, ONLY option1 filled -> option1 IS the
+            # subtopic name. Checked BEFORE the empty-question skip below,
+            # since this row legitimately has a blank 'questions' cell.
+            if not q.strip() and _opt1_chk and not _opt2_chk and not _ans_chk and not _exp_chk:
+                _cur_sub = _opt1_chk
+                continue
             if not q:
                 continue
             row_type = (row_norm.get("type") or "").strip()
@@ -6595,6 +6606,13 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
                 continue
             if row_type == "sub_topic_header":
                 _cur_sub = re.sub(r'^—+\s*|\s*—+$', '', q).strip()
+                continue
+            # NEW marker-row format: topic row has ONLY 'questions' filled,
+            # everything else (options/answer/explanation) blank -> this
+            # row's question text IS the topic name, not a real MCQ.
+            if q.strip() and not _opt1_chk and not _opt2_chk and not _ans_chk and not _exp_chk:
+                _cur_main = q.strip()
+                _cur_sub = None
                 continue
             if _has_topic_cols:
                 # NEW style: this row's own topic/subtopic columns (if
@@ -9387,6 +9405,42 @@ def _build_topicwise_csv_rows(topics_ordered: list, topic_mcqs: dict) -> list:
                 ])
                 _first_in_main = False
                 _first_in_sub = False
+    return rows
+
+
+def _build_pdfs_marker_row_csv(topics_ordered: list, topic_mcqs: dict) -> list:
+    """/pdfs NEW marker-row CSV format (2026-08-26):
+    - Topic marker row: ONLY 'questions' filled with the topic name, every
+      other column (options/answer/explanation) blank.
+    - Subtopic marker row: 'questions' blank, options/answer/explanation
+      blank, ONLY 'option1' filled with the subtopic name.
+    - Real MCQ rows follow normally under whichever marker rows precede
+      them. No separate topic/subtopic columns -- topic name IS the
+      question-column content of its marker row.
+    Column order: questions, option1, option2, option3, option4, option5,
+    answer, explanation, type, section (10 cols, matches non-topicwise
+    CSV header so both paths write the same width)."""
+    rows = []
+    for main_t in topics_ordered:
+        if not main_t:
+            continue
+        sub_map = topic_mcqs.get(main_t, {})
+        sub_order = sub_map.get("__order__", [])
+        if not sub_order:
+            continue
+        rows.append([main_t, "", "", "", "", "", "", "", "", ""])
+        for sub_t in sub_order:
+            mcqs = sub_map.get(sub_t, [])
+            if not mcqs:
+                continue
+            if sub_t:
+                rows.append(["", sub_t, "", "", "", "", "", "", "", ""])
+            for q in mcqs:
+                opts = (q.get("options", []) + ["", "", "", ""])[:4]
+                rows.append([
+                    q.get("question", ""), opts[0], opts[1], opts[2], opts[3], "",
+                    q.get("answer", "A"), q.get("explanation", ""), "1", "1"
+                ])
     return rows
 
 
@@ -13316,8 +13370,8 @@ async def _process_pdf_pages_inner(
         writer.writerow(["questions","option1","option2","option3","option4","answer","explanation","type","section"])
         if _PDFS_MODE.get() and all_mcqs_raw:
             _topics_order, _topic_map = _group_pdfs_mcqs(all_mcqs_raw, "প্রাক্টিস প্রশ্ন")
-            for row in _build_topicwise_csv_rows(_topics_order, _topic_map):
-                writer.writerow(row)
+            for row in _build_pdfs_marker_row_csv(_topics_order, _topic_map):
+                writer.writerow(row[:5] + row[6:])
         else:
             for row in all_mcqs_csv:
                 writer.writerow(row)
@@ -13982,14 +14036,14 @@ async def _process_pdfs_pages_inner(
         import io, csv as csv_mod
         buf = io.StringIO()
         writer = csv_mod.writer(buf)
-        writer.writerow(["questions","option1","option2","option3","option4","option5","answer","explanation","type","section","topic","subtopic"])
+        writer.writerow(["questions","option1","option2","option3","option4","option5","answer","explanation","type","section"])
         if all_mcqs_raw:
             _topics_order, _topic_map = _group_pdfs_mcqs(all_mcqs_raw, "প্রাক্টিস প্রশ্ন")
-            for row in _build_topicwise_csv_rows(_topics_order, _topic_map):
+            for row in _build_pdfs_marker_row_csv(_topics_order, _topic_map):
                 writer.writerow(row)
         else:
             for row in all_mcqs_csv:
-                writer.writerow(row[:5] + [""] + row[5:] + ["", ""])
+                writer.writerow(row[:5] + [""] + row[5:])
         await send_document(chat_id, buf.getvalue().encode("utf-8"), f"{topic}_mcq.csv",
             caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ", mime_type="text/csv",
             reply_to_message_id=status_msg_id)
