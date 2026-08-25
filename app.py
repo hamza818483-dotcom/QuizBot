@@ -22368,9 +22368,12 @@ def _onu2_clean_mcq_fields(mc: dict) -> dict:
         mc["question"] = q
     opts = mc.get("options")
     if isinstance(opts, dict):
-        for k in ("A", "B", "C", "D"):
-            if opts.get(k):
-                opts[k] = _clean_mcq_text(str(opts[k]))
+        # Normalize dict-shape options {"A":..,"B":..,"C":..,"D":..} to a
+        # plain 4-item list -- callers (e.g. /extra's CSV writer) expect
+        # a list and silently iterate a dict's KEYS ("A","B","C","D")
+        # instead of its values if left as a dict, producing MCQs with
+        # literal "A"/"B"/"C"/"D" as option text (2026-08-26 bug fix).
+        mc["options"] = [_clean_mcq_text(str(opts.get(k, ""))) for k in ("A", "B", "C", "D")]
     elif isinstance(opts, list):
         mc["options"] = [_clean_mcq_text(str(o)) if o else o for o in opts]
     if mc.get("explanation"):
