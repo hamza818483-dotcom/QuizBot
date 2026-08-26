@@ -3094,6 +3094,7 @@ async def _gen_groq_raw_text(img, prompt: str, mcq_count_hint=None) -> str:
     # a last-resort fallback so a single key's truncated/malformed JSON
     # doesn't waste the whole attempt if every other key also fails.
     if keys and data_url:
+        _tpm_retry_delays = []
         for key in keys:
             txt, status = await _post_openai_compat(
                 "https://api.groq.com/openai/v1/chat/completions",
@@ -3126,8 +3127,45 @@ async def _gen_groq_raw_text(img, prompt: str, mcq_count_hint=None) -> str:
                 is_tpm_only = _key_429_is_tpm.get(key) is True
                 groq_key_rotator.mark_rate_limited(key, daily_exhausted=not is_tpm_only)
                 logger.warning(f"[GroqVerify] key {key[:12]}... rate-limited (429, daily_exhausted={not is_tpm_only}), trying next key")
+                if is_tpm_only:
+                    ra = _key_429_retry_after.get(key)
+                    if ra:
+                        _tpm_retry_delays.append(ra)
             else:
                 logger.warning(f"[GroqVerify] key {key[:12]}... failed (status={status}), trying next key")
+        # All keys failed this pass. If EVERY failure was a TPM (per-minute,
+        # org-wide) 429 -- not genuine daily quota exhaustion -- the keys
+        # are actually fine, just the org's shared TPM window is briefly
+        # full. Retrying immediately across keys hits the same wall (as
+        # seen in logs: many keys 429 within the same second) and used to
+        # fall straight through to NVIDIA/OpenRouter/Nemotron/Gemma, which
+        # are usually all dead-ends too -- wasting the call entirely when
+        # a single short wait would have let Groq succeed. Wait the
+        # shortest real retry-after Groq gave us, once, then retry Groq
+        # before giving up on it.
+        if _tpm_retry_delays and len(_tpm_retry_delays) == len(keys):
+            wait_s = min(_tpm_retry_delays) + 1
+            logger.warning(f"[GroqVerify] all {len(keys)} keys hit TPM (org-wide, not genuine exhaustion) — waiting {wait_s:.1f}s then retrying Groq once before falling to other providers")
+            await asyncio.sleep(wait_s)
+            for key in keys:
+                txt, status = await _post_openai_compat(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    key, "qwen/qwen3.6-27b",
+                    data_url, prompt, mcq_count_hint=mcq_count_hint
+                )
+                if txt:
+                    try:
+                        if _parse_mcq_json(txt):
+                            groq_key_rotator.mark_healthy(key)
+                            return txt
+                    except Exception:
+                        if len(txt) > len(best_invalid_txt):
+                            best_invalid_txt = txt
+                    continue
+                if status == 429:
+                    is_tpm_only = _key_429_is_tpm.get(key) is True
+                    groq_key_rotator.mark_rate_limited(key, daily_exhausted=not is_tpm_only)
+            logger.warning("[GroqVerify] Groq retry-after-TPM-wait still failed on every key")
     logger.warning("[GroqVerify] all Groq keys exhausted; trying NVIDIA/OpenRouter/Nemotron/Gemma fallback")
     # All Groq keys exhausted/failing -- rotate through other vision providers
     # instead of silently returning empty (previously killed the whole call).
