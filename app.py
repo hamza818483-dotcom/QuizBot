@@ -6868,13 +6868,27 @@ _cut_pdf_cache = {}  # file_id -> pdf_bytes (small in-memory cache to skip re-do
 _CUT_CACHE_MAX = 5
 
 async def handle_cut_command(msg: dict):
+    """Dispatch /cut to the PDF or CSV handler based on the replied file's extension."""
+    reply = msg.get("reply_to_message")
+    chat_id = msg["chat"]["id"]
+    doc = reply.get("document") if reply else None
+    if not doc:
+        await send_msg(chat_id, "❌ PDF বা CSV ফাইলে reply করে <code>/cut</code> দাও", parse_mode="HTML")
+        return
+    file_name = (doc.get("file_name") or "").lower()
+    if file_name.endswith(".csv"):
+        return await handle_cut_csv_command(msg)
+    return await handle_cut_pdf_command(msg)
+
+
+async def handle_cut_pdf_command(msg: dict):
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
     try:
-        return await _handle_cut_command_inner(msg)
+        return await _handle_cut_pdf_command_inner(msg)
     finally:
         _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
 
-async def _handle_cut_command_inner(msg: dict):
+async def _handle_cut_pdf_command_inner(msg: dict):
     """/cut <page or range> — reply to a PDF file.
     Single page (e.g. /cut 5) -> sends that page as a photo.
     Range (e.g. /cut 3-7) -> sends a new PDF with those pages."""
@@ -7012,15 +7026,15 @@ async def _handle_cut_command_inner(msg: dict):
         return
 
 
-async def handle_cut_command(msg: dict):
+async def handle_cut_csv_command(msg: dict):
     _active_jobs["count"] = _active_jobs.get("count", 0) + 1
     try:
-        return await _handle_cut_command_inner(msg)
+        return await _handle_cut_csv_command_inner(msg)
     finally:
         _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
 
 
-async def _handle_cut_command_inner(msg: dict):
+async def _handle_cut_csv_command_inner(msg: dict):
     """/cut <start>-<end> — reply to a CSV file, keeps only MCQ rows
     start..end (1-indexed against the MCQ list, i.e. "1" = the first
     actual MCQ row, NOT the header row -- header is never counted),
@@ -27690,8 +27704,6 @@ async def handle_message(msg: dict):
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_clean_command(msg))
-    elif text.startswith("/cut"):
-        _spawn_command_task(uid, handle_cut_command(msg))
     elif text.startswith("/split"):
 
         if not is_auth:
