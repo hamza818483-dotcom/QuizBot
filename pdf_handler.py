@@ -543,10 +543,16 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
     topic grouping can use them directly with zero extra topic-detect calls."""
     prompt = PDFS_TOPIC_MCQ_PROMPT.format(topic=topic, page=str(page).zfill(2), per_topic_count=mcq_count_hint)
     _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
-    _ordered = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
-    if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
-        logger.warning(f"[PDFS] All {len(key_rotator.keys)} Gemini keys daily-exhausted — returning empty (caller tries Groq/other fallbacks)")
-        return []
+    _all_marked_exhausted = bool(key_rotator.keys) and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
+    _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
+    if _live:
+        _ordered = _live
+    elif _all_marked_exhausted:
+        # Don't blind-trust "every key exhausted" -- implausible for 40+
+        # independent keys at once, likely a bad flag. Verify with 2 real
+        # attempts before giving up to Groq/other fallbacks.
+        logger.warning(f"[PDFS] all {len(key_rotator.keys)} Gemini keys marked daily-exhausted (suspicious) — retrying 2 keys for real before giving up")
+        _ordered = _ordered[:2] if _ordered else []
     # User instruction (2026-08-25): try every live key before Groq -- only
     # stop early on a genuine backend/network outage (3 consecutive
     # non-quota failures), never just because a key-count ceiling was hit.
@@ -627,10 +633,18 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
     prompt = PDFS_CALL2_MCQ_ONLY_PROMPT.format(
         topics_list=topics_list, page=str(page).zfill(2), per_topic_count=mcq_count_hint)
     _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
-    _ordered = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
-    if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
-        logger.warning(f"[PDFS-C2] All {len(key_rotator.keys)} Gemini keys daily-exhausted — returning empty")
-        return [], round(_time.time() - _t0, 1), None
+    _all_marked_exhausted = bool(key_rotator.keys) and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
+    _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
+    if _live:
+        _ordered = _live
+    elif _all_marked_exhausted:
+        # Don't blind-trust an in-memory/D1 flag that says EVERY key is
+        # daily-exhausted -- 40+ independent keys genuinely hitting quota
+        # at the exact same moment is implausible, so this usually means
+        # the flag was set wrongly somewhere. Verify with 2 real attempts
+        # before giving up, instead of returning empty immediately.
+        logger.warning(f"[PDFS-C2] all {len(key_rotator.keys)} Gemini keys marked daily-exhausted (suspicious) — retrying 2 keys for real before giving up")
+        _ordered = _ordered[:2] if _ordered else []
     max_retries = len(_ordered) if _ordered else 5
     _consecutive_infra_fails = 0
     for attempt in range(max_retries):
@@ -1159,14 +1173,18 @@ async def generate_mcq_from_image(
     # Only attempt keys not already known-exhausted/banned today — retrying
     # a dead key wastes a full timeout slot for nothing, and skipping them
     # lets us cycle through ALL live keys within max_retries.
-    _ordered = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
-
-    # If every key is already known daily-exhausted (Pacific-day), skip Gemini
-    # entirely instead of burning 429 round-trips we already know will fail —
-    # go straight to OpenRouter fallback.
-    if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
-        logger.warning(f"[Gemini] All {len(key_rotator.keys)} keys already daily-exhausted for today — returning empty (caller will try Groq/other fallbacks)")
-        return []
+    _all_marked_exhausted = bool(key_rotator.keys) and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
+    _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
+    if _live:
+        _ordered = _live
+    elif _all_marked_exhausted:
+        # Don't blind-trust "every key exhausted" -- 40+ independent keys
+        # genuinely hitting quota at the exact same moment is implausible;
+        # this is much more likely a bad flag (D1 rehydrate glitch,
+        # misclassified error, stale date compare). Verify with 2 real
+        # attempts before falling to OpenRouter/Groq.
+        logger.warning(f"[Gemini] all {len(key_rotator.keys)} keys marked daily-exhausted (suspicious) — retrying 2 keys for real before giving up")
+        _ordered = _ordered[:2] if _ordered else []
 
     # User instruction (2026-08-25): Gemini has many live keys -- Groq
     # should NEVER be touched while even one Gemini key is still alive

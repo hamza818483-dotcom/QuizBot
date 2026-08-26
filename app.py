@@ -19261,9 +19261,17 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
             return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
-        if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
-            logger.warning(f"[QBM] all {len(key_rotator.keys)} Gemini keys already known daily-exhausted — skipping straight to Groq (this is why /extra used Groq/other instead of Gemini)")
-            return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+        _all_marked_exhausted = all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
+        if _all_marked_exhausted:
+            # Don't blind-trust the in-memory/D1 exhaustion flag -- if it was
+            # ever set wrongly (bad D1 rehydrate, a non-quota error
+            # misclassified as daily-exhausted, stale date compare, etc.)
+            # ALL keys can end up permanently "dead" with zero real
+            # verification, even though it's practically impossible for
+            # 40+ independent Gemini keys to genuinely exhaust at the exact
+            # same moment. Retry a real key now -- if it actually succeeds,
+            # clear its flag and use the result instead of going to Groq.
+            logger.warning(f"[QBM] all {len(key_rotator.keys)} Gemini keys marked daily-exhausted — this is suspicious (unlikely all exhaust simultaneously), retrying one key for real before falling to Groq")
         from google import genai as gai
         from google.genai import types
         img_bytes_list = []
@@ -19286,6 +19294,14 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
+        elif _all_marked_exhausted:
+            # Every key is marked exhausted -- don't burn through all 40+ of
+            # them re-confirming the same suspicious state; try just the
+            # first 2 for real. If either succeeds, the flag was wrong and
+            # mark_healthy() below clears it; if both genuinely 429 with
+            # PerDay, the flags were correct after all and Groq is the
+            # right call.
+            keys_to_try = keys_to_try[:2]
         for key in keys_to_try:
             if is_cancelled():
                 return ""
