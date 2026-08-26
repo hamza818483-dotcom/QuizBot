@@ -3043,6 +3043,8 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
         img_b64 = image_to_base64(img)
         _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
         _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
+        if not _live:
+            logger.warning(f"[GeminiVerify] all {len(_ordered)} Gemini keys already known daily-exhausted — retrying them anyway (Google resets may have happened) but this is likely why /extra fell to Groq")
         keys_to_try = _live if _live else _ordered
 
         def _call(key):
@@ -19260,7 +19262,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
         if not key_rotator.keys:
             return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
         if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
-            logger.warning("[QBM] all Gemini keys already known daily-exhausted — skipping straight to Groq")
+            logger.warning(f"[QBM] all {len(key_rotator.keys)} Gemini keys already known daily-exhausted — skipping straight to Groq (this is why /extra used Groq/other instead of Gemini)")
             return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
         from google import genai as gai
         from google.genai import types
