@@ -426,6 +426,56 @@ MUST Return ONLY valid JSON array, no markdown:
 # must avoid while writing the single JSON response, and the code-level
 # post-filter below (_pdfs_reconcile_mcq_topics) double-checks the tags
 # against the model's own detected topic list before anything is used.
+PDFS_TOPIC_DETECT_PROMPT = """📝 /pdfs Call1 — TOPIC DETECTION ONLY (এই ধাপে কোনো MCQ বানাবে না, শুধু topic/sub-topic identify করো)
+
+পুরো page স্ক্যান করে সব MAIN TOPIC ও SUB TOPIC identify করো এই cue দিয়ে:
+- MAIN TOPIC: content-এর উপরে/মাঝখানে (top-center), bold + অন্য টেক্সট থেকে বড় ফন্ট, প্রায়ই আলাদা background/box/boundary দিয়ে ঘেরা, আগে special marker/symbol থাকতে পারে।
+- SUB TOPIC (optional): main topic-এর নিচে, ছোট ফন্ট, background হালকা ভিন্ন color হতে পারে (full-white না), আগে প্রায়ই colon (: বা ঃ), আগে marker/symbol থাকতে পারে।
+
+প্রতিটা candidate-এর জন্য বাধ্যতামূলক VERIFY (সন্দেহ থাকুক বা না থাকুক সবসময়): heading OCR/visual read করে raw name বের করো, তারপর সেই heading-এর নিচের/আশেপাশের actual body content সম্পূর্ণ পড়ে বুঝে নাও content আসলে কী বিষয়ে। raw name আর content-এর প্রকৃত বিষয় না মিললে (বানান ভুল/OCR-misread/garbled), content বুঝে সঠিক নাম নিজে ঠিক করে দাও — content-ই আসল সত্য, heading-এর লেখা শুধু hint, blind copy কখনো না।
+
+প্রতিটা confirmed topic-এর জন্য নির্ধারণ করো ঠিক কোন প্যারাগ্রাফ/লাইন/বক্স/সারণি তার নিজের content (content-boundary lock) — দুইটা topic-এর content কখনো overlap/split/duplicate করা যাবে না; overlap মনে হলে যে heading content-টার সবচেয়ে কাছে/উপরে সেটাই owner। এই boundary-র summary output-এ দাও যাতে Call2 exactly জানে কোন topic-এর content কোথা থেকে কোথায়।
+
+কোনো clear topic/sub-topic না পেলে single virtual topic ধরো: main="{topic}", sub=null (পুরো page-ই তার content)।
+
+Page: {page}
+
+MUST Return ONLY valid JSON array, no markdown, no MCQs — শুধু detected topics:
+[{{"main_topic":"...","sub_topic":"..." or null,"content_summary":"এই topic-এর content ঠিক কোথা থেকে কোথায়/কী নিয়ে, 1-2 line"}}]"""
+
+
+PDFS_MCQ_GENERATE_PROMPT = """📝 /pdfs Call2 — MCQ GENERATION (topic detection Call1-এ আগেই হয়ে গেছে, এখানে শুধু MCQ বানাও)
+
+Call1-এ এই page-এর জন্য এই topic/sub-topic গুলো ইতিমধ্যে confirm করা হয়েছে (content-boundary lock সহ):
+{detected_topics}
+
+প্রতিটা confirmed topic/sub-topic-এর জন্য আলাদা করে MCQ বানাও:
+🔒 SOURCE-LOCK + TOPIC-LOCK (ABSOLUTE): প্রতিটা MCQ শুধুমাত্র তার নিজের topic-এর Call1-এ lock করা content-boundary থেকেই বানাবে। একটা topic-এর MCQ-তে অন্য topic-এর content/fact কখনো মিশতে পারবে না, এমনকি অন্য topic-এ সহজ/ভালো content থাকলেও। প্রতিটা MCQ output-এ অবশ্যই সেটা কোন main_topic ও sub_topic থেকে এসেছে সেটা সঠিকভাবে লিখতে হবে (Call1-এ ফাইনাল করা নাম অনুযায়ী, exact same spelling) — ভুল topic-এ MCQ tag করা কঠোরভাবে নিষিদ্ধ, কারণ এই ট্যাগ দিয়েই পরে output topic-wise ভাগ হবে।
+🔴 STRICT PAGE-ONLY CONTENT (ABSOLUTE, প্রশ্ন+অপশন+ব্যাখ্যা সবক্ষেত্রে): question, প্রতিটা option, ও ব্যাখ্যা — সব শুধুমাত্র এই page-এ visible content থেকে আসবে। বাইরের সাধারণ জ্ঞান/training data থেকে কোনো fact, number, নাম, তারিখ, বা detail যোগ করা কঠোরভাবে নিষিদ্ধ — এমনকি সেটা সত্যি হলেও এবং topic-টা পরিচিত মনে হলেও। কোনো option-এর মধ্যে যদি page-এ না থাকা কোনো তথ্য বসাতে হয়, সেই MCQ-টাই বাদ দাও, বানিয়ে option দিও না। প্রতিটা MCQ লেখার আগে নিজেকে verify করো: "এই question/option-এর প্রতিটা শব্দ কি আমি এই page-এর ছবিতে সরাসরি দেখতে পাচ্ছি?" — না পারলে সেটা রাখা যাবে না।
+-🔒 TWO-MODE RULE: page-এ আগে থেকেই MCQ (question+options) থাকলে সেগুলো 100% VERBATIM extract করবে, নইলে content থেকে নতুন MCQ বানাবে।
+-🔒 NO-DUPLICATE-FROM-EXISTING-MCQ: existing question rephrase করে নতুন MCQ বানানো নিষিদ্ধ। NO-MCQ-FROM-ANSWER/EXPLANATION-TEXT: কোনো প্রশ্নের answer/explanation paragraph থেকে সরাসরি নতুন MCQ বানানো নিষিদ্ধ, শুধু actual info-content থেকেই বানাবে।
+-🔴 HIGHLIGHT/MARK PRIORITY (ABSOLUTE FIRST): হাইলাইটেড/মার্ক করা/আন্ডারলাইন করা লাইন থেকে MCQ সবার আগে বানাবে (মিস করা যাবে না), তারপর বাকি normal content থেকে।
+-প্রতিটা topic থেকে গড়ে {per_topic_count} টি MCQ target করো (topic-এ content বেশি/কম থাকলে স্বাভাবিকভাবে কমবেশি হতে পারে, কিন্তু কোনো topic 0 রাখা যাবে না যদি তার নিজের content থাকে)।
+-টপিকের নাম/অধ্যায়ের নাম/হেডলাইন/পেইজ সংখ্যা/navigation label থেকে MCQ বানাবে না।
+-প্রতিটা অপশন actual factual content হতে হবে, হ্যাঁ/না/সত্য/মিথ্যা না।
+💥প্রশ্ন: ছোট (১/১.৫/২ লাইন)
+💥অপশন: ৪টি, সঠিক উত্তর একটিই
+💥উত্তর: A/B/C/D — বিভিন্ন position-এ ছড়িয়ে দিবে, সব একই letter না।
+🔒 ANSWER RELEVANCY SANITY CHECK: page-এ answer আগে থেকে marked থাকলে, সেটা question+options-এর সাথে logically সঠিক কিনা re-check করো; স্পষ্ট mismatch হলেই শুধু নিজের জ্ঞান দিয়ে override করবে।
+💥ব্যাখ্যা (MAX 165 WORDS মূল অংশ): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, সব মিলিয়ে ১৬৫ শব্দের মধ্যে; না আঁটলে extra detail নিচে আলাদা লাইনে, মূল অংশ কখনো truncate না। শুধু page content থেকে, বাইরের knowledge না। source-reference phrase ("টেক্সট অনুসারে" ইত্যাদি) নিষিদ্ধ।
+
+🌐 LANGUAGE RULE: source-এর ভাষায় (বাংলা হলে বাংলা, ইংরেজি হলে ইংরেজি — translate করবে না)।
+
+Page: {page}
+
+MUST Return ONLY valid JSON array, no markdown, EVERY item MUST include main_topic + sub_topic (Call1-এ detected topic list থেকে exact নাম মিলিয়ে):
+[{{"main_topic":"...","sub_topic":"..." or null,"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
+
+
+# Kept for reference/backward-compat only -- superseded by the Call1
+# (PDFS_TOPIC_DETECT_PROMPT) + Call2 (PDFS_MCQ_GENERATE_PROMPT) split
+# above (2026-08-24, per request: /pdfs now mirrors /topic's separate
+# detect-then-generate call structure instead of doing both in one call).
 PDFS_TOPIC_MCQ_PROMPT = """📝 Special MCQ TYPE: /pdfs Topic-wise Generation (SINGLE CALL — topic detection + MCQ generation together)
 
 🎯 এই কাজটা ২টা ধাপে করবে, কিন্তু একটাই response-এ:
@@ -531,17 +581,13 @@ def _pdfs_reconcile_mcq_topics(mcqs: list, fallback: str, allowed_topics: list =
     return out
 
 
-async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_count_hint: int = 15) -> list:
-    """/pdfs SINGLE-CALL pipeline: exactly ONE Gemini call per page does
-    topic-detection + self-verification + content-boundary lock + MCQ
-    generation together (see PDFS_TOPIC_MCQ_PROMPT above). Falls through the
-    same Gemini key-rotation pool as the normal /pdf path — tries every live
-    key before returning empty (caller's normal Groq/OpenRouter fallback
-    chain then applies exactly as it does for /pdf). Returns a flat list of
-    MCQ dicts, each already carrying _pdfs_topic/_pdfs_subtopic (see
-    _pdfs_reconcile_mcq_topics) so app.py's per-page loop and end-of-job
-    topic grouping can use them directly with zero extra topic-detect calls."""
-    prompt = PDFS_TOPIC_MCQ_PROMPT.format(topic=topic, page=str(page).zfill(2), per_topic_count=mcq_count_hint)
+async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: str) -> str:
+    """Shared Gemini-call-with-key-rotation-retry logic used by both /pdfs
+    Call1 (topic detect) and Call2 (MCQ generate) -- extracted out of the
+    old single-call generate_pdfs_topic_mcqs so both calls get the same
+    key-rotation, daily-exhaustion skip, and timeout/retry behavior
+    without duplicating it. Returns raw response text, or "" if every key
+    failed (caller decides what empty means for its own step)."""
     _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
     _all_marked_exhausted = bool(key_rotator.keys) and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
     _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
@@ -551,7 +597,7 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
         # Don't blind-trust "every key exhausted" -- implausible for 40+
         # independent keys at once, likely a bad flag. Verify with 2 real
         # attempts before giving up to Groq/other fallbacks.
-        logger.warning(f"[PDFS] all {len(key_rotator.keys)} Gemini keys marked daily-exhausted (suspicious) — retrying 2 keys for real before giving up")
+        logger.warning(f"[{log_tag}] all {len(key_rotator.keys)} Gemini keys marked daily-exhausted (suspicious) — retrying 2 keys for real before giving up")
         _ordered = _ordered[:2] if _ordered else []
     # User instruction (2026-08-25): try every live key before Groq -- only
     # stop early on a genuine backend/network outage (3 consecutive
@@ -575,20 +621,10 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
                         types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
                     ]
                 )
-            # 2026-08-22: 25-40s range across all keys (uncapped) -- gives
-            # each key a fair chance to succeed while still failing fast
-            # enough on genuinely dead/throttled keys.
             _attempt_timeout = 40 if attempt == 0 else 25
             response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
-            valid = _parse_mcq_json(response.text)
-            if not valid:
-                logger.warning(f"[PDFS] Page {page}: 0 valid MCQs parsed (attempt {attempt+1}) — likely malformed/truncated JSON")
-            else:
-                valid = _pdfs_reconcile_mcq_topics(valid, topic)
             key_rotator.mark_healthy(key)
-            logger.info(f"[PDFS] Page {page}: {len(valid)} MCQs across "
-                        f"{len(set(m['_pdfs_topic'] for m in valid))} topic(s) (attempt {attempt+1})")
-            return valid
+            return response.text or ""
         except Exception as e:
             err_str = _gemini_full_error_text(e)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
@@ -601,13 +637,81 @@ async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_
                 key_rotator.mark_banned(key, reason=err_str[:200])
                 _consecutive_infra_fails = 0
             else:
-                logger.warning(f"[PDFS] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
+                logger.warning(f"[{log_tag}] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
                 _consecutive_infra_fails += 1
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
-    logger.warning(f"[PDFS] All keys failed for page {page} — returning empty (caller will try Groq/other fallbacks)")
-    return []
+    logger.warning(f"[{log_tag}] All keys failed — returning empty (caller will try Groq/other fallbacks)")
+    return ""
+
+
+async def _pdfs_call1_detect_topics(img: Image.Image, topic: str, page: int) -> list:
+    """/pdfs Call1 — topic/sub-topic detection ONLY, no MCQs. Returns a list
+    of {"main_topic":..., "sub_topic":..., "content_summary":...} dicts.
+    Falls back to a single virtual topic (the page's given `topic` name)
+    if detection fails/returns nothing, so Call2 always has something to
+    work with rather than failing the whole page."""
+    prompt = PDFS_TOPIC_DETECT_PROMPT.format(topic=topic, page=str(page).zfill(2))
+    txt = await _pdfs_gemini_call_with_retry(prompt, img, "PDFS Call1")
+    if not txt:
+        return [{"main_topic": topic, "sub_topic": None, "content_summary": ""}]
+    try:
+        detected = _parse_mcq_json(txt)  # reuse the same tolerant JSON-array parser
+    except Exception as e:
+        logger.warning(f"[PDFS Call1] page {page}: parse failed: {e}")
+        detected = []
+    if not detected:
+        return [{"main_topic": topic, "sub_topic": None, "content_summary": ""}]
+    out = []
+    for d in detected:
+        if not isinstance(d, dict):
+            continue
+        main_t = (d.get("main_topic") or "").strip() or topic
+        sub_t = d.get("sub_topic")
+        sub_t = sub_t.strip() if isinstance(sub_t, str) and sub_t.strip() else None
+        out.append({"main_topic": main_t[:60], "sub_topic": sub_t[:60] if sub_t else None,
+                     "content_summary": (d.get("content_summary") or "")[:200]})
+    logger.info(f"[PDFS Call1] page {page}: {len(out)} topic(s) detected")
+    return out or [{"main_topic": topic, "sub_topic": None, "content_summary": ""}]
+
+
+async def _pdfs_call2_generate_mcqs(img: Image.Image, detected_topics: list, page: int, mcq_count_hint: int, fallback_topic: str) -> list:
+    """/pdfs Call2 — MCQ generation using the topics Call1 already
+    detected. Returns MCQs already tagged with _pdfs_topic/_pdfs_subtopic
+    via _pdfs_reconcile_mcq_topics, same contract as before."""
+    topics_json = json.dumps(
+        [{"main_topic": t["main_topic"], "sub_topic": t["sub_topic"]} for t in detected_topics],
+        ensure_ascii=False
+    )
+    prompt = PDFS_MCQ_GENERATE_PROMPT.format(
+        detected_topics=topics_json, page=str(page).zfill(2), per_topic_count=mcq_count_hint
+    )
+    txt = await _pdfs_gemini_call_with_retry(prompt, img, "PDFS Call2")
+    if not txt:
+        return []
+    valid = _parse_mcq_json(txt)
+    if not valid:
+        logger.warning(f"[PDFS Call2] page {page}: 0 valid MCQs parsed — likely malformed/truncated JSON")
+        return []
+    valid = _pdfs_reconcile_mcq_topics(valid, fallback_topic)
+    logger.info(f"[PDFS Call2] page {page}: {len(valid)} MCQs across "
+                f"{len(set(m['_pdfs_topic'] for m in valid))} topic(s)")
+    return valid
+
+
+async def generate_pdfs_topic_mcqs(img: Image.Image, topic: str, page: int, mcq_count_hint: int = 15) -> list:
+    """/pdfs TWO-CALL pipeline (2026-08-24, per request — mirrors /topic's
+    separate detect-then-generate structure instead of doing both in one
+    call): Call1 (_pdfs_call1_detect_topics) detects topic/sub-topic
+    boundaries ONLY, no MCQs; Call2 (_pdfs_call2_generate_mcqs) then
+    generates MCQs using exactly those detected topics. Same external
+    signature/return shape as before (flat list of MCQ dicts, each
+    carrying _pdfs_topic/_pdfs_subtopic) so app.py's caller needs zero
+    changes -- this function is now a 2-call orchestrator instead of a
+    single call."""
+    detected_topics = await _pdfs_call1_detect_topics(img, topic, page)
+    return await _pdfs_call2_generate_mcqs(img, detected_topics, page, mcq_count_hint, topic)
 
 
 async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str, page: int,
