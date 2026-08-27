@@ -15029,6 +15029,34 @@ UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 )
 
 
+# 2026-08-27 (per request): compact-base Groq-only variants of the topic-
+# grouping prompts above. Keep the SAME topic-detection/segment-ordering
+# extra rules (those are accuracy-critical and NOT shortened -- shortening
+# banner/heading-detection logic risks breaking topic boundaries), but
+# swap the base rules portion for the compact base (see
+# QBM_EXTRACT_PROMPT_GROQ_COMPACT) so the overall prompt is still smaller,
+# leaving more of Groq's 8000 TPM budget for the image.
+def _swap_to_compact_base(full_prompt: str) -> str:
+    """TOPIC/CHEM/UNMESH_EXTRACT_PROMPT are built as
+    QBM_EXTRACT_PROMPT_DEFAULT.replace(<output-format-line>, <extra-topic-
+    detection-text-ending-in-same-output-format-line>) -- so their first
+    len(prefix) characters are IDENTICAL to QBM_EXTRACT_PROMPT_DEFAULT's
+    own text up to (not including) that output-format marker. This finds
+    that exact shared prefix, strips it off, and prepends the compact base
+    instead -- keeping 100% of the topic-detection/segment-ordering rules
+    the .replace() call added on top, untouched."""
+    _marker = 'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]'
+    prefix_len = QBM_EXTRACT_PROMPT_DEFAULT.find(_marker)
+    if prefix_len == -1 or not full_prompt.startswith(QBM_EXTRACT_PROMPT_DEFAULT[:prefix_len]):
+        return full_prompt  # prefix mismatch -- leave untouched, safer than guessing
+    return QBM_EXTRACT_PROMPT_GROQ_COMPACT + full_prompt[prefix_len:]
+
+
+TOPIC_EXTRACT_PROMPT_GROQ_COMPACT = _swap_to_compact_base(TOPIC_EXTRACT_PROMPT)
+CHEM_EXTRACT_PROMPT_GROQ_COMPACT = _swap_to_compact_base(CHEM_EXTRACT_PROMPT)
+UNMESH_EXTRACT_PROMPT_GROQ_COMPACT = _swap_to_compact_base(UNMESH_EXTRACT_PROMPT)
+
+
 def _check_segment_topic_consistency(mcqs: list, context: str = "", forced_boundaries: set = None) -> list:
     """CODE-LEVEL CHECK (used at both Call1 and Call2 stages): walks mcqs in
     read order and finds every 'segment' — the run of MCQs from one
@@ -15279,7 +15307,7 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
                 _topic_mcq_result_cache[cache_key] = result
                 _cap_qbm_mcq_cache(_topic_mcq_result_cache)
             return result
-        txt = await _qbm_groq_call(img, TOPIC_EXTRACT_PROMPT)
+        txt = await _qbm_groq_call(img, TOPIC_EXTRACT_PROMPT_GROQ_COMPACT)
         result = _qbm_parse_json(txt) if txt else []
         if result:
             result = _qbm_dedup_list(result)
@@ -15477,7 +15505,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
                 _unmesh_mcq_result_cache[cache_key] = result
                 _cap_qbm_mcq_cache(_unmesh_mcq_result_cache)
             return result
-        txt = await _qbm_groq_call(img, UNMESH_EXTRACT_PROMPT)
+        txt = await _qbm_groq_call(img, UNMESH_EXTRACT_PROMPT_GROQ_COMPACT)
         result = _qbm_parse_json(txt) if txt else []
         if result:
             result = _qbm_dedup_list(result)
@@ -16494,7 +16522,7 @@ async def _chem_extract_from_image(img, cache_key: tuple = None) -> list:
                 _chem_mcq_result_cache[cache_key] = result
                 _cap_qbm_mcq_cache(_chem_mcq_result_cache)
             return result
-        txt = await _qbm_groq_call(img, CHEM_EXTRACT_PROMPT)
+        txt = await _qbm_groq_call(img, CHEM_EXTRACT_PROMPT_GROQ_COMPACT)
         result = _qbm_parse_json(txt) if txt else []
         if result:
             result = _qbm_dedup_list(result)
