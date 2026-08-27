@@ -2252,13 +2252,24 @@ def _parse_mcq_json(text: str) -> list:
             bbox = it.get("exp_bbox")
             if not (isinstance(bbox, list) and len(bbox) == 4):
                 bbox = None
-            out.append({
+            _entry = {
                 "question": q,
                 "options": opts,
                 "answer": ans,
                 "explanation": str(it.get("explanation",""))[:500],
                 "exp_bbox": bbox,
-            })
+            }
+            # 2026-08-27: preserve source_verbatim/verified through parsing --
+            # these were being silently stripped by this whitelist before any
+            # caller could ever gate on them (root cause of ungrounded/
+            # hallucinated MCQs surviving on /pdf's default path, since the
+            # prompt asks the model for these fields but the parser threw
+            # them away before _filter_verified_mcqs could see them).
+            if "source_verbatim" in it:
+                _entry["source_verbatim"] = str(it.get("source_verbatim") or "")[:200]
+            if "verified" in it:
+                _entry["verified"] = it.get("verified")
+            out.append(_entry)
         if data and not out:
             logger.warning(f"[_parse_mcq_json] all {len(data)} items dropped during validation (missing question/options) | first item raw: {str(data[0])[:300]!r}")
     return out
@@ -3824,6 +3835,16 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     # and has nothing that actually needs global serialization. Multiple users'
     # jobs now run concurrently instead of queuing behind one another.
     out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=exclude_groq_keys, key_offset=key_offset)
+    # 2026-08-27: code-level SOURCE-GROUNDING enforcement for the default
+    # /pdf path (was only wired to /chem before -- see _filter_verified_mcqs
+    # docstring). The default prompt already asks Gemini/Groq for
+    # source_verbatim+verified per MCQ, but nothing gated on it, so a model
+    # under count pressure could freely fabricate MCQs not actually on the
+    # page and they'd sail straight through. Only filters when at least one
+    # MCQ in this batch actually carries the field (some modes/prompts don't
+    # request it), so modes without the field are untouched.
+    if out and any("verified" in m for m in out):
+        out = _filter_verified_mcqs(out, page_num, tag="/pdf")
     out = _cap_mcq_options(out, 4)
     out = _validate_mcq_structure(out)
     if _TF_MODE.get():
@@ -17149,7 +17170,7 @@ def _chem_heading_score(h: dict) -> int:
     return score
 
 
-def _chem_filter_verified_mcqs(mcqs: list, page_num) -> list:
+def _filter_verified_mcqs(mcqs: list, page_num, tag: str = "") -> list:
     """CODE-LEVEL enforcement of the SOURCE-GROUNDING LOCK -- the prompt
     asks Gemini to self-report 'source_verbatim' (an exact quote from the
     page) and 'verified' (its own honest re-check that the quote is real
@@ -17184,13 +17205,16 @@ def _chem_filter_verified_mcqs(mcqs: list, page_num) -> list:
             dropped += 1
             q_preview = (m.get("question") or "")[:60]
             logger.warning(
-                f"[CHEM SOURCE-GROUNDING] page {page_num}: dropped unverified/"
+                f"[SOURCE-GROUNDING{(' ' + tag) if tag else ''}] page {page_num}: dropped unverified/"
                 f"unsupported MCQ (verified={verified!r}, source_verbatim="
                 f"{src[:40]!r}) -- question: '{q_preview}'"
             )
     if dropped:
-        logger.warning(f"[CHEM SOURCE-GROUNDING] page {page_num}: {dropped}/{len(mcqs)} MCQ dropped as unverified/fabricated, {len(kept)} kept")
+        logger.warning(f"[SOURCE-GROUNDING{(' ' + tag) if tag else ''}] page {page_num}: {dropped}/{len(mcqs)} MCQ dropped as unverified/fabricated, {len(kept)} kept")
     return kept
+
+# Back-compat alias -- /chem call sites still use the old name.
+_chem_filter_verified_mcqs = _filter_verified_mcqs
 
 
 # Matches an explanation referring to an option by its LETTER instead of its
