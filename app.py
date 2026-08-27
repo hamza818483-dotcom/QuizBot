@@ -5237,6 +5237,7 @@ async def _run_forward_job(chat_id, uid, target_channel):
 
     done = 0
     failed = 0
+    failed_ids = []
     last_edit = time.time()
     for mid in range(start_id, end_id + 1):
         if is_cancelled(chat_id) or CURRENT_JOB_ID.get(chat_id) != job_id:
@@ -5254,9 +5255,11 @@ async def _run_forward_job(chat_id, uid, target_channel):
                 done += 1
             else:
                 failed += 1
+                failed_ids.append(mid)
                 logger.warning(f"[/forward] msg {mid} forward failed: {res.get('description')}")
         except Exception as e:
             failed += 1
+            failed_ids.append(mid)
             logger.warning(f"[/forward] msg {mid} forward exception: {e}")
         # Telegram allows ~20 msgs/min into the same channel without hitting
         # broadcast limits reliably -- small delay keeps this well under that
@@ -5271,8 +5274,16 @@ async def _run_forward_job(chat_id, uid, target_channel):
             except Exception:
                 pass
 
-    await edit_msg(chat_id, status_msg_id,
-        f"✅ Forward শেষ!\n📤 সফল: {done}/{total}\n❌ Fail: {failed}")
+    summary = f"✅ Forward শেষ!\n📤 সফল: {done}/{total}\n❌ Fail: {failed}"
+    if failed_ids:
+        # Cap the listed IDs so a run with many failures doesn't blow past
+        # Telegram's message length limit.
+        shown = failed_ids[:30]
+        id_list = ", ".join(str(i) for i in shown)
+        if len(failed_ids) > 30:
+            id_list += f" ...(+{len(failed_ids) - 30} more)"
+        summary += f"\n🔻 Skipped msg IDs: {id_list}"
+    await edit_msg(chat_id, status_msg_id, summary)
     _FORWARD_PENDING.pop(uid, None)
 
 
