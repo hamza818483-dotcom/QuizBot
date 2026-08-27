@@ -5156,8 +5156,121 @@ async def _show_channel_actions(chat_id, message_id, channel_id):
                                         "parse_mode": "HTML", "reply_markup": {"inline_keyboard": buttons}})
 
 # ============================================================
-# FEATURE: /getid — public/private channel/group link থেকে auto ID বের করা
+# FEATURE: /forward — range-forward all messages between two t.me links,
+# serially, into a channel picked from the saved-channel list.
 # ============================================================
+_FORWARD_PENDING: Dict[int, dict] = {}  # uid -> {"src_chat": ..., "start_id": int, "end_id": int}
+
+def _parse_tg_link(link: str):
+    """Parses a t.me message link into (chat_ref, message_id).
+    chat_ref is either an int (-100xxxxxxxxxx, from /c/ internal-id links)
+    or a str username (from public t.me/<username>/<msgid> links) --
+    forwardMessage's from_chat_id accepts both forms directly."""
+    link = link.strip()
+    m = re.search(r"t\.me/c/(\d+)/(\d+)", link)
+    if m:
+        internal_id, msg_id = m.group(1), int(m.group(2))
+        return int(f"-100{internal_id}"), msg_id
+    m = re.search(r"t\.me/([A-Za-z0-9_]+)/(\d+)", link)
+    if m:
+        username, msg_id = m.group(1), int(m.group(2))
+        return f"@{username}", msg_id
+    return None, None
+
+async def handle_forward(msg: dict):
+    chat_id = msg["chat"]["id"]
+    uid = msg.get("from", {}).get("id")
+    text = msg.get("text", "")
+    args = text.replace("/forward", "", 1).strip().split()
+    if len(args) != 2:
+        await send_msg(chat_id,
+            "❌ Usage:\n<code>/forward (first link)\n(2nd link)</code>\n\n"
+            "প্রথম link = শুরুর message, দ্বিতীয় link = শেষের message — "
+            "মাঝের সব message serially একটা channel-এ forward হবে।")
+        return
+    src1, start_id = _parse_tg_link(args[0])
+    src2, end_id = _parse_tg_link(args[1])
+    if src1 is None or src2 is None:
+        await send_msg(chat_id, "❌ Link পড়তে পারলাম না — শুধু t.me message link দাও।")
+        return
+    if str(src1) != str(src2):
+        await send_msg(chat_id, "❌ দুইটা link একই group/channel থেকে হতে হবে।")
+        return
+    if start_id > end_id:
+        start_id, end_id = end_id, start_id
+    total = end_id - start_id + 1
+    if total > 2000:
+        await send_msg(chat_id, f"❌ Range খুব বড় ({total} messages) — max 2000 এ limit করো।")
+        return
+    _FORWARD_PENDING[uid] = {"src_chat": src1, "start_id": start_id, "end_id": end_id}
+    channels = await db_get_channels()
+    if not channels:
+        await send_msg(chat_id, "❌ কোনো channel saved নেই। আগে <code>/channel</code> দিয়ে add করো।")
+        return
+    buttons = [[{"text": f"📢 {ch.get('channel_name', ch.get('channel_id',''))}",
+                 "callback_data": f"fwdch_{ch.get('channel_id','')}"}] for ch in channels]
+    await send_msg(chat_id,
+        f"📥 Source: <code>{src1}</code>\n🔢 Messages: {start_id} → {end_id} ({total}টা)\n\n"
+        f"কোন channel-এ forward করবো?",
+        reply_markup={"inline_keyboard": buttons})
+
+async def _run_forward_job(chat_id, uid, target_channel):
+    pending = _FORWARD_PENDING.get(uid)
+    if not pending:
+        await send_msg(chat_id, "❌ Forward request expired, আবার /forward দাও।")
+        return
+    src_chat = pending["src_chat"]
+    start_id = pending["start_id"]
+    end_id = pending["end_id"]
+    total = end_id - start_id + 1
+    job_id = new_job_id(chat_id)
+    clear_cancel(chat_id)
+    set_active_job(chat_id, "forward")
+
+    r = await send_msg(chat_id, f"⏳ Forward শুরু হচ্ছে... 0/{total}", reply_markup=_cancel_kb(chat_id, job_id))
+    status_msg_id = r.get("result", {}).get("message_id")
+
+    done = 0
+    failed = 0
+    last_edit = time.time()
+    for mid in range(start_id, end_id + 1):
+        if is_cancelled(chat_id) or CURRENT_JOB_ID.get(chat_id) != job_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"🛑 Forward বন্ধ করা হয়েছে — {done}/{total} সফল, {failed} skip.")
+            _FORWARD_PENDING.pop(uid, None)
+            return
+        try:
+            res = await tg_post("forwardMessage", {
+                "chat_id": target_channel,
+                "from_chat_id": src_chat,
+                "message_id": mid,
+            })
+            if res.get("ok"):
+                done += 1
+            else:
+                failed += 1
+                logger.warning(f"[/forward] msg {mid} forward failed: {res.get('description')}")
+        except Exception as e:
+            failed += 1
+            logger.warning(f"[/forward] msg {mid} forward exception: {e}")
+        # Telegram allows ~20 msgs/min into the same channel without hitting
+        # broadcast limits reliably -- small delay keeps this well under that
+        # per-chat rate limit for a serial forward run.
+        await asyncio.sleep(0.4)
+        if time.time() - last_edit >= 3:
+            last_edit = time.time()
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                    f"⏳ Forward হচ্ছে... {done + failed}/{total} ({done} সফল, {failed} fail)",
+                    reply_markup=_cancel_kb(chat_id, job_id))
+            except Exception:
+                pass
+
+    await edit_msg(chat_id, status_msg_id,
+        f"✅ Forward শেষ!\n📤 সফল: {done}/{total}\n❌ Fail: {failed}")
+    _FORWARD_PENDING.pop(uid, None)
+
+
 async def handle_getid(msg: dict):
     chat_id = msg["chat"]["id"]
     text = msg.get("text", "").strip()
@@ -27270,6 +27383,7 @@ async def set_bot_commands(notify_chat_id: int = None):
         {"command": "rapid", "description": "CSV দিয়ে Scheduled Rapid Fire (comment-based) শুরু করো"},
         {"command": "livetime", "description": "Live Quiz-এর প্রতি প্রশ্নের সময় set করো"},
         {"command": "channel", "description": "Channel/Group add করো (custom name সহ)"},
+        {"command": "forward", "description": "দুটো link দিয়ে range serially forward করো"},
         {"command": "channelist", "description": "Channel list দেখো"},
         {"command": "rename", "description": "File reply kore rename koro"},
         {"command": "compress", "description": "PDF reply kore size compress koro (quality bhalo rekhe)"},
@@ -27679,6 +27793,8 @@ async def handle_message(msg: dict):
         await handle_expQ(msg)
     elif text.startswith("/channel") or text == "/channelist":
         await handle_channel(msg)
+    elif text.startswith("/forward"):
+        _spawn_command_task(uid, handle_forward(msg))
     elif text.startswith("/getid"):
         await handle_getid(msg)
     elif text.strip() == "/special":
@@ -28161,6 +28277,12 @@ async def handle_callback(query: dict):
         if data.startswith("chsel_"):
             channel_id = data[len("chsel_"):]
             await _show_channel_actions(chat_id, msg_id, channel_id)
+            return
+        if data.startswith("fwdch_"):
+            target_channel = data[len("fwdch_"):]
+            await tg_post("editMessageText", {"chat_id": chat_id, "message_id": msg_id,
+                                                "text": f"✅ Target: <code>{target_channel}</code>", "parse_mode": "HTML"})
+            _spawn_command_task(uid, _run_forward_job(chat_id, uid, target_channel))
             return
         if data == "chback":
             await _show_channel_list(chat_id, edit_message_id=msg_id)
