@@ -5226,8 +5226,16 @@ async def handle_forward(msg: dict):
     if not channels:
         await send_msg(chat_id, "❌ কোনো channel saved নেই। আগে <code>/channel</code> দিয়ে add করো।")
         return
-    buttons = [[{"text": f"📢 {ch.get('channel_name', ch.get('channel_id',''))}",
-                 "callback_data": f"fwdch_{ch.get('channel_id','')}"}] for ch in channels]
+    buttons = []
+    row = []
+    for ch in channels:
+        row.append({"text": f"📢 {ch.get('channel_name', ch.get('channel_id',''))}",
+                     "callback_data": f"fwdch_{ch.get('channel_id','')}"})
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
     await send_msg(chat_id,
         f"📥 Source: <code>{src1}</code>\n🔢 Messages: {start_id} → {end_id} ({total}টা)\n\n"
         f"কোন channel-এ forward করবো?",
