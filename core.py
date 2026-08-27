@@ -509,11 +509,18 @@ async def tg_post(method: str, data: dict) -> dict:
         # "bot was blocked by the user" / user deactivated / chat not found are
         # permanent — retrying across proxies or waiting 2.5s can never fix them,
         # it only burns proxy calls and delays the rest of the quiz queue.
+        # "message can't be copied/forwarded" (service messages, poll-vote-only
+        # notices, deleted-since messages) is equally permanent for
+        # copyMessage/forwardMessage -- no amount of retrying changes it.
         desc = (result.get("description") or "").lower()
         return (
             "bot was blocked by the user" in desc
             or "user is deactivated" in desc
             or "chat not found" in desc
+            or "message can't be copied" in desc
+            or "message can't be forwarded" in desc
+            or "message to copy not found" in desc
+            or "message to forward not found" in desc
         )
 
     async def _try_primary():
@@ -600,12 +607,15 @@ async def tg_post(method: str, data: dict) -> dict:
         await asyncio.sleep(2.5)
         for name, fn in order:
             result, ok = await fn()
+            if ok == "permanent":
+                logger.warning(f"[TG] {method} permanent failure on retry ({result.get('description')}) — not retrying further")
+                return result
             if ok:
                 logger.info(f"[TG] {method} recovered via {name} on retry-after-wait")
                 _last_good_api = name
                 return result
         logger.error(f"[TG] {method} CF proxy failed and direct API is blocked on this platform — giving up")
-        return {"ok": False, "error": "cf_proxy_failed_direct_blocked"}
+        return result if result else {"ok": False, "error": "cf_proxy_failed_direct_blocked"}
     for attempt in range(2):
         try:
             client = await _get_shared_http_client()
