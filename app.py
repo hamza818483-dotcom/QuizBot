@@ -5156,12 +5156,13 @@ async def _show_channel_actions(chat_id, message_id, channel_id):
                                         "parse_mode": "HTML", "reply_markup": {"inline_keyboard": buttons}})
 
 # ============================================================
-# FEATURE: /forward — range-copies all messages between two t.me links,
+# FEATURE: /forward — range-forwards all messages between two t.me links,
 # serially, into a channel picked from the saved-channel list. Uses
-# copyMessage (not forwardMessage) so no "Forwarded from" tag shows on
-# the target channel -- poll type/correct_option_id/explanation are
-# preserved as-is by Telegram's copyMessage for the bot's own quiz polls,
-# so answers stay correct after copying.
+# forwardMessage (not copyMessage) -- reliable for every content type
+# (photo+caption, quiz polls with correct_option_id, reply chains between
+# them) without Telegram's "message can't be copied" restriction that
+# closed/quiz polls hit under copyMessage. "Forwarded from" tag shows on
+# the target channel as a result.
 # ============================================================
 _FORWARD_PENDING: Dict[int, dict] = {}  # uid -> {"src_chat": ..., "start_id": int, "end_id": int}
 
@@ -5244,7 +5245,7 @@ async def _run_forward_job(chat_id, uid, target_channel):
             _FORWARD_PENDING.pop(uid, None)
             return
         try:
-            res = await tg_post("copyMessage", {
+            res = await tg_post("forwardMessage", {
                 "chat_id": target_channel,
                 "from_chat_id": src_chat,
                 "message_id": mid,
@@ -5253,10 +5254,10 @@ async def _run_forward_job(chat_id, uid, target_channel):
                 done += 1
             else:
                 failed += 1
-                logger.warning(f"[/forward] msg {mid} copy failed: {res.get('description')}")
+                logger.warning(f"[/forward] msg {mid} forward failed: {res.get('description')}")
         except Exception as e:
             failed += 1
-            logger.warning(f"[/forward] msg {mid} copy exception: {e}")
+            logger.warning(f"[/forward] msg {mid} forward exception: {e}")
         # Telegram allows ~20 msgs/min into the same channel without hitting
         # broadcast limits reliably -- small delay keeps this well under that
         # per-chat rate limit for a serial forward run.
