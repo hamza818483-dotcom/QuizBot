@@ -13325,6 +13325,8 @@ async def _process_pdf_pages_inner(
                 first_poll_link = ""
                 poll_msg_ids = []
                 for i, mcq in enumerate(mcqs):
+                  if is_cancelled(chat_id):
+                      break
                   try:
                     opts = mcq.get("options", [])[:4]
                     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
@@ -13633,14 +13635,23 @@ async def _process_pdf_pages_inner(
     if row:
         page_btn_rows.append(row)
     complete_kb = {"inline_keyboard": page_btn_rows} if page_btn_rows else None
-    await edit_msg(chat_id, status_msg_id,
+    # 2026-08-27 FIX: this used to edit_msg() over the live per-page
+    # dashboard (overwriting all page-by-page + AI-call stats with a small
+    # "Processing Complete!" summary), and the page-number buttons only
+    # appeared attached to THAT overwrite -- so both the full dashboard
+    # disappeared AND the buttons felt delayed (same call, same instant).
+    # Now the dashboard is left untouched (final state stays visible) and
+    # the completion summary + page buttons go out as a separate new
+    # message replying to the dashboard.
+    await send_msg(chat_id,
         "✅ <b>Processing Complete!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📄 File: {file_name}\n🎯 Topic: {topic}\n"
         f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}\n"
         f"🤖 AI calls: {_get_ai_call_count(chat_id)}\n"
         "━━━━━━━━━━━━━━━━━━━━━━",
-        reply_markup=complete_kb)
+        reply_markup=complete_kb,
+        reply_to_message_id=status_msg_id)
 
 # ============================================================
 # FEATURE: /pdfm — PDF pagewise MCQ to channel
@@ -13995,6 +14006,8 @@ async def _process_pdfs_pages_inner(
                 first_poll_link = ""
                 poll_msg_ids = []
                 for i, mcq in enumerate(mcqs):
+                  if is_cancelled(chat_id):
+                      break
                   try:
                     opts = mcq.get("options", [])[:4]
                     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
@@ -14298,14 +14311,23 @@ async def _process_pdfs_pages_inner(
     if row:
         page_btn_rows.append(row)
     complete_kb = {"inline_keyboard": page_btn_rows} if page_btn_rows else None
-    await edit_msg(chat_id, status_msg_id,
+    # 2026-08-27 FIX: this used to edit_msg() over the live per-page
+    # dashboard (overwriting all page-by-page + AI-call stats with a small
+    # "Processing Complete!" summary), and the page-number buttons only
+    # appeared attached to THAT overwrite -- so both the full dashboard
+    # disappeared AND the buttons felt delayed (same call, same instant).
+    # Now the dashboard is left untouched (final state stays visible) and
+    # the completion summary + page buttons go out as a separate new
+    # message replying to the dashboard.
+    await send_msg(chat_id,
         "✅ <b>Processing Complete!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📄 File: {file_name}\n🎯 Topic: {topic}\n"
         f"📝 Total MCQ: {total_mcq}\n📋 Pages: {len(pages)}\n⏱️ Time: {mins}:{secs:02d}\n"
         f"🤖 AI calls: {_get_ai_call_count(chat_id)}\n"
         "━━━━━━━━━━━━━━━━━━━━━━",
-        reply_markup=complete_kb)
+        reply_markup=complete_kb,
+        reply_to_message_id=status_msg_id)
 
 # ============================================================
 # FEATURE: /pdfm — PDF pagewise MCQ to channel
@@ -14638,6 +14660,8 @@ async def _process_pdfm_pages_impl(
                 poll_links = []
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
+                    if is_cancelled(chat_id):
+                        break
                     opts = mcq.get("options",[])[:4]
                     ans_idx = {"A":0,"B":1,"C":2,"D":3}.get(mcq.get("answer","A"),0)
                     q_text = mcq["question"]
