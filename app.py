@@ -14901,6 +14901,45 @@ OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exact
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]"""
 
 
+# 2026-08-27 (per request): Groq (qwen/qwen3.6-27b) has an 8000 TPM hard
+# limit shared across prompt+image+output. QBM_EXTRACT_PROMPT_DEFAULT is
+# ~2400 tokens by itself, which forced the image to be downscaled as low
+# as 192x192px on pages needing many MCQs (large output budget) -- at
+# that resolution Groq often couldn't actually read the page text and
+# started hallucinating MCQs unrelated to the real content instead of
+# extracting from it. This compact version keeps every rule that changes
+# *correctness* (column-major order, never invent, answer-detection
+# priority chain, output JSON shape, no-translate, exact wording) but
+# drops verbose explanatory prose, the long visually-similar-word list,
+# and extended formatting examples -- roughly 1/3 the size, leaving much
+# more of the 8000 TPM budget for the image so it can stay at a
+# genuinely readable resolution. Gemini/OpenRouter still use the full
+# QBM_EXTRACT_PROMPT_DEFAULT; only the Groq path swaps to this.
+QBM_EXTRACT_PROMPT_GROQ_COMPACT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page. Never invent new ones, never skip any — extract ALL, exact page order.
+
+RULES (zero tolerance):
+- 2+ columns → COLUMN-MAJOR order: finish entire left column top-to-bottom, then next column. Never zigzag.
+- Never guess without source proof; never modify question/option wording (strip only numbering like ১./1./Q1./ক.)
+- Never translate — keep source language exactly. Fix only obvious OCR spelling errors without changing meaning.
+- Never output partial/truncated text — question ends only at proper punctuation (?।) or finished clause.
+- 0 MCQs → []. N MCQs → exactly N.
+
+ANSWER DETECTION (priority order, trace to actual source, never guess): A) any visual mark on an option (circle/tick/cross/underline/bold/highlight) — overrides all; B) answer right after the MCQ block; C) answer table at page bottom; D) combined answer key on later/adjacent pages. None found → "A" + note "Answer not found in source". Convert to A/B/C/D format.
+
+OPTION ORDER (absolute): source's 1st option → output A, 2nd → B, 3rd → C, 4th → D, regardless of source's own labels (a/b/c/d, ক/খ/গ/ঘ, ১/২/৩/৪, bullets). Answer letter = position of correct text in OUTPUT, not the source's original label. Numbers/years stay exactly as source (never convert Bengali↔English numerals).
+
+উদ্দীপক (PASSAGE): prepend full passage text to each linked MCQ. Remove ONLY the navigation sentence like "উদ্দীপকের আলোকে ২১-২২ নং প্রশ্নের উত্তর দাও" — never strip a sentence just for containing "উদ্দীপক" if it's the actual question.
+
+EXPLANATION (max 190 chars Bengali unless verbatim source text): if page has explanation text for this MCQ, copy VERBATIM (overrides length limit). Otherwise build from any relevant page info, correct-option reasoning first. Nothing relevant → best explanation from own knowledge, same structure. Never use phrases like "চিত্রে দেখা যাচ্ছে"/"as shown in the figure" — state facts directly.
+
+MATH/CHEMISTRY: never raw LaTeX — use Unicode (H₂O, x², √x, Na⁺, °C, × not x, etc).
+
+QUESTION needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) covering the diagram. Omit if none.
+
+OUTPUT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]"""
+
+
 TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
@@ -18282,7 +18321,15 @@ async def _qbm_call1_extract(img) -> list:
                 m["_call1_provider"] = "Gemini"
             return out
         logger.warning("[QBM Call1] Gemini returned empty/failed -> falling back to Groq for Call1")
-        txt = await _qbm_groq_call(img, prompt)
+        # 2026-08-27 (per request): use the compact Groq-only prompt when
+        # the active prompt is still the stock default -- frees up much
+        # more of Groq's 8000 TPM budget for the image itself instead of
+        # the image being forced down to an unreadable ~192px, which was
+        # causing Groq to hallucinate MCQs unrelated to the actual page
+        # content. If an admin has set a genuinely custom prompt (not the
+        # default), respect it as-is rather than silently swapping it.
+        _groq_prompt = QBM_EXTRACT_PROMPT_GROQ_COMPACT if prompt == QBM_EXTRACT_PROMPT_DEFAULT else prompt
+        txt = await _qbm_groq_call(img, _groq_prompt)
         result = _qbm_parse_json(txt) if txt else []
         if result:
             out = _qbm_dedup_list(result)
