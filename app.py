@@ -5261,40 +5261,74 @@ async def _run_forward_job(chat_id, uid, target_channel):
     failed = 0
     failed_ids = []
     last_edit = time.time()
-    for mid in range(start_id, end_id + 1):
+    all_ids = list(range(start_id, end_id + 1))
+    CHUNK = 100  # forwardMessages max message_ids per call (Bot API limit)
+    for chunk_start in range(0, len(all_ids), CHUNK):
         if is_cancelled(chat_id) or CURRENT_JOB_ID.get(chat_id) != job_id:
             await edit_msg(chat_id, status_msg_id,
                 f"🛑 Forward বন্ধ করা হয়েছে — {done}/{total} সফল, {failed} skip.")
             _FORWARD_PENDING.pop(uid, None)
             return
+        chunk_ids = all_ids[chunk_start:chunk_start + CHUNK]
         try:
-            res = await tg_post("forwardMessage", {
+            # forwardMessages (batch) sends the whole chunk as ONE grouped
+            # forward action, same as manually multi-selecting messages in
+            # the Telegram app and forwarding together -- this is what
+            # actually preserves a poll's reply-link to its photo on the
+            # target side, unlike calling forwardMessage one-by-one (each
+            # single forward is a fresh, unrelated message with no
+            # reply_to support in the Bot API).
+            res = await tg_post("forwardMessages", {
                 "chat_id": target_channel,
                 "from_chat_id": src_chat,
-                "message_id": mid,
+                "message_ids": chunk_ids,
             })
             if res.get("ok"):
-                done += 1
+                forwarded = res.get("result") or []
+                done += len(forwarded)
+                if len(forwarded) < len(chunk_ids):
+                    missed = chunk_ids[len(forwarded):]
+                    failed += len(missed)
+                    failed_ids.extend(missed)
+                    logger.warning(f"[/forward] chunk starting {chunk_ids[0]}: only {len(forwarded)}/{len(chunk_ids)} forwarded")
             else:
-                failed += 1
-                failed_ids.append(mid)
-                logger.warning(f"[/forward] msg {mid} forward failed: {res.get('description')}")
+                # Whole-chunk failure (e.g. one message in it is permanently
+                # un-forwardable) -- fall back to per-message forwardMessage
+                # for just this chunk so one bad ID doesn't sink the rest of
+                # it (loses the reply-link for this chunk only, but nothing
+                # is silently dropped).
+                logger.warning(f"[/forward] chunk starting {chunk_ids[0]} batch failed ({res.get('description')}), falling back to per-message for this chunk")
+                for mid in chunk_ids:
+                    try:
+                        r2 = await tg_post("forwardMessage", {
+                            "chat_id": target_channel,
+                            "from_chat_id": src_chat,
+                            "message_id": mid,
+                        })
+                        if r2.get("ok"):
+                            done += 1
+                        else:
+                            failed += 1
+                            failed_ids.append(mid)
+                    except Exception:
+                        failed += 1
+                        failed_ids.append(mid)
+                    await asyncio.sleep(0.3)
         except Exception as e:
-            failed += 1
-            failed_ids.append(mid)
-            logger.warning(f"[/forward] msg {mid} forward exception: {e}")
+            failed += len(chunk_ids)
+            failed_ids.extend(chunk_ids)
+            logger.warning(f"[/forward] chunk starting {chunk_ids[0]} exception: {e}")
         # Telegram allows ~20 msgs/min into the same channel without hitting
-        # broadcast limits reliably -- small delay keeps this well under that
-        # per-chat rate limit for a serial forward run.
-        await asyncio.sleep(0.4)
-        if time.time() - last_edit >= 3:
-            last_edit = time.time()
-            try:
-                await edit_msg(chat_id, status_msg_id,
-                    f"⏳ Forward হচ্ছে... {done + failed}/{total} ({done} সফল, {failed} fail)",
-                    reply_markup=_cancel_kb(chat_id, job_id))
-            except Exception:
-                pass
+        # broadcast limits reliably -- small delay between chunks keeps this
+        # well under that per-chat rate limit for a serial forward run.
+        await asyncio.sleep(0.6)
+        last_edit = time.time()
+        try:
+            await edit_msg(chat_id, status_msg_id,
+                f"⏳ Forward হচ্ছে... {done + failed}/{total} ({done} সফল, {failed} fail)",
+                reply_markup=_cancel_kb(chat_id, job_id))
+        except Exception:
+            pass
 
     summary = f"✅ Forward শেষ!\n📤 সফল: {done}/{total}\n❌ Fail: {failed}"
     if failed_ids:
