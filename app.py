@@ -14,6 +14,7 @@
 import os
 import json
 import logging
+import traceback
 import asyncio
 import time
 import random
@@ -4330,6 +4331,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
             _LAST_GROQ_ERROR["reason"] = f"{type(e).__name__}: {e}"
             classify_ai_error(e, "groq", page_num)
             logger.warning(f"[AI-ROT] {_gp_tag} groq (fallback) failed (page {page_num}): {e}")
+            logger.warning(f"[AI-ROT] groq (fallback) full traceback:\n{traceback.format_exc()}")
             groq_out, groq_tried = [], set()
 
         if groq_out:
