@@ -5170,12 +5170,26 @@ def _parse_tg_link(link: str):
     """Parses a t.me message link into (chat_ref, message_id).
     chat_ref is either an int (-100xxxxxxxxxx, from /c/ internal-id links)
     or a str username (from public t.me/<username>/<msgid> links) --
-    forwardMessage's from_chat_id accepts both forms directly."""
+    forwardMessage's from_chat_id accepts both forms directly.
+
+    Handles both plain links (t.me/c/<internal_id>/<msg_id>) and
+    forum/topic-thread links (t.me/c/<internal_id>/<thread_id>/<msg_id>) --
+    the thread-link 3-segment form must be checked FIRST since its first
+    two numbers would otherwise wrongly match the plain 2-segment pattern
+    and silently grab the thread_id as if it were the message_id."""
     link = link.strip()
+    m = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", link)
+    if m:
+        internal_id, msg_id = m.group(1), int(m.group(3))
+        return int(f"-100{internal_id}"), msg_id
     m = re.search(r"t\.me/c/(\d+)/(\d+)", link)
     if m:
         internal_id, msg_id = m.group(1), int(m.group(2))
         return int(f"-100{internal_id}"), msg_id
+    m = re.search(r"t\.me/([A-Za-z0-9_]+)/(\d+)/(\d+)", link)
+    if m:
+        username, msg_id = m.group(1), int(m.group(3))
+        return f"@{username}", msg_id
     m = re.search(r"t\.me/([A-Za-z0-9_]+)/(\d+)", link)
     if m:
         username, msg_id = m.group(1), int(m.group(2))
