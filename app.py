@@ -5260,6 +5260,7 @@ async def _run_forward_job(chat_id, uid, target_channel):
     done = 0
     failed = 0
     failed_ids = []
+    first_target_msg_id = None
     last_edit = time.time()
     all_ids = list(range(start_id, end_id + 1))
     CHUNK = 100  # forwardMessages max message_ids per call (Bot API limit)
@@ -5285,6 +5286,8 @@ async def _run_forward_job(chat_id, uid, target_channel):
             })
             if res.get("ok"):
                 forwarded = res.get("result") or []
+                if forwarded and first_target_msg_id is None:
+                    first_target_msg_id = forwarded[0].get("message_id")
                 done += len(forwarded)
                 if len(forwarded) < len(chunk_ids):
                     missed = chunk_ids[len(forwarded):]
@@ -5307,6 +5310,8 @@ async def _run_forward_job(chat_id, uid, target_channel):
                         })
                         if r2.get("ok"):
                             done += 1
+                            if first_target_msg_id is None:
+                                first_target_msg_id = r2.get("result", {}).get("message_id")
                         else:
                             failed += 1
                             failed_ids.append(mid)
@@ -5331,6 +5336,8 @@ async def _run_forward_job(chat_id, uid, target_channel):
             pass
 
     summary = f"✅ Forward শেষ!\n📤 সফল: {done}/{total}\n❌ Fail: {failed}"
+    if first_target_msg_id:
+        summary += f"\n🔗 First Link: {_get_first_poll_link(target_channel, first_target_msg_id)}"
     if failed_ids:
         # Cap the listed IDs so a run with many failures doesn't blow past
         # Telegram's message length limit.
