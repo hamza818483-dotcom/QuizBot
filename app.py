@@ -14871,6 +14871,7 @@ FORBIDDEN (zero tolerance):
 - MULTI-COLUMN ORDER: 2+ columns → COLUMN-MAJOR — finish ENTIRE left column top-to-bottom first, then next column. Never zigzag (left-Q1,right-Q1,left-Q2... is WRONG). Verify: every left-column question number precedes every right-column number in output.
 - Never guess an answer without source proof; never modify question/option wording (only strip numbering like ১./1./Q1./ক.)
 - Never translate — keep source language exactly
+- SYNONYM/ANTONYM MCQ SPECIAL RULE: if the MCQ is a synonym or antonym question (e.g. "Choose the synonym of...", "Select the word opposite in meaning to...", or the Bangla equivalent asking for প্রতিশব্দ/সমার্থক শব্দ/বিপরীত শব্দ of an English word), the question and ALL 4 options MUST stay 100% in English — the target word, every option word, and the question phrasing itself. NEVER add a Bangla meaning/translation next to the English word (not in parentheses, not as a gloss, not anywhere) — output only the plain English word exactly as printed, nothing appended.
 - 0 MCQs → []. N MCQs → exactly N.
 
 EXTRACTION & COMPLETENESS (zero-tolerance):
@@ -14945,6 +14946,7 @@ RULES (zero tolerance):
 - 2+ columns → COLUMN-MAJOR order: finish entire left column top-to-bottom, then next column. Never zigzag.
 - Never guess without source proof; never modify question/option wording (strip only numbering like ১./1./Q1./ক.)
 - Never translate — keep source language exactly. Fix only obvious OCR spelling errors without changing meaning.
+- SYNONYM/ANTONYM MCQ: question + ALL 4 options stay 100% English (target word, every option, question text) — never add a Bangla meaning/translation next to an English word, not even in parentheses.
 - Never output partial/truncated text — question ends only at proper punctuation (?।) or finished clause.
 - 0 MCQs → []. N MCQs → exactly N.
 
