@@ -23986,6 +23986,8 @@ async def process_qbm_pages(
 
                 first_poll_link = ""
                 for i, mcq in enumerate(mcqs):
+                    if is_cancelled(chat_id):
+                        break
                     opts = mcq.get("options", [])[:4]
                     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
                     q_text = mcq["question"]
