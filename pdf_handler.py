@@ -1251,7 +1251,6 @@ async def generate_mcq_from_image(
     page: int,
     mcq_count: int = None,
     max_keys: int = None,
-    key_start_index: int = 0,
 ) -> list:
     if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
         c_min, c_max = mcq_count
@@ -1277,13 +1276,15 @@ async def generate_mcq_from_image(
     # shorter timeout on the 2nd/3rd attempt so a bad/slow key fails fast.
     _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
     # 2026-08-28 (user request): multi-round Gemini/Gemma interleaving --
-    # caller can request only a SLICE of the ordered key list (key_start_index
-    # onward), so the outer loop in app.py can do "10 Gemini keys -> Gemma ->
-    # 5 more Gemini keys -> Gemma -> remaining Gemini keys -> Groq" instead of
-    # always burning every live key before ever trying Gemma. Default (0)
-    # preserves old behavior (starts from the normal rotation offset).
-    if key_start_index:
-        _ordered = _ordered[key_start_index:] + _ordered[:key_start_index]
+    # caller can cap this round to max_keys, so the outer loop in app.py can
+    # do "10 Gemini keys -> Gemma -> 5 more Gemini keys -> Gemma -> remaining
+    # Gemini keys -> Groq" instead of always burning every live key before
+    # ever trying Gemma. Deliberately NOT slicing by key_start_index here --
+    # ordered_keys() is called fresh each round and already sorts healthy
+    # keys first (any key that failed in an earlier round gets mark_rate_
+    # limited() and sinks in THIS call automatically), so re-deriving the
+    # order fresh always tries the current healthiest keys first rather than
+    # a stale index offset that could re-surface an already-failed key.
     # Only attempt keys not already known-exhausted/banned today — retrying
     # a dead key wastes a full timeout slot for nothing, and skipping them
     # lets us cycle through ALL live keys within max_retries.

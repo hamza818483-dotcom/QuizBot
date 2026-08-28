@@ -4481,13 +4481,12 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
         # overall since it's the higher-quality primary.
         _gemini_rounds = [10, 5, None]  # None = all remaining keys
         gemini_out = []
-        _key_cursor = 0
         for _round_idx, _round_size in enumerate(_gemini_rounds):
             try:
                 _bump_ai_call_count(_ai_call_chat_id, model="Gemini")
                 gemini_out = await _gemini_gen_mcq(
                     img, topic, page_num, mcq_count,
-                    max_keys=_round_size, key_start_index=_key_cursor,
+                    max_keys=_round_size,
                 )
             except Exception as e:
                 _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"
@@ -4502,7 +4501,6 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
                     _m.setdefault("_provider", "Gemini")
                 return gemini_out, set()
 
-            _key_cursor += _round_size or 0
             _is_last_round = (_round_idx == len(_gemini_rounds) - 1)
             if _is_last_round:
                 break
