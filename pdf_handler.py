@@ -1457,7 +1457,23 @@ async def generate_mcq_from_image(
             logger.warning(f"[Gemini] Attempt {attempt+1} failed (both models): {err_label}")
             _consecutive_infra_fails += 1
         if attempt < max_retries - 1:
-            await asyncio.sleep(1)
+            # 2026-08-28 (user request): exponential backoff on transient
+            # infra failures (timeout/503/504-style) instead of a flat 1s
+            # delay -- 2s -> 5s -> 10s -> capped at 10s, so repeated retries
+            # give Google's backend more breathing room during a real
+            # overload instead of hammering it every second. 429/401 skip
+            # this (they already cooldown/ban the specific key above and
+            # move to a different key immediately, no benefit from delay).
+            _is_infra_fail = not ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+                                   or "quota" in err_str.lower()
+                                   or "SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
+                                   or "UNAUTHENTICATED" in err_str.upper() or "401" in err_str)
+            if _is_infra_fail:
+                _backoff_schedule = [2, 5, 10]
+                _backoff_s = _backoff_schedule[min(_consecutive_infra_fails - 1, len(_backoff_schedule) - 1)] if _consecutive_infra_fails > 0 else 2
+                await asyncio.sleep(_backoff_s)
+            else:
+                await asyncio.sleep(1)
         continue
 
     logger.warning(f"[Gemini] All keys failed for page {page} — returning empty (caller will try Groq/other fallbacks)")
