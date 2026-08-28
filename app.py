@@ -2907,6 +2907,19 @@ async def _gen_openrouter_dots(img, topic, count):
         "dots-studio/dots-3-note-preview:free", data_url, _build_mcq_prompt(topic, count)
     )
 
+async def _gen_openrouter_qwen_vl(img, topic, count):
+    """2026-08-28: Qwen2.5-VL-32B free model -- strong OCR/document-
+    understanding benchmarks (DocVQA, CC-OCR), general multilingual, added
+    as another independent-backend fallback alongside the Gemma/Dots
+    OpenRouter options above."""
+    data_url = _img_to_data_url(img)
+    if not data_url:
+        return []
+    return await _try_rotator_openai_compat(
+        or_qwen_rotator, "https://openrouter.ai/api/v1/chat/completions",
+        "qwen/qwen2.5-vl-32b-instruct:free", data_url, _build_mcq_prompt(topic, count)
+    )
+
 async def _gen_hf(img, topic, count):
     """Hugging Face Inference API — free tier vision fallback (last resort)."""
     data_url = _img_to_data_url(img)
@@ -2953,11 +2966,12 @@ async def _gen_hf(img, topic, count):
             return parsed
     return []
 
-_AI_PROVIDERS_ORDER = ["nvidia", "openrouter_qwen", "openrouter_dots", "nemotron", "gemma", "hf"]
+_AI_PROVIDERS_ORDER = ["nvidia", "openrouter_qwen_vl", "openrouter_qwen", "openrouter_dots", "nemotron", "gemma", "hf"]
 
 _AI_FALLBACK_FNS = {
     "nvidia":          _gen_nvidia,
     "openrouter_qwen": _gen_openrouter_qwen,
+    "openrouter_qwen_vl": _gen_openrouter_qwen_vl,
     "openrouter_dots": _gen_openrouter_dots,
     "nemotron":        _gen_nemotron,
     "gemma":           _gen_gemma,
