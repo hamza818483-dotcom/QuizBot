@@ -6203,10 +6203,9 @@ async def handle_img_command(msg: dict):
     text = msg.get("text", "").strip()
     reply = msg.get("reply_to_message")
 
-    _img_cmd = "/math" if _MATH_MODE.get() else "/img"
     # Topic extract from command: /img Physics Chapter 3
     # Count can appear anywhere in the command: /img 5, /img 5 Physics, /img Physics 5
-    raw = re.sub(rf"^{re.escape(_img_cmd)}\s*", "", text, flags=re.IGNORECASE).strip()
+    raw = re.sub(r"^/img\s*", "", text, flags=re.IGNORECASE).strip()
     mcq_count = None
     m_count = re.search(r'(?:^|\s)(\d+)(?=\s|$)', raw)
     if m_count:
@@ -6214,13 +6213,9 @@ async def handle_img_command(msg: dict):
         raw = (raw[:m_count.start()] + raw[m_count.end():]).strip()
         raw = re.sub(r'\s+', ' ', raw)
     topic = raw or "ATLAS Special MCQ"
-    if _MATH_MODE.get():
-        # /math count is content-driven (page math first, then simple
-        # self-made) -- never user-settable, same as /math on PDF.
-        mcq_count = None
 
     if not reply:
-        await send_msg(chat_id, f"❌ কোনো image-এ reply করে {_img_cmd} দাও!\n\nExample: image-এ reply করে <code>{_img_cmd} Physics</code>", parse_mode="HTML")
+        await send_msg(chat_id, "❌ কোনো image-এ reply করে /img দাও!\n\nExample: image-এ reply করে <code>/img Physics</code>", parse_mode="HTML")
         return
     if not (reply.get("photo") or reply.get("document")):
         await send_msg(chat_id, "❌ Image-এ reply করতে হবে!")
@@ -6234,16 +6229,9 @@ async def handle_img_command(msg: dict):
     session_key = f"img_cmd_{uid}"
     await sb_exec(lambda: sb.table("quiz_sessions").upsert({
         "key": session_key,
-        "data": json.dumps({"file_id": file_id, "msg_id": reply["message_id"], "topic": topic, "mcq_count": mcq_count, "math_mode": _MATH_MODE.get()}),
+        "data": json.dumps({"file_id": file_id, "msg_id": reply["message_id"], "topic": topic, "mcq_count": mcq_count}),
         "updated_at": int(time.time())
     }).execute())
-
-    # /math always means AI-generate (numeric math MCQ) -- "existing MCQ
-    # extraction" makes no sense for this mode, so skip the source-select
-    # prompt entirely and go straight to "new" generation.
-    if _MATH_MODE.get():
-        await handle_img_source("new", uid, chat_id, msg["from"])
-        return
 
     # STEP 0 (NEW): source select — New MCQ (AI-generated, present system)
     # vs Existing MCQ (extract already-existing MCQ from the image, qbm-style).
@@ -6300,7 +6288,6 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     topic = img_data.get("topic", "ATLAS Special MCQ")
     source = img_data.get("source", "new")
     mcq_count = img_data.get("mcq_count")
-    math_mode = img_data.get("math_mode", False)
 
     channels = await db_get_channels()
     if not channels:
@@ -6311,7 +6298,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     # pattern as /qbm: generate/extract first -> CSV auto-sent -> THEN show
     # channel list, so the person picks a channel already knowing the count. ──
     est_secs = 30 if source == "new" else 38
-    label = "Math MCQ তৈরি হচ্ছে" if (source == "new" and math_mode) else ("MCQ তৈরি হচ্ছে" if source == "new" else "Existing MCQ বের করা হচ্ছে")
+    label = "MCQ তৈরি হচ্ছে" if source == "new" else "Existing MCQ বের করা হচ্ছে"
     loading = await send_msg(chat_id, f"⏳ Image থেকে {label}... 0%")
     loading_id = loading.get("result", {}).get("message_id")
 
@@ -6354,12 +6341,6 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             # new questions, only extracts what's already in the image, per /qbm rules.
             mcqs = await _qbm_extract_from_image(img)
             mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
-        elif math_mode:
-            _mm_token = _MATH_MODE.set(True)
-            try:
-                mcqs = await generate_mcq_from_image(img, topic, 1, mcq_count)
-            finally:
-                _MATH_MODE.reset(_mm_token)
         else:
             mcqs = await generate_mcq_from_image(img, topic, 1, mcq_count)
     except Exception as e:
@@ -13119,6 +13100,62 @@ async def _handle_extra_impl(msg: dict):
 # ============================================================
 # FEATURE 8: /pdf COMMAND
 # ============================================================
+async def handle_math_image(msg: dict):
+    """/math on an IMAGE reply — same processing pipeline as /pdf's
+    single-page path (no /img-style source-select or channel-select-first
+    flow): parse -c/-m/-t args the same way, treat the image as ONE page,
+    and reuse process_pdf_pages directly so behavior matches /pdf exactly
+    (channel given -> stream+send poll; no channel -> generate then show
+    channel-list button), just with 1 page instead of many."""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    uname = msg["from"].get("first_name", "User")
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    params = parse_pdf_command(text)
+    topic = params["topic"]
+    if not topic:
+        m_t = re.search(r'-t\s+"([^"]+)"', text) or re.search(r"-t\s+'([^']+)'", text) or re.search(r'-t\s+(\S+)', text)
+        if m_t:
+            topic = m_t.group(1)
+    topic = topic or DEFAULT_TOPIC
+    channel_id = params["channel_id"]
+    thread_id = params.get("thread_id")
+    # /math count is content-driven (~10-25, page math first then simple
+    # self-made) -- never user-settable, same as /math on PDF.
+    mcq_count = None
+
+    if reply.get("photo"):
+        file_id = reply["photo"][-1]["file_id"]
+    else:
+        file_id = reply["document"]["file_id"]
+    file_name = (reply.get("document") or {}).get("file_name", "image.jpg")
+
+    status_r = await send_msg(chat_id, "⏳ Image থেকে Math MCQ generate হচ্ছে...")
+    status_msg_id = status_r.get("result", {}).get("message_id")
+
+    token = _MATH_MODE.set(True)
+    try:
+        img_bytes = await download_tg_file(file_id)
+        from PIL import Image as PILImage
+        img = PILImage.open(BytesIO(img_bytes))
+        pages = [(1, img)]
+
+        if channel_id:
+            await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count,
+                channel_id, False, file_name, status_msg_id, thread_id=thread_id, skip_generate=False)
+        else:
+            await process_pdf_pages(chat_id, uid, uname, pages, topic, mcq_count,
+                None, True, file_name, status_msg_id, thread_id=thread_id, skip_generate=False)
+    except Exception as e:
+        logger.error(f"[MATH-IMG] Handle error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+        await notify_owner(f"[MATH-IMG] Error for user {uid}:\n{e}")
+    finally:
+        _MATH_MODE.reset(token)
+
+
 async def handle_pdf(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
@@ -28565,16 +28602,13 @@ async def handle_message(msg: dict):
             return
         await handle_img_command(msg)
     elif text.startswith("/math") and msg.get("reply_to_message") and (msg["reply_to_message"].get("photo") or (msg["reply_to_message"].get("document") and msg["reply_to_message"]["document"].get("mime_type", "").startswith("image/"))):
-        # /math on an image reply -- same image pipeline as /img, with
-        # _MATH_MODE forcing the numeric-math prompt instead of default.
+        # /math on an image reply -- same single-page pipeline as /pdf
+        # (parse -c/-m/-t, process_pdf_pages), NOT /img's source-select flow.
         if not is_auth:
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
-        token = _MATH_MODE.set(True)
-        try:
-            await handle_img_command(msg)
-        finally:
-            _MATH_MODE.reset(token)
+        clear_cancel(chat_id)
+        _spawn_command_task(uid, handle_math_image(msg))
     elif text.startswith("/txt"):
         if not is_auth:
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
