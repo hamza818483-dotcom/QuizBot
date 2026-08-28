@@ -4470,23 +4470,60 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
     if _gemini_primary_mode:
         _gp_tag = "/extra" if _EXTRA_MODE.get() else ("/bio" if _BIO_MODE.get() else ("/chem" if _CHEM_MODE.get() else "default"))
         _ai_call_chat_id = _current_job_chat_id_ctx.get()
-        try:
-            _bump_ai_call_count(_ai_call_chat_id, model="Gemini")
-            gemini_out = await _gemini_gen_mcq(img, topic, page_num, mcq_count)
-        except Exception as e:
-            _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"
-            classify_ai_error(e, "gemini", page_num)
-            logger.warning(f"[AI-ROT] {_gp_tag} gemini (primary) failed (page {page_num}): {e}")
-            gemini_out = []
 
-        if gemini_out:
-            logger.info(f"[AI-ROT] {_gp_tag} page {page_num} satisfied by provider=gemini (primary)")
-            _track_provider_use("gemini", page_num)
-            for _m in gemini_out:
-                _m.setdefault("_provider", "Gemini")
-            return gemini_out, set()
+        # 2026-08-28 (user request): multi-round Gemini/Gemma interleave --
+        # instead of burning every live Gemini key (could be 40+) before
+        # ever trying the Gemma-4 fallback, try in rounds: 10 Gemini keys ->
+        # Gemma -> 5 more Gemini keys -> Gemma -> all remaining Gemini keys
+        # -> Groq. This way a temporary Gemini outage/rate-limit gets a
+        # faster second opinion from Gemma instead of waiting through the
+        # full key list first, while still giving Gemini most of the shots
+        # overall since it's the higher-quality primary.
+        _gemini_rounds = [10, 5, None]  # None = all remaining keys
+        gemini_out = []
+        _key_cursor = 0
+        for _round_idx, _round_size in enumerate(_gemini_rounds):
+            try:
+                _bump_ai_call_count(_ai_call_chat_id, model="Gemini")
+                gemini_out = await _gemini_gen_mcq(
+                    img, topic, page_num, mcq_count,
+                    max_keys=_round_size, key_start_index=_key_cursor,
+                )
+            except Exception as e:
+                _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"
+                classify_ai_error(e, "gemini", page_num)
+                logger.warning(f"[AI-ROT] {_gp_tag} gemini round {_round_idx+1} failed (page {page_num}): {e}")
+                gemini_out = []
 
-        logger.warning(f"[AI-ROT] {_gp_tag} gemini empty (page {page_num}); trying gemma-vl")
+            if gemini_out:
+                logger.info(f"[AI-ROT] {_gp_tag} page {page_num} satisfied by provider=gemini (round {_round_idx+1})")
+                _track_provider_use("gemini", page_num)
+                for _m in gemini_out:
+                    _m.setdefault("_provider", "Gemini")
+                return gemini_out, set()
+
+            _key_cursor += _round_size or 0
+            _is_last_round = (_round_idx == len(_gemini_rounds) - 1)
+            if _is_last_round:
+                break
+
+            logger.warning(f"[AI-ROT] {_gp_tag} gemini round {_round_idx+1} empty (page {page_num}); trying gemma-vl before next round")
+            try:
+                _bump_ai_call_count(_ai_call_chat_id, model="OpenRouterQwenVL")
+                qwenvl_out = await _gen_openrouter_qwen_vl(img, topic, mcq_count)
+            except Exception as e:
+                logger.warning(f"[AI-ROT] {_gp_tag} gemma-vl (interleave) failed (page {page_num}): {e}")
+                qwenvl_out = []
+
+            if qwenvl_out:
+                logger.info(f"[AI-ROT] {_gp_tag} page {page_num} satisfied by provider=openrouter_qwen_vl (interleave round {_round_idx+1})")
+                _track_provider_use("openrouter_qwen_vl", page_num)
+                for _m in qwenvl_out:
+                    _m.setdefault("_provider", "Gemma-4-VL")
+                return qwenvl_out, set()
+
+        # all Gemini rounds exhausted -- one final Gemma try before Groq
+        logger.warning(f"[AI-ROT] {_gp_tag} gemini all rounds empty (page {page_num}); trying gemma-vl")
         try:
             _bump_ai_call_count(_ai_call_chat_id, model="OpenRouterQwenVL")
             qwenvl_out = await _gen_openrouter_qwen_vl(img, topic, mcq_count)

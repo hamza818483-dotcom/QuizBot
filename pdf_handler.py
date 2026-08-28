@@ -1250,6 +1250,8 @@ async def generate_mcq_from_image(
     topic: str,
     page: int,
     mcq_count: int = None,
+    max_keys: int = None,
+    key_start_index: int = 0,
 ) -> list:
     if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
         c_min, c_max = mcq_count
@@ -1274,6 +1276,14 @@ async def generate_mcq_from_image(
     # reaching the OpenRouter fallback. Cap attempts at 3 keys max, and use a
     # shorter timeout on the 2nd/3rd attempt so a bad/slow key fails fast.
     _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+    # 2026-08-28 (user request): multi-round Gemini/Gemma interleaving --
+    # caller can request only a SLICE of the ordered key list (key_start_index
+    # onward), so the outer loop in app.py can do "10 Gemini keys -> Gemma ->
+    # 5 more Gemini keys -> Gemma -> remaining Gemini keys -> Groq" instead of
+    # always burning every live key before ever trying Gemma. Default (0)
+    # preserves old behavior (starts from the normal rotation offset).
+    if key_start_index:
+        _ordered = _ordered[key_start_index:] + _ordered[:key_start_index]
     # Only attempt keys not already known-exhausted/banned today — retrying
     # a dead key wastes a full timeout slot for nothing, and skipping them
     # lets us cycle through ALL live keys within max_retries.
@@ -1301,6 +1311,12 @@ async def generate_mcq_from_image(
     # error (not quota/429/invalid-key), treat it as a backend outage and
     # stop early instead of exhausting the whole key list pointlessly.
     max_retries = len(_ordered) if _ordered else 5
+    if max_keys is not None:
+        # 2026-08-28: cap this round to max_keys so the caller's multi-round
+        # Gemini/Gemma interleave loop controls how many keys get tried
+        # before returning control (empty list if none of this round's keys
+        # succeed -- caller decides whether to try Gemma or another round).
+        max_retries = min(max_retries, max_keys)
     _consecutive_infra_fails = 0
     # Model fallback chain: try the latest model first, and if the WHOLE
     # Gemini backend for it is overloaded (503 UNAVAILABLE — this is a
