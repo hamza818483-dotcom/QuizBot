@@ -3002,19 +3002,23 @@ async def _gen_openrouter_qwen_vl(img, topic, count):
     if not keys:
         return []
 
+    # 2026-08-28: qwen/qwen2.5-vl-32b-instruct:free was retired from OpenRouter
+    # (404 on every key). Replaced with google/gemma-4-31b-it:free -- currently
+    # live, free, vision-capable, 262K context, strong multilingual (140+ langs)
+    # performance, good fit for Bengali OCR/document tasks.
+    _MODEL = "google/gemma-4-31b-it:free"
+
     first_batch = []
     for key in keys:
         txt, status = await _post_openai_compat(
             "https://openrouter.ai/api/v1/chat/completions", key,
-            "qwen/qwen2.5-vl-32b-instruct:free", data_url,
+            _MODEL, data_url,
             _build_qwen_compact_prompt(topic, n_target)
         )
         if status == 404:
-            # 2026-08-28: model retired/renamed on OpenRouter -- this is a
-            # model-level failure, not a per-key issue. Retrying across all
-            # remaining keys just burns ~14 wasted calls per page. Bail out
-            # immediately so the caller falls through to Groq/other fallbacks.
-            logger.warning("[openrouter_qwen_vl] model 404 -- skipping remaining keys, model likely retired")
+            # Model-level failure (retired/renamed), not per-key -- bail out
+            # immediately instead of burning a full key-rotation cycle.
+            logger.warning(f"[openrouter_qwen_vl] model 404 ({_MODEL}) -- skipping remaining keys, model likely retired")
             return []
         if txt:
             first_batch = _parse_mcq_json(txt)
@@ -3034,11 +3038,11 @@ async def _gen_openrouter_qwen_vl(img, topic, count):
     for key in keys:
         txt, status = await _post_openai_compat(
             "https://openrouter.ai/api/v1/chat/completions", key,
-            "qwen/qwen2.5-vl-32b-instruct:free", data_url,
+            _MODEL, data_url,
             _build_qwen_compact_prompt(topic, n_target, avoid=avoid_qs)
         )
         if status == 404:
-            logger.warning("[openrouter_qwen_vl] model 404 on second call -- skipping remaining keys")
+            logger.warning(f"[openrouter_qwen_vl] model 404 ({_MODEL}) on second call -- skipping remaining keys")
             break
         if txt:
             second_batch = _parse_mcq_json(txt)
@@ -4505,22 +4509,22 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
                 _m.setdefault("_provider", "Gemini")
             return gemini_out, set()
 
-        logger.warning(f"[AI-ROT] {_gp_tag} gemini empty (page {page_num}); trying qwen2.5-vl")
+        logger.warning(f"[AI-ROT] {_gp_tag} gemini empty (page {page_num}); trying gemma-vl")
         try:
             _bump_ai_call_count(_ai_call_chat_id, model="OpenRouterQwenVL")
             qwenvl_out = await _gen_openrouter_qwen_vl(img, topic, mcq_count)
         except Exception as e:
-            logger.warning(f"[AI-ROT] {_gp_tag} qwen2.5-vl (fallback) failed (page {page_num}): {e}")
+            logger.warning(f"[AI-ROT] {_gp_tag} gemma-vl (fallback) failed (page {page_num}): {e}")
             qwenvl_out = []
 
         if qwenvl_out:
             logger.info(f"[AI-ROT] {_gp_tag} page {page_num} satisfied by provider=openrouter_qwen_vl (fallback)")
             _track_provider_use("openrouter_qwen_vl", page_num)
             for _m in qwenvl_out:
-                _m.setdefault("_provider", "Qwen2.5-VL")
+                _m.setdefault("_provider", "Gemma-4-VL")
             return qwenvl_out, set()
 
-        logger.warning(f"[AI-ROT] {_gp_tag} qwen2.5-vl empty (page {page_num}); trying groq")
+        logger.warning(f"[AI-ROT] {_gp_tag} gemma-vl empty (page {page_num}); trying groq")
         try:
             _bump_ai_call_count(_ai_call_chat_id, model="Groq")
             groq_out, groq_tried = await _gen_groq(img, topic, mcq_count, exclude_keys=exclude_groq_keys, key_offset=key_offset)
