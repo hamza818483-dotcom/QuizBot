@@ -19711,7 +19711,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
             return client.models.generate_content(
                 model="gemini-3.6-flash",
                 contents=[types.Part.from_text(text=prompt)],
-                config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=65536)
+                config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=16384)
             )
 
         keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys

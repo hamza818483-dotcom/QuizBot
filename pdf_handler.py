@@ -1347,7 +1347,18 @@ async def generate_mcq_from_image(
                                 data=base64.b64decode(img_b64),
                                 mime_type="image/jpeg"
                             )
-                        ]
+                        ],
+                        # 2026-08-28: explicit output cap (was previously
+                        # unset, meaning the SDK/model default applied) --
+                        # a single PDF page's MCQ batch rarely needs more
+                        # than a few thousand tokens of JSON, and per
+                        # Google's own guidance an uncapped/very large
+                        # requested output increases the chance of the
+                        # 504 DEADLINE_EXCEEDED seen recently (server can't
+                        # finish generating within its fixed deadline).
+                        # Capping this reduces that risk without touching
+                        # per-call http_options timeouts above.
+                        config=types.GenerateContentConfig(max_output_tokens=16384)
                     )
 
                 # 2026-08-22: 25-40s range across all keys (uncapped) --
