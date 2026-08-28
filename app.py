@@ -3009,6 +3009,13 @@ async def _gen_openrouter_qwen_vl(img, topic, count):
             "qwen/qwen2.5-vl-32b-instruct:free", data_url,
             _build_qwen_compact_prompt(topic, n_target)
         )
+        if status == 404:
+            # 2026-08-28: model retired/renamed on OpenRouter -- this is a
+            # model-level failure, not a per-key issue. Retrying across all
+            # remaining keys just burns ~14 wasted calls per page. Bail out
+            # immediately so the caller falls through to Groq/other fallbacks.
+            logger.warning("[openrouter_qwen_vl] model 404 -- skipping remaining keys, model likely retired")
+            return []
         if txt:
             first_batch = _parse_mcq_json(txt)
             if first_batch:
@@ -3030,6 +3037,9 @@ async def _gen_openrouter_qwen_vl(img, topic, count):
             "qwen/qwen2.5-vl-32b-instruct:free", data_url,
             _build_qwen_compact_prompt(topic, n_target, avoid=avoid_qs)
         )
+        if status == 404:
+            logger.warning("[openrouter_qwen_vl] model 404 on second call -- skipping remaining keys")
+            break
         if txt:
             second_batch = _parse_mcq_json(txt)
             if second_batch:
