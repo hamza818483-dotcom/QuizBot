@@ -2618,7 +2618,7 @@ def _track_provider_use(provider: str, page_num: int):
     _PROVIDER_LAST_USED["page"] = page_num
     _PROVIDER_LAST_USED["time"] = _dt.now().strftime("%H:%M:%S")
 
-async def _gen_groq(img, topic, count, exclude_keys: set = None, key_offset: int = 0):
+async def _gen_groq_single(img, topic, count, exclude_keys: set = None, key_offset: int = 0):
     keys = groq_key_rotator.ordered_keys(offset=key_offset)
     if exclude_keys:
         # Retry-loop calls (page came back thin) pass in keys already tried
@@ -2765,6 +2765,42 @@ async def _gen_groq(img, topic, count, exclude_keys: set = None, key_offset: int
     _LAST_GROQ_ERROR["reason"] = f"Groq সব {len(keys)}টি key-তেই fail করেছে — [" + "; ".join(key_errors) + "]"
     return [], tried_keys
 
+async def _gen_groq(img, topic, count, exclude_keys: set = None, key_offset: int = 0):
+    """2026-08-28: wraps _gen_groq_single into 2 calls per page (~16k total
+    token budget vs ~8k for one call), to get closer to a full page's MCQ
+    coverage the same way _gen_openrouter_qwen_vl does for Qwen. Groq
+    enforces an 8000 TPM (tokens-per-minute) hard cap PER KEY -- the second
+    call passes first_tried as exclude_keys, forcing it onto a DIFFERENT
+    key than the first call, so the two calls never share the same key's
+    rolling TPM budget window (the 2s gap below is just an extra courtesy
+    margin, not the main safety mechanism). If the second call still
+    fails/returns empty, the first call's MCQs are returned rather than
+    discarded -- this never performs worse than the single-call version,
+    only better or equal."""
+    first_batch, first_tried = await _gen_groq_single(img, topic, count, exclude_keys=exclude_keys, key_offset=key_offset)
+    if not first_batch:
+        return first_batch, first_tried
+
+    # Small gap before the second call -- reduces (does not eliminate) the
+    # chance of tripping the same key's rolling 8000 TPM window twice in
+    # quick succession.
+    await asyncio.sleep(2)
+
+    avoid_qs = [m.get("question", "") for m in first_batch if m.get("question")]
+    second_prompt_topic = topic
+    if avoid_qs:
+        joined = " | ".join(q[:60] for q in avoid_qs[:10])
+        second_prompt_topic = (
+            f"{topic}\n(এই প্রশ্নগুলো আগে বানানো হয়েছে, এগুলোর পুনরাবৃত্তি না করে "
+            f"পেজের অন্য অংশ থেকে নতুন প্রশ্ন বানাও: {joined})"
+        )
+    second_batch, second_tried = await _gen_groq_single(
+        img, second_prompt_topic, count,
+        exclude_keys=exclude_keys | first_tried if exclude_keys else first_tried,
+        key_offset=key_offset,
+    )
+    return first_batch + second_batch, first_tried | second_tried
+
 _generic_exhausted_day: Dict[str, str] = {}   # "label:key" -> 'YYYY-MM-DD' (BD)
 _generic_exhausted_flag: Dict[str, bool] = {}
 
@@ -2907,25 +2943,31 @@ async def _gen_openrouter_dots(img, topic, count):
         "dots-studio/dots-3-note-preview:free", data_url, _build_mcq_prompt(topic, count)
     )
 
-def _build_qwen_compact_prompt(topic: str, count) -> str:
+def _build_qwen_compact_prompt(topic: str, n: int, avoid: list = None) -> str:
     """2026-08-28: Qwen2.5-VL's max_tokens is shared-capped at 4500 (same
     dynamic budget as Groq, via _post_openai_compat) -- the full default
     prompt targets up to 10-25 MCQs with verbose full-page-coverage
     instructions, which for Bengali text (roughly 2-3x more tokens per
     character than English) can truncate mid-response well before that
-    count is reached. This trims the instruction overhead and caps the
-    target count low enough to reliably finish within budget, rather than
-    relying on _parse_mcq_json's truncation-repair to salvage a partial
-    response every time."""
-    n = 8
-    if isinstance(count, (tuple, list)) and len(count) == 2:
-        n = min(count[1], 8)
-    elif isinstance(count, int) and count:
-        n = min(count, 8)
+    count is reached. This trims the instruction overhead and caps each
+    single call's target to n (10), reliably fitting one call's ~4500
+    tokens; two calls (see _gen_openrouter_qwen_vl) combine to cover up to
+    20 MCQs per page.
+    avoid: question texts already produced by an earlier call on the same
+    page, passed in so the second call targets different content instead
+    of repeating the first call's questions."""
+    avoid_rule = ""
+    if avoid:
+        joined = " | ".join(q[:60] for q in avoid[:10])
+        avoid_rule = (
+            f"এই প্রশ্নগুলো আগেই বানানো হয়েছে, এগুলোর মতো বা এগুলোর পুনরাবৃত্তি "
+            f"করবে না, পেজের অন্য অংশ/তথ্য থেকে নতুন প্রশ্ন বানাও: {joined}\n"
+        )
     return (
         f"এই পেজের ছবি থেকে বাংলায় {n}টি MCQ বানাও (বিষয়: {topic}). "
         f"পেজে যা লেখা আছে শুধু তা থেকেই বানাবে, নিজে থেকে কিছু বানিয়ো না। "
         f"পেজে {n}টির কম তথ্য থাকলে যতগুলো পাওয়া যায় ততগুলোই দাও, কম দিলেও সমস্যা নেই। "
+        f"{avoid_rule}"
         f'শুধু এই JSON array ফরম্যাটে উত্তর দাও, অন্য কোনো লেখা ছাড়া:\n'
         f'[{{"question":"...","options":["...","...","...","..."],"answer":"A","explanation":"..."}}]\n'
         f"answer অবশ্যই A/B/C/D এর একটি হতে হবে। explanation ছোট (এক লাইন) রাখো।"
@@ -2935,17 +2977,70 @@ async def _gen_openrouter_qwen_vl(img, topic, count):
     """2026-08-28: Qwen2.5-VL-32B free model -- strong OCR/document-
     understanding benchmarks (DocVQA, CC-OCR), general multilingual, added
     as another independent-backend fallback alongside the Gemma/Dots
-    OpenRouter options above. Uses a compact Bengali-specific prompt (see
-    _build_qwen_compact_prompt) instead of the default full prompt, since
-    Qwen's shared 4500-token output budget truncates before finishing a
-    10-25-MCQ Bengali response."""
+    OpenRouter options above.
+
+    Two-call split (2026-08-28): a single call's shared 4500-token output
+    budget can't reliably cover a full 20-MCQ Bengali page in one shot, so
+    this makes 2 back-to-back calls against the SAME full page image (not
+    a cropped half), each targeting 10 MCQs with a compact prompt (see
+    _build_qwen_compact_prompt) -- combined ~9000 tokens total, covering
+    up to 20 MCQs/page. The second call is told which questions the first
+    call already produced so it targets different page content instead of
+    repeating. If the second call fails/empty, the first call's MCQs are
+    still returned rather than discarded."""
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
-    return await _try_rotator_openai_compat(
-        or_qwen_rotator, "https://openrouter.ai/api/v1/chat/completions",
-        "qwen/qwen2.5-vl-32b-instruct:free", data_url, _build_qwen_compact_prompt(topic, count)
-    )
+
+    n_target = 10
+    if isinstance(count, (tuple, list)) and len(count) == 2:
+        n_target = min(count[1] // 2, 10) or 10
+    elif isinstance(count, int) and count:
+        n_target = min(count // 2, 10) or 10
+
+    keys = or_qwen_rotator.ordered_keys()
+    if not keys:
+        return []
+
+    first_batch = []
+    for key in keys:
+        txt, status = await _post_openai_compat(
+            "https://openrouter.ai/api/v1/chat/completions", key,
+            "qwen/qwen2.5-vl-32b-instruct:free", data_url,
+            _build_qwen_compact_prompt(topic, n_target)
+        )
+        if txt:
+            first_batch = _parse_mcq_json(txt)
+            if first_batch:
+                or_qwen_rotator.mark_healthy(key)
+                break
+            continue
+        if status == 429:
+            or_qwen_rotator.mark_rate_limited(key)
+            continue
+
+    if not first_batch:
+        return []
+
+    avoid_qs = [m.get("question", "") for m in first_batch if m.get("question")]
+    second_batch = []
+    for key in keys:
+        txt, status = await _post_openai_compat(
+            "https://openrouter.ai/api/v1/chat/completions", key,
+            "qwen/qwen2.5-vl-32b-instruct:free", data_url,
+            _build_qwen_compact_prompt(topic, n_target, avoid=avoid_qs)
+        )
+        if txt:
+            second_batch = _parse_mcq_json(txt)
+            if second_batch:
+                or_qwen_rotator.mark_healthy(key)
+                break
+            continue
+        if status == 429:
+            or_qwen_rotator.mark_rate_limited(key)
+            continue
+
+    return first_batch + second_batch
 
 async def _gen_hf(img, topic, count):
     """Hugging Face Inference API — free tier vision fallback (last resort)."""
