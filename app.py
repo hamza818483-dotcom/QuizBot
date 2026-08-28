@@ -4283,6 +4283,14 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         # prompt itself) -- the floor was pure wasted key spend, not
         # improving coverage.
         _rng_min, _rng_max = 1, None
+    elif _BORO_MODE.get():
+        # /boro, like /bangla, is maximum-source-utilization with no cap --
+        # never fall through to /pdf's own MIN_MCQ/MAX_MCQ floor/ceiling.
+        _rng_min, _rng_max = 1, None
+    elif _MATH_MODE.get():
+        # /math count is entirely content-driven (page math first, then
+        # simple self-made, roughly 10-25) -- never /pdf's own floor/cap.
+        _rng_min, _rng_max = 1, None
     else:
         _rng_min, _rng_max = MIN_MCQ, MAX_MCQ
 
