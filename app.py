@@ -2966,7 +2966,7 @@ async def _gen_hf(img, topic, count):
             return parsed
     return []
 
-_AI_PROVIDERS_ORDER = ["nvidia", "openrouter_qwen_vl", "openrouter_qwen", "openrouter_dots", "nemotron", "gemma", "hf"]
+_AI_PROVIDERS_ORDER = ["nvidia", "openrouter_qwen", "openrouter_dots", "nemotron", "gemma", "hf"]
 
 _AI_FALLBACK_FNS = {
     "nvidia":          _gen_nvidia,
@@ -4373,7 +4373,22 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
                 _m.setdefault("_provider", "Gemini")
             return gemini_out, set()
 
-        logger.warning(f"[AI-ROT] {_gp_tag} gemini empty (page {page_num}); trying groq")
+        logger.warning(f"[AI-ROT] {_gp_tag} gemini empty (page {page_num}); trying qwen2.5-vl")
+        try:
+            _bump_ai_call_count(_ai_call_chat_id, model="OpenRouterQwenVL")
+            qwenvl_out = await _gen_openrouter_qwen_vl(img, topic, mcq_count)
+        except Exception as e:
+            logger.warning(f"[AI-ROT] {_gp_tag} qwen2.5-vl (fallback) failed (page {page_num}): {e}")
+            qwenvl_out = []
+
+        if qwenvl_out:
+            logger.info(f"[AI-ROT] {_gp_tag} page {page_num} satisfied by provider=openrouter_qwen_vl (fallback)")
+            _track_provider_use("openrouter_qwen_vl", page_num)
+            for _m in qwenvl_out:
+                _m.setdefault("_provider", "Qwen2.5-VL")
+            return qwenvl_out, set()
+
+        logger.warning(f"[AI-ROT] {_gp_tag} qwen2.5-vl empty (page {page_num}); trying groq")
         try:
             _bump_ai_call_count(_ai_call_chat_id, model="Groq")
             groq_out, groq_tried = await _gen_groq(img, topic, mcq_count, exclude_keys=exclude_groq_keys, key_offset=key_offset)
