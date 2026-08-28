@@ -1328,7 +1328,7 @@ async def generate_mcq_from_image(
     # 2026-08-07: switched back to gemini-3.7-flash — gemini-3.7-flash was
     # 404ing ("no longer available to new users") for new API keys, on top
     # of its own daily-quota exhaustion, so it's no longer a safe primary.
-    _GEMINI_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash"]
+    _GEMINI_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-2.5-flash"]
 
     for attempt in range(max_retries):
         key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
