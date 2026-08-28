@@ -3009,6 +3009,12 @@ async def _gen_openrouter_qwen_vl(img, topic, count):
     _GEMMA_MAX_TOKENS_CAP = 12000
 
     batch = []
+    _consecutive_429 = 0
+    _MAX_429_BEFORE_BAIL = 2  # provider-wide rate limit (not per-key) --
+    # error explicitly says "temporarily rate-limited upstream", so trying
+    # all ~14 keys wastes time on a limit that isn't key-specific. 2 tries
+    # covers the rare case of a request landing right at the rate-limit
+    # window boundary, without burning a full rotation on a shared limit.
     for key in keys:
         txt, status = await _post_openai_compat(
             "https://openrouter.ai/api/v1/chat/completions", key,
@@ -3030,6 +3036,10 @@ async def _gen_openrouter_qwen_vl(img, topic, count):
             continue
         if status == 429:
             or_qwen_rotator.mark_rate_limited(key)
+            _consecutive_429 += 1
+            if _consecutive_429 >= _MAX_429_BEFORE_BAIL:
+                logger.warning(f"[openrouter_qwen_vl] {_MAX_429_BEFORE_BAIL} consecutive 429s ({_MODEL}) -- provider-wide rate limit, bailing to Groq instead of trying remaining keys")
+                return []
             continue
 
     return batch
