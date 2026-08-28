@@ -1338,10 +1338,10 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
     unmodified, exactly like AtlasBot's own generate_mcq_from_image(img, 'prompt_2').
 
     Returns (mcqs, provider_name) so the caller can report which model
-    (Gemini/Groq) actually produced each page — 2026-08-07: gemini-3.7-flash
+    (Gemini/Groq) actually produced each page — 2026-08-07: gemini-3.5-flash
     started 404ing ("no longer available to new users") on top of daily-quota
     429s, silently killing every /tf page since this function had no fallback.
-    Switched primary model to gemini-3.7-flash and added a Groq vision
+    Switched primary model to gemini-3.5-flash and added a Groq vision
     fallback so a Gemini-side outage doesn't zero out the whole run.
 
     count_min/count_max come from the user's [N-M] bracket (e.g. /tf [8-20]);
@@ -1413,7 +1413,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
 
             def _call():
                 return client.models.generate_content(
-                    model="gemini-3.7-flash",
+                    model="gemini-3.5-flash",
                     contents=[
                         gtypes.Part.from_text(text=prompt_text),
                         gtypes.Part.from_bytes(
@@ -3225,7 +3225,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
                 http_options=types.HttpOptions(timeout=38000)
             )
             return client.models.generate_content(
-                model="gemini-3.7-flash",
+                model="gemini-3.5-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
@@ -11531,7 +11531,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
             for ib in img_bytes_list:
                 parts.append(types.Part.from_bytes(data=ib, mime_type="image/jpeg"))
             return client.models.generate_content(
-                model="gemini-3.7-flash",
+                model="gemini-3.5-flash",
                 contents=parts,
                 config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=8192)
             )
@@ -19756,7 +19756,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                 http_options=types.HttpOptions(timeout=38000)
             )
             return client.models.generate_content(
-                model="gemini-3.7-flash",
+                model="gemini-3.5-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
@@ -19858,7 +19858,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
             for ib in img_bytes_list:
                 parts.append(types.Part.from_bytes(data=ib, mime_type="image/jpeg"))
             return client.models.generate_content(
-                model="gemini-3.7-flash",
+                model="gemini-3.5-flash",
                 contents=parts,
                 config=types.GenerateContentConfig(
                     temperature=0.1,
@@ -19936,7 +19936,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
                 http_options=types.HttpOptions(timeout=38000)
             )
             return client.models.generate_content(
-                model="gemini-3.7-flash",
+                model="gemini-3.5-flash",
                 contents=[types.Part.from_text(text=prompt)],
                 config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=8192)
             )
@@ -23987,7 +23987,7 @@ Return ONLY the JSON array, nothing else."""
 
                     def _call():
                         return client.models.generate_content(
-                            model="gemini-3.7-flash",
+                            model="gemini-3.5-flash",
                             contents=[
                                 types.Part.from_text(text=prompt),
                                 types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
@@ -28417,7 +28417,7 @@ async def handle_message(msg: dict):
             gem_exhausted = sum(1 for k in gemini_keys if _is_gemini_key_exhausted_today(k))
             gem_cooling = sum(1 for k in gemini_keys if 0 < key_rotator._cooldown_until.get(k, 0) < float("inf") and key_rotator._cooldown_until.get(k, 0) > now and not _is_gemini_key_exhausted_today(k))
             gem_healthy = len(gemini_keys) - gem_cooling - gem_exhausted
-            lines.append(f"\n🔵 <b>Gemini</b> (gemini-3.7-flash, free tier ~20 req/day/key): {len(gemini_keys) + gem_banned} key\n"
+            lines.append(f"\n🔵 <b>Gemini</b> (gemini-3.5-flash, free tier ~20 req/day/key): {len(gemini_keys) + gem_banned} key\n"
                          f"  ✅ Healthy: {gem_healthy} | ⏳ Cooldown: {gem_cooling} | 🔴 আজকে exhausted: {gem_exhausted} | 🚫 Banned: {gem_banned}")
             if gem_banned_set:
                 reasons = key_rotator._ban_reasons
