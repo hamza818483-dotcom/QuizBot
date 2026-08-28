@@ -6,7 +6,7 @@ GEMINI_KEYS-এ যত key দেওয়া আছে সবগুলো এ�
 চালানোর নিয়ম:
     GEMINI_KEYS="key1,key2,key3" python3 check_keys.py
 
-নোট: Google-এর official published free-tier limit (2026, gemini-flash-latest):
+নোট: Google-এর official published free-tier limit (2026, gemini-3.7-flash):
   - RPM (per minute): ~10-15 request
   - RPD (per day): ~250-1500 request (source ভেদে ভিন্ন, নিচের actual header-ই সঠিক)
   - TPM (tokens/minute): ~250,000 token (এটা কখনো bottleneck হয় না, RPM/RPD-ই আসল সীমা)
@@ -36,7 +36,7 @@ for i, key in enumerate(keys):
         # Direct REST call to inspect rate-limit headers (SDK hides these)
         try:
             r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={key}",
                 json={"contents": [{"parts": [{"text": "hi"}]}]},
                 timeout=15
             )
