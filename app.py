@@ -2893,6 +2893,20 @@ async def _gen_gemma(img, topic, count):
         "google/gemma-4-31b-it:free", data_url, _build_mcq_prompt(topic, count)
     )
 
+async def _gen_openrouter_dots(img, topic, count):
+    """2026-08-28: added as an extra free-tier OpenRouter vision fallback,
+    independent of Gemini's infrastructure -- useful specifically during a
+    Gemini-wide outage/high-demand window (all Gemini keys 504/503 at once,
+    not a per-key quota issue) since it runs on a completely separate
+    backend and isn't affected by Google's capacity."""
+    data_url = _img_to_data_url(img)
+    if not data_url:
+        return []
+    return await _try_rotator_openai_compat(
+        or_qwen_rotator, "https://openrouter.ai/api/v1/chat/completions",
+        "dots-studio/dots-3-note-preview:free", data_url, _build_mcq_prompt(topic, count)
+    )
+
 async def _gen_hf(img, topic, count):
     """Hugging Face Inference API — free tier vision fallback (last resort)."""
     data_url = _img_to_data_url(img)
@@ -2939,11 +2953,12 @@ async def _gen_hf(img, topic, count):
             return parsed
     return []
 
-_AI_PROVIDERS_ORDER = ["nvidia", "openrouter_qwen", "nemotron", "gemma", "hf"]
+_AI_PROVIDERS_ORDER = ["nvidia", "openrouter_qwen", "openrouter_dots", "nemotron", "gemma", "hf"]
 
 _AI_FALLBACK_FNS = {
     "nvidia":          _gen_nvidia,
     "openrouter_qwen": _gen_openrouter_qwen,
+    "openrouter_dots": _gen_openrouter_dots,
     "nemotron":        _gen_nemotron,
     "gemma":           _gen_gemma,
     "hf":              _gen_hf,

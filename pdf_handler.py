@@ -1173,7 +1173,7 @@ def crop_explanation_image(img: Image.Image, bbox: list) -> dict:
 OPENROUTER_MODELS = [
     m.strip() for m in
     os.environ.get("OPENROUTER_MODELS",
-        "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+        "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free,dots-studio/dots-3-note-preview:free"
     ).split(",") if m.strip()
 ]
 
