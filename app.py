@@ -2907,17 +2907,44 @@ async def _gen_openrouter_dots(img, topic, count):
         "dots-studio/dots-3-note-preview:free", data_url, _build_mcq_prompt(topic, count)
     )
 
+def _build_qwen_compact_prompt(topic: str, count) -> str:
+    """2026-08-28: Qwen2.5-VL's max_tokens is shared-capped at 4500 (same
+    dynamic budget as Groq, via _post_openai_compat) -- the full default
+    prompt targets up to 10-25 MCQs with verbose full-page-coverage
+    instructions, which for Bengali text (roughly 2-3x more tokens per
+    character than English) can truncate mid-response well before that
+    count is reached. This trims the instruction overhead and caps the
+    target count low enough to reliably finish within budget, rather than
+    relying on _parse_mcq_json's truncation-repair to salvage a partial
+    response every time."""
+    n = 8
+    if isinstance(count, (tuple, list)) and len(count) == 2:
+        n = min(count[1], 8)
+    elif isinstance(count, int) and count:
+        n = min(count, 8)
+    return (
+        f"এই পেজের ছবি থেকে বাংলায় {n}টি MCQ বানাও (বিষয়: {topic}). "
+        f"পেজে যা লেখা আছে শুধু তা থেকেই বানাবে, নিজে থেকে কিছু বানিয়ো না। "
+        f"পেজে {n}টির কম তথ্য থাকলে যতগুলো পাওয়া যায় ততগুলোই দাও, কম দিলেও সমস্যা নেই। "
+        f'শুধু এই JSON array ফরম্যাটে উত্তর দাও, অন্য কোনো লেখা ছাড়া:\n'
+        f'[{{"question":"...","options":["...","...","...","..."],"answer":"A","explanation":"..."}}]\n'
+        f"answer অবশ্যই A/B/C/D এর একটি হতে হবে। explanation ছোট (এক লাইন) রাখো।"
+    )
+
 async def _gen_openrouter_qwen_vl(img, topic, count):
     """2026-08-28: Qwen2.5-VL-32B free model -- strong OCR/document-
     understanding benchmarks (DocVQA, CC-OCR), general multilingual, added
     as another independent-backend fallback alongside the Gemma/Dots
-    OpenRouter options above."""
+    OpenRouter options above. Uses a compact Bengali-specific prompt (see
+    _build_qwen_compact_prompt) instead of the default full prompt, since
+    Qwen's shared 4500-token output budget truncates before finishing a
+    10-25-MCQ Bengali response."""
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
     return await _try_rotator_openai_compat(
         or_qwen_rotator, "https://openrouter.ai/api/v1/chat/completions",
-        "qwen/qwen2.5-vl-32b-instruct:free", data_url, _build_mcq_prompt(topic, count)
+        "qwen/qwen2.5-vl-32b-instruct:free", data_url, _build_qwen_compact_prompt(topic, count)
     )
 
 async def _gen_hf(img, topic, count):
