@@ -5263,7 +5263,10 @@ async def _run_forward_job(chat_id, uid, target_channel):
     first_target_msg_id = None
     last_edit = time.time()
     all_ids = list(range(start_id, end_id + 1))
-    CHUNK = 100  # forwardMessages max message_ids per call (Bot API limit)
+    CHUNK = 30  # kept well below forwardMessages' 100-id hard cap -- a
+    # single 100-message batch posts almost instantly server-side and can
+    # itself trip Telegram's flood control for the target chat regardless
+    # of the inter-chunk delay below, so a smaller chunk size is safer.
     for chunk_start in range(0, len(all_ids), CHUNK):
         if is_cancelled(chat_id) or CURRENT_JOB_ID.get(chat_id) != job_id:
             await edit_msg(chat_id, status_msg_id,
@@ -5288,6 +5291,7 @@ async def _run_forward_job(chat_id, uid, target_channel):
                 forwarded = res.get("result") or []
                 if forwarded and first_target_msg_id is None:
                     first_target_msg_id = forwarded[0].get("message_id")
+                    logger.info(f"[/forward] captured first_target_msg_id={first_target_msg_id} in target_channel={target_channel!r} (source src_chat={src_chat!r})")
                 done += len(forwarded)
                 if len(forwarded) < len(chunk_ids):
                     missed = chunk_ids[len(forwarded):]
@@ -5323,10 +5327,13 @@ async def _run_forward_job(chat_id, uid, target_channel):
             failed += len(chunk_ids)
             failed_ids.extend(chunk_ids)
             logger.warning(f"[/forward] chunk starting {chunk_ids[0]} exception: {e}")
-        # Telegram allows ~20 msgs/min into the same channel without hitting
-        # broadcast limits reliably -- small delay between chunks keeps this
-        # well under that per-chat rate limit for a serial forward run.
-        await asyncio.sleep(0.6)
+        # Telegram's flood limit for messages into the same chat is roughly
+        # ~20/minute (~1 per 3s) for broadcast-type sends. A single
+        # forwardMessages call posts the whole 100-message chunk almost
+        # instantly server-side, so the delay must scale with chunk size
+        # (not be a flat per-chunk sleep) or large ranges will trip a 429
+        # flood-wait on Telegram's side.
+        await asyncio.sleep(max(0.6, len(chunk_ids) * 0.35))
         last_edit = time.time()
         try:
             await edit_msg(chat_id, status_msg_id,
