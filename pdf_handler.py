@@ -1366,6 +1366,21 @@ async def generate_mcq_from_image(
                 # failing fast enough on genuinely dead/throttled keys.
                 _attempt_timeout = 40 if attempt == 0 else 25
                 response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
+                # 2026-08-28: detect a response that got cut off by the
+                # max_output_tokens cap above (MAX_TOKENS finish_reason) --
+                # a truncated response is usually broken/partial JSON (cut
+                # mid-key or mid-string) that _parse_mcq_json's repair logic
+                # can't always recover, and silently accepting it risks
+                # returning fewer/mangled MCQs instead of retrying with a
+                # fresh key the way a real technical failure would.
+                try:
+                    _finish_reason = response.candidates[0].finish_reason if response.candidates else None
+                except Exception:
+                    _finish_reason = None
+                if _finish_reason is not None and "MAX_TOKENS" in str(_finish_reason).upper():
+                    logger.warning(f"[Gemini] Page {page}: response hit max_output_tokens (truncated) on attempt {attempt+1} — treating as technical failure, trying next key")
+                    last_exc = RuntimeError("MAX_TOKENS truncation")
+                    continue
                 valid = _parse_mcq_json(response.text)
                 if not valid:
                     try:
