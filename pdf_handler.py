@@ -610,7 +610,10 @@ async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: s
         try:
             from google import genai as gai
             from google.genai import types
-            client = gai.Client(api_key=key)
+            client = gai.Client(
+                api_key=key,
+                http_options=types.HttpOptions(timeout=38000)
+            )
             img_b64 = image_to_base64(img)
 
             def _call():
@@ -619,7 +622,8 @@ async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: s
                     contents=[
                         types.Part.from_text(text=prompt),
                         types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
-                    ]
+                    ],
+                    config=types.GenerateContentConfig(max_output_tokens=8192)
                 )
             _attempt_timeout = 40 if attempt == 0 else 25
             response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
@@ -757,7 +761,10 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
         try:
             from google import genai as gai
             from google.genai import types
-            client = gai.Client(api_key=key)
+            client = gai.Client(
+                api_key=key,
+                http_options=types.HttpOptions(timeout=38000)
+            )
             img_b64 = image_to_base64(img)
 
             def _call():
@@ -766,7 +773,8 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
                     contents=[
                         types.Part.from_text(text=prompt),
                         types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
-                    ]
+                    ],
+                    config=types.GenerateContentConfig(max_output_tokens=8192)
                 )
             _attempt_timeout = 40 if attempt == 0 else 25
             response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
@@ -1375,10 +1383,10 @@ async def generate_mcq_from_image(
                         # finish generating within its fixed deadline).
                         # Capping this reduces that risk without touching
                         # per-call http_options timeouts above.
-                        config=types.GenerateContentConfig(max_output_tokens=16384)
+                        config=types.GenerateContentConfig(max_output_tokens=8192)
                     )
 
-                # 2026-08-22: 25-40s range across all keys (uncapped) --
+                # 2026-08-22: 25-40s range across all keys --
                 # gives each key a fair chance to succeed while still
                 # failing fast enough on genuinely dead/throttled keys.
                 _attempt_timeout = 40 if attempt == 0 else 25
@@ -1571,7 +1579,8 @@ Return ONLY valid JSON array, no markdown, no extra text:
             def _call_gemini():
                 return client.models.generate_content(
                     model="gemini-3.7-flash",
-                    contents=[types.Part.from_text(text=prompt)]
+                    contents=[types.Part.from_text(text=prompt)],
+                    config=types.GenerateContentConfig(max_output_tokens=8192)
                 )
 
             response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=45)
@@ -1748,4 +1757,3 @@ def get_motivation(pct: float) -> str:
         return "📚 পড়া হয়নি! আবার পড়ে চেষ্টা করো!"
 
 generate_new_mcq = generate_mcq_from_image
-

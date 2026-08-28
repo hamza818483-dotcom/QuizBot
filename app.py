@@ -1406,7 +1406,10 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
         key = _ordered[attempt % len(_ordered)]
         key_rotator.record_call(key)
         try:
-            client = gai.Client(api_key=key)
+            client = gai.Client(
+                api_key=key,
+                http_options=gtypes.HttpOptions(timeout=38000)
+            )
 
             def _call():
                 return client.models.generate_content(
@@ -1417,9 +1420,10 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
                             data=base64.b64decode(img_b64),
                             mime_type="image/jpeg"
                         )
-                    ]
+                    ],
+                    config=gtypes.GenerateContentConfig(max_output_tokens=8192)
                 )
-            resp = await asyncio.to_thread(_call)
+            resp = await asyncio.wait_for(asyncio.to_thread(_call), timeout=40)
             text = (resp.text or "").strip()
             if not text:
                 continue
@@ -3216,13 +3220,17 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
         keys_to_try = _live if _live else _ordered
 
         def _call(key):
-            client = gai.Client(api_key=key)
+            client = gai.Client(
+                api_key=key,
+                http_options=types.HttpOptions(timeout=38000)
+            )
             return client.models.generate_content(
                 model="gemini-3.7-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
-                ]
+                ],
+                config=types.GenerateContentConfig(max_output_tokens=8192)
             )
 
         for idx, key in enumerate(keys_to_try):
@@ -11496,9 +11504,8 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
     """/dagano's OWN multi-image Gemini caller -- fully independent of
     _qbm_gemini_raw_multi (no shared call), so /dagano's token-limit and
     behavior can't be changed by edits elsewhere. Sets an EXPLICIT
-    max_output_tokens (32768) -- safely within Gemini 3.6 Flash free-tier
-    output limits -- so a page with many MCQs + full main_explanation +
-    extra_info text never gets silently truncated mid-JSON. Same
+    max_output_tokens (8192) -- enough for a page-sized response while
+    keeping generation inside Google's request deadline. Same
     key-rotation/quota-exhaustion/Groq-fallback pattern as the shared
     QBM caller, reimplemented standalone."""
     try:
@@ -11516,21 +11523,24 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
             img_bytes_list.append(base64.b64decode(b64))
 
         def _call(key):
-            client = gai.Client(api_key=key)
+            client = gai.Client(
+                api_key=key,
+                http_options=types.HttpOptions(timeout=38000)
+            )
             parts = [types.Part.from_text(text=prompt)]
             for ib in img_bytes_list:
                 parts.append(types.Part.from_bytes(data=ib, mime_type="image/jpeg"))
             return client.models.generate_content(
                 model="gemini-3.7-flash",
                 contents=parts,
-                config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=32768)
+                config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=8192)
             )
 
         keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
-        # 2026-08-22: try ALL live keys (uncapped) -- any single key's own
+        # 2026-08-22: try ALL live keys -- any single key's own
         # quota could be the one that succeeds. Timeout 25-40s range so
         # each key gets a fair shot while still failing fast on dead keys.
         for idx, key in enumerate(keys_to_try):
@@ -19741,14 +19751,20 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
         img_bytes = base64.b64decode(img_b64)
 
         def _call(key):
-            client = gai.Client(api_key=key)
+            client = gai.Client(
+                api_key=key,
+                http_options=types.HttpOptions(timeout=38000)
+            )
             return client.models.generate_content(
                 model="gemini-3.7-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
                 ],
-                config=types.GenerateContentConfig(temperature=0.1)
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=8192
+                )
             )
 
         keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
@@ -19764,7 +19780,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
             if is_cancelled():
                 return ""
             try:
-                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=90)
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
             except Exception as e:
@@ -19834,14 +19850,20 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
             img_bytes_list.append(base64.b64decode(b64))
 
         def _call(key):
-            client = gai.Client(api_key=key)
+            client = gai.Client(
+                api_key=key,
+                http_options=types.HttpOptions(timeout=38000)
+            )
             parts = [types.Part.from_text(text=prompt)]
             for ib in img_bytes_list:
                 parts.append(types.Part.from_bytes(data=ib, mime_type="image/jpeg"))
             return client.models.generate_content(
                 model="gemini-3.7-flash",
                 contents=parts,
-                config=types.GenerateContentConfig(temperature=0.1)
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=8192
+                )
             )
 
         keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
@@ -19860,7 +19882,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
             if is_cancelled():
                 return ""
             try:
-                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=60)
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
             except asyncio.TimeoutError:
@@ -19909,11 +19931,14 @@ async def _ai_gemini_text_call(prompt: str) -> str:
         from google.genai import types
 
         def _call(key):
-            client = gai.Client(api_key=key)
+            client = gai.Client(
+                api_key=key,
+                http_options=types.HttpOptions(timeout=38000)
+            )
             return client.models.generate_content(
                 model="gemini-3.7-flash",
                 contents=[types.Part.from_text(text=prompt)],
-                config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=16384)
+                config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=8192)
             )
 
         keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
@@ -19924,7 +19949,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
             if is_cancelled():
                 return ""
             try:
-                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=90)
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
             except Exception as e:
@@ -23954,7 +23979,10 @@ Return ONLY the JSON array, nothing else."""
                     gkey = _gkeys[0]
                     from google import genai as gai
                     from google.genai import types
-                    client = gai.Client(api_key=gkey)
+                    client = gai.Client(
+                        api_key=gkey,
+                        http_options=types.HttpOptions(timeout=38000)
+                    )
                     img_b64 = image_to_base64(img)
 
                     def _call():
@@ -23963,9 +23991,10 @@ Return ONLY the JSON array, nothing else."""
                             contents=[
                                 types.Part.from_text(text=prompt),
                                 types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
-                            ]
+                            ],
+                            config=types.GenerateContentConfig(max_output_tokens=8192)
                         )
-                    response = await asyncio.to_thread(_call)
+                    response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=40)
                     result_json = _qbm_parse_json(response.text)
             except Exception as e:
                 logger.warning(f"[QBM] answer-key scan gemini fallback failed: {e}")
@@ -30341,5 +30370,3 @@ async def startup():
         await _recover_rapid_jobs()
     except Exception as e:
         logger.error(f"[App] /rapid job recovery failed: {e}")
-
-
