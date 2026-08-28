@@ -4479,7 +4479,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
         # faster second opinion from Gemma instead of waiting through the
         # full key list first, while still giving Gemini most of the shots
         # overall since it's the higher-quality primary.
-        _gemini_rounds = [10, 5, None]  # None = all remaining keys
+        _gemini_rounds = [6, 5, None]  # None = all remaining keys
         gemini_out = []
         for _round_idx, _round_size in enumerate(_gemini_rounds):
             try:
