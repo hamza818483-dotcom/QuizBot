@@ -2278,7 +2278,7 @@ _key_429_is_tpm = {}  # key -> True if last 429 was TPM/per-request-too-large (n
 _key_429_retry_after = {}  # key -> exact seconds to wait, parsed from Groq's 429 body (None if not found)
 _LAST_TRIED_GROQ_KEYS = {"keys": set()}  # side-channel: which Groq keys the most recent generate_mcq_from_image call touched
 
-async def _post_openai_compat(url: str, key: str, model: str, data_url: str, prompt: str, mcq_count_hint=None) -> tuple:
+async def _post_openai_compat(url: str, key: str, model: str, data_url: str, prompt: str, mcq_count_hint=None, max_tokens_cap: int = 4500) -> tuple:
     """Returns (text, status_code). status_code=0 means network/exception (no HTTP response).
 
     bug fix (2026-07-22, same root cause as ATLAS AI proxy worker's Groq issue):
@@ -2323,7 +2323,7 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
         # compression. 15 keeps max_tokens well under the cap for the
         # common case; genuinely large pages still get mcq_count_hint set
         # explicitly by their caller and aren't affected by this default.
-    dynamic_max_tokens = max(900, min(4500, int(est_count) * 190 + 400))
+    dynamic_max_tokens = max(900, min(max_tokens_cap, int(est_count) * 190 + 400))
     payload = {
         "model": model,
         "messages": [{
@@ -2974,29 +2974,26 @@ def _build_qwen_compact_prompt(topic: str, n: int, avoid: list = None) -> str:
     )
 
 async def _gen_openrouter_qwen_vl(img, topic, count):
-    """2026-08-28: Qwen2.5-VL-32B free model -- strong OCR/document-
-    understanding benchmarks (DocVQA, CC-OCR), general multilingual, added
-    as another independent-backend fallback alongside the Gemma/Dots
-    OpenRouter options above.
-
-    Two-call split (2026-08-28): a single call's shared 4500-token output
-    budget can't reliably cover a full 20-MCQ Bengali page in one shot, so
-    this makes 2 back-to-back calls against the SAME full page image (not
-    a cropped half), each targeting 10 MCQs with a compact prompt (see
-    _build_qwen_compact_prompt) -- combined ~9000 tokens total, covering
-    up to 20 MCQs/page. The second call is told which questions the first
-    call already produced so it targets different page content instead of
-    repeating. If the second call fails/empty, the first call's MCQs are
-    still returned rather than discarded."""
+    """2026-08-28: Originally Qwen2.5-VL-32B (retired, see below); now uses
+    google/gemma-4-31b-it:free -- strong multilingual/OCR performance, 262K
+    context, 32,768 max output tokens (no Groq-style shared TPM constraint).
+    Single call targets up to 20 MCQs directly against the full page image
+    (previously split into two 10-MCQ calls to fit Qwen's 4500-token cap;
+    Gemma-4's higher ceiling makes that split unnecessary)."""
     data_url = _img_to_data_url(img)
     if not data_url:
         return []
 
-    n_target = 10
+    # 2026-08-28: switched from Qwen2.5-VL (4500-token shared TPM cap) to
+    # Gemma-4-31B (free), which supports up to 32,768 output tokens and has
+    # no shared Groq-style TPM constraint. Single call can now safely target
+    # up to 20 MCQs directly instead of splitting into two 10-MCQ calls --
+    # simpler, faster (1 request instead of 2), same page coverage.
+    n_target = 20
     if isinstance(count, (tuple, list)) and len(count) == 2:
-        n_target = min(count[1] // 2, 10) or 10
+        n_target = min(count[1], 20) or 20
     elif isinstance(count, int) and count:
-        n_target = min(count // 2, 10) or 10
+        n_target = min(count, 20) or 20
 
     keys = or_qwen_rotator.ordered_keys()
     if not keys:
@@ -3005,15 +3002,20 @@ async def _gen_openrouter_qwen_vl(img, topic, count):
     # 2026-08-28: qwen/qwen2.5-vl-32b-instruct:free was retired from OpenRouter
     # (404 on every key). Replaced with google/gemma-4-31b-it:free -- currently
     # live, free, vision-capable, 262K context, strong multilingual (140+ langs)
-    # performance, good fit for Bengali OCR/document tasks.
+    # performance, good fit for Bengali OCR/document tasks. Gemma-4 also
+    # supports a much higher max_tokens (32,768) than Groq's TPM-safe 4500,
+    # so this uses a higher cap to comfortably fit 20 MCQs in one call.
     _MODEL = "google/gemma-4-31b-it:free"
+    _GEMMA_MAX_TOKENS_CAP = 12000
 
-    first_batch = []
+    batch = []
     for key in keys:
         txt, status = await _post_openai_compat(
             "https://openrouter.ai/api/v1/chat/completions", key,
             _MODEL, data_url,
-            _build_qwen_compact_prompt(topic, n_target)
+            _build_qwen_compact_prompt(topic, n_target),
+            mcq_count_hint=n_target,
+            max_tokens_cap=_GEMMA_MAX_TOKENS_CAP,
         )
         if status == 404:
             # Model-level failure (retired/renamed), not per-key -- bail out
@@ -3021,8 +3023,8 @@ async def _gen_openrouter_qwen_vl(img, topic, count):
             logger.warning(f"[openrouter_qwen_vl] model 404 ({_MODEL}) -- skipping remaining keys, model likely retired")
             return []
         if txt:
-            first_batch = _parse_mcq_json(txt)
-            if first_batch:
+            batch = _parse_mcq_json(txt)
+            if batch:
                 or_qwen_rotator.mark_healthy(key)
                 break
             continue
@@ -3030,31 +3032,7 @@ async def _gen_openrouter_qwen_vl(img, topic, count):
             or_qwen_rotator.mark_rate_limited(key)
             continue
 
-    if not first_batch:
-        return []
-
-    avoid_qs = [m.get("question", "") for m in first_batch if m.get("question")]
-    second_batch = []
-    for key in keys:
-        txt, status = await _post_openai_compat(
-            "https://openrouter.ai/api/v1/chat/completions", key,
-            _MODEL, data_url,
-            _build_qwen_compact_prompt(topic, n_target, avoid=avoid_qs)
-        )
-        if status == 404:
-            logger.warning(f"[openrouter_qwen_vl] model 404 ({_MODEL}) on second call -- skipping remaining keys")
-            break
-        if txt:
-            second_batch = _parse_mcq_json(txt)
-            if second_batch:
-                or_qwen_rotator.mark_healthy(key)
-                break
-            continue
-        if status == 429:
-            or_qwen_rotator.mark_rate_limited(key)
-            continue
-
-    return first_batch + second_batch
+    return batch
 
 async def _gen_hf(img, topic, count):
     """Hugging Face Inference API — free tier vision fallback (last resort)."""
