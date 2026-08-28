@@ -5,7 +5,7 @@ Gemini model vs prompt vs environment ভাবে diagnose করার জন�
     GEMINI_KEYS="key1,key2" python3 diagnose_gemini.py
 
 কী টেস্ট করে:
-1. gemini-3.6-flash vs gemini-2.5-flash — দুই model দিয়ে একই সহজ prompt,
+1. gemini-flash-latest vs gemini-flash-latest — দুই model দিয়ে একই সহজ prompt,
    সময় compare করে (model-level issue হলে একটাতেই স্লো/fail হবে)
 2. ছোট prompt (~200 token) vs বড় prompt (আসল bot prompt, ~3000+ token) —
    একই model দিয়ে, সময় compare করে (prompt-length issue হলে বড় prompt-এ
@@ -13,7 +13,7 @@ Gemini model vs prompt vs environment ভাবে diagnose করার জন�
 3. Text-only vs Image+text — image processing নিজেই কতটা সময় নেয় সেটা আলাদা করে
 
 Output থেকে বোঝা যাবে:
-- যদি gemini-2.5-flash consistently দ্রুত আর gemini-3.6-flash consistently
+- যদি gemini-flash-latest consistently দ্রুত আর gemini-flash-latest consistently
   স্লো/timeout হয় → এটা MODEL-level issue (3.6 এখনো নতুন/busy)
 - যদি ছোট prompt দ্রুত কিন্তু বড় prompt-এ বেশি সময় লাগে (উভয় model-এই)
   → এটা PROMPT-length/output-size issue, model-এর দোষ না
@@ -112,12 +112,12 @@ async def main():
     print("=" * 90)
 
     tests = [
-        ("gemini-2.5-flash", SHORT_PROMPT, None, "2.5-flash + short prompt (no image)"),
-        ("gemini-3.6-flash", SHORT_PROMPT, None, "3.6-flash + short prompt (no image)"),
-        ("gemini-2.5-flash", SHORT_PROMPT, img_b64, "2.5-flash + short prompt + image"),
-        ("gemini-3.6-flash", SHORT_PROMPT, img_b64, "3.6-flash + short prompt + image"),
-        ("gemini-2.5-flash", LONG_PROMPT, img_b64, "2.5-flash + LONG bot-style prompt + image"),
-        ("gemini-3.6-flash", LONG_PROMPT, img_b64, "3.6-flash + LONG bot-style prompt + image"),
+        ("gemini-flash-latest", SHORT_PROMPT, None, "2.5-flash + short prompt (no image)"),
+        ("gemini-flash-latest", SHORT_PROMPT, None, "3.6-flash + short prompt (no image)"),
+        ("gemini-flash-latest", SHORT_PROMPT, img_b64, "2.5-flash + short prompt + image"),
+        ("gemini-flash-latest", SHORT_PROMPT, img_b64, "3.6-flash + short prompt + image"),
+        ("gemini-flash-latest", LONG_PROMPT, img_b64, "2.5-flash + LONG bot-style prompt + image"),
+        ("gemini-flash-latest", LONG_PROMPT, img_b64, "3.6-flash + LONG bot-style prompt + image"),
     ]
 
     results = []
@@ -137,7 +137,7 @@ async def main():
 
     if fast_25 and fast_36:
         avg25, avg36 = sum(fast_25) / len(fast_25), sum(fast_36) / len(fast_36)
-        print(f"গড় সময় — gemini-2.5-flash: {avg25:.2f}s | gemini-3.6-flash: {avg36:.2f}s")
+        print(f"গড় সময় — gemini-flash-latest: {avg25:.2f}s | gemini-flash-latest: {avg36:.2f}s")
         if avg36 > avg25 * 1.5:
             print("👉 3.6-flash উল্লেখযোগ্যভাবে ধীর — এটা MODEL-level issue (নতুন model, বেশি busy)")
         else:
