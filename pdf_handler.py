@@ -1383,7 +1383,7 @@ async def generate_mcq_from_image(
                         # finish generating within its fixed deadline).
                         # Capping this reduces that risk without touching
                         # per-call http_options timeouts above.
-                        config=types.GenerateContentConfig(max_output_tokens=16384)
+                        config=types.GenerateContentConfig(max_output_tokens=32768)
                     )
 
                 # 2026-08-22: 25-40s range across all keys --
