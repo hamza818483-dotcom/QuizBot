@@ -3080,11 +3080,10 @@ async def _gen_hf(img, topic, count):
             return parsed
     return []
 
-_AI_PROVIDERS_ORDER = ["nvidia", "openrouter_qwen", "openrouter_dots", "nemotron", "gemma", "hf"]
+_AI_PROVIDERS_ORDER = ["nvidia", "openrouter_dots", "nemotron", "gemma", "hf"]
 
 _AI_FALLBACK_FNS = {
     "nvidia":          _gen_nvidia,
-    "openrouter_qwen": _gen_openrouter_qwen,
     "openrouter_qwen_vl": _gen_openrouter_qwen_vl,
     "openrouter_dots": _gen_openrouter_dots,
     "nemotron":        _gen_nemotron,
