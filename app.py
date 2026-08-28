@@ -926,6 +926,8 @@ def _build_chok_prompt(topic: str) -> str:
 
 _BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
 _BIO_MODE = contextvars.ContextVar("bio_mode", default=False)
+_BORO_MODE = contextvars.ContextVar("boro_mode", default=False)
+_MATH_MODE = contextvars.ContextVar("math_mode", default=False)
 _CHEM_MODE = contextvars.ContextVar("chem_mode", default=False)
 
 # Per-chat AI call counter for /pdf & /pdfs dashboards — incremented at every
@@ -1115,6 +1117,239 @@ def _build_bangla_prompt(topic: str) -> str:
         f"with '[' and contain nothing but the JSON array. Schema:\n"
         f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"exp_bbox\":[100,200,900,350]}}]"
+    )
+
+
+def _build_boro_prompt(topic: str) -> str:
+    """
+    /boro command prompt — same pipeline as /pdf (page range, channel,
+    thread, topic, watermark, count-range override all inherited via
+    handle_pdf reuse). Same max-source-utilization/no-cap base as /bangla,
+    with two specializations:
+      1) QUESTION SHORT, OPTIONS LONG — question kept minimal (just enough
+         to point at the concept), while all 4 options carry the real,
+         substantial content/detail from the page.
+      2) Explanation is split into main_explanation (<=165 words, states
+         ONLY why the correct option is right, question-relevant) +
+         extra_info (separate line, broader topic-related info — other
+         facts about that same topic present on the page, beyond the 4
+         options) — merged into final explanation downstream.
+    """
+    return (
+        f"You are an expert MCQ-extraction engine for Bengali/English academic "
+        f"textbook pages (medical/HSC/admission-standard quality).\n"
+        f"Topic: {topic}\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 OVERALL RULES — MAXIMUM SOURCE UTILIZATION, NO CAP\n"
+        f"═══════════════════════════════\n"
+        f"- Go through this page LINE BY LINE, PARAGRAPH BY PARAGRAPH, POINT BY "
+        f"POINT, CELL BY CELL. Every distinct line, sentence, fact, definition, "
+        f"or portion of text on the page MUST generate at least one MCQ — zero "
+        f"exceptions, zero skipped lines/portions.\n"
+        f"- If a line/portion/box has rich information, generate MORE than one "
+        f"MCQ from it, covering different angles.\n"
+        f"- NO MAXIMUM MCQ COUNT — squeeze out every usable fact on the page "
+        f"into its own MCQ. The page's actual content volume is the only limit.\n"
+        f"- Never skip a line/portion for being 'too short' or 'minor'.\n"
+        f"- Pay special attention to the LAST lines / bottom of the page and "
+        f"footnotes.\n"
+        f"- Never make junk/filler MCQs just to inflate the count.\n"
+        f"- NEVER generate MCQs from topic names, chapter titles, headlines, or "
+        f"page numbers.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 MUST-PRIORITY — NEVER skip lines that are marked in ANY way\n"
+        f"═══════════════════════════════\n"
+        f"- Any line/paragraph highlighted, boxed, circled, or underlined in "
+        f"ANY color means this content is high-priority and MUST get an MCQ.\n"
+        f"- Tables/charts/ছক get special priority — use EVERY cell.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 প্রশ্ন (QUESTION) — 🚨 KEEP SHORT\n"
+        f"═══════════════════════════════\n"
+        f"- The question itself must be SHORT — just enough to point at the "
+        f"specific concept/fact being asked (roughly half a line to 1 line, "
+        f"never long/wordy). All the substantive detail belongs in the "
+        f"OPTIONS, not the question.\n"
+        f"- 🚨 EXACT TERM FIDELITY: copy every proper noun, name, place, "
+        f"term, or spelling EXACTLY as printed on the page.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 অপশন (OPTIONS) — exactly 4, 🚨 KEEP LONG/DETAILED\n"
+        f"═══════════════════════════════\n"
+        f"- Unlike the question, options must carry the real substantial "
+        f"content — full facts/definitions/detail from the source, not "
+        f"short one-word/one-phrase answers. Each option should read as a "
+        f"complete, information-rich statement pulled from the page.\n"
+        f"- Prefer distractors CLOSE/CONFUSABLE with the correct answer "
+        f"(pulled from nearby/related page content).\n"
+        f"- Exactly ONE option correct, no ambiguity.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 উত্তর (ANSWER)\n"
+        f"═══════════════════════════════\n"
+        f"- Exactly one of A/B/C/D. Vary which letter is correct across the set.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 ব্যাখ্যা (EXPLANATION) — TWO SEPARATE FIELDS, PAGE-ONLY\n"
+        f"═══════════════════════════════\n"
+        f"Give exactly two explanation fields, BOTH sourced only from this "
+        f"page's own content — never invent or use outside knowledge:\n"
+        f"1) \"main_explanation\": explain ONLY why the correct option is "
+        f"right, directly relevant to the question asked — STRICT MAXIMUM "
+        f"165 words. Do NOT explain why the other 3 options are wrong here.\n"
+        f"2) \"extra_info\": on a separate line/field, additional info "
+        f"related to the SAME topic that exists on the page beyond what the "
+        f"4 options cover — other facts/details about this topic present "
+        f"on the page. If nothing else relevant exists on the page for this "
+        f"topic, use an empty string \"\".\n"
+        f"- \"topic_key\": a short string identifying the topic/concept this "
+        f"MCQ belongs to — MCQs on the same topic should share the same "
+        f"topic_key so their extra_info can be reused consistently.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟩 STRICT LANGUAGE RULE\n"
+        f"═══════════════════════════════\n"
+        f"Detect the language of the source image text (Bengali or English) "
+        f"and write everything in that exact same language. Never translate.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🚫 FORBIDDEN SOURCE-REFERENCE WORDS\n"
+        f"═══════════════════════════════\n"
+        f"NEVER refer back to the source material itself (word-root ban): "
+        f"পৃষ্ঠা, চিত্র, বক্স/box, ছক/table, সারণি, টেক্সট/text, অনুচ্ছেদ, "
+        f"প্যাসেজ, টপিক in any grammatical form. Also: \"দেখা যাচ্ছে\" / "
+        f"\"লিখা আছে\" / \"বর্ণিত আছে\" / \"as shown in the figure/box/table/page\". "
+        f"State facts directly as if general knowledge.\n\n"
+
+        f"For EACH MCQ also give 'exp_bbox': tight bounding box centered on "
+        f"the source line/paragraph, normalized 0-1000 ([x_min,y_min,x_max,y_max]). "
+        f"Use null if unsure.\n\n"
+
+        f"Return STRICT JSON array only, no prose, no markdown fences. "
+        f"🚨 DO NOT include any <think>, reasoning, or explanation text "
+        f"before the JSON — output must start IMMEDIATELY with '['. Schema:\n"
+        f'[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],'
+        f'"answer":"A|B|C|D","main_explanation":"...","extra_info":"...",'
+        f'"topic_key":"...","exp_bbox":[100,200,900,350]}}]'
+    )
+
+
+def _build_math_prompt(topic: str) -> str:
+    """
+    /math command prompt — same pipeline as /pdf (page range, channel,
+    thread, topic, watermark all inherited via handle_pdf reuse).
+
+    Scope: Physics/Chemistry-style NUMERIC math questions on the page
+    (Bangla text + formula/মান-based problems), never higher/pure math.
+    - Page-এ থাকা math questions PRIORITY — those get extracted/solved
+      FIRST, hubohu (exact numbers/wording preserved), before generating
+      any of its own.
+    - After covering all page math questions, generates ADDITIONAL similar
+      numeric questions on its own from the same page's concepts/formulas —
+      only SIMPLE, hand-calculable ones (never complex/lengthy math).
+    - Count is content-driven, roughly 10-25, never fixed.
+    - If the page's own question has no options printed, generates 4
+      plausible numeric options itself — one exactly matching the page's
+      given/derivable answer (this must be the REAL correct answer), the
+      other 3 close-but-different (some near the real value, some with a
+      clear gap), so it's not guessable by elimination alone.
+    """
+    return (
+        f"You are an expert Physics/Chemistry NUMERIC MATH MCQ engine for "
+        f"Bengali HSC-standard textbook pages.\n"
+        f"Subject/Topic: {topic}\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🚨 SCOPE — NUMERIC MATH ONLY, NEVER HIGHER MATH\n"
+        f"═══════════════════════════════\n"
+        f"- 'Math' here means Physics/Chemistry numerical problems — Bangla "
+        f"text + formula/মান (values) based calculation questions. This is "
+        f"NOT higher/pure mathematics (no calculus, no abstract algebra, "
+        f"no pure-math proofs).\n"
+        f"- Every answer MUST be numeric (a number, with unit if the source "
+        f"uses one) — never a text/conceptual option.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟥 PRIORITY ORDER — PAGE'S OWN MATH FIRST, THEN SELF-GENERATED\n"
+        f"═══════════════════════════════\n"
+        f"STEP 1 (highest priority): find EVERY math/numerical question "
+        f"already printed on this page. Extract each one HUBOHU (exactly "
+        f"as printed — same numbers, same wording, same given values) — "
+        f"do not paraphrase or alter the page's own question text.\n"
+        f"  - If the page's question ALREADY has an answer/সমাধান given on "
+        f"the page (worked-out result), that page-given answer is the "
+        f"MANDATORY real correct answer — never override it with your own "
+        f"recalculated value, even if your calculation differs.\n"
+        f"  - If the page shows the question but NOT its 4 options (open-"
+        f"ended numeric problem), generate 4 plausible numeric options "
+        f"yourself: one must be EXACTLY the correct value (from the page's "
+        f"given/derivable answer), and the other 3 must be close-but-wrong "
+        f"distractors — some very near the real value (common calculation "
+        f"slip-ups), and at least one with a clearer gap — so all 4 look "
+        f"plausible but only one is truly correct.\n"
+        f"  - If the page's question already has its own 4 options printed, "
+        f"use those exact options — don't replace them.\n\n"
+        f"STEP 2 (after step 1 is fully done): using the SAME page's "
+        f"concepts/formulas/context, generate ADDITIONAL new numeric "
+        f"questions of your own, in the same style.\n"
+        f"  - 🚫🚫 CRITICAL RESTRICTION: only generate SIMPLE problems "
+        f"solvable by hand/basic calculation — never a complex, lengthy, "
+        f"or multi-step difficult calculation. If a potential self-made "
+        f"question would require heavy/complex computation, DO NOT include "
+        f"it — skip it entirely rather than force a hard one in.\n"
+        f"  - For your own questions, you naturally know the real correct "
+        f"answer (you're creating the values) — the same rule applies: "
+        f"exactly one option must be the true correct answer, the other 3 "
+        f"close-but-different distractors (some near, some with more gap).\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟦 COUNT — CONTENT-DRIVEN, NOT FIXED\n"
+        f"═══════════════════════════════\n"
+        f"No fixed number — roughly 10 to 25 total per page depending on "
+        f"how many math questions the page actually has plus how many "
+        f"simple self-made ones fit naturally. Never force a specific "
+        f"count; let the page's actual math content decide.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 OPTIONS — exactly 4, ALL NUMERIC\n"
+        f"═══════════════════════════════\n"
+        f"- All 4 options must be numbers (with the same unit as the "
+        f"source, if any) — never a text/word option.\n"
+        f"- Exactly ONE option is the true correct answer — verify this "
+        f"carefully, especially for page-given questions (use the page's "
+        f"own worked answer, not your own recomputation, whenever the page "
+        f"already shows one).\n\n"
+
+        f"═══════════════════════════════\n"
+        f"💥 ব্যাখ্যা (EXPLANATION)\n"
+        f"═══════════════════════════════\n"
+        f"Briefly show the calculation/formula used to reach the correct "
+        f"numeric answer — from the page's own given values/formula when "
+        f"it's a page question, or your own stated values when it's a "
+        f"self-made question. Keep it concise, hand-calculation style.\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟩 STRICT LANGUAGE RULE\n"
+        f"═══════════════════════════════\n"
+        f"Detect the language of the source page (Bengali or English) and "
+        f"write the question and explanation in that exact same language. "
+        f"Numeric options stay as numbers/units regardless.\n\n"
+
+        f"For EACH MCQ also give 'is_from_page': true if this question was "
+        f"physically printed on the page (Step 1), false if self-generated "
+        f"(Step 2). Also give 'exp_bbox': tight bounding box centered on "
+        f"the source line/problem (for is_from_page=true only), normalized "
+        f"0-1000 ([x_min,y_min,x_max,y_max]); null for self-generated or if "
+        f"unsure.\n\n"
+
+        f"Return STRICT JSON array only, no prose, no markdown fences. "
+        f"🚨 DO NOT include any <think>, reasoning, or explanation text "
+        f"before the JSON — output must start IMMEDIATELY with '['. Schema:\n"
+        f'[{{"question":"...","options":["12","15","18","10"],'
+        f'"answer":"A|B|C|D","explanation":"...","is_from_page":true,'
+        f'"exp_bbox":[100,200,900,350]}}]'
     )
 
 
@@ -1642,6 +1877,10 @@ def _build_mcq_prompt(topic: str, count) -> str:
         return _build_chok_prompt(topic)
     if _BANGLA_MODE.get():
         return _build_bangla_prompt(topic)
+    if _BORO_MODE.get():
+        return _build_boro_prompt(topic)
+    if _MATH_MODE.get():
+        return _build_math_prompt(topic)
     if _BIO_MODE.get():
         return _build_bio_prompt(topic)
     if _TF_MODE.get():
@@ -4009,6 +4248,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     out = _validate_mcq_structure(out)
     if _TF_MODE.get():
         out = _tf_validate_and_filter(out)
+    if _BORO_MODE.get() and "_dagano_apply_topic_reuse" in globals():
+        out = _dagano_apply_topic_reuse(out)
     out = _dedupe_mcqs(out) if "_dedupe_mcqs" in globals() else out
 
     if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
@@ -4843,6 +5084,8 @@ async def handle_start(msg: dict):
             "| `/pdf` | PDF reply → MCQ + channel poll |\n"
             "| `/chok` | ছক/বক্স PDF → per-box MCQ (mixed) |\n"
             "| `/bangla` | প্রতি লাইন থেকে MCQ (no limit) |\n"
+            "| `/boro` | প্রশ্ন ছোট, অপশন বড় টাইপ MCQ |\n"
+            "| `/math` | Physics/Chemistry numeric math MCQ |\n"
             "| `/pdfm -p 1-5 -c @ch -m \"Topic\" 10` | Pagewise MCQ + image |\n\n"
             "## 📸 Image\n"
             "| Command | কাজ |\n"
@@ -4910,6 +5153,8 @@ async def handle_start(msg: dict):
             "<code>/pdf     </code> PDF reply → MCQ + channel poll\n"
             "<code>/chok    </code> ছক/বক্স PDF → per-box MCQ (mixed)\n"
             "<code>/bangla  </code> প্রতি লাইন থেকে MCQ (no limit)\n"
+            "<code>/boro    </code> প্রশ্ন ছোট, অপশন বড় টাইপ MCQ\n"
+            "<code>/math    </code> Physics/Chemistry numeric math MCQ\n"
             "<code>/pdfm    </code> Pagewise MCQ + image\n"
             "          <code>/pdfm -p 1-5 -c @channel -m \"Topic\" 10</code>\n\n"
             "📸 <b>Image</b>\n"
@@ -12875,6 +13120,29 @@ async def handle_pdf(msg: dict):
                 "<code>[N]</code> = প্রতি পেইজে কতগুলো MCQ বানাতে হবে (ঐচ্ছিক)\n"
                 "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
             )
+        elif _BORO_MODE.get():
+            await send_msg(chat_id,
+                "❌ PDF ফাইলে reply করে <code>/boro</code> দাও!\n\n"
+                "<b>Example:</b>\n"
+                "<code>/boro -p 1-5 -c @channel -m \"Topic\" [10]</code>\n"
+                "<code>/boro -p 2 -c -100xxx -t 447 -m \"Group Topic\" [10]</code>\n\n"
+                "প্রশ্ন ছোট, অপশন বড়/বিস্তারিত টাইপ MCQ বানাবে। Explanation শুধু page "
+                "content থেকেই — main answer কেন সঠিক (165 শব্দ) + আলাদা লাইনে "
+                "টপিক-সম্পর্কিত বাকি তথ্য।\n"
+                "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
+            )
+        elif _MATH_MODE.get():
+            await send_msg(chat_id,
+                "❌ PDF ফাইলে reply করে <code>/math</code> দাও!\n\n"
+                "<b>Example:</b>\n"
+                "<code>/math -p 1-5 -c @channel -m \"Topic\"</code>\n"
+                "<code>/math -p 2 -c -100xxx -t 447 -m \"Group Topic\"</code>\n\n"
+                "Physics/Chemistry numeric math MCQ — page-এ থাকা math questions "
+                "আগে hubohu extract করবে (answer page-এর দেওয়া হিসেবেই), তারপর "
+                "একই টপিক থেকে সহজ (hand-calculation) numeric MCQ নিজে বানাবে। "
+                "কঠিন/জটিল math বানাবে না। কাউন্ট content-driven (~10-25)।\n"
+                "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
+            )
         elif _TF_MODE.get():
             await send_msg(chat_id,
                 "❌ PDF ফাইলে reply করে <code>/tf</code> দাও!\n\n"
@@ -12932,6 +13200,11 @@ async def handle_pdf(msg: dict):
         # /extra count is content-driven by how much is actually
         # hand-marked on the page (could legitimately be 0) — never
         # user-settable, same reasoning as /chok/tf above.
+        mcq_count = None
+    if _MATH_MODE.get():
+        # /math count is content-driven (~10-25, page math first then
+        # simple self-made) — never user-settable, same reasoning as
+        # /chok/tf/extra above.
         mcq_count = None
     thread_id = params.get("thread_id")
     file_name = reply["document"].get("file_name", "document.pdf")
@@ -28006,17 +28279,38 @@ async def handle_message(msg: dict):
         quiz_id = text.split()[1] if len(text.split()) > 1 else text.replace("/start ", "")
         _spawn_command_task(uid, start_d1_quiz(chat_id, quiz_id, msg["from"]))
         return
-    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm") and not text.startswith("/pdfs")) or text.startswith("/bangla"):
+    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm") and not text.startswith("/pdfs")) or text.startswith("/bangla") or text.startswith("/boro") or text.startswith("/math"):
         if not is_auth:
             if is_private:
                 await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
-        _cmd_prefix = "/bangla" if text.startswith("/bangla") else "/pdf"
+        if text.startswith("/bangla"):
+            _cmd_prefix = "/bangla"
+        elif text.startswith("/boro"):
+            _cmd_prefix = "/boro"
+        elif text.startswith("/math"):
+            _cmd_prefix = "/math"
+        else:
+            _cmd_prefix = "/pdf"
         arg = text.replace(_cmd_prefix, "").strip().lower()
         if arg in ("on", "off"):
             await handle_pdf_autosend_toggle(msg, arg)
             return
         clear_cancel(chat_id)
+        if text.startswith("/boro"):
+            token = _BORO_MODE.set(True)
+            try:
+                await handle_pdf(msg)
+            finally:
+                _BORO_MODE.reset(token)
+            return
+        if text.startswith("/math"):
+            token = _MATH_MODE.set(True)
+            try:
+                await handle_pdf(msg)
+            finally:
+                _MATH_MODE.reset(token)
+            return
         await handle_pdf(msg)
         return
     if text.startswith("/chok"):
