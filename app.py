@@ -2503,7 +2503,16 @@ async def _math_generate_all_explanations(mcqs: list) -> None:
     single-call-first-then-chunked-fallback strategy, but always uses
     _math_generate_explanations_chunk so the সূত্র->ধাপ->উত্তর structure
     is enforced on every MCQ, never falls back to /ai's generic
-    wrong-option-analysis prompt."""
+    wrong-option-analysis prompt.
+
+    2026-08-29: added a 3rd fallback tier -- if even an 8-item chunk
+    comes back with a length mismatch (whole chunk silently dropped,
+    Call 1's thin/citation explanation left in place with zero retry),
+    each item in that chunk is now retried ONE-AT-A-TIME before giving
+    up on it. This is what caused real MCQs (numbered 9-16 in one CSV)
+    to keep their thin "সমস্যা-X.X(x) এর উত্তর অনুসারে ..." explanation
+    even though the 2nd call ran -- the chunk it landed in failed as a
+    whole and nothing retried the individual items."""
     if not mcqs:
         return
     single = await _math_generate_explanations_chunk(mcqs)
@@ -2520,6 +2529,19 @@ async def _math_generate_all_explanations(mcqs: list) -> None:
             result = await _math_generate_explanations_chunk(chunk)
             for idx, exp in result.items():
                 chunk[idx]["explanation"] = exp
+            # 3rd tier: any item this chunk didn't cover (whole-chunk
+            # JSON parse/length mismatch drops ALL of them with zero
+            # retry otherwise) gets one more single-item attempt each,
+            # so a single malformed response in an 8-item batch no
+            # longer leaves every item in it stuck on Call 1's thin
+            # explanation.
+            missing = [i for i in range(len(chunk)) if i not in result]
+            for i in missing:
+                retry = await _math_generate_explanations_chunk([chunk[i]])
+                if retry.get(0):
+                    chunk[i]["explanation"] = retry[0]
+                else:
+                    logger.warning(f"[MathAiExplain] item-level retry also failed, keeping Call 1 explanation for: {chunk[i].get('question', '')[:60]}")
 
     await asyncio.gather(*[_run_chunk(c) for c in chunks])
 
