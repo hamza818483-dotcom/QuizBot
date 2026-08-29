@@ -2461,6 +2461,79 @@ def _math_normalize_mult_sign(text: str) -> str:
         return text
 
 
+# Unicode superscript/subscript digit maps -- used by
+# _math_normalize_sub_super to fix "10^23" -> "10²³" and "N_2" -> "N₂"
+# style caret/underscore notation that leaks in despite the prompt rule.
+_SUPERSCRIPT_DIGIT_MAP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+_SUBSCRIPT_DIGIT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+
+
+def _math_normalize_sub_super(text: str) -> str:
+    """Code-level safety net (regex, zero extra API calls) for the
+    Unicode subscript/superscript rule: converts caret-notation
+    exponents ("10^23" -> "10²³") and underscore-notation NUMERIC
+    subscripts ("H_2O" -> "H₂O", "CO_2" -> "CO₂") to proper Unicode.
+    Deliberately does NOT touch underscore followed by a LETTER
+    (e.g. "N_A" for Avogadro's number) since there's no reliable
+    Unicode subscript-letter equivalent for most Latin letters --
+    the prompt instructs the model to spell those out instead
+    (e.g. "NA" or "অ্যাভোগাড্রো সংখ্যা"), so this only mechanically
+    fixes the numeric-subscript/exponent cases that have a safe
+    1:1 Unicode mapping. Best-effort, never raises."""
+    if not text:
+        return text
+    try:
+        # caret exponents: digit(s) after ^ -> superscript
+        text = re.sub(
+            r'\^(\d+)',
+            lambda m: m.group(1).translate(_SUPERSCRIPT_DIGIT_MAP),
+            text
+        )
+        # underscore NUMERIC subscripts only: digit(s) after _ -> subscript
+        # (letter-subscripts like N_A are left alone, see docstring)
+        text = re.sub(
+            r'_(\d+)',
+            lambda m: m.group(1).translate(_SUBSCRIPT_DIGIT_MAP),
+            text
+        )
+        return text
+    except Exception:
+        return text
+
+
+# Label words that must NEVER appear in a /math explanation -- the
+# structure (formula -> step calc -> final value) must be implicit,
+# not announced with a heading/label. Matched at line-start (optionally
+# with a leading bullet/dash) with an optional trailing colon/দাঁড়ি, so
+# only the LABEL itself is removed, not any actual formula content that
+# happens to follow on the same line.
+_MATH_LABEL_WORD_PATTERNS = [
+    re.compile(r'(?m)^[\s\-•]*সূত্র\s*[:ঃ।]?\s*'),
+    re.compile(r'(?m)^[\s\-•]*চূড়ান্ত\s*উত্তর\s*[:ঃ।]?\s*'),
+    re.compile(r'(?m)^[\s\-•]*ধাপে\s*ধাপে\s*হিসাব\s*[:ঃ।]?\s*'),
+]
+
+
+def _math_strip_label_words(text: str) -> str:
+    """Code-level safety net (regex, zero extra API calls) removing the
+    three structural label words the /math explanation prompt forbids
+    ('সূত্র', 'চূড়ান্ত উত্তর', 'ধাপে ধাপে হিসাব') if the model still
+    writes them as a heading despite the prompt rule -- the actual
+    formula/calculation content on that line is preserved, only the
+    label prefix itself is stripped. Best-effort, never raises."""
+    if not text:
+        return text
+    try:
+        for pat in _MATH_LABEL_WORD_PATTERNS:
+            text = pat.sub('', text)
+        # collapse any blank lines left behind by a label-only line
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'^\s*\n', '', text)
+        return text.strip()
+    except Exception:
+        return text
+
+
 async def _math_generate_explanations_chunk(chunk: list) -> dict:
     """/math-only variant of _ai_generate_explanations_chunk. The generic
     /ai prompt's PRIMARY structure is wrong-option-by-option analysis
@@ -2482,7 +2555,8 @@ async def _math_generate_explanations_chunk(chunk: list) -> dict:
 - সরাসরি ব্যবহৃত সূত্র/রাশি দিয়ে শুরু করবে (কোনো "সূত্র:" লেবেল/শব্দ লেখা যাবে না, সরাসরি রাশিমালা যেমন "n = W / M" লিখে শুরু করবে), তারপর মান বসিয়ে ধাপে ধাপে হিসাব -- প্রতিটা ধাপ আলাদা লাইনে (\\n দিয়ে), প্রতি ধাপে দৃশ্যমান "=" সহ সংখ্যা বসানো, শেষে চূড়ান্ত মান (কোনো "চূড়ান্ত উত্তর:" জাতীয় লেবেল ছাড়াই, option-এর মান সহ শেষ লাইনেই থাকবে)।
 - শুধু উত্তর repeat/restate করা INVALID -- "H পরমাণুর সংখ্যা 3.34×10²³ টি" জাতীয় এক লাইনের answer-only বাক্য কখনো একা থাকবে না, তার আগে রাশি ও হিসাবের ধাপ অবশ্যই থাকতে হবে।
 - গুণ চিহ্নের জন্য সবসময় "×" ব্যবহার করবে, কখনো "*" ব্যবহার করা যাবে না।
-- explanation সরাসরি রাশি/হিসাব দিয়ে শুরু করবে -- "সঠিক উত্তর X।" জাতীয় কোনো prefix লেখা যাবে না, answer letter (A/B/C/D) কোথাও mention করা যাবে না, "সূত্র" বা "চূড়ান্ত উত্তর" শব্দ দুটোও কোথাও লেখা যাবে না।
+- সাবস্ক্রিপ্ট/সুপারস্ক্রিপ্ট (subscript/superscript) সবসময় আসল Unicode ক্যারেক্টার দিয়ে লিখতে হবে, কখনো underscore/caret দিয়ে না। যেমন: "N_A" নয়, লিখবে "Nₐ"; "N_O" নয়, লিখবে "N_O কে Nₒ হিসেবে না লিখে বরং যদি সাবস্ক্রিপ্ট O না থাকে তাহলে পুরো শব্দ লিখবে (যেমন O পরমাণুর সংখ্যা, N)"; "10^23" নয়, লিখবে "10²³"; "CO_2" নয়, লিখবে "CO₂"; "H_2O" নয়, লিখবে "H₂O"। ব্যবহারযোগ্য Unicode সাবস্ক্রিপ্ট সংখ্যা: ₀₁₂₃₄₅₆₇₈₉, এবং সুপারস্ক্রিপ্ট সংখ্যা: ⁰¹²³⁴⁵⁶⁷⁸⁹। যদি কোনো ভেরিয়েবলের সাবস্ক্রিপ্টে অক্ষর থাকে (যেমন অ্যাভোগাড্রো সংখ্যার জন্য A) এবং তার জন্য উপযুক্ত Unicode সাবস্ক্রিপ্ট অক্ষর না থাকে, underscore/caret ব্যবহার না করে পুরো নাম লিখে বুঝিয়ে দাও (যেমন "N_A" এর বদলে শুধু "NA" বা "অ্যাভোগাড্রো সংখ্যা" লিখবে, কখনো _ চিহ্ন ব্যবহার করবে না)।
+- explanation সরাসরি রাশি/হিসাব দিয়ে শুরু করবে -- "সঠিক উত্তর X।" জাতীয় কোনো prefix লেখা যাবে না, answer letter (A/B/C/D) কোথাও mention করা যাবে না, "সূত্র", "চূড়ান্ত উত্তর", "ধাপে ধাপে হিসাব" -- এই তিনটা label/heading শব্দগুচ্ছের একটাও কোথাও লেখা যাবে না, সরাসরি রাশি ও হিসাবের লাইন দিয়েই শুরু-শেষ হবে, কোনো heading ছাড়া।
 - এই প্রশ্নটা বইয়ের কোন সমস্যা নম্বর/অনুচ্ছেদ থেকে এসেছে তার কোনো reference ("সমস্যা-X.X অনুযায়ী", "এর উত্তর/সমাধান হলো", "পৃষ্ঠা অনুসারে" ইত্যাদি -- এই ধরনের কোনো phrasing) explanation বা question-এ কখনো থাকবে না -- explanation সবসময় স্বয়ংসম্পূর্ণ, শুধু রাশি+হিসাব দিয়ে গঠিত।
 - ভুল অপশনগুলো নিয়ে আলাদা করে ব্যাখ্যা/বিশ্লেষণ লেখার দরকার নেই -- শুধু সঠিক উত্তরের সম্পূর্ণ হিসাবের ধাপ থাকলেই যথেষ্ট।
 - সংখ্যা (digit) সবসময় English/Arabic (0-9) দিয়ে লিখতে হবে, কখনো বাংলা সংখ্যা (০-৯) ব্যবহার করা যাবে না।
@@ -2582,17 +2656,19 @@ async def _math_postprocess_mcqs(mcqs: list) -> list:
                 v = _math_strip_source_citations(m2[field])
                 v = _math_normalize_digits(v)
                 v = _math_normalize_mult_sign(v)
+                v = _math_normalize_sub_super(v)
                 m2[field] = v
         if isinstance(m2.get("options"), list):
             m2["options"] = [
-                _math_normalize_mult_sign(_math_normalize_digits(_math_strip_source_citations(o))) if isinstance(o, str) else o
+                _math_normalize_sub_super(_math_normalize_mult_sign(_math_normalize_digits(_math_strip_source_citations(o)))) if isinstance(o, str) else o
                 for o in m2["options"]
             ]
         out.append(m2)
 
-    # 2nd call: math-only explanation regeneration (সূত্র -> ধাপে ধাপে
-    # হিসাব -> উত্তর, no wrong-option-analysis) -- replaces Call 1's
-    # explanation entirely with this freshly generated one.
+    # 2nd call: math-only explanation regeneration (রাশি -> ধাপে ধাপে
+    # হিসাব -> উত্তর, no wrong-option-analysis, no সূত্র/চূড়ান্ত উত্তর/
+    # ধাপে ধাপে হিসাব label words) -- replaces Call 1's explanation
+    # entirely with this freshly generated one.
     try:
         await _math_generate_all_explanations(out)
         for m in out:
@@ -2601,6 +2677,8 @@ async def _math_postprocess_mcqs(mcqs: list) -> list:
                 exp = _math_strip_source_citations(exp)
                 exp = _math_normalize_digits(exp)
                 exp = _math_normalize_mult_sign(exp)
+                exp = _math_normalize_sub_super(exp)
+                exp = _math_strip_label_words(exp)
                 m["explanation"] = exp
     except Exception as e:
         logger.warning(f"[MathAiExplain] 2nd call failed, keeping Call 1 explanations: {e}")
