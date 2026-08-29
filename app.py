@@ -2398,7 +2398,14 @@ _BN_DIGIT_MAP = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 # regardless of the exact words used. Much more robust than chasing
 # each new phrase variant one at a time.
 _MATH_CITATION_PATTERNS = [
+    # leading clause ending in অনুসারে/অনুযায়ী + comma (original rule)
     re.compile(r'^[^,،]{0,60}?(?:অনুসারে|অনুযায়ী)[,،]\s*'),
+    # same, but ending in দাঁড়ি/period instead of comma
+    # (e.g. "সমস্যা-3.1(চ) অনুযায়ী।" / "...অনুযায়ী.")
+    re.compile(r'^[^,،।]{0,60}?(?:অনুসারে|অনুযায়ী)[.।]\s*'),
+    # "সমস্যা-X.X(x) এর উত্তর হলো" / "এর সমাধান হলো" style lead-in,
+    # no অনুসারে/অনুযায়ী word at all -- ends in comma or দাঁড়ি/period
+    re.compile(r'^সমস্যা[-–]?\s*[০-৯0-9]+\.[০-৯０-9]+\s*\([^)]{0,3}\)\s*(?:এর\s*(?:উত্তর|সমাধান))\s*(?:হলো|হচ্ছে)[,،.।]\s*'),
 ]
 
 
