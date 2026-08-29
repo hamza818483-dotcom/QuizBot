@@ -2413,6 +2413,22 @@ _MATH_CITATION_PATTERNS = [
     # the সমস্যা-X.X(x) label itself so it can't over-match normal prose.
     re.compile(r'^সমস্যা[-–]?\s*[০-৯0-9]+\.[০-৯0-9]+\s*\([^)]{0,3}\)\s*'
                r'(?:এর\s*(?:উত্তর|সমাধান))?\s*(?:অনুসারে|অনুযায়ী)\s*'),
+    # GENERIC catch-all (2026-08-29 #2): every exact-phrase rule above
+    # kept missing new variants the model invents each time (সমস্যা-X.X
+    # label, উদ্দীপকের ... তথ্য (i)/(ii) label, "-তে" suffix instead of
+    # অনুসারে/অনুযায়ী, run-on with zero punctuation) -- chasing each
+    # wording one at a time is a losing game, same lesson as the
+    # original comma-only rule. This is ONE structural rule instead:
+    # ANY leading clause (up to 80 chars, no internal comma/দাঁড়ি) that
+    # contains a source-reference noun (সমস্যা, উদ্দীপক, পৃষ্ঠা, তথ্য,
+    # অনুচ্ছেদ, চিত্র, টেবিল) AND ends in a reference-verb/suffix
+    # (অনুসারে, অনুযায়ী, "-তে", দেওয়া আছে, উল্লেখ আছে) is a citation
+    # lead-in and gets stripped -- regardless of exact wording,
+    # punctuation, or whether a problem-number/parenthesis is present.
+    re.compile(
+        r'^[^,،।]{0,80}?(?:সমস্যা|উদ্দীপক|পৃষ্ঠা|তথ্য|অনুচ্ছেদ|চিত্র|টেবিল)'
+        r'[^,،।]{0,60}?(?:অনুসারে|অনুযায়ী|[-–]তে)\s*[,،.।]?\s*'
+    ),
 ]
 
 
