@@ -1356,7 +1356,7 @@ async def generate_mcq_from_image(
                 # asyncio timeout, in ms) lets the real network call give
                 # up on its own so the retry loop can move to the next key
                 # promptly instead of stalling on a dead/slow connection.
-                _http_timeout_ms = 55000 if attempt == 0 else 35000
+                _http_timeout_ms = 45000 if attempt == 0 else 28000
                 client = gai.Client(
                     api_key=key,
                     http_options=types.HttpOptions(timeout=_http_timeout_ms)
@@ -1373,27 +1373,23 @@ async def generate_mcq_from_image(
                                 mime_type="image/jpeg"
                             )
                         ],
-                        # 2026-08-29: pulled back down from 32768 -- per
-                        # Google's own guidance a very large requested
-                        # output raises 504 DEADLINE_EXCEEDED risk since
-                        # the server has a fixed generation deadline; 30-40
-                        # dense math MCQs with full formula+step
-                        # explanations was hitting that ceiling. 24576
-                        # still covers the /math 40-question safety cap
-                        # comfortably while reducing timeout risk. Paired
-                        # with the longer http/asyncio timeouts below so
-                        # genuinely large (but not runaway) responses still
-                        # get enough wall-clock time to finish.
-                        config=types.GenerateContentConfig(max_output_tokens=24576)
+                        # 2026-08-29: right-sized for /math's actual target
+                        # (20-25 MCQs/page, safety ceiling 40) -- 25 dense
+                        # MCQs with full formula+step explanations run
+                        # roughly 6k-11k tokens; 16384 gives comfortable
+                        # headroom up to the 40-MCQ ceiling without the
+                        # excess that was pushing generation past Gemini's
+                        # fixed deadline (was 32768, then 24576).
+                        config=types.GenerateContentConfig(max_output_tokens=16384)
                     )
 
-                # 2026-08-29: widened from 40/25s -- with 24576 max output
-                # tokens, dense pages (e.g. /math with 30-40 MCQs, full
-                # formula/step explanations) legitimately need more
-                # wall-clock time to generate; the old 40s/25s budget was
-                # forcing perfectly good long responses into DEADLINE_
-                # EXCEEDED/ReadTimeout failures on attempt after attempt.
-                _attempt_timeout = 60 if attempt == 0 else 40
+                # 2026-08-29: 16384 token cap (right-sized for 20-25 MCQs)
+                # generates faster than the earlier 24576/32768 caps did --
+                # 50/32s gives enough margin without holding a slow/dead
+                # key too long, keeping the fast+accurate balance for the
+                # common case while still tolerating occasional slower
+                # generations for pages near the 40-MCQ ceiling.
+                _attempt_timeout = 50 if attempt == 0 else 32
                 response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 # 2026-08-28: detect a response that got cut off by the
                 # max_output_tokens cap above (MAX_TOKENS finish_reason) --
