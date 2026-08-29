@@ -2440,6 +2440,83 @@ def _math_normalize_digits(text: str) -> str:
         return text
 
 
+async def _math_generate_explanations_chunk(chunk: list) -> dict:
+    """/math-only variant of _ai_generate_explanations_chunk. The generic
+    /ai prompt's PRIMARY structure is wrong-option-by-option analysis
+    (built for general-knowledge MCQs) with only a secondary bolt-on
+    line for math -- mixing both structures in one prompt let Gemini
+    drift back toward citation-style or answer-only explanations on the
+    2nd call. This prompt drops the wrong-option-analysis requirement
+    entirely and makes সূত্র -> ধাপে ধাপে হিসাব -> চূড়ান্ত উত্তর the ONLY
+    structure, so Call 2 can't dilute Call 1's math-specific quality."""
+    if not chunk:
+        return {}
+    items_json = json.dumps([
+        {"question": c["question"], "options": c["options"], "answer": c["answer"]}
+        for c in chunk
+    ], ensure_ascii=False)
+    prompt = f"""তুমি একজন Physics/Chemistry শিক্ষক। নিচে কিছু সাংখ্যিক (numeric) MCQ (প্রশ্ন + অপশন + সঠিক উত্তর) দেওয়া আছে, প্রতিটার জন্য একটা সম্পূর্ণ গাণিতিক সমাধান-ব্যাখ্যা (explanation) লিখতে হবে।
+
+কঠোর নিয়ম (এটাই একমাত্র বাধ্যতামূলক structure, ভুল option নিয়ে আলাদা বিশ্লেষণের দরকার নেই):
+- অবশ্যই এই order-এ লিখতে হবে: (1) সূত্র (formula) -- কোন সূত্র ব্যবহার হচ্ছে, (2) মান বসিয়ে ধাপে ধাপে হিসাব -- প্রতিটা ধাপ আলাদা লাইনে (\\n দিয়ে), প্রতি ধাপে দৃশ্যমান "=" সহ সংখ্যা বসানো, (3) চূড়ান্ত উত্তর (option-এর মান সহ)।
+- শুধু উত্তর repeat/restate করা INVALID -- "H পরমাণুর সংখ্যা 3.34×10²³ টি" জাতীয় এক লাইনের answer-only বাক্য কখনো একা থাকবে না, তার আগে সূত্র ও হিসাবের ধাপ অবশ্যই থাকতে হবে।
+- explanation সরাসরি সূত্র/হিসাব দিয়ে শুরু করবে -- "সঠিক উত্তর X।" জাতীয় কোনো prefix লেখা যাবে না, answer letter (A/B/C/D) কোথাও mention করা যাবে না।
+- এই প্রশ্নটা বইয়ের কোন সমস্যা নম্বর/অনুচ্ছেদ থেকে এসেছে তার কোনো reference ("সমস্যা-X.X অনুযায়ী", "এর উত্তর/সমাধান হলো", "পৃষ্ঠা অনুসারে" ইত্যাদি -- এই ধরনের কোনো phrasing) explanation বা question-এ কখনো থাকবে না -- explanation সবসময় স্বয়ংসম্পূর্ণ, শুধু সূত্র+হিসাব দিয়ে গঠিত।
+- ভুল অপশনগুলো নিয়ে আলাদা করে ব্যাখ্যা/বিশ্লেষণ লেখার দরকার নেই -- শুধু সঠিক উত্তরের সম্পূর্ণ হিসাবের ধাপ থাকলেই যথেষ্ট।
+- সংখ্যা (digit) সবসময় English/Arabic (0-9) দিয়ে লিখতে হবে, কখনো বাংলা সংখ্যা (০-৯) ব্যবহার করা যাবে না।
+- ভাষা: প্রশ্ন যে ভাষায় (বাংলা/ইংরেজি) সেই ভাষাতেই লিখতে হবে।
+- যদি input-এ আগে থেকেই কোনো explanation থাকে সেটা উপেক্ষা করে নতুন করে সঠিক ও সম্পূর্ণ সূত্র-ভিত্তিক explanation বানাও।
+
+INPUT MCQs (in order):
+{items_json}
+
+OUTPUT — ONLY a valid JSON array, exactly {len(chunk)} items, same order, nothing else:
+[{{"explanation":"..."}}]"""
+
+    txt = await _ai_gemini_text_call(prompt)
+    if not txt:
+        return {}
+    parsed = _ai_parse_explanations_json(txt, len(chunk))
+    if not parsed:
+        return {}
+    _answer_prefix_re = re.compile(
+        r'^\s*(সঠিক\s*উত্তর|উত্তর)\s*[:\-]?\s*[A-Eক-ঙ১-৫][\)\.।]?\s*[।\.\-:]?\s*',
+        re.IGNORECASE
+    )
+    out = {}
+    for i, item in enumerate(parsed):
+        exp = (item.get("explanation") or "").strip() if isinstance(item, dict) else ""
+        if exp:
+            out[i] = _answer_prefix_re.sub("", exp).strip()
+    return out
+
+
+async def _math_generate_all_explanations(mcqs: list) -> None:
+    """/math-only counterpart to _ai_generate_all_explanations -- same
+    single-call-first-then-chunked-fallback strategy, but always uses
+    _math_generate_explanations_chunk so the সূত্র->ধাপ->উত্তর structure
+    is enforced on every MCQ, never falls back to /ai's generic
+    wrong-option-analysis prompt."""
+    if not mcqs:
+        return
+    single = await _math_generate_explanations_chunk(mcqs)
+    if len(single) == len(mcqs):
+        for idx, exp in single.items():
+            mcqs[idx]["explanation"] = exp
+        return
+    logger.warning(f"[MathAiExplain] single-call covered {len(single)}/{len(mcqs)} -- falling back to chunked calls")
+    chunks = [mcqs[i:i + _AI_EXPLAIN_CHUNK_SIZE] for i in range(0, len(mcqs), _AI_EXPLAIN_CHUNK_SIZE)]
+    sem = asyncio.Semaphore(_AI_EXPLAIN_CONCURRENCY)
+
+    async def _run_chunk(chunk):
+        async with sem:
+            result = await _math_generate_explanations_chunk(chunk)
+            for idx, exp in result.items():
+                chunk[idx]["explanation"] = exp
+
+    await asyncio.gather(*[_run_chunk(c) for c in chunks])
+
+
 async def _math_postprocess_mcqs(mcqs: list) -> list:
     """Applies citation-stripping + digit-normalization to every text field
     of every MCQ (deterministic, no API call), THEN runs a 2nd call that
@@ -2468,12 +2545,11 @@ async def _math_postprocess_mcqs(mcqs: list) -> list:
             ]
         out.append(m2)
 
-    # 2nd call: apply /ai's exact explanation logic over every MCQ,
-    # text-only (question+options+answer, no image) -- replaces Call 1's
-    # explanation entirely with /ai's freshly generated one. Same helper
-    # /ai itself calls manually, just triggered automatically here.
+    # 2nd call: math-only explanation regeneration (সূত্র -> ধাপে ধাপে
+    # হিসাব -> উত্তর, no wrong-option-analysis) -- replaces Call 1's
+    # explanation entirely with this freshly generated one.
     try:
-        await _ai_generate_all_explanations(out)
+        await _math_generate_all_explanations(out)
         for m in out:
             exp = m.get("explanation", "")
             if exp:
@@ -2484,6 +2560,7 @@ async def _math_postprocess_mcqs(mcqs: list) -> list:
         logger.warning(f"[MathAiExplain] 2nd call failed, keeping Call 1 explanations: {e}")
 
     return out
+
 
 
 def _validate_mcq_structure(mcqs: list) -> list:
