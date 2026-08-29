@@ -2435,8 +2435,12 @@ def _math_normalize_digits(text: str) -> str:
 
 async def _math_postprocess_mcqs(mcqs: list) -> list:
     """Applies citation-stripping + digit-normalization to every text field
-    of every MCQ (deterministic, no API call, single-call pipeline only --
-    no regen fallback per user's explicit 1-call requirement)."""
+    of every MCQ (deterministic, no API call), THEN runs a 2nd call that
+    applies /ai's exact explanation-generation logic
+    (_ai_generate_all_explanations, text-only -- question+options+answer,
+    no image) over every MCQ, replacing Call 1's explanation with /ai's
+    output. Best-effort: if the 2nd call fails, Call 1's original
+    (already cleaned) explanations are kept."""
     if not mcqs:
         return mcqs
     out = []
@@ -2456,6 +2460,22 @@ async def _math_postprocess_mcqs(mcqs: list) -> list:
                 for o in m2["options"]
             ]
         out.append(m2)
+
+    # 2nd call: apply /ai's exact explanation logic over every MCQ,
+    # text-only (question+options+answer, no image) -- replaces Call 1's
+    # explanation entirely with /ai's freshly generated one. Same helper
+    # /ai itself calls manually, just triggered automatically here.
+    try:
+        await _ai_generate_all_explanations(out)
+        for m in out:
+            exp = m.get("explanation", "")
+            if exp:
+                exp = _math_strip_source_citations(exp)
+                exp = _math_normalize_digits(exp)
+                m["explanation"] = exp
+    except Exception as e:
+        logger.warning(f"[MathAiExplain] 2nd call failed, keeping Call 1 explanations: {e}")
+
     return out
 
 
