@@ -2447,6 +2447,20 @@ def _math_normalize_digits(text: str) -> str:
         return text
 
 
+def _math_normalize_mult_sign(text: str) -> str:
+    """Force any stray '*' multiplication sign to '×', per /math's rule
+    -- code-level safety net since the prompt rule alone isn't always
+    followed. Only touches '*' used as multiplication between digits/
+    scientific-notation tokens (e.g. '6.022 * 10^23'), not markdown
+    bold/italic '*' if any ever appears. Best-effort, never raises."""
+    if not text:
+        return text
+    try:
+        return re.sub(r'(?<=[\d\)])\s*\*\s*(?=[\d\(])', ' × ', text)
+    except Exception:
+        return text
+
+
 async def _math_generate_explanations_chunk(chunk: list) -> dict:
     """/math-only variant of _ai_generate_explanations_chunk. The generic
     /ai prompt's PRIMARY structure is wrong-option-by-option analysis
@@ -2465,14 +2479,15 @@ async def _math_generate_explanations_chunk(chunk: list) -> dict:
     prompt = f"""তুমি একজন Physics/Chemistry শিক্ষক। নিচে কিছু সাংখ্যিক (numeric) MCQ (প্রশ্ন + অপশন + সঠিক উত্তর) দেওয়া আছে, প্রতিটার জন্য একটা সম্পূর্ণ গাণিতিক সমাধান-ব্যাখ্যা (explanation) লিখতে হবে।
 
 কঠোর নিয়ম (এটাই একমাত্র বাধ্যতামূলক structure, ভুল option নিয়ে আলাদা বিশ্লেষণের দরকার নেই):
-- অবশ্যই এই order-এ লিখতে হবে: (1) সূত্র (formula) -- কোন সূত্র ব্যবহার হচ্ছে, (2) মান বসিয়ে ধাপে ধাপে হিসাব -- প্রতিটা ধাপ আলাদা লাইনে (\\n দিয়ে), প্রতি ধাপে দৃশ্যমান "=" সহ সংখ্যা বসানো, (3) চূড়ান্ত উত্তর (option-এর মান সহ)।
-- শুধু উত্তর repeat/restate করা INVALID -- "H পরমাণুর সংখ্যা 3.34×10²³ টি" জাতীয় এক লাইনের answer-only বাক্য কখনো একা থাকবে না, তার আগে সূত্র ও হিসাবের ধাপ অবশ্যই থাকতে হবে।
-- explanation সরাসরি সূত্র/হিসাব দিয়ে শুরু করবে -- "সঠিক উত্তর X।" জাতীয় কোনো prefix লেখা যাবে না, answer letter (A/B/C/D) কোথাও mention করা যাবে না।
-- এই প্রশ্নটা বইয়ের কোন সমস্যা নম্বর/অনুচ্ছেদ থেকে এসেছে তার কোনো reference ("সমস্যা-X.X অনুযায়ী", "এর উত্তর/সমাধান হলো", "পৃষ্ঠা অনুসারে" ইত্যাদি -- এই ধরনের কোনো phrasing) explanation বা question-এ কখনো থাকবে না -- explanation সবসময় স্বয়ংসম্পূর্ণ, শুধু সূত্র+হিসাব দিয়ে গঠিত।
+- সরাসরি ব্যবহৃত সূত্র/রাশি দিয়ে শুরু করবে (কোনো "সূত্র:" লেবেল/শব্দ লেখা যাবে না, সরাসরি রাশিমালা যেমন "n = W / M" লিখে শুরু করবে), তারপর মান বসিয়ে ধাপে ধাপে হিসাব -- প্রতিটা ধাপ আলাদা লাইনে (\\n দিয়ে), প্রতি ধাপে দৃশ্যমান "=" সহ সংখ্যা বসানো, শেষে চূড়ান্ত মান (কোনো "চূড়ান্ত উত্তর:" জাতীয় লেবেল ছাড়াই, option-এর মান সহ শেষ লাইনেই থাকবে)।
+- শুধু উত্তর repeat/restate করা INVALID -- "H পরমাণুর সংখ্যা 3.34×10²³ টি" জাতীয় এক লাইনের answer-only বাক্য কখনো একা থাকবে না, তার আগে রাশি ও হিসাবের ধাপ অবশ্যই থাকতে হবে।
+- গুণ চিহ্নের জন্য সবসময় "×" ব্যবহার করবে, কখনো "*" ব্যবহার করা যাবে না।
+- explanation সরাসরি রাশি/হিসাব দিয়ে শুরু করবে -- "সঠিক উত্তর X।" জাতীয় কোনো prefix লেখা যাবে না, answer letter (A/B/C/D) কোথাও mention করা যাবে না, "সূত্র" বা "চূড়ান্ত উত্তর" শব্দ দুটোও কোথাও লেখা যাবে না।
+- এই প্রশ্নটা বইয়ের কোন সমস্যা নম্বর/অনুচ্ছেদ থেকে এসেছে তার কোনো reference ("সমস্যা-X.X অনুযায়ী", "এর উত্তর/সমাধান হলো", "পৃষ্ঠা অনুসারে" ইত্যাদি -- এই ধরনের কোনো phrasing) explanation বা question-এ কখনো থাকবে না -- explanation সবসময় স্বয়ংসম্পূর্ণ, শুধু রাশি+হিসাব দিয়ে গঠিত।
 - ভুল অপশনগুলো নিয়ে আলাদা করে ব্যাখ্যা/বিশ্লেষণ লেখার দরকার নেই -- শুধু সঠিক উত্তরের সম্পূর্ণ হিসাবের ধাপ থাকলেই যথেষ্ট।
 - সংখ্যা (digit) সবসময় English/Arabic (0-9) দিয়ে লিখতে হবে, কখনো বাংলা সংখ্যা (০-৯) ব্যবহার করা যাবে না।
 - ভাষা: প্রশ্ন যে ভাষায় (বাংলা/ইংরেজি) সেই ভাষাতেই লিখতে হবে।
-- যদি input-এ আগে থেকেই কোনো explanation থাকে সেটা উপেক্ষা করে নতুন করে সঠিক ও সম্পূর্ণ সূত্র-ভিত্তিক explanation বানাও।
+- যদি input-এ আগে থেকেই কোনো explanation থাকে সেটা উপেক্ষা করে নতুন করে সঠিক ও সম্পূর্ণ রাশি-ভিত্তিক explanation বানাও।
 
 INPUT MCQs (in order):
 {items_json}
@@ -2566,10 +2581,11 @@ async def _math_postprocess_mcqs(mcqs: list) -> list:
             if field in m2 and isinstance(m2[field], str):
                 v = _math_strip_source_citations(m2[field])
                 v = _math_normalize_digits(v)
+                v = _math_normalize_mult_sign(v)
                 m2[field] = v
         if isinstance(m2.get("options"), list):
             m2["options"] = [
-                _math_normalize_digits(_math_strip_source_citations(o)) if isinstance(o, str) else o
+                _math_normalize_mult_sign(_math_normalize_digits(_math_strip_source_citations(o))) if isinstance(o, str) else o
                 for o in m2["options"]
             ]
         out.append(m2)
@@ -2584,6 +2600,7 @@ async def _math_postprocess_mcqs(mcqs: list) -> list:
             if exp:
                 exp = _math_strip_source_citations(exp)
                 exp = _math_normalize_digits(exp)
+                exp = _math_normalize_mult_sign(exp)
                 m["explanation"] = exp
     except Exception as e:
         logger.warning(f"[MathAiExplain] 2nd call failed, keeping Call 1 explanations: {e}")
