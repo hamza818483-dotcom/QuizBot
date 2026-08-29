@@ -2406,6 +2406,13 @@ _MATH_CITATION_PATTERNS = [
     # "সমস্যা-X.X(x) এর উত্তর হলো" / "এর সমাধান হলো" style lead-in,
     # no অনুসারে/অনুযায়ী word at all -- ends in comma or দাঁড়ি/period
     re.compile(r'^সমস্যা[-–]?\s*[০-৯0-9]+\.[০-৯0-9]+\s*\([^)]{0,3}\)\s*(?:এর\s*(?:উত্তর|সমাধান))\s*(?:হলো|হচ্ছে)[,،.।]\s*'),
+    # "সমস্যা-X.X(x) এর উত্তর/সমাধান অনুসারে/অনুযায়ী" run-on style with
+    # NO punctuation right after অনুসারে/অনুযায়ী -- real data seen:
+    # "সমস্যা-3.1(জ) এর উত্তর অনুসারে অবশিষ্ট CaCO3 এর পরিমাণ 9.967 g"
+    # (the actual info follows immediately, no comma/দাঁড়ি). Anchored to
+    # the সমস্যা-X.X(x) label itself so it can't over-match normal prose.
+    re.compile(r'^সমস্যা[-–]?\s*[০-৯0-9]+\.[০-৯0-9]+\s*\([^)]{0,3}\)\s*'
+               r'(?:এর\s*(?:উত্তর|সমাধান))?\s*(?:অনুসারে|অনুযায়ী)\s*'),
 ]
 
 
