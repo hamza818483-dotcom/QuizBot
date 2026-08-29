@@ -7513,13 +7513,56 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
         logger.error(f"[CSV Parse] Error: {e}")
         return []
 
-def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
+async def _ensure_explanations_before_csv(mcqs: list) -> list:
+    """
+    Auto-fills any missing/thin explanation on the given MCQ list BEFORE
+    it's written to CSV -- same generation logic /ai uses manually
+    (_ai_generate_explanations_chunk), so every CSV QuizBot itself
+    produces already has full explanations without a separate /ai step.
+    Also runs the same source-citation-strip + digit-normalize safety net
+    used for /math on every explanation (own-generated or freshly filled),
+    since those rules should hold everywhere, not just /math. Best-effort:
+    any failure here just returns the original list untouched -- never
+    blocks CSV delivery.
+    """
+    if not mcqs:
+        return mcqs
+    try:
+        needs_fill = [m for m in mcqs if _is_thin_explanation(m.get("explanation", ""))]
+        if needs_fill:
+            await _ai_generate_all_explanations(needs_fill)
+        for m in mcqs:
+            exp = m.get("explanation", "")
+            if exp:
+                exp = _math_strip_source_citations(exp)
+                exp = _math_normalize_digits(exp)
+                m["explanation"] = exp
+            q = m.get("question", "")
+            if q:
+                m["question"] = _math_normalize_digits(_math_strip_source_citations(q))
+            if isinstance(m.get("options"), list):
+                m["options"] = [
+                    _math_normalize_digits(_math_strip_source_citations(o)) if isinstance(o, str) else o
+                    for o in m["options"]
+                ]
+    except Exception as e:
+        logger.warning(f"[CSVAutoExplain] skipped: {e}")
+    return mcqs
+
+
+async def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
     """MCQ list → CSV bytes. NEW dual-purpose style: writes 'topic'/
     'subtopic' columns, filling them in only on the row where a segment
     actually changes (blank on every row that continues the same
     topic/subtopic) — matches _parse_csv_bytes's NEW-style reading and
     keeps the file human-editable (person can just type a new topic name
-    into any row's topic/subtopic cell to re-split segments)."""
+    into any row's topic/subtopic cell to re-split segments).
+
+    2026-08-29: now auto-fills any missing/thin explanation before writing
+    (same logic /ai runs manually) so every QuizBot-generated CSV already
+    has full explanations, no separate /ai step needed.
+    """
+    mcqs = await _ensure_explanations_before_csv(mcqs)
     import io, csv as csv_mod_local
     buf = io.StringIO()
     w = csv_mod_local.writer(buf)
@@ -7627,7 +7670,7 @@ async def _handle_clean_command_inner(msg: dict):
         return
 
     cleaned = _clean_mcqs(mcqs)
-    out_bytes = _mcqs_to_csv_bytes(cleaned)
+    out_bytes = await _mcqs_to_csv_bytes(cleaned)
     base_name = re.sub(r'\.(csv|json)$', '', file_name, flags=re.I)
 
     if status_msg_id:
@@ -7882,7 +7925,7 @@ async def _handle_cut_csv_command_inner(msg: dict):
             f"✅ {total}টি MCQ পাওয়া গেছে!\n⏳ {start_no}-{end_no_clamped} range কাটা হচ্ছে...")
 
     base_name = re.sub(r'\.(csv|json)$', '', file_name, flags=re.I)
-    out_bytes = _mcqs_to_csv_bytes(cut_slice)
+    out_bytes = await _mcqs_to_csv_bytes(cut_slice)
     out_name = f"{base_name}_cut{start_no}-{end_no_clamped}.csv"
     r = await send_document(chat_id, out_bytes, out_name,
         caption=f"✂️ Cut: {start_no}-{end_no_clamped} | 📊 {len(cut_slice)}টি MCQ",
@@ -7966,7 +8009,7 @@ async def _handle_split_command_inner(msg: dict):
     try:
         for i in range(total_parts):
             chunk = mcqs[i * chunk_size:(i + 1) * chunk_size]
-            part_bytes = _mcqs_to_csv_bytes(chunk)
+            part_bytes = await _mcqs_to_csv_bytes(chunk)
             part_name = f"{base_name}_part{i+1:02d}.csv"
             r = await send_document(chat_id, part_bytes, part_name,
                 caption=f"📄 Part-{i+1:02d} | 📊 {len(chunk)}টি MCQ")
@@ -12765,7 +12808,7 @@ async def _handle_dagano_impl(msg: dict):
         try:
             all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
             if all_mcqs_flat:
-                csv_bytes = _mcqs_to_csv_bytes(all_mcqs_flat)
+                csv_bytes = await _mcqs_to_csv_bytes(all_mcqs_flat)
                 await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
                     caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv")
         except Exception as csv_err:
@@ -13169,7 +13212,7 @@ async def _handle_extra_impl(msg: dict):
         all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
         try:
             if all_mcqs_flat:
-                csv_bytes = _mcqs_to_csv_bytes(all_mcqs_flat)
+                csv_bytes = await _mcqs_to_csv_bytes(all_mcqs_flat)
                 await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
                     caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv",
                     reply_to_message_id=status_msg_id)
@@ -13489,7 +13532,7 @@ async def handle_pdf(msg: dict):
             try:
                 all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
                 if all_mcqs_flat:
-                    csv_bytes = _mcqs_to_csv_bytes(all_mcqs_flat)
+                    csv_bytes = await _mcqs_to_csv_bytes(all_mcqs_flat)
                     await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
                         caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv")
             except Exception as csv_err:
@@ -20445,6 +20488,9 @@ async def _ai_generate_explanations_chunk(chunk: list) -> dict:
 - generic/এক-লাইনের ফাঁকা কথা লেখা যাবে না -- প্রতিটা option সম্পর্কে নির্দিষ্ট (specific), তথ্যবহুল বাক্য থাকতে হবে, "এটা ভুল কারণ এটা সঠিক না" জাতীয় ফাঁকা logic চলবে না।
 - ভাষা: প্রশ্ন যে ভাষায় (বাংলা/ইংরেজি) সেই ভাষাতেই লিখতে হবে।
 - যদি input-এ আগে থেকেই কোনো explanation থাকে সেটা উপেক্ষা করে নতুন করে সঠিক ও তথ্যবহুল explanation বানাও।
+- সংখ্যা (digit) সবসময় English/Arabic (0-9) দিয়ে লিখতে হবে, কখনো বাংলা সংখ্যা (০-৯) ব্যবহার করা যাবে না, বাক্যের বাকি অংশ বাংলা হলেও।
+- এই প্রশ্নটা বইয়ের কোন সমস্যা নম্বর/অনুচ্ছেদ থেকে এসেছে তার কোনো reference ("সমস্যা-X.X অনুযায়ী", "এর সমাধান অনুযায়ী" ইত্যাদি) explanation-এ কখনো লেখা যাবে না -- explanation সবসময় স্বয়ংসম্পূর্ণ হবে।
+- যদি প্রশ্নটা গাণিতিক/সাংখ্যিক হিসাব-নির্ভর হয় (যেমন mol, ভর, আয়তন, অণুর সংখ্যা ইত্যাদি বের করা), শুধু উত্তর repeat করলে চলবে না -- সূত্র (formula) কী ব্যবহার হয়েছে, তারপর মান বসিয়ে ধাপে ধাপে (প্রতি ধাপ আলাদা লাইনে, \\n দিয়ে) হিসাব দেখাতে হবে, শেষে চূড়ান্ত উত্তর।
 
 INPUT MCQs (in order):
 {items_json}
