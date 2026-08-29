@@ -2374,12 +2374,16 @@ _BN_DIGIT_MAP = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 # alone kept failing on this specific pattern, a deterministic regex pass
 # is applied AFTER generation as a safety net -- zero extra API calls,
 # runs on the same single-call output already returned.
+# 2026-08-29: replaced the old fragile list of exact phrase-patterns
+# (kept missing new phrasings like "পৃষ্ঠা অনুসারে,", "এর উত্তর অনুসারে,",
+# "উদ্দীপকের পৃষ্ঠা অনুসারে," -- the model varies its own citation
+# wording every time) with ONE generic structural rule: any leading
+# clause (up to 60 chars, no comma inside it) that ends in
+# "অনুসারে,"/"অনুযায়ী," is a source-citation lead-in and gets stripped,
+# regardless of the exact words used. Much more robust than chasing
+# each new phrase variant one at a time.
 _MATH_CITATION_PATTERNS = [
-    re.compile(r'সমস্যা[-–—]?\s*[০-৯0-9]+[.．]?[০-৯０-９0-9]*\s*\([ক-়]\)\s*(?:এর)?\s*(?:সমাধান|উত্তর)?\s*অনুযায়ী[,،]?\s*'),
-    re.compile(r'সমস্যা[-–—]?\s*[০-৯0-9]+[.．]?[০-৯０-９0-9]*\s*\([ক-়]\)\s*(?:অনুসারে)[,،]?\s*'),
-    re.compile(r'[পপ]ৃষ্ঠার\s*শুরুতে\s*(?:দেওয়া\s*)?তথ্য\s*অনুযায়ী[,،]?\s*'),
-    re.compile(r'(?:এই|উক্ত)?\s*সমস্যা(?:র সমাধান| এর সমাধান| এর উত্তর)?\s*অনুযায়ী[,،]?\s*'),
-    re.compile(r'সমস্যা[-–—]?\s*[০-৯0-9]+[.．]?[০-৯０-９0-9]*\s*\([ক-়]\)\s*'),
+    re.compile(r'^[^,،]{0,60}?(?:অনুসারে|অনুযায়ী)[,،]\s*'),
 ]
 
 
