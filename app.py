@@ -1309,21 +1309,12 @@ def _build_math_prompt(topic: str) -> str:
         f"═══════════════════════════════\n"
         f"STEP 1 — EXTRACT EVERY MATH QUESTION ON THE PAGE\n"
         f"═══════════════════════════════\n"
-        f"1) Scan the WHOLE page top-to-bottom first. If it uses labeled "
-        f"sub-parts (ক)(খ)(গ)(ঘ)(ঙ)(চ)(ছ)(জ)(ঝ)(ঞ)(ট)..., count them "
-        f"ALL before extracting anything (pages with 15-30 sub-parts are "
-        f"normal — every single one is a required question, including "
-        f"ones near the bottom edge).\n"
-        f"1b) SMALL/SHORT numeric problems that are NOT part of a "
-        f"labeled sub-part list are just as required as the labeled "
-        f"ones — a single short in-text calculation, a one-line "
-        f"worked example, a side numeric note, or a small standalone "
-        f"problem statement anywhere on the page (even if it's only "
-        f"1-2 lines, has no সমস্যা/উদাহরণ number, or sits between "
-        f"paragraphs) must be extracted into its own MCQ exactly like "
-        f"a labeled sub-part. Do not skip a numeric problem just "
-        f"because it looks minor, short, or informal — its size has "
-        f"no bearing on whether it counts.\n"
+        f"1) Scan the WHOLE page top-to-bottom. Extract EVERY numeric "
+        f"problem on it — labeled (ক)(খ)(গ)... or not, long or short, "
+        f"a full problem or a small in-text calculation. Labeling is "
+        f"just formatting, not the criterion for what counts (pages "
+        f"with 15-30 problems are normal — all of them required, "
+        f"including small/easy-to-miss ones).\n"
         f"2) For each one, copy the question wording exactly (hubohu, "
         f"same numbers/units) BUT strip out the \"সমস্যা-X.X(x) অনুযায়ী\" "
         f"label itself — per the worked example above, the label never "
@@ -1333,11 +1324,9 @@ def _build_math_prompt(topic: str) -> str:
         f"4) If no 4 options are printed (the normal case — ~99% of the "
         f"time), build 4 numeric options yourself: one is the exact page "
         f"answer, the other 3 are close-but-wrong distractors.\n"
-        f"5) SELF-CHECK before moving on: count your extracted questions "
-        f"against BOTH the labeled sub-part count from step 1 AND any "
-        f"small/short unlabeled numeric problems from step 1b — if they "
-        f"don't match, go back and find the missing one(s). Do not stop "
-        f"early because the count 'feels like enough'.\n\n"
+        f"5) SELF-CHECK: re-scan once more, count every numeric problem "
+        f"visible — if your extracted count is lower, find the missing "
+        f"one(s). Don't stop early because the count 'feels enough'.\n\n"
 
         f"═══════════════════════════════\n"
         f"STEP 2 — SELF-GENERATE MORE, SAME CONCEPTS\n"
@@ -2580,7 +2569,7 @@ async def _math_generate_explanations_chunk(chunk: list) -> dict:
 
 কঠোর নিয়ম (এটাই একমাত্র বাধ্যতামূলক structure, ভুল option নিয়ে আলাদা বিশ্লেষণের দরকার নেই):
 - সরাসরি ব্যবহৃত সূত্র/রাশি দিয়ে শুরু করবে (কোনো "সূত্র:" লেবেল/শব্দ লেখা যাবে না, সরাসরি রাশিমালা যেমন "n = W / M" লিখে শুরু করবে), তারপর মান বসিয়ে ধাপে ধাপে হিসাব -- প্রতিটা ধাপ আলাদা লাইনে (\\n দিয়ে), প্রতি ধাপে দৃশ্যমান "=" সহ সংখ্যা বসানো, শেষে চূড়ান্ত মান (কোনো "চূড়ান্ত উত্তর:" জাতীয় লেবেল ছাড়াই, option-এর মান সহ শেষ লাইনেই থাকবে)।
-- প্রতিটা ভেরিয়েবলে (W, M, N, NA, V, n ইত্যাদি) প্রথমবার মান বসানোর সময় সেটা কী রাশি তা অবশ্যই বলে দিতে হবে -- শুধু "M = 32 g/mol" লিখলে হবে না, লিখতে হবে "আণবিক ভর, M = 32 g/mol" স্টাইলে (রাশির নাম + প্রতীক + মান, কমা দিয়ে আলাদা, প্রতিটা আলাদা লাইনে)। যেমন: "গ্যাসের ভর, W = 16 g" / "আণবিক ভর, M = 32 g/mol" / "অ্যাভোগাড্রো সংখ্যা, NA = 6.022 × 10²³" -- এভাবে প্রতিটা মান বসানোর লাইনে কার মান বসছে তা স্পষ্ট থাকতে হবে, নাহলে ছাত্র বুঝবে না কোন সংখ্যাটা আসলে কী বোঝাচ্ছে। শুধু চূড়ান্ত হিসাবের লাইনে (যেমন "N = (16 / 32) × 6.022 × 10²³") আলাদাভাবে প্রতিটা প্রতীক ব্যাখ্যা করার দরকার নেই, কারণ সূত্রের রাশিগুলো ততক্ষণে আগেই ব্যাখ্যা হয়ে গেছে।
+- প্রথমবার কোনো ভেরিয়েবলের (W, M, N, NA ইত্যাদি) মান বসানোর সময় সেটা কী রাশি তা বলে দিতে হবে -- শুধু "M = 32 g/mol" নয়, লিখতে হবে "আণবিক ভর, M = 32 g/mol" স্টাইলে (রাশির নাম + প্রতীক + মান)।
 - শুধু উত্তর repeat/restate করা INVALID -- "H পরমাণুর সংখ্যা 3.34×10²³ টি" জাতীয় এক লাইনের answer-only বাক্য কখনো একা থাকবে না, তার আগে রাশি ও হিসাবের ধাপ অবশ্যই থাকতে হবে।
 - গুণ চিহ্নের জন্য সবসময় "×" ব্যবহার করবে, কখনো "*" ব্যবহার করা যাবে না।
 - সাবস্ক্রিপ্ট/সুপারস্ক্রিপ্ট (subscript/superscript) সবসময় আসল Unicode ক্যারেক্টার দিয়ে লিখতে হবে, কখনো underscore/caret দিয়ে না। যেমন: "N_A" নয়, লিখবে "Nₐ"; "N_O" নয়, লিখবে "N_O কে Nₒ হিসেবে না লিখে বরং যদি সাবস্ক্রিপ্ট O না থাকে তাহলে পুরো শব্দ লিখবে (যেমন O পরমাণুর সংখ্যা, N)"; "10^23" নয়, লিখবে "10²³"; "CO_2" নয়, লিখবে "CO₂"; "H_2O" নয়, লিখবে "H₂O"। ব্যবহারযোগ্য Unicode সাবস্ক্রিপ্ট সংখ্যা: ₀₁₂₃₄₅₆₇₈₉, এবং সুপারস্ক্রিপ্ট সংখ্যা: ⁰¹²³⁴⁵⁶⁷⁸⁹। যদি কোনো ভেরিয়েবলের সাবস্ক্রিপ্টে অক্ষর থাকে (যেমন অ্যাভোগাড্রো সংখ্যার জন্য A) এবং তার জন্য উপযুক্ত Unicode সাবস্ক্রিপ্ট অক্ষর না থাকে, underscore/caret ব্যবহার না করে পুরো নাম লিখে বুঝিয়ে দাও (যেমন "N_A" এর বদলে শুধু "NA" বা "অ্যাভোগাড্রো সংখ্যা" লিখবে, কখনো _ চিহ্ন ব্যবহার করবে না)।
