@@ -2418,10 +2418,13 @@ def _math_normalize_digits(text: str) -> str:
         return text
 
 
-def _math_postprocess_mcqs(mcqs: list) -> list:
+async def _math_postprocess_mcqs(mcqs: list) -> list:
     """Applies citation-stripping + digit-normalization to every text field
-    of every MCQ, in place on a copy. Single deterministic pass, no extra
-    API calls -- runs on the same generation output already returned."""
+    of every MCQ (deterministic, no API call), then does ONE targeted
+    text-only regen pass (question+options+answer, no image) for any MCQ
+    whose explanation still lacks formula/step content after cleanup --
+    catches cases the prompt alone didn't produce correctly, right after
+    Call 1 instead of waiting until CSV time."""
     if not mcqs:
         return mcqs
     out = []
@@ -2441,6 +2444,15 @@ def _math_postprocess_mcqs(mcqs: list) -> list:
                 for o in m2["options"]
             ]
         out.append(m2)
+    thin = [m for m in out if _math_is_thin_explanation(m.get("explanation", ""))]
+    if thin:
+        try:
+            await _math_regen_explanations_with_steps(thin)
+            for m in thin:
+                if m.get("explanation"):
+                    m["explanation"] = _math_normalize_digits(_math_strip_source_citations(m["explanation"]))
+        except Exception as e:
+            logger.warning(f"[MathPostprocess] regen skipped: {e}")
     return out
 
 
@@ -3458,6 +3470,36 @@ def _is_thin_explanation(exp: str) -> bool:
             return True
     return False
 
+
+def _math_is_thin_explanation(exp: str) -> bool:
+    """
+    /math-specific stricter check on top of _is_thin_explanation: a math
+    explanation must show actual worked steps (formula + substitution +
+    calculation), not just restate the final numeric answer at length.
+    Catches cases that pass the generic 60-char length check but still
+    have zero formula/step content (e.g. an explanation that repeats the
+    question's numbers/units in a full sentence with no সূত্র, মান বসিয়ে,
+    বা visible calculation like 'A × B = C' / 'A / B = C').
+    """
+    e = (exp or "").strip()
+    if _is_thin_explanation(e):
+        return True
+    e_no_img = re.sub(r'<img[^>]*>', '', e, flags=re.IGNORECASE).strip()
+    # multi-line (actual step breakdown) is a strong positive signal on its own
+    if "\n" in e_no_img:
+        return False
+    # formula/step keyword markers
+    step_markers = ("সূত্র", "মান বসি", "বসিয়ে", "n =", "n=", "formula", "সূত্রঃ")
+    has_marker = any(mk in e_no_img for mk in step_markers)
+    # a visible calculation like "5/18" or "5 × 6.022" or "0.556 × 6.022×10²³"
+    # 2026-08-29: require a visible "=" with a computed result on both
+    # sides (not just any digit-operator-digit, which false-matches
+    # scientific notation like "7.589 × 10⁻³" that has no actual computed
+    # step) -- e.g. "5/18 = 0.278" or "n = 5/18".
+    has_calc = bool(re.search(r'\d[^=\n]{0,25}=[^=\n]{0,3}\d', e_no_img))
+    return not (has_marker or has_calc)
+
+
 async def _repair_thin_explanations(mcqs: list, img, topic: str) -> list:
     """
     Targeted, single-pass repair for MCQs whose explanation only names the
@@ -4410,7 +4452,7 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         # code-level safety net (no extra API call) -- strips leaked
         # source-citation phrasing and normalizes stray Bengali digits
         # that prompt-level rules alone weren't fully catching.
-        out = _math_postprocess_mcqs(out)
+        out = await _math_postprocess_mcqs(out)
 
     out = _validate_mcq_structure(out)
     # Side-channel for outer retry callers (pdf_generate_all_pages'
@@ -7517,6 +7559,53 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
         logger.error(f"[CSV Parse] Error: {e}")
         return []
 
+async def _math_regen_explanations_with_steps(mcqs: list) -> None:
+    """
+    Fills mcqs[i]['explanation'] in-place with a STRICT math worked-solution
+    prompt (formula -> substitute -> calculate -> answer, each on its own
+    line) -- used as a 2nd-chance regen only for MCQs that came back thin
+    even after the normal /ai-style fill. Text-only Gemini call (question+
+    options+answer as input, same as the first fill), so no extra image
+    call. Best-effort: leaves the existing explanation untouched on any
+    failure.
+    """
+    if not mcqs:
+        return
+    items_json = json.dumps([
+        {"question": m.get("question", ""), "options": m.get("options", []), "answer": m.get("answer", "A")}
+        for m in mcqs
+    ], ensure_ascii=False)
+    prompt = (
+        f"For EACH numbered math MCQ below, write a proper worked-solution "
+        f"explanation. STRICT FORMAT (mandatory, no exceptions): show the "
+        f"formula/সূত্র used, then substitute the given values, then the "
+        f"calculation, then the final answer -- each on its OWN LINE "
+        f"(use \\n between lines). NEVER just restate the final numeric "
+        f"answer alone -- that is invalid output. Every numeric step must "
+        f"show real numbers combined (e.g. '5/18 = 0.278', '0.278 × 6.022 "
+        f"× 10²³ = 1.673 × 10²³'). All digits English/Arabic (0-9) only, "
+        f"never Bengali digits. NEVER mention any source/problem-number "
+        f"citation. Multiplication always '×', never '*'. Same language "
+        f"as the question (Bengali/English).\n\n"
+        f"{items_json}\n\n"
+        f"Return STRICT JSON array only, same order, no prose: "
+        f'[{{"explanation":"..."}}]'
+    )
+    try:
+        txt = await _ai_gemini_text_call(prompt)
+        if not txt:
+            return
+        parsed = _ai_parse_explanations_json(txt, len(mcqs))
+        if not parsed or len(parsed) != len(mcqs):
+            return
+        for m, item in zip(mcqs, parsed):
+            exp = (item.get("explanation") or "").strip() if isinstance(item, dict) else ""
+            if exp:
+                m["explanation"] = exp
+    except Exception as e:
+        logger.warning(f"[MathExplainRegen] failed, keeping originals: {e}")
+
+
 async def _ensure_explanations_before_csv(mcqs: list) -> list:
     """
     Auto-fills any missing/thin explanation on the given MCQ list BEFORE
@@ -7532,9 +7621,21 @@ async def _ensure_explanations_before_csv(mcqs: list) -> list:
     if not mcqs:
         return mcqs
     try:
-        needs_fill = [m for m in mcqs if _is_thin_explanation(m.get("explanation", ""))]
+        is_math = _MATH_MODE.get()
+        thin_check = _math_is_thin_explanation if is_math else _is_thin_explanation
+        needs_fill = [m for m in mcqs if thin_check(m.get("explanation", ""))]
         if needs_fill:
             await _ai_generate_all_explanations(needs_fill)
+            # 2026-08-29: math mode gets ONE extra targeted regen pass for
+            # any that are STILL thin after the first fill (e.g. the
+            # generic /ai prompt filled something but without formula/
+            # steps) -- still zero extra image calls, this only re-asks
+            # Gemini with text (question+options+answer), same as the
+            # first fill, just with a stricter math-specific instruction.
+            if is_math:
+                still_thin = [m for m in needs_fill if _math_is_thin_explanation(m.get("explanation", ""))]
+                if still_thin:
+                    await _math_regen_explanations_with_steps(still_thin)
         for m in mcqs:
             exp = m.get("explanation", "")
             if exp:
