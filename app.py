@@ -1285,11 +1285,26 @@ def _build_math_prompt(topic: str) -> str:
         f"or any problem-number label anywhere — question starts directly "
         f"with the actual content; (2) explanation shows formula → "
         f"substitution → calculation on separate lines, NEVER just "
-        f"restates \"H পরমাণুর সংখ্যা 3.342584368×10²³ টি\" alone. An "
-        f"explanation that only repeats the final number, or a question/"
-        f"explanation that mentions \"সমস্যা-X.X অনুযায়ী\"/\"উত্তর অনুযায়ী\"/"
-        f"any source label, is WRONG output — apply this exact pattern "
-        f"to every single MCQ you produce below.\n\n"
+        f"restates \"H পরমাণুর সংখ্যা 3.342584368×10²³ টি\" alone.\n\n"
+        f"🚫 WRONG explanation examples (ANY of these forms is invalid, "
+        f"reject the pattern entirely, not just the exact wording shown):\n"
+        f"  \"এর উত্তর অনুসারে, H পরমাণুর সংখ্যা 3.342584368 × 10²³ টি\"\n"
+        f"  \"পৃষ্ঠা অনুসারে, STP-তে Vm = 22.414 L\"\n"
+        f"  \"সমস্যা-৩.১(খ) এর সমাধান অনুযায়ী, H = 3.34×10²³\"\n"
+        f"  \"উদ্দীপকের পৃষ্ঠা অনুসারে, ...\"\n"
+        f"The failure pattern is ANY phrase ending in \"অনুসারে\"/\"অনুযায়ী\" "
+        f"followed by a comma, referencing the page/problem/answer as a "
+        f"source, placed anywhere in the explanation (usually at the "
+        f"start) — regardless of which exact words surround it (পৃষ্ঠা, "
+        f"সমস্যা, উদ্দীপক, তথ্য, উত্তর, সমাধান — none of these words may "
+        f"appear immediately before অনুসারে/অনুযায়ী). Also wrong: an "
+        f"explanation with no সূত্র (formula) line and no visible "
+        f"computed step showing an \"=\" with numbers on both sides (e.g. "
+        f"\"5/18 = 0.278\") — a wall of text that only restates given/"
+        f"final numbers without an actual formula+substitution+"
+        f"calculation trail is INVALID, apply the exact pattern shown in "
+        f"the correct output above to every single MCQ you produce "
+        f"below.\n\n"
 
         f"═══════════════════════════════\n"
         f"STEP 1 — EXTRACT EVERY MATH QUESTION ON THE PAGE\n"
@@ -2420,11 +2435,8 @@ def _math_normalize_digits(text: str) -> str:
 
 async def _math_postprocess_mcqs(mcqs: list) -> list:
     """Applies citation-stripping + digit-normalization to every text field
-    of every MCQ (deterministic, no API call), then does ONE targeted
-    text-only regen pass (question+options+answer, no image) for any MCQ
-    whose explanation still lacks formula/step content after cleanup --
-    catches cases the prompt alone didn't produce correctly, right after
-    Call 1 instead of waiting until CSV time."""
+    of every MCQ (deterministic, no API call, single-call pipeline only --
+    no regen fallback per user's explicit 1-call requirement)."""
     if not mcqs:
         return mcqs
     out = []
@@ -2444,15 +2456,6 @@ async def _math_postprocess_mcqs(mcqs: list) -> list:
                 for o in m2["options"]
             ]
         out.append(m2)
-    thin = [m for m in out if _math_is_thin_explanation(m.get("explanation", ""))]
-    if thin:
-        try:
-            await _math_regen_explanations_with_steps(thin)
-            for m in thin:
-                if m.get("explanation"):
-                    m["explanation"] = _math_normalize_digits(_math_strip_source_citations(m["explanation"]))
-        except Exception as e:
-            logger.warning(f"[MathPostprocess] regen skipped: {e}")
     return out
 
 
@@ -7559,52 +7562,6 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
         logger.error(f"[CSV Parse] Error: {e}")
         return []
 
-async def _math_regen_explanations_with_steps(mcqs: list) -> None:
-    """
-    Fills mcqs[i]['explanation'] in-place with a STRICT math worked-solution
-    prompt (formula -> substitute -> calculate -> answer, each on its own
-    line) -- used as a 2nd-chance regen only for MCQs that came back thin
-    even after the normal /ai-style fill. Text-only Gemini call (question+
-    options+answer as input, same as the first fill), so no extra image
-    call. Best-effort: leaves the existing explanation untouched on any
-    failure.
-    """
-    if not mcqs:
-        return
-    items_json = json.dumps([
-        {"question": m.get("question", ""), "options": m.get("options", []), "answer": m.get("answer", "A")}
-        for m in mcqs
-    ], ensure_ascii=False)
-    prompt = (
-        f"For EACH numbered math MCQ below, write a proper worked-solution "
-        f"explanation. STRICT FORMAT (mandatory, no exceptions): show the "
-        f"formula/সূত্র used, then substitute the given values, then the "
-        f"calculation, then the final answer -- each on its OWN LINE "
-        f"(use \\n between lines). NEVER just restate the final numeric "
-        f"answer alone -- that is invalid output. Every numeric step must "
-        f"show real numbers combined (e.g. '5/18 = 0.278', '0.278 × 6.022 "
-        f"× 10²³ = 1.673 × 10²³'). All digits English/Arabic (0-9) only, "
-        f"never Bengali digits. NEVER mention any source/problem-number "
-        f"citation. Multiplication always '×', never '*'. Same language "
-        f"as the question (Bengali/English).\n\n"
-        f"{items_json}\n\n"
-        f"Return STRICT JSON array only, same order, no prose: "
-        f'[{{"explanation":"..."}}]'
-    )
-    try:
-        txt = await _ai_gemini_text_call(prompt)
-        if not txt:
-            return
-        parsed = _ai_parse_explanations_json(txt, len(mcqs))
-        if not parsed or len(parsed) != len(mcqs):
-            return
-        for m, item in zip(mcqs, parsed):
-            exp = (item.get("explanation") or "").strip() if isinstance(item, dict) else ""
-            if exp:
-                m["explanation"] = exp
-    except Exception as e:
-        logger.warning(f"[MathExplainRegen] failed, keeping originals: {e}")
-
 
 async def _ensure_explanations_before_csv(mcqs: list) -> list:
     """
@@ -7622,20 +7579,16 @@ async def _ensure_explanations_before_csv(mcqs: list) -> list:
         return mcqs
     try:
         is_math = _MATH_MODE.get()
-        thin_check = _math_is_thin_explanation if is_math else _is_thin_explanation
-        needs_fill = [m for m in mcqs if thin_check(m.get("explanation", ""))]
-        if needs_fill:
-            await _ai_generate_all_explanations(needs_fill)
-            # 2026-08-29: math mode gets ONE extra targeted regen pass for
-            # any that are STILL thin after the first fill (e.g. the
-            # generic /ai prompt filled something but without formula/
-            # steps) -- still zero extra image calls, this only re-asks
-            # Gemini with text (question+options+answer), same as the
-            # first fill, just with a stricter math-specific instruction.
-            if is_math:
-                still_thin = [m for m in needs_fill if _math_is_thin_explanation(m.get("explanation", ""))]
-                if still_thin:
-                    await _math_regen_explanations_with_steps(still_thin)
+        if is_math:
+            # /math: strictly single-call, per explicit requirement --
+            # NEVER fire an extra fill/regen call here even if an
+            # explanation still looks thin. Only the deterministic
+            # citation-strip/digit-normalize cleanup below runs.
+            pass
+        else:
+            needs_fill = [m for m in mcqs if _is_thin_explanation(m.get("explanation", ""))]
+            if needs_fill:
+                await _ai_generate_all_explanations(needs_fill)
         for m in mcqs:
             exp = m.get("explanation", "")
             if exp:
