@@ -2363,6 +2363,83 @@ def _tf_validate_and_filter(mcqs: list) -> list:
     return mcqs
 
 
+_BN_DIGIT_MAP = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+
+# 2026-08-29: code-level cleanup for /math -- prompt-level rules (worked
+# example + explicit anti-example) were not fully stopping the model from
+# copying the source page's own "সমস্যা-X.X(x) অনুযায়ী"/"এর সমাধান
+# অনুযায়ী"/"এর উত্তর অনুযায়ী" citation phrasing into question/explanation
+# text, and from leaving stray Bengali digits (০-৯) or malformed OCR
+# fragments (e.g. "৫.MDE৮৩") in numeric output. Since prompt adherence
+# alone kept failing on this specific pattern, a deterministic regex pass
+# is applied AFTER generation as a safety net -- zero extra API calls,
+# runs on the same single-call output already returned.
+_MATH_CITATION_PATTERNS = [
+    re.compile(r'সমস্যা[-–—]?\s*[০-৯0-9]+[.．]?[০-৯０-９0-9]*\s*\([ক-়]\)\s*(?:এর)?\s*(?:সমাধান|উত্তর)?\s*অনুযায়ী[,،]?\s*'),
+    re.compile(r'সমস্যা[-–—]?\s*[০-৯0-9]+[.．]?[০-৯０-９0-9]*\s*\([ক-়]\)\s*(?:অনুসারে)[,،]?\s*'),
+    re.compile(r'[পপ]ৃষ্ঠার\s*শুরুতে\s*(?:দেওয়া\s*)?তথ্য\s*অনুযায়ী[,،]?\s*'),
+    re.compile(r'(?:এই|উক্ত)?\s*সমস্যা(?:র সমাধান| এর সমাধান| এর উত্তর)?\s*অনুযায়ী[,،]?\s*'),
+    re.compile(r'সমস্যা[-–—]?\s*[০-৯0-9]+[.．]?[০-৯０-９0-9]*\s*\([ক-়]\)\s*'),
+]
+
+
+def _math_strip_source_citations(text: str) -> str:
+    """Remove any 'সমস্যা-X.X(x) অনুযায়ী' style source-citation phrasing
+    that leaked into question/explanation text despite the prompt rule
+    against it. Best-effort regex, never raises."""
+    if not text:
+        return text
+    try:
+        cleaned = text
+        for pat in _MATH_CITATION_PATTERNS:
+            cleaned = pat.sub('', cleaned)
+        # collapse any double spaces/commas left behind by the strip
+        cleaned = re.sub(r'\s{2,}', ' ', cleaned)
+        cleaned = re.sub(r'^[,،\s]+', '', cleaned)
+        cleaned = re.sub(r'[,،]\s*,', ',', cleaned)
+        return cleaned.strip()
+    except Exception:
+        return text
+
+
+def _math_normalize_digits(text: str) -> str:
+    """Force any stray Bengali digits (০-৯) to English (0-9) in numeric
+    output, per /math's digit rule -- code-level safety net since the
+    prompt rule alone wasn't always followed. Best-effort, never raises."""
+    if not text:
+        return text
+    try:
+        return text.translate(_BN_DIGIT_MAP)
+    except Exception:
+        return text
+
+
+def _math_postprocess_mcqs(mcqs: list) -> list:
+    """Applies citation-stripping + digit-normalization to every text field
+    of every MCQ, in place on a copy. Single deterministic pass, no extra
+    API calls -- runs on the same generation output already returned."""
+    if not mcqs:
+        return mcqs
+    out = []
+    for m in mcqs:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        m2 = dict(m)
+        for field in ("question", "explanation"):
+            if field in m2 and isinstance(m2[field], str):
+                v = _math_strip_source_citations(m2[field])
+                v = _math_normalize_digits(v)
+                m2[field] = v
+        if isinstance(m2.get("options"), list):
+            m2["options"] = [
+                _math_normalize_digits(_math_strip_source_citations(o)) if isinstance(o, str) else o
+                for o in m2["options"]
+            ]
+        out.append(m2)
+    return out
+
+
 def _validate_mcq_structure(mcqs: list) -> list:
     """
     Structural + sanity validation applied to any freshly-generated MCQ batch
@@ -4325,6 +4402,11 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         out = await _bangla_verify_and_enforce(out, img, topic, page_num)
     if _EXTRA_MODE.get():
         out = await _extra_marking_audit(out, img, topic, page_num)
+    if _MATH_MODE.get():
+        # code-level safety net (no extra API call) -- strips leaked
+        # source-citation phrasing and normalizes stray Bengali digits
+        # that prompt-level rules alone weren't fully catching.
+        out = _math_postprocess_mcqs(out)
 
     out = _validate_mcq_structure(out)
     # Side-channel for outer retry callers (pdf_generate_all_pages'
