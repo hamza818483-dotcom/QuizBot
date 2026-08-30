@@ -28564,11 +28564,18 @@ async def process_update(update: dict):
                     cp_photo_id = cp["photo"][-1]["file_id"]
                 _cache_channel_post(cp_chat_id, cp_msg_id, cp_text, cp_photo_id)
                 # ✅-as-a-REPLY trigger (not a Telegram reaction): if this
-                # channel_post is itself just "✅" and replies to an earlier
-                # post, treat that reply as the trigger — same effect as the
-                # message_reaction path below, for channels/setups where the
-                # ✅ emoji reaction isn't available/enabled.
-                if cp_text.strip() == "✅" and cp.get("reply_to_message"):
+                # channel_post is itself just "✅" (as plain text OR as a
+                # ✅ sticker/emoji-message — Telegram sends the checkmark
+                # sticker with sticker.emoji == "✅", no text field at all)
+                # and replies to an earlier post, treat that as the trigger
+                # — same effect as the message_reaction path below, for
+                # channels/setups where the ✅ emoji reaction isn't
+                # available/enabled.
+                _cp_is_checkmark = (
+                    cp_text.strip() == "✅"
+                    or (cp.get("sticker") or {}).get("emoji") == "✅"
+                )
+                if _cp_is_checkmark and cp.get("reply_to_message"):
                     _src = cp["reply_to_message"]
                     _spawn_task(handle_checkmark_reply_trigger(cp_chat_id, _src.get("message_id")))
         elif "message_reaction" in update:
