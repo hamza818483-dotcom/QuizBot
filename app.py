@@ -20882,7 +20882,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
             if is_cancelled():
                 return ""
             try:
-                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=150)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
             except Exception as e:
@@ -20901,7 +20901,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
         return await _qbm_groq_text_call(prompt)
 
 
-_AI_EXPLAIN_CHUNK_SIZE = 50
+_AI_EXPLAIN_CHUNK_SIZE = 15
 _AI_EXPLAIN_CONCURRENCY = 3
 _AI_SINGLE_CALL_MAX = 30  # above this, skip the single-big-call attempt entirely
 
