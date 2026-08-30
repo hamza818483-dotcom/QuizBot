@@ -1676,16 +1676,24 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
                             mime_type="image/jpeg"
                         )
                     ],
-                    config=gtypes.GenerateContentConfig(max_output_tokens=8192)
+                    config=gtypes.GenerateContentConfig(max_output_tokens=16384)
                 )
             resp = await asyncio.wait_for(asyncio.to_thread(_call), timeout=40)
             text = (resp.text or "").strip()
             if not text:
                 continue
+            finish_reason = None
+            try:
+                finish_reason = resp.candidates[0].finish_reason
+            except Exception:
+                pass
             try:
                 mcqs = _parse_mcq_json(text)
             except Exception as e:
-                logger.warning(f"[/tf] page {page_num} JSON parse failed (attempt {attempt+1}): {e}")
+                logger.warning(f"[/tf] page {page_num} JSON parse failed (attempt {attempt+1}, finish_reason={finish_reason}): {e}")
+                continue
+            if not mcqs and str(finish_reason) not in ("STOP", "1", "None"):
+                logger.warning(f"[/tf] page {page_num} truncated by model (finish_reason={finish_reason}), retrying")
                 continue
             if mcqs:
                 key_rotator.mark_healthy(key)
@@ -2803,7 +2811,13 @@ def _parse_mcq_json(text: str) -> list:
         # before the failure point) and re-closing the array, instead of
         # discarding the whole page's MCQs over one bad tail object.
         try:
-            last_obj_end = s.rfind("}")
+            # An "Unterminated string" error means the failure point is
+            # INSIDE an open string, past the last real '}'. Walk backward
+            # from e.pos (or end of string) to the nearest '}' that precedes
+            # the break, so a mid-string cutoff doesn't get treated as if
+            # the last object were complete.
+            search_end = getattr(e, "pos", len(s))
+            last_obj_end = s.rfind("}", 0, search_end)
             if last_obj_end != -1:
                 repaired = s[:last_obj_end + 1] + "]"
                 data = json.loads(repaired)
