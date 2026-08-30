@@ -20958,6 +20958,7 @@ async def _ai_generate_explanations_chunk(chunk: list) -> dict:
 - সংখ্যা (digit) সবসময় English/Arabic (0-9) দিয়ে লিখতে হবে, কখনো বাংলা সংখ্যা (০-৯) ব্যবহার করা যাবে না, বাক্যের বাকি অংশ বাংলা হলেও।
 - এই প্রশ্নটা বইয়ের কোন সমস্যা নম্বর/অনুচ্ছেদ থেকে এসেছে তার কোনো reference ("সমস্যা-X.X অনুযায়ী", "এর সমাধান অনুযায়ী" ইত্যাদি) explanation-এ কখনো লেখা যাবে না -- explanation সবসময় স্বয়ংসম্পূর্ণ হবে।
 - যদি প্রশ্নটা গাণিতিক/সাংখ্যিক হিসাব-নির্ভর হয় (যেমন mol, ভর, আয়তন, অণুর সংখ্যা ইত্যাদি বের করা), শুধু উত্তর repeat করলে চলবে না -- সূত্র (formula) কী ব্যবহার হয়েছে, তারপর মান বসিয়ে ধাপে ধাপে (প্রতি ধাপ আলাদা লাইনে, \\n দিয়ে) হিসাব দেখাতে হবে, শেষে চূড়ান্ত উত্তর।
+- যদি প্রশ্নটা Synonym/Antonym (প্রতিশব্দ/বিপরীত শব্দ) টাইপের হয় (ইংরেজি শব্দের প্রতিশব্দ/বিপরীত শব্দ বাছাই করতে বলা হয়েছে), explanation-এ প্রতিটা option-এর (৪টা শব্দের) বাংলা অর্থ আলাদা আলাদা করে লিখতে হবে -- প্রতিটা শব্দ ও তার বাংলা অর্থ স্পষ্টভাবে উল্লেখ করে বুঝিয়ে দিতে হবে কেন সঠিক option-টাই প্রশ্নের শব্দের সমার্থক/বিপরীতার্থক, এবং বাকি ৩টা কেন না।
 
 INPUT MCQs (in order):
 {items_json}
@@ -21015,17 +21016,27 @@ async def _ai_generate_all_explanations(mcqs: list, progress_cb=None, chat_id=No
         async def _run_chunk(chunk):
             if chat_id is not None and is_cancelled(chat_id):
                 return
-            async with sem:
-                if chat_id is not None and is_cancelled(chat_id):
-                    return
-                result = await _ai_generate_explanations_chunk(chunk)
-                for idx, exp in result.items():
-                    chunk[idx]["explanation"] = exp
+            try:
+                async with sem:
+                    if chat_id is not None and is_cancelled(chat_id):
+                        return
+                    result = await _ai_generate_explanations_chunk(chunk)
+                    for idx, exp in result.items():
+                        chunk[idx]["explanation"] = exp
+            except Exception as e:
+                # A single bad/failed chunk must never abort the whole batch
+                # -- previously gather() had no return_exceptions, so one
+                # uncaught error here (network blip, malformed index, etc.)
+                # propagated up and silently killed every OTHER in-flight/
+                # not-yet-started chunk too, stopping the whole run partway
+                # through (e.g. stuck around ~120/685) with no visible error.
+                logger.warning(f"[AI] chunk failed, skipping (its MCQs keep existing/blank explanation): {e}")
+            finally:
                 _done["n"] += len(chunk)
                 if progress_cb:
                     progress_cb(_done["n"])
 
-        await asyncio.gather(*[_run_chunk(c) for c in chunks])
+        await asyncio.gather(*[_run_chunk(c) for c in chunks], return_exceptions=True)
         return
 
     single = await _ai_generate_explanations_chunk(mcqs)
@@ -21042,15 +21053,19 @@ async def _ai_generate_all_explanations(mcqs: list, progress_cb=None, chat_id=No
     _done = {"n": 0}
 
     async def _run_chunk(chunk):
-        async with sem:
-            result = await _ai_generate_explanations_chunk(chunk)
-            for idx, exp in result.items():
-                chunk[idx]["explanation"] = exp
+        try:
+            async with sem:
+                result = await _ai_generate_explanations_chunk(chunk)
+                for idx, exp in result.items():
+                    chunk[idx]["explanation"] = exp
+        except Exception as e:
+            logger.warning(f"[AI] chunk failed, skipping (its MCQs keep existing/blank explanation): {e}")
+        finally:
             _done["n"] += len(chunk)
             if progress_cb:
                 progress_cb(_done["n"])
 
-    await asyncio.gather(*[_run_chunk(c) for c in chunks])
+    await asyncio.gather(*[_run_chunk(c) for c in chunks], return_exceptions=True)
 
 
 async def handle_ai(msg: dict):
