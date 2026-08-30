@@ -20871,7 +20871,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
             return client.models.generate_content(
                 model="gemini-3.5-flash",
                 contents=[types.Part.from_text(text=prompt)],
-                config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=8192)
+                config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=65536)
             )
 
         keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
@@ -20901,7 +20901,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
         return await _qbm_groq_text_call(prompt)
 
 
-_AI_EXPLAIN_CHUNK_SIZE = 8
+_AI_EXPLAIN_CHUNK_SIZE = 50
 _AI_EXPLAIN_CONCURRENCY = 3
 _AI_SINGLE_CALL_MAX = 30  # above this, skip the single-big-call attempt entirely
 
