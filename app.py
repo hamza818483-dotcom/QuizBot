@@ -11913,12 +11913,14 @@ async def handle_tf(msg: dict):
                         mcqs = _cap_mcq_options(mcqs, 4)
                         mcqs = _validate_mcq_structure(mcqs)
                         mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
-                        if mcqs and per_page_min and len(mcqs) < per_page_min:
-                            last_err = f"only {len(mcqs)} MCQ, need >= {per_page_min}"
-                            logger.warning(f"[/tf] page {page_no} attempt {attempt}: {last_err}")
-                            if attempt < 3:
-                                continue
+                        # /pdf-এর মতোই: একটা successful (non-empty) call এলে
+                        # সেটাই accept করে নেওয়া হয়, count_min-এর কমে হলেও রিট্রাই
+                        # করা হয় না -- prompt-এর নিজের HARD RULE-ই count নিশ্চিত
+                        # করার দায়িত্বে থাকে। শুধু genuinely empty/failed হলেই
+                        # retry হয়, যাতে /pdf-এর মতো per-page ১টা কলেই কাজ হয়।
                         if mcqs:
+                            if per_page_min and len(mcqs) < per_page_min:
+                                logger.warning(f"[/tf] page {page_no}: only {len(mcqs)} MCQ (min {per_page_min}) — accepting anyway, no retry")
                             break
                         last_err = "empty result"
                     except Exception as e:
