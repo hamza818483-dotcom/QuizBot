@@ -1554,7 +1554,7 @@ def _build_bio_prompt(topic: str) -> str:
 # ============================================================
 ATLAS_PROMPT_02 = """MCQ TYPE: True/False Style
 
-🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ, HARD RULE): কমপক্ষে ৭টি, সর্বোচ্চ ২০টি MCQ বানাতে হবে — ৭টির কমে কখনোই থামবে না। Source page-এ যত তথ্য/লাইন/পয়েন্ট আছে তার প্রতিটি অংশ ব্যবহার করে MCQ বানাও, কোনো তথ্য বাদ দেওয়া যাবে না। তথ্য কম মনে হলেও একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করে ৭-এর নিচে না যাওয়া নিশ্চিত করো। তথ্য বেশি থাকলে ১৫-২০টি পর্যন্ত বানাও।
+🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ, HARD RULE): কমপক্ষে ৭টি, সর্বোচ্চ ৩০টি MCQ বানাতে হবে — ৭টির কমে কখনোই থামবে না। Source page-এ যত তথ্য/লাইন/পয়েন্ট আছে তার প্রতিটি অংশ ব্যবহার করে MCQ বানাও, কোনো তথ্য বাদ দেওয়া যাবে না। তথ্য কম মনে হলেও একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করে ৭-এর নিচে না যাওয়া নিশ্চিত করো। তথ্য বেশি থাকলে ২৫-৩০টি পর্যন্ত বানাও।
 
 💥প্রশ্নের ধরন (randomly mix করো, একঘেয়ে নয়):
 🔴 প্রতিটা প্যাটার্নে answer কোনটা হবে তা নিচে EXACT বলা আছে — ভুল ম্যাপ করা যাবে না:
@@ -1621,7 +1621,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
 
     prompt_text = ATLAS_PROMPT_02
     if count_min:
-        _max = count_max or 20
+        _max = count_max or 30
         # Replace the prompt's own default count-rule line instead of
         # prepending a whole new block — prepending added ~250 extra chars,
         # which combined with the /tf prompt's already-long Bangla text
@@ -1663,7 +1663,7 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
         try:
             client = gai.Client(
                 api_key=key,
-                http_options=gtypes.HttpOptions(timeout=38000)
+                http_options=gtypes.HttpOptions(timeout=53000)
             )
 
             def _call():
@@ -1676,9 +1676,9 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
                             mime_type="image/jpeg"
                         )
                     ],
-                    config=gtypes.GenerateContentConfig(max_output_tokens=16384)
+                    config=gtypes.GenerateContentConfig(max_output_tokens=65536)
                 )
-            resp = await asyncio.wait_for(asyncio.to_thread(_call), timeout=40)
+            resp = await asyncio.wait_for(asyncio.to_thread(_call), timeout=55)
             text = (resp.text or "").strip()
             if not text:
                 continue
