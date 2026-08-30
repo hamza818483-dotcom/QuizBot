@@ -1650,114 +1650,19 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
             )
             prompt_text = prompt_text + _boost
 
-    # Same persistent, process-lifetime daily-exhaustion memory that /img's
-    # generate_mcq_from_image() already uses (pdf_handler._is_gemini_key_exhausted_today).
-    # Previously /tf tracked exhaustion only in a per-run skip_state dict, so
-    # every NEW /tf invocation re-learned "all keys are dead" from scratch by
-    # burning 3 fresh 429s per page before falling back — this check makes
-    # /tf skip Gemini immediately (same as /img already does) whenever every
-    # key was already marked exhausted-today by ANY earlier call in this
-    # process, /tf or /img alike.
-    if key_rotator.keys and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
-        logger.warning(f"[/tf] page {page_num}: all Gemini keys already known daily-exhausted — skipping straight to Groq")
-        if skip_state is not None:
-            skip_state["gemini_dead"] = True
-        _ordered = []
-    else:
-        _ordered = key_rotator.ordered_keys()
-    img_b64 = image_to_base64(img) if _ordered else None
-    # Try every live key before ever falling back to Groq/other providers --
-    # Gemini must be exhausted key-by-key first, per explicit instruction,
-    # not capped at 3 attempts while dozens of other keys sit unused.
-    max_retries = len(_ordered) if _ordered else 0
-    gemini_quota_errors = 0
-    for attempt in range(max_retries):
-        key = _ordered[attempt % len(_ordered)]
-        key_rotator.record_call(key)
-        try:
-            client = gai.Client(
-                api_key=key,
-                http_options=gtypes.HttpOptions(timeout=53000)
-            )
-
-            def _call():
-                return client.models.generate_content(
-                    model="gemini-3.5-flash",
-                    contents=[
-                        gtypes.Part.from_text(text=prompt_text),
-                        gtypes.Part.from_bytes(
-                            data=base64.b64decode(img_b64),
-                            mime_type="image/jpeg"
-                        )
-                    ],
-                    config=gtypes.GenerateContentConfig(max_output_tokens=65536)
-                )
-            resp = await asyncio.wait_for(asyncio.to_thread(_call), timeout=55)
-            text = (resp.text or "").strip()
-            if not text:
-                continue
-            finish_reason = None
-            try:
-                finish_reason = resp.candidates[0].finish_reason
-            except Exception:
-                pass
-            try:
-                mcqs = _parse_mcq_json(text)
-            except Exception as e:
-                logger.warning(f"[/tf] page {page_num} JSON parse failed (attempt {attempt+1}, finish_reason={finish_reason}): {e}")
-                continue
-            if not mcqs and str(finish_reason) not in ("STOP", "1", "None"):
-                logger.warning(f"[/tf] page {page_num} truncated by model (finish_reason={finish_reason}), retrying")
-                continue
-            if mcqs:
-                key_rotator.mark_healthy(key)
-                return mcqs, "Gemini"
-        except Exception as e:
-            logger.warning(f"[/tf] page {page_num} gen failed (attempt {attempt+1}, key {key[:12]}...): {e}")
-            if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
-                gemini_quota_errors += 1
-                # Populate the SAME persistent tracker /img's generate_mcq_from_image()
-                # reads, so a future /tf OR /img call in this same process
-                # immediately knows this key is dead-for-today instead of
-                # re-discovering it via another live 429.
-                key_rotator.mark_rate_limited(key, daily_exhausted=True)
-            try:
-                classify_ai_error(e, "gemini", page_num)
-            except Exception:
-                pass
-            continue
-
-    # All attempted keys 429'd on quota (not some other transient error) —
-    # every key shares the same daily free-tier quota reset, so retrying
-    # more keys this run won't help. Mark Gemini dead for this /tf run.
-    if skip_state is not None and max_retries > 0 and gemini_quota_errors >= max_retries:
-        skip_state["gemini_dead"] = True
-
-    logger.warning(f"[/tf] page {page_num} gemini exhausted; trying groq fallback")
-    try:
-        text = await _gen_groq_raw_text(img, prompt_text, mcq_count_hint=(count_max or 20))
-        if not text:
-            logger.warning(f"[/tf] page {page_num} groq fallback returned empty text (see [AI-ROT]/[GroqVerify] logs above for cause)")
-            if skip_state is not None:
-                # _gen_groq_raw_text already rotates through every configured
-                # key internally; an empty result here means the whole pool
-                # (Groq + any secondary fallbacks it tries) came back empty,
-                # which in practice only happens when every key is TPD-exhausted.
-                skip_state["groq_dead"] = True
-        else:
-            mcqs = _parse_mcq_json(text)
-            if mcqs:
-                logger.info(f"[/tf] page {page_num} satisfied by provider=groq (fallback)")
-                return mcqs, "Groq"
-            else:
-                logger.warning(f"[/tf] page {page_num} groq returned text but 0 parsed MCQs, raw (first 300 chars): {text[:300]}")
-    except Exception as e:
-        logger.warning(f"[/tf] page {page_num} groq fallback failed: {e}")
-        if skip_state is not None:
-            skip_state["groq_dead"] = True
-
+    # Reuse /pdf's exact battle-tested provider chain (Gemini multi-round
+    # key rotation -> Gemma-VL interleave -> Groq fallback, with model
+    # fallback/backoff/MAX_TOKENS detection all built in) instead of a
+    # separate lighter Gemini-only implementation — same engine /pdf uses,
+    # just with /tf's own True/False prompt injected via custom_prompt.
+    if skip_state is not None:
+        skip_state.setdefault("gemini_dead", False)
+        skip_state.setdefault("groq_dead", False)
+    mcqs = await generate_mcq_from_image(img, "TF", page_num, mcq_count=None, custom_prompt=prompt_text)
+    if mcqs:
+        provider = mcqs[0].get("_provider", "Gemini") if isinstance(mcqs[0], dict) else "Gemini"
+        return mcqs, provider
     return [], None
-    return []
 
 
 def _build_chem_gen_prompt(topic: str, count) -> str:
@@ -4614,7 +4519,7 @@ def _dedupe_mcqs(mcqs: list) -> list:
         out.append(m)
     return out
 
-async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0):
+async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None):
     """
     Smart wrapper: Gemini first (primary), then Groq fallback (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
@@ -4637,7 +4542,7 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     # each call already uses its own independent API key + Gemini/Groq request
     # and has nothing that actually needs global serialization. Multiple users'
     # jobs now run concurrently instead of queuing behind one another.
-    out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=exclude_groq_keys, key_offset=key_offset)
+    out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=exclude_groq_keys, key_offset=key_offset, custom_prompt=custom_prompt)
     # 2026-08-27: code-level SOURCE-GROUNDING enforcement for the default
     # /pdf path (was only wired to /chem before -- see _filter_verified_mcqs
     # docstring). The default prompt already asks Gemini/Groq for
@@ -4688,6 +4593,12 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     elif _MATH_MODE.get():
         # /math count is entirely content-driven (page math first, then
         # simple self-made, roughly 10-25) -- never /pdf's own floor/cap.
+        _rng_min, _rng_max = 1, None
+    elif custom_prompt:
+        # /tf supplies its own fully-formed prompt with its own count rules
+        # baked in — the prompt itself already enforces min/max, so no
+        # extra MIN_MCQ-based retry loop is needed here (that loop also
+        # doesn't carry custom_prompt through to its retry call).
         _rng_min, _rng_max = 1, None
     else:
         _rng_min, _rng_max = MIN_MCQ, MAX_MCQ
@@ -5130,7 +5041,7 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
     return mcqs
 
 
-async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0):
+async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None):
     # 2026-08-19: Gemini is now PRIMARY for ALL modes (explicit user
     # preference), Groq is fallback only when Gemini fails/empty. Previously
     # (2026-08-07) Groq was made primary because Gemini's free-tier daily
@@ -5163,6 +5074,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
                 gemini_out = await _gemini_gen_mcq(
                     img, topic, page_num, mcq_count,
                     max_keys=_round_size,
+                    custom_prompt=custom_prompt,
                 )
             except Exception as e:
                 _LAST_GEMINI_ERROR["reason"] = f"{type(e).__name__}: {e}"

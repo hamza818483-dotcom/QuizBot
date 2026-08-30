@@ -1259,8 +1259,16 @@ async def generate_mcq_from_image(
     page: int,
     mcq_count: int = None,
     max_keys: int = None,
+    custom_prompt: str = None,
 ) -> list:
-    if isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
+    if custom_prompt:
+        # /tf (and any other caller with its own fully-formed prompt) skips
+        # the default MCQ_PROMPT_WITH_COUNT/MCQ_PROMPT_MAX templating below
+        # entirely and reuses THIS SAME battle-tested Gemini/Groq provider
+        # chain (key rotation, model fallback, MAX_TOKENS detection,
+        # exponential backoff) with its own prompt text instead.
+        prompt = custom_prompt
+    elif isinstance(mcq_count, (tuple, list)) and len(mcq_count) == 2:
         c_min, c_max = mcq_count
         range_rule = (
             f"STRICT RANGE REQUIRED: Extract BETWEEN {c_min} AND {c_max} MCQs from "
