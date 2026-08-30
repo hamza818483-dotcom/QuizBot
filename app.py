@@ -77,7 +77,7 @@ from supabase.client import Client
 
 from pdf_handler import (
     pdf_to_images, pdf_to_images_safe, image_to_bytes, generate_mcq_from_image,
-    generate_new_mcq, parse_pdf_command, parse_page_range,
+    generate_new_mcq, generate_mcq_from_text, parse_pdf_command, parse_page_range,
     fmt_page, gen_session_id, get_random_ayat, get_motivation,
     key_rotator, crop_explanation_image, get_pdf_page_count,
     _PDF_MAX_PAGES_PER_CALL
@@ -580,6 +580,14 @@ import itertools
 CANCEL_FLAGS = {}  # chat_id -> bool, checked by long loops between steps
 ACTIVE_JOB_LABEL = {}  # chat_id -> human-readable label of the job currently running
 CURRENT_JOB_ID = {}  # chat_id -> int, id of the job currently running in that chat
+
+# ✅-reaction-to-poll feature: caches recent channel posts (text/photo) in
+# memory keyed by (chat_id, message_id) so when a ✅ reaction arrives on that
+# post later, the handler can find the source content without needing to
+# re-fetch it (reaction updates carry no message content, only the id).
+_REACT_POST_CACHE = {}  # (chat_id, message_id) -> {"text":.., "photo_file_id":.., "date":..}
+_REACT_POST_CACHE_MAXLEN = 500
+_REACT_PROCESSED = set()  # (chat_id, message_id) already turned into polls — never repeat on re-reaction
 # chat_id -> asyncio.Task currently running a single page's generation call.
 # Cancel button uses this to .cancel() the in-flight HTTP call directly
 # instead of only setting CANCEL_FLAGS and waiting for the next between-
@@ -6770,6 +6778,117 @@ def _imgqbm_options_to_list(mcqs: list) -> list:
         m2["options"] = opts or []
         out.append(m2)
     return out
+
+
+def _cache_channel_post(chat_id, message_id, text: str = "", photo_file_id: str = None):
+    key = (chat_id, message_id)
+    _REACT_POST_CACHE[key] = {"text": text or "", "photo_file_id": photo_file_id, "date": time.time()}
+    if len(_REACT_POST_CACHE) > _REACT_POST_CACHE_MAXLEN:
+        # Drop the oldest entries once the cache grows past its cap —
+        # simple FIFO eviction by insertion date, good enough since old
+        # channel posts are very unlikely to get a fresh ✅ reaction.
+        oldest = sorted(_REACT_POST_CACHE.items(), key=lambda kv: kv[1]["date"])[:50]
+        for k, _ in oldest:
+            _REACT_POST_CACHE.pop(k, None)
+
+
+async def handle_message_reaction(update: dict):
+    """✅ reaction on a channel post (bot must be admin there) turns that
+    post's text/image into MCQs and sends them as polls replying to the
+    SAME post — same generation engine as /img (Gemini/Groq via
+    generate_mcq_from_image / generate_mcq_from_text), followed by a score
+    prompt message and a separate Poll Again/Quiz Solve/Website Exam
+    practice-buttons message, both also replying to the source post."""
+    try:
+        chat = update.get("chat", {})
+        chat_id = chat.get("id")
+        message_id = update.get("message_id")
+        if not chat_id or not message_id:
+            return
+        new_reaction = update.get("new_reaction", []) or []
+        old_reaction = update.get("old_reaction", []) or []
+        old_emojis = {r.get("emoji") for r in old_reaction if r.get("type") == "emoji"}
+        new_emojis = {r.get("emoji") for r in new_reaction if r.get("type") == "emoji"}
+        if "✅" not in (new_emojis - old_emojis):
+            return  # only trigger on a FRESH ✅ add, not other emoji or a ✅ removal
+
+        key = (chat_id, message_id)
+        if key in _REACT_PROCESSED:
+            return
+        _REACT_PROCESSED.add(key)
+
+        cached = _REACT_POST_CACHE.get(key)
+        if not cached:
+            logger.warning(f"[ReactPoll] chat={chat_id} msg={message_id}: source post not in cache (posted before bot restart?) — skipping")
+            return
+
+        text = (cached.get("text") or "").strip()
+        photo_file_id = cached.get("photo_file_id")
+        topic = "✅ Reaction MCQ"
+
+        if photo_file_id:
+            img_bytes = await download_tg_file(photo_file_id)
+            from PIL import Image as PILImage
+            img = PILImage.open(BytesIO(img_bytes))
+            mcqs = await generate_mcq_from_image(img, topic, 1, None)
+        elif text:
+            mcqs = await generate_mcq_from_text(text, topic, 15)
+        else:
+            return
+
+        mcqs = _cap_mcq_options(mcqs, 4)
+        mcqs = _validate_mcq_structure(mcqs)
+        mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
+        if not mcqs:
+            logger.warning(f"[ReactPoll] chat={chat_id} msg={message_id}: 0 MCQs generated, nothing to send")
+            return
+
+        settings = await db_get_settings()
+        tag = settings.get("tag", "")
+        exp_footer = settings.get("exp_footer", "")
+
+        poll_links = []
+        for i, mcq in enumerate(mcqs):
+            opts = [o[:100] for o in mcq.get("options", [])[:4]]
+            ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
+            q_text = mcq["question"][:295]
+            if tag:
+                q_text = f"{tag}\n\n{q_text}"
+            q_text = q_text[:300]
+            exp = mcq.get("explanation", "")
+            if exp_footer:
+                exp = f"{exp}\n{exp_footer}"
+            poll_r = {"ok": False}
+            for _attempt in range(3):
+                poll_r = await send_poll(
+                    chat_id, q_text, opts, ans_idx,
+                    explanation=exp,
+                    reply_to_message_id=message_id
+                )
+                if poll_r.get("ok"):
+                    break
+                await asyncio.sleep(2)
+            if poll_r.get("ok") and i == 0:
+                poll_links.append(_get_first_poll_link(chat_id, poll_r["result"]["message_id"]))
+            await asyncio.sleep(0.5)
+
+        cache_id = gen_session_id()
+        await db_save_mcq_cache(cache_id, cache_id, 1, topic, mcqs, poll_links, channel_id=str(chat_id))
+
+        await tg_post("sendMessage", {
+            "chat_id": chat_id,
+            "text": f"🏁 {len(mcqs)}টি Poll পাঠানো হয়েছে! উপরে scroll করে answer করো, score দেখো।",
+            "reply_to_message_id": message_id
+        })
+        await tg_post("sendMessage", {
+            "chat_id": chat_id,
+            "text": "🔄 আবার practice করতে বা নতুন poll চাইলে নিচের বাটন চাপো।",
+            "reply_to_message_id": message_id,
+            "reply_markup": await _csv_pre_buttons(cache_id)
+        })
+    except Exception as e:
+        logger.error(f"[ReactPoll] error: {e}", exc_info=True)
+
 
 
 async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
@@ -28396,6 +28515,18 @@ async def process_update(update: dict):
                     _spawn_task(_drain_user_queue(uid))
             else:
                 await handle_message(update["message"])
+        elif "channel_post" in update or "edited_channel_post" in update:
+            cp = update.get("channel_post") or update.get("edited_channel_post")
+            cp_chat_id = cp.get("chat", {}).get("id")
+            cp_msg_id = cp.get("message_id")
+            if cp_chat_id and cp_msg_id:
+                cp_text = cp.get("text") or cp.get("caption") or ""
+                cp_photo_id = None
+                if cp.get("photo"):
+                    cp_photo_id = cp["photo"][-1]["file_id"]
+                _cache_channel_post(cp_chat_id, cp_msg_id, cp_text, cp_photo_id)
+        elif "message_reaction" in update:
+            _spawn_task(handle_message_reaction(update["message_reaction"]))
         elif "callback_query" in update:
             await handle_callback(update["callback_query"])
         elif "poll_answer" in update:
@@ -30762,7 +30893,7 @@ async def _webhook_healer_task() -> None:
                     else:
                         target_webhook = CF_WORKER_URL.rstrip("/") + "/webhook"
                     payload = {"url": target_webhook, "drop_pending_updates": False, "max_connections": 40,
-                               "allowed_updates": ["message", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"]}
+                               "allowed_updates": ["message", "channel_post", "message_reaction", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"]}
                     if WEBHOOK_SECRET:
                         payload["secret_token"] = WEBHOOK_SECRET
                     result = await tg_post("setWebhook", payload)
@@ -31092,7 +31223,7 @@ async def startup():
                 if "onrender.com" in current_url:
                     # ইতিমধ্যেই Render-এ ছিল — restart এর পর re-confirm করছি
                     _r_payload = {"url": webhook_url, "drop_pending_updates": True, "max_connections": 40,
-                                  "allowed_updates": ["message", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"]}
+                                  "allowed_updates": ["message", "channel_post", "message_reaction", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"]}
                     if WEBHOOK_SECRET:
                         _r_payload["secret_token"] = WEBHOOK_SECRET
                     r = await _c.post(
@@ -31115,7 +31246,7 @@ async def startup():
 
             if current_url != worker_webhook or WEBHOOK_SECRET:
                 _wh_payload = {"url": worker_webhook, "drop_pending_updates": True, "max_connections": 40,
-                               "allowed_updates": ["message", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"]}
+                               "allowed_updates": ["message", "channel_post", "message_reaction", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"]}
                 if WEBHOOK_SECRET:
                     _wh_payload["secret_token"] = WEBHOOK_SECRET
                 result = await tg_post("setWebhook", _wh_payload)
