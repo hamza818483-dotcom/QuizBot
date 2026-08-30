@@ -1587,7 +1587,7 @@ ATLAS_PROMPT_02 = """MCQ TYPE: True/False Style
 -answer must be one of A/B/C/D (letter)"""
 
 
-async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, count_max: int = None, skip_state: dict = None) -> tuple:
+async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, count_max: int = None, skip_state: dict = None, retry_attempt: int = 1) -> tuple:
     """Direct Gemini call using AtlasBot's exact PROMPT_02 — bypasses the
     topic-templated pipeline entirely so the prompt's rules reach the model
     unmodified, exactly like AtlasBot's own generate_mcq_from_image(img, 'prompt_2').
@@ -1635,6 +1635,21 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
             f"{count_min}-এর কমে থামবে না। Source-এর প্রতিটি তথ্য ব্যবহার করো।"
         )
         prompt_text = ATLAS_PROMPT_02.replace(_old_rule_line, _new_rule_line, 1)
+        if retry_attempt >= 2:
+            # Previous attempt(s) undershot count_min despite the HARD RULE
+            # line above — Gemini sometimes just stops early regardless of
+            # the stated minimum. Append an explicit self-check instruction
+            # forcing it to count its own output before finishing, escalating
+            # wording each retry instead of resending the identical prompt.
+            _boost = (
+                f"\n\n⚠️⚠️ অত্যন্ত গুরুত্বপূর্ণ (attempt {retry_attempt}): আগের চেষ্টায় "
+                f"{count_min}টির কমে থেমে গেছো — এবার JSON output লেখা শেষ করার আগে "
+                f"নিজে গুনে দেখো কতগুলো object আছে array-তে। {count_min}টির কম হলে "
+                f"array বন্ধ করবে না, source-এর বাকি তথ্য দিয়ে আরও MCQ যোগ করে "
+                f"{count_min}টি পূর্ণ করো। একই তথ্য ভিন্নভাবে (সত্য/মিথ্যা ঘুরিয়ে) প্রশ্ন "
+                f"করেও সংখ্যা পূরণ করা যাবে।"
+            )
+            prompt_text = prompt_text + _boost
 
     # Same persistent, process-lifetime daily-exhaustion memory that /img's
     # generate_mcq_from_image() already uses (pdf_handler._is_gemini_key_exhausted_today).
@@ -11811,23 +11826,46 @@ async def handle_tf(msg: dict):
         page_stats = []  # (page_no, mcq_count_or_None, seconds_taken, provider_or_None) — live dashboard rows
         overall_start = time.monotonic()
         _last_update = [0.0]
+        _current_page_box = {"n": None}
 
         def _fmt_secs(s: float) -> str:
             return f"{s:.1f}s" if s < 60 else f"{int(s // 60)}m {s % 60:.0f}s"
 
         def _build_dashboard() -> str:
             elapsed = time.monotonic() - overall_start
-            lines = [f"⏳ Processing... ({len(page_stats)}/{total_pages} page)",
-                      f"🎯 Topic: {topic}",
-                      f"⏱️ Elapsed: {_fmt_secs(elapsed)}", "",
-                      "📄 Page | MCQ | Model | Time"]
-            for p_no, m_count, secs, prov in page_stats[-15:]:
-                status_icon = "✅" if m_count is not None else "❌"
-                mcq_str = str(m_count) if m_count is not None else "fail"
-                prov_str = prov if prov else "-"
-                lines.append(f"{status_icon} {p_no} | {mcq_str} | {prov_str} | {_fmt_secs(secs)}")
-            if len(page_stats) > 15:
-                lines.insert(4, f"... ({len(page_stats) - 15} আগের row লুকানো)")
+            mins, secs_r = divmod(int(elapsed), 60)
+            done_n = len(page_stats)
+            pct = int(done_n / total_pages * 100) if total_pages else 0
+            bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+            total_mcq_so_far = sum(m for _, m, _, _ in page_stats if m)
+            lines = [
+                "⏳ <b>/tf Processing...</b>",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+                f"🎯 Topic: {topic}", f"📋 Pages: {total_pages} total",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+            ]
+            done_page_nos = {p for p, _, _, _ in page_stats}
+            for page_entry in pages:
+                p_no = page_entry[0] if isinstance(page_entry, tuple) else None
+                if p_no is None:
+                    continue
+                if p_no in done_page_nos:
+                    m_count, secs, prov = next((m, s, pr) for pn, m, s, pr in page_stats if pn == p_no)
+                    if m_count is None:
+                        lines.append(f"⚠️ Page {p_no}: 0 MCQ (ব্যর্থ) ⏱{_fmt_secs(secs)}")
+                    else:
+                        prov_str = f" ({prov})" if prov else ""
+                        lines.append(f"✅ Page {p_no}: {m_count} MCQ{prov_str} ⏱{_fmt_secs(secs)}")
+                elif p_no == _current_page_box["n"]:
+                    lines.append(f"⏳ Page {p_no}: Processing...")
+                else:
+                    lines.append(f"⬜ Page {p_no}: Waiting")
+            lines += [
+                "━━━━━━━━━━━━━━━━━━━━━━",
+                f"📊 Progress: {pct}% [{bar}]",
+                f"⏱️ Elapsed: {mins}:{secs_r:02d}",
+                f"📝 মোট MCQ: {total_mcq_so_far}",
+            ]
             return "\n".join(lines)
 
         for idx, page_entry in enumerate(pages, 1):
@@ -11842,6 +11880,7 @@ async def handle_tf(msg: dict):
                 break
 
             page_start = time.monotonic()
+            _current_page_box["n"] = page_no
             if status_msg_id:
                 try:
                     now = time.monotonic()
@@ -11870,7 +11909,7 @@ async def handle_tf(msg: dict):
                         break
                     try:
                         mcqs, provider_used = await _generate_tf_mcq_atlas(
-                            page_img, page_no, per_page_min, per_page_max, skip_state=_tf_skip_state
+                            page_img, page_no, per_page_min, per_page_max, skip_state=_tf_skip_state, retry_attempt=attempt
                         )
                         mcqs = _cap_mcq_options(mcqs, 4)
                         mcqs = _validate_mcq_structure(mcqs)
