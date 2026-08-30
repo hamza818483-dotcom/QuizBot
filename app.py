@@ -20903,6 +20903,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
 
 _AI_EXPLAIN_CHUNK_SIZE = 8
 _AI_EXPLAIN_CONCURRENCY = 3
+_AI_SINGLE_CALL_MAX = 30  # above this, skip the single-big-call attempt entirely
 
 
 def _ai_parse_explanations_json(text: str, expected_len: int) -> list:
@@ -20997,6 +20998,29 @@ async def _ai_generate_all_explanations(mcqs: list, progress_cb=None) -> None:
     every completed chunk so the caller can show live %/elapsed status."""
     if not mcqs:
         return
+    # Large batches (single call risks hitting Gemini's 8192 output-token
+    # cap -> truncated/malformed JSON -> length-mismatch parse failure) AND
+    # progress_cb never fires during this whole attempt, so the user sees
+    # a frozen 0% for however long the single-call + per-key-timeout retry
+    # chain takes before falling back. Skip straight to chunked calls above
+    # this threshold so progress updates immediately from the first chunk.
+    if len(mcqs) > _AI_SINGLE_CALL_MAX:
+        chunks = [mcqs[i:i + _AI_EXPLAIN_CHUNK_SIZE] for i in range(0, len(mcqs), _AI_EXPLAIN_CHUNK_SIZE)]
+        sem = asyncio.Semaphore(_AI_EXPLAIN_CONCURRENCY)
+        _done = {"n": 0}
+
+        async def _run_chunk(chunk):
+            async with sem:
+                result = await _ai_generate_explanations_chunk(chunk)
+                for idx, exp in result.items():
+                    chunk[idx]["explanation"] = exp
+                _done["n"] += len(chunk)
+                if progress_cb:
+                    progress_cb(_done["n"])
+
+        await asyncio.gather(*[_run_chunk(c) for c in chunks])
+        return
+
     single = await _ai_generate_explanations_chunk(mcqs)
     if len(single) == len(mcqs):
         for idx, exp in single.items():
