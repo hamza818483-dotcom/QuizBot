@@ -16396,8 +16396,14 @@ UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '  1) Scan the ENTIRE page top-to-bottom, BOTH columns independently, for the icon+bold-black-heading pattern (rule iii/iii-ALT above). A heading can appear on EITHER the left OR right column, at ANY vertical position including the very bottom of the page — check the bottom of both columns specifically, this is the most commonly missed spot.\n'
     '  2) If ANY such heading is found anywhere on the page — even with zero MCQs following it on this page — you MUST emit the trailing_topic_marker sentinel for it (or apply it as topic_hint to the MCQs after it in that same column). Do not silently omit a heading you detected; if unsure whether something qualifies, err toward reporting it as a marker rather than dropping it.\n'
     '  3) Every single MCQ, including the very last MCQ(s) at the bottom of the page (last row of either column), must carry the topic_hint of whichever heading is actually active in ITS OWN column at that position — never leave the last few MCQs of a page defaulting to an old/wrong topic just because no new heading happened to follow them; if the most recent heading in their own column is topic X, they belong to topic X even if that heading was near the top of the page.\n\n'
+    'ADDITIONALLY extract for EACH MCQ:\n'
+    '- "subtopic_hint": text from a heading placed inside its OWN separate colored/shaded background box (a filled bg color box, distinct from the plain-white ✪ topic heading) appearing above this MCQ. This is a SECOND, finer-grained level nested under the current topic_hint. Rules:\n'
+    '  i) Only a heading actually enclosed in a solid/shaded background box counts — plain bold text with no box background is NOT a subtopic_hint.\n'
+    '  ii) A new subtopic box heading changes subtopic_hint for every MCQ after it (in its own column) until either a new subtopic box heading or a new ✪ topic_hint heading appears — a new topic_hint heading also resets subtopic_hint to "" for MCQs after it, until a new box heading is seen for the new topic.\n'
+    '  iii) If no box-heading has appeared yet for the current topic, or this page has no such box visible, use "" (empty string) — do not guess.\n'
+    '  iv) Every MCQ under the same visible box heading gets the EXACT SAME subtopic_hint string, character-for-character (box background color/styling itself is not part of the string, just the heading text).\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"...","subtopic_hint":"..."}]'
 )
 
 
@@ -17075,6 +17081,7 @@ def _unmesh_group_mcqs(extracted_pages: list) -> list:
 
     flat = []
     last_hint = None
+    last_subhint = ""
     for _page_idx, (_, _, mcqs) in enumerate(extracted_pages):
         # CODE-LEVEL FIX: trailing_topic_marker sentinels are appended by the
         # extraction prompt at the END of a page's MCQ array, but they can
@@ -17102,16 +17109,25 @@ def _unmesh_group_mcqs(extracted_pages: list) -> list:
                 th = (m.get("trailing_topic_marker") or "").strip()
                 if th and not _is_fake_topic(th):
                     last_hint = th
+                    last_subhint = ""  # a new topic resets any active subtopic
                 continue  # sentinel only updates carry-forward, not a real MCQ
             m["_page_key"] = _page_idx
             hint = (m.get("topic_hint") or "").strip()
             if hint and _is_fake_topic(hint):
                 hint = ""
             if hint:
+                if hint != last_hint:
+                    last_subhint = ""  # topic changed -> drop stale subtopic
                 last_hint = hint
                 m["_effective_hint"] = hint
             else:
                 m["_effective_hint"] = last_hint or ""
+            subhint = (m.get("subtopic_hint") or "").strip()
+            if subhint:
+                last_subhint = subhint
+                m["_effective_subhint"] = subhint
+            else:
+                m["_effective_subhint"] = last_subhint or ""
             flat.append(m)
 
     # CODE-LEVEL GUARD: the very last page of the whole extracted range is a
@@ -19545,6 +19561,7 @@ def _qbm_parse_json(text: str) -> list:
                 **({"yellow_highlight": mc.get("yellow_highlight")} if "yellow_highlight" in mc else {}),
                 **({"qsn_no": mc.get("qsn_no")} if "qsn_no" in mc else {}),
                 **({"topic_hint": mc.get("topic_hint")} if "topic_hint" in mc else {}),
+                **({"subtopic_hint": mc.get("subtopic_hint")} if "subtopic_hint" in mc else {}),
                 # SOURCE-GROUNDING fields (2026-08-20): /chem's generation
                 # prompt asks Gemini to self-report these per MCQ so a
                 # code-level gate (_chem_filter_verified_mcqs) can enforce
@@ -22536,7 +22553,17 @@ async def _handle_unmesh_impl(msg: dict):
                 # where this topic's MCQs begin in the merged CSV.
                 _merged_w.writerow(_EMPTY_ROW)
                 _merged_w.writerow([name, "", "", "", "", "", "", "", "", ""])
+            _last_written_subhint = None
             for m in mcqs:
+                # Subtopic marker row: a row with ONLY option1 filled
+                # (questions + every other column empty), placed right
+                # before the first MCQ of that subtopic. Only emitted in
+                # the merged CSV (not the per-topic CSV), and only when a
+                # subtopic actually changes within this topic group.
+                _cur_subhint = (m.get("_effective_subhint") or "").strip()
+                if _cur_subhint and _cur_subhint != _last_written_subhint:
+                    _merged_w.writerow(["", _cur_subhint, "", "", "", "", "", "", "", ""])
+                _last_written_subhint = _cur_subhint or _last_written_subhint
                 opts = m.get("options", ["", "", "", ""])
                 row = [
                     m.get("question", ""), opts[0] if len(opts) > 0 else "",
