@@ -14040,7 +14040,7 @@ def _pdf_dashboard_kb(chat_id, pages, page_status):
         rows.append(done_buttons[i:i+3])
     return {"inline_keyboard": rows}
 
-def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=None, ai_calls_breakdown=None, topic_breakdown=None):
+def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=None, ai_calls_breakdown=None, topic_breakdown=None, live_topic=None):
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
     done = sum(1 for s in page_status if s["done"])
@@ -14051,8 +14051,10 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
         "⏳ <b>ATLAS PDF Processing...</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"📄 File: {file_name}", f"🎯 Topic: {topic}", f"📋 Pages: {total} total",
-        "━━━━━━━━━━━━━━━━━━━━━━"
     ]
+    if live_topic:
+        lines.append(f"📂 Current topic: {live_topic}")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     for s in page_status:
         if s["done"]:
             if s.get("failed") or s["mcq"] == 0:
@@ -22478,17 +22480,35 @@ async def _handle_unmesh_impl(msg: dict):
             except Exception as e:
                 logger.warning(f"[UNMESH] explanation fill failed: {e}")
 
-        if status_msg_id:
-            breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
-            next_step = "channel-এ poll পাঠানো হচ্ছে..." if unmesh_channel_id else "CSV পাঠানো হচ্ছে..."
-            await edit_msg(chat_id, status_msg_id,
-                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
+        _unmesh_topic_breakdown = {name: len(mcqs) for name, mcqs in topic_groups}
+        _unmesh_final_status = "⏳ CSV পাঠানো হচ্ছে..." if not unmesh_channel_id else "⏳ Channel-এ poll পাঠানো হচ্ছে..."
+
+        async def _unmesh_render_final_dashboard(extra_status: str = None):
+            # Rebuild the SAME live per-page dashboard (never replaced by a
+            # short summary) with the topic-wise breakdown appended, so the
+            # full page-by-page/model/call/timing history stays visible
+            # start to finish.
+            if not status_msg_id:
+                return
+            text = _build_dashboard(
+                file_name, topic, pages, page_status, start_time, total_mcq_found, 0,
+                ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
+                topic_breakdown=_unmesh_topic_breakdown
+            )
+            if extra_status:
+                text += f"\n\n{extra_status}"
+            try:
+                await edit_msg(chat_id, status_msg_id, text)
+            except Exception:
+                pass
+
+        await _unmesh_render_final_dashboard(_unmesh_final_status)
 
         if unmesh_channel_id:
             total_polls = await _post_topic_groups_to_channel(unmesh_channel_id, topic_groups, unmesh_thread_id)
-            if status_msg_id:
-                await edit_msg(chat_id, status_msg_id,
-                    f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+            await _unmesh_render_final_dashboard(
+                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।"
+            )
             return
 
         _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
@@ -22529,9 +22549,9 @@ async def _handle_unmesh_impl(msg: dict):
                 mime_type="text/csv",
                 reply_to_message_id=_cmd_msg_id)
 
-        if status_msg_id:
-            await edit_msg(chat_id, status_msg_id,
-                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
+        await _unmesh_render_final_dashboard(
+            f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।"
+        )
 
     except Exception as e:
         logger.error(f"[UNMESH] Error: {e}", exc_info=True)
@@ -24969,6 +24989,7 @@ async def qbm_extract_all_pages(
     _qbm_dash_stop = asyncio.Event()
     _qbm_dash_lock = asyncio.Lock()
     _qbm_last_dash_text = [None]
+    _live_active_topic = [""]
 
     async def _qbm_safe_dash_edit():
         # Serialize every dashboard edit (page-start, page-done, ticker) —
@@ -24980,7 +25001,7 @@ async def qbm_extract_all_pages(
         # call entirely when the text is unchanged (avoids Telegram's
         # "message is not modified" error burning a request for nothing).
         async with _qbm_dash_lock:
-            text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id))
+            text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), live_topic=_live_active_topic[0])
             if text == _qbm_last_dash_text[0]:
                 return
             try:
@@ -25013,6 +25034,8 @@ async def qbm_extract_all_pages(
         if status_msg_id:
             await _qbm_safe_dash_edit()
         mcqs = []
+        _page_start_ts = time.time()
+        _page_ai_calls_before = _get_ai_call_count(chat_id)
 
         async def _run_extract():
             _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
@@ -25096,12 +25119,30 @@ async def qbm_extract_all_pages(
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
         page_status[idx]["mcq"] = len(mcqs)
+        page_status[idx]["gen_seconds"] = round(time.time() - _page_start_ts, 1)
+        page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
         _counts = {}
         for _m in (mcqs or []):
             _prov = _m.get("_provider", "")
             if _prov:
                 _counts[_prov] = _counts.get(_prov, 0) + 1
         page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _counts.items())
+        # Detected topic for this page: last non-empty topic_hint among this
+        # page's own MCQs (covers /unmesh + /topic + /chem style extractors
+        # that emit topic_hint per MCQ); also honors a trailing_topic_marker-
+        # only entry so a page with zero real MCQs but a new heading still
+        # reports the heading that started there.
+        _page_topic = ""
+        for _m in (mcqs or []):
+            if "trailing_topic_marker" in _m:
+                _t = (_m.get("trailing_topic_marker") or "").strip()
+            else:
+                _t = (_m.get("topic_hint") or "").strip()
+            if _t:
+                _page_topic = _t
+        page_status[idx]["detected_topic"] = _page_topic
+        if _page_topic:
+            _live_active_topic[0] = _page_topic
         total_mcq += len(mcqs)
         if status_msg_id:
             await _qbm_safe_dash_edit()
