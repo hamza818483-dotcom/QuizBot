@@ -16372,14 +16372,13 @@ UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
-    '- "topic_hint": the topic-heading text that this MCQ falls under. THIS PAGE STYLE uses a DIFFERENT topic-marker design than a plain black banner bar — a topic heading here is identified by ALL THREE of the following together, right before the heading text:\n'
+    '- "topic_hint": the topic-heading text that this MCQ falls under. A topic heading here is identified by ALL THREE of the following together, right before the heading text:\n'
     '  i) the heading text itself sits on a WHITE/plain page background (NOT inside a solid dark/black bar),\n'
     '  ii) the heading text is BOLD BLACK font (visibly heavier/darker than normal question text),\n'
-    '  iii) immediately to the LEFT of the heading text (and sometimes duplicated once more further left before it) there is a small ICON MARKER — this can be a solid BLACK/DARK FILLED CIRCLE (●) with 1-3 small WHITE STAR (★) glyphs inside/beside it, OR a HOLLOW/OUTLINE STAR (✪) appearing 1, 2, OR 3 times in a row right before the heading text (the exact count of ✪ does NOT matter — even a single ✪ before a bold-black heading on white/light bg is enough, this is a strong standalone topic marker on its own), OR ANY OTHER small colored/graphical icon repeated exactly TWICE in a row right before the heading text (e.g. two folder icons \U0001F4C2\U0001F4C2, two star icons \u2B50\u2B50, two colored circle icons \U0001F535\U0001F535 of any color, two bullseye/target icons, etc.) — the EXACT icon style, color, or star-count does not matter and does not change the topic; what matters is that some small icon glyph (especially ✪) appears immediately before a bold-black heading line on white background. Always treat this icon + bold-black-heading pattern as a genuine topic marker regardless of which specific icon/emoji/color is used on this particular page — never require it to look identical to markers seen on other pages.\n'
-    '  iii-ALT) ALSO treat as a genuine topic marker (equally valid alternative to iii above, do NOT require both): a SINGLE small icon/emoji (book, folder, magnifier, target, pin, star, etc. \u2014 any single small graphical icon, not doubled) placed immediately to the left of a short bold heading line, where that heading line sits inside its OWN distinct bounded box/strip (a thin border, a shaded/colored background rectangle, or a horizontal rule directly above+below just that heading) that visually separates it from the surrounding question text above and below. This boxed-single-icon-heading style is common on pages that number/list topics (e.g. a heading like \u09e9\u09ea (34) followed by a topic title inside its own box) \u2014 such a numbered/titled heading line inside its own box, with any single icon beside it, is a topic_hint exactly like the doubled-icon or black-banner styles; a leading topic-number prefix (if present) is part of the topic_hint text.\n'
-    '  A line of text is a topic_hint ONLY when i, ii, and EITHER iii OR iii-ALT are true together. Do NOT treat as topic_hint: plain bold text with no icon marker (doubled or single-boxed) before it, sub-headers like university/organization names, exam-source tags (BCS/MAT/DAT/RU-D/DU-D/JnU-D bracket tags), \u09ac\u09cd\u09af\u09be\u0996\u09cd\u09af\u09be/explanation labels, or a single generic recurring section-label like \"\u09ac\u09bf\u0997\u09a4 \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8\u09be\u09ac\u09b2\u09c0\" (past-questions label) that itself carries no icon marker of its own — that label is noise, not a topic name.\n'
+    '  iii) immediately to the LEFT of the heading text (and sometimes duplicated once more further left before it) there is the HOLLOW/OUTLINE STAR marker (✪) appearing 1, 2, OR 3 times in a row right before the heading text — the exact count (1, 2, or 3 stars) does NOT matter and does NOT change the topic, a single ✪ is just as valid a marker as ✪✪ or ✪✪✪.\n'
+    '  ‼️ HARD RULE — ✪ IS THE ONLY VALID TOPIC MARKER: a heading is a real topic_hint ONLY when the ✪ star glyph (1-3 of them) appears immediately before it. NO OTHER marker counts as a topic boundary, no matter how visually similar — this specifically EXCLUDES: a solid black/dark filled circle with white stars inside (●★), any other colored/graphical icon (folder, book, magnifier, target, pin, bullseye, colored circles, etc.) even if doubled or repeated, a single icon next to a boxed/bordered heading, a numbered heading inside its own box, or ANY heading with no icon at all. If the marker before a bold-black heading is not literally the ✪ star character, that heading is NOT a topic_hint — treat it as ordinary body text and let the MCQs following it keep whatever ✪-topic was already active.\n'
+    '  A line of text is a topic_hint ONLY when i, ii, AND iii (the ✪ marker specifically) are all true together. Do NOT treat as topic_hint: plain bold text with no ✪ marker before it (even with some other icon/box styling), sub-headers like university/organization names, exam-source tags (BCS/MAT/DAT/RU-D/DU-D/JnU-D bracket tags), \u09ac\u09cd\u09af\u09be\u0996\u09cd\u09af\u09be/explanation labels, or ANY generic recurring section-label like \"\u09ac\u09bf\u0997\u09a4 \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8\u09be\u09ac\u09b2\u09c0\" (past-questions label), \"More Questions for Practice\", \"Previous Questions (Different Universities)\", \"Practice Questions\", \"Extra Questions\", or similar wording about the ORIGIN/PURPOSE of the questions rather than a real ✪-marked subject name — these are ALWAYS noise, never a topic name, REGARDLESS of what icon (if any) appears next to them, unless that exact heading itself also carries the ✪ star marker.\n'
     '  a) Do NOT use smaller sub-headers like university/organization names or unit labels (\u098f \u0987\u0989\u09a8\u09bf\u099f, \u09ac\u09bf \u0987\u0989\u09a8\u09bf\u099f, BUP, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself.\n'
-    '  a2) ALSO NEVER treat as a NEW topic_hint (even if it carries an icon marker per iii/iii-ALT): a generic PRACTICE/REFERENCE section-label whose text is about the ORIGIN or PURPOSE of the questions rather than a distinct subject name — e.g. "More Questions for Practice", "Previous Questions (Different Universities)", "\u0985\u09a8\u09c1\u09b6\u09c0\u09b2\u09a8\u09c0\u09b0 \u099c\u09a8\u09cd\u09af \u0986\u09b0\u09cb \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8", "\u09ac\u09bf\u09ad\u09bf\u09a8\u09cd\u09a8 \u09ac\u09bf\u09b6\u09cd\u09ac\u09ac\u09bf\u09a6\u09cd\u09af\u09be\u09b2\u09af\u09c7\u09b0 \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8", "Practice Questions", "Extra Questions", "\u09aa\u09c2\u09b0\u09cd\u09ac\u09c7\u09b0 \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8" or similar wording centered on "more/extra/practice/previous/university questions" rather than naming an actual subject/grammar-point/topic (like "Synonym & Antonym", "Preposition", "Tense"). These ALWAYS keep the CURRENT active topic_hint unchanged (inherit whatever topic was active immediately before this label), never start a new group, and are NEVER emitted as a trailing_topic_marker. Only a heading naming an actual distinct subject/grammar-point is a real topic_hint.\n'
     '  b) If a new doubled-icon heading appears anywhere on THIS page (even partway down), every MCQ from that point onward gets the NEW heading text; MCQs above it on the same page keep the heading that was already active for them.\n'
     '  b2) TWO-COLUMN pages: left and right columns can each have their OWN active heading, independent of each other. Determine each MCQ\'s topic_hint by which doubled-icon heading is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current heading.\n'
     '  b3) A NEW doubled-icon heading ALWAYS immediately changes topic_hint for every MCQ after it in ITS OWN column, the instant it appears — even if that heading is the very last thing on the page (right at the bottom, no MCQ follows it on this page at all) and even if the other column still has old-topic MCQs left. Never wait for "both columns to finish" — that is WRONG. If a heading appears with zero MCQs following it on this page, still report it: emit one extra object at the very end of the JSON array in the form {"trailing_topic_marker":"<heading text>"} (no other fields) so the next page knows this new topic already started.\n'
@@ -16804,29 +16803,31 @@ def _build_unmesh_heading_scan_prompt() -> str:
     can silently miss heading styles it wasn't primed to recognize."""
     return (
         "Find ONLY genuine TOPIC-LEVEL headings on this page — ignore all MCQ question/option text.\n\n"
-        "‼️ HARD RULE — CHECK THIS FIRST, ALWAYS: if you see the HOLLOW/OUTLINE STAR glyph (✪) "
-        "appearing 1 time, 2 times, or 3 times in a row immediately before a bold-black heading line "
-        "on a white/light background, that line IS a genuine topic heading — no exceptions, no need "
-        "to judge whether the wording 'sounds broad enough'. The presence of ✪ (any count 1-3) right "
-        "before a bold-black heading is BY ITSELF sufficient proof of a topic heading. Report it.\n\n"
-        "A genuine topic heading is a BROAD SUBJECT-CATEGORY TITLE that groups MANY MCQs under it "
-        "(e.g. \"বাংলাদেশের নদ-নদী, বঙ্গোপসাগর, দ্বীপ, বাঁধ...\", \"ভূপ্রকৃতি, পাহাড়-পর্বত, উপত্যকা...\"). "
-        "It is visually set apart (bold/dark heading font, and/or an icon beside it, and/or its own "
-        "box/border/shaded strip/banner bar) AND its wording names a general knowledge subject area, "
-        "not a single fact — UNLESS the ✪ hard rule above already applies, in which case report it "
-        "regardless of wording.\n\n"
-        "STRICTLY DO NOT report any of the following even if styled/boxed/bold — these are NOT topic "
-        "headings, they are per-question labels that repeat on nearly every MCQ and never span many "
-        "MCQs as one group:\n"
+        "‼️ HARD RULE — THE ✪ STAR IS THE ONLY VALID TOPIC MARKER, NO EXCEPTIONS: a line is a genuine "
+        "topic heading IF AND ONLY IF the HOLLOW/OUTLINE STAR glyph (✪) appears 1, 2, or 3 times in a "
+        "row immediately before a bold-black heading line on a white/light background. The exact count "
+        "(1, 2, or 3 stars) does not matter. If the ✪ star is present, report it immediately — no need "
+        "to judge whether the wording 'sounds broad enough'.\n\n"
+        "If a bold-black heading line has ANY OTHER marker instead of ✪ — a solid black/dark filled "
+        "circle with white stars (●★), any other colored/graphical icon (folder, book, magnifier, "
+        "target, pin, colored circle, etc.), a boxed/bordered single-icon heading, a numbered heading "
+        "in its own box, or NO icon at all — it is NEVER a topic heading, no matter how broad or "
+        "subject-like its wording sounds, no matter how visually set apart (box/border/shading) it is. "
+        "Do NOT report it. Only the literal ✪ character makes a heading real — treat every other "
+        "styled/bold/boxed line as ordinary body text.\n\n"
+        "STRICTLY DO NOT report any of the following even if styled/boxed/bold/iconed — these are NOT "
+        "topic headings unless they themselves also carry the ✪ marker:\n"
         "  - exam-source bracket tags: [BCS: 17th], [DU-D: 11-12], [MAT: 25-26], [JnU-B: 11-12], etc.\n"
         "  - ব্যাখ্যা:/explanation labels\n"
         "  - university/organization/exam-body names (বিশ্ববিদ্যালয়, BUP, FASS) or unit labels (বি ইউনিট)\n"
-        "  - a generic recurring section-label like \"বিগত প্রশ্নাবলি\" or \"সম্ভাব্য আরও প্রশ্ন\" "
-        "(these repeat as a running section divider, not a subject-specific topic name)\n"
+        "  - any generic recurring section-label about the origin/purpose of the questions, e.g. "
+        "\"বিগত প্রশ্নাবলি\", \"সম্ভাব্য আরও প্রশ্ন\", \"More Questions for Practice\", \"Previous Questions "
+        "(Different Universities)\", \"Practice Questions\", \"Extra Questions\" (these repeat as a running "
+        "section divider, not a subject-specific topic name, and are noise regardless of any non-✪ icon "
+        "beside them)\n"
         "  - page footer/header branding, book title, publisher name, page numbers\n\n"
-        "A true topic heading is rare — expect at most 0-2 per page, often ZERO (most pages are pure "
-        "continuation of the previous page's topic with no new heading at all). If you are not confident "
-        "a line is a genuine broad-subject topic title, do NOT report it.\n\n"
+        "A true ✪ topic heading is rare — expect at most 0-2 per page, often ZERO (most pages are pure "
+        "continuation of the previous page's topic with no new ✪ heading at all).\n\n"
         "For each genuine topic heading found (top to bottom, both columns if 2-column), report:\n"
         "  - its exact text\n"
         "  - the printed qsn_no of the very next MCQ that appears after it on the page "
