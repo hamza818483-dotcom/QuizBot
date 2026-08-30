@@ -22541,17 +22541,15 @@ async def _handle_unmesh_impl(msg: dict):
         _merged_w = _csv_unmesh.writer(_merged_buf)
         _merged_w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                              "answer", "explanation", "type", "section"])
-        _EMPTY_ROW = ["", "", "", "", "", "", "", "", "", ""]
         for _gi, (name, mcqs) in enumerate(topic_groups):
             buf = _io_unmesh.StringIO()
             w = _csv_unmesh.writer(buf)
             w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                         "answer", "explanation", "type", "section"])
             if _gi > 0:
-                # Blank separator row, then a row with ONLY the topic name in
-                # the questions column (every other column empty), marking
-                # where this topic's MCQs begin in the merged CSV.
-                _merged_w.writerow(_EMPTY_ROW)
+                # A row with ONLY the topic name in the questions column
+                # (every other column empty), marking where this topic's
+                # MCQs begin in the merged CSV. No blank separator row.
                 _merged_w.writerow([name, "", "", "", "", "", "", "", "", ""])
             _last_written_subhint = None
             for m in mcqs:
