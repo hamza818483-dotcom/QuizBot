@@ -20671,7 +20671,9 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                 ],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=8192
+                    max_output_tokens=8192,
+                    response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_budget=0)
                 )
             )
 
