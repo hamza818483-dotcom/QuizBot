@@ -16379,6 +16379,7 @@ UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '  iii-ALT) ALSO treat as a genuine topic marker (equally valid alternative to iii above, do NOT require both): a SINGLE small icon/emoji (book, folder, magnifier, target, pin, star, etc. \u2014 any single small graphical icon, not doubled) placed immediately to the left of a short bold heading line, where that heading line sits inside its OWN distinct bounded box/strip (a thin border, a shaded/colored background rectangle, or a horizontal rule directly above+below just that heading) that visually separates it from the surrounding question text above and below. This boxed-single-icon-heading style is common on pages that number/list topics (e.g. a heading like \u09e9\u09ea (34) followed by a topic title inside its own box) \u2014 such a numbered/titled heading line inside its own box, with any single icon beside it, is a topic_hint exactly like the doubled-icon or black-banner styles; a leading topic-number prefix (if present) is part of the topic_hint text.\n'
     '  A line of text is a topic_hint ONLY when i, ii, and EITHER iii OR iii-ALT are true together. Do NOT treat as topic_hint: plain bold text with no icon marker (doubled or single-boxed) before it, sub-headers like university/organization names, exam-source tags (BCS/MAT/DAT/RU-D/DU-D/JnU-D bracket tags), \u09ac\u09cd\u09af\u09be\u0996\u09cd\u09af\u09be/explanation labels, or a single generic recurring section-label like \"\u09ac\u09bf\u0997\u09a4 \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8\u09be\u09ac\u09b2\u09c0\" (past-questions label) that itself carries no icon marker of its own — that label is noise, not a topic name.\n'
     '  a) Do NOT use smaller sub-headers like university/organization names or unit labels (\u098f \u0987\u0989\u09a8\u09bf\u099f, \u09ac\u09bf \u0987\u0989\u09a8\u09bf\u099f, BUP, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself.\n'
+    '  a2) ALSO NEVER treat as a NEW topic_hint (even if it carries an icon marker per iii/iii-ALT): a generic PRACTICE/REFERENCE section-label whose text is about the ORIGIN or PURPOSE of the questions rather than a distinct subject name — e.g. "More Questions for Practice", "Previous Questions (Different Universities)", "\u0985\u09a8\u09c1\u09b6\u09c0\u09b2\u09a8\u09c0\u09b0 \u099c\u09a8\u09cd\u09af \u0986\u09b0\u09cb \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8", "\u09ac\u09bf\u09ad\u09bf\u09a8\u09cd\u09a8 \u09ac\u09bf\u09b6\u09cd\u09ac\u09ac\u09bf\u09a6\u09cd\u09af\u09be\u09b2\u09af\u09c7\u09b0 \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8", "Practice Questions", "Extra Questions", "\u09aa\u09c2\u09b0\u09cd\u09ac\u09c7\u09b0 \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8" or similar wording centered on "more/extra/practice/previous/university questions" rather than naming an actual subject/grammar-point/topic (like "Synonym & Antonym", "Preposition", "Tense"). These ALWAYS keep the CURRENT active topic_hint unchanged (inherit whatever topic was active immediately before this label), never start a new group, and are NEVER emitted as a trailing_topic_marker. Only a heading naming an actual distinct subject/grammar-point is a real topic_hint.\n'
     '  b) If a new doubled-icon heading appears anywhere on THIS page (even partway down), every MCQ from that point onward gets the NEW heading text; MCQs above it on the same page keep the heading that was already active for them.\n'
     '  b2) TWO-COLUMN pages: left and right columns can each have their OWN active heading, independent of each other. Determine each MCQ\'s topic_hint by which doubled-icon heading is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current heading.\n'
     '  b3) A NEW doubled-icon heading ALWAYS immediately changes topic_hint for every MCQ after it in ITS OWN column, the instant it appears — even if that heading is the very last thing on the page (right at the bottom, no MCQ follows it on this page at all) and even if the other column still has old-topic MCQs left. Never wait for "both columns to finish" — that is WRONG. If a heading appears with zero MCQs following it on this page, still report it: emit one extra object at the very end of the JSON array in the form {"trailing_topic_marker":"<heading text>"} (no other fields) so the next page knows this new topic already started.\n'
@@ -22458,9 +22459,12 @@ async def _handle_unmesh_impl(msg: dict):
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (⚫★ topic detect সহ)...")
 
+        _unmesh_page_status = []
+        _unmesh_start_time = time.time()
         extracted_pages = await qbm_extract_all_pages(
             chat_id, pages, "Unmesh Extract", file_name, status_msg_id,
-            extractor=_unmesh_extract_from_image, file_id=file_id
+            extractor=_unmesh_extract_from_image, file_id=file_id,
+            page_status_out=_unmesh_page_status
         )
 
         total_mcq_found = sum(
@@ -22491,7 +22495,7 @@ async def _handle_unmesh_impl(msg: dict):
             if not status_msg_id:
                 return
             text = _build_dashboard(
-                file_name, topic, pages, page_status, start_time, total_mcq_found, 0,
+                file_name, "Unmesh Extract", pages, _unmesh_page_status, _unmesh_start_time, total_mcq_found, 0,
                 ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
                 topic_breakdown=_unmesh_topic_breakdown
             )
@@ -24956,7 +24960,8 @@ Return ONLY the JSON array, nothing else."""
 async def qbm_extract_all_pages(
     chat_id: int, pages: list, topic: str,
     file_name: str, status_msg_id: int = None,
-    extractor=None, file_id: str = None
+    extractor=None, file_id: str = None,
+    page_status_out: list = None
 ) -> list:
     """
     Phase 1 -- runs the full 3-call connected extraction pipeline for every
@@ -24970,6 +24975,13 @@ async def qbm_extract_all_pages(
     (Call1) and goes straight to a full Call2 verify pass on the cached
     result. Intentionally opt-in (only /qbm passes this) so /onu and other
     callers of this same function are completely unaffected.
+
+    page_status_out (optional): if given a list, it is populated in place
+    with this run's final page_status entries (page/mcq/model/ai_calls/
+    gen_seconds/detected_topic) so a caller can rebuild the same live
+    dashboard AFTER this function returns (e.g. to append a completion
+    line without losing the per-page history). Opt-in, default None, so
+    every existing caller is unaffected.
     """
     _extract_fn = extractor or _qbm_extract_from_image
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
@@ -25185,6 +25197,9 @@ async def qbm_extract_all_pages(
     except Exception:
         pass
     clear_active_job(chat_id)
+
+    if page_status_out is not None:
+        page_status_out.extend(page_status)
 
     # Cross-page dedup: each page is extracted independently (no shared
     # context between pages), so an MCQ whose question/answer block visually
