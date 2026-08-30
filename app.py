@@ -6864,10 +6864,16 @@ async def _generate_and_send_checkmark_polls(chat_id, message_id: int, text: str
     })
 
 
-async def handle_checkmark_reply_trigger(chat_id, message_id: int):
+async def handle_checkmark_reply_trigger(chat_id, message_id: int, src_msg: dict = None):
     """CHANNEL-ONLY trigger: a channel_post whose text is literally "✅"
-    and replies to an earlier channel_post. Looks up the earlier post from
-    _REACT_POST_CACHE and hands off to the shared generator above."""
+    (or a ✅ sticker) and replies to an earlier channel_post. Telegram
+    includes the FULL replied-to message inline as reply_to_message on the
+    ✅ post itself, so src_msg (when given) is used directly — no dependence
+    on _REACT_POST_CACHE, which is in-memory only and empties on every bot
+    restart (HF Spaces restarts often), which was silently dropping every
+    reply-trigger whose source post predated the current process start.
+    Cache lookup remains only as a fallback for callers that don't have the
+    inline object (e.g. a future Telegram reaction event)."""
     try:
         if not chat_id or not message_id:
             return
@@ -6876,14 +6882,18 @@ async def handle_checkmark_reply_trigger(chat_id, message_id: int):
             return
         _REACT_PROCESSED.add(key)
 
-        cached = _REACT_POST_CACHE.get(key)
-        if not cached:
-            logger.warning(f"[ReactPoll] chat={chat_id} msg={message_id}: source post not in cache (posted before bot restart?) — skipping")
-            return
+        if src_msg is not None:
+            text = src_msg.get("text") or src_msg.get("caption") or ""
+            photo_file_id = src_msg["photo"][-1]["file_id"] if src_msg.get("photo") else None
+        else:
+            cached = _REACT_POST_CACHE.get(key)
+            if not cached:
+                logger.warning(f"[ReactPoll] chat={chat_id} msg={message_id}: source post not in cache (posted before bot restart?) — skipping")
+                return
+            text = cached.get("text", "")
+            photo_file_id = cached.get("photo_file_id")
 
-        await _generate_and_send_checkmark_polls(
-            chat_id, message_id, cached.get("text", ""), cached.get("photo_file_id")
-        )
+        await _generate_and_send_checkmark_polls(chat_id, message_id, text, photo_file_id)
     except Exception as e:
         logger.error(f"[ReactPoll] checkmark-reply error: {e}", exc_info=True)
 
@@ -28577,7 +28587,7 @@ async def process_update(update: dict):
                 )
                 if _cp_is_checkmark and cp.get("reply_to_message"):
                     _src = cp["reply_to_message"]
-                    _spawn_task(handle_checkmark_reply_trigger(cp_chat_id, _src.get("message_id")))
+                    _spawn_task(handle_checkmark_reply_trigger(cp_chat_id, _src.get("message_id"), src_msg=_src))
         elif "message_reaction" in update:
             _spawn_task(handle_message_reaction(update["message_reaction"]))
         elif "callback_query" in update:
