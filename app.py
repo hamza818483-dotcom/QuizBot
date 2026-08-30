@@ -16231,6 +16231,8 @@ D) Combined answer key on later pages (scan forward, often after 2-3 pages/doc e
 E) Answer key on adjacent page(s) — if no mark
 Absolute priority A>B>C>D>E, match by question number. None found → "A" + note "Answer not found in source". Convert source format to A/B/C/D. Re-verify twice.
 
+UNDERLINED WORD MARKING (always check, independent of answer-detection above): if any INDIVIDUAL WORD OR PHRASE (not a whole option used just to mark the answer — see case A above, which is separate) is visually underlined ANYWHERE in the question text or inside any of the 4 options, wrap that exact word/phrase in the output text with double asterisks: word → **word**. Apply this to every underlined word you see, in the question and/or in options, independent of which option is the correct answer. Do NOT wrap non-underlined text. Do NOT confuse this with bold/italic source styling (only true underline/underscore-beneath-text counts). If nothing is underlined, output the text with no ** markers at all.
+
 OPTION ORDER (absolute, never reorder):
 - Any source label system (A,B,C,D / a,b,c,d / ক,খ,গ,ঘ / ১,২,৩,৪ / bullets/none) → output uses SAME VISUAL POSITION: 1st→A, 2nd→B, 3rd→C, 4th→D. Position matching, not label matching — never sort/reorder text.
 - Answer letter = position of correct text in OUTPUT. Example: source order গ,খ,ক,ঘ, correct is "ক" → output slot C (3rd) → answer="C", not "A"
