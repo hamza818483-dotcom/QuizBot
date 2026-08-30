@@ -6792,6 +6792,102 @@ def _cache_channel_post(chat_id, message_id, text: str = "", photo_file_id: str 
             _REACT_POST_CACHE.pop(k, None)
 
 
+async def _generate_and_send_checkmark_polls(chat_id, message_id: int, text: str, photo_file_id: str = None):
+    """Shared core for the ✅ trigger (Telegram reaction OR a channel_post
+    that's literally "✅" replying to an earlier post) — CHANNEL ONLY.
+    Generates MCQs from the source text/image using /img's engine, sends
+    them as polls replying to the source post, then a score message and a
+    separate Poll Again/Quiz Solve/Website Exam practice-buttons message,
+    both also replying to the source post."""
+    text = (text or "").strip()
+    topic = "✅ Reaction MCQ"
+
+    if photo_file_id:
+        img_bytes = await download_tg_file(photo_file_id)
+        from PIL import Image as PILImage
+        img = PILImage.open(BytesIO(img_bytes))
+        mcqs = await generate_mcq_from_image(img, topic, 1, None)
+    elif text:
+        mcqs = await generate_mcq_from_text(text, topic, 15)
+    else:
+        return
+
+    mcqs = _cap_mcq_options(mcqs, 4)
+    mcqs = _validate_mcq_structure(mcqs)
+    mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
+    if not mcqs:
+        logger.warning(f"[ReactPoll] chat={chat_id} msg={message_id}: 0 MCQs generated, nothing to send")
+        return
+
+    settings = await db_get_settings()
+    tag = settings.get("tag", "")
+    exp_footer = settings.get("exp_footer", "")
+
+    poll_links = []
+    for i, mcq in enumerate(mcqs):
+        opts = [o[:100] for o in mcq.get("options", [])[:4]]
+        ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
+        q_text = mcq["question"][:295]
+        if tag:
+            q_text = f"{tag}\n\n{q_text}"
+        q_text = q_text[:300]
+        exp = mcq.get("explanation", "")
+        if exp_footer:
+            exp = f"{exp}\n{exp_footer}"
+        poll_r = {"ok": False}
+        for _attempt in range(3):
+            poll_r = await send_poll(
+                chat_id, q_text, opts, ans_idx,
+                explanation=exp,
+                reply_to_message_id=message_id
+            )
+            if poll_r.get("ok"):
+                break
+            await asyncio.sleep(2)
+        if poll_r.get("ok") and i == 0:
+            poll_links.append(_get_first_poll_link(chat_id, poll_r["result"]["message_id"]))
+        await asyncio.sleep(0.5)
+
+    cache_id = gen_session_id()
+    await db_save_mcq_cache(cache_id, cache_id, 1, topic, mcqs, poll_links, channel_id=str(chat_id))
+
+    await tg_post("sendMessage", {
+        "chat_id": chat_id,
+        "text": f"🏁 {len(mcqs)}টি Poll পাঠানো হয়েছে! উপরে scroll করে answer করো, score দেখো।",
+        "reply_to_message_id": message_id
+    })
+    await tg_post("sendMessage", {
+        "chat_id": chat_id,
+        "text": "🔄 আবার practice করতে বা নতুন poll চাইলে নিচের বাটন চাপো।",
+        "reply_to_message_id": message_id,
+        "reply_markup": await _csv_pre_buttons(cache_id)
+    })
+
+
+async def handle_checkmark_reply_trigger(chat_id, message_id: int):
+    """CHANNEL-ONLY trigger: a channel_post whose text is literally "✅"
+    and replies to an earlier channel_post. Looks up the earlier post from
+    _REACT_POST_CACHE and hands off to the shared generator above."""
+    try:
+        if not chat_id or not message_id:
+            return
+        key = (chat_id, message_id)
+        if key in _REACT_PROCESSED:
+            return
+        _REACT_PROCESSED.add(key)
+
+        cached = _REACT_POST_CACHE.get(key)
+        if not cached:
+            logger.warning(f"[ReactPoll] chat={chat_id} msg={message_id}: source post not in cache (posted before bot restart?) — skipping")
+            return
+
+        await _generate_and_send_checkmark_polls(
+            chat_id, message_id, cached.get("text", ""), cached.get("photo_file_id")
+        )
+    except Exception as e:
+        logger.error(f"[ReactPoll] checkmark-reply error: {e}", exc_info=True)
+
+
 async def handle_message_reaction(update: dict):
     """✅ reaction on a channel post (bot must be admin there) turns that
     post's text/image into MCQs and sends them as polls replying to the
@@ -6804,6 +6900,9 @@ async def handle_message_reaction(update: dict):
         chat_id = chat.get("id")
         message_id = update.get("message_id")
         if not chat_id or not message_id:
+            return
+        # CHANNEL ONLY — reactions on group/private messages never trigger this.
+        if chat.get("type") != "channel":
             return
         new_reaction = update.get("new_reaction", []) or []
         old_reaction = update.get("old_reaction", []) or []
@@ -6822,70 +6921,9 @@ async def handle_message_reaction(update: dict):
             logger.warning(f"[ReactPoll] chat={chat_id} msg={message_id}: source post not in cache (posted before bot restart?) — skipping")
             return
 
-        text = (cached.get("text") or "").strip()
-        photo_file_id = cached.get("photo_file_id")
-        topic = "✅ Reaction MCQ"
-
-        if photo_file_id:
-            img_bytes = await download_tg_file(photo_file_id)
-            from PIL import Image as PILImage
-            img = PILImage.open(BytesIO(img_bytes))
-            mcqs = await generate_mcq_from_image(img, topic, 1, None)
-        elif text:
-            mcqs = await generate_mcq_from_text(text, topic, 15)
-        else:
-            return
-
-        mcqs = _cap_mcq_options(mcqs, 4)
-        mcqs = _validate_mcq_structure(mcqs)
-        mcqs = _dedupe_mcqs(mcqs) if "_dedupe_mcqs" in globals() else mcqs
-        if not mcqs:
-            logger.warning(f"[ReactPoll] chat={chat_id} msg={message_id}: 0 MCQs generated, nothing to send")
-            return
-
-        settings = await db_get_settings()
-        tag = settings.get("tag", "")
-        exp_footer = settings.get("exp_footer", "")
-
-        poll_links = []
-        for i, mcq in enumerate(mcqs):
-            opts = [o[:100] for o in mcq.get("options", [])[:4]]
-            ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
-            q_text = mcq["question"][:295]
-            if tag:
-                q_text = f"{tag}\n\n{q_text}"
-            q_text = q_text[:300]
-            exp = mcq.get("explanation", "")
-            if exp_footer:
-                exp = f"{exp}\n{exp_footer}"
-            poll_r = {"ok": False}
-            for _attempt in range(3):
-                poll_r = await send_poll(
-                    chat_id, q_text, opts, ans_idx,
-                    explanation=exp,
-                    reply_to_message_id=message_id
-                )
-                if poll_r.get("ok"):
-                    break
-                await asyncio.sleep(2)
-            if poll_r.get("ok") and i == 0:
-                poll_links.append(_get_first_poll_link(chat_id, poll_r["result"]["message_id"]))
-            await asyncio.sleep(0.5)
-
-        cache_id = gen_session_id()
-        await db_save_mcq_cache(cache_id, cache_id, 1, topic, mcqs, poll_links, channel_id=str(chat_id))
-
-        await tg_post("sendMessage", {
-            "chat_id": chat_id,
-            "text": f"🏁 {len(mcqs)}টি Poll পাঠানো হয়েছে! উপরে scroll করে answer করো, score দেখো।",
-            "reply_to_message_id": message_id
-        })
-        await tg_post("sendMessage", {
-            "chat_id": chat_id,
-            "text": "🔄 আবার practice করতে বা নতুন poll চাইলে নিচের বাটন চাপো।",
-            "reply_to_message_id": message_id,
-            "reply_markup": await _csv_pre_buttons(cache_id)
-        })
+        await _generate_and_send_checkmark_polls(
+            chat_id, message_id, cached.get("text", ""), cached.get("photo_file_id")
+        )
     except Exception as e:
         logger.error(f"[ReactPoll] error: {e}", exc_info=True)
 
@@ -28525,6 +28563,14 @@ async def process_update(update: dict):
                 if cp.get("photo"):
                     cp_photo_id = cp["photo"][-1]["file_id"]
                 _cache_channel_post(cp_chat_id, cp_msg_id, cp_text, cp_photo_id)
+                # ✅-as-a-REPLY trigger (not a Telegram reaction): if this
+                # channel_post is itself just "✅" and replies to an earlier
+                # post, treat that reply as the trigger — same effect as the
+                # message_reaction path below, for channels/setups where the
+                # ✅ emoji reaction isn't available/enabled.
+                if cp_text.strip() == "✅" and cp.get("reply_to_message"):
+                    _src = cp["reply_to_message"]
+                    _spawn_task(handle_checkmark_reply_trigger(cp_chat_id, _src.get("message_id")))
         elif "message_reaction" in update:
             _spawn_task(handle_message_reaction(update["message_reaction"]))
         elif "callback_query" in update:
@@ -28667,6 +28713,7 @@ async def handle_message(msg: dict):
     uname = msg["from"].get("first_name", "User")
     chat_type = msg["chat"].get("type", "private")
     is_private = chat_type == "private"
+
     # These two are independent DB lookups that ran one-after-another before
     # every single command — running them concurrently halves this fixed
     # per-message latency for every command in the bot.
