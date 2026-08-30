@@ -1632,22 +1632,21 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
         _old_rule_line = ATLAS_PROMPT_02.split("\n\n")[0]
         _new_rule_line = (
             f"🔴 সংখ্যা (HARD RULE): কমপক্ষে {count_min}টি, সর্বোচ্চ {_max}টি MCQ — "
-            f"{count_min}-এর কমে থামবে না। Source-এর প্রতিটি তথ্য ব্যবহার করো।"
+            f"{count_min}-এর কমে থামবে না। Source-এর প্রতিটি তথ্য ব্যবহার করো। "
+            f"JSON output লেখা শেষ করার আগে নিজে গুনে দেখো array-তে কতগুলো object আছে — "
+            f"{count_min}টির কম হলে বন্ধ করবে না, source-এর বাকি তথ্য দিয়ে অথবা একই "
+            f"তথ্য ভিন্নভাবে (সত্য/মিথ্যা ঘুরিয়ে) প্রশ্ন করে {count_min}টি পূর্ণ করো।"
         )
         prompt_text = ATLAS_PROMPT_02.replace(_old_rule_line, _new_rule_line, 1)
         if retry_attempt >= 2:
-            # Previous attempt(s) undershot count_min despite the HARD RULE
-            # line above — Gemini sometimes just stops early regardless of
-            # the stated minimum. Append an explicit self-check instruction
-            # forcing it to count its own output before finishing, escalating
-            # wording each retry instead of resending the identical prompt.
+            # Previous attempt(s) still undershot count_min despite the
+            # self-check instruction above — Gemini sometimes just stops
+            # early regardless. Escalate wording further each retry instead
+            # of resending the identical prompt.
             _boost = (
                 f"\n\n⚠️⚠️ অত্যন্ত গুরুত্বপূর্ণ (attempt {retry_attempt}): আগের চেষ্টায় "
-                f"{count_min}টির কমে থেমে গেছো — এবার JSON output লেখা শেষ করার আগে "
-                f"নিজে গুনে দেখো কতগুলো object আছে array-তে। {count_min}টির কম হলে "
-                f"array বন্ধ করবে না, source-এর বাকি তথ্য দিয়ে আরও MCQ যোগ করে "
-                f"{count_min}টি পূর্ণ করো। একই তথ্য ভিন্নভাবে (সত্য/মিথ্যা ঘুরিয়ে) প্রশ্ন "
-                f"করেও সংখ্যা পূরণ করা যাবে।"
+                f"{count_min}টির কমে থেমে গেছো — এবার অবশ্যই {count_min}টি পূর্ণ করেই "
+                f"array বন্ধ করবে।"
             )
             prompt_text = prompt_text + _boost
 
