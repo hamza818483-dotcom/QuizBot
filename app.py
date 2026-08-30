@@ -1554,7 +1554,7 @@ def _build_bio_prompt(topic: str) -> str:
 # ============================================================
 ATLAS_PROMPT_02 = """MCQ TYPE: True/False Style
 
-🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ, HARD RULE): কমপক্ষে ৭টি, সর্বোচ্চ ৩০টি MCQ বানাতে হবে — ৭টির কমে কখনোই থামবে না। Source page-এ যত তথ্য/লাইন/পয়েন্ট আছে তার প্রতিটি অংশ ব্যবহার করে MCQ বানাও, কোনো তথ্য বাদ দেওয়া যাবে না। তথ্য কম মনে হলেও একই তথ্য বিভিন্ন সত্য/মিথ্যা ভঙ্গিতে ঘুরিয়ে প্রশ্ন করে ৭-এর নিচে না যাওয়া নিশ্চিত করো। তথ্য বেশি থাকলে ২৫-৩০টি পর্যন্ত বানাও।
+🔴 সংখ্যা (সবচেয়ে গুরুত্বপূর্ণ, HARD RULE): Page-এ যত তথ্য আছে তার উপর ভিত্তি করে কমপক্ষে ৫টি, সর্বোচ্চ ২০টি MCQ বানাও — তথ্য কম হলে ৫-১০টি, বেশি হলে ১৫-২০টি পর্যন্ত। ৫টির কমে কখনোই থামবে না। Source page-এর প্রতিটি তথ্য/লাইন/পয়েন্ট ব্যবহার করো, কোনো তথ্য বাদ দেওয়া যাবে না।
 
 💥প্রশ্নের ধরন (randomly mix করো, একঘেয়ে নয়):
 🔴 প্রতিটা প্যাটার্নে answer কোনটা হবে তা নিচে EXACT বলা আছে — ভুল ম্যাপ করা যাবে না:
@@ -11775,7 +11775,7 @@ async def handle_tf(msg: dict):
     # [N-M] রেঞ্জ ব্র্যাকেট এতদিন /tf-এ silently ignore হচ্ছিল (শুধু অন্য
     # command handler-গুলোতে mcq_count_min/max ব্যবহার হতো) — এখন এখানেও min
     # enforce করা হচ্ছে যাতে user একটা রেঞ্জ দিলে সেটা মানা হয়।
-    per_page_min = params.get("mcq_count_min") or 7
+    per_page_min = params.get("mcq_count_min") or 5
     per_page_max = params.get("mcq_count_max")
     _tf_skip_state = {"gemini_dead": False, "groq_dead": False}  # shared across pages this run
 
@@ -11801,6 +11801,9 @@ async def handle_tf(msg: dict):
             return
 
         total_pages = len(pages)
+
+        clear_cancel(chat_id)
+        new_job_id(chat_id)
 
         ok_count = 0
         fail_count = 0
@@ -11843,7 +11846,7 @@ async def handle_tf(msg: dict):
                 try:
                     now = time.monotonic()
                     if now - _last_update[0] >= 1.2 or idx == 1:
-                        await edit_msg(chat_id, status_msg_id, _build_dashboard())
+                        await edit_msg(chat_id, status_msg_id, _build_dashboard(), reply_markup=_cancel_kb(chat_id))
                         _last_update[0] = now
                 except Exception:
                     pass
@@ -11927,11 +11930,13 @@ async def handle_tf(msg: dict):
 
         if status_msg_id:
             try:
+                _tf_cancelled = is_cancelled(chat_id)
                 await edit_msg(chat_id, status_msg_id,
-                    f"🏁 সম্পন্ন! ✅ {ok_count} page সফল"
+                    (f"🛑 Cancel করা হয়েছে! ✅ {ok_count} page সফল" if _tf_cancelled else f"🏁 সম্পন্ন! ✅ {ok_count} page সফল")
                     + (f", ❌ {fail_count} page ব্যর্থ" if fail_count else "")
                     + f"\n⏱️ মোট সময়: {_fmt_secs(total_elapsed)}"
-                    + f"\n📝 মোট MCQ: {len(all_mcqs_for_csv)}"
+                    + f"\n📝 মোট MCQ: {len(all_mcqs_for_csv)}",
+                    reply_markup={"inline_keyboard": []}
                 )
             except Exception:
                 pass
