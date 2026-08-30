@@ -9052,7 +9052,170 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
         await db_finish_csv_job(job_id)
 
     else:
-        # Normal /csv mode — single batch
+        # Normal /csv mode — CSV-তে topic marker (questions-only row, via
+        # _parse_csv_bytes) থাকলে প্রতিটা topic আলাদা batch হিসেবে পাঠানো হয়
+        # (csvs batch mode-এর মতোই: নিজস্ব pre-msg + polls + PDF + end-msg),
+        # topic name CSV থেকেই নেওয়া হয় (-m/default topic তখন ব্যবহার হয় না)।
+        # marker না থাকলে (বা একটাই topic group হলে) আগের single-batch পথেই যায়।
+        _topics_order, _topic_groups = [], {}
+        for _m in mcqs:
+            _mt = (_m.get("_pdfs_topic") or "").strip()
+            if not _mt:
+                continue
+            if _mt not in _topic_groups:
+                _topic_groups[_mt] = []
+                _topics_order.append(_mt)
+            _topic_groups[_mt].append(_m)
+        # সব MCQ কোনো না কোনো topic marker-এর আওতায় পড়েছে কিনা যাচাই — না হলে
+        # (marker আংশিক/অনুপস্থিত হলে) নিরাপদে single-batch পথেই যাওয়া উচিত,
+        # নাহলে marker-বিহীন MCQ গুলো silently বাদ পড়ে যাবে।
+        _all_tagged = sum(len(v) for v in _topic_groups.values()) == total
+        _is_topicwise = len(_topics_order) > 1 and _all_tagged
+
+        if _is_topicwise:
+            job_id = f"csvtopic_{cache_id}"
+            total_batches = len(_topics_order)
+            batch_links = []
+            first_pre_msg_id = None
+            all_batch_mcqs = []
+
+            _existing = await d1_select(
+                "SELECT sent_index, status FROM csv_poll_jobs WHERE job_id=?1", [job_id]
+            )
+            resume_from_batch = 0
+            if _existing and _existing[0].get("status") == "running":
+                resume_from_batch = _existing[0].get("sent_index") or 0
+                if resume_from_batch > 0:
+                    logger.info(f"[CSV-Topicwise] Resuming job {job_id} from batch {resume_from_batch+1}/{total_batches}")
+                    if loading_id:
+                        await edit_msg(chat_id, loading_id,
+                            f"📄 {csv_fname}\n🔄 আগের অসম্পূর্ণ কাজ resume হচ্ছে (topic {resume_from_batch+1}/{total_batches} থেকে)...")
+            else:
+                await db_save_csv_job(
+                    job_id, cache_id=cache_id, channel_id=channel_id, chat_id=chat_id, uid=uid,
+                    mode="csvtopic", batch_size=0, topic=topic, csv_fname=csv_fname,
+                    thread_id=thread_id or 0, loading_id=loading_id or 0,
+                    sent_index=0, total=total_batches, first_poll_link="", status="running"
+                )
+
+            for b_idx, batch_topic in enumerate(_topics_order, 1):
+                batch = _topic_groups[batch_topic]
+                if is_cancelled(chat_id):
+                    if loading_id:
+                        await edit_msg(chat_id, loading_id,
+                            f"📄 {csv_fname}\n🛑 বন্ধ করা হয়েছে — {b_idx-1}/{total_batches} topic শেষ হয়েছিল")
+                    await db_finish_csv_job(job_id)
+                    return
+                if b_idx <= resume_from_batch:
+                    all_batch_mcqs.extend(batch)
+                    continue
+
+                batch_cache_id = gen_session_id()
+                await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
+
+                pre_text = csv_get_pre_message(batch_topic, len(batch))
+                pre_send_data = {"chat_id": channel_id, "text": pre_text}
+                if thread_id:
+                    pre_send_data["message_thread_id"] = thread_id
+                pre_r = await tg_post("sendMessage", pre_send_data)
+                if not pre_r.get("ok") and thread_id:
+                    pre_send_data.pop("message_thread_id", None)
+                    pre_r = await tg_post("sendMessage", pre_send_data)
+                    thread_id = None
+                pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
+                if first_pre_msg_id is None:
+                    first_pre_msg_id = pre_msg_id
+                all_batch_mcqs.extend(batch)
+
+                sent, first_link = await _send_csv_polls_to_channel(
+                    channel_id, batch, batch_topic, chat_id, pre_msg_id,
+                    thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname
+                )
+
+                if pre_msg_id and first_link:
+                    try:
+                        await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(batch_topic, len(batch), first_link))
+                    except Exception as e:
+                        logger.warning(f"[CSV-Topicwise] pre-msg link edit failed: {e}")
+
+                batch_pdf_bytes = await _generate_style1_pdf_guaranteed(batch, batch_topic, chat_id)
+                if batch_pdf_bytes:
+                    safe_btitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", batch_topic)[:50] or "ATLAS_Sheet"
+                    btn_kb = await _csv_pre_buttons(batch_cache_id)
+                    pdf_doc_r = await send_document(
+                        channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
+                        caption=csv_get_pdf_caption(batch_topic),
+                        message_thread_id=thread_id,
+                        reply_to_message_id=pre_msg_id
+                    )
+                    if pdf_doc_r and pdf_doc_r.get("ok"):
+                        pdf_msg_id = pdf_doc_r.get("result", {}).get("message_id")
+                        if pdf_msg_id:
+                            try:
+                                await tg_post("editMessageReplyMarkup", {
+                                    "chat_id": channel_id, "message_id": pdf_msg_id,
+                                    "reply_markup": btn_kb
+                                })
+                            except Exception as e:
+                                logger.warning(f"[CSV-Topicwise] PDF button attach failed: {e}")
+
+                ending = csv_get_ending_message(batch_topic, sent, first_link, ask_score=ask_score)
+                end_send_data2 = {
+                    "chat_id": channel_id,
+                    "text": ending,
+                    "disable_web_page_preview": True
+                }
+                if pre_msg_id:
+                    end_send_data2["reply_to_message_id"] = pre_msg_id
+                if thread_id:
+                    end_send_data2["message_thread_id"] = thread_id
+                end_r = await tg_post("sendMessage", end_send_data2)
+                if not end_r.get("ok"):
+                    end_r = await tg_post("sendMessage", end_send_data2)
+                if end_r.get("ok"):
+                    await db_update_cache(batch_cache_id, {
+                        "channel_id": channel_id,
+                        "end_msg_id": end_r["result"]["message_id"]
+                    })
+                    if loading_id:
+                        await edit_msg(chat_id, loading_id,
+                            f"📄 {csv_fname}\n✅ Topic {b_idx}/{total_batches} ({batch_topic}) — end message পাঠানো হয়েছে")
+                else:
+                    await send_msg(chat_id,
+                        f"⚠️ '{batch_topic}' এর end message + button পাঠানো ব্যর্থ হয়েছে: {end_r.get('description', 'unknown error')}")
+
+                batch_links.append((b_idx, first_link, len(batch)))
+                await db_update_csv_job_progress(job_id, b_idx)
+
+                if loading_id:
+                    await edit_msg(chat_id, loading_id,
+                        f"⏳ Topic {b_idx}/{total_batches} ({batch_topic}) done — {sent} polls sent")
+
+                await asyncio.sleep(2.5)
+
+            if total_batches > 1:
+                summary = csv_get_master_summary(topic, total, total_batches, batch_links)
+                sum_send_data = {
+                    "chat_id": channel_id,
+                    "text": summary,
+                    "disable_web_page_preview": True
+                }
+                if first_pre_msg_id:
+                    sum_send_data["reply_to_message_id"] = first_pre_msg_id
+                if thread_id:
+                    sum_send_data["message_thread_id"] = thread_id
+                sum_r = await tg_post("sendMessage", sum_send_data)
+                if sum_r.get("ok"):
+                    await try_pin_message(channel_id, sum_r["result"]["message_id"])
+
+            if loading_id:
+                await edit_msg(chat_id, loading_id,
+                    f"📄 {csv_fname}\n🏁 CSV topic-wise job সম্পূর্ণ! {total} MCQ → {total_batches}টি topic, সব poll+PDF+end message পাঠানো হয়েছে।")
+
+            await db_finish_csv_job(job_id)
+            return
+
+        # Normal /csv mode — single batch (no topic markers detected in CSV)
         job_id = cache_id  # cache_id ইতিমধ্যেই unique, আলাদা job_id বানানোর দরকার নেই
 
         # আগের run-এ (restart-এর আগে) কতটা পাঠানো হয়ে গিয়েছিল সেটা চেক —
