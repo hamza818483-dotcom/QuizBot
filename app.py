@@ -20988,14 +20988,17 @@ OUTPUT — ONLY a valid JSON array, exactly {len(chunk)} items, same order, noth
     return out
 
 
-async def _ai_generate_all_explanations(mcqs: list, progress_cb=None) -> None:
+async def _ai_generate_all_explanations(mcqs: list, progress_cb=None, chat_id=None) -> None:
     """Fills mcqs[i]['explanation'] in-place. Tries the WHOLE file in a
     single Gemini call first (one key, one call) -- works fine for typical
     CSV sizes since Gemini has no small TPM ceiling like Groq. Only falls
     back to chunked (8/call, 3 concurrent) calls if the single-call attempt
     fails or Gemini's response gets truncated/malformed (large files can
     still hit output-token limits). progress_cb(done_count) is called after
-    every completed chunk so the caller can show live %/elapsed status."""
+    every completed chunk so the caller can show live %/elapsed status.
+    If chat_id is given, checks is_cancelled(chat_id) before dispatching
+    each chunk so a /cancel or Cancel-button tap during a large run stops
+    launching new chunks (already-in-flight chunks still finish)."""
     if not mcqs:
         return
     # Large batches (single call risks hitting Gemini's 8192 output-token
@@ -21010,7 +21013,11 @@ async def _ai_generate_all_explanations(mcqs: list, progress_cb=None) -> None:
         _done = {"n": 0}
 
         async def _run_chunk(chunk):
+            if chat_id is not None and is_cancelled(chat_id):
+                return
             async with sem:
+                if chat_id is not None and is_cancelled(chat_id):
+                    return
                 result = await _ai_generate_explanations_chunk(chunk)
                 for idx, exp in result.items():
                     chunk[idx]["explanation"] = exp
@@ -21064,9 +21071,17 @@ async def handle_ai(msg: dict):
             "📌 প্রতিটা MCQ-র জন্য Gemini দিয়ে relevant explanation বসাবে (answer + topic info সহ, ~200 ক্যারেক্টারের মধ্যে)")
         return
 
+    job_id = new_job_id(chat_id)
+    clear_cancel(chat_id)
+    set_active_job(chat_id, "/ai explanation generation")
+
     file_id = doc["file_id"]
     status_r = await send_msg(chat_id, "⏳ CSV পড়া হচ্ছে...")
     status_msg_id = status_r.get("result", {}).get("message_id")
+
+    def _fmt_mmss(seconds: int) -> str:
+        m, s = divmod(max(0, seconds), 60)
+        return f"{m}m {s}s" if m else f"{s}s"
 
     try:
         csv_bytes = await download_tg_file(file_id)
@@ -21094,8 +21109,15 @@ async def handle_ai(msg: dict):
             mcqs.append({"question": q, "options": opts, "answer": ans_letter,
                          "explanation": row.get("explanation", "").strip(), "_row": row})
 
+        _ai_kb = _cancel_kb(chat_id, job_id)
         if status_msg_id:
-            await edit_msg(chat_id, status_msg_id, f"⏳ {len(mcqs)}টা MCQ পাওয়া গেছে, Gemini দিয়ে explanation বসানো হচ্ছে...\n[░░░░░░░░░░ 0%] | 0/{len(mcqs)} | 0s")
+            await edit_msg(chat_id, status_msg_id,
+                f"⏳ {len(mcqs)}টা MCQ পাওয়া গেছে\n"
+                f"🤖 Gemini দিয়ে explanation বসানো হচ্ছে...\n"
+                f"[░░░░░░░░░░ 0%]\n"
+                f"📊 0/{len(mcqs)}\n"
+                f"⏱ 0s",
+                reply_markup=_ai_kb)
 
         _ai_start = time.time()
         _total_mcqs = len(mcqs)
@@ -21111,14 +21133,30 @@ async def handle_ai(msg: dict):
             bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
             elapsed = int(time.time() - _ai_start)
             _spawn_task(edit_msg(chat_id, status_msg_id,
-                f"⏳ Explanation বসানো হচ্ছে...\n[{bar} {pct}%] | {done}/{_total_mcqs} | {elapsed}s"))
+                f"⏳ Explanation বসানো হচ্ছে...\n"
+                f"[{bar} {pct}%]\n"
+                f"📊 {done}/{_total_mcqs}\n"
+                f"⏱ {_fmt_mmss(elapsed)}",
+                reply_markup=_ai_kb))
 
-        await _ai_generate_all_explanations(mcqs, progress_cb=_ai_progress)
+        await _ai_generate_all_explanations(mcqs, progress_cb=_ai_progress, chat_id=chat_id)
         _total_elapsed = int(time.time() - _ai_start)
+
+        if is_cancelled(chat_id):
+            _filled_now = sum(1 for m in mcqs if m["explanation"])
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    f"🛑 বন্ধ করা হলো।\n"
+                    f"📊 {_filled_now}/{_total_mcqs} MCQ-তে explanation বসেছে (বাকিগুলো আগের মতোই আছে)\n"
+                    f"⏱ {_fmt_mmss(_total_elapsed)}")
+            clear_active_job(chat_id)
+            return
+
         _filled_count = sum(1 for m in mcqs if m["explanation"])
         if _filled_count == 0:
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "❌ Gemini থেকে কোনো explanation পাওয়া যায়নি (API/key সমস্যা)। আবার চেষ্টা করো।")
+            clear_active_job(chat_id)
             return
 
         buf = _io_ai.StringIO()
@@ -21137,9 +21175,14 @@ async def handle_ai(msg: dict):
             caption=f"✅ {len(mcqs)}টা MCQ-তে explanation যোগ করা হয়েছে",
             mime_type="text/csv")
         if status_msg_id:
-            await edit_msg(chat_id, status_msg_id, f"✅ সম্পূর্ণ! {len(mcqs)}টা MCQ-তে explanation যোগ করা হয়েছে।\n⏱ সময় লেগেছে: {_total_elapsed}s")
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ সম্পূর্ণ!\n"
+                f"📊 {len(mcqs)}টা MCQ-তে explanation যোগ করা হয়েছে\n"
+                f"⏱ সময় লেগেছে: {_fmt_mmss(_total_elapsed)}")
+        clear_active_job(chat_id)
     except Exception as e:
         logger.error(f"[AI] Error: {e}", exc_info=True)
+        clear_active_job(chat_id)
         await _safe_error_reply(chat_id, e)
 
 
