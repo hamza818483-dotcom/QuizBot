@@ -7038,7 +7038,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
         caption = ""
         if tag:
             caption = f"{tag}\n\n"
-        caption += csv_get_pre_message(topic, len(mcqs))
+        caption += csv_get_pre_message(topic, topic, len(mcqs))
         photo_r = await send_photo(channel_id, img_bytes, caption)
         if photo_r.get("ok"):
             image_msg_id = photo_r["result"]["message_id"]
@@ -7053,7 +7053,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
             pre_text = ""
             if tag:
                 pre_text = f"{tag}\n\n"
-            pre_text += csv_get_pre_message(topic, len(mcqs))
+            pre_text += csv_get_pre_message(topic, topic, len(mcqs))
             pre_r = await tg_post("sendMessage", {"chat_id": channel_id, "text": pre_text})
             image_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
 
@@ -7100,7 +7100,7 @@ async def process_img_to_poll(file_id: str, channel_id: str, mode: str,
                                 image_file_id, image_msg_id, channel_id)
 
         # 1) Button-msg (pre-msg টেক্সট পুনরাবৃত্তি + 4 button), pre-msg কে reply
-        btn_text = csv_get_pre_message(topic, len(mcqs))
+        btn_text = csv_get_pre_message(topic, topic, len(mcqs))
         btn_kb = await _csv_pre_buttons(cache_id_img)
         btn_send_data = {"chat_id": channel_id, "text": btn_text, "reply_markup": btn_kb}
         if image_msg_id:
@@ -7375,16 +7375,18 @@ async def _process_txt_to_poll_inner(channel_id: str, chat_id: int, uid: int, un
 # ============================================================
 # HELPER FUNCTIONS — CSV pre/end/summary messages
 # ============================================================
-def csv_get_pre_message(topic: str, count: int, first_link: str = "") -> str:
-    topic_text = topic or "Special MCQ By ATLAS"
+def csv_get_pre_message(main_topic: str, batch_topic: str, count: int, first_link: str = "") -> str:
+    main_text = main_topic or "Special MCQ By ATLAS"
+    batch_text = batch_topic or main_text
     text = (
-        f"🌟Topic:{topic_text}\n"
-        f"⚡MCQ:{count}\n"
+        f"🟥{main_text}\n"
+        f"✅{batch_text}\n"
+        f"📌MCQ Count: {count}\n"
     )
     if first_link:
-        text += f"\n✅পোল যেখান থেকে শুরু হয়েছে:\n{first_link}"
+        text += f"🔗First Poll Link:\n{first_link}"
     else:
-        text += f"\n✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো"
+        text += f"✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো"
     return text
 
 def csv_get_pdf_caption(topic: str) -> str:
@@ -8966,7 +8968,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
 
             # Pre-message (plain, no button, no reply)
-            pre_text = csv_get_pre_message(batch_topic, len(batch))
+            pre_text = csv_get_pre_message(topic, batch_topic, len(batch))
             pre_send_data = {"chat_id": channel_id, "text": pre_text}
             if thread_id:
                 pre_send_data["message_thread_id"] = thread_id
@@ -8990,7 +8992,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             # Pre-message edit করে first poll link বসানো হচ্ছে (practice line-এর জায়গায়)
             if pre_msg_id and first_link:
                 try:
-                    await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(batch_topic, len(batch), first_link))
+                    await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(topic, batch_topic, len(batch), first_link))
                 except Exception as e:
                     logger.warning(f"[CSVS] pre-msg link edit failed: {e}")
 
@@ -9158,7 +9160,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 batch_cache_id = gen_session_id()
                 await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
 
-                pre_text = csv_get_pre_message(batch_topic, len(batch))
+                pre_text = csv_get_pre_message(topic, batch_topic, len(batch))
                 pre_send_data = {"chat_id": channel_id, "text": pre_text}
                 if thread_id:
                     pre_send_data["message_thread_id"] = thread_id
@@ -9179,7 +9181,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
 
                 if pre_msg_id and first_link:
                     try:
-                        await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(batch_topic, len(batch), first_link))
+                        await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(topic, batch_topic, len(batch), first_link))
                     except Exception as e:
                         logger.warning(f"[CSV-Topicwise] pre-msg link edit failed: {e}")
 
@@ -9307,7 +9309,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             # (কোনো reply ছাড়া) পাঠানো হবে, functionally ঠিক থাকে।
             pre_msg_id = None
         else:
-            pre_text = csv_get_pre_message(topic, total)
+            pre_text = csv_get_pre_message(topic, topic, total)
             pre_send_data = {"chat_id": channel_id, "text": pre_text}
             if thread_id:
                 pre_send_data["message_thread_id"] = thread_id
@@ -9343,7 +9345,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
         # Pre-message edit করে first poll link বসানো হচ্ছে (practice line-এর জায়গায়)
         if pre_msg_id and first_link:
             try:
-                await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(topic, total, first_link))
+                await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(topic, topic, total, first_link))
             except Exception as e:
                 logger.warning(f"[CSV] pre-msg link edit failed: {e}")
 
