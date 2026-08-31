@@ -5352,6 +5352,38 @@ async def db_auto_cleanup_if_needed():
             ids3 = [row["id"] for row in (old3.data or [])]
             if ids3:
                 await sb_exec(lambda: sb.table("pdf_sessions").delete().in_("id", ids3).execute())
+
+        # live_quiz_results — 20000 rows limit. No single-column 'id' PK
+        # here (PK is session_id+user_id), so delete by matching the
+        # (session_id, user_id) pairs of the oldest rows instead of an id
+        # list.
+        r4 = await sb_exec(lambda: sb.table("live_quiz_results").select("session_id", count="exact").execute())
+        if (r4.count or 0) > 20000:
+            old4 = await sb_exec(lambda: sb.table("live_quiz_results").select("session_id,user_id")\
+                .order("updated_at").limit(1000).execute())
+            for row in (old4.data or []):
+                try:
+                    await sb_exec(lambda row=row: sb.table("live_quiz_results")
+                                  .delete().eq("session_id", row["session_id"]).eq("user_id", row["user_id"]).execute())
+                except Exception:
+                    pass
+            logger.info(f"[Cleanup] Deleted {len(old4.data or [])} old live_quiz_results rows")
+
+        # web_exam_leaderboard — 20000 rows limit. Written by the Cloudflare
+        # Worker (not this app), so the exact PK/id column isn't guaranteed
+        # here -- best-effort with its own try/except so a schema surprise
+        # never breaks the rest of cleanup.
+        try:
+            r5 = await sb_exec(lambda: sb.table("web_exam_leaderboard").select("id", count="exact").execute())
+            if (r5.count or 0) > 20000:
+                old5 = await sb_exec(lambda: sb.table("web_exam_leaderboard").select("id")\
+                    .order("id").limit(1000).execute())
+                ids5 = [row["id"] for row in (old5.data or [])]
+                if ids5:
+                    await sb_exec(lambda: sb.table("web_exam_leaderboard").delete().in_("id", ids5).execute())
+                    logger.info(f"[Cleanup] Deleted {len(ids5)} old web_exam_leaderboard rows")
+        except Exception as e:
+            logger.warning(f"[Cleanup] web_exam_leaderboard cleanup skipped (schema mismatch?): {e}")
     except Exception as e:
         logger.error(f"[Cleanup] Error: {e}")
 
