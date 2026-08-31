@@ -22926,13 +22926,14 @@ async def _handle_unmesh_impl(msg: dict):
             w = _csv_unmesh.writer(buf)
             w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                         "answer", "explanation", "type", "section"])
-            if _gi > 0:
-                # A row with ONLY the topic name in the questions column
-                # (every other column empty), marking where this topic's
-                # MCQs begin in the merged CSV. No blank separator row.
-                # Name is stripped of the leading ✪ star marker -- only the
-                # plain topic name goes in the CSV.
-                _merged_w.writerow([_clean_topic_name_for_copy(name), "", "", "", "", "", "", "", "", ""])
+            # A row with ONLY the topic name in the questions column
+            # (every other column empty), marking where this topic's
+            # MCQs begin in the merged CSV. No blank separator row.
+            # Name is stripped of the leading ✪ star marker -- only the
+            # plain topic name goes in the CSV. Written for every topic,
+            # including the first, so the merged CSV never starts with
+            # unlabeled MCQs.
+            _merged_w.writerow([_clean_topic_name_for_copy(name), "", "", "", "", "", "", "", "", ""])
             for m in mcqs:
                 opts = m.get("options", ["", "", "", ""])
                 row = [
