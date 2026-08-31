@@ -9154,7 +9154,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 batch_pdf_bytes = await _generate_style1_pdf_guaranteed(batch, batch_topic, chat_id)
                 if batch_pdf_bytes:
                     safe_btitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", batch_topic)[:50] or "ATLAS_Sheet"
-                    btn_kb = await _csv_pre_buttons(batch_cache_id)
+                    btn_kb = await _csv_pre_buttons_no_premium(batch_cache_id)
                     pdf_doc_r = await send_document(
                         channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
                         caption=csv_get_pdf_caption(batch_topic),
