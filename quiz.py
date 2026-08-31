@@ -816,60 +816,16 @@ async def handle_quiz_poll_answer(pa: dict):
     session = QUIZ_SESSIONS[uid]
     poll_id = pa.get("poll_id", "")
     if session.get("pid") != poll_id:
-        logger.warning(f"[Quiz] pid mismatch uid={uid} got={poll_id} expected={session.get('pid')} cur={session.get('cur')}")
-        # Two known-benign mismatch patterns that self-heal via stall-recovery
-        # below in ~2s and aren't actionable, so skip owner alert noise:
-        # 1) expected pid None at cur=0 - answer raced the very first sendPoll's
-        #    own completion (poll not yet persisted to session when it arrived).
-        # 2) got pid is exactly the PREVIOUS question's pid (off-by-one behind
-        #    expected) - a genuinely late poll_answer webhook for an already-
-        #    auto-advanced question (timeout already fired timer+6s ago), not
-        #    a race. Common under Telegram delivery lag on long quizzes.
-        is_cur0_race = session.get("pid") is None and session.get("cur") == 0
-        is_late_stale_answer = (
-            session.get("_prev_pid") is not None and poll_id == session.get("_prev_pid")
-        )
-        if not is_cur0_race and not is_late_stale_answer:
-            try:
-                await notify_owner(
-                    f"⚠️ Quiz auto-next FAILED\nuid: {uid}\ncur: {session.get('cur')}/{session.get('tot')}\n"
-                    f"expected pid: {session.get('pid')}\ngot pid: {poll_id}\n\n"
-                    f"User answered but poll_id didn't match — next question not sent."
-                )
-            except Exception:
-                pass
-        # SAFETY NET: never leave the quiz permanently stalled on a mismatch.
-        # If nothing has advanced the session shortly after this, force it
-        # forward using this answer so the user isn't stuck forever.
-        async def _stall_recovery():
-            await asyncio.sleep(2)
-            s2 = QUIZ_SESSIONS.get(uid)
-            if not s2 or s2.get("pid") != session.get("pid") or s2.get("cur") != session.get("cur"):
-                return  # something else already advanced it -- no stall after all
-            # Claim the advance atomically so a genuine answer arriving in
-            # this same 2s window (handled by the normal path below, which
-            # also mutates cur/pid) can never double-advance alongside us.
-            guard_key = ("stall_advance", uid, s2["cur"])
-            if s2.get("_advancing") == guard_key:
-                return
-            s2["_advancing"] = guard_key
-            QUIZ_SESSIONS[uid] = s2
-            logger.warning(f"[Quiz] Force-recovering stalled quiz uid={uid} cur={s2.get('cur')}")
-            option_ids2 = pa.get("option_ids", [])
-            if option_ids2 and option_ids2[0] == s2.get("cor"):
-                s2["right"] += 1
-            elif not option_ids2:
-                s2["skip"] += 1
-            else:
-                s2["wrong"] += 1
-            s2["cur"] += 1
-            s2["_advancing"] = None
-            QUIZ_SESSIONS[uid] = s2
-            if s2["cur"] >= s2["tot"]:
-                await finish_d1_quiz(s2)
-            else:
-                await send_quiz_question(s2["chat_id"], s2, force=True)
-        asyncio.create_task(_stall_recovery())
+        # A poll_answer for any pid other than the CURRENT question's pid is
+        # always a late/stale answer for an already-passed question (user
+        # tapped after the timer moved on, or Telegram delivered it late) —
+        # never a real answer to act on. Silently ignore it: the current
+        # question already has its own live timer/answer path handling
+        # advancement, so nothing here should force-advance or notify the
+        # owner. Force-advancing on a stale answer previously caused
+        # runaway loops that skipped many questions in seconds whenever a
+        # user's client kept delivering delayed answers.
+        logger.info(f"[Quiz] stale/late poll_answer ignored uid={uid} got={poll_id} expected={session.get('pid')} cur={session.get('cur')}")
         return
 
     # Claim this advance so a concurrent _stall_recovery task for the same
