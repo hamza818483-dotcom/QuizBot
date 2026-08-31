@@ -17309,6 +17309,20 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
 
         by_qsn = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
 
+        # CODE-LEVEL GAP CHECK — don't rely solely on Call2 self-reporting
+        # its own misses (the model can under-count on its own audit just
+        # as easily as on the original extraction). Any hole in the
+        # qsn_no sequence between the lowest and highest number actually
+        # extracted on this page is a certain miss and gets added
+        # regardless of what Call2's missing_qsn_no said.
+        if by_qsn:
+            _present = sorted(by_qsn.keys())
+            _lo, _hi = _present[0], _present[-1]
+            _gap_nums = set(range(_lo, _hi + 1)) - set(_present)
+            if _gap_nums:
+                logger.warning(f"[UNMESH gap-check] sequence hole detected {sorted(_gap_nums)} between {_lo}-{_hi} — forcing recovery")
+                missing_nums |= _gap_nums
+
         if missing_nums:
             logger.warning(f"[UNMESH verify] missing qsn_no {sorted(missing_nums)} — targeted recovery pass")
             for _retry_attempt in range(3):
