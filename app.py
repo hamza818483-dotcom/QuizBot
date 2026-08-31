@@ -17150,6 +17150,40 @@ def _parse_unmesh_heading_scan(text: str) -> list:
         return []
 
 
+def _build_missing_qsn_recovery_prompt(missing_nums: list, known_mcqs: list) -> str:
+    """Targeted recovery pass — asks the model to find ONLY the specific
+    missing serial numbers on the page, instead of blindly re-running the
+    full extraction and hoping the same misses don't happen again. Gives
+    the neighboring qsn_no's question text (from what WAS extracted) as
+    anchors so the model knows exactly where on the page to look."""
+    nums_sorted = sorted(missing_nums)
+    by_qsn = {m.get("qsn_no"): m for m in known_mcqs if isinstance(m.get("qsn_no"), int)}
+    anchor_lines = []
+    for n in nums_sorted:
+        before = by_qsn.get(n - 1)
+        after = by_qsn.get(n + 1)
+        parts = []
+        if before:
+            parts.append(f"right after qsn_no {n-1} (\"{(before.get('question') or '')[:40]}\")")
+        if after:
+            parts.append(f"right before qsn_no {n+1} (\"{(after.get('question') or '')[:40]}\")")
+        anchor = " and ".join(parts) if parts else "at its expected position on the page"
+        anchor_lines.append(f"- qsn_no {n}: located {anchor}")
+    return (
+        "A previous extraction of this page MISSED the following specific MCQs. "
+        "They ARE visible on the page — look carefully at exactly these positions:\n"
+        + "\n".join(anchor_lines) +
+        "\n\nExtract ONLY these missing MCQs (do not re-extract ones already found). "
+        "For each, give qsn_no, question, options (array of 4), answer (A/B/C/D), "
+        "explanation (if visible), and topic_hint (nearest heading above it, if any).\n"
+        "Output ONLY a JSON array, nothing else:\n"
+        '[{"qsn_no": <int>, "question": "...", "options": ["...","...","...","..."], '
+        '"answer": "A", "explanation": "", "topic_hint": ""}]\n'
+        "If a listed qsn_no genuinely does not exist on this page (was a false miss), "
+        "simply omit it from the array."
+    )
+
+
 async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
     """/unmesh extractor — same Call1+Call2 pipeline as /topic, but topic
     boundaries are detected via the WHITE-bg + BOLD BLACK text + preceding
@@ -17276,11 +17310,20 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
         by_qsn = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
 
         if missing_nums:
-            logger.warning(f"[UNMESH verify] missing qsn_no {sorted(missing_nums)} — re-extracting page")
-            for _retry_attempt in range(2):
+            logger.warning(f"[UNMESH verify] missing qsn_no {sorted(missing_nums)} — targeted recovery pass")
+            for _retry_attempt in range(3):
                 if not missing_nums:
                     break
-                retry_mcqs = await _run_extract_call(bypass_cache=True)
+                try:
+                    recovery_prompt = _build_missing_qsn_recovery_prompt(list(missing_nums), mcqs)
+                    recovery_txt = await _qbm_gemini_raw(img, recovery_prompt)
+                    retry_mcqs = _qbm_parse_json(recovery_txt) if recovery_txt else []
+                except Exception as e:
+                    logger.warning(f"[UNMESH verify] targeted recovery attempt {_retry_attempt+1} failed: {e}")
+                    retry_mcqs = []
+                if not retry_mcqs:
+                    # fall back to a full blind re-extraction as a second chance
+                    retry_mcqs = await _run_extract_call(bypass_cache=True)
                 retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
                 recovered = set()
                 for n in missing_nums:
@@ -17289,8 +17332,10 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
                         by_qsn[n] = retry_got[n]
                         recovered.add(n)
                 missing_nums -= recovered
-                if missing_nums and _retry_attempt == 0:
-                    logger.warning(f"[UNMESH verify] still missing qsn_no {sorted(missing_nums)} after retry 1 — trying once more")
+                if missing_nums:
+                    logger.warning(f"[UNMESH verify] still missing qsn_no {sorted(missing_nums)} after attempt {_retry_attempt+1}")
+            if missing_nums:
+                logger.error(f"[UNMESH verify] gave up recovering qsn_no {sorted(missing_nums)} after 3 targeted attempts")
 
         for fix in wrong_serials:
             was = fix.get("was")
