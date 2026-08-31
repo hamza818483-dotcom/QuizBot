@@ -9207,6 +9207,27 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 await asyncio.sleep(2.5)
 
             if total_batches > 1:
+                # /sheet কমান্ডের topicwise PDF (style1, _pdfs_topic দিয়ে
+                # গ্রুপ করা) এর সাথে হুবহু একই বিল্ডার ব্যবহার করে একটাই
+                # সম্মিলিত PDF — master summary টেক্সট মেসেজের ঠিক আগে।
+                try:
+                    _combined_topics_order, _combined_topic_map = _group_pdfs_mcqs(all_batch_mcqs, topic)
+                    _combined_html = _build_topicwise_pdf_html(_combined_topics_order, _combined_topic_map, topic)
+                    _combined_pdf_bytes = await _html_to_pdf(_combined_html, use_css_page_size=False, page_width_mm=420)
+                    _combined_pdf_bytes = await _apply_saved_watermark(_combined_pdf_bytes)
+                    if _combined_pdf_bytes:
+                        _safe_ctitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                        _combined_send_data = {}
+                        if thread_id:
+                            _combined_send_data["message_thread_id"] = thread_id
+                        await send_document(
+                            channel_id, _combined_pdf_bytes, f"{_safe_ctitle}_combined.pdf",
+                            caption=f"📖 সম্মিলিত Practice Sheet (Topic-wise)\n📝 মোট MCQ: {total}\n📂 Topics: {total_batches}\n🚀 ATLAS APP",
+                            message_thread_id=thread_id
+                        )
+                except Exception as e:
+                    logger.warning(f"[CSV-Topicwise] combined PDF failed, skipping: {e}")
+
                 summary = csv_get_master_summary(topic, total, total_batches, batch_links)
                 sum_send_data = {
                     "chat_id": channel_id,
