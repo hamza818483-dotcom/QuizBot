@@ -7413,14 +7413,16 @@ def csv_get_comment_prompt_message(topic: str, count: int) -> str:
 def csv_get_ending_message(topic: str, count: int, first_link: str = "", ask_score: bool = True) -> str:
     """Channel: score-ask সহ. Group: শুধু thank-you + count, score-ask নাই."""
     topic_text = topic or "Special MCQ By ATLAS"
+    sep = "▬▬▬▬▬▬▬▬▬▬"
     base = (
         f"🎉 <b>ধন্যবাদ প্রিয় শিক্ষার্থী!</b>\n"
-        f"👉এটলাস আয়োজিত \"<b>{topic_text}</b>\" পোল সলভে অংশগ্রহণ করার জন্য। 😊\n\n"
+        f"👉এটলাস আয়োজিত \"<b>{topic_text}</b>\" পোল সলভে অংশগ্রহণ করার জন্য। 😊\n"
+        f"{sep}\n"
         f"📊 মোট পোল: {count}"
     )
     if ask_score:
         base += (
-            f"\n\n⁉️তোমার স্কোর কত? 🤔\n"
+            f"\n{sep}\n⁉️তোমার স্কোর কত? 🤔\n"
             f"( ? / {count} )\n\n"
             f"নিচে লিখো! 👇"
         )
