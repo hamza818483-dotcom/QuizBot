@@ -7379,7 +7379,7 @@ def csv_get_pre_message(main_topic: str, batch_topic: str, count: int, first_lin
     main_text = main_topic or "Special MCQ By ATLAS"
     batch_text = batch_topic or main_text
     text = (
-        f"🟥\n({main_text})\n\n"
+        f"🟥({main_text})\n\n"
         f"✅Topic:\n({batch_text})\n\n"
         f"📌MCQ Count: {count}\n"
     )
