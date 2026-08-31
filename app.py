@@ -3935,6 +3935,50 @@ async def _gen_groq_raw_text(img, prompt: str, mcq_count_hint=None) -> str:
     if best_invalid_txt:
         logger.warning(f"[GroqVerify] every provider exhausted; returning longest unparseable response ({len(best_invalid_txt)} chars) as last resort")
         return best_invalid_txt
+    # LAST-RESORT WAIT-AND-RETRY: every key on every provider was in
+    # cooldown at the same moment (temporary simultaneous rate-limit
+    # spike, not a permanent outage). Rather than give up with an empty
+    # response, wait for whichever key clears its cooldown soonest and
+    # try that single key once before truly giving up.
+    all_rotators = (groq_key_rotator, nvidia_rotator, or_qwen_rotator, nemotron_rotator, gemma_rotator)
+    soonest_wait = None
+    soonest_key = None
+    soonest_rotator = None
+    soonest_url = None
+    soonest_model = None
+    _rot_targets = {
+        id(groq_key_rotator): ("https://api.groq.com/openai/v1/chat/completions", "llama-3.2-90b-vision-preview"),
+        id(nvidia_rotator): ("https://integrate.api.nvidia.com/v1/chat/completions", "meta/llama-3.2-11b-vision-instruct"),
+        id(or_qwen_rotator): ("https://openrouter.ai/api/v1/chat/completions", "google/gemma-4-31b-it:free"),
+        id(nemotron_rotator): ("https://integrate.api.nvidia.com/v1/chat/completions", "nvidia/llama-3.1-nemotron-51b-instruct"),
+        id(gemma_rotator): ("https://api.groq.com/openai/v1/chat/completions", "gemma2-9b-it"),
+    }
+    now = time.time()
+    for rotator in all_rotators:
+        for key in getattr(rotator, "keys", []):
+            until = rotator._cooldown_until.get(key, 0)
+            if until <= now:
+                continue  # already usable, would've been tried above -- true outage confirmed for it
+            wait = until - now
+            if wait < 20 and (soonest_wait is None or wait < soonest_wait):
+                soonest_wait, soonest_key, soonest_rotator = wait, key, rotator
+                soonest_url, soonest_model = _rot_targets.get(id(rotator), (None, None))
+    if soonest_key and soonest_wait is not None and soonest_url:
+        logger.warning(f"[GroqVerify] all providers cooling simultaneously — waiting {soonest_wait:.1f}s for soonest key ({soonest_rotator.label}) then retrying once")
+        await asyncio.sleep(soonest_wait + 0.5)
+        fb_data_url = data_url or _img_to_data_url_groq(img, prompt_len_hint=prompt)
+        if fb_data_url:
+            txt, status = await _post_openai_compat(soonest_url, soonest_key, soonest_model, fb_data_url, prompt, mcq_count_hint=mcq_count_hint)
+            if txt:
+                try:
+                    if _parse_mcq_json(txt):
+                        soonest_rotator.mark_healthy(soonest_key)
+                        logger.info(f"[GroqVerify] wait-and-retry succeeded via {soonest_rotator.label}")
+                        return txt
+                except Exception:
+                    pass
+            if status == 429:
+                soonest_rotator.mark_rate_limited(soonest_key)
     logger.error("[GroqVerify] every fallback provider exhausted, returning empty")
     return ""
 
