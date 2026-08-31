@@ -22742,27 +22742,6 @@ async def _handle_unmesh_impl(msg: dict):
 
         _unmesh_topic_breakdown = {name: len(mcqs) for name, mcqs in topic_groups}
 
-        _missing_exp = [m for _, mcqs in topic_groups for m in mcqs if len((m.get("explanation") or "").strip()) < 80]
-        if _missing_exp:
-            _exp_total = len(_missing_exp)
-
-            def _exp_progress_cb(done_n):
-                if status_msg_id:
-                    _spawn_task(edit_msg(
-                        chat_id, status_msg_id,
-                        _build_dashboard(
-                            file_name, "Unmesh Extract", pages, _unmesh_page_status, _unmesh_start_time,
-                            total_mcq_found, 0, ai_calls=_get_ai_call_count(chat_id),
-                            ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
-                            topic_breakdown=_unmesh_topic_breakdown,
-                        ) + f"\n\n⏳ Explanation তৈরি হচ্ছে... {done_n}/{_exp_total}"
-                    ))
-
-            try:
-                await _ai_generate_all_explanations(_missing_exp, progress_cb=_exp_progress_cb, chat_id=chat_id)
-            except Exception as e:
-                logger.warning(f"[UNMESH] explanation fill failed: {e}")
-
         _unmesh_final_status = "⏳ CSV পাঠানো হচ্ছে..." if not unmesh_channel_id else "⏳ Channel-এ poll পাঠানো হচ্ছে..."
 
         async def _unmesh_render_final_dashboard(extra_status: str = None):
@@ -22810,18 +22789,10 @@ async def _handle_unmesh_impl(msg: dict):
                 # A row with ONLY the topic name in the questions column
                 # (every other column empty), marking where this topic's
                 # MCQs begin in the merged CSV. No blank separator row.
-                _merged_w.writerow([name, "", "", "", "", "", "", "", "", ""])
-            _last_written_subhint = None
+                # Name is stripped of the leading ✪ star marker -- only the
+                # plain topic name goes in the CSV.
+                _merged_w.writerow([_clean_topic_name_for_copy(name), "", "", "", "", "", "", "", "", ""])
             for m in mcqs:
-                # Subtopic marker row: a row with ONLY option1 filled
-                # (questions + every other column empty), placed right
-                # before the first MCQ of that subtopic. Only emitted in
-                # the merged CSV (not the per-topic CSV), and only when a
-                # subtopic actually changes within this topic group.
-                _cur_subhint = (m.get("_effective_subhint") or "").strip()
-                if _cur_subhint and _cur_subhint != _last_written_subhint:
-                    _merged_w.writerow(["", _cur_subhint, "", "", "", "", "", "", "", ""])
-                _last_written_subhint = _cur_subhint or _last_written_subhint
                 opts = m.get("options", ["", "", "", ""])
                 row = [
                     m.get("question", ""), opts[0] if len(opts) > 0 else "",
