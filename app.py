@@ -7479,6 +7479,19 @@ async def _csv_pre_buttons(cache_id: str) -> dict:
          {"text": "💎 Premium PDF", "url": premium_url}],
     ]}
 
+async def _csv_pre_buttons_no_premium(cache_id: str) -> dict:
+    """/topic, /unmesh, /bio, /chem -c (topicwise → channel poll) flow-এর
+    জন্য — একই 3 বাটন কিন্তু Premium PDF ছাড়া।"""
+    bot_un = await get_bot_username()
+    quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+    poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+    exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+    return {"inline_keyboard": [
+        [{"text": "📝 Quiz Solve", "url": quiz_url},
+         {"text": "🔄 Poll Again", "url": poll_url}],
+        [{"text": "🌐 Website Exam", "url": exam_url}],
+    ]}
+
 def _get_first_poll_link(channel_id: str, msg_id: int) -> str:
     """Poll message link বানাও"""
     cid = str(channel_id)
@@ -9934,6 +9947,53 @@ async def _generate_style1_pdf_guaranteed(mcqs: list, topic: str, chat_id: int, 
             await asyncio.sleep(1.5 * attempt)
     await send_msg(chat_id,
         f"⚠️ '{topic}' এর PDF তৈরি {max_attempts} বার চেষ্টা করেও ব্যর্থ হয়েছে: {last_err}")
+    return None
+
+async def _generate_combined_topicwise_pdf(topic_groups: list, file_heading: str, chat_id: int, max_attempts: int = 3):
+    """/topic, /unmesh, /bio, /chem -c (channel poll) flow-এর জন্য — সব
+    টপিকের MCQ একটাই PDF-এ, প্রতিটা টপিকের শুরুতে (style1-এর মতো CSS,
+    .topic-header-green ক্লাস দিয়ে) টপিক নাম হেডিং হিসেবে বসিয়ে, question
+    numbering পুরো PDF জুড়ে একটানা (1..N, প্রতি টপিকে আবার 1 থেকে শুরু হয়
+    না)। Style1-এর একই per-question renderer পুনর্ব্যবহার করা হয়েছে।
+    Returns pdf_bytes or None (error already reported to chat_id)."""
+    css = _PRINT_CSS
+    body = f'<div class="exam-header"><h1>{file_heading} - Practice Sheet</h1></div><div class="content-columns">'
+    qn = 0
+    for name, mcqs in topic_groups:
+        clean_name = _clean_topic_name_for_copy(name)
+        body += f'<div class="topic-header-green"><h2>📂 {clean_name}</h2></div>'
+        data_adapted = _adapt_mcqs_for_print(mcqs)
+        for d in data_adapted:
+            qn += 1
+            is_short = _check_short_option(d["opts"])
+            body += f'<div class="question"><div class="question-header"><span class="question-num">{qn:02d}.</span><div class="question-text">{d["q"]}{d["qi"]}</div></div>'
+            ans_letter_map = {0: "Ⓐ", 1: "Ⓑ", 2: "Ⓒ", 3: "Ⓓ"}
+            ans_circle = ans_letter_map.get(d["ai"], "?")
+            if is_short:
+                body += f'<table class="options-table-short"><tr><td class="option-col">Ⓐ {d["opts"][0]}{d["oimgs"][0]}</td><td class="option-col">Ⓑ {d["opts"][1]}{d["oimgs"][1]}</td><td rowspan="2" class="answer-col"><span class="answer-circle">{ans_circle}</span></td></tr><tr><td class="option-col">Ⓒ {d["opts"][2]}{d["oimgs"][2]}</td><td class="option-col">Ⓓ {d["opts"][3]}{d["oimgs"][3]}</td></tr></table>'
+            else:
+                body += f'<ul class="options-list"><li>Ⓐ {d["opts"][0]}{d["oimgs"][0]}</li><li>Ⓑ {d["opts"][1]}{d["oimgs"][1]}</li><li>Ⓒ {d["opts"][2]}{d["oimgs"][2]}</li><li class="option-with-answer"><span>Ⓓ {d["opts"][3]}{d["oimgs"][3]}</span><span class="answer-circle">{ans_circle}</span></li></ul>'
+            if d['exp']:
+                body += f'<div class="explanation"><span class="explanation-label">ব্যাখ্যা:</span> {d["exp"]}{d["ei"]}</div>'
+            body += '</div>'
+    body += '</div>'
+    html_s = f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}</body></html>'
+
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            pdf_bytes = await _html_to_pdf(html_s)
+            if pdf_bytes:
+                pdf_bytes = await _apply_saved_watermark(pdf_bytes)
+                return pdf_bytes
+            last_err = _last_pdf_error.get("msg", "unknown error")
+        except Exception as e:
+            last_err = str(e)
+        logger.warning(f"[Combined-PDF] Attempt {attempt}/{max_attempts} failed for '{file_heading}': {last_err}")
+        if attempt < max_attempts:
+            await asyncio.sleep(1.5 * attempt)
+    await send_msg(chat_id,
+        f"⚠️ সম্মিলিত PDF তৈরি {max_attempts} বার চেষ্টা করেও ব্যর্থ হয়েছে: {last_err}")
     return None
 
 async def _apply_saved_watermark(pdf_bytes: bytes) -> bytes:
@@ -22163,19 +22223,22 @@ async def _handle_qbm_impl(msg: dict):
 async def _post_topic_groups_to_channel(channel_id, topic_groups: list, thread_id: int = None):
     """Posts topic_groups (from _topic_group_mcqs / _unmesh_group_mcqs) as
     live Telegram polls directly to a channel — one header message per
-    topic (name + MCQ count), followed by that topic's polls in order,
-    followed by an end message (replying to the header) with 3 buttons —
-    Poll Again, Quiz Solve, Website Exam — same as /csv. Channel gets a
-    score-asking prompt in the end message; group/thread does not.
+    topic (name + MCQ count), followed by that topic's polls in order.
+    No per-topic PDF/end-message anymore — after ALL topics' polls are
+    sent, ONE combined topicwise-marked PDF (all topics in one file, each
+    section headed by its topic name) is sent, followed by ONE summary
+    message listing every topic name + a link to that topic's first poll,
+    with Quiz Solve/Poll Again/Website Exam buttons (no Premium PDF here).
     Used by /topic and /unmesh when -c <channel_id> is given, instead of
     the default CSV-file output."""
     settings = await db_get_settings()
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
-    chat_type = await _get_chat_type(channel_id)
-    ask_score = chat_type == "channel"
     bot_un = await get_bot_username()
     total_polls = 0
+    topic_first_links = []  # [(name, first_poll_link, mcq_count), ...]
+    all_mcqs_flat = []
+
     for name, mcqs in topic_groups:
         header_text = f"📂 {name}\n💎 MCQ: {len(mcqs)}"
         header_data = {"chat_id": channel_id, "text": header_text}
@@ -22183,6 +22246,8 @@ async def _post_topic_groups_to_channel(channel_id, topic_groups: list, thread_i
             header_data["message_thread_id"] = thread_id
         header_r = await tg_post("sendMessage", header_data)
         header_msg_id = header_r.get("result", {}).get("message_id") if header_r.get("ok") else None
+
+        first_poll_msg_id = None
         for mcq in mcqs:
             opts = mcq.get("options", [])[:4]
             ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
@@ -22203,46 +22268,55 @@ async def _post_topic_groups_to_channel(channel_id, topic_groups: list, thread_i
                 if poll_r.get("ok"):
                     break
                 await asyncio.sleep(2)
+            if poll_r.get("ok") and first_poll_msg_id is None:
+                first_poll_msg_id = poll_r.get("result", {}).get("message_id")
             total_polls += 1
             await asyncio.sleep(1.0)
 
-        # Polls শেষে: cache করে Style1 PDF (caption + 4 button) পাঠাও,
-        # header-কে reply করে। তারপর score-ask আলাদা message (channel only),
-        # PDF-msg কে reply করে — /csv এর মতোই structure।
-        cache_id = gen_session_id()
-        await db_save_mcq_cache(cache_id, cache_id, 0, name, mcqs)
+        link_msg_id = first_poll_msg_id or header_msg_id
+        if link_msg_id:
+            topic_first_links.append((name, _get_first_poll_link(channel_id, link_msg_id), len(mcqs)))
+        all_mcqs_flat.append((name, mcqs))
 
-        pdf_bytes = await _generate_style1_pdf_guaranteed(mcqs, name, channel_id)
-        pdf_msg_id = header_msg_id
-        if pdf_bytes:
-            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", name)[:50] or "ATLAS_Sheet"
-            btn_kb = await _csv_pre_buttons(cache_id)
-            doc_r = await send_document(
-                channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
-                caption=csv_get_pdf_caption(name),
-                message_thread_id=thread_id,
-                reply_to_message_id=header_msg_id
-            )
-            if doc_r and doc_r.get("ok"):
-                doc_msg_id = doc_r.get("result", {}).get("message_id")
-                if doc_msg_id:
-                    pdf_msg_id = doc_msg_id
-                    try:
-                        await tg_post("editMessageReplyMarkup", {
-                            "chat_id": channel_id, "message_id": doc_msg_id,
-                            "reply_markup": btn_kb
-                        })
-                    except Exception as e:
-                        logger.warning(f"[TOPIC-C] PDF button attach failed: {e}")
+    # সব টপিকের polls পাঠানো শেষ -- এবার ONE সম্মিলিত, টপিকওয়ারি-মার্কড PDF।
+    file_heading = all_mcqs_flat[0][0] if len(all_mcqs_flat) == 1 else "Combined"
+    cache_id = gen_session_id()
+    combined_mcqs = [m for _, mcqs in all_mcqs_flat for m in mcqs]
+    await db_save_mcq_cache(cache_id, cache_id, 0, file_heading, combined_mcqs)
 
-        end_text = csv_get_ending_message(name, len(mcqs), ask_score=ask_score)
+    pdf_bytes = await _generate_combined_topicwise_pdf(all_mcqs_flat, file_heading, channel_id)
+    summary_lines = [f"🎉 মোট {total_polls} পোল পাঠানো হয়েছে, {len(topic_groups)}টি টপিকে ভাগ করে।\n"]
+    for name, link, count in topic_first_links:
+        summary_lines.append(f"📂 {_clean_topic_name_for_copy(name)} ({count} MCQ)\n{link}\n")
+    summary_text = "\n".join(summary_lines)
+
+    pdf_msg_id = None
+    if pdf_bytes:
+        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", file_heading)[:50] or "ATLAS_Sheet"
+        doc_r = await send_document(
+            channel_id, pdf_bytes, f"{safe_title}_combined.pdf",
+            caption=summary_text,
+            message_thread_id=thread_id
+        )
+        if doc_r and doc_r.get("ok"):
+            pdf_msg_id = doc_r.get("result", {}).get("message_id")
+            btn_kb = await _csv_pre_buttons_no_premium(cache_id)
+            try:
+                await tg_post("editMessageReplyMarkup", {
+                    "chat_id": channel_id, "message_id": pdf_msg_id,
+                    "reply_markup": btn_kb
+                })
+            except Exception as e:
+                logger.warning(f"[TOPIC-C] combined PDF button attach failed: {e}")
+
+    if not pdf_msg_id:
+        # PDF ব্যর্থ হলেও summary message + বাটন যেন পাঠানো হয়, output silently
+        # হারিয়ে না যায়।
+        btn_kb = await _csv_pre_buttons_no_premium(cache_id)
         end_data = {
-            "chat_id": channel_id,
-            "text": end_text,
-            "disable_web_page_preview": True,
+            "chat_id": channel_id, "text": summary_text,
+            "disable_web_page_preview": True, "reply_markup": btn_kb,
         }
-        if pdf_msg_id:
-            end_data["reply_to_message_id"] = pdf_msg_id
         if thread_id:
             end_data["message_thread_id"] = thread_id
         for _end_attempt in range(3):
@@ -22250,6 +22324,7 @@ async def _post_topic_groups_to_channel(channel_id, topic_groups: list, thread_i
             if end_r.get("ok"):
                 break
             await asyncio.sleep(2)
+
     return total_polls
 
 
