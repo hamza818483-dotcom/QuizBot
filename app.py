@@ -7378,9 +7378,12 @@ async def _process_txt_to_poll_inner(channel_id: str, chat_id: int, uid: int, un
 def csv_get_pre_message(main_topic: str, batch_topic: str, count: int, first_link: str = "") -> str:
     main_text = main_topic or "Special MCQ By ATLAS"
     batch_text = batch_topic or main_text
+    sep = "▬▬▬▬▬▬▬▬▬▬"
     text = (
-        f"🟥{main_text}\n\n"
-        f"✅Topic:\n{batch_text}\n\n"
+        f"🟥{main_text}\n"
+        f"{sep}\n"
+        f"✅Topic:\n<b>{batch_text}</b>\n"
+        f"{sep}\n"
         f"📌MCQ Count: {count}\n"
     )
     if first_link:
@@ -7411,8 +7414,8 @@ def csv_get_ending_message(topic: str, count: int, first_link: str = "", ask_sco
     """Channel: score-ask সহ. Group: শুধু thank-you + count, score-ask নাই."""
     topic_text = topic or "Special MCQ By ATLAS"
     base = (
-        f"🎉 ধন্যবাদ প্রিয় শিক্ষার্থী!\n"
-        f"👉এটলাস আয়োজিত \"{topic_text}\" পোল সলভে অংশগ্রহণ করার জন্য। 😊\n\n"
+        f"🎉 <b>ধন্যবাদ প্রিয় শিক্ষার্থী!</b>\n"
+        f"👉এটলাস আয়োজিত \"<b>{topic_text}</b>\" পোল সলভে অংশগ্রহণ করার জন্য। 😊\n\n"
         f"📊 মোট পোল: {count}"
     )
     if ask_score:
@@ -8972,7 +8975,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
 
             # Pre-message (plain, no button, no reply)
             pre_text = csv_get_pre_message(topic, batch_topic, len(batch))
-            pre_send_data = {"chat_id": channel_id, "text": pre_text}
+            pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
             if thread_id:
                 pre_send_data["message_thread_id"] = thread_id
             pre_r = await tg_post("sendMessage", pre_send_data)
@@ -9027,6 +9030,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             end_send_data2 = {
                 "chat_id": channel_id,
                 "text": ending,
+                "parse_mode": "HTML",
                 "disable_web_page_preview": True
             }
             if pre_msg_id:
@@ -9164,7 +9168,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
 
                 pre_text = csv_get_pre_message(topic, batch_topic, len(batch))
-                pre_send_data = {"chat_id": channel_id, "text": pre_text}
+                pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
                 if thread_id:
                     pre_send_data["message_thread_id"] = thread_id
                 pre_r = await tg_post("sendMessage", pre_send_data)
@@ -9213,6 +9217,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 end_send_data2 = {
                     "chat_id": channel_id,
                     "text": ending,
+                    "parse_mode": "HTML",
                     "disable_web_page_preview": True
                 }
                 if pre_msg_id:
@@ -9313,7 +9318,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             pre_msg_id = None
         else:
             pre_text = csv_get_pre_message(topic, topic, total)
-            pre_send_data = {"chat_id": channel_id, "text": pre_text}
+            pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
             if thread_id:
                 pre_send_data["message_thread_id"] = thread_id
             pre_r = await tg_post("sendMessage", pre_send_data)
@@ -9387,6 +9392,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
         end_send_data = {
             "chat_id": channel_id,
             "text": ending,
+            "parse_mode": "HTML",
             "disable_web_page_preview": True
         }
         if pre_msg_id:
