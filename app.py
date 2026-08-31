@@ -7379,8 +7379,8 @@ def csv_get_pre_message(main_topic: str, batch_topic: str, count: int, first_lin
     main_text = main_topic or "Special MCQ By ATLAS"
     batch_text = batch_topic or main_text
     text = (
-        f"🟥{main_text}\n"
-        f"✅{batch_text}\n"
+        f"🟥Topic:\n({main_text})\n\n"
+        f"✅Topic:\n({batch_text})\n\n"
         f"📌MCQ Count: {count}\n"
     )
     if first_link:
@@ -7428,15 +7428,18 @@ def csv_get_ending_message(topic: str, count: int, first_link: str = "", ask_sco
 def csv_get_master_summary(topic: str, total: int,
                             total_batches: int, batch_links: list) -> str:
     """
-    batch_links = [(part_num, link, count), ...]
+    batch_links = [(part_num, link, count, batch_topic), ...]
+    batch_topic শো করা হয় Part number এর বদলে (CSV থেকে আসা topic name)।
     """
     text = (
         f"🟥Poll Topic: \"{topic}\"\n"
         f"🌟মোট প্রশ্ন: {total}\n"
         f"📦 মোট ব্যাচ: {total_batches}\n\n"
     )
-    for part_n, link, count in batch_links:
-        text += f"📍Part-{part_n:02d}: ({count}টি প্রশ্ন)\n{link}\n\n"
+    for entry in batch_links:
+        part_n, link, count = entry[0], entry[1], entry[2]
+        label = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
+        text += f"📍{label}: ({count}টি প্রশ্ন)\n{link}\n\n"
     text += (
         "📌 *এটলাসের Exam Batch* এ অসংখ্য প্রশ্ন প্রাক্টিসের সুযোগ আছে।\n"
         "💬 *Whatsapp:* wa.me/8801999681290\n"
@@ -9231,7 +9234,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     await send_msg(chat_id,
                         f"⚠️ '{batch_topic}' এর end message + button পাঠানো ব্যর্থ হয়েছে: {end_r.get('description', 'unknown error')}")
 
-                batch_links.append((b_idx, first_link, len(batch)))
+                batch_links.append((b_idx, first_link, len(batch), batch_topic))
                 await db_update_csv_job_progress(job_id, b_idx)
 
                 if loading_id:
