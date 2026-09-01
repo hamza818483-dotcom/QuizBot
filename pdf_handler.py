@@ -189,6 +189,23 @@ class GeminiKeyRotator:
     RPM_PER_KEY = 15  # proactive per-minute ceiling; skip a key before it 429s
     RPM_WINDOW_SECONDS = 60
 
+    ACCOUNT_CONCURRENT_CAP = 2  # only takes effect for keys explicitly tagged
+    # via GEMINI_KEYS_GROUPED (key@account). Untagged keys each count as
+    # their own account, so this provides no protection by itself when
+    # grouping is unknown -- see GLOBAL_CONCURRENT_CAP below for the
+    # mapping-independent safeguard.
+
+    GLOBAL_CONCURRENT_CAP = 20  # hard ceiling on simultaneous in-flight Gemini
+    # calls across ALL keys/accounts combined, regardless of grouping info.
+    # 120 keys firing at once -- even round-robined and even if evenly
+    # spread across many accounts -- is a burst pattern Google's abuse
+    # detection can flag on its own. This caps total concurrency so traffic
+    # stays within a volume that reads as organic regardless of how keys
+    # happen to be grouped.
+    GLOBAL_MIN_GAP_SECONDS = 0.05  # minimum spacing enforced between any two
+    # Gemini calls starting, globally -- prevents true-simultaneous (same
+    # millisecond) fan-out even under high concurrency.
+
     def __init__(self):
         self.keys = []
         self.current = 0
@@ -196,20 +213,88 @@ class GeminiKeyRotator:
         self._banned = _load_banned_keys()
         self._ban_reasons = _load_banned_reasons()  # key -> reason string, for /keys visibility
         self._call_times = {}  # key -> list[float] call timestamps (rolling 60s window)
+        self._key_account = {}  # key -> account_id
+        self._account_inflight = {}  # account_id -> current in-flight count
+        self._global_sem = asyncio.Semaphore(self.GLOBAL_CONCURRENT_CAP)
+        self._global_lock = asyncio.Lock()
+        self._last_global_call = 0.0
         self._load_keys()
 
 
     def _load_keys(self):
-        raw = os.environ.get("GEMINI_KEYS", "")
+        # Preferred: GEMINI_KEYS_GROUPED="key1@acct1,key2@acct1,key3@acct2,..."
+        # explicitly tags which Google account each key belongs to, so keys
+        # from the same account can be spread apart instead of hammered
+        # together. Falls back to plain GEMINI_KEYS (no @account suffix)
+        # where every key is treated as its own account -- same behavior as
+        # before, just without cross-account spreading.
+        raw = os.environ.get("GEMINI_KEYS_GROUPED", "") or os.environ.get("GEMINI_KEYS", "")
+        all_keys = []
+        self._key_account = {}
         if raw:
-            all_keys = [k.strip() for k in raw.split(",") if k.strip()]
-        else:
-            all_keys = []
+            for entry in raw.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                if "@" in entry:
+                    key, acct = entry.rsplit("@", 1)
+                    key = key.strip()
+                    acct = acct.strip() or key
+                else:
+                    key, acct = entry, entry
+                all_keys.append(key)
+                self._key_account[key] = acct
         skipped = [k for k in all_keys if k in self._banned]
         self.keys = [k for k in all_keys if k not in self._banned]
+        n_accounts = len(set(self._key_account.get(k, k) for k in self.keys))
         if skipped:
             logger.warning(f"[Gemini] Skipped {len(skipped)} previously-banned key(s) at startup: {[k[:12]+'...' for k in skipped]}")
-        logger.info(f"[Gemini] Loaded {len(self.keys)} usable keys ({len(skipped)} auto-skipped as banned)")
+        logger.info(f"[Gemini] Loaded {len(self.keys)} usable keys across {n_accounts} account(s) ({len(skipped)} auto-skipped as banned)")
+
+    def account_of(self, key: str) -> str:
+        return self._key_account.get(key, key)
+
+    def acquire_account_slot(self, key: str) -> bool:
+        """Returns True and reserves a slot if this key's account is under
+        its concurrent-in-flight cap; False if the account is already
+        saturated (caller should skip to the next candidate key)."""
+        acct = self.account_of(key)
+        n = self._account_inflight.get(acct, 0)
+        if n >= self.ACCOUNT_CONCURRENT_CAP:
+            return False
+        self._account_inflight[acct] = n + 1
+        return True
+
+    def release_account_slot(self, key: str):
+        acct = self.account_of(key)
+        n = self._account_inflight.get(acct, 0)
+        self._account_inflight[acct] = max(0, n - 1)
+
+    class _ThrottleGuard:
+        def __init__(self, rotator):
+            self.rotator = rotator
+        async def __aenter__(self):
+            r = self.rotator
+            await r._global_sem.acquire()
+            async with r._global_lock:
+                now = time.time()
+                wait = r.GLOBAL_MIN_GAP_SECONDS - (now - r._last_global_call)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                r._last_global_call = time.time()
+            return self
+        async def __aexit__(self, exc_type, exc, tb):
+            self.rotator._global_sem.release()
+            return False
+
+    def throttled_call(self):
+        """Async context manager: `async with rotator.throttled_call(): ...`
+        Caps total simultaneous Gemini calls at GLOBAL_CONCURRENT_CAP and
+        enforces a minimum spacing between call starts, independent of
+        which key or account is used. This is the mapping-independent
+        safeguard against burst-fanout looking like scripted/hijacked
+        traffic -- wrap the actual Gemini API call site with it."""
+        return self._ThrottleGuard(self)
 
     def _prune_and_count(self, key: str, now: float) -> int:
         """Drops call-timestamps older than the rolling window and returns
@@ -637,7 +722,8 @@ async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: s
                     config=types.GenerateContentConfig(max_output_tokens=8192)
                 )
             _attempt_timeout = 40 if attempt == 0 else 25
-            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
+            async with key_rotator.throttled_call():
+                response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
             key_rotator.mark_healthy(key)
             return response.text or ""
         except Exception as e:
@@ -788,7 +874,8 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
                     config=types.GenerateContentConfig(max_output_tokens=8192)
                 )
             _attempt_timeout = 40 if attempt == 0 else 25
-            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
+            async with key_rotator.throttled_call():
+                response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
             valid = _parse_mcq_json(response.text)
             elapsed = round(_time.time() - _t0, 1)
             if not valid:
@@ -1409,7 +1496,8 @@ async def generate_mcq_from_image(
                 # common case while still tolerating occasional slower
                 # generations for pages near the 40-MCQ ceiling.
                 _attempt_timeout = 50 if attempt == 0 else 32
-                response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
+                async with key_rotator.throttled_call():
+                    response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 # 2026-08-28: detect a response that got cut off by the
                 # max_output_tokens cap above (MAX_TOKENS finish_reason) --
                 # a truncated response is usually broken/partial JSON (cut
@@ -1602,7 +1690,8 @@ Return ONLY valid JSON array, no markdown, no extra text:
                     config=types.GenerateContentConfig(max_output_tokens=8192)
                 )
 
-            response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=45)
+            async with key_rotator.throttled_call():
+                response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=45)
             valid = _parse_text_json(response.text)
             if valid:
                 key_rotator.mark_healthy(key)
