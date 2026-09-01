@@ -17392,11 +17392,25 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
     # Call 2: audit pass against Call1's own output (same verify prompt/logic
     # as /topic — it only reasons about qsn_no/topic_hint/text, not the
     # visual marker style, so it's reusable unchanged).
+    #
+    # RESILIENCE FIX: the verify CALL itself (network/parse) is isolated in
+    # its own try — if IT fails, `check` just falls back to {} instead of
+    # skipping the entire miss-check/recovery block below. Previously a
+    # single Call2 network failure meant ZERO miss-check and ZERO recovery
+    # ever ran for that page, silently keeping only Call1's raw (possibly
+    # incomplete) output as final. Now the code-level gap-check (which needs
+    # no AI call) and the heading-scan's own _scan_flagged_missing signal
+    # still run and still trigger targeted recovery even when Call2 itself
+    # is fully down.
     try:
         verify_prompt = _build_topic_verify_prompt(mcqs)
         check_txt = await _qbm_gemini_raw(img, verify_prompt)
         check = _parse_count_check_json(check_txt)
+    except Exception as e:
+        logger.warning(f"[UNMESH verify] Call2 network/parse failed, continuing with code-level checks only: {e}")
+        check = {}
 
+    try:
         missing_nums = set(n for n in (check.get("missing_qsn_no") or []) if isinstance(n, int))
         missing_nums |= _scan_flagged_missing
         wrong_serials = check.get("wrong_serials") or []
