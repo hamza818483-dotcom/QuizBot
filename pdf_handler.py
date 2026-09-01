@@ -1078,6 +1078,24 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                 raise ValueError(
                     f"PDF_RANGE_TOO_LARGE:{first}:{last}:{_PDF_MAX_PAGES_PER_CALL}"
                 )
+            # BUG FIX: requested range could exceed the PDF's real page count
+            # (e.g. range 505-508 on a 504-page PDF). Without this check every
+            # non-existent page burns 5 retry attempts + dpi-100 fallback each
+            # (pure wasted time), then gets a blank white placeholder inserted,
+            # which Gemini/Groq then "sees" as a real empty page and returns
+            # zero MCQs for it -- surfacing as a confusing "কোনো MCQ পাওয়া যায়নি"
+            # instead of a clear out-of-range error.
+            _total_pages_check = get_pdf_page_count(pdf_bytes)
+            if _total_pages_check and first > _total_pages_check:
+                raise ValueError(
+                    f"PDF_RANGE_OUT_OF_BOUNDS:{first}:{last}:{_total_pages_check}"
+                )
+            if _total_pages_check and last > _total_pages_check:
+                logger.warning(
+                    f"[PDF] Requested range {first}-{last} exceeds real page count "
+                    f"({_total_pages_check}) — clamping to {first}-{_total_pages_check}"
+                )
+                last = _total_pages_check
             batch = _convert_batch(first, last)
             if batch is not None:
                 result = list(zip(range(first, last + 1), batch))
@@ -1175,6 +1193,10 @@ def pdf_to_images_safe(pdf_bytes: bytes, page_range: str = None):
             _, first, last, cap = msg.split(":")
             return False, (f"❌ এই range-এ {int(last)-int(first)+1} page, কিন্তু সর্বোচ্চ {cap} page "
                             f"একসাথে process করা যায়।\nদয়া করে ছোট range দিয়ে আবার চেষ্টা করো।")
+        if msg.startswith("PDF_RANGE_OUT_OF_BOUNDS:"):
+            _, first, last, total = msg.split(":")
+            return False, (f"❌ PDF-এ মোট {total} page আছে, কিন্তু তুমি {first}-{last} চেয়েছো।\n"
+                            f"দয়া করে সঠিক page range দিয়ে আবার চেষ্টা করো (১-{total} এর মধ্যে)।")
         return False, f"❌ PDF process করতে সমস্যা হয়েছে: {msg}"
     except RuntimeError:
         return False, "⏳ Server এখন busy (অন্য একটা PDF process হচ্ছে), কিছুক্ষণ পর আবার চেষ্টা করো।"
