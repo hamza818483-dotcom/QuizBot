@@ -20681,12 +20681,16 @@ def _qbm_is_duplicate(norm_q: str, existing_keys: list, threshold: float = 0.93)
 
 
 def _qbm_dedup_list(mcqs: list) -> list:
-    """Fuzzy-dedup a list in place order, dropping duplicate/ghost MCQs."""
+    """Fuzzy-dedup a list in place order, dropping duplicate/ghost MCQs.
+    An MCQ with a genuinely empty question (extraction glitch, not a real
+    duplicate) used to be silently discarded with zero trace -- now logged
+    so an empty-question drop is visible instead of an invisible miss."""
     seen_keys: list = []
     out = []
     for mc in mcqs:
         key_q = _qbm_normalize_q(mc.get("question", ""))
         if not key_q:
+            logger.warning(f"[QBM dedup] dropping MCQ with empty/unparseable question text (qsn_no={mc.get('qsn_no')}, raw='{(mc.get('question') or '')[:30]}')")
             continue
         if not _qbm_is_duplicate(key_q, seen_keys):
             seen_keys.append(key_q)
@@ -25855,14 +25859,46 @@ async def qbm_extract_all_pages(
     # extra duplicate poll on posting. Dedup runs across the FULL combined
     # list (not just within one page) using the same fuzzy-match logic
     # already used per-page, keeping the first (earlier-page) occurrence.
+    #
+    # SAFETY GUARD: fuzzy text-similarity dedup across an ENTIRE multi-page
+    # document risks a false-positive — two genuinely DIFFERENT MCQs from
+    # different topics/pages can coincidentally share very similar wording
+    # (same subject, similar phrasing) and cross the 0.93 threshold, silently
+    # dropping a real, unique MCQ. Two MCQs that both carry a valid qsn_no
+    # AND those qsn_no differ are never actually the same physical MCQ (a
+    # page's own serial numbering guarantees that), so only apply the
+    # cross-page fuzzy-dedup to MCQs sharing the same qsn_no (or with no
+    # qsn_no info at all, where numbering can't disambiguate) — MCQs with
+    # clearly different qsn_no are exempted outright, never merged away.
     final_results = [r for r in results if r is not None]
     combined_mcqs = []
     for page_num, img, mcqs in final_results:
         combined_mcqs.extend(mcqs or [])
-    deduped_mcqs = _qbm_dedup_list(combined_mcqs)
+
+    _has_qsn = [m for m in combined_mcqs if isinstance(m.get("qsn_no"), int)]
+    _no_qsn = [m for m in combined_mcqs if not isinstance(m.get("qsn_no"), int)]
+    if _has_qsn:
+        # Group by (qsn_no, topic_hint) — qsn_no ALONE isn't enough, since
+        # /unmesh/topic-style extractors reset qsn_no back to 1 at every new
+        # topic segment, so two DIFFERENT topics on different pages can
+        # legitimately share the same qsn_no. Only compare MCQs that share
+        # both the same serial AND the same topic (true page-boundary/reprint
+        # duplicate candidates); anything outside that exact pairing is
+        # exempted from cross-page fuzzy-dedup entirely.
+        _by_qsn_group: dict = {}
+        for m in _has_qsn:
+            _key = (m["qsn_no"], (m.get("topic_hint") or m.get("_effective_hint") or "").strip())
+            _by_qsn_group.setdefault(_key, []).append(m)
+        deduped_mcqs = []
+        for _key, _group in _by_qsn_group.items():
+            deduped_mcqs.extend(_qbm_dedup_list(_group) if len(_group) > 1 else _group)
+        deduped_mcqs.extend(_qbm_dedup_list(_no_qsn))
+    else:
+        deduped_mcqs = _qbm_dedup_list(combined_mcqs)
+
     if len(deduped_mcqs) < len(combined_mcqs):
         dropped = len(combined_mcqs) - len(deduped_mcqs)
-        logger.info(f"[QBM Cross-Page Dedup] dropped {dropped} duplicate MCQ(s) across pages")
+        logger.info(f"[QBM Cross-Page Dedup] dropped {dropped} duplicate MCQ(s) across pages (same-qsn_no groups only — different qsn_no never merged)")
         deduped_ids = {id(m) for m in deduped_mcqs}
         rebuilt = []
         for page_num, img, mcqs in final_results:
