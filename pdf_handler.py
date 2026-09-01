@@ -212,6 +212,23 @@ class GeminiKeyRotator:
     # hits on one account are spread out further -- reduces same-account
     # burst signature even when the account is under its concurrency cap.
 
+    ACCOUNT_DAILY_CALL_CAP = 1200  # soft ceiling on total calls per account
+    # per rolling 24h. Free-tier keys used at sustained bot/commercial-scale
+    # volume is itself a suspension trigger regardless of per-minute/burst
+    # shaping -- this caps the aggregate daily footprint per Google account
+    # so no single account's total usage pattern looks like production-scale
+    # traffic riding a free tier. When an account crosses this, its keys are
+    # pushed to the back of ordered_keys() (not hard-blocked) so load drains
+    # to less-used accounts first.
+    ACCOUNT_ERROR_CIRCUIT_THRESHOLD = 4  # consecutive 401/403/suspend-style
+    # errors from the SAME account (across any of its keys) within
+    # ACCOUNT_ERROR_CIRCUIT_WINDOW triggers a temporary full-account pause --
+    # this is the code-side approximation of "account looks flagged, back off
+    # entirely" rather than continuing to round-robin its other keys, which
+    # previously kept hitting an account that was already being penalized.
+    ACCOUNT_ERROR_CIRCUIT_WINDOW = 300  # seconds
+    ACCOUNT_ERROR_CIRCUIT_COOLDOWN = 1800  # 30 min full-account pause once tripped
+
     def __init__(self):
         self.keys = []
         self.current = 0
@@ -222,10 +239,55 @@ class GeminiKeyRotator:
         self._key_account = {}  # key -> account_id
         self._account_inflight = {}  # account_id -> current in-flight count
         self._account_last_call = {}  # account_id -> last call-start time
+        self._account_daily_calls = {}  # account_id -> list[float] call timestamps (rolling 24h)
+        self._account_error_times = {}  # account_id -> list[float] recent error timestamps
+        self._account_circuit_until = {}  # account_id -> epoch time when pause lifts
         self._global_sem = asyncio.Semaphore(self.GLOBAL_CONCURRENT_CAP)
         self._global_lock = asyncio.Lock()
         self._last_global_call = 0.0
         self._load_keys()
+
+    def _prune_account_daily(self, acct: str, now: float) -> int:
+        times = self._account_daily_calls.get(acct)
+        if not times:
+            return 0
+        cutoff = now - 86400
+        fresh = [t for t in times if t > cutoff]
+        self._account_daily_calls[acct] = fresh
+        return len(fresh)
+
+    def record_account_call(self, key: str):
+        """Call alongside record_call() so per-account daily volume is
+        tracked independent of per-key RPM tracking."""
+        acct = self.account_of(key)
+        self._account_daily_calls.setdefault(acct, []).append(time.time())
+
+    def account_over_daily_cap(self, key: str) -> bool:
+        acct = self.account_of(key)
+        return self._prune_account_daily(acct, time.time()) >= self.ACCOUNT_DAILY_CALL_CAP
+
+    def record_account_error(self, key: str):
+        """Track suspend/auth-style errors per account. If enough pile up in
+        the window, trip a full-account circuit breaker so the code stops
+        routing ANY of that account's keys for a cooldown period, instead of
+        continuing to cycle through its other keys (which just spreads the
+        same flagged-account risk across more of its own quota)."""
+        acct = self.account_of(key)
+        now = time.time()
+        times = [t for t in self._account_error_times.get(acct, []) if t > now - self.ACCOUNT_ERROR_CIRCUIT_WINDOW]
+        times.append(now)
+        self._account_error_times[acct] = times
+        if len(times) >= self.ACCOUNT_ERROR_CIRCUIT_THRESHOLD:
+            self._account_circuit_until[acct] = now + self.ACCOUNT_ERROR_CIRCUIT_COOLDOWN
+            logger.error(f"[Gemini] Account circuit breaker TRIPPED for {acct}: {len(times)} errors in {self.ACCOUNT_ERROR_CIRCUIT_WINDOW}s -- pausing this account's keys for {self.ACCOUNT_ERROR_CIRCUIT_COOLDOWN}s")
+
+    def account_circuit_open(self, key: str) -> bool:
+        acct = self.account_of(key)
+        until = self._account_circuit_until.get(acct, 0)
+        if until and time.time() >= until:
+            del self._account_circuit_until[acct]
+            return False
+        return bool(until)
 
 
     def _load_keys(self):
@@ -403,6 +465,7 @@ class GeminiKeyRotator:
         """Call this right before/when actually using a key, so the rolling
         window reflects real usage (independent of mark_healthy/rate_limited)."""
         self._call_times.setdefault(key, []).append(time.time())
+        self.record_account_call(key)
 
     def get_key(self):
         if not self.keys:
@@ -438,6 +501,13 @@ class GeminiKeyRotator:
         3x the Gemini load per page QBM had before)."""
         now = time.time()
         live_keys = [k for k in self.keys if k not in self._banned]
+        # Account circuit breaker: keys on a currently-paused account are
+        # pushed to the very back (still usable as last resort, never
+        # hard-blocked, since misfires shouldn't strand a request with zero
+        # keys) -- this is checked before daily-cap/exhaustion tiers so a
+        # tripped account never gets picked while any other option exists.
+        circuit_open = [k for k in live_keys if self.account_circuit_open(k)]
+        live_keys = [k for k in live_keys if k not in circuit_open]
         not_exhausted = [k for k in live_keys if not _is_gemini_key_exhausted_today(k)]
         exhausted = [k for k in live_keys if _is_gemini_key_exhausted_today(k)]
         pool = not_exhausted if not_exhausted else live_keys
@@ -445,7 +515,14 @@ class GeminiKeyRotator:
         cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
         under_rpm = [k for k in cooled if self._prune_and_count(k, now) < self.RPM_PER_KEY]
         over_rpm = [k for k in cooled if self._prune_and_count(k, now) >= self.RPM_PER_KEY]
-        healthy = under_rpm
+        # Daily account-volume cap: within the under-rpm tier, keys whose
+        # account has already made ACCOUNT_DAILY_CALL_CAP+ calls today are
+        # deprioritized (not blocked) below keys on less-used accounts, so
+        # aggregate load naturally drains toward accounts with daily
+        # headroom instead of concentrating sustained volume on a few.
+        under_cap = [k for k in under_rpm if not self.account_over_daily_cap(k)]
+        over_cap = [k for k in under_rpm if self.account_over_daily_cap(k)]
+        healthy = under_cap
         if healthy:
             # Randomized start instead of pure sequential round-robin.
             # Deterministic serial rotation across an account's keys is
@@ -461,7 +538,7 @@ class GeminiKeyRotator:
             healthy = healthy[start:] + healthy[:start]
             random.shuffle(healthy)
             self.current = (self.current + 1) % max(len(self.keys), 1)
-        return healthy + over_rpm + cooling + (exhausted if not_exhausted else [])
+        return healthy + over_cap + over_rpm + cooling + (exhausted if not_exhausted else []) + circuit_open
 
     def mark_rate_limited(self, key: str, daily_exhausted: bool = False, retry_after_seconds: int = None):
         cooldown = retry_after_seconds if retry_after_seconds and retry_after_seconds > 0 else self.COOLDOWN_SECONDS
@@ -827,7 +904,7 @@ async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: s
             elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
                   or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
                   or "401" in err_str):
-                key_rotator.mark_banned(key, reason=err_str[:200])
+                key_rotator.mark_banned(key, reason=err_str[:200]); key_rotator.record_account_error(key)
                 _consecutive_infra_fails = 0
             else:
                 logger.warning(f"[{log_tag}] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
@@ -995,7 +1072,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
             elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
                   or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
                   or "401" in err_str):
-                key_rotator.mark_banned(key, reason=err_str[:200])
+                key_rotator.mark_banned(key, reason=err_str[:200]); key_rotator.record_account_error(key)
                 _consecutive_infra_fails = 0
             else:
                 logger.warning(f"[PDFS-C2] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
@@ -1674,7 +1751,7 @@ async def generate_mcq_from_image(
               or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
               or "401" in err_str):
             logger.error(f"[Gemini] Attempt {attempt+1}: key permanently banned (suspended/invalid): {err_label}")
-            key_rotator.mark_banned(key, reason=err_str[:200])
+            key_rotator.mark_banned(key, reason=err_str[:200]); key_rotator.record_account_error(key)
             _consecutive_infra_fails = 0  # per-key issue, not backend-wide
         else:
             # Timeout / connection error / non-429-503 exception. Previously
@@ -1821,7 +1898,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
                   or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
                   or "401" in err_str):
                 logger.error(f"[Gemini-Text] Attempt {attempt+1}: key permanently banned (suspended/invalid): {e}")
-                key_rotator.mark_banned(key, reason=err_str[:200])
+                key_rotator.mark_banned(key, reason=err_str[:200]); key_rotator.record_account_error(key)
             else:
                 logger.warning(f"[Gemini-Text] Attempt {attempt+1} failed: {e}")
             if attempt < max_retries - 1:
