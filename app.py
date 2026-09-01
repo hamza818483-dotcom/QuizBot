@@ -30263,9 +30263,12 @@ async def handle_message(msg: dict):
                          f"  ✅ Healthy: {gem_healthy} | ⏳ Cooldown: {gem_cooling} | 🔴 আজকে exhausted: {gem_exhausted} | 🚫 Banned: {gem_banned}")
             if gem_banned_set:
                 reasons = key_rotator._ban_reasons
-                for bk in list(gem_banned_set)[:10]:  # cap listed reasons to avoid a huge message
+                shown = list(gem_banned_set)[:25]
+                for bk in shown:
                     why = reasons.get(bk, "reason not recorded")
                     lines.append(f"    🚫 <code>{bk[:12]}...</code> — {why}")
+                if len(gem_banned_set) > 25:
+                    lines.append(f"    ...আরও {len(gem_banned_set) - 25} টা banned key (মোট {len(gem_banned_set)})")
 
 
             # Generic rotators (NVIDIA, Nemotron, Gemma, OpenRouter-Qwen, HF)
