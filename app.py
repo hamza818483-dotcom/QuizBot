@@ -17302,25 +17302,17 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
         if cached:
             logger.info(f"[UNMESH MCQ Cache] hit for {cache_key} — skipping Call1, still running full heading-scan + Call2 verify")
             return _qbm_dedup_list(cached)
+        # /unmesh: Gemini-ONLY, no Groq/OpenRouter fallback (per user request
+        # 2026-09-01) — ~150 Gemini keys available so no need to leak into
+        # other providers; also avoids wasted calls when OpenRouter's daily
+        # quota is already fully exhausted.
         gem_txt = await _qbm_gemini_raw_only(img, UNMESH_EXTRACT_PROMPT)
         gem = _qbm_parse_json(gem_txt) if gem_txt else []
-        if gem:
-            result = _qbm_dedup_list(gem)
-            if result and cache_key:
-                _unmesh_mcq_result_cache[cache_key] = result
-                _cap_qbm_mcq_cache(_unmesh_mcq_result_cache)
-            return result
-        txt = await _qbm_groq_call(img, UNMESH_EXTRACT_PROMPT_GROQ_COMPACT)
-        result = _qbm_parse_json(txt) if txt else []
-        if result:
-            result = _qbm_dedup_list(result)
-            if result and cache_key:
-                _unmesh_mcq_result_cache[cache_key] = result
-                _cap_qbm_mcq_cache(_unmesh_mcq_result_cache)
-            return result
-        txt3 = await _qbm_openrouter_call(img, UNMESH_EXTRACT_PROMPT)
-        result3 = _qbm_parse_json(txt3) if txt3 else []
-        return _qbm_dedup_list(result3)
+        result = _qbm_dedup_list(gem) if gem else []
+        if result and cache_key:
+            _unmesh_mcq_result_cache[cache_key] = result
+            _cap_qbm_mcq_cache(_unmesh_mcq_result_cache)
+        return result
 
     mcqs = await _run_extract_call()
     if not mcqs:
