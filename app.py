@@ -17279,7 +17279,8 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
         if cached:
             logger.info(f"[UNMESH MCQ Cache] hit for {cache_key} — skipping Call1, still running full heading-scan + Call2 verify")
             return _qbm_dedup_list(cached)
-        gem = await _qbm_gemini_extract(img, UNMESH_EXTRACT_PROMPT)
+        gem_txt = await _qbm_gemini_raw_only(img, UNMESH_EXTRACT_PROMPT)
+        gem = _qbm_parse_json(gem_txt) if gem_txt else []
         if gem:
             result = _qbm_dedup_list(gem)
             if result and cache_key:
@@ -17309,7 +17310,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
     # topic_hint the main prompt may have silently missed (e.g. box-style
     # single-icon headings the main prompt wasn't primed to recognize).
     try:
-        scan_txt = await _qbm_gemini_raw(img, _build_unmesh_heading_scan_prompt())
+        scan_txt = await _qbm_gemini_raw_only(img, _build_unmesh_heading_scan_prompt())
         headings, _scan_last_qsn = _parse_unmesh_heading_scan(scan_txt)
     except Exception as e:
         logger.warning(f"[UNMESH heading-scan] failed, skipping: {e}")
@@ -17404,7 +17405,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
     # is fully down.
     try:
         verify_prompt = _build_topic_verify_prompt(mcqs)
-        check_txt = await _qbm_gemini_raw(img, verify_prompt)
+        check_txt = await _qbm_gemini_raw_only(img, verify_prompt)
         check = _parse_count_check_json(check_txt)
     except Exception as e:
         logger.warning(f"[UNMESH verify] Call2 network/parse failed, continuing with code-level checks only: {e}")
@@ -17484,7 +17485,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
                     break
                 try:
                     recovery_prompt = _build_missing_qsn_recovery_prompt(list(missing_nums), mcqs)
-                    recovery_txt = await _qbm_gemini_raw(img, recovery_prompt)
+                    recovery_txt = await _qbm_gemini_raw_only(img, recovery_prompt)
                     retry_mcqs = _qbm_parse_json(recovery_txt) if recovery_txt else []
                 except Exception as e:
                     logger.warning(f"[UNMESH verify] targeted recovery attempt {_retry_attempt+1} failed: {e}")
@@ -17517,7 +17518,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
                 logger.warning(f"[UNMESH gap-check] post-recovery segment gap still found {sorted(_post_recovery_gaps)} — one more targeted attempt")
                 try:
                     recovery_prompt2 = _build_missing_qsn_recovery_prompt(list(_post_recovery_gaps), mcqs)
-                    recovery_txt2 = await _qbm_gemini_raw(img, recovery_prompt2)
+                    recovery_txt2 = await _qbm_gemini_raw_only(img, recovery_prompt2)
                     retry_mcqs2 = _qbm_parse_json(recovery_txt2) if recovery_txt2 else []
                 except Exception as e:
                     logger.warning(f"[UNMESH verify] post-recovery final attempt failed: {e}")
@@ -21185,6 +21186,91 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
 
     fixed = await _attach_option_images_if_missing(fixed, img)
     return fixed
+
+
+async def _qbm_gemini_raw_only(img, prompt: str) -> str:
+    """/unmesh-ONLY variant of _qbm_gemini_raw: tries every Gemini key
+    (healthiest-first, skipping already-known-daily-exhausted ones) but
+    NEVER internally falls back to Groq -- returns "" if every key fails.
+    Exists because /unmesh's outer _run_extract_call already has its own
+    explicit Gemini -> Groq -> OpenRouter fallback chain; the plain
+    _qbm_gemini_raw silently jumping to Groq INSIDE itself meant that
+    chain's own "if gem: ... else: try Groq" logic couldn't tell whether
+    an empty result already came from a Groq call underneath, and with
+    ~150 keys now available there is no reason to give up on Gemini before
+    truly exhausting the whole key pool first."""
+    _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
+    try:
+        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
+        if not key_rotator.keys:
+            return ""
+        if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
+            logger.warning("[UNMESH] all Gemini keys already known daily-exhausted")
+            return ""
+        from google import genai as gai
+        from google.genai import types
+        img_b64 = image_to_base64(img)
+        img_bytes = base64.b64decode(img_b64)
+
+        def _call(key):
+            client = gai.Client(
+                api_key=key,
+                http_options=types.HttpOptions(timeout=38000)
+            )
+            return client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=[
+                    types.Part.from_text(text=prompt),
+                    types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=8192,
+                    response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_budget=0)
+                )
+            )
+
+        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
+        if _live:
+            keys_to_try = _live
+        for key in keys_to_try:
+            if is_cancelled():
+                return ""
+            try:
+                response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
+                key_rotator.mark_healthy(key)
+                return response.text or ""
+            except Exception as e:
+                msg = str(e)
+                extra = ""
+                try:
+                    resp_obj = getattr(e, "response", None)
+                    if resp_obj is not None:
+                        extra = getattr(resp_obj, "text", "") or ""
+                except Exception:
+                    pass
+                full_msg = msg + " " + extra
+                if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                    daily = "PerDay" in full_msg
+                    retry_s = None
+                    try:
+                        rd_match = re.search(r"'retryDelay':\s*'(\d+)s'", full_msg)
+                        if rd_match:
+                            retry_s = int(rd_match.group(1))
+                    except Exception:
+                        pass
+                    key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
+                    logger.warning(f"[UNMESH] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key")
+                    continue
+                logger.warning(f"[UNMESH] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
+                continue
+        logger.warning("[UNMESH] All Gemini keys exhausted/failed on this call — returning empty (caller decides next fallback)")
+        return ""
+    except Exception as e:
+        logger.warning(f"[UNMESH] Gemini-only raw call failed: {e}")
+        return ""
 
 
 async def _qbm_gemini_raw(img, prompt: str) -> str:
