@@ -231,6 +231,7 @@ class GeminiKeyRotator:
         raw = os.environ.get("GEMINI_KEYS_GROUPED", "") or os.environ.get("GEMINI_KEYS", "")
         all_keys = []
         self._key_account = {}
+        explicit_tagging = "@" in raw
         if raw:
             for entry in raw.split(","):
                 entry = entry.strip()
@@ -244,6 +245,36 @@ class GeminiKeyRotator:
                     key, acct = entry, entry
                 all_keys.append(key)
                 self._key_account[key] = acct
+        # AUTO-BATCH FALLBACK: when no key carries an explicit "@account" tag
+        # (plain GEMINI_KEYS list), every key was being treated as its own
+        # account, so ACCOUNT_CONCURRENT_CAP never engaged -- N keys from the
+        # same real Google account could all get hit at once, which is the
+        # likely cause of the account-level suspensions seen (2-3 projects
+        # per account). Keys are typically appended to the env var in the
+        # same order they were created (10 keys/account from the "10
+        # projects per account" pattern), so grouping every consecutive
+        # AUTO_BATCH_SIZE keys into one virtual account approximates the
+        # real grouping without needing the user to remember or re-tag
+        # anything. This costs nothing when the mapping happens to be
+        # wrong (worst case: same behavior as today, no @-tags) and helps
+        # whenever the order does line up with real account boundaries.
+        if all_keys and not explicit_tagging:
+            # Two zones per user-provided clue: first FIRST_ZONE_SIZE keys
+            # have unknown/mixed grouping (treated as individual accounts --
+            # safe default, same as before), keys after that are serially
+            # ZONE2_BATCH_SIZE per account (8-9 confirmed by user; using 9
+            # errs toward under-grouping rather than over-grouping two
+            # different real accounts into one, which would over-restrict
+            # unrelated accounts).
+            FIRST_ZONE_SIZE = int(os.environ.get("GEMINI_FIRST_ZONE_SIZE", "44"))
+            ZONE2_BATCH_SIZE = int(os.environ.get("GEMINI_ZONE2_BATCH_SIZE", "9"))
+            for idx, key in enumerate(all_keys):
+                if idx < FIRST_ZONE_SIZE:
+                    self._key_account[key] = f"zone1-key-{idx}"
+                else:
+                    zone2_idx = idx - FIRST_ZONE_SIZE
+                    self._key_account[key] = f"zone2-batch-{zone2_idx // ZONE2_BATCH_SIZE}"
+            logger.info(f"[Gemini] No @account tags found — auto-grouped keys: first {FIRST_ZONE_SIZE} treated individually, remaining {len(all_keys) - FIRST_ZONE_SIZE} grouped in batches of {ZONE2_BATCH_SIZE} by env-var order")
         skipped = [k for k in all_keys if k in self._banned]
         self.keys = [k for k in all_keys if k not in self._banned]
         n_accounts = len(set(self._key_account.get(k, k) for k in self.keys))
@@ -271,8 +302,10 @@ class GeminiKeyRotator:
         self._account_inflight[acct] = max(0, n - 1)
 
     class _ThrottleGuard:
-        def __init__(self, rotator):
+        def __init__(self, rotator, key=None):
             self.rotator = rotator
+            self.key = key
+            self._got_account_slot = False
         async def __aenter__(self):
             r = self.rotator
             await r._global_sem.acquire()
@@ -282,19 +315,37 @@ class GeminiKeyRotator:
                 if wait > 0:
                     await asyncio.sleep(wait)
                 r._last_global_call = time.time()
+            # Account-level gate: acquire_account_slot/release_account_slot
+            # existed but were never wired into an actual call site, so
+            # ACCOUNT_CONCURRENT_CAP had zero effect even with @account
+            # tagging or the auto-batch grouping -- wait briefly for a slot
+            # to free up rather than hard-failing, since global_sem already
+            # bounds total concurrency and this is a soft same-account
+            # spacing safeguard, not a correctness requirement.
+            if self.key is not None:
+                for _ in range(20):  # ~2s max wait before giving up the gate
+                    if r.acquire_account_slot(self.key):
+                        self._got_account_slot = True
+                        break
+                    await asyncio.sleep(0.1)
             return self
         async def __aexit__(self, exc_type, exc, tb):
+            if self._got_account_slot:
+                self.rotator.release_account_slot(self.key)
             self.rotator._global_sem.release()
             return False
 
-    def throttled_call(self):
-        """Async context manager: `async with rotator.throttled_call(): ...`
-        Caps total simultaneous Gemini calls at GLOBAL_CONCURRENT_CAP and
-        enforces a minimum spacing between call starts, independent of
-        which key or account is used. This is the mapping-independent
-        safeguard against burst-fanout looking like scripted/hijacked
-        traffic -- wrap the actual Gemini API call site with it."""
-        return self._ThrottleGuard(self)
+    def throttled_call(self, key: str = None):
+        """Async context manager: `async with rotator.throttled_call(key=key): ...`
+        Caps total simultaneous Gemini calls at GLOBAL_CONCURRENT_CAP,
+        enforces a minimum spacing between call starts, and (when `key` is
+        given) also gates on ACCOUNT_CONCURRENT_CAP so no single Google
+        account gets more than 2 simultaneous in-flight calls across its
+        keys. Wrap the actual Gemini API call site with it. `key` is
+        optional for backward compatibility with existing call sites that
+        don't pass it (they still get the global cap+spacing, just not the
+        account gate)."""
+        return self._ThrottleGuard(self, key=key)
 
     def _prune_and_count(self, key: str, now: float) -> int:
         """Drops call-timestamps older than the rolling window and returns

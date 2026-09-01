@@ -3793,7 +3793,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
             key_rotator.record_call(key)
             try:
                 _timeout = 40 if idx == 0 else 20
-                async with key_rotator.throttled_call():
+                async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=_timeout)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
@@ -12706,7 +12706,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 return ""
             try:
                 _dagano_timeout = 40 if idx == 0 else 25
-                async with key_rotator.throttled_call():
+                async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=_dagano_timeout)
                 key_rotator.mark_healthy(key)
                 finish_reason = None
@@ -21247,7 +21247,7 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
                 # retries look like normal spaced traffic.
                 await asyncio.sleep(random.uniform(0.15, 0.6))
             try:
-                async with key_rotator.throttled_call():
+                async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
@@ -21345,7 +21345,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                 # retries look like normal spaced traffic.
                 await asyncio.sleep(random.uniform(0.15, 0.6))
             try:
-                async with key_rotator.throttled_call():
+                async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
@@ -21454,7 +21454,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 # retries look like normal spaced traffic.
                 await asyncio.sleep(random.uniform(0.15, 0.6))
             try:
-                async with key_rotator.throttled_call():
+                async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
@@ -21528,7 +21528,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
                 # retries look like normal spaced traffic.
                 await asyncio.sleep(random.uniform(0.15, 0.6))
             try:
-                async with key_rotator.throttled_call():
+                async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=150)
                 key_rotator.mark_healthy(key)
                 return response.text or ""
