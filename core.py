@@ -679,14 +679,45 @@ async def send_rich_msg(chat_id, markdown_text: str, fallback_text: str = None) 
         logger.warning(f"[RichMsg] sendRichMessage failed, falling back to plain text: {e}")
     return await send_msg(chat_id, fallback_text if fallback_text else markdown_text, parse_mode="HTML")
 
+_TG_MSG_LIMIT = 4096
+
+def _chunk_text(text: str, limit: int = _TG_MSG_LIMIT) -> list:
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        cut = text.rfind("\n", 0, limit)
+        if cut == -1:
+            cut = text.rfind(" ", 0, limit)
+        if cut == -1 or cut < limit // 2:
+            cut = limit
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    return chunks
+
 async def send_msg(chat_id, text: str, parse_mode: str = "HTML",
                    reply_markup=None, reply_to_message_id: int = None) -> dict:
-    data = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
-    if reply_markup:
-        data["reply_markup"] = reply_markup
-    if reply_to_message_id:
-        data["reply_to_message_id"] = reply_to_message_id
-    return await tg_post("sendMessage", data)
+    chunks = _chunk_text(text)
+    if len(chunks) == 1:
+        data = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        if reply_to_message_id:
+            data["reply_to_message_id"] = reply_to_message_id
+        return await tg_post("sendMessage", data)
+
+    result = {}
+    for i, chunk in enumerate(chunks):
+        data = {"chat_id": chat_id, "text": chunk, "parse_mode": parse_mode}
+        if reply_to_message_id and i == 0:
+            data["reply_to_message_id"] = reply_to_message_id
+        if reply_markup and i == len(chunks) - 1:
+            data["reply_markup"] = reply_markup
+        result = await tg_post("sendMessage", data)
+    return result
 
 async def edit_msg(chat_id, message_id: int, text: str, parse_mode: str = "HTML", reply_markup: dict = None) -> dict:
     payload = {
