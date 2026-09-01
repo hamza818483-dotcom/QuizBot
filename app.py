@@ -17285,7 +17285,7 @@ def _build_missing_qsn_recovery_prompt(missing_nums: list, known_mcqs: list) -> 
     )
 
 
-async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
+async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False) -> list:
     """/unmesh extractor — same Call1+Call2 pipeline as /topic, but topic
     boundaries are detected via the WHITE-bg + BOLD BLACK text + preceding
     black-circle-with-1/2/3-white-stars heading style (UNMESH_EXTRACT_PROMPT),
@@ -17314,7 +17314,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
             _cap_qbm_mcq_cache(_unmesh_mcq_result_cache)
         return result
 
-    mcqs = await _run_extract_call()
+    mcqs = await _run_extract_call(bypass_cache=bypass_cache)
     if not mcqs:
         return mcqs
 
@@ -25936,6 +25936,33 @@ async def qbm_extract_all_pages(
                 except Exception as e2:
                     logger.error(f"[QBM Extract] Page {page_num} retry also failed: {e2}")
                     mcqs = []
+
+        # CLEAN 0-MCQ RESULT (no exception raised, extractor just returned
+        # an empty list) previously got accepted as final with zero retry —
+        # only the exception path above retried. A transient bad frame/
+        # model miss on a page that genuinely has MCQs would then silently
+        # report "0 MCQ" forever. Retry once here too, bypassing the
+        # page-level cache so it's a genuinely fresh attempt, not a cached
+        # empty replay.
+        if not mcqs and not is_cancelled(chat_id):
+            logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retrying once (cache bypassed) before accepting as empty")
+            try:
+                _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
+                mcqs = await _extract_fn(img, cache_key=_ck, bypass_cache=True) if _ck else await _extract_fn(img)
+            except TypeError:
+                # extractor doesn't accept bypass_cache kwarg — fall back to
+                # a plain re-call (still a fresh network attempt).
+                try:
+                    _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
+                    mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
+                except Exception as e3:
+                    logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry also failed: {e3}")
+                    mcqs = []
+            except Exception as e3:
+                logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry also failed: {e3}")
+                mcqs = []
+            if not mcqs:
+                logger.warning(f"[QBM Extract] Page {page_num} still 0 MCQ after retry — accepting as genuinely empty")
 
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
