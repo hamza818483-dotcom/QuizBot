@@ -17184,26 +17184,48 @@ def _build_unmesh_heading_scan_prompt() -> str:
         "  - the printed qsn_no of the very next MCQ that appears after it on the page "
         "(the first question number below/after that heading in its own column) — use null if the "
         "heading is the last thing on the page with no MCQ following it on this page.\n\n"
-        "Output ONLY this JSON array, nothing else, in top-to-bottom page order:\n"
-        '[{"heading_text": "...", "next_qsn_no": <int or null>}]\n'
-        "If there are zero genuine topic headings on this page, output exactly []."
+        "ADDITIONALLY (independent of the heading detection above): report the printed qsn_no of "
+        "the very LAST MCQ visible anywhere on this page (bottom of the last column, top to bottom "
+        "both columns considered) — this is a separate lightweight completeness signal, not a "
+        "topic heading, so give it even if zero headings were found. Use null only if the page has "
+        "no MCQ at all.\n\n"
+        "Output ONLY this JSON object, nothing else:\n"
+        '{"headings": [{"heading_text": "...", "next_qsn_no": <int or null>}], '
+        '"last_qsn_no_on_page": <int or null>}\n'
+        "If there are zero genuine topic headings on this page, output headings as exactly []."
     )
 
 
-def _parse_unmesh_heading_scan(text: str) -> list:
+def _parse_unmesh_heading_scan(text: str) -> tuple:
+    """Returns (headings_list, last_qsn_no_on_page). Backward-compatible with
+    the old plain-array output format (some fallback providers/cached
+    responses may still return just the array) — in that case
+    last_qsn_no_on_page comes back as None and callers should skip that
+    extra check rather than treat it as a real signal."""
     if not text:
-        return []
+        return [], None
     t = text.strip()
     if "```json" in t:
         t = t.split("```json")[1].split("```")[0].strip()
     elif "```" in t:
         t = t.split("```")[1].split("```")[0].strip()
     try:
-        m = re.search(r'\[.*\]', t, re.DOTALL)
-        data = json.loads(m.group()) if m else json.loads(t)
-        return data if isinstance(data, list) else []
+        m = re.search(r'\{.*\}', t, re.DOTALL)
+        if m:
+            data = json.loads(m.group())
+        else:
+            m2 = re.search(r'\[.*\]', t, re.DOTALL)
+            data = json.loads(m2.group()) if m2 else json.loads(t)
+        if isinstance(data, dict):
+            headings = data.get("headings") or []
+            last_q = data.get("last_qsn_no_on_page")
+            last_q = last_q if isinstance(last_q, int) else None
+            return (headings if isinstance(headings, list) else []), last_q
+        if isinstance(data, list):
+            return data, None
+        return [], None
     except Exception:
-        return []
+        return [], None
 
 
 def _build_missing_qsn_recovery_prompt(missing_nums: list, known_mcqs: list) -> str:
@@ -17288,10 +17310,27 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
     # single-icon headings the main prompt wasn't primed to recognize).
     try:
         scan_txt = await _qbm_gemini_raw(img, _build_unmesh_heading_scan_prompt())
-        headings = _parse_unmesh_heading_scan(scan_txt)
+        headings, _scan_last_qsn = _parse_unmesh_heading_scan(scan_txt)
     except Exception as e:
         logger.warning(f"[UNMESH heading-scan] failed, skipping: {e}")
         headings = []
+        _scan_last_qsn = None
+
+    # CODE-LEVEL CROSS-CHECK using the heading-scan's own independent
+    # last_qsn_no_on_page signal — this call already reads the whole page
+    # top-to-bottom for headings, so its own count of the LAST visible
+    # qsn_no is a second, independent opinion on where the page actually
+    # ends. If Call1's own highest extracted qsn_no falls short of that,
+    # Call1 missed one or more trailing MCQs that this scan itself
+    # actually saw — flag it now (before Call2 even runs) so those numbers
+    # are queued into Call2's own missing-check net below rather than only
+    # relying on Call2 to catch it fresh.
+    _scan_flagged_missing = set()
+    if isinstance(_scan_last_qsn, int):
+        _extracted_max = max((m.get("qsn_no") for m in mcqs if isinstance(m.get("qsn_no"), int)), default=None)
+        if _extracted_max is not None and _scan_last_qsn > _extracted_max:
+            _scan_flagged_missing = set(range(_extracted_max + 1, _scan_last_qsn + 1))
+            logger.warning(f"[UNMESH heading-scan] independent last_qsn_no_on_page={_scan_last_qsn} > extracted max={_extracted_max} — flagging {sorted(_scan_flagged_missing)} for Call2 miss-check")
 
     forced_boundaries = set()
     if headings:
@@ -17359,6 +17398,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
         check = _parse_count_check_json(check_txt)
 
         missing_nums = set(n for n in (check.get("missing_qsn_no") or []) if isinstance(n, int))
+        missing_nums |= _scan_flagged_missing
         wrong_serials = check.get("wrong_serials") or []
         word_fixes = check.get("word_fixes") or []
         topic_leaks = check.get("topic_leaks") or []
@@ -17804,7 +17844,8 @@ def _build_bio_heading_scan_prompt_batched(n_pages: int) -> str:
 
 
 def _parse_bio_heading_scan(text: str) -> list:
-    return _parse_unmesh_heading_scan(text)
+    headings, _ = _parse_unmesh_heading_scan(text)
+    return headings
 
 
 def _is_sane_bio_heading(text: str) -> bool:
@@ -18355,7 +18396,8 @@ async def _bio_apply_heading_scan(generated_pages: list) -> list:
 
 
 def _parse_chem_heading_scan(text: str) -> list:
-    return _parse_unmesh_heading_scan(text)
+    headings, _ = _parse_unmesh_heading_scan(text)
+    return headings
 
 
 async def _chem_extract_from_image(img, cache_key: tuple = None) -> list:
