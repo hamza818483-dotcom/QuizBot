@@ -270,8 +270,19 @@ class GeminiKeyRotator:
         over_rpm = [k for k in cooled if self._prune_and_count(k, now) >= self.RPM_PER_KEY]
         healthy = under_rpm
         if healthy:
-            start = (self.current + offset) % len(healthy)
+            # Randomized start instead of pure sequential round-robin.
+            # Deterministic serial rotation across an account's keys is
+            # itself an abuse signal Google's suspension system watches
+            # for (predictable ordered key-cycling from one account looks
+            # scripted/hijacked even when total volume is within quota).
+            # `offset` still separates concurrent slots so they don't
+            # collide on the same key; `current` still advances so
+            # sequential single-slot calls don't reuse one random pick
+            # forever, but the actual starting point is randomized so the
+            # observed key-use order isn't a fixed cycle.
+            start = (self.current + offset + random.randint(0, len(healthy) - 1)) % len(healthy)
             healthy = healthy[start:] + healthy[:start]
+            random.shuffle(healthy)
             self.current = (self.current + 1) % max(len(self.keys), 1)
         return healthy + over_rpm + cooling + (exhausted if not_exhausted else [])
 

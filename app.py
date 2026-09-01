@@ -21235,9 +21235,15 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
-        for key in keys_to_try:
+        for _ki, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
+            if _ki > 0:
+                # Jitter before switching keys — rapid deterministic
+                # back-to-back key-hopping on failure is itself part of
+                # the scripted-abuse pattern; a small random gap makes
+                # retries look like normal spaced traffic.
+                await asyncio.sleep(random.uniform(0.15, 0.6))
             try:
                 response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
@@ -21326,9 +21332,15 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
-        for key in keys_to_try:
+        for _ki, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
+            if _ki > 0:
+                # Jitter before switching keys — rapid deterministic
+                # back-to-back key-hopping on failure is itself part of
+                # the scripted-abuse pattern; a small random gap makes
+                # retries look like normal spaced traffic.
+                await asyncio.sleep(random.uniform(0.15, 0.6))
             try:
                 response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
@@ -21428,9 +21440,15 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
             # PerDay, the flags were correct after all and Groq is the
             # right call.
             keys_to_try = keys_to_try[:2]
-        for key in keys_to_try:
+        for _ki, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
+            if _ki > 0:
+                # Jitter before switching keys — rapid deterministic
+                # back-to-back key-hopping on failure is itself part of
+                # the scripted-abuse pattern; a small random gap makes
+                # retries look like normal spaced traffic.
+                await asyncio.sleep(random.uniform(0.15, 0.6))
             try:
                 response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
@@ -21495,9 +21513,15 @@ async def _ai_gemini_text_call(prompt: str) -> str:
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
-        for key in keys_to_try:
+        for _ki, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
+            if _ki > 0:
+                # Jitter before switching keys — rapid deterministic
+                # back-to-back key-hopping on failure is itself part of
+                # the scripted-abuse pattern; a small random gap makes
+                # retries look like normal spaced traffic.
+                await asyncio.sleep(random.uniform(0.15, 0.6))
             try:
                 response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=150)
                 key_rotator.mark_healthy(key)
