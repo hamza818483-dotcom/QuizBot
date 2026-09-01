@@ -37,6 +37,23 @@ def _clean_topic_name_for_copy(name: str) -> str:
     return s.strip() or (name or "").strip()
 
 
+def _is_auth_ban_error(full_msg: str) -> bool:
+    """True only for genuine auth/suspension failures (structured status code
+    or explicit reason keyword), never a loose '401'/'403' substring match
+    which can false-positive on retryDelay seconds, timestamps, IDs, etc."""
+    up = full_msg.upper()
+    if ("SUSPENDED" in up or "API_KEY_INVALID" in up
+            or "UNAUTHENTICATED" in up or "ACCOUNT_STATE_INVALID" in up):
+        return True
+    # Match structured status codes only: 'code': 401 / status_code=403 / "status": "403"
+    if re.search(r"""['"]?(?:code|status_code|http_status)['"]?\s*[:=]\s*['"]?(401|403)\b""", full_msg):
+        return True
+    # Also match "403 " / "401 " immediately followed by a known HTTP reason phrase
+    if re.search(r"\b(401|403)\s+(Client Error|Unauthorized|Forbidden)\b", full_msg, re.IGNORECASE):
+        return True
+    return False
+
+
 def _split_topic_number_and_bangla_name(name: str) -> tuple:
     """Splits a /chem-style topic heading ('১.৩ লিভার ... — Liver ...') into
     (numbering, bangla_only_name) for captions where the numbering must
@@ -12743,9 +12760,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[Dagano] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
-                if ("SUSPENDED" in full_msg.upper() or "API_KEY_INVALID" in full_msg.upper()
-                      or "UNAUTHENTICATED" in full_msg.upper() or "ACCOUNT_STATE_INVALID" in full_msg.upper()
-                      or "401" in full_msg or "403" in full_msg):
+                if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
                     logger.warning(f"[Dagano] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
@@ -21279,9 +21294,7 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[UNMESH] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key")
                     continue
-                if ("SUSPENDED" in full_msg.upper() or "API_KEY_INVALID" in full_msg.upper()
-                      or "UNAUTHENTICATED" in full_msg.upper() or "ACCOUNT_STATE_INVALID" in full_msg.upper()
-                      or "401" in full_msg or "403" in full_msg):
+                if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
                     logger.warning(f"[UNMESH] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
@@ -21386,9 +21399,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
-                if ("SUSPENDED" in full_msg.upper() or "API_KEY_INVALID" in full_msg.upper()
-                      or "UNAUTHENTICATED" in full_msg.upper() or "ACCOUNT_STATE_INVALID" in full_msg.upper()
-                      or "401" in full_msg or "403" in full_msg):
+                if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
                     logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
@@ -21501,9 +21512,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
-                if ("SUSPENDED" in full_msg.upper() or "API_KEY_INVALID" in full_msg.upper()
-                      or "UNAUTHENTICATED" in full_msg.upper() or "ACCOUNT_STATE_INVALID" in full_msg.upper()
-                      or "401" in full_msg or "403" in full_msg):
+                if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
                     logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
@@ -21563,9 +21572,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily)
                     logger.warning(f"[AI] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key")
                     continue
-                if ("SUSPENDED" in full_msg.upper() or "API_KEY_INVALID" in full_msg.upper()
-                      or "UNAUTHENTICATED" in full_msg.upper() or "ACCOUNT_STATE_INVALID" in full_msg.upper()
-                      or "401" in full_msg or "403" in full_msg):
+                if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
                     logger.warning(f"[AI] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
