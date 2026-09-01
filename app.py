@@ -17365,6 +17365,48 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
 
         by_qsn = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
 
+        def _segment_gap_check(mcq_list: list) -> set:
+            """CODE-LEVEL PER-TOPIC-SEGMENT GAP CHECK — the plain full-page
+            gap-check below only catches a hole INSIDE the overall qsn_no
+            range (e.g. sees 24,25,27, infers 26 missing). It CANNOT catch a
+            miss sitting at the very END of one topic segment, right before
+            the next segment's heading — that qsn_no was simply never
+            extracted at all, so it never shows up as an internal gap in the
+            page-wide range. Splitting by topic_hint into per-segment runs
+            and checking each segment's own local sequence for gaps AND for
+            a jump larger than +1 at the segment's tail (segment ends but the
+            next segment's first qsn_no is more than 1 higher, meaning at
+            least one number was skipped) closes that hole."""
+            _gaps = set()
+            _segs = {}
+            _order = []
+            for _m in mcq_list:
+                _n = _m.get("qsn_no")
+                if not isinstance(_n, int):
+                    continue
+                _key = (_m.get("topic_hint") or "").strip()
+                if _key not in _segs:
+                    _segs[_key] = []
+                    _order.append(_key)
+                _segs[_key].append(_n)
+            _seg_bounds = []
+            for _key in _order:
+                _nums = sorted(_segs[_key])
+                if not _nums:
+                    continue
+                _lo2, _hi2 = _nums[0], _nums[-1]
+                _gaps |= (set(range(_lo2, _hi2 + 1)) - set(_nums))
+                _seg_bounds.append((_lo2, _hi2))
+            # tail check: this segment's last qsn_no vs the very next
+            # segment's first qsn_no — a jump of more than 1 means the
+            # in-between number(s) were skipped right at the boundary.
+            for _i in range(len(_seg_bounds) - 1):
+                _this_hi = _seg_bounds[_i][1]
+                _next_lo = _seg_bounds[_i + 1][0]
+                if _next_lo - _this_hi > 1:
+                    _gaps |= set(range(_this_hi + 1, _next_lo))
+            return _gaps
+
         # CODE-LEVEL GAP CHECK — don't rely solely on Call2 self-reporting
         # its own misses (the model can under-count on its own audit just
         # as easily as on the original extraction). Any hole in the
@@ -17375,8 +17417,10 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
             _present = sorted(by_qsn.keys())
             _lo, _hi = _present[0], _present[-1]
             _gap_nums = set(range(_lo, _hi + 1)) - set(_present)
+            _seg_gap_nums = _segment_gap_check(mcqs)
+            _gap_nums |= _seg_gap_nums
             if _gap_nums:
-                logger.warning(f"[UNMESH gap-check] sequence hole detected {sorted(_gap_nums)} between {_lo}-{_hi} — forcing recovery")
+                logger.warning(f"[UNMESH gap-check] sequence hole detected {sorted(_gap_nums)} between {_lo}-{_hi} (segment-boundary misses included) — forcing recovery")
                 missing_nums |= _gap_nums
 
         if missing_nums:
@@ -17406,6 +17450,29 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None) -> list:
                     logger.warning(f"[UNMESH verify] still missing qsn_no {sorted(missing_nums)} after attempt {_retry_attempt+1}")
             if missing_nums:
                 logger.error(f"[UNMESH verify] gave up recovering qsn_no {sorted(missing_nums)} after 3 targeted attempts")
+
+            # FINAL RE-CHECK after recovery — a recovery pass can add MCQs
+            # with a topic_hint that reshapes segment boundaries again (or
+            # still leave a segment-tail gap if the recovered MCQ landed
+            # under a different segment than expected). Re-run the same
+            # per-segment gap check ONE more time on the post-recovery list
+            # so a second-order segment-boundary miss doesn't slip through
+            # silently just because the first recovery round already ran.
+            _post_recovery_gaps = _segment_gap_check(mcqs) - set(by_qsn.keys())
+            if _post_recovery_gaps:
+                logger.warning(f"[UNMESH gap-check] post-recovery segment gap still found {sorted(_post_recovery_gaps)} — one more targeted attempt")
+                try:
+                    recovery_prompt2 = _build_missing_qsn_recovery_prompt(list(_post_recovery_gaps), mcqs)
+                    recovery_txt2 = await _qbm_gemini_raw(img, recovery_prompt2)
+                    retry_mcqs2 = _qbm_parse_json(recovery_txt2) if recovery_txt2 else []
+                except Exception as e:
+                    logger.warning(f"[UNMESH verify] post-recovery final attempt failed: {e}")
+                    retry_mcqs2 = []
+                retry_got2 = {m.get("qsn_no"): m for m in retry_mcqs2 if isinstance(m.get("qsn_no"), int)}
+                for n in _post_recovery_gaps:
+                    if n in retry_got2:
+                        mcqs.append(retry_got2[n])
+                        by_qsn[n] = retry_got2[n]
 
         for fix in wrong_serials:
             was = fix.get("was")
