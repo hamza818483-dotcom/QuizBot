@@ -222,15 +222,41 @@ class GeminiKeyRotator:
 
 
     def _load_keys(self):
-        # Preferred: GEMINI_KEYS_GROUPED="key1@acct1,key2@acct1,key3@acct2,..."
+        # Preferred #1: separate env vars per account, e.g.
+        #   GEMINI_KEYS_ACC1=key1,key2,key3
+        #   GEMINI_KEYS_ACC2=key4,key5,key6
+        # Easiest option for the user -- no need to tag each key inline,
+        # just put each account's keys in their own named env var.
+        all_keys = []
+        self._key_account = {}
+        acc_env_vars = sorted(
+            k for k in os.environ.keys()
+            if k.startswith("GEMINI_KEYS_ACC") or k.startswith("GEMINI_KEYS_ACCOUNT")
+        )
+        if acc_env_vars:
+            for env_name in acc_env_vars:
+                acct = env_name  # e.g. "GEMINI_KEYS_ACC1" used directly as account tag
+                for entry in os.environ.get(env_name, "").split(","):
+                    key = entry.strip()
+                    if not key:
+                        continue
+                    all_keys.append(key)
+                    self._key_account[key] = acct
+            n_accounts = len(acc_env_vars)
+            logger.info(f"[Gemini] Loaded {len(all_keys)} keys from {n_accounts} per-account env var(s): {acc_env_vars}")
+            self.keys = [k for k in all_keys if k not in self._banned]
+            skipped = [k for k in all_keys if k in self._banned]
+            if skipped:
+                logger.warning(f"[Gemini] Skipped {len(skipped)} previously-banned key(s) at startup: {[k[:12]+'...' for k in skipped]}")
+            logger.info(f"[Gemini] Loaded {len(self.keys)} usable keys across {n_accounts} account(s) ({len(skipped)} auto-skipped as banned)")
+            return
+        # Preferred #2: GEMINI_KEYS_GROUPED="key1@acct1,key2@acct1,key3@acct2,..."
         # explicitly tags which Google account each key belongs to, so keys
         # from the same account can be spread apart instead of hammered
         # together. Falls back to plain GEMINI_KEYS (no @account suffix)
         # where every key is treated as its own account -- same behavior as
         # before, just without cross-account spreading.
         raw = os.environ.get("GEMINI_KEYS_GROUPED", "") or os.environ.get("GEMINI_KEYS", "")
-        all_keys = []
-        self._key_account = {}
         explicit_tagging = "@" in raw
         if raw:
             for entry in raw.split(","):
