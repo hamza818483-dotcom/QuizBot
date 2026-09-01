@@ -540,6 +540,24 @@ class GeminiKeyRotator:
             self.current = (self.current + 1) % max(len(self.keys), 1)
         return healthy + over_cap + over_rpm + cooling + (exhausted if not_exhausted else []) + circuit_open
 
+    def ordered_keys_avoiding_accounts(self, avoid_accounts: set, offset: int = 0):
+        """Same as ordered_keys(), but keys whose account is in
+        avoid_accounts are pushed to the back (never hard-excluded — if
+        every remaining option is on an already-used account, e.g. single-
+        account setups, we still must return usable keys). Used so a single
+        page's own sequential calls (Call1, heading-scan, Call2, ...) don't
+        keep landing back on the SAME Google account just because it's the
+        globally healthiest one -- spreading a page's own call sequence
+        across different accounts (when more than one is available) reduces
+        how concentrated that one account's short-window call footprint
+        gets, on top of the existing gap/cap/circuit-breaker protections."""
+        base = self.ordered_keys(offset=offset)
+        if not avoid_accounts:
+            return base
+        preferred = [k for k in base if self.account_of(k) not in avoid_accounts]
+        deprioritized = [k for k in base if self.account_of(k) in avoid_accounts]
+        return preferred + deprioritized if preferred else base
+
     def mark_rate_limited(self, key: str, daily_exhausted: bool = False, retry_after_seconds: int = None):
         cooldown = retry_after_seconds if retry_after_seconds and retry_after_seconds > 0 else self.COOLDOWN_SECONDS
         self._cooldown_until[key] = time.time() + cooldown
@@ -579,6 +597,19 @@ key_rotator = GeminiKeyRotator()
 # chains automatically, so app.py setting this before calling into
 # pdf_handler.py functions works with zero explicit parameter threading.
 _qbm_key_offset_ctx = contextvars.ContextVar("_qbm_key_offset_ctx", default=0)
+
+# Per-page account-diversity tracking: app.py's page-extraction loop resets
+# this to a fresh empty set at the start of each page, then every Gemini
+# call within that SAME page (Call1, heading-scan, Call2, missing-recovery
+# retries, ...) appends the account it actually used. ordered_keys_
+# avoiding_accounts() reads this so a page's later calls prefer a DIFFERENT
+# account than its own earlier calls already used, instead of every call
+# independently picking the same "healthiest" account and concentrating
+# that one page's whole call sequence onto a single Google account. Falls
+# back to normal healthiest-first ordering once every available account has
+# already been used once this page (never blocks a call for lack of a
+# fresh account).
+_qbm_page_used_accounts_ctx = contextvars.ContextVar("_qbm_page_used_accounts_ctx", default=None)
 
 # ============================================================
 # OPENROUTER KEY ROTATION

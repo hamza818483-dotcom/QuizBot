@@ -619,7 +619,7 @@ _current_job_chat_id_ctx = contextvars.ContextVar("_current_job_chat_id_ctx", de
 # contextvars only propagate correctly through await-chains when both sides
 # reference the SAME ContextVar object, not two separately-created vars
 # with the same name/default.
-from pdf_handler import _qbm_key_offset_ctx
+from pdf_handler import _qbm_key_offset_ctx, _qbm_page_used_accounts_ctx
 
 def is_cancelled(chat_id=None):
     if chat_id is None:
@@ -21216,7 +21216,7 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
     truly exhausting the whole key pool first."""
     _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
     try:
-        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
+        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today, _qbm_page_used_accounts_ctx
         if not key_rotator.keys:
             return ""
         if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
@@ -21246,7 +21246,9 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
                 )
             )
 
-        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        keys_to_try = key_rotator.ordered_keys_avoiding_accounts(
+            _qbm_page_used_accounts_ctx.get() or set(), offset=_qbm_key_offset_ctx.get()
+        ) or key_rotator.keys
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
@@ -21263,6 +21265,9 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
+                _used = _qbm_page_used_accounts_ctx.get()
+                if _used is not None:
+                    _used.add(key_rotator.account_of(key))
                 return response.text or ""
             except Exception as e:
                 msg = str(e)
@@ -26013,6 +26018,11 @@ async def qbm_extract_all_pages(
 
     async def _extract_one_slotted(slot, idx, page_num, img):
         _qbm_key_offset_ctx.set(slot)
+        # Fresh empty set per page so this page's own sequential Gemini
+        # calls (Call1, heading-scan, Call2, missing-recovery) prefer
+        # different accounts from each other -- see
+        # ordered_keys_avoiding_accounts() / _qbm_page_used_accounts_ctx.
+        _qbm_page_used_accounts_ctx.set(set())
         return await _extract_one(idx, page_num, img)
 
     for start in range(0, len(pages), WINDOW):
