@@ -12743,6 +12743,12 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[Dagano] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
+                if ("SUSPENDED" in full_msg.upper() or "API_KEY_INVALID" in full_msg.upper()
+                      or "UNAUTHENTICATED" in full_msg.upper() or "ACCOUNT_STATE_INVALID" in full_msg.upper()
+                      or "401" in full_msg or "403" in full_msg):
+                    key_rotator.mark_banned(key, reason=full_msg[:200])
+                    logger.warning(f"[Dagano] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
+                    continue
                 logger.warning(f"[Dagano] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         logger.warning("[Dagano] All Gemini keys exhausted — falling back to Groq vision (first image only)")
@@ -21273,6 +21279,12 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[UNMESH] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key")
                     continue
+                if ("SUSPENDED" in full_msg.upper() or "API_KEY_INVALID" in full_msg.upper()
+                      or "UNAUTHENTICATED" in full_msg.upper() or "ACCOUNT_STATE_INVALID" in full_msg.upper()
+                      or "401" in full_msg or "403" in full_msg):
+                    key_rotator.mark_banned(key, reason=full_msg[:200])
+                    logger.warning(f"[UNMESH] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
+                    continue
                 logger.warning(f"[UNMESH] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         logger.warning("[UNMESH] All Gemini keys exhausted/failed on this call — returning empty (caller decides next fallback)")
@@ -21373,6 +21385,12 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                         pass
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
+                    continue
+                if ("SUSPENDED" in full_msg.upper() or "API_KEY_INVALID" in full_msg.upper()
+                      or "UNAUTHENTICATED" in full_msg.upper() or "ACCOUNT_STATE_INVALID" in full_msg.upper()
+                      or "401" in full_msg or "403" in full_msg):
+                    key_rotator.mark_banned(key, reason=full_msg[:200])
+                    logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
@@ -21483,6 +21501,12 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
+                if ("SUSPENDED" in full_msg.upper() or "API_KEY_INVALID" in full_msg.upper()
+                      or "UNAUTHENTICATED" in full_msg.upper() or "ACCOUNT_STATE_INVALID" in full_msg.upper()
+                      or "401" in full_msg or "403" in full_msg):
+                    key_rotator.mark_banned(key, reason=full_msg[:200])
+                    logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
+                    continue
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision (first image only)")
@@ -21538,6 +21562,12 @@ async def _ai_gemini_text_call(prompt: str) -> str:
                     daily = "PerDay" in msg
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily)
                     logger.warning(f"[AI] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key")
+                    continue
+                if ("SUSPENDED" in full_msg.upper() or "API_KEY_INVALID" in full_msg.upper()
+                      or "UNAUTHENTICATED" in full_msg.upper() or "ACCOUNT_STATE_INVALID" in full_msg.upper()
+                      or "401" in full_msg or "403" in full_msg):
+                    key_rotator.mark_banned(key, reason=full_msg[:200])
+                    logger.warning(f"[AI] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[AI] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
