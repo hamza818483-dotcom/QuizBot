@@ -206,6 +206,12 @@ class GeminiKeyRotator:
     # same reason: spreads call-starts out in time so concurrent load never
     # looks like an instantaneous fan-out burst.
 
+    ACCOUNT_MIN_GAP_SECONDS = 1.0  # minimum spacing between call-starts on
+    # the SAME account, tighter than the global gap. Two different accounts
+    # can still fire close together (global gap covers that), but repeated
+    # hits on one account are spread out further -- reduces same-account
+    # burst signature even when the account is under its concurrency cap.
+
     def __init__(self):
         self.keys = []
         self.current = 0
@@ -215,6 +221,7 @@ class GeminiKeyRotator:
         self._call_times = {}  # key -> list[float] call timestamps (rolling 60s window)
         self._key_account = {}  # key -> account_id
         self._account_inflight = {}  # account_id -> current in-flight count
+        self._account_last_call = {}  # account_id -> last call-start time
         self._global_sem = asyncio.Semaphore(self.GLOBAL_CONCURRENT_CAP)
         self._global_lock = asyncio.Lock()
         self._last_global_call = 0.0
@@ -349,6 +356,14 @@ class GeminiKeyRotator:
             # bounds total concurrency and this is a soft same-account
             # spacing safeguard, not a correctness requirement.
             if self.key is not None:
+                acct = r.account_of(self.key)
+                async with r._global_lock:
+                    now = time.time()
+                    last = r._account_last_call.get(acct, 0.0)
+                    wait = r.ACCOUNT_MIN_GAP_SECONDS - (now - last)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    r._account_last_call[acct] = time.time()
                 for _ in range(20):  # ~2s max wait before giving up the gate
                     if r.acquire_account_slot(self.key):
                         self._got_account_slot = True
