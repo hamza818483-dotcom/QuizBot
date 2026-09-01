@@ -195,16 +195,16 @@ class GeminiKeyRotator:
     # grouping is unknown -- see GLOBAL_CONCURRENT_CAP below for the
     # mapping-independent safeguard.
 
-    GLOBAL_CONCURRENT_CAP = 20  # hard ceiling on simultaneous in-flight Gemini
+    GLOBAL_CONCURRENT_CAP = 8  # hard ceiling on simultaneous in-flight Gemini
     # calls across ALL keys/accounts combined, regardless of grouping info.
-    # 120 keys firing at once -- even round-robined and even if evenly
-    # spread across many accounts -- is a burst pattern Google's abuse
-    # detection can flag on its own. This caps total concurrency so traffic
-    # stays within a volume that reads as organic regardless of how keys
-    # happen to be grouped.
-    GLOBAL_MIN_GAP_SECONDS = 0.05  # minimum spacing enforced between any two
-    # Gemini calls starting, globally -- prevents true-simultaneous (same
-    # millisecond) fan-out even under high concurrency.
+    # Lowered from 20 -> 8 after real suspensions were observed (2-3
+    # projects per account) even under per-key RPM limits -- the burst
+    # *volume* itself, not just per-key rate, appears to be part of what's
+    # flagged. Slower throughput, but priority is zero further suspensions.
+    GLOBAL_MIN_GAP_SECONDS = 0.25  # minimum spacing enforced between any two
+    # Gemini calls starting, globally -- raised from 0.05 -> 0.25 for the
+    # same reason: spreads call-starts out in time so concurrent load never
+    # looks like an instantaneous fan-out burst.
 
     def __init__(self):
         self.keys = []
