@@ -1298,6 +1298,23 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_c
         return file_bytes.getvalue() if hasattr(file_bytes, "getvalue") else file_bytes
     except Exception as e:
         logger.error(f"[pyrogram] download error: {e}")
+        # Underlying MTProto TCP socket died (e.g. "socket.send() raised
+        # exception" / "Connection lost") -- the cached _pyro_client keeps
+        # this dead connection forever since nothing else resets it, so
+        # every future large-file download keeps retrying on the same
+        # broken socket until Bot API getFile (20MB cap) is hit instead.
+        # Detect connection-level failures and drop the cached client so
+        # the NEXT call builds+starts a fresh one.
+        err_str = str(e).lower()
+        if any(s in err_str for s in ("connection lost", "socket.send", "not connected",
+                                       "connection is closed", "transport is closed")):
+            global _pyro_client
+            try:
+                await client.stop()
+            except Exception:
+                pass
+            _pyro_client = None
+            logger.warning("[pyrogram] dropped dead client after connection error, will reconnect next call")
         return None
 
 async def resolve_private_invite_link(invite_link: str) -> dict:
