@@ -1295,7 +1295,22 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_c
         file_bytes = await client.download_media(msg, in_memory=True, progress=_progress_fn)
         if file_bytes is None:
             return None
-        return file_bytes.getvalue() if hasattr(file_bytes, "getvalue") else file_bytes
+        data = file_bytes.getvalue() if hasattr(file_bytes, "getvalue") else file_bytes
+        # BUG FIX: validate against Telegram's reported file size. A dropped
+        # MTProto connection mid-download previously returned a silently
+        # truncated buffer as if it were the complete file -- the caller
+        # cached and rasterized it, and poppler failed deep into the PDF
+        # with "Document stream is empty" (looked like PDF corruption, was
+        # actually an incomplete download). Reject short reads so the
+        # caller's retry path runs instead of caching bad bytes.
+        expected = getattr(msg.document, "file_size", None) or getattr(msg.video, "file_size", None) \
+            or getattr(msg.audio, "file_size", None)
+        if expected and len(data) < expected:
+            logger.error(f"[pyrogram] Incomplete download: got {len(data)} of {expected} bytes")
+            return None
+        if not data:
+            return None
+        return data
     except Exception as e:
         logger.error(f"[pyrogram] download error: {e}")
         # Underlying MTProto TCP socket died (e.g. "socket.send() raised
@@ -1372,6 +1387,13 @@ async def download_tg_file(file_id: str, progress_cb=None,
             chat_id, message_id = cached
     if chat_id is not None and message_id is not None:
         big = await download_large_file_pyrogram(chat_id, message_id, progress_cb=progress_cb)
+        if big is None:
+            # One retry on a fresh attempt before giving up on pyrogram --
+            # covers the transient dropped-connection case instead of
+            # immediately falling to Bot API (which has a 20MB ceiling and
+            # will just fail outright on large PDFs anyway).
+            await asyncio.sleep(1.5)
+            big = await download_large_file_pyrogram(chat_id, message_id, progress_cb=progress_cb)
         if big is not None:
             return big
         logger.warning("[download_tg_file] pyrogram unavailable/failed, falling back to Bot API getFile")
@@ -1408,7 +1430,7 @@ async def download_tg_file(file_id: str, progress_cb=None,
         downloaded = 0
         buf = io.BytesIO()
         client = await _get_shared_http_client()
-        async with client.stream("GET", url, timeout=10) as r:
+        async with client.stream("GET", url, timeout=30) as r:
             if r.status_code != 200:
                 raise Exception(f"HTTP {r.status_code}")
             async for chunk in r.aiter_bytes(chunk_size=1048576):  # 1MB chunks
@@ -1421,7 +1443,23 @@ async def download_tg_file(file_id: str, progress_cb=None,
                             await res
                     except Exception:
                         pass
-        return buf.getvalue()
+        data = buf.getvalue()
+        # BUG FIX: a stream that ends early (connection drop, silent
+        # throttle-cutoff, proxy hiccup) previously returned here as if it
+        # were a complete, valid file. Callers (esp. PDF conversion) then
+        # cached and rasterized a truncated file, which poppler reports as
+        # "Document stream is empty" / "Unable to get page count" -- looking
+        # like a PDF-corruption bug when the real cause is an incomplete
+        # download. Validate against Telegram's reported total_size (when
+        # known) and reject short reads so the caller's retry/fallback path
+        # runs on a fresh attempt instead of caching bad bytes.
+        if total_size and len(data) < total_size:
+            raise Exception(
+                f"Incomplete download: got {len(data)} of {total_size} bytes"
+            )
+        if not data:
+            raise Exception("Empty download (0 bytes)")
+        return data
 
     # HF-এ (_tg_mode == "cf-proxy") direct Telegram network-level blocked —
     # আগে এখানে সবসময় প্রথমে direct try করা হতো, shared client-এর 300s
@@ -1429,13 +1467,28 @@ async def download_tg_file(file_id: str, progress_cb=None,
     # পারতো প্রতিটা /csv-তে, তারপর CF proxy fallback চলতো। এখন platform
     # অনুযায়ী সরাসরি সঠিক path-এ যাওয়া হচ্ছে — HF হলে CF proxy দিয়েই শুরু,
     # Render/direct মোডে direct API দিয়েই শুরু (যেখানে সেটা আসলে কাজ করে)।
+    async def _stream_with_retry(url: str, attempts: int = 3) -> bytes:
+        # Truncated/incomplete streams are transient (network blip, proxy
+        # cutoff) -- retry a couple times before giving up, instead of
+        # handing a partial file straight to the caller.
+        last_err = None
+        for i in range(attempts):
+            try:
+                return await _stream_download(url)
+            except Exception as e:
+                last_err = e
+                logger.warning(f"[Download] stream attempt {i+1}/{attempts} failed: {e}")
+                if i < attempts - 1:
+                    await asyncio.sleep(1 + i)
+        raise last_err
+
     if _tg_mode == "cf-proxy":
-        return await _stream_download(f"{CF_WORKER_URL}/tg-file?path={file_path}")
+        return await _stream_with_retry(f"{CF_WORKER_URL}/tg-file?path={file_path}")
     try:
-        return await _stream_download(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
+        return await _stream_with_retry(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
     except Exception as e:
         logger.warning(f"[Download] Direct Telegram failed, trying CF proxy: {e}")
-    return await _stream_download(f"{CF_WORKER_URL}/tg-file?path={file_path}")
+    return await _stream_with_retry(f"{CF_WORKER_URL}/tg-file?path={file_path}")
 
 # ============================================================
 # SUPABASE HELPERS (shared)
