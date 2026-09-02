@@ -1519,6 +1519,54 @@ async def db_load_gemini_exhausted_keys() -> dict:
     try:
         await _ensure_gemini_exhausted_table()
         rows = await d1_select("SELECT key_hash, exhausted_day FROM gemini_exhausted_keys")
+        return {r["key_hash"]: r["exhausted_day"] for r in rows}
+    except Exception as e:
+        logger.warning(f"[D1] load_gemini_exhausted_keys warn (non-fatal): {e}")
+        return {}
+
+
+# ============================================================
+# API KEY WARM-UP / FIRST-SEEN PERSISTENCE
+# Google's abuse detection flags brand-new keys that jump straight to full
+# concurrent load ("burst from a key with zero history" is itself a signal
+# per the mass-ban incident). Bot now records the very first time it ever
+# saw a given key (across ANY provider -- Gemini, Groq, etc) and gradually
+# ramps that key's allowed concurrency/rate over the following days instead
+# of dropping it straight into the normal rotation. Must be D1-persisted --
+# /tmp and in-memory dicts are wiped on every restart (routine on free-tier
+# hosting), which would silently reset every key back to warm-up = wasted
+# throttling on keys that had already earned full trust.
+# ============================================================
+async def _ensure_key_first_seen_table():
+    await _ensure_d1_table("key_first_seen",
+        "CREATE TABLE IF NOT EXISTS key_first_seen ("
+        "key_hash TEXT PRIMARY KEY, provider TEXT, first_seen_at INTEGER)")
+
+async def db_record_key_first_seen(key_hash: str, provider: str):
+    """INSERT-only (no update) -- first_seen_at must never move forward,
+    or a key's warm-up window would silently reset on every restart."""
+    try:
+        await _ensure_key_first_seen_table()
+        await d1_run(
+            "INSERT INTO key_first_seen (key_hash, provider, first_seen_at) VALUES (?1,?2,?3) "
+            "ON CONFLICT(key_hash) DO NOTHING",
+            [key_hash, provider, int(time.time())]
+        )
+    except Exception as e:
+        logger.warning(f"[D1] record_key_first_seen warn (non-fatal): {e}")
+
+async def db_load_key_first_seen() -> dict:
+    """Returns {key_hash: first_seen_at (unix ts)} for every key ever seen,
+    across all providers -- called once at startup to rehydrate the
+    in-memory warm-up map."""
+    try:
+        await _ensure_key_first_seen_table()
+        rows = await d1_select("SELECT key_hash, first_seen_at FROM key_first_seen")
+        return {r["key_hash"]: r["first_seen_at"] for r in rows}
+    except Exception as e:
+        logger.warning(f"[D1] load_key_first_seen warn (non-fatal): {e}")
+        return {}
+        rows = await d1_select("SELECT key_hash, exhausted_day FROM gemini_exhausted_keys")
         return {r["key_hash"]: r["exhausted_day"] for r in (rows or [])}
     except Exception as e:
         logger.warning(f"[D1] load_gemini_exhausted_keys warn: {e}")
