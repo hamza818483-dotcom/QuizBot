@@ -20595,10 +20595,10 @@ Output ONLY the full corrected JSON array, all fixes applied, same length/order 
                 # call1/miss-check MCQ that has NO match in verify's output,
                 # so a partial verify degradation can never make a real MCQ
                 # disappear from the final result.
-                _deduped_norm_qs = {_qbm_normalize_q(m.get("question", "")) for m in deduped}
+                _deduped_norm_qs = {_qbm_dedup_key(m) for m in deduped}
                 _backfilled = list(deduped)
                 for _c1 in call1_mcqs:
-                    _c1_norm = _qbm_normalize_q(_c1.get("question", ""))
+                    _c1_norm = _qbm_dedup_key(_c1)
                     if _c1_norm and not _qbm_is_duplicate(_c1_norm, list(_deduped_norm_qs)):
                         _c1.setdefault("_call2_provider", "backfill-call1")
                         _c1.setdefault("_provider", _c1.get("_call1_provider", "?"))
@@ -20691,13 +20691,37 @@ def _qbm_normalize_q(question: str) -> str:
     return q
 
 
+def _qbm_dedup_key(mc: dict) -> str:
+    """Dedup key combining the question stem WITH its options, not the
+    question text alone. Many real exam sets reuse the exact same bare
+    stem verbatim across multiple genuinely different MCQs -- e.g. two
+    separate spelling questions both titled just "Choose the correctly
+    spelt word:" with completely different option sets. Keying dedup on
+    question-text-only (the old behavior) treated the second one as a
+    duplicate of the first and silently dropped a real MCQ (this is what
+    caused a 23-MCQ page to come out as only 17). Folding the options into
+    the key means two MCQs only collide when BOTH the stem and the actual
+    choices match, which is what an actual duplicate extraction looks like."""
+    q = _qbm_normalize_q(mc.get("question", ""))
+    opts = []
+    for i in range(1, 6):
+        o = mc.get(f"option{i}") or mc.get(f"option_{i}") or ""
+        if o:
+            opts.append(_qbm_normalize_q(str(o)))
+    return q + "||" + "|".join(opts)
+
+
 def _qbm_is_duplicate(norm_q: str, existing_keys: list, threshold: float = 0.93) -> bool:
     """Exact match না থাকলেও near-identical প্রশ্ন (একই MCQ দুইবার extract হলে, শুধু
     সামান্য spelling/space difference) কে duplicate হিসেবে ধরার জন্য fuzzy match।
     Threshold রাখা হয়েছে খুব high (0.93) এবং substring-containment rule সরিয়ে
     ফেলা হয়েছে -- আগের 0.85 + 70%-substring rule ভিন্ন ভিন্ন MCQ-কে (একই subject/
     chapter-এর কারণে similar wording বা length থাকলে) ভুলবশত duplicate ধরে ফেলে
-    দিচ্ছিল, real MCQ silently miss হওয়ার একটা কারণ ছিল এটা।"""
+    দিচ্ছিল, real MCQ silently miss হওয়ার একটা কারণ ছিল এটা।
+    NOTE: norm_q/existing_keys here are expected to already be the combined
+    question+options key from _qbm_dedup_key, not bare question text --
+    callers should build keys with that helper so a repeated bare stem with
+    different options doesn't fuzzy-match itself as a duplicate."""
     if not norm_q:
         return True
     if norm_q in existing_keys:
@@ -20718,10 +20742,11 @@ def _qbm_dedup_list(mcqs: list) -> list:
     seen_keys: list = []
     out = []
     for mc in mcqs:
-        key_q = _qbm_normalize_q(mc.get("question", ""))
-        if not key_q:
+        q_only = _qbm_normalize_q(mc.get("question", ""))
+        if not q_only:
             logger.warning(f"[QBM dedup] dropping MCQ with empty/unparseable question text (qsn_no={mc.get('qsn_no')}, raw='{(mc.get('question') or '')[:30]}')")
             continue
+        key_q = _qbm_dedup_key(mc)
         if not _qbm_is_duplicate(key_q, seen_keys):
             seen_keys.append(key_q)
             out.append(mc)
@@ -20997,11 +21022,11 @@ def _qbm_repair_order(source_mcqs: list, verified_mcqs: list) -> list:
     never dropped."""
     if not verified_mcqs or len(verified_mcqs) != len(source_mcqs):
         return verified_mcqs  # length mismatch -> trust verify's own order, don't risk misalignment
-    source_order = [_qbm_normalize_q(mc.get("question", "")) for mc in source_mcqs]
+    source_order = [_qbm_dedup_key(mc) for mc in source_mcqs]
     by_key = {}
     leftovers = []
     for mc in verified_mcqs:
-        key = _qbm_normalize_q(mc.get("question", ""))
+        key = _qbm_dedup_key(mc)
         if key and key not in by_key:
             by_key[key] = mc
         else:
@@ -26197,7 +26222,7 @@ async def process_qbm_pages(
             if _qbm_seen_q_keys is not None:
                 _kept = []
                 for m in mcqs:
-                    _key = _qbm_normalize_q(m.get("question", ""))
+                    _key = _qbm_dedup_key(m)
                     if _key and _qbm_is_duplicate(_key, _qbm_seen_q_keys):
                         continue
                     if _key:
