@@ -32246,6 +32246,15 @@ async def startup():
     except Exception as e:
         logger.warning(f"[App] Gemini exhausted-key D1 rehydrate failed (non-fatal, starts fresh): {e}")
 
+    # Rehydrate each key's first-seen (warm-up) timestamp from D1 so newly
+    # onboarded keys keep ramping up correctly across restarts instead of
+    # looking "brand new" again every time the bot restarts.
+    try:
+        from pdf_handler import load_key_warmup_state_from_d1
+        await load_key_warmup_state_from_d1()
+    except Exception as e:
+        logger.warning(f"[App] Gemini key warm-up D1 rehydrate failed (non-fatal): {e}")
+
     try:
         if sb is not None:
             await sb_exec(lambda: sb.table("pdf_users").select("user_id").limit(1).execute(), timeout=10)

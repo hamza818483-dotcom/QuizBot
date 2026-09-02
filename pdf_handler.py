@@ -84,6 +84,28 @@ async def load_gemini_exhausted_keys_from_d1():
     except Exception as e:
         logger.warning(f"[Gemini] load_gemini_exhausted_keys_from_d1 failed (non-fatal, starts fresh): {e}")
 
+async def load_key_warmup_state_from_d1():
+    """Call once at bot startup, after key_rotator is constructed. Rehydrates
+    each key's first-seen timestamp from D1 so the warm-up clock survives a
+    restart -- without this, every restart would make every key look
+    'brand new' again and re-throttle keys that had already earned full
+    trust days ago."""
+    try:
+        from core import db_load_key_first_seen
+        rows = await db_load_key_first_seen()  # {key_hash: first_seen_at}
+        restored = 0
+        for key in key_rotator.keys:
+            h = _gemini_key_hash(key)
+            ts = rows.get(h)
+            if ts:
+                key_rotator._key_first_seen[key] = ts
+                restored += 1
+        still_new = [k for k in key_rotator.keys if key_rotator.is_warming_up(k)]
+        logger.info(f"[Gemini] Warm-up state restored for {restored}/{len(key_rotator.keys)} key(s) from D1; {len(still_new)} key(s) still inside the {GeminiKeyRotator.WARMUP_DAYS}-day warm-up window")
+    except Exception as e:
+        logger.warning(f"[Gemini] load_key_warmup_state_from_d1 failed (non-fatal, treats all keys as warmed-up): {e}")
+
+
 def _is_gemini_key_exhausted_today(key: str) -> bool:
     """Daily quota-exhaustion memory for Gemini free-tier keys
     (20 requests/day/model). A 60s cooldown is pointless for a daily quota —
@@ -229,6 +251,19 @@ class GeminiKeyRotator:
     ACCOUNT_ERROR_CIRCUIT_WINDOW = 300  # seconds
     ACCOUNT_ERROR_CIRCUIT_COOLDOWN = 1800  # 30 min full-account pause once tripped
 
+    # ── NEW-KEY WARM-UP ──────────────────────────────────────────────────
+    # A brand-new key jumping straight into full rotation load (same RPM,
+    # same concurrency as a key with months of history) is itself a signal
+    # per the mass-ban review -- Google's abuse detection appears to weigh
+    # a key/project's usage history, not just instantaneous rate. Any key
+    # whose first-ever-seen timestamp is within WARMUP_DAYS gets a reduced
+    # RPM ceiling and is excluded from the account concurrency pool,
+    # ramping linearly up to full trust by day WARMUP_DAYS.
+    WARMUP_DAYS = 5
+    WARMUP_DAY0_RPM_FRACTION = 0.2  # day 0: only 20% of RPM_PER_KEY allowed
+    WARMUP_MAX_CONCURRENT = 1  # a warming-up key never gets more than 1
+    # simultaneous in-flight call, regardless of ACCOUNT_CONCURRENT_CAP.
+
     def __init__(self):
         self.keys = []
         self.current = 0
@@ -245,7 +280,45 @@ class GeminiKeyRotator:
         self._global_sem = asyncio.Semaphore(self.GLOBAL_CONCURRENT_CAP)
         self._global_lock = asyncio.Lock()
         self._last_global_call = 0.0
+        self._key_first_seen = {}  # key -> unix ts first observed (D1-backed, rehydrated at startup)
+        self._key_inflight = {}  # key -> current in-flight count (used only during warm-up)
         self._load_keys()
+
+    def warmup_days_elapsed(self, key: str) -> float:
+        """Days since this key was first seen. Returns WARMUP_DAYS (i.e.
+        'fully warmed up') if first-seen is unknown, so a key never gets
+        throttled just because D1 rehydrate hasn't run/loaded yet -- safer
+        default is normal treatment, not silently starving an old key."""
+        first_seen = self._key_first_seen.get(key)
+        if not first_seen:
+            return float(self.WARMUP_DAYS)
+        return (time.time() - first_seen) / 86400.0
+
+    def is_warming_up(self, key: str) -> bool:
+        return self.warmup_days_elapsed(key) < self.WARMUP_DAYS
+
+    def warmup_rpm_limit(self, key: str) -> int:
+        """Linearly ramps from WARMUP_DAY0_RPM_FRACTION*RPM_PER_KEY on day 0
+        up to the full RPM_PER_KEY by WARMUP_DAYS."""
+        days = self.warmup_days_elapsed(key)
+        if days >= self.WARMUP_DAYS:
+            return self.RPM_PER_KEY
+        progress = max(0.0, days) / self.WARMUP_DAYS  # 0.0 .. 1.0
+        fraction = self.WARMUP_DAY0_RPM_FRACTION + progress * (1.0 - self.WARMUP_DAY0_RPM_FRACTION)
+        return max(1, int(self.RPM_PER_KEY * fraction))
+
+    def note_key_seen(self, key: str):
+        """Marks a key as seen right now if it has never been recorded
+        before (in-memory + fire-and-forget D1 persist). Safe to call on
+        every use -- D1 insert is INSERT...ON CONFLICT DO NOTHING so this
+        never moves an existing first-seen date forward."""
+        if key not in self._key_first_seen:
+            self._key_first_seen[key] = time.time()
+        try:
+            from core import db_record_key_first_seen
+            asyncio.create_task(db_record_key_first_seen(_gemini_key_hash(key), "gemini"))
+        except Exception as e:
+            logger.warning(f"[Gemini] note_key_seen D1 persist warn (non-fatal): {e}")
 
     def _prune_account_daily(self, acct: str, now: float) -> int:
         times = self._account_daily_calls.get(acct)
@@ -401,8 +474,21 @@ class GeminiKeyRotator:
             self.rotator = rotator
             self.key = key
             self._got_account_slot = False
+            self._got_warmup_slot = False
         async def __aenter__(self):
             r = self.rotator
+            # Warm-up concurrency gate: a still-warming key is capped at
+            # WARMUP_MAX_CONCURRENT in-flight calls regardless of the
+            # account/global caps, so a brand-new key never gets swept into
+            # a multi-call burst on its very first days of use.
+            if self.key is not None and r.is_warming_up(self.key):
+                for _ in range(30):  # ~3s max wait before giving up the gate
+                    n = r._key_inflight.get(self.key, 0)
+                    if n < r.WARMUP_MAX_CONCURRENT:
+                        r._key_inflight[self.key] = n + 1
+                        self._got_warmup_slot = True
+                        break
+                    await asyncio.sleep(0.1)
             await r._global_sem.acquire()
             async with r._global_lock:
                 now = time.time()
@@ -439,6 +525,9 @@ class GeminiKeyRotator:
         async def __aexit__(self, exc_type, exc, tb):
             if self._got_account_slot:
                 self.rotator.release_account_slot(self.key)
+            if self._got_warmup_slot:
+                n = self.rotator._key_inflight.get(self.key, 0)
+                self.rotator._key_inflight[self.key] = max(0, n - 1)
             self.rotator._global_sem.release()
             return False
 
@@ -470,6 +559,7 @@ class GeminiKeyRotator:
         window reflects real usage (independent of mark_healthy/rate_limited)."""
         self._call_times.setdefault(key, []).append(time.time())
         self.record_account_call(key)
+        self.note_key_seen(key)
 
     def get_key(self):
         if not self.keys:
@@ -517,8 +607,8 @@ class GeminiKeyRotator:
         pool = not_exhausted if not_exhausted else live_keys
         cooled = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
         cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
-        under_rpm = [k for k in cooled if self._prune_and_count(k, now) < self.RPM_PER_KEY]
-        over_rpm = [k for k in cooled if self._prune_and_count(k, now) >= self.RPM_PER_KEY]
+        under_rpm = [k for k in cooled if self._prune_and_count(k, now) < self.warmup_rpm_limit(k)]
+        over_rpm = [k for k in cooled if self._prune_and_count(k, now) >= self.warmup_rpm_limit(k)]
         # Daily account-volume cap: within the under-rpm tier, keys whose
         # account has already made ACCOUNT_DAILY_CALL_CAP+ calls today are
         # deprioritized (not blocked) below keys on less-used accounts, so
@@ -567,7 +657,7 @@ class GeminiKeyRotator:
         not_exhausted = {k for k in live_keys if not _is_gemini_key_exhausted_today(k)}
         pool = not_exhausted if not_exhausted else set(live_keys)
         cooled = {k for k in pool if self._cooldown_until.get(k, 0) <= now}
-        under_rpm = {k for k in cooled if self._prune_and_count(k, now) < self.RPM_PER_KEY}
+        under_rpm = {k for k in cooled if self._prune_and_count(k, now) < self.warmup_rpm_limit(k)}
         under_cap = {k for k in under_rpm if not self.account_over_daily_cap(k)}
         healthy_set = under_cap - circuit_open
         # base's own prefix IS the healthy tier (see ordered_keys), so
