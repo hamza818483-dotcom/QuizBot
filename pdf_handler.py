@@ -106,6 +106,40 @@ async def load_key_warmup_state_from_d1():
         logger.warning(f"[Gemini] load_key_warmup_state_from_d1 failed (non-fatal, treats all keys as warmed-up): {e}")
 
 
+async def load_banned_keys_from_d1():
+    """Call once at bot startup, after key_rotator is constructed. The local
+    /tmp ban file is wiped on every restart (routine on free-tier hosting) --
+    this rehydrates from D1 so a permanently-banned key (403 suspended, 401
+    invalid/deleted service account) doesn't silently come back into
+    rotation after a restart and get retried against an already-flagged
+    Google account."""
+    try:
+        from core import db_load_gemini_banned_keys
+        rows = await db_load_gemini_banned_keys()  # {key_hash: {reason, banned_at, key_age_days_at_ban}}
+        if not rows:
+            return
+        by_hash = {_gemini_key_hash(k): k for k in key_rotator.keys}
+        restored = 0
+        for h, meta in rows.items():
+            key = by_hash.get(h)
+            if not key:
+                continue  # key no longer configured (removed from env) -- nothing to re-ban
+            key_rotator._banned.add(key)
+            if meta.get("reason"):
+                key_rotator._ban_reasons[key] = meta["reason"]
+            key_rotator._ban_meta[key] = {"banned_at": meta.get("banned_at"),
+                                           "key_age_days_at_ban": meta.get("key_age_days_at_ban")}
+            restored += 1
+        if restored:
+            key_rotator.keys = [k for k in key_rotator.keys if k not in key_rotator._banned]
+            _save_banned_keys(key_rotator._banned)
+            _save_banned_reasons(key_rotator._ban_reasons)
+            _save_ban_meta(key_rotator._ban_meta)
+            logger.warning(f"[Gemini] Re-applied {restored} permanent ban(s) from D1 after restart ({len(key_rotator.keys)} usable keys remain)")
+    except Exception as e:
+        logger.warning(f"[Gemini] load_banned_keys_from_d1 failed (non-fatal, relies on local /tmp file only): {e}")
+
+
 def _is_gemini_key_exhausted_today(key: str) -> bool:
     """Daily quota-exhaustion memory for Gemini free-tier keys
     (20 requests/day/model). A 60s cooldown is pointless for a daily quota —
@@ -909,6 +943,11 @@ class GeminiKeyRotator:
         _save_banned_keys(self._banned)
         age_str = f", key was {age_days:.1f}d old" if age_days is not None else ""
         logger.error(f"[Gemini] Key {key[:12]}... permanently banned and removed from rotation ({len(self.keys)} keys remain){age_str}" + (f" — reason: {reason}" if reason else ""))
+        try:
+            from core import db_mark_gemini_key_banned
+            asyncio.create_task(db_mark_gemini_key_banned(_gemini_key_hash(key), reason, int(now), age_days))
+        except Exception as e:
+            logger.warning(f"[Gemini] D1 ban-persist scheduling failed (non-fatal, /tmp file still authoritative until restart): {e}")
 
     def mark_healthy(self, key: str):
         self._cooldown_until.pop(key, None)

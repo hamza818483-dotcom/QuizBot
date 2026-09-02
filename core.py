@@ -1566,10 +1566,47 @@ async def db_load_key_first_seen() -> dict:
     except Exception as e:
         logger.warning(f"[D1] load_key_first_seen warn (non-fatal): {e}")
         return {}
-        rows = await d1_select("SELECT key_hash, exhausted_day FROM gemini_exhausted_keys")
-        return {r["key_hash"]: r["exhausted_day"] for r in (rows or [])}
+
+
+# ============================================================
+# GEMINI PERMANENT-BAN PERSISTENCE
+# mark_banned() previously wrote only to /tmp/atlas_banned_gemini_*.json,
+# which is wiped on every restart (routine on free-tier hosting). A
+# restart would silently un-ban a permanently-suspended/invalid key, so
+# the bot would immediately retry it -- wasted round-trips at best, and
+# repeat traffic hitting an already-flagged Google account at worst
+# (exactly the kind of signal the rest of this safety layer exists to
+# avoid). D1-persisting means a ban survives restarts just like
+# first-seen/exhausted-key state already does.
+# ============================================================
+async def _ensure_gemini_banned_table():
+    await _ensure_d1_table("gemini_banned_keys",
+        "CREATE TABLE IF NOT EXISTS gemini_banned_keys ("
+        "key_hash TEXT PRIMARY KEY, reason TEXT, banned_at INTEGER, key_age_days_at_ban REAL)")
+
+async def db_mark_gemini_key_banned(key_hash: str, reason: str = "", banned_at: int = None, key_age_days_at_ban: float = None):
+    try:
+        await _ensure_gemini_banned_table()
+        await d1_run(
+            "INSERT INTO gemini_banned_keys (key_hash, reason, banned_at, key_age_days_at_ban) VALUES (?1,?2,?3,?4) "
+            "ON CONFLICT(key_hash) DO UPDATE SET reason=excluded.reason",
+            [key_hash, (reason or "")[:200], banned_at or int(time.time()), key_age_days_at_ban]
+        )
     except Exception as e:
-        logger.warning(f"[D1] load_gemini_exhausted_keys warn: {e}")
+        logger.warning(f"[D1] mark_gemini_key_banned warn (non-fatal): {e}")
+
+async def db_load_gemini_banned_keys() -> dict:
+    """Returns {key_hash: {"reason": str, "banned_at": int, "key_age_days_at_ban": float|None}}
+    for every permanently-banned key -- called once at startup to rehydrate
+    pdf_handler.py's in-memory _banned/_ban_reasons/_ban_meta so a restart
+    doesn't un-ban anything."""
+    try:
+        await _ensure_gemini_banned_table()
+        rows = await d1_select("SELECT key_hash, reason, banned_at, key_age_days_at_ban FROM gemini_banned_keys")
+        return {r["key_hash"]: {"reason": r.get("reason", ""), "banned_at": r.get("banned_at"),
+                                 "key_age_days_at_ban": r.get("key_age_days_at_ban")} for r in rows}
+    except Exception as e:
+        logger.warning(f"[D1] load_gemini_banned_keys warn (non-fatal): {e}")
         return {}
 
 async def auto_link_map_set(label: str, url: str, context: str = ""):
