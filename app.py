@@ -17508,18 +17508,27 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
         if missing_nums:
             logger.warning(f"[UNMESH verify] missing qsn_no {sorted(missing_nums)} — targeted recovery pass")
             for _retry_attempt in range(3):
+                logger.warning(f"[UNMESH verify] recovery loop iteration {_retry_attempt+1}/3 starting, missing_nums={sorted(missing_nums)}")
                 if not missing_nums:
+                    logger.warning(f"[UNMESH verify] recovery loop breaking early at iteration {_retry_attempt+1}: missing_nums already empty")
                     break
                 try:
                     recovery_prompt = _build_missing_qsn_recovery_prompt(list(missing_nums), mcqs)
                     recovery_txt = await _qbm_gemini_raw_only(img, recovery_prompt)
                     retry_mcqs = _qbm_parse_json(recovery_txt) if recovery_txt else []
+                    logger.warning(f"[UNMESH verify] recovery iteration {_retry_attempt+1} got {len(retry_mcqs)} MCQ(s) back from Gemini")
                 except Exception as e:
                     logger.warning(f"[UNMESH verify] targeted recovery attempt {_retry_attempt+1} failed: {e}")
                     retry_mcqs = []
                 if not retry_mcqs:
                     # fall back to a full blind re-extraction as a second chance
-                    retry_mcqs = await _run_extract_call(bypass_cache=True)
+                    logger.warning(f"[UNMESH verify] recovery iteration {_retry_attempt+1}: targeted prompt returned nothing, trying full blind re-extraction")
+                    try:
+                        retry_mcqs = await _run_extract_call(bypass_cache=True)
+                        logger.warning(f"[UNMESH verify] recovery iteration {_retry_attempt+1}: blind re-extraction got {len(retry_mcqs)} MCQ(s)")
+                    except Exception as e:
+                        logger.warning(f"[UNMESH verify] recovery iteration {_retry_attempt+1}: blind re-extraction ALSO failed: {e}")
+                        retry_mcqs = []
                 retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
                 recovered = set()
                 for n in missing_nums:
@@ -17528,8 +17537,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
                         by_qsn[n] = retry_got[n]
                         recovered.add(n)
                 missing_nums -= recovered
-                if missing_nums:
-                    logger.warning(f"[UNMESH verify] still missing qsn_no {sorted(missing_nums)} after attempt {_retry_attempt+1}")
+                logger.warning(f"[UNMESH verify] recovery iteration {_retry_attempt+1} done: recovered={sorted(recovered) if recovered else 'none'}, still missing={sorted(missing_nums) if missing_nums else 'none'}")
             if missing_nums:
                 logger.error(f"[UNMESH verify] gave up recovering qsn_no {sorted(missing_nums)} after 3 targeted Gemini attempts — trying a different model (Groq) as last resort")
                 # LAST-RESORT CROSS-MODEL FALLBACK: 3 Gemini attempts (Call1
