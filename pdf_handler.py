@@ -249,7 +249,18 @@ class GeminiKeyRotator:
     # entirely" rather than continuing to round-robin its other keys, which
     # previously kept hitting an account that was already being penalized.
     ACCOUNT_ERROR_CIRCUIT_WINDOW = 300  # seconds
-    ACCOUNT_ERROR_CIRCUIT_COOLDOWN = 1800  # 30 min full-account pause once tripped
+    ACCOUNT_ERROR_CIRCUIT_COOLDOWN = 1800  # 30 min base pause on 1st trip
+
+    # ── EXPONENTIAL BACKOFF ON REPEAT TRIPS ─────────────────────────────
+    # A single trip is treated as noise (transient/network). An account
+    # that keeps re-tripping soon after each cooldown lifts is a stronger
+    # signal something is actually wrong with it, so each repeat trip
+    # (within CIRCUIT_BACKOFF_RESET_WINDOW of the previous one lifting)
+    # multiplies the cooldown, up to a cap. A long clean stretch resets
+    # the level back to 0 -- this is NOT a permanent downgrade.
+    CIRCUIT_BACKOFF_MULTIPLIER = 4  # 30min -> 2hr -> 8hr (capped)
+    CIRCUIT_BACKOFF_MAX_COOLDOWN = 21600  # 6hr hard cap
+    CIRCUIT_BACKOFF_RESET_WINDOW = 86400  # 24hr clean (no new trip) resets level to 0
 
     # ── NEW-KEY WARM-UP ──────────────────────────────────────────────────
     # A brand-new key jumping straight into full rotation load (same RPM,
@@ -296,6 +307,8 @@ class GeminiKeyRotator:
         self._account_daily_calls = {}  # account_id -> list[float] call timestamps (rolling 24h)
         self._account_error_times = {}  # account_id -> list[float] recent error timestamps
         self._account_circuit_until = {}  # account_id -> epoch time when pause lifts
+        self._account_backoff_level = {}  # account_id -> consecutive-trip count (resets after a clean window)
+        self._account_last_trip_lifted = {}  # account_id -> epoch time the last cooldown lifted
         self._global_sem = asyncio.Semaphore(self.GLOBAL_CONCURRENT_CAP)
         self._global_lock = asyncio.Lock()
         self._last_global_call = 0.0
@@ -399,14 +412,28 @@ class GeminiKeyRotator:
         times.append(now)
         self._account_error_times[acct] = times
         if len(times) >= self.ACCOUNT_ERROR_CIRCUIT_THRESHOLD:
-            self._account_circuit_until[acct] = now + self.ACCOUNT_ERROR_CIRCUIT_COOLDOWN
-            logger.error(f"[Gemini] Account circuit breaker TRIPPED for {acct}: {len(times)} errors in {self.ACCOUNT_ERROR_CIRCUIT_WINDOW}s -- pausing this account's keys for {self.ACCOUNT_ERROR_CIRCUIT_COOLDOWN}s")
+            # Decide backoff level: if the previous cooldown lifted recently
+            # (within CIRCUIT_BACKOFF_RESET_WINDOW), this is a repeat trip --
+            # escalate. Otherwise treat as a fresh, isolated incident.
+            last_lifted = self._account_last_trip_lifted.get(acct, 0)
+            if last_lifted and (now - last_lifted) < self.CIRCUIT_BACKOFF_RESET_WINDOW:
+                level = self._account_backoff_level.get(acct, 0) + 1
+            else:
+                level = 0  # clean stretch since last trip -- reset to base
+            self._account_backoff_level[acct] = level
+            cooldown = min(
+                self.ACCOUNT_ERROR_CIRCUIT_COOLDOWN * (self.CIRCUIT_BACKOFF_MULTIPLIER ** level),
+                self.CIRCUIT_BACKOFF_MAX_COOLDOWN,
+            )
+            self._account_circuit_until[acct] = now + cooldown
+            logger.error(f"[Gemini] Account circuit breaker TRIPPED for {acct}: {len(times)} errors in {self.ACCOUNT_ERROR_CIRCUIT_WINDOW}s -- backoff level {level}, pausing this account's keys for {cooldown}s")
 
     def account_circuit_open(self, key: str) -> bool:
         acct = self.account_of(key)
         until = self._account_circuit_until.get(acct, 0)
         if until and time.time() >= until:
             del self._account_circuit_until[acct]
+            self._account_last_trip_lifted[acct] = time.time()  # marks when the clean-window clock starts
             return False
         return bool(until)
 

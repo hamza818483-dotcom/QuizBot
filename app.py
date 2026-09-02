@@ -2991,7 +2991,14 @@ class GroqKeyRotator:
     # errors on ONE key pause it fully) with no false cross-key grouping.
     ACCOUNT_ERROR_CIRCUIT_THRESHOLD = 4
     ACCOUNT_ERROR_CIRCUIT_WINDOW = 300  # seconds
-    ACCOUNT_ERROR_CIRCUIT_COOLDOWN = 1800  # 30 min pause once tripped
+    ACCOUNT_ERROR_CIRCUIT_COOLDOWN = 1800  # 30 min base pause on 1st trip
+
+    # Exponential backoff on repeat trips (same rationale as GeminiKeyRotator):
+    # one trip is treated as noise; re-tripping soon after a cooldown lifts
+    # escalates the pause, capped, and resets after a long clean stretch.
+    CIRCUIT_BACKOFF_MULTIPLIER = 4  # 30min -> 2hr -> 8hr (capped)
+    CIRCUIT_BACKOFF_MAX_COOLDOWN = 21600  # 6hr hard cap
+    CIRCUIT_BACKOFF_RESET_WINDOW = 86400  # 24hr clean resets level to 0
 
     def __init__(self):
         self.keys = []
@@ -3000,6 +3007,8 @@ class GroqKeyRotator:
         self._banned = _load_groq_banned_keys()
         self._account_error_times = {}  # key(as account) -> list[float] recent error timestamps
         self._account_circuit_until = {}  # key(as account) -> epoch time when pause lifts
+        self._account_backoff_level = {}  # key -> consecutive-trip count (resets after a clean window)
+        self._account_last_trip_lifted = {}  # key -> epoch time the last cooldown lifted
         self._load_keys()
 
     def account_of(self, key: str) -> str:
@@ -3021,13 +3030,24 @@ class GroqKeyRotator:
         times.append(now)
         self._account_error_times[key] = times
         if len(times) >= self.ACCOUNT_ERROR_CIRCUIT_THRESHOLD:
-            self._account_circuit_until[key] = now + self.ACCOUNT_ERROR_CIRCUIT_COOLDOWN
-            logger.error(f"[Groq] Account circuit breaker TRIPPED for key {key[:12]}...: {len(times)} errors in {self.ACCOUNT_ERROR_CIRCUIT_WINDOW}s -- pausing for {self.ACCOUNT_ERROR_CIRCUIT_COOLDOWN}s")
+            last_lifted = self._account_last_trip_lifted.get(key, 0)
+            if last_lifted and (now - last_lifted) < self.CIRCUIT_BACKOFF_RESET_WINDOW:
+                level = self._account_backoff_level.get(key, 0) + 1
+            else:
+                level = 0
+            self._account_backoff_level[key] = level
+            cooldown = min(
+                self.ACCOUNT_ERROR_CIRCUIT_COOLDOWN * (self.CIRCUIT_BACKOFF_MULTIPLIER ** level),
+                self.CIRCUIT_BACKOFF_MAX_COOLDOWN,
+            )
+            self._account_circuit_until[key] = now + cooldown
+            logger.error(f"[Groq] Account circuit breaker TRIPPED for key {key[:12]}...: {len(times)} errors in {self.ACCOUNT_ERROR_CIRCUIT_WINDOW}s -- backoff level {level}, pausing for {cooldown}s")
 
     def account_circuit_open(self, key: str) -> bool:
         until = self._account_circuit_until.get(key, 0)
         if until and time.time() >= until:
             del self._account_circuit_until[key]
+            self._account_last_trip_lifted[key] = time.time()
             return False
         return bool(until)
 
