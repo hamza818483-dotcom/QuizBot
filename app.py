@@ -17272,16 +17272,27 @@ def _build_missing_qsn_recovery_prompt(missing_nums: list, known_mcqs: list) -> 
         anchor_lines.append(f"- qsn_no {n}: located {anchor}")
     return (
         "A previous extraction of this page MISSED the following specific MCQs. "
-        "They ARE visible on the page — look carefully at exactly these positions:\n"
+        "They ARE definitely visible and printed on this page — this is confirmed, "
+        "not a guess. Do NOT return an empty result for any of these unless you have "
+        "scanned the ENTIRE page (both columns, top to bottom) and are certain the "
+        "number truly does not exist. Look carefully at exactly these positions:\n"
         + "\n".join(anchor_lines) +
-        "\n\nExtract ONLY these missing MCQs (do not re-extract ones already found). "
+        "\n\nCommon reasons a real MCQ gets missed on the first pass: it sits in a "
+        "dense two-column layout and gets skipped switching columns; its printed "
+        "serial number is small/faint and gets misread as part of the previous "
+        "question; or its question stem is short and looks like it could be a repeat "
+        "of another question on the page even though the OPTIONS are completely "
+        "different (e.g. two separate MCQs both titled just \"Choose the correct "
+        "spelling\" or \"কোন বানানটি শুদ্ধ?\" with different answer choices are TWO "
+        "separate real MCQs, not a duplicate — extract both).\n\n"
+        "Extract ONLY these missing MCQs (do not re-extract ones already found). "
         "For each, give qsn_no, question, options (array of 4), answer (A/B/C/D), "
         "explanation (if visible), and topic_hint (nearest heading above it, if any).\n"
         "Output ONLY a JSON array, nothing else:\n"
         '[{"qsn_no": <int>, "question": "...", "options": ["...","...","...","..."], '
         '"answer": "A", "explanation": "", "topic_hint": ""}]\n'
-        "If a listed qsn_no genuinely does not exist on this page (was a false miss), "
-        "simply omit it from the array."
+        "Only omit a listed qsn_no from your output if, after this careful re-check, "
+        "you are truly certain it does not exist on the page."
     )
 
 
