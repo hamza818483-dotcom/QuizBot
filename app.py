@@ -16890,14 +16890,17 @@ def _check_segment_topic_consistency(mcqs: list, context: str = "", forced_bound
     return mcqs
 
 
-def _check_segment_serial_order(mcqs: list, context: str = "") -> list:
+def _check_segment_serial_order(mcqs: list, context: str = "", page_num=None) -> list:
     """CODE-LEVEL CHECK (used at both Call1 and Call2 stages, alongside the
     topic-consistency check): within each segment (run of MCQs from one
     qsn_no==1 up to the next qsn_no==1), verifies qsn_no forms a clean
     ascending sequence in list order — no jumbled/out-of-order entries and
     no gap (a missing serial). Does not reorder or invent MCQs (that's
     Call2's missing-recovery job) — this only LOGS what it finds so gaps/
-    jumbles are visible per-stage instead of silently slipping through."""
+    jumbles are visible per-stage instead of silently slipping through.
+    page_num (when passed) is included in the log line so a gap that
+    SURVIVES all recovery attempts (i.e. still logged at the final Call2
+    stage) can be traced back to the exact page it happened on."""
     if not mcqs:
         return mcqs
     segments = []
@@ -16910,19 +16913,20 @@ def _check_segment_serial_order(mcqs: list, context: str = "") -> list:
     if cur:
         segments.append(cur)
 
+    _page_tag = f" page={page_num}" if page_num is not None else ""
     for seg in segments:
         nums = [m.get("qsn_no") for m in seg if isinstance(m.get("qsn_no"), int)]
         if len(nums) < 2:
             continue
         if nums != sorted(nums):
             logger.warning(
-                f"[TOPIC serial-order{(' ' + context) if context else ''}] "
+                f"[TOPIC serial-order{(' ' + context) if context else ''}]{_page_tag} "
                 f"segment qsn {nums[0]}-{nums[-1]} is OUT OF ORDER in list: {nums}"
             )
         gaps = [n for n in range(nums[0], nums[-1] + 1) if n not in set(nums)]
         if gaps:
             logger.warning(
-                f"[TOPIC serial-order{(' ' + context) if context else ''}] "
+                f"[TOPIC serial-order{(' ' + context) if context else ''}]{_page_tag} "
                 f"segment qsn {nums[0]}-{nums[-1]} MISSING serial(s): {gaps}"
             )
     return mcqs
@@ -17631,7 +17635,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
 
         mcqs = _qbm_dedup_list(mcqs)
         mcqs = _check_segment_topic_consistency(mcqs, context="UNMESH-Call2")
-        mcqs = _check_segment_serial_order(mcqs, context="UNMESH-Call2")
+        mcqs = _check_segment_serial_order(mcqs, context="UNMESH-Call2-FINAL", page_num=(cache_key[1] if cache_key else None))
     except Exception as e:
         logger.warning(f"[UNMESH verify] audit pass failed, skipping: {e}")
 
