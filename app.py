@@ -17530,7 +17530,41 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
                 if missing_nums:
                     logger.warning(f"[UNMESH verify] still missing qsn_no {sorted(missing_nums)} after attempt {_retry_attempt+1}")
             if missing_nums:
-                logger.error(f"[UNMESH verify] gave up recovering qsn_no {sorted(missing_nums)} after 3 targeted attempts")
+                logger.error(f"[UNMESH verify] gave up recovering qsn_no {sorted(missing_nums)} after 3 targeted Gemini attempts — trying a different model (Groq) as last resort")
+                # LAST-RESORT CROSS-MODEL FALLBACK: 3 Gemini attempts (Call1
+                # + 2 targeted retries, sometimes across different Gemini
+                # ACCOUNTS via key rotation) still failed for these exact
+                # qsn_no. Switching keys/accounts doesn't help here because
+                # the underlying model doing the actual image-reading is
+                # the SAME Gemini model every time -- it isn't a quota/rate
+                # problem, it's that specific model repeatedly failing to
+                # read that specific spot on the page (dense two-column
+                # layout, or a short question stem it's mistaking for a
+                # duplicate of an earlier one). A genuinely different model
+                # (Groq/qwen) gets an independent "second pair of eyes" on
+                # exactly those positions, without touching Call1's
+                # Gemini-only design for the normal (non-failing) path.
+                try:
+                    groq_recovery_prompt = _build_missing_qsn_recovery_prompt(list(missing_nums), mcqs)
+                    groq_txt = await _gen_groq_raw_text(img, groq_recovery_prompt)
+                    groq_mcqs = _qbm_parse_json(groq_txt) if groq_txt else []
+                except Exception as e:
+                    logger.warning(f"[UNMESH verify] Groq last-resort recovery failed: {e}")
+                    groq_mcqs = []
+                groq_got = {m.get("qsn_no"): m for m in groq_mcqs if isinstance(m.get("qsn_no"), int)}
+                recovered = set()
+                for n in missing_nums:
+                    if n in groq_got:
+                        mc = groq_got[n]
+                        mc["_provider"] = "groq-last-resort"
+                        mcqs.append(mc)
+                        by_qsn[n] = mc
+                        recovered.add(n)
+                if recovered:
+                    logger.warning(f"[UNMESH verify] Groq last-resort recovered qsn_no {sorted(recovered)}")
+                missing_nums -= recovered
+                if missing_nums:
+                    logger.error(f"[UNMESH verify] still missing qsn_no {sorted(missing_nums)} after Gemini + Groq last-resort — genuinely giving up")
 
             # FINAL RE-CHECK after recovery — a recovery pass can add MCQs
             # with a topic_hint that reshapes segment boundaries again (or
