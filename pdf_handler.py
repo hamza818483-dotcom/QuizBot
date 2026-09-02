@@ -228,6 +228,16 @@ class GeminiKeyRotator:
     # same reason: spreads call-starts out in time so concurrent load never
     # looks like an instantaneous fan-out burst.
 
+    DISTINCT_ACCOUNT_CONCURRENT_CAP = 3  # hard ceiling on how many DIFFERENT
+    # accounts can have an in-flight call at the same instant, independent of
+    # GLOBAL_CONCURRENT_CAP (which only bounds total call count, not account
+    # diversity). All keys/accounts share one egress IP here, so N different
+    # "accounts" firing simultaneously from that IP is itself a correlatable
+    # fingerprint (looks like one operator running N accounts in parallel,
+    # not N independent users). Capping simultaneous distinct accounts keeps
+    # the live account-set small at any given instant even with many
+    # accounts configured overall.
+
     ACCOUNT_MIN_GAP_SECONDS = 1.0  # minimum spacing between call-starts on
     # the SAME account, tighter than the global gap. Two different accounts
     # can still fire close together (global gap covers that), but repeated
@@ -309,6 +319,8 @@ class GeminiKeyRotator:
         self._account_circuit_until = {}  # account_id -> epoch time when pause lifts
         self._account_backoff_level = {}  # account_id -> consecutive-trip count (resets after a clean window)
         self._account_last_trip_lifted = {}  # account_id -> epoch time the last cooldown lifted
+        self._distinct_accounts_inflight = set()  # account_ids currently holding a slot
+        self._distinct_account_cond = None  # asyncio.Condition, created lazily (needs running loop)
         self._global_sem = asyncio.Semaphore(self.GLOBAL_CONCURRENT_CAP)
         self._global_lock = asyncio.Lock()
         self._last_global_call = 0.0
@@ -544,12 +556,41 @@ class GeminiKeyRotator:
         n = self._account_inflight.get(acct, 0)
         self._account_inflight[acct] = max(0, n - 1)
 
+    def _get_distinct_account_cond(self) -> asyncio.Condition:
+        if self._distinct_account_cond is None:
+            self._distinct_account_cond = asyncio.Condition()
+        return self._distinct_account_cond
+
+    async def acquire_distinct_account_slot(self, acct: str):
+        """Blocks until fewer than DISTINCT_ACCOUNT_CONCURRENT_CAP distinct
+        accounts are currently in-flight, OR this account already holds a
+        slot (re-entrant per account -- multiple calls on the SAME account
+        don't count against account diversity, only different accounts do).
+        Caller must pair with release_distinct_account_slot in a finally."""
+        cond = self._get_distinct_account_cond()
+        async with cond:
+            while (acct not in self._distinct_accounts_inflight
+                   and len(self._distinct_accounts_inflight) >= self.DISTINCT_ACCOUNT_CONCURRENT_CAP):
+                await cond.wait()
+            self._distinct_accounts_inflight.add(acct)
+
+    async def release_distinct_account_slot(self, acct: str):
+        cond = self._get_distinct_account_cond()
+        async with cond:
+            # Only drop the account once nothing else on it is still
+            # in-flight -- tracked via _account_inflight (already maintained
+            # by acquire_account_slot/release_account_slot).
+            if self._account_inflight.get(acct, 0) <= 0:
+                self._distinct_accounts_inflight.discard(acct)
+            cond.notify_all()
+
     class _ThrottleGuard:
         def __init__(self, rotator, key=None):
             self.rotator = rotator
             self.key = key
             self._got_account_slot = False
             self._got_warmup_slot = False
+            self._got_distinct_slot = None
         async def __aenter__(self):
             r = self.rotator
             # Warm-up concurrency gate: a still-warming key is capped at
@@ -583,6 +624,8 @@ class GeminiKeyRotator:
             # spacing safeguard, not a correctness requirement.
             if self.key is not None:
                 acct = r.account_of(self.key)
+                await r.acquire_distinct_account_slot(acct)
+                self._got_distinct_slot = acct
                 async with r._global_lock:
                     now = time.time()
                     last = r._account_last_call.get(acct, 0.0)
@@ -600,6 +643,8 @@ class GeminiKeyRotator:
         async def __aexit__(self, exc_type, exc, tb):
             if self._got_account_slot:
                 self.rotator.release_account_slot(self.key)
+            if self._got_distinct_slot is not None:
+                await self.rotator.release_distinct_account_slot(self._got_distinct_slot)
             if self._got_warmup_slot:
                 n = self.rotator._key_inflight.get(self.key, 0)
                 self.rotator._key_inflight[self.key] = max(0, n - 1)
