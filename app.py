@@ -4576,18 +4576,8 @@ MIN_MCQ = 10
 MAX_MCQ = 20
 
 def _dedupe_mcqs(mcqs: list) -> list:
-    """Remove duplicate MCQs (same question text) so retry-merges don't inflate count with repeats."""
-    seen = set()
-    out = []
-    for m in (mcqs or []):
-        q = (m.get('question') or m.get('q') or '').strip().lower()
-        key = ''.join(q.split())
-        if key and key in seen:
-            continue
-        if key:
-            seen.add(key)
-        out.append(m)
-    return out
+    """DISABLED: dedup inactivated to stop false-positive MCQ drops. No-op passthrough."""
+    return list(mcqs or [])
 
 async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None):
     """
@@ -20793,18 +20783,9 @@ def _qbm_dedup_list(mcqs: list) -> list:
     An MCQ with a genuinely empty question (extraction glitch, not a real
     duplicate) used to be silently discarded with zero trace -- now logged
     so an empty-question drop is visible instead of an invisible miss."""
-    seen_keys: list = []
-    out = []
-    for mc in mcqs:
-        q_only = _qbm_normalize_q(mc.get("question", ""))
-        if not q_only:
-            logger.warning(f"[QBM dedup] dropping MCQ with empty/unparseable question text (qsn_no={mc.get('qsn_no')}, raw='{(mc.get('question') or '')[:30]}')")
-            continue
-        key_q = _qbm_dedup_key(mc)
-        if not _qbm_is_duplicate(key_q, seen_keys):
-            seen_keys.append(key_q)
-            out.append(mc)
-    return out
+    # DISABLED: dedup logic inactivated to stop MCQs being dropped as
+    # false-positive duplicates (root cause of /unmesh misses). No-op passthrough.
+    return list(mcqs)
 
 
 # v-RAM-fix: caps how many pages (across ALL users) run the 3-call extraction
