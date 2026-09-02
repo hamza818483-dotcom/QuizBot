@@ -30472,10 +30472,22 @@ async def handle_message(msg: dict):
                          f"  ✅ Healthy: {gem_healthy} | ⏳ Cooldown: {gem_cooling} | 🔴 আজকে exhausted: {gem_exhausted} | 🚫 Banned: {gem_banned}")
             if gem_banned_set:
                 reasons = key_rotator._ban_reasons
+                meta = getattr(key_rotator, "_ban_meta", {})
                 shown = list(gem_banned_set)[:25]
                 for bk in shown:
                     why = reasons.get(bk, "reason not recorded")
-                    lines.append(f"    🚫 <code>{bk[:12]}...</code> — {why}")
+                    m = meta.get(bk)
+                    extra = ""
+                    if m:
+                        banned_at = m.get("banned_at")
+                        age = m.get("key_age_days_at_ban")
+                        if banned_at:
+                            when_str = datetime.fromtimestamp(banned_at, BD_TZ).strftime('%Y-%m-%d %H:%M')
+                            extra = f" [banned {when_str}"
+                            if age is not None:
+                                extra += f", key was {age:.1f}d old"
+                            extra += "]"
+                    lines.append(f"    🚫 <code>{bk[:12]}...</code> — {why}{extra}")
                 if len(gem_banned_set) > 25:
                     lines.append(f"    ...আরও {len(gem_banned_set) - 25} টা banned key (মোট {len(gem_banned_set)})")
 

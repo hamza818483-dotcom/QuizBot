@@ -205,6 +205,22 @@ def _save_banned_reasons(reasons: dict):
     except Exception as e:
         logger.warning(f"[Gemini] Failed to persist banned reasons: {e}")
 
+_BAN_META_FILE = "/tmp/atlas_banned_gemini_meta.json"
+
+def _load_ban_meta() -> dict:
+    try:
+        with open(_BAN_META_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_ban_meta(meta: dict):
+    try:
+        with open(_BAN_META_FILE, "w") as f:
+            json.dump(meta, f)
+    except Exception as e:
+        logger.warning(f"[Gemini] Failed to persist ban metadata: {e}")
+
 
 class GeminiKeyRotator:
     COOLDOWN_SECONDS = 60
@@ -310,6 +326,7 @@ class GeminiKeyRotator:
         self._cooldown_until = {}
         self._banned = _load_banned_keys()
         self._ban_reasons = _load_banned_reasons()  # key -> reason string, for /keys visibility
+        self._ban_meta = _load_ban_meta()  # key -> {banned_at, key_age_days_at_ban}, for timeline review
         self._call_times = {}  # key -> list[float] call timestamps (rolling 60s window)
         self._key_account = {}  # key -> account_id
         self._account_inflight = {}  # account_id -> current in-flight count
@@ -808,15 +825,24 @@ class GeminiKeyRotator:
         401 UNAUTHENTICATED / ACCOUNT_STATE_INVALID) — removed from the active
         pool immediately and persisted to disk so restarts don't waste a retry
         cycle on a key that will keep failing forever. `reason` is stored so
-        /keys can show WHY each key was banned, not just that it was."""
+        /keys can show WHY each key was banned, not just that it was. Also
+        stores WHEN it was banned and how old the key was at ban-time (days
+        since first_seen), so a later timeline review (was this a fresh key
+        hit right after heavy first use, or an old established one?) doesn't
+        require cross-referencing separate logs."""
         self._cooldown_until[key] = float("inf")
         self._banned.add(key)
         if reason:
             self._ban_reasons[key] = reason[:200]  # cap stored reason length
             _save_banned_reasons(self._ban_reasons)
+        now = time.time()
+        age_days = self.warmup_days_elapsed(key) if key in self._key_first_seen else None
+        self._ban_meta[key] = {"banned_at": now, "key_age_days_at_ban": age_days}
+        _save_ban_meta(self._ban_meta)
         self.keys = [k for k in self.keys if k != key]
         _save_banned_keys(self._banned)
-        logger.error(f"[Gemini] Key {key[:12]}... permanently banned and removed from rotation ({len(self.keys)} keys remain)" + (f" — reason: {reason}" if reason else ""))
+        age_str = f", key was {age_days:.1f}d old" if age_days is not None else ""
+        logger.error(f"[Gemini] Key {key[:12]}... permanently banned and removed from rotation ({len(self.keys)} keys remain){age_str}" + (f" — reason: {reason}" if reason else ""))
 
     def mark_healthy(self, key: str):
         self._cooldown_until.pop(key, None)
