@@ -338,6 +338,7 @@ class GeminiKeyRotator:
         self._account_last_trip_lifted = {}  # account_id -> epoch time the last cooldown lifted
         self._distinct_accounts_inflight = set()  # account_ids currently holding a slot
         self._distinct_account_cond = None  # asyncio.Condition, created lazily (needs running loop)
+        self._account_slot_cond = None  # asyncio.Condition for ACCOUNT_CONCURRENT_CAP hard-enforcement
         self._global_sem = asyncio.Semaphore(self.GLOBAL_CONCURRENT_CAP)
         self._global_lock = asyncio.Lock()
         self._last_global_call = 0.0
@@ -573,6 +574,33 @@ class GeminiKeyRotator:
         n = self._account_inflight.get(acct, 0)
         self._account_inflight[acct] = max(0, n - 1)
 
+    def _get_account_slot_cond(self) -> asyncio.Condition:
+        if self._account_slot_cond is None:
+            self._account_slot_cond = asyncio.Condition()
+        return self._account_slot_cond
+
+    async def acquire_account_slot_blocking(self, key: str):
+        """Hard-blocking version of acquire_account_slot: waits indefinitely
+        (no timeout/give-up) until this key's account has a free concurrent
+        slot under ACCOUNT_CONCURRENT_CAP. The old acquire_account_slot's
+        caller gave up after ~2s and proceeded anyway, which meant the cap
+        was cosmetic under real load -- a 5-key account WOULD end up with
+        more than ACCOUNT_CONCURRENT_CAP calls in flight simultaneously
+        whenever the 2s wait elapsed. This guarantees the cap actually
+        holds, at the cost of calls queueing longer under heavy same-account
+        load -- the correct trade-off given the whole point of the cap is
+        exactly this kind of enforcement."""
+        cond = self._get_account_slot_cond()
+        async with cond:
+            while not self.acquire_account_slot(key):
+                await cond.wait()
+
+    async def release_account_slot_blocking(self, key: str):
+        cond = self._get_account_slot_cond()
+        async with cond:
+            self.release_account_slot(key)
+            cond.notify_all()
+
     def _get_distinct_account_cond(self) -> asyncio.Condition:
         if self._distinct_account_cond is None:
             self._distinct_account_cond = asyncio.Condition()
@@ -632,13 +660,12 @@ class GeminiKeyRotator:
                 if wait > 0:
                     await asyncio.sleep(wait)
                 r._last_global_call = time.time()
-            # Account-level gate: acquire_account_slot/release_account_slot
-            # existed but were never wired into an actual call site, so
-            # ACCOUNT_CONCURRENT_CAP had zero effect even with @account
-            # tagging or the auto-batch grouping -- wait briefly for a slot
-            # to free up rather than hard-failing, since global_sem already
-            # bounds total concurrency and this is a soft same-account
-            # spacing safeguard, not a correctness requirement.
+            # Account-level gate: hard-blocking (acquire_account_slot_blocking)
+            # so ACCOUNT_CONCURRENT_CAP is a real ceiling -- previously this
+            # waited ~2s and proceeded anyway on timeout, meaning a busy
+            # account (e.g. 5 keys all healthy, heavy load) could still end
+            # up with MORE than ACCOUNT_CONCURRENT_CAP calls in flight at
+            # once. Now it queues until a slot is genuinely free.
             if self.key is not None:
                 acct = r.account_of(self.key)
                 await r.acquire_distinct_account_slot(acct)
@@ -651,15 +678,12 @@ class GeminiKeyRotator:
                     if wait > 0:
                         await asyncio.sleep(wait)
                     r._account_last_call[acct] = time.time()
-                for _ in range(20):  # ~2s max wait before giving up the gate
-                    if r.acquire_account_slot(self.key):
-                        self._got_account_slot = True
-                        break
-                    await asyncio.sleep(0.1)
+                await r.acquire_account_slot_blocking(self.key)
+                self._got_account_slot = True
             return self
         async def __aexit__(self, exc_type, exc, tb):
             if self._got_account_slot:
-                self.rotator.release_account_slot(self.key)
+                await self.rotator.release_account_slot_blocking(self.key)
             if self._got_distinct_slot is not None:
                 await self.rotator.release_distinct_account_slot(self._got_distinct_slot)
             if self._got_warmup_slot:
