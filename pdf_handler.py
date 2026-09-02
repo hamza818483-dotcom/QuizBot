@@ -406,7 +406,10 @@ class GeminiKeyRotator:
             await r._global_sem.acquire()
             async with r._global_lock:
                 now = time.time()
-                wait = r.GLOBAL_MIN_GAP_SECONDS - (now - r._last_global_call)
+                # jitter added so call spacing isn't perfectly uniform
+                # (uniform inter-call timing is itself a bot-detection signal)
+                jittered_gap = r.GLOBAL_MIN_GAP_SECONDS + random.uniform(0.0, r.GLOBAL_MIN_GAP_SECONDS * 0.6)
+                wait = jittered_gap - (now - r._last_global_call)
                 if wait > 0:
                     await asyncio.sleep(wait)
                 r._last_global_call = time.time()
@@ -422,7 +425,8 @@ class GeminiKeyRotator:
                 async with r._global_lock:
                     now = time.time()
                     last = r._account_last_call.get(acct, 0.0)
-                    wait = r.ACCOUNT_MIN_GAP_SECONDS - (now - last)
+                    jittered_acct_gap = r.ACCOUNT_MIN_GAP_SECONDS + random.uniform(0.0, r.ACCOUNT_MIN_GAP_SECONDS * 0.5)
+                    wait = jittered_acct_gap - (now - last)
                     if wait > 0:
                         await asyncio.sleep(wait)
                     r._account_last_call[acct] = time.time()
