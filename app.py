@@ -3827,6 +3827,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
                       or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
                       or "401" in err_str):
                     key_rotator.mark_banned(key, reason=err_str[:200])
+                    key_rotator.record_account_error(key)
                 logger.warning(f"[GeminiVerify] key {key[:12]}... failed, trying next key: {e}")
                 continue
         logger.warning(f"[GeminiVerify] all {len(keys_to_try)} Gemini key(s) failed — returning empty")
@@ -12711,6 +12712,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
         for idx, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
+            key_rotator.record_call(key)
             try:
                 _dagano_timeout = 40 if idx == 0 else 25
                 async with key_rotator.throttled_call(key=key):
@@ -12752,6 +12754,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                     continue
                 if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
+                    key_rotator.record_account_error(key)
                     logger.warning(f"[Dagano] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[Dagano] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
@@ -21325,6 +21328,7 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
                 # the scripted-abuse pattern; a small random gap makes
                 # retries look like normal spaced traffic.
                 await asyncio.sleep(random.uniform(0.15, 0.6))
+            key_rotator.record_call(key)
             try:
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
@@ -21357,6 +21361,7 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
                     continue
                 if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
+                    key_rotator.record_account_error(key)
                     logger.warning(f"[UNMESH] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[UNMESH] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
@@ -21430,6 +21435,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                 # the scripted-abuse pattern; a small random gap makes
                 # retries look like normal spaced traffic.
                 await asyncio.sleep(random.uniform(0.15, 0.6))
+            key_rotator.record_call(key)
             try:
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
@@ -21462,6 +21468,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                     continue
                 if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
+                    key_rotator.record_account_error(key)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
@@ -21543,6 +21550,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 # the scripted-abuse pattern; a small random gap makes
                 # retries look like normal spaced traffic.
                 await asyncio.sleep(random.uniform(0.15, 0.6))
+            key_rotator.record_call(key)
             try:
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
@@ -21575,6 +21583,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
                     continue
                 if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
+                    key_rotator.record_account_error(key)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
@@ -21621,6 +21630,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
                 # the scripted-abuse pattern; a small random gap makes
                 # retries look like normal spaced traffic.
                 await asyncio.sleep(random.uniform(0.15, 0.6))
+            key_rotator.record_call(key)
             try:
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=150)
@@ -21633,8 +21643,9 @@ async def _ai_gemini_text_call(prompt: str) -> str:
                     key_rotator.mark_rate_limited(key, daily_exhausted=daily)
                     logger.warning(f"[AI] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key")
                     continue
-                if _is_auth_ban_error(full_msg):
-                    key_rotator.mark_banned(key, reason=full_msg[:200])
+                if _is_auth_ban_error(msg):
+                    key_rotator.mark_banned(key, reason=msg[:200])
+                    key_rotator.record_account_error(key)
                     logger.warning(f"[AI] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[AI] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
