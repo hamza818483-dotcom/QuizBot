@@ -23301,7 +23301,12 @@ async def _handle_unmesh_impl(msg: dict):
     unmesh_channel_id = params["channel_id"]
     unmesh_thread_id = params["thread_id"]
 
-    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
+    _is_cache_hit = (
+        file_id in _pdf_bytes_cache
+        or (file_unique_id and _pdf_unique_id_index.get(file_unique_id) in _pdf_bytes_cache)
+    )
+    status_r = await send_msg(chat_id, ("✅ Cached PDF ব্যবহার হচ্ছে...\n📄 " + file_name) if _is_cache_hit else
+        f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
     status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
 
     try:
