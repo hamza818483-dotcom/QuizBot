@@ -940,7 +940,7 @@ async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: s
                     config=types.GenerateContentConfig(max_output_tokens=8192)
                 )
             _attempt_timeout = 40 if attempt == 0 else 25
-            async with key_rotator.throttled_call():
+            async with key_rotator.throttled_call(key=key):
                 response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
             key_rotator.mark_healthy(key)
             return response.text or ""
@@ -1092,7 +1092,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
                     config=types.GenerateContentConfig(max_output_tokens=8192)
                 )
             _attempt_timeout = 40 if attempt == 0 else 25
-            async with key_rotator.throttled_call():
+            async with key_rotator.throttled_call(key=key):
                 response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=_attempt_timeout)
             valid = _parse_mcq_json(response.text)
             elapsed = round(_time.time() - _t0, 1)
@@ -1736,7 +1736,7 @@ async def generate_mcq_from_image(
                 # common case while still tolerating occasional slower
                 # generations for pages near the 40-MCQ ceiling.
                 _attempt_timeout = 50 if attempt == 0 else 32
-                async with key_rotator.throttled_call():
+                async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 # 2026-08-28: detect a response that got cut off by the
                 # max_output_tokens cap above (MAX_TOKENS finish_reason) --
@@ -1930,7 +1930,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
                     config=types.GenerateContentConfig(max_output_tokens=8192)
                 )
 
-            async with key_rotator.throttled_call():
+            async with key_rotator.throttled_call(key=key):
                 response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=45)
             valid = _parse_text_json(response.text)
             if valid:
