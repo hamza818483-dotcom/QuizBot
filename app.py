@@ -2985,12 +2985,51 @@ class GroqKeyRotator:
     banned and persisted to disk so restarts don't retry a dead key."""
     COOLDOWN_SECONDS = 60
 
+    # Groq keys aren't tagged to accounts (no @account grouping like Gemini),
+    # so each key is treated as its own "account" -- this still gives
+    # per-key error-circuit protection (repeated 401/403/suspend-style
+    # errors on ONE key pause it fully) with no false cross-key grouping.
+    ACCOUNT_ERROR_CIRCUIT_THRESHOLD = 4
+    ACCOUNT_ERROR_CIRCUIT_WINDOW = 300  # seconds
+    ACCOUNT_ERROR_CIRCUIT_COOLDOWN = 1800  # 30 min pause once tripped
+
     def __init__(self):
         self.keys = []
         self.current = 0
         self._cooldown_until = {}  # key -> unix timestamp when it's usable again (short-term)
         self._banned = _load_groq_banned_keys()
+        self._account_error_times = {}  # key(as account) -> list[float] recent error timestamps
+        self._account_circuit_until = {}  # key(as account) -> epoch time when pause lifts
         self._load_keys()
+
+    def account_of(self, key: str) -> str:
+        return key
+
+    def record_call(self, key: str):
+        """No-op call-tracking hook, kept for parity with GeminiKeyRotator's
+        interface (RPM tracking here is done via _key_429_is_tpm/exhaustion
+        instead of a rolling window, so nothing to record beyond this)."""
+        pass
+
+    def record_account_error(self, key: str):
+        """Track suspend/auth-style errors per key. If enough pile up in the
+        window, trip a circuit breaker so this key is pushed to the back of
+        ordered_keys() (never hard-blocked) for a cooldown period instead of
+        continuing to retry an account that already looks flagged."""
+        now = time.time()
+        times = [t for t in self._account_error_times.get(key, []) if t > now - self.ACCOUNT_ERROR_CIRCUIT_WINDOW]
+        times.append(now)
+        self._account_error_times[key] = times
+        if len(times) >= self.ACCOUNT_ERROR_CIRCUIT_THRESHOLD:
+            self._account_circuit_until[key] = now + self.ACCOUNT_ERROR_CIRCUIT_COOLDOWN
+            logger.error(f"[Groq] Account circuit breaker TRIPPED for key {key[:12]}...: {len(times)} errors in {self.ACCOUNT_ERROR_CIRCUIT_WINDOW}s -- pausing for {self.ACCOUNT_ERROR_CIRCUIT_COOLDOWN}s")
+
+    def account_circuit_open(self, key: str) -> bool:
+        until = self._account_circuit_until.get(key, 0)
+        if until and time.time() >= until:
+            del self._account_circuit_until[key]
+            return False
+        return bool(until)
 
     def _load_keys(self):
         raw = os.environ.get("GROQ_KEYS", "") or os.environ.get("GROQ_API_KEY", "")
@@ -3024,6 +3063,8 @@ class GroqKeyRotator:
         same-sized slice, just a different starting point in the healthy pool)."""
         keys = self.all_keys()
         now = time.time()
+        circuit_open = [k for k in keys if self.account_circuit_open(k)]
+        keys = [k for k in keys if k not in circuit_open]
         not_exhausted = [k for k in keys if not _is_groq_key_exhausted_today(k)]
         exhausted = [k for k in keys if _is_groq_key_exhausted_today(k)]
         pool = not_exhausted if not_exhausted else keys
@@ -3032,7 +3073,7 @@ class GroqKeyRotator:
         if offset and healthy:
             off = offset % len(healthy)
             healthy = healthy[off:] + healthy[:off]
-        return healthy + cooling + (exhausted if not_exhausted else [])
+        return healthy + cooling + (exhausted if not_exhausted else []) + circuit_open
 
     def mark_rate_limited(self, key: str, daily_exhausted: bool = True):
         """daily_exhausted=False for TPM/per-request-too-large 429s (key itself
@@ -3297,6 +3338,7 @@ async def _gen_groq_single(img, topic, count, exclude_keys: set = None, key_offs
             _FAILURE_COUNTS["groq"]["rate_limit_429"] += 1
             continue
         if status in (401, 403):
+            groq_key_rotator.record_account_error(key)
             groq_key_rotator.mark_banned(key)
             key_errors.append(f"key#{i+1}: {status} invalid/suspended — permanently banned")
             _FAILURE_COUNTS["groq"]["suspended_banned"] += 1
