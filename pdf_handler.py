@@ -541,22 +541,40 @@ class GeminiKeyRotator:
         return healthy + over_cap + over_rpm + cooling + (exhausted if not_exhausted else []) + circuit_open
 
     def ordered_keys_avoiding_accounts(self, avoid_accounts: set, offset: int = 0):
-        """Same as ordered_keys(), but keys whose account is in
-        avoid_accounts are pushed to the back (never hard-excluded — if
-        every remaining option is on an already-used account, e.g. single-
-        account setups, we still must return usable keys). Used so a single
-        page's own sequential calls (Call1, heading-scan, Call2, ...) don't
-        keep landing back on the SAME Google account just because it's the
-        globally healthiest one -- spreading a page's own call sequence
-        across different accounts (when more than one is available) reduces
-        how concentrated that one account's short-window call footprint
-        gets, on top of the existing gap/cap/circuit-breaker protections."""
+        """Same as ordered_keys(), but as a PURE tie-breaker within the
+        top healthy tier only: among keys that are already equally
+        "healthy" (not exhausted/cooling/over-cap/circuit-open), prefer
+        ones whose account isn't in avoid_accounts. Never promotes a
+        worse-tier key (cooling, over-cap, exhausted) ahead of a healthy
+        one, and never demotes a healthy key below a worse tier -- doing
+        so previously caused some calls to land on slower/cooling accounts
+        first and eat into the per-call timeout budget, which showed up as
+        more real extraction misses. This only changes ORDER WITHIN the
+        healthy tier, so speed/success rate should match plain
+        ordered_keys() while still nudging a single page's own sequential
+        calls toward different accounts when the healthy tier has more
+        than one to choose from."""
         base = self.ordered_keys(offset=offset)
-        if not avoid_accounts:
+        if not avoid_accounts or not base:
             return base
-        preferred = [k for k in base if self.account_of(k) not in avoid_accounts]
-        deprioritized = [k for k in base if self.account_of(k) in avoid_accounts]
-        return preferred + deprioritized if preferred else base
+        now = time.time()
+        live_keys = [k for k in self.keys if k not in self._banned]
+        circuit_open = {k for k in live_keys if self.account_circuit_open(k)}
+        not_exhausted = {k for k in live_keys if not _is_gemini_key_exhausted_today(k)}
+        pool = not_exhausted if not_exhausted else set(live_keys)
+        cooled = {k for k in pool if self._cooldown_until.get(k, 0) <= now}
+        under_rpm = {k for k in cooled if self._prune_and_count(k, now) < self.RPM_PER_KEY}
+        under_cap = {k for k in under_rpm if not self.account_over_daily_cap(k)}
+        healthy_set = under_cap - circuit_open
+        # base's own prefix IS the healthy tier (see ordered_keys), so
+        # intersecting with healthy_set recovers exactly that prefix
+        # without re-deriving its (already-randomized) order.
+        healthy_prefix_len = sum(1 for k in base if k in healthy_set)
+        healthy_prefix = base[:healthy_prefix_len]
+        rest = base[healthy_prefix_len:]
+        preferred = [k for k in healthy_prefix if self.account_of(k) not in avoid_accounts]
+        deprioritized = [k for k in healthy_prefix if self.account_of(k) in avoid_accounts]
+        return (preferred + deprioritized if preferred else healthy_prefix) + rest
 
     def mark_rate_limited(self, key: str, daily_exhausted: bool = False, retry_after_seconds: int = None):
         cooldown = retry_after_seconds if retry_after_seconds and retry_after_seconds > 0 else self.COOLDOWN_SECONDS
