@@ -16726,8 +16726,9 @@ CHEM_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 )
 
 
+UNMESH_CODE_VERSION_MARKER = "306adaf-groq-fallback-v1"  # bump this any time recovery logic changes; log it once per /unmesh run to confirm deployed code version from Telegram output alone, no server log access needed
+
 UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
-    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
@@ -23436,7 +23437,8 @@ async def _handle_unmesh_impl(msg: dict):
                 reply_to_message_id=_cmd_msg_id)
 
         await _unmesh_render_final_dashboard(
-            f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।"
+            f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।\n"
+            f"🔖 build: {UNMESH_CODE_VERSION_MARKER}"
         )
 
     except Exception as e:
