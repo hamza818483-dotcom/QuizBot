@@ -21246,9 +21246,7 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
                 )
             )
 
-        keys_to_try = key_rotator.ordered_keys_avoiding_accounts(
-            _qbm_page_used_accounts_ctx.get() or set(), offset=_qbm_key_offset_ctx.get()
-        ) or key_rotator.keys
+        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
