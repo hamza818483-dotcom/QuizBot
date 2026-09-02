@@ -344,6 +344,7 @@ class GeminiKeyRotator:
         self._last_global_call = 0.0
         self._key_first_seen = {}  # key -> unix ts first observed (D1-backed, rehydrated at startup)
         self._key_inflight = {}  # key -> current in-flight count (used only during warm-up)
+        self._key_daily_calls = {}  # key -> list[float] rolling-24h call timestamps, for within-account balance
         self._load_keys()
 
     def warmup_days_elapsed(self, key: str) -> float:
@@ -721,6 +722,22 @@ class GeminiKeyRotator:
         self._call_times.setdefault(key, []).append(time.time())
         self.record_account_call(key)
         self.note_key_seen(key)
+        now = time.time()
+        cutoff = now - 86400
+        times = [t for t in self._key_daily_calls.get(key, []) if t > cutoff]
+        times.append(now)
+        self._key_daily_calls[key] = times
+
+    def key_daily_call_count(self, key: str) -> int:
+        """Rolling-24h call count for THIS key specifically (not the whole
+        account) -- used to balance usage across an account's own keys so
+        random shuffle doesn't let a couple of keys silently absorb most of
+        an account's traffic while siblings sit near-idle."""
+        now = time.time()
+        cutoff = now - 86400
+        times = [t for t in self._key_daily_calls.get(key, []) if t > cutoff]
+        self._key_daily_calls[key] = times
+        return len(times)
 
     def get_key(self):
         if not self.keys:
@@ -798,6 +815,31 @@ class GeminiKeyRotator:
             start = (self.current + offset + random.randint(0, len(healthy) - 1)) % len(healthy)
             healthy = healthy[start:] + healthy[:start]
             random.shuffle(healthy)
+            # Within-account balance: group healthy keys by account, and
+            # order accounts' own key-groups by each key's rolling-24h use
+            # count (least-used-first). Pure random shuffle alone can let a
+            # couple of an account's 10 keys absorb most of its traffic by
+            # chance while siblings stay idle -- this doesn't remove the
+            # cross-account randomization above (accounts/groups still
+            # appear in the already-randomized order), it just makes sure
+            # that WITHIN each account's own slice, its least-used key
+            # surfaces first so load actually spreads across all N keys
+            # instead of concentrating on whichever ones randomness favored.
+            by_acct = {}
+            order = []
+            for k in healthy:
+                acct = self.account_of(k)
+                if acct not in by_acct:
+                    by_acct[acct] = []
+                    order.append(acct)
+                by_acct[acct].append(k)
+            rebuilt = []
+            for acct in order:
+                group = by_acct[acct]
+                if len(group) > 1:
+                    group.sort(key=lambda k: self.key_daily_call_count(k))
+                rebuilt.extend(group)
+            healthy = rebuilt
             self.current = (self.current + 1) % max(len(self.keys), 1)
         return healthy + over_cap + over_rpm + cooling + (exhausted if not_exhausted else []) + stagger_locked + circuit_open
 
