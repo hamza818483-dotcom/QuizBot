@@ -1270,8 +1270,21 @@ async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: s
     # non-quota failures), never just because a key-count ceiling was hit.
     max_retries = len(_ordered) if _ordered else 5
     _consecutive_infra_fails = 0
+    _tried_keys = set()
     for attempt in range(max_retries):
-        key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+        # Re-derive fresh healthy order each attempt instead of indexing a
+        # stale pre-loop snapshot, so a key cooled/banned earlier in THIS
+        # loop is never revisited while an untried healthy key exists.
+        _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+        _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
+        _untried = [k for k in _fresh if k not in _tried_keys]
+        if _untried:
+            key = _untried[0]
+        elif _fresh:
+            key = _fresh[attempt % len(_fresh)]
+        else:
+            key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+        _tried_keys.add(key)
         key_rotator.record_call(key)
         try:
             from google import genai as gai
@@ -1422,8 +1435,18 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
         _ordered = _ordered[:2] if _ordered else []
     max_retries = len(_ordered) if _ordered else 5
     _consecutive_infra_fails = 0
+    _tried_keys = set()
     for attempt in range(max_retries):
-        key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+        _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+        _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
+        _untried = [k for k in _fresh if k not in _tried_keys]
+        if _untried:
+            key = _untried[0]
+        elif _fresh:
+            key = _fresh[attempt % len(_fresh)]
+        else:
+            key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+        _tried_keys.add(key)
         key_rotator.record_call(key)
         try:
             from google import genai as gai
@@ -2036,8 +2059,30 @@ async def generate_mcq_from_image(
     # of its own daily-quota exhaustion, so it's no longer a safe primary.
     _GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-2.5-flash"]
 
+    _tried_keys = set()
     for attempt in range(max_retries):
-        key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+        # BUG FIX: previously indexed into the `_ordered` snapshot taken
+        # BEFORE the loop started (attempt % len(_ordered)). As attempts
+        # fail and mark_rate_limited()/mark_banned() run below, that stale
+        # snapshot never updated -- so later attempts kept cycling back onto
+        # keys already just cooled-down/banned in THIS same loop (wasting a
+        # retry slot on a known-bad key) while a genuinely healthy key
+        # sitting elsewhere in the live pool could go completely untried
+        # whenever max_keys capped max_retries below the full key count.
+        # Re-deriving ordered_keys() fresh each attempt (already cheap --
+        # same call used to build the original _ordered) always reflects
+        # the current healthy-first order and skips keys already tried
+        # this round before falling back to a repeat if truly none remain.
+        _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+        _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
+        _untried = [k for k in _fresh if k not in _tried_keys]
+        if _untried:
+            key = _untried[0]
+        elif _fresh:
+            key = _fresh[attempt % len(_fresh)]
+        else:
+            key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+        _tried_keys.add(key)
         key_rotator.record_call(key)
         last_exc = None
         for model_name in _GEMINI_MODELS:
@@ -2258,9 +2303,19 @@ Return ONLY valid JSON array, no markdown, no extra text:
     # ── PRIMARY: Gemini (new google.genai SDK, multi-key rotation) ──
     max_retries = len(key_rotator.keys) if key_rotator.keys else 3
     _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+    _tried_keys = set()
     for attempt in range(max_retries):
         try:
-            key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+            _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+            _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
+            _untried = [k for k in _fresh if k not in _tried_keys]
+            if _untried:
+                key = _untried[0]
+            elif _fresh:
+                key = _fresh[attempt % len(_fresh)]
+            else:
+                key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
+            _tried_keys.add(key)
             key_rotator.record_call(key)
             from google import genai as gai
             from google.genai import types
