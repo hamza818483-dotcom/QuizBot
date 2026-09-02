@@ -264,6 +264,25 @@ class GeminiKeyRotator:
     WARMUP_MAX_CONCURRENT = 1  # a warming-up key never gets more than 1
     # simultaneous in-flight call, regardless of ACCOUNT_CONCURRENT_CAP.
 
+    # ── PER-ACCOUNT STAGGERED KEY ROLLOUT ───────────────────────────────
+    # Per-key warm-up alone doesn't cover the case of adding many NEW keys
+    # to the SAME Google account all at once (e.g. pasting in all 10
+    # freshly-created project keys for one account in a single env var
+    # update) -- that's still an account-level anomaly (a burst of brand
+    # new projects all activating together) even though each key
+    # individually ramps its own RPM. To avoid this, keys within an
+    # account are activated in a staggered order: only the first
+    # ACCOUNT_STAGGER_BATCH_SIZE keys (by first-seen time) are usable
+    # immediately; the next batch unlocks after ACCOUNT_STAGGER_DAYS, and
+    # so on, until the whole account's key set is live.
+    ACCOUNT_STAGGER_BATCH_SIZE = 4  # keys unlocked per stagger step -- larger
+    # batch keeps more quota usable sooner (balance: not too slow), while
+    # still avoiding a full 10-key account activating in one shot.
+    ACCOUNT_STAGGER_DAYS = 1  # days between unlocking each stagger step --
+    # short gap so a 10-key account reaches full quota within ~2-3 days
+    # instead of a full week, while still breaking up the "all at once"
+    # signal into 2-3 distinct activation events over time.
+
     def __init__(self):
         self.keys = []
         self.current = 0
@@ -319,6 +338,35 @@ class GeminiKeyRotator:
             asyncio.create_task(db_record_key_first_seen(_gemini_key_hash(key), "gemini"))
         except Exception as e:
             logger.warning(f"[Gemini] note_key_seen D1 persist warn (non-fatal): {e}")
+
+    def is_stagger_locked(self, key: str) -> bool:
+        """Returns True if this key belongs to an account whose keys are
+        being rolled out in stagger batches (ordered by first-seen time
+        within the account) and this particular key hasn't reached its
+        unlock step yet. A key with unknown first-seen is treated as
+        already unlocked (same fail-safe default as warm-up: never starve
+        a key just because D1 rehydrate hasn't run)."""
+        acct = self.account_of(key)
+        siblings = [k for k in self.keys if self.account_of(k) == acct]
+        if len(siblings) <= self.ACCOUNT_STAGGER_BATCH_SIZE:
+            return False  # small accounts never need staggering
+        # Order siblings by first-seen time (unknown/never-seen keys sort
+        # last, since they haven't been used yet so their "activation"
+        # naturally happens whenever they're first picked).
+        def _fs(k):
+            return self._key_first_seen.get(k, float("inf"))
+        ordered = sorted(siblings, key=_fs)
+        idx = ordered.index(key)
+        step = idx // self.ACCOUNT_STAGGER_BATCH_SIZE
+        if step == 0:
+            return False  # first batch always unlocked
+        # This step unlocks ACCOUNT_STAGGER_DAYS * step days after the
+        # ACCOUNT's own first key was first seen (i.e. the account's
+        # activation start), not after this specific key -- otherwise an
+        # unused key sitting at the back of the list would never age in.
+        acct_start = min((self._key_first_seen.get(k, time.time()) for k in siblings), default=time.time())
+        unlock_at = acct_start + step * self.ACCOUNT_STAGGER_DAYS * 86400
+        return time.time() < unlock_at
 
     def _prune_account_daily(self, acct: str, now: float) -> int:
         times = self._account_daily_calls.get(acct)
@@ -602,6 +650,12 @@ class GeminiKeyRotator:
         # tripped account never gets picked while any other option exists.
         circuit_open = [k for k in live_keys if self.account_circuit_open(k)]
         live_keys = [k for k in live_keys if k not in circuit_open]
+        # Account stagger: keys in an unlocked-later batch (see
+        # is_stagger_locked) are pushed to the very back too -- still
+        # usable as last resort so a request never strands with zero keys,
+        # but never picked while any unlocked key exists.
+        stagger_locked = [k for k in live_keys if self.is_stagger_locked(k)]
+        live_keys = [k for k in live_keys if k not in stagger_locked]
         not_exhausted = [k for k in live_keys if not _is_gemini_key_exhausted_today(k)]
         exhausted = [k for k in live_keys if _is_gemini_key_exhausted_today(k)]
         pool = not_exhausted if not_exhausted else live_keys
@@ -632,7 +686,7 @@ class GeminiKeyRotator:
             healthy = healthy[start:] + healthy[:start]
             random.shuffle(healthy)
             self.current = (self.current + 1) % max(len(self.keys), 1)
-        return healthy + over_cap + over_rpm + cooling + (exhausted if not_exhausted else []) + circuit_open
+        return healthy + over_cap + over_rpm + cooling + (exhausted if not_exhausted else []) + stagger_locked + circuit_open
 
     def ordered_keys_avoiding_accounts(self, avoid_accounts: set, offset: int = 0):
         """Same as ordered_keys(), but as a PURE tie-breaker within the
@@ -660,6 +714,7 @@ class GeminiKeyRotator:
         under_rpm = {k for k in cooled if self._prune_and_count(k, now) < self.warmup_rpm_limit(k)}
         under_cap = {k for k in under_rpm if not self.account_over_daily_cap(k)}
         healthy_set = under_cap - circuit_open
+        healthy_set = {k for k in healthy_set if not self.is_stagger_locked(k)}
         # base's own prefix IS the healthy tier (see ordered_keys), so
         # intersecting with healthy_set recovers exactly that prefix
         # without re-deriving its (already-randomized) order.
