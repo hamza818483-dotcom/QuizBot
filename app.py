@@ -24298,7 +24298,10 @@ async def _onu_extract_all_pages_streaming(
         if status_msg_id:
             await _safe_dash_edit()
 
-    WINDOW = 4  # same concurrency window qbm_extract_all_pages uses
+    WINDOW = 3  # same concurrency window qbm_extract_all_pages uses.
+    # Lowered 4 -> 3 (2026-09-03 accuracy/safety/smoothness balance pass) --
+    # fewer pages racing simultaneously means fewer keys/accounts hit at the
+    # same instant, on top of the global concurrency cap in pdf_handler.py.
 
     async def _run_call1_then_maybe_pair(idx: int, page_num, img):
         _current_job_chat_id_ctx.set(chat_id)
@@ -26245,15 +26248,16 @@ async def qbm_extract_all_pages(
     # dense-MCQ PDFs). Each concurrent slot sets _qbm_key_offset_ctx to a
     # different starting Groq key (round-robin via ordered_keys(offset=)),
     # so pages in a window pull from different keys first instead of
-    # hammering the same one. With 12 Groq keys total, WINDOW=4 keeps every
-    # slot on its own starting key with headroom to spare (still leaves 8
-    # other keys as fallback per slot if its primary key is cooling), so
-    # accuracy/collision-safety is preserved while roughly halving wall-clock
-    # time again vs WINDOW=2. Pages still complete in strict index order
-    # (gather waits for the whole window before moving to the next), so
-    # ordering guarantees and the cross-page answer-lookahead (which needs
-    # earlier pages already resolved) are unaffected.
-    WINDOW = 4
+    # hammering the same one. Lowered 4 -> 3 (2026-09-03 accuracy/safety/
+    # smoothness balance pass) -- fewer simultaneous pages means fewer
+    # accounts/keys hit at the same instant (compounds with the global
+    # Gemini concurrency cap in pdf_handler.py), trading roughly 10-15%
+    # wall-clock for a smaller live concurrent-account fingerprint. Pages
+    # still complete in strict index order (gather waits for the whole
+    # window before moving to the next), so ordering guarantees and the
+    # cross-page answer-lookahead (which needs earlier pages already
+    # resolved) are unaffected.
+    WINDOW = 3
 
     async def _extract_one_slotted(slot, idx, page_num, img):
         _qbm_key_offset_ctx.set(slot)

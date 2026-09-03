@@ -267,26 +267,26 @@ class GeminiKeyRotator:
     # grouping is unknown -- see GLOBAL_CONCURRENT_CAP below for the
     # mapping-independent safeguard.
 
-    GLOBAL_CONCURRENT_CAP = 8  # hard ceiling on simultaneous in-flight Gemini
+    GLOBAL_CONCURRENT_CAP = 6  # hard ceiling on simultaneous in-flight Gemini
     # calls across ALL keys/accounts combined, regardless of grouping info.
-    # Lowered from 20 -> 8 after real suspensions were observed (2-3
-    # projects per account) even under per-key RPM limits -- the burst
+    # Lowered 20 -> 8 -> 6 (2026-09-03 accuracy/safety/smoothness balance
+    # pass) after real suspensions kept occurring even at 8 -- burst
     # *volume* itself, not just per-key rate, appears to be part of what's
-    # flagged. Slower throughput, but priority is zero further suspensions.
-    GLOBAL_MIN_GAP_SECONDS = 0.25  # minimum spacing enforced between any two
-    # Gemini calls starting, globally -- raised from 0.05 -> 0.25 for the
+    # flagged. Accepts ~10-15% slower wall-clock in exchange for fewer
+    # concurrent calls sharing the one egress IP at any instant.
+    GLOBAL_MIN_GAP_SECONDS = 0.3  # minimum spacing enforced between any two
+    # Gemini calls starting, globally -- raised 0.05 -> 0.25 -> 0.3 for the
     # same reason: spreads call-starts out in time so concurrent load never
     # looks like an instantaneous fan-out burst.
 
-    DISTINCT_ACCOUNT_CONCURRENT_CAP = 3  # hard ceiling on how many DIFFERENT
+    DISTINCT_ACCOUNT_CONCURRENT_CAP = 2  # hard ceiling on how many DIFFERENT
     # accounts can have an in-flight call at the same instant, independent of
     # GLOBAL_CONCURRENT_CAP (which only bounds total call count, not account
     # diversity). All keys/accounts share one egress IP here, so N different
     # "accounts" firing simultaneously from that IP is itself a correlatable
     # fingerprint (looks like one operator running N accounts in parallel,
-    # not N independent users). Capping simultaneous distinct accounts keeps
-    # the live account-set small at any given instant even with many
-    # accounts configured overall.
+    # not N independent users). Lowered 3 -> 2 (2026-09-03 balance pass) to
+    # keep the live account-set even smaller at any given instant.
 
     ACCOUNT_MIN_GAP_SECONDS = 1.0  # minimum spacing between call-starts on
     # the SAME account, tighter than the global gap. Two different accounts
