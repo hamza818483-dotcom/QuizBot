@@ -1639,10 +1639,17 @@ async def _ensure_gemini_banned_table():
     # Migration: older DBs created before `account` existed won't have the
     # column -- add it if missing so root-cause/account tracking works for
     # DBs created before 2026-09-03 without needing a manual drop/recreate.
-    try:
-        await d1_run("ALTER TABLE gemini_banned_keys ADD COLUMN account TEXT", [])
-    except Exception:
-        pass  # column already exists -- expected on every run after the first
+    # Check pragma first so we don't spam "duplicate column" errors on every run.
+    global _gemini_banned_account_col_checked
+    if not globals().get("_gemini_banned_account_col_checked"):
+        try:
+            cols = await d1_select("PRAGMA table_info(gemini_banned_keys)")
+            col_names = {c.get("name") for c in (cols or [])}
+            if "account" not in col_names:
+                await d1_run("ALTER TABLE gemini_banned_keys ADD COLUMN account TEXT", [])
+        except Exception:
+            pass
+        globals()["_gemini_banned_account_col_checked"] = True
 
 async def db_mark_gemini_key_banned(key_hash: str, reason: str = "", banned_at: int = None, key_age_days_at_ban: float = None, account: str = None):
     try:

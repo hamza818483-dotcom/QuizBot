@@ -30776,7 +30776,7 @@ async def handle_message(msg: dict):
             reasons = getattr(key_rotator, "_ban_reasons", {})
             banned_set = key_rotator._banned
             if not banned_set:
-                await send_message(msg, "🔑 কোনো Gemini key ban হয়নি।")
+                await send_msg(chat_id, "🔑 কোনো Gemini key ban হয়নি।")
                 return
             by_account = defaultdict(list)
             by_reason_type = defaultdict(int)
@@ -30814,10 +30814,10 @@ async def handle_message(msg: dict):
             for hour_str, cnt in sorted(by_hour.items()):
                 lines.append(f"  • {hour_str}: {cnt} banned")
 
-            await send_message(msg, "\n".join(lines))
+            await send_msg(chat_id, "\n".join(lines))
         except Exception as e:
             logger.error(f"[/banreport] failed: {e}")
-            await send_message(msg, f"⚠️ Report generate করতে সমস্যা: {e}")
+            await send_msg(chat_id, f"⚠️ Report generate করতে সমস্যা: {e}")
     elif text == "/keys":
         try:
             today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
