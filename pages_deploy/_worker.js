@@ -56,6 +56,25 @@ export default {
     // we no longer just 502 — result/leaderboard/bookmark now fall back to
     // writing/reading D1 + both Supabase accounts directly from the Worker,
     // so the exam still "works" end-to-end even with the backend fully off.
+    // LMS "Send to Telegram channel" — plain forward to HF, no fallback path
+    // (poll-sending has no D1/Supabase-direct alternative). Longer timeout
+    // since a full batch (pre-msg + N polls + PDF + ending) can take a while;
+    // the LMS side itself polls /status/{job_id} separately so this just
+    // needs to survive the initial "job started" response.
+    if (url.pathname.startsWith('/api/lms-send-channel')) {
+      const RENDER = env.RENDER_URL || env.HF_SPACE_URL || 'https://hamza-02-quizbot.hf.space';
+      const renderReq = new Request(RENDER + url.pathname + url.search, {
+        method: request.method,
+        headers: request.headers,
+        body: request.method !== 'GET' ? request.body : undefined,
+      });
+      try {
+        return await fetch(renderReq, { signal: AbortSignal.timeout(30000) });
+      } catch (e) {
+        return jsonResp({ ok: false, error: 'Bot server (HF Space) unreachable: ' + e.message }, 502);
+      }
+    }
+
     const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
                      '/api/leaderboard', '/api/solve-pdf', '/api/tg-image', '/api/new-exam/status'];
     if (HF_ONLY.some(p => url.pathname.startsWith(p))) {
