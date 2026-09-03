@@ -267,13 +267,14 @@ class GeminiKeyRotator:
     # grouping is unknown -- see GLOBAL_CONCURRENT_CAP below for the
     # mapping-independent safeguard.
 
-    GLOBAL_CONCURRENT_CAP = 6  # hard ceiling on simultaneous in-flight Gemini
+    GLOBAL_CONCURRENT_CAP = 8  # hard ceiling on simultaneous in-flight Gemini
     # calls across ALL keys/accounts combined, regardless of grouping info.
-    # Lowered 20 -> 8 -> 6 (2026-09-03 accuracy/safety/smoothness balance
-    # pass) after real suspensions kept occurring even at 8 -- burst
-    # *volume* itself, not just per-key rate, appears to be part of what's
-    # flagged. Accepts ~10-15% slower wall-clock in exchange for fewer
-    # concurrent calls sharing the one egress IP at any instant.
+    # History: 20 -> 8 -> 6 -> 8 (2026-09-03 second pass). The 34-key mass-ban
+    # that day was overwhelmingly on keys still inside WARMUP window (0.3-0.8d
+    # old), not on trusted/aged keys -- so the bottleneck was warm-up strictness,
+    # not raw global concurrency. Restored to 8 to recover throughput on
+    # trusted (post-warmup) keys while warm-up keys stay tightly capped below
+    # (see WARMUP_MAX_CONCURRENT) to isolate where the actual risk is.
     GLOBAL_MIN_GAP_SECONDS = 0.3  # minimum spacing enforced between any two
     # Gemini calls starting, globally -- raised 0.05 -> 0.25 -> 0.3 for the
     # same reason: spreads call-starts out in time so concurrent load never
@@ -330,8 +331,12 @@ class GeminiKeyRotator:
     # whose first-ever-seen timestamp is within WARMUP_DAYS gets a reduced
     # RPM ceiling and is excluded from the account concurrency pool,
     # ramping linearly up to full trust by day WARMUP_DAYS.
-    WARMUP_DAYS = 5
-    WARMUP_DAY0_RPM_FRACTION = 0.2  # day 0: only 20% of RPM_PER_KEY allowed
+    WARMUP_DAYS = 7  # widened 5 -> 7 (2026-09-03 second pass): the mass-ban
+    # keys were mostly 0.3-0.8d old, well inside even the old 5-day window,
+    # but banned anyway -- extending the window keeps them throttled longer
+    # while GLOBAL_CONCURRENT_CAP is restored for already-trusted keys.
+    WARMUP_DAY0_RPM_FRACTION = 0.15  # day 0: only 15% of RPM_PER_KEY allowed
+    # (tightened from 0.2 -- brand-new keys get even less initial load)
     WARMUP_MAX_CONCURRENT = 1  # a warming-up key never gets more than 1
     # simultaneous in-flight call, regardless of ACCOUNT_CONCURRENT_CAP.
 
