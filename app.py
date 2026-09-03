@@ -30769,6 +30769,56 @@ async def handle_message(msg: dict):
         await handle_convert_command(msg)
     elif text.startswith("/error") or text.startswith("/errors"):
         await handle_error_command(msg)
+    elif text == "/banreport":
+        try:
+            from pdf_handler import key_rotator
+            from collections import defaultdict
+            meta = getattr(key_rotator, "_ban_meta", {})
+            reasons = getattr(key_rotator, "_ban_reasons", {})
+            banned_set = key_rotator._banned
+            if not banned_set:
+                await send_message(msg, "🔑 কোনো Gemini key ban হয়নি।")
+                return
+            by_account = defaultdict(list)
+            by_reason_type = defaultdict(int)
+            by_hour = defaultdict(int)
+            for bk in banned_set:
+                m = meta.get(bk, {})
+                acct = m.get("account") or key_rotator.account_of(bk) or "unknown"
+                by_account[acct].append(bk)
+                why = reasons.get(bk, "")
+                if "deleted or disabled" in why:
+                    rtype = "service_account_disabled (401)"
+                elif "suspended" in why:
+                    rtype = "consumer_suspended (403)"
+                elif "not valid" in why or "INVALID_ARGUMENT" in why:
+                    rtype = "invalid_key (400)"
+                else:
+                    rtype = "other/unrecorded"
+                by_reason_type[rtype] += 1
+                banned_at = m.get("banned_at")
+                if banned_at:
+                    hour_str = datetime.fromtimestamp(banned_at, BD_TZ).strftime('%Y-%m-%d %H:00')
+                    by_hour[hour_str] += 1
+
+            lines = [f"📊 <b>Gemini Ban Root-Cause Report</b>\n(মোট banned: {len(banned_set)})\n"]
+
+            lines.append("🗂 <b>Account-wise:</b>")
+            for acct, keys in sorted(by_account.items(), key=lambda x: -len(x[1])):
+                lines.append(f"  • {acct}: {len(keys)} key banned")
+
+            lines.append("\n📋 <b>Reason-wise:</b>")
+            for rtype, cnt in sorted(by_reason_type.items(), key=lambda x: -x[1]):
+                lines.append(f"  • {rtype}: {cnt}")
+
+            lines.append("\n⏱ <b>Timeline (per hour, when spikes happened):</b>")
+            for hour_str, cnt in sorted(by_hour.items()):
+                lines.append(f"  • {hour_str}: {cnt} banned")
+
+            await send_message(msg, "\n".join(lines))
+        except Exception as e:
+            logger.error(f"[/banreport] failed: {e}")
+            await send_message(msg, f"⚠️ Report generate করতে সমস্যা: {e}")
     elif text == "/keys":
         try:
             today = datetime.now(BD_TZ).strftime('%Y-%m-%d')
@@ -30806,15 +30856,19 @@ async def handle_message(msg: dict):
                     if m:
                         banned_at = m.get("banned_at")
                         age = m.get("key_age_days_at_ban")
+                        acct = m.get("account")
                         if banned_at:
                             when_str = datetime.fromtimestamp(banned_at, BD_TZ).strftime('%Y-%m-%d %H:%M')
                             extra = f" [banned {when_str}"
                             if age is not None:
                                 extra += f", key was {age:.1f}d old"
+                            if acct:
+                                extra += f", account={acct}"
                             extra += "]"
                     lines.append(f"    🚫 <code>{bk[:12]}...</code> — {why}{extra}")
                 if len(gem_banned_set) > 25:
                     lines.append(f"    ...আরও {len(gem_banned_set) - 25} টা banned key (মোট {len(gem_banned_set)})")
+                lines.append("    বিস্তারিত account/timeline breakdown এর জন্য /banreport দাও")
 
 
             # Generic rotators (NVIDIA, Nemotron, Gemma, OpenRouter-Qwen, HF)

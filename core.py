@@ -1635,29 +1635,37 @@ async def db_load_key_first_seen() -> dict:
 async def _ensure_gemini_banned_table():
     await _ensure_d1_table("gemini_banned_keys",
         "CREATE TABLE IF NOT EXISTS gemini_banned_keys ("
-        "key_hash TEXT PRIMARY KEY, reason TEXT, banned_at INTEGER, key_age_days_at_ban REAL)")
+        "key_hash TEXT PRIMARY KEY, reason TEXT, banned_at INTEGER, key_age_days_at_ban REAL, account TEXT)")
+    # Migration: older DBs created before `account` existed won't have the
+    # column -- add it if missing so root-cause/account tracking works for
+    # DBs created before 2026-09-03 without needing a manual drop/recreate.
+    try:
+        await d1_run("ALTER TABLE gemini_banned_keys ADD COLUMN account TEXT", [])
+    except Exception:
+        pass  # column already exists -- expected on every run after the first
 
-async def db_mark_gemini_key_banned(key_hash: str, reason: str = "", banned_at: int = None, key_age_days_at_ban: float = None):
+async def db_mark_gemini_key_banned(key_hash: str, reason: str = "", banned_at: int = None, key_age_days_at_ban: float = None, account: str = None):
     try:
         await _ensure_gemini_banned_table()
         await d1_run(
-            "INSERT INTO gemini_banned_keys (key_hash, reason, banned_at, key_age_days_at_ban) VALUES (?1,?2,?3,?4) "
-            "ON CONFLICT(key_hash) DO UPDATE SET reason=excluded.reason",
-            [key_hash, (reason or "")[:200], banned_at or int(time.time()), key_age_days_at_ban]
+            "INSERT INTO gemini_banned_keys (key_hash, reason, banned_at, key_age_days_at_ban, account) VALUES (?1,?2,?3,?4,?5) "
+            "ON CONFLICT(key_hash) DO UPDATE SET reason=excluded.reason, account=excluded.account",
+            [key_hash, (reason or "")[:200], banned_at or int(time.time()), key_age_days_at_ban, account]
         )
     except Exception as e:
         logger.warning(f"[D1] mark_gemini_key_banned warn (non-fatal): {e}")
 
 async def db_load_gemini_banned_keys() -> dict:
-    """Returns {key_hash: {"reason": str, "banned_at": int, "key_age_days_at_ban": float|None}}
+    """Returns {key_hash: {"reason": str, "banned_at": int, "key_age_days_at_ban": float|None, "account": str|None}}
     for every permanently-banned key -- called once at startup to rehydrate
     pdf_handler.py's in-memory _banned/_ban_reasons/_ban_meta so a restart
     doesn't un-ban anything."""
     try:
         await _ensure_gemini_banned_table()
-        rows = await d1_select("SELECT key_hash, reason, banned_at, key_age_days_at_ban FROM gemini_banned_keys")
+        rows = await d1_select("SELECT key_hash, reason, banned_at, key_age_days_at_ban, account FROM gemini_banned_keys")
         return {r["key_hash"]: {"reason": r.get("reason", ""), "banned_at": r.get("banned_at"),
-                                 "key_age_days_at_ban": r.get("key_age_days_at_ban")} for r in rows}
+                                 "key_age_days_at_ban": r.get("key_age_days_at_ban"),
+                                 "account": r.get("account")} for r in rows}
     except Exception as e:
         logger.warning(f"[D1] load_gemini_banned_keys warn (non-fatal): {e}")
         return {}

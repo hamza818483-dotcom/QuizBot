@@ -128,7 +128,8 @@ async def load_banned_keys_from_d1():
             if meta.get("reason"):
                 key_rotator._ban_reasons[key] = meta["reason"]
             key_rotator._ban_meta[key] = {"banned_at": meta.get("banned_at"),
-                                           "key_age_days_at_ban": meta.get("key_age_days_at_ban")}
+                                           "key_age_days_at_ban": meta.get("key_age_days_at_ban"),
+                                           "account": meta.get("account") or key_rotator.account_of(key)}
             restored += 1
         if restored:
             key_rotator.keys = [k for k in key_rotator.keys if k not in key_rotator._banned]
@@ -942,15 +943,16 @@ class GeminiKeyRotator:
             _save_banned_reasons(self._ban_reasons)
         now = time.time()
         age_days = self.warmup_days_elapsed(key) if key in self._key_first_seen else None
-        self._ban_meta[key] = {"banned_at": now, "key_age_days_at_ban": age_days}
+        acct = self.account_of(key)
+        self._ban_meta[key] = {"banned_at": now, "key_age_days_at_ban": age_days, "account": acct}
         _save_ban_meta(self._ban_meta)
         self.keys = [k for k in self.keys if k != key]
         _save_banned_keys(self._banned)
         age_str = f", key was {age_days:.1f}d old" if age_days is not None else ""
-        logger.error(f"[Gemini] Key {key[:12]}... permanently banned and removed from rotation ({len(self.keys)} keys remain){age_str}" + (f" — reason: {reason}" if reason else ""))
+        logger.error(f"[Gemini] Key {key[:12]}... (account={acct}) permanently banned and removed from rotation ({len(self.keys)} keys remain){age_str}" + (f" — reason: {reason}" if reason else ""))
         try:
             from core import db_mark_gemini_key_banned
-            asyncio.create_task(db_mark_gemini_key_banned(_gemini_key_hash(key), reason, int(now), age_days))
+            asyncio.create_task(db_mark_gemini_key_banned(_gemini_key_hash(key), reason, int(now), age_days, acct))
         except Exception as e:
             logger.warning(f"[Gemini] D1 ban-persist scheduling failed (non-fatal, /tmp file still authoritative until restart): {e}")
 
