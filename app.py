@@ -30771,7 +30771,6 @@ async def handle_message(msg: dict):
         await handle_error_command(msg)
     elif text == "/banreport":
         try:
-            from pdf_handler import key_rotator
             from collections import defaultdict
             meta = getattr(key_rotator, "_ban_meta", {})
             reasons = getattr(key_rotator, "_ban_reasons", {})
