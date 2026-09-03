@@ -26441,24 +26441,38 @@ async def qbm_extract_all_pages(
         # page-level cache so it's a genuinely fresh attempt, not a cached
         # empty replay.
         if not mcqs and not is_cancelled(chat_id):
-            logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retrying once (cache bypassed) before accepting as empty")
-            try:
-                _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
-                mcqs = await _extract_fn(img, cache_key=_ck, bypass_cache=True) if _ck else await _extract_fn(img)
-            except TypeError:
-                # extractor doesn't accept bypass_cache kwarg — fall back to
-                # a plain re-call (still a fresh network attempt).
+            # 0-MCQ page: retry up to 3 more times (cache bypassed each time,
+            # small backoff between) before accepting as genuinely empty.
+            # A transient single-attempt miss (bad frame decode, provider
+            # hiccup) must not permanently zero out a page that has real
+            # content — real result required, "jai hoye jak" is not
+            # acceptable per explicit instruction.
+            for _attempt_n in range(1, 4):
+                if is_cancelled(chat_id):
+                    break
+                logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry {_attempt_n}/3 (cache bypassed) before accepting as empty")
+                if _attempt_n > 1:
+                    await asyncio.sleep(2 * _attempt_n)
                 try:
                     _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
-                    mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
+                    mcqs = await _extract_fn(img, cache_key=_ck, bypass_cache=True) if _ck else await _extract_fn(img)
+                except TypeError:
+                    # extractor doesn't accept bypass_cache kwarg — fall back
+                    # to a plain re-call (still a fresh network attempt).
+                    try:
+                        _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
+                        mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
+                    except Exception as e3:
+                        logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry {_attempt_n}/3 also failed: {e3}")
+                        mcqs = []
                 except Exception as e3:
-                    logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry also failed: {e3}")
+                    logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry {_attempt_n}/3 also failed: {e3}")
                     mcqs = []
-            except Exception as e3:
-                logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry also failed: {e3}")
-                mcqs = []
+                if mcqs:
+                    logger.info(f"[QBM Extract] Page {page_num} recovered {len(mcqs)} MCQ on retry {_attempt_n}/3")
+                    break
             if not mcqs:
-                logger.warning(f"[QBM Extract] Page {page_num} still 0 MCQ after retry — accepting as genuinely empty")
+                logger.warning(f"[QBM Extract] Page {page_num} still 0 MCQ after 3 retries — accepting as genuinely empty")
 
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
