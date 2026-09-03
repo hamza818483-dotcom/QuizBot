@@ -296,7 +296,7 @@ class GeminiKeyRotator:
     # hits on one account are spread out further -- reduces same-account
     # burst signature even when the account is under its concurrency cap.
 
-    ACCOUNT_DAILY_CALL_CAP = 1200  # soft ceiling on total calls per account
+    ACCOUNT_DAILY_CALL_CAP = 2000  # soft ceiling on total calls per account
     # per rolling 24h. Free-tier keys used at sustained bot/commercial-scale
     # volume is itself a suspension trigger regardless of per-minute/burst
     # shaping -- this caps the aggregate daily footprint per Google account
@@ -304,7 +304,7 @@ class GeminiKeyRotator:
     # traffic riding a free tier. When an account crosses this, its keys are
     # pushed to the back of ordered_keys() (not hard-blocked) so load drains
     # to less-used accounts first.
-    ACCOUNT_ERROR_CIRCUIT_THRESHOLD = 4  # consecutive 401/403/suspend-style
+    ACCOUNT_ERROR_CIRCUIT_THRESHOLD = 6  # consecutive 401/403/suspend-style
     # errors from the SAME account (across any of its keys) within
     # ACCOUNT_ERROR_CIRCUIT_WINDOW triggers a temporary full-account pause --
     # this is the code-side approximation of "account looks flagged, back off
@@ -352,10 +352,10 @@ class GeminiKeyRotator:
     # ACCOUNT_STAGGER_BATCH_SIZE keys (by first-seen time) are usable
     # immediately; the next batch unlocks after ACCOUNT_STAGGER_DAYS, and
     # so on, until the whole account's key set is live.
-    ACCOUNT_STAGGER_BATCH_SIZE = 4  # keys unlocked per stagger step -- larger
+    ACCOUNT_STAGGER_BATCH_SIZE = 6  # keys unlocked per stagger step -- larger
     # batch keeps more quota usable sooner (balance: not too slow), while
     # still avoiding a full 10-key account activating in one shot.
-    ACCOUNT_STAGGER_DAYS = 1  # days between unlocking each stagger step --
+    ACCOUNT_STAGGER_DAYS = 0.5  # days between unlocking each stagger step --
     # short gap so a 10-key account reaches full quota within ~2-3 days
     # instead of a full week, while still breaking up the "all at once"
     # signal into 2-3 distinct activation events over time.

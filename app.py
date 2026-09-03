@@ -30868,6 +30868,23 @@ async def handle_message(msg: dict):
             gem_healthy = len(gemini_keys) - gem_cooling - gem_exhausted
             lines.append(f"\n🔵 <b>Gemini</b> (gemini-3.5-flash, free tier ~20 req/day/key): {len(gemini_keys) + gem_banned} key\n"
                          f"  ✅ Healthy: {gem_healthy} | ⏳ Cooldown: {gem_cooling} | 🔴 আজকে exhausted: {gem_exhausted} | 🚫 Banned: {gem_banned}")
+            # Compact breakdown of the "healthy" bucket: not-banned/cooling/
+            # exhausted doesn't mean immediately usable -- stagger-lock,
+            # circuit-pause, daily-cap and warmup all deprioritize a key
+            # without making it unhealthy. Shown so /keys reflects what's
+            # actually being picked, not just raw availability.
+            not_banned_not_cooling_not_exhausted = [
+                k for k in gemini_keys
+                if k not in gem_banned_set
+                and not (0 < key_rotator._cooldown_until.get(k, 0) < float("inf") and key_rotator._cooldown_until.get(k, 0) > now)
+                and not _is_gemini_key_exhausted_today(k)
+            ]
+            n_circuit = sum(1 for k in not_banned_not_cooling_not_exhausted if key_rotator.account_circuit_open(k))
+            n_stagger = sum(1 for k in not_banned_not_cooling_not_exhausted if key_rotator.is_stagger_locked(k))
+            n_warmup = sum(1 for k in not_banned_not_cooling_not_exhausted if key_rotator.is_warming_up(k))
+            n_overcap = sum(1 for k in not_banned_not_cooling_not_exhausted if key_rotator.account_over_daily_cap(k))
+            n_active = len(not_banned_not_cooling_not_exhausted) - len({k for k in not_banned_not_cooling_not_exhausted if key_rotator.account_circuit_open(k) or key_rotator.is_stagger_locked(k)})
+            lines.append(f"  ↳ এর মধ্যে actively usable: {n_active} | 🔒 stagger-locked: {n_stagger} | ⛔ circuit-paused: {n_circuit} | 🐣 warming-up: {n_warmup} | 📈 over daily-cap: {n_overcap}")
             if gem_banned_set:
                 reasons = key_rotator._ban_reasons
                 meta = getattr(key_rotator, "_ban_meta", {})
