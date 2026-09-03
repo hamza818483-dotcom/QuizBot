@@ -26441,18 +26441,19 @@ async def qbm_extract_all_pages(
         # page-level cache so it's a genuinely fresh attempt, not a cached
         # empty replay.
         if not mcqs and not is_cancelled(chat_id):
-            # 0-MCQ page: retry up to 3 more times (cache bypassed each time,
-            # small backoff between) before accepting as genuinely empty.
+            # 0-MCQ page: keep retrying (cache bypassed, capped backoff)
+            # until a real result comes back or the job is cancelled.
             # A transient single-attempt miss (bad frame decode, provider
-            # hiccup) must not permanently zero out a page that has real
-            # content — real result required, "jai hoye jak" is not
-            # acceptable per explicit instruction.
-            for _attempt_n in range(1, 4):
-                if is_cancelled(chat_id):
-                    break
-                logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry {_attempt_n}/3 (cache bypassed) before accepting as empty")
+            # hiccup, temporary key exhaustion) must never permanently
+            # zero out a page that has real content — per explicit
+            # instruction, output for this page does not finalize until
+            # it actually succeeds.
+            _attempt_n = 0
+            while not mcqs and not is_cancelled(chat_id):
+                _attempt_n += 1
+                logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry #{_attempt_n} (cache bypassed), will not finalize until real result found")
                 if _attempt_n > 1:
-                    await asyncio.sleep(2 * _attempt_n)
+                    await asyncio.sleep(min(3 * _attempt_n, 30))
                 try:
                     _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
                     mcqs = await _extract_fn(img, cache_key=_ck, bypass_cache=True) if _ck else await _extract_fn(img)
@@ -26463,16 +26464,28 @@ async def qbm_extract_all_pages(
                         _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
                         mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
                     except Exception as e3:
-                        logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry {_attempt_n}/3 also failed: {e3}")
+                        logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry #{_attempt_n} also failed: {e3}")
                         mcqs = []
                 except Exception as e3:
-                    logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry {_attempt_n}/3 also failed: {e3}")
+                    logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry #{_attempt_n} also failed: {e3}")
                     mcqs = []
                 if mcqs:
-                    logger.info(f"[QBM Extract] Page {page_num} recovered {len(mcqs)} MCQ on retry {_attempt_n}/3")
+                    logger.info(f"[QBM Extract] Page {page_num} recovered {len(mcqs)} MCQ on retry #{_attempt_n}")
                     break
-            if not mcqs:
-                logger.warning(f"[QBM Extract] Page {page_num} still 0 MCQ after 3 retries — accepting as genuinely empty")
+                # Safety valve: after 15 straight failures, do one independent
+                # final-empty-page scan (different code path) to confirm the
+                # page is genuinely blank rather than looping forever on a
+                # truly empty page (e.g. a cover/divider page).
+                if _attempt_n >= 15:
+                    try:
+                        _final = await _qbm_final_empty_page_scan(img)
+                    except Exception:
+                        _final = None
+                    if not _final:
+                        logger.warning(f"[QBM Extract] Page {page_num} confirmed genuinely empty after {_attempt_n} retries + independent final scan")
+                        break
+                    # final scan found something Call1 kept missing — keep the loop going
+                    logger.warning(f"[QBM Extract] Page {page_num} final-scan found content after {_attempt_n} retries — continuing retry loop")
 
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
