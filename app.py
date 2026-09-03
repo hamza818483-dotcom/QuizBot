@@ -6180,6 +6180,88 @@ async def handle_forward(msg: dict):
         f"কোন channel-এ forward করবো?",
         reply_markup={"inline_keyboard": buttons})
 
+async def _fetch_message_types(src_chat, all_ids: list) -> dict:
+    """Returns {message_id: 'photo'|'poll'|'other'|None(missing)} for the
+    given IDs, using pyrogram's batch get_messages (up to 200 IDs/call).
+    Falls back to treating everything as 'other' (no grouping) if pyrogram
+    is unavailable -- forwarding still works, just without image+poll
+    grouping in that case."""
+    from core import _get_pyro_client
+    client = await _get_pyro_client()
+    if client is None:
+        return {}
+    types = {}
+    BATCH = 200  # pyrogram get_messages hard cap per call
+    for i in range(0, len(all_ids), BATCH):
+        batch_ids = all_ids[i:i + BATCH]
+        try:
+            msgs = await client.get_messages(src_chat, batch_ids)
+            if not isinstance(msgs, list):
+                msgs = [msgs]
+            for m in msgs:
+                if m is None or getattr(m, "empty", False):
+                    continue
+                mid = m.id
+                if getattr(m, "photo", None) or getattr(m, "video", None) or getattr(m, "document", None):
+                    types[mid] = "photo"
+                elif getattr(m, "poll", None):
+                    types[mid] = "poll"
+                else:
+                    types[mid] = "other"
+        except Exception as e:
+            logger.warning(f"[/forward] get_messages batch failed for {batch_ids[0]}..{batch_ids[-1]}: {e}")
+    return types
+
+
+def _build_forward_groups(all_ids: list, msg_types: dict) -> list:
+    """Groups message IDs so an image and every poll that follows it (until
+    the next image) travel together. If type info is missing for an ID
+    (pyrogram unavailable or message not found), it's treated as a
+    continuation of the current group rather than starting a new one, so
+    grouping degrades gracefully instead of splitting things up wrongly.
+    Returns a list of groups, each group a list of message IDs."""
+    groups = []
+    current = []
+    for mid in all_ids:
+        t = msg_types.get(mid)
+        if t == "photo" and current:
+            groups.append(current)
+            current = [mid]
+        else:
+            current.append(mid)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _chunk_groups(groups: list, target_chunk: int = 30, hard_cap: int = 100) -> list:
+    """Packs whole groups into chunks near target_chunk size, never
+    splitting a group across chunks (user requirement: image+its polls must
+    forward together). A single group larger than hard_cap (Telegram's
+    forwardMessages 100-id limit) is split as a last resort -- this only
+    happens for a pathological group with 100+ messages between images."""
+    chunks = []
+    current = []
+    current_size = 0
+    for g in groups:
+        if len(g) > hard_cap:
+            # Oversized single group: must split, no choice (Bot API cap).
+            if current:
+                chunks.append(current)
+                current, current_size = [], 0
+            for i in range(0, len(g), hard_cap):
+                chunks.append(g[i:i + hard_cap])
+            continue
+        if current_size + len(g) > hard_cap or (current_size >= target_chunk and current):
+            chunks.append(current)
+            current, current_size = [], 0
+        current.extend(g)
+        current_size += len(g)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 async def _run_forward_job(chat_id, uid, target_channel):
     pending = _FORWARD_PENDING.get(uid)
     if not pending:
@@ -6202,17 +6284,31 @@ async def _run_forward_job(chat_id, uid, target_channel):
     first_target_msg_id = None
     last_edit = time.time()
     all_ids = list(range(start_id, end_id + 1))
-    CHUNK = 30  # kept well below forwardMessages' 100-id hard cap -- a
-    # single 100-message batch posts almost instantly server-side and can
-    # itself trip Telegram's flood control for the target chat regardless
-    # of the inter-chunk delay below, so a smaller chunk size is safer.
-    for chunk_start in range(0, len(all_ids), CHUNK):
+
+    # USER REQUIREMENT (2026-09-03): an image and every poll that follows it
+    # (up to the next image) must forward together in the same batch call,
+    # so they never end up split across two forwardMessages chunks. Fetch
+    # message types via pyrogram first to find image boundaries, group
+    # accordingly, then pack whole groups into ~30-message chunks (packing
+    # may vary chunk size -- a chunk can run smaller or larger than 30 to
+    # keep every group intact, capped only by Telegram's 100-id hard limit).
+    msg_types = await _fetch_message_types(src_chat, all_ids)
+    if msg_types:
+        groups = _build_forward_groups(all_ids, msg_types)
+        chunked_ids = _chunk_groups(groups, target_chunk=30, hard_cap=100)
+    else:
+        # pyrogram unavailable -- fall back to plain fixed-size chunking
+        # (old behavior) rather than blocking the whole forward job.
+        logger.warning("[/forward] pyrogram unavailable, falling back to plain 30-id chunking (no image+poll grouping)")
+        CHUNK = 30
+        chunked_ids = [all_ids[i:i + CHUNK] for i in range(0, len(all_ids), CHUNK)]
+
+    for chunk_ids in chunked_ids:
         if is_cancelled(chat_id) or CURRENT_JOB_ID.get(chat_id) != job_id:
             await edit_msg(chat_id, status_msg_id,
                 f"🛑 Forward বন্ধ করা হয়েছে — {done}/{total} সফল, {failed} skip.")
             _FORWARD_PENDING.pop(uid, None)
             return
-        chunk_ids = all_ids[chunk_start:chunk_start + CHUNK]
         try:
             # forwardMessages (batch) sends the whole chunk as ONE grouped
             # forward action, same as manually multi-selecting messages in
