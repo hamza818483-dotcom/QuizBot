@@ -14838,7 +14838,7 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 if err_short:
                     lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ — {err_short}")
                 else:
-                    lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ (content না পাওয়া গেছে)")
+                    lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ (কারণ অজানা — retry/log চেক করুন)")
             else:
                 model_tag = s.get("model", "")
                 model_str = f" ({model_tag})" if model_tag else ""
@@ -26530,6 +26530,10 @@ async def qbm_extract_all_pages(
             # nothing — never on attempt-count alone.
             _attempt_n = 0
             _MAX_FAST_RETRIES = 5
+            _zero_reason = None  # 2026-09-04: root-cause string surfaced to the
+            # dashboard instead of a generic "content না পাওয়া গেছে" -- lets
+            # a real cause (JSON parse/repair failure, exception, key
+            # exhaustion) be told apart from a page that's genuinely blank.
             while not mcqs and not is_cancelled(chat_id):
                 _attempt_n += 1
                 _careful = _attempt_n >= 2  # 1st retry stays fast; 2nd+ uses careful mode (higher thinking budget + exhaustive-scan prompt)
@@ -26548,11 +26552,14 @@ async def qbm_extract_all_pages(
                     except Exception as e3:
                         logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry #{_attempt_n} also failed: {e3}")
                         mcqs = []
+                        _zero_reason = f"AI call error: {str(e3)[:120]}"
                 except Exception as e3:
                     logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry #{_attempt_n} also failed: {e3}")
                     mcqs = []
+                    _zero_reason = f"AI call error: {str(e3)[:120]}"
                 if mcqs:
                     logger.info(f"[QBM Extract] Page {page_num} recovered {len(mcqs)} MCQ on retry #{_attempt_n}")
+                    _zero_reason = None
                     break
                 if _attempt_n >= _MAX_FAST_RETRIES:
                     # Independent confirmation pass, differently prompted —
@@ -26562,12 +26569,20 @@ async def qbm_extract_all_pages(
                     except Exception as e4:
                         logger.error(f"[QBM Extract] Page {page_num} independent empty-scan errored: {e4}")
                         _final_scan = None
+                        _zero_reason = f"independent scan error: {str(e4)[:120]}"
                     if _final_scan:
                         logger.warning(f"[QBM Extract] Page {page_num} independent scan RECOVERED {len(_final_scan)} MCQ after {_attempt_n} misses — using this result")
                         mcqs = _final_scan
+                        _zero_reason = None
                         break
                     logger.warning(f"[QBM Extract] Page {page_num} independent scan also confirms 0 MCQ after {_attempt_n} attempts — accepting as genuinely empty page")
+                    if not _zero_reason:
+                        _zero_reason = f"genuinely empty page (confirmed via {_attempt_n} retries + independent scan)"
                     break
+            if not mcqs and is_cancelled(chat_id) and not _zero_reason:
+                _zero_reason = "cancelled before confirmation"
+            if not mcqs and _zero_reason:
+                page_status[idx]["error"] = _zero_reason
 
 
         page_status[idx]["current"] = False
