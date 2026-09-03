@@ -2946,6 +2946,38 @@ def _validate_mcq_structure(mcqs: list) -> list:
     return clean
 
 
+def _find_last_complete_top_level_json_object_end(s: str, search_end: int) -> int:
+    """Scan a JSON array string s[0:search_end] and return the index of the
+    '}' that closes the LAST fully-balanced top-level object inside the
+    array (brace-depth aware), or -1 if none found. A naive rfind("}") can
+    land on a '}' that closes a NESTED object (e.g. an "options": {...}
+    sub-dict) rather than a top-level array element, producing an invalid
+    unbalanced-brace repair. This walks depth so only true top-level object
+    boundaries are considered."""
+    depth = 0
+    last_top_level_close = -1
+    in_string = False
+    escape = False
+    for i, ch in enumerate(s[:search_end]):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                last_top_level_close = i
+    return last_top_level_close
+
+
 def _parse_mcq_json(text: str) -> list:
     if not text:
         return []
@@ -2986,7 +3018,7 @@ def _parse_mcq_json(text: str) -> list:
             # the break, so a mid-string cutoff doesn't get treated as if
             # the last object were complete.
             search_end = getattr(e, "pos", len(s))
-            last_obj_end = s.rfind("}", 0, search_end)
+            last_obj_end = _find_last_complete_top_level_json_object_end(s, search_end)
             if last_obj_end != -1:
                 repaired = s[:last_obj_end + 1] + "]"
                 data = json.loads(repaired)
@@ -20494,8 +20526,19 @@ def _qbm_parse_json(text: str) -> list:
     try:
         m = re.search(r'\[.*\]', t, re.DOTALL)
         raw = json.loads(m.group()) if m else json.loads(t)
-    except Exception:
-        return []
+    except Exception as e:
+        try:
+            search_end = getattr(e, "pos", len(t))
+            last_obj_end = _find_last_complete_top_level_json_object_end(t, search_end)
+            if last_obj_end != -1:
+                repaired = t[:last_obj_end + 1] + "]"
+                raw = json.loads(repaired)
+                logger.warning(f"[_qbm_parse_json] JSON decode failed, repaired via truncation to last complete object: {e}")
+            else:
+                raise e
+        except Exception:
+            logger.warning(f"[_qbm_parse_json] JSON decode failed: {e} | raw (first 200 chars): {t[:200]!r}")
+            return []
     if not isinstance(raw, list):
         return []
     valid = []
@@ -21711,7 +21754,7 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
                 ],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=8192,
+                    max_output_tokens=12288,
                     response_mime_type="application/json",
                     thinking_config=types.ThinkingConfig(thinking_budget=768 if careful else 0)
                 )
@@ -21837,7 +21880,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False) -> str:
                 ],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=8192,
+                    max_output_tokens=12288,
                     response_mime_type="application/json",
                     thinking_config=types.ThinkingConfig(thinking_budget=768 if careful else 0)
                 )
@@ -21955,7 +21998,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 contents=parts,
                 config=types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=8192
+                    max_output_tokens=12288
                 )
             )
 
