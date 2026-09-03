@@ -17687,7 +17687,7 @@ def _build_missing_qsn_recovery_prompt(missing_nums: list, known_mcqs: list) -> 
     )
 
 
-async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False) -> list:
+async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False) -> list:
     """/unmesh extractor — same Call1+Call2 pipeline as /topic, but topic
     boundaries are detected via the WHITE-bg + BOLD BLACK text + preceding
     black-circle-with-1/2/3-white-stars heading style (UNMESH_EXTRACT_PROMPT),
@@ -17708,7 +17708,8 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
         # 2026-09-01) — ~150 Gemini keys available so no need to leak into
         # other providers; also avoids wasted calls when OpenRouter's daily
         # quota is already fully exhausted.
-        gem_txt = await _qbm_gemini_raw_only(img, UNMESH_EXTRACT_PROMPT)
+        _prompt = UNMESH_EXTRACT_PROMPT + _QBM_CAREFUL_SCAN_ADDENDUM if careful else UNMESH_EXTRACT_PROMPT
+        gem_txt = await _qbm_gemini_raw_only(img, _prompt, careful=careful)
         gem = _qbm_parse_json(gem_txt) if gem_txt else []
         result = _qbm_dedup_list(gem) if gem else []
         if result and cache_key:
@@ -21670,7 +21671,7 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
     return fixed
 
 
-async def _qbm_gemini_raw_only(img, prompt: str) -> str:
+async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
     """/unmesh-ONLY variant of _qbm_gemini_raw: tries every Gemini key
     (healthiest-first, skipping already-known-daily-exhausted ones) but
     NEVER internally falls back to Groq -- returns "" if every key fails.
@@ -21680,7 +21681,10 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
     chain's own "if gem: ... else: try Groq" logic couldn't tell whether
     an empty result already came from a Groq call underneath, and with
     ~150 keys now available there is no reason to give up on Gemini before
-    truly exhausting the whole key pool first."""
+    truly exhausting the whole key pool first.
+
+    careful=True: raises thinking_budget (0 -> 768) for a slower, more
+    thorough read -- same balance as the QBM path, used on 0-MCQ retries."""
     _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
     try:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today, _qbm_page_used_accounts_ctx
@@ -21709,7 +21713,7 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
                     temperature=0.1,
                     max_output_tokens=8192,
                     response_mime_type="application/json",
-                    thinking_config=types.ThinkingConfig(thinking_budget=0)
+                    thinking_config=types.ThinkingConfig(thinking_budget=768 if careful else 0)
                 )
             )
 
