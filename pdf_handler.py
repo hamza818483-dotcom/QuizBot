@@ -268,7 +268,7 @@ class GeminiKeyRotator:
     # grouping is unknown -- see GLOBAL_CONCURRENT_CAP below for the
     # mapping-independent safeguard.
 
-    GLOBAL_CONCURRENT_CAP = 8  # hard ceiling on simultaneous in-flight Gemini
+    GLOBAL_CONCURRENT_CAP = 12  # hard ceiling on simultaneous in-flight Gemini
     # calls across ALL keys/accounts combined, regardless of grouping info.
     # History: 20 -> 8 -> 6 -> 8 (2026-09-03 second pass). The 34-key mass-ban
     # that day was overwhelmingly on keys still inside WARMUP window (0.3-0.8d
@@ -281,7 +281,7 @@ class GeminiKeyRotator:
     # same reason: spreads call-starts out in time so concurrent load never
     # looks like an instantaneous fan-out burst.
 
-    DISTINCT_ACCOUNT_CONCURRENT_CAP = 2  # hard ceiling on how many DIFFERENT
+    DISTINCT_ACCOUNT_CONCURRENT_CAP = 3  # hard ceiling on how many DIFFERENT
     # accounts can have an in-flight call at the same instant, independent of
     # GLOBAL_CONCURRENT_CAP (which only bounds total call count, not account
     # diversity). All keys/accounts share one egress IP here, so N different
