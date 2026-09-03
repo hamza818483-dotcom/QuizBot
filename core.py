@@ -1642,14 +1642,17 @@ async def _ensure_gemini_banned_table():
     # Check pragma first so we don't spam "duplicate column" errors on every run.
     global _gemini_banned_account_col_checked
     if not globals().get("_gemini_banned_account_col_checked"):
-        try:
-            cols = await d1_select("PRAGMA table_info(gemini_banned_keys)")
-            col_names = {c.get("name") for c in (cols or [])}
-            if "account" not in col_names:
-                await d1_run("ALTER TABLE gemini_banned_keys ADD COLUMN account TEXT", [])
-        except Exception:
-            pass
-        globals()["_gemini_banned_account_col_checked"] = True
+        lock = globals().setdefault("_gemini_banned_account_col_lock", asyncio.Lock())
+        async with lock:
+            if not globals().get("_gemini_banned_account_col_checked"):
+                try:
+                    cols = await d1_select("PRAGMA table_info(gemini_banned_keys)")
+                    col_names = {c.get("name") for c in (cols or [])}
+                    if "account" not in col_names:
+                        await d1_run("ALTER TABLE gemini_banned_keys ADD COLUMN account TEXT", [])
+                except Exception:
+                    pass
+                globals()["_gemini_banned_account_col_checked"] = True
 
 async def db_mark_gemini_key_banned(key_hash: str, reason: str = "", banned_at: int = None, key_age_days_at_ban: float = None, account: str = None):
     try:
