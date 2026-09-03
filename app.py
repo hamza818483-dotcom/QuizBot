@@ -26472,20 +26472,8 @@ async def qbm_extract_all_pages(
                 if mcqs:
                     logger.info(f"[QBM Extract] Page {page_num} recovered {len(mcqs)} MCQ on retry #{_attempt_n}")
                     break
-                # Safety valve: after 15 straight failures, do one independent
-                # final-empty-page scan (different code path) to confirm the
-                # page is genuinely blank rather than looping forever on a
-                # truly empty page (e.g. a cover/divider page).
-                if _attempt_n >= 15:
-                    try:
-                        _final = await _qbm_final_empty_page_scan(img)
-                    except Exception:
-                        _final = None
-                    if not _final:
-                        logger.warning(f"[QBM Extract] Page {page_num} confirmed genuinely empty after {_attempt_n} retries + independent final scan")
-                        break
-                    # final scan found something Call1 kept missing — keep the loop going
-                    logger.warning(f"[QBM Extract] Page {page_num} final-scan found content after {_attempt_n} retries — continuing retry loop")
+                if _attempt_n % 10 == 0:
+                    logger.warning(f"[QBM Extract] Page {page_num} still 0 MCQ after {_attempt_n} retries — content is known non-blank, continuing until real result found")
 
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
