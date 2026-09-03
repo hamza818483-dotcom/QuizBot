@@ -26473,18 +26473,20 @@ async def qbm_extract_all_pages(
         # page-level cache so it's a genuinely fresh attempt, not a cached
         # empty replay.
         if not mcqs and not is_cancelled(chat_id):
-            # 0-MCQ page: keep retrying (cache bypassed, capped backoff)
-            # until a real result comes back or the job is cancelled.
-            # A transient single-attempt miss (bad frame decode, provider
-            # hiccup, temporary key exhaustion) must never permanently
-            # zero out a page that has real content — per explicit
-            # instruction, output for this page does not finalize until
-            # it actually succeeds.
+            # 0-MCQ page: retry with rising effort (careful mode from 2nd
+            # attempt) up to 5 tries — most speed-related misses recover in
+            # 1-2. After 5 straight misses, run ONE independent fresh-eyes
+            # scan (_qbm_final_empty_page_scan — a differently-worded prompt,
+            # not just another regular retry) to distinguish "Gemini keeps
+            # missing a real page" from "page is genuinely blank/divider".
+            # Only stop retrying once that independent check also finds
+            # nothing — never on attempt-count alone.
             _attempt_n = 0
+            _MAX_FAST_RETRIES = 5
             while not mcqs and not is_cancelled(chat_id):
                 _attempt_n += 1
                 _careful = _attempt_n >= 2  # 1st retry stays fast; 2nd+ uses careful mode (higher thinking budget + exhaustive-scan prompt)
-                logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry #{_attempt_n}{' (careful mode)' if _careful else ''} (cache bypassed), will not finalize until real result found")
+                logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry #{_attempt_n}{' (careful mode)' if _careful else ''} (cache bypassed), will not finalize until confirmed")
                 if _attempt_n > 1:
                     await asyncio.sleep(min(3 * _attempt_n, 30))
                 try:
@@ -26505,8 +26507,21 @@ async def qbm_extract_all_pages(
                 if mcqs:
                     logger.info(f"[QBM Extract] Page {page_num} recovered {len(mcqs)} MCQ on retry #{_attempt_n}")
                     break
-                if _attempt_n % 10 == 0:
-                    logger.warning(f"[QBM Extract] Page {page_num} still 0 MCQ after {_attempt_n} retries (soft-cap check, still continuing) — content is known non-blank, will not give up")
+                if _attempt_n >= _MAX_FAST_RETRIES:
+                    # Independent confirmation pass, differently prompted —
+                    # not just "retry again and hope".
+                    try:
+                        _final_scan = await _qbm_final_empty_page_scan(img)
+                    except Exception as e4:
+                        logger.error(f"[QBM Extract] Page {page_num} independent empty-scan errored: {e4}")
+                        _final_scan = None
+                    if _final_scan:
+                        logger.warning(f"[QBM Extract] Page {page_num} independent scan RECOVERED {len(_final_scan)} MCQ after {_attempt_n} misses — using this result")
+                        mcqs = _final_scan
+                        break
+                    logger.warning(f"[QBM Extract] Page {page_num} independent scan also confirms 0 MCQ after {_attempt_n} attempts — accepting as genuinely empty page")
+                    break
+
 
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
