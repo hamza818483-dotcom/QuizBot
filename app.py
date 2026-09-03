@@ -17962,41 +17962,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
                 missing_nums -= recovered
                 logger.warning(f"[UNMESH verify] recovery iteration {_retry_attempt+1} done: recovered={sorted(recovered) if recovered else 'none'}, still missing={sorted(missing_nums) if missing_nums else 'none'}")
             if missing_nums:
-                logger.error(f"[UNMESH verify] gave up recovering qsn_no {sorted(missing_nums)} after 3 targeted Gemini attempts — trying a different model (Groq) as last resort")
-                # LAST-RESORT CROSS-MODEL FALLBACK: 3 Gemini attempts (Call1
-                # + 2 targeted retries, sometimes across different Gemini
-                # ACCOUNTS via key rotation) still failed for these exact
-                # qsn_no. Switching keys/accounts doesn't help here because
-                # the underlying model doing the actual image-reading is
-                # the SAME Gemini model every time -- it isn't a quota/rate
-                # problem, it's that specific model repeatedly failing to
-                # read that specific spot on the page (dense two-column
-                # layout, or a short question stem it's mistaking for a
-                # duplicate of an earlier one). A genuinely different model
-                # (Groq/qwen) gets an independent "second pair of eyes" on
-                # exactly those positions, without touching Call1's
-                # Gemini-only design for the normal (non-failing) path.
-                try:
-                    groq_recovery_prompt = _build_missing_qsn_recovery_prompt(list(missing_nums), mcqs)
-                    groq_txt = await _gen_groq_raw_text(img, groq_recovery_prompt)
-                    groq_mcqs = _qbm_parse_json(groq_txt) if groq_txt else []
-                except Exception as e:
-                    logger.warning(f"[UNMESH verify] Groq last-resort recovery failed: {e}")
-                    groq_mcqs = []
-                groq_got = {m.get("qsn_no"): m for m in groq_mcqs if isinstance(m.get("qsn_no"), int)}
-                recovered = set()
-                for n in missing_nums:
-                    if n in groq_got:
-                        mc = groq_got[n]
-                        mc["_provider"] = "groq-last-resort"
-                        mcqs.append(mc)
-                        by_qsn[n] = mc
-                        recovered.add(n)
-                if recovered:
-                    logger.warning(f"[UNMESH verify] Groq last-resort recovered qsn_no {sorted(recovered)}")
-                missing_nums -= recovered
-                if missing_nums:
-                    logger.error(f"[UNMESH verify] still missing qsn_no {sorted(missing_nums)} after Gemini + Groq last-resort — genuinely giving up")
+                logger.error(f"[UNMESH verify] gave up recovering qsn_no {sorted(missing_nums)} after 3 targeted Gemini attempts — accepting as unrecovered (Gemini-only, no cross-model fallback per user request 2026-09-04)")
 
             # FINAL RE-CHECK after recovery — a recovery pass can add MCQs
             # with a topic_hint that reshapes segment boundaries again (or
@@ -21107,7 +21073,7 @@ Output ONLY the full corrected JSON array, all fixes applied, same length/order 
         return call1_mcqs
 
 
-async def _qbm_final_empty_page_scan(img, onu_mode: bool = False) -> list:
+async def _qbm_final_empty_page_scan(img, onu_mode: bool = False, gemini_only: bool = False) -> list:
     """
     CALL 3 (empty-page variant) — used ONLY when Call 1 AND Call 2 BOTH
     returned zero MCQs. Two independent empty results is a strong signal but
@@ -21157,6 +21123,17 @@ MCQ's block, or "yellow_highlight": false if not. Update the output format:
             gem_txt = await _qbm_gemini_raw(img, prompt)
             found = _qbm_parse_json(gem_txt) if gem_txt else []
             provider = "Gemini"
+        elif gemini_only:
+            # /unmesh (per user request 2026-09-04): Gemini-only, no Groq/
+            # OpenRouter fallback anywhere in the pipeline, including this
+            # final empty-page confirmation scan.
+            gem_txt = await _qbm_gemini_raw(img, prompt)
+            found = _qbm_parse_json(gem_txt) if gem_txt else []
+            provider = "Gemini"
+            out = _qbm_dedup_list(found) if found else []
+            for m in out:
+                m.setdefault("_provider", provider)
+            return out
         else:
             txt = await _qbm_groq_call(img, prompt)
             found = _qbm_parse_json(txt) if txt else []
@@ -22503,7 +22480,7 @@ async def _qbm_groq_text_call(prompt: str, model: str = "openai/gpt-oss-120b") -
     return ""
 
 
-async def _qbm_web_resolve_answer(mc: dict) -> dict | None:
+async def _qbm_web_resolve_answer(mc: dict, gemini_only: bool = False) -> dict | None:
     """
     LAST-RESORT answer resolution -- used ONLY when the answer could not be
     found anywhere in the page/PDF (no mark, no inline answer, no answer-key
@@ -22518,6 +22495,10 @@ async def _qbm_web_resolve_answer(mc: dict) -> dict | None:
       search", or any other meta/source-reference note -- explanation must
       read exactly like a normal question-related explanation.
     Returns {"answer": "A/B/C/D", "explanation": "..."} or None if unresolved.
+
+    gemini_only (default False): when True (/unmesh, per user request
+    2026-09-04), uses Gemini's text-only call instead of Groq -- no non-
+    Gemini model anywhere in /unmesh's pipeline.
     """
     try:
         q = mc.get("question", "")
@@ -22553,7 +22534,7 @@ Line 2: ONLY the final answer letter A/B/C/D, or the word NONE if not genuinely 
 Line 3: the 165-char-max Bengali explanation (omit this line entirely if Line 2 is NONE)"""
 
         async def _one_pass() -> dict | None:
-            txt = (await _qbm_groq_text_call(prompt, model="openai/gpt-oss-120b")).strip()
+            txt = (await (_ai_gemini_text_call(prompt) if gemini_only else _qbm_groq_text_call(prompt, model="openai/gpt-oss-120b"))).strip()
             lines = [l.strip() for l in txt.splitlines() if l.strip()]
             if len(lines) < 2:
                 return None
@@ -22587,7 +22568,7 @@ Line 3: the 165-char-max Bengali explanation (omit this line entirely if Line 2 
         return None
 
 
-async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str) -> str:
+async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str, gemini_only: bool = False) -> str:
     """
     Builds a clean, question-related, step-by-step Bengali explanation
     when the correct answer is already known (e.g. matched from an
@@ -22595,6 +22576,10 @@ async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str) 
     it. Main line (why the correct option is right) capped at ~200 chars,
     then one line per wrong option -- each on its own line (\\n-separated).
     NEVER references the source, page, or how the answer was found.
+
+    gemini_only (default False): when True (/unmesh, per user request
+    2026-09-04), uses Gemini's text-only call instead of Groq -- no non-
+    Gemini model anywhere in /unmesh's pipeline.
     """
     try:
         q = mc.get("question", "")
@@ -22613,7 +22598,7 @@ Line 1 (MAIN line, max ~200 characters): why the correct option ({answer_letter}
 Line 2 onward (one line per WRONG option, in order): briefly what that option actually is/means and why it's wrong here, specific fact each time -- never a bare "ভুল" with no reason.
 
 NEVER mention the source, page, answer key, or how the answer was determined. Output ONLY the explanation text (with real line breaks), nothing else."""
-        txt = (await _qbm_groq_text_call(prompt)).strip()
+        txt = (await (_ai_gemini_text_call(prompt) if gemini_only else _qbm_groq_text_call(prompt))).strip()
         return txt[:800]
     except Exception as e:
         logger.warning(f"[QBM] Explanation build failed: {e}")
@@ -23826,7 +23811,7 @@ async def _handle_unmesh_impl(msg: dict):
         extracted_pages = await qbm_extract_all_pages(
             chat_id, pages, "Unmesh Extract", file_name, status_msg_id,
             extractor=_unmesh_extract_from_image, file_id=file_id,
-            page_status_out=_unmesh_page_status
+            page_status_out=_unmesh_page_status, gemini_only=True
         )
 
         total_mcq_found = sum(
@@ -26242,13 +26227,17 @@ async def _handle_onu2_impl(msg: dict):
                 pass
 
 
-async def _qbm_scan_answer_key(img, unresolved_mcqs: list) -> dict:
+async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = False) -> dict:
     """
     Given a page image and a list of MCQs whose answer wasn't found on their
     own page, check if THIS page contains an answer key (table, boxed list,
     or "1-A, 2-C..." style) that matches any of these questions by text.
     Returns {question_text_first_80_chars: answer_letter} for matches found.
     Never guesses — only returns a match if the page genuinely contains one.
+
+    gemini_only (default False): when True (/unmesh, per user request
+    2026-09-04), skips the Groq attempt entirely and goes straight to
+    Gemini — no non-Gemini model anywhere in /unmesh's pipeline.
     """
     if not unresolved_mcqs:
         return {}
@@ -26273,8 +26262,8 @@ If this page has no answer key at all, or no match for these specific questions,
 return exactly: []
 Return ONLY the JSON array, nothing else."""
 
-        keys = groq_key_rotator.ordered_keys()
         result_json = None
+        keys = [] if gemini_only else groq_key_rotator.ordered_keys()
         if keys:
             data_url = _img_to_data_url_groq(img)
             if data_url:
@@ -26345,7 +26334,8 @@ async def qbm_extract_all_pages(
     chat_id: int, pages: list, topic: str,
     file_name: str, status_msg_id: int = None,
     extractor=None, file_id: str = None,
-    page_status_out: list = None
+    page_status_out: list = None,
+    gemini_only: bool = False
 ) -> list:
     """
     Phase 1 -- runs the full 3-call connected extraction pipeline for every
@@ -26366,6 +26356,12 @@ async def qbm_extract_all_pages(
     dashboard AFTER this function returns (e.g. to append a completion
     line without losing the per-page history). Opt-in, default None, so
     every existing caller is unaffected.
+
+    gemini_only (opt-in, default False): when True, the 0-MCQ confirmation
+    scan (_qbm_final_empty_page_scan) is forced Gemini-only, no Groq/
+    OpenRouter fallback -- used by /unmesh (per user request 2026-09-04:
+    /unmesh must never use a non-Gemini model anywhere in its pipeline).
+    Every other caller (/qbm, /onu) is unaffected (default False).
     """
     _extract_fn = extractor or _qbm_extract_from_image
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
@@ -26477,7 +26473,7 @@ async def qbm_extract_all_pages(
                     if not unresolved or is_cancelled(chat_id):
                         break
                     _, lookahead_img = pages[idx + lookahead_offset]
-                    found_map = await _qbm_scan_answer_key(lookahead_img, unresolved)
+                    found_map = await _qbm_scan_answer_key(lookahead_img, unresolved, gemini_only=gemini_only)
                     if found_map:
                         for m in mcqs:
                             key = (m.get("question") or "").strip()[:80]
@@ -26487,7 +26483,7 @@ async def qbm_extract_all_pages(
                                     "Answer not found in source", ""
                                 ).strip()
                                 if not m["explanation"]:
-                                    m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"])
+                                    m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=gemini_only)
                         unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
 
             # Still unresolved after scanning nearby pages -> last-resort Groq
@@ -26496,7 +26492,7 @@ async def qbm_extract_all_pages(
                 for m in unresolved:
                     if is_cancelled(chat_id):
                         break
-                    resolved = await _qbm_web_resolve_answer(m)
+                    resolved = await _qbm_web_resolve_answer(m, gemini_only=gemini_only)
                     if resolved:
                         m["answer"] = resolved["answer"]
                         m["explanation"] = resolved["explanation"] or (m.get("explanation") or "").replace(
@@ -26565,7 +26561,7 @@ async def qbm_extract_all_pages(
                     # Independent confirmation pass, differently prompted —
                     # not just "retry again and hope".
                     try:
-                        _final_scan = await _qbm_final_empty_page_scan(img)
+                        _final_scan = await _qbm_final_empty_page_scan(img, gemini_only=gemini_only)
                     except Exception as e4:
                         logger.error(f"[QBM Extract] Page {page_num} independent empty-scan errored: {e4}")
                         _final_scan = None
