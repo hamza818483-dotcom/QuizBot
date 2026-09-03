@@ -20710,7 +20710,7 @@ async def _qbm_openrouter_call(img, prompt: str) -> str:
     return ""
 
 
-async def _qbm_call1_extract(img) -> list:
+async def _qbm_call1_extract(img, careful: bool = False) -> list:
     """
     CALL 1 — OWN OCR + strict-prompt MCQ extraction + inline dedup.
     Job: extract every existing MCQ on the page (option-serial strictly
@@ -20718,10 +20718,17 @@ async def _qbm_call1_extract(img) -> list:
     /ghost MCQ enters the list. Gemini primary (better raw extraction
     quality for the initial make) -> Groq fallback (higher daily budget,
     used if Gemini quota is exhausted) -> OpenRouter last resort.
+
+    careful=True (used on 0-MCQ retry passes): raises Gemini's thinking
+    budget and appends an explicit slow/exhaustive-scan instruction to the
+    prompt. Normal fast-path calls stay careful=False (thinking_budget=0)
+    so throughput on the common case is unaffected -- only pages that
+    already missed once pay the extra latency/token cost for a more
+    thorough re-read.
     """
     try:
         prompt = await qbm_get_active_prompt()
-        gem = await _qbm_gemini_extract(img, prompt)
+        gem = await _qbm_gemini_extract(img, prompt, careful=careful)
         if gem:
             logger.info(f"[QBM Call1] Gemini succeeded, {len(gem)} MCQ")
             out = _qbm_dedup_list(gem)
@@ -21255,7 +21262,7 @@ def _cap_qbm_mcq_cache(cache_dict: dict = None):
         d.pop(next(iter(d)), None)
 
 
-async def _qbm_extract_from_image(img, cache_key: tuple = None) -> list:
+async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False) -> list:
     """
     2-STAGE CONNECTED PIPELINE (per page) — Call1 extract + Call2 (which
     itself makes 2 sub-calls: miss-check, then verify), so up to 3 Gemini
@@ -21284,12 +21291,12 @@ async def _qbm_extract_from_image(img, cache_key: tuple = None) -> list:
     await _qbm_ram_aware_acquire()
     try:
         for _pipeline_attempt in range(3):
-            cached_call1 = _qbm_mcq_result_cache.get(cache_key) if cache_key else None
+            cached_call1 = _qbm_mcq_result_cache.get(cache_key) if (cache_key and not bypass_cache) else None
             if cached_call1:
                 logger.info(f"[QBM MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
                 call1 = cached_call1
             else:
-                call1 = await _qbm_call1_extract(img)
+                call1 = await _qbm_call1_extract(img, careful=careful)
                 if call1 and cache_key:
                     _qbm_mcq_result_cache[cache_key] = call1
                     _cap_qbm_mcq_cache()
@@ -21768,15 +21775,35 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
         return ""
 
 
-async def _qbm_gemini_raw(img, prompt: str) -> str:
+_QBM_CAREFUL_SCAN_ADDENDUM = (
+    "\n\n[CAREFUL RE-SCAN MODE] This page was processed once already and "
+    "missed content -- likely from scanning too fast. Slow down. Read the "
+    "ENTIRE page top to bottom, line by line, before answering. Do not "
+    "stop at the first block of text you find -- check for MCQs that may "
+    "be split across columns, continued after a diagram/table, printed in "
+    "smaller font, or placed near page edges/margins. Do not return an "
+    "empty result unless you have visually confirmed, after this full "
+    "careful read, that the page truly contains zero MCQs."
+)
+
+
+async def _qbm_gemini_raw(img, prompt: str, careful: bool = False) -> str:
     """Direct Gemini call with any given prompt -> raw text (caller parses).
     Tries keys in healthiest-first order, one after another, until one
     succeeds -- a single key's 429 RESOURCE_EXHAUSTED (daily quota, only 20
     RPD/key on free tier) or rate limit must never kill the whole call while
     any other key in the pool is still usable. If every Gemini key is
     exhausted/failing, falls back to Groq vision (qwen) so the caller still
-    gets a result instead of an empty string."""
+    gets a result instead of an empty string.
+
+    careful=True: appends an explicit slow/exhaustive-scan instruction to
+    the prompt and raises the thinking budget (from 0 -> 2048) so Gemini
+    actually reasons over the full page instead of the default zero-latency
+    pass. Only used on 0-MCQ retry attempts -- normal calls are unaffected,
+    so throughput on the common case does not change."""
     _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
+    if careful:
+        prompt = (prompt or "") + _QBM_CAREFUL_SCAN_ADDENDUM
     try:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
@@ -21808,7 +21835,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                     temperature=0.1,
                     max_output_tokens=8192,
                     response_mime_type="application/json",
-                    thinking_config=types.ThinkingConfig(thinking_budget=0)
+                    thinking_config=types.ThinkingConfig(thinking_budget=768 if careful else 0)
                 )
             )
 
@@ -22364,7 +22391,7 @@ async def handle_ai(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
-async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False):
+async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False, careful: bool = False):
     """Direct Gemini call with the strict extraction prompt (fallback path).
 
     2026-08-20: added optional _return_marker_info flag (default False, so
@@ -22374,8 +22401,13 @@ async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool
     legitimately saying "heading here, no content") vs an ambiguous/empty
     result (parse fail, empty text, or 0 items with no marker at all) that
     may just be a fluke worth retrying with a different Gemini key before
-    burning scarce Groq/OpenRouter quota."""
-    txt = await _qbm_gemini_raw(img, prompt or await qbm_get_active_prompt())
+    burning scarce Groq/OpenRouter quota.
+
+    careful=True: passed through to _qbm_gemini_raw for a slower, more
+    thorough re-scan (higher thinking budget + explicit exhaustive-scan
+    prompt addendum) -- used on 0-MCQ retry passes where speed already
+    cost a miss."""
+    txt = await _qbm_gemini_raw(img, prompt or await qbm_get_active_prompt(), careful=careful)
     # DEBUG (2026-08-20): log raw response snippet so a genuinely-empty
     # Gemini result (model says no content) can be told apart from a
     # non-JSON/refusal response that _qbm_parse_json would silently drop.
@@ -26451,15 +26483,16 @@ async def qbm_extract_all_pages(
             _attempt_n = 0
             while not mcqs and not is_cancelled(chat_id):
                 _attempt_n += 1
-                logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry #{_attempt_n} (cache bypassed), will not finalize until real result found")
+                _careful = _attempt_n >= 2  # 1st retry stays fast; 2nd+ uses careful mode (higher thinking budget + exhaustive-scan prompt)
+                logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry #{_attempt_n}{' (careful mode)' if _careful else ''} (cache bypassed), will not finalize until real result found")
                 if _attempt_n > 1:
                     await asyncio.sleep(min(3 * _attempt_n, 30))
                 try:
                     _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
-                    mcqs = await _extract_fn(img, cache_key=_ck, bypass_cache=True) if _ck else await _extract_fn(img)
+                    mcqs = await _extract_fn(img, cache_key=_ck, bypass_cache=True, careful=_careful) if _ck else await _extract_fn(img, careful=_careful)
                 except TypeError:
-                    # extractor doesn't accept bypass_cache kwarg — fall back
-                    # to a plain re-call (still a fresh network attempt).
+                    # extractor doesn't accept bypass_cache/careful kwargs —
+                    # fall back to a plain re-call (still a fresh attempt).
                     try:
                         _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
                         mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
@@ -26473,7 +26506,7 @@ async def qbm_extract_all_pages(
                     logger.info(f"[QBM Extract] Page {page_num} recovered {len(mcqs)} MCQ on retry #{_attempt_n}")
                     break
                 if _attempt_n % 10 == 0:
-                    logger.warning(f"[QBM Extract] Page {page_num} still 0 MCQ after {_attempt_n} retries — content is known non-blank, continuing until real result found")
+                    logger.warning(f"[QBM Extract] Page {page_num} still 0 MCQ after {_attempt_n} retries (soft-cap check, still continuing) — content is known non-blank, will not give up")
 
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
