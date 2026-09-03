@@ -792,6 +792,9 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         total_batches = len(batches)
         sent_total = 0
         for b_idx, batch in enumerate(batches):
+            if job.get("cancel_requested"):
+                job["status"] = "cancelled"
+                return
             topic = batch.get("topic") or "Special MCQ By ATLAS"
             mcqs = batch.get("mcqs") or []
             if not mcqs:
@@ -807,8 +810,11 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job["batches_done"] = b_idx + 1
             job["pct"] = int((b_idx + 1) * 100 / total_batches) if total_batches else 100
 
-        job["status"] = "done"
-        job["pct"] = 100
+        if job.get("cancel_requested"):
+            job["status"] = "cancelled"
+        else:
+            job["status"] = "done"
+            job["pct"] = 100
     except Exception as e:
         logger.error(f"[LMS-Send] job {job_id} error: {e}")
         job["status"] = "error"
@@ -839,6 +845,7 @@ async def lms_send_channel(request: Request):
     thread_id = data.get("thread_id")
     thread_id = int(thread_id) if thread_id else None
     batches = data.get("batches") or []
+    exam_id = str(data.get("exam_id") or "").strip()
 
     if not channel_id:
         return JSONResponse({"error": "channel_id is required"}, status_code=400)
@@ -849,7 +856,8 @@ async def lms_send_channel(request: Request):
     job_id = gen_session_id()
     LMS_SEND_JOBS[job_id] = {
         "status": "queued", "pct": 0, "sent_total": 0, "total": total_q,
-        "batches_done": 0, "batches_total": len(batches), "error": None
+        "batches_done": 0, "batches_total": len(batches), "error": None,
+        "exam_id": exam_id, "cancel_requested": False,
     }
     _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches))
     return JSONResponse({"ok": True, "job_id": job_id})
@@ -861,6 +869,26 @@ async def lms_send_channel_status(job_id: str):
     if not job:
         return JSONResponse({"error": "job not found"}, status_code=404)
     return JSONResponse(job)
+
+
+@app.post("/api/lms-send-channel/cancel/{job_id}")
+async def lms_send_channel_cancel(job_id: str):
+    job = LMS_SEND_JOBS.get(job_id)
+    if not job:
+        return JSONResponse({"error": "job not found"}, status_code=404)
+    job["cancel_requested"] = True
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/lms-send-channel/active-by-exam/{exam_id}")
+async def lms_send_channel_active_by_exam(exam_id: str):
+    """LMS polls this on page load/card render to find a still-running job
+    for a given exam (so progress/stop survives a page reload or the admin
+    reopening the app on another device/tab)."""
+    for jid, job in LMS_SEND_JOBS.items():
+        if job.get("exam_id") == exam_id and job.get("status") in ("queued", "running"):
+            return JSONResponse({"ok": True, "job_id": jid, **job})
+    return JSONResponse({"ok": True, "job_id": None})
 
 
 
