@@ -701,12 +701,36 @@ NEW_EXAM_JOBS = {}
 LMS_API_SECRET = os.environ.get("LMS_API_SECRET", "")
 LMS_SEND_JOBS = {}  # job_id -> {"status", "pct", "sent_total", "total", "batches_done", "batches_total", "error"}
 
+async def _create_forum_topic(channel_id: str, name: str) -> int | None:
+    """Creates a new forum topic in a supergroup (forum mode must be ON) and
+    returns its message_thread_id, or None if creation isn't possible (chat
+    isn't a forum-enabled supergroup, bot lacks permission, etc.) — caller
+    falls back to sending without a thread_id in that case."""
+    safe_name = (name or "MCQ")[:128]  # Telegram's createForumTopic name limit
+    r = await tg_post("createForumTopic", {"chat_id": channel_id, "name": safe_name})
+    if r.get("ok"):
+        return r["result"]["message_thread_id"]
+    logger.warning(f"[LMS-Send] createForumTopic failed for '{safe_name}': {r.get('description')}")
+    return None
+
+
 async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool) -> int:
     """Sends one topic-batch: pre-message (topic name) -> polls (reply to
     pre-msg) -> Style-01 PDF + inline buttons -> ending message. Same shape
     as one /csvS batch iteration. Returns sent poll count. Raises on the
     pre-message failing (fatal for this batch); PDF/ending failures are
-    logged but non-fatal, matching /csv's own tolerance."""
+    logged but non-fatal, matching /csv's own tolerance.
+
+    If thread_id is None/0 (LMS left "Thread/Topic ID" blank for a group),
+    a new forum topic named after this batch's topic (usually the exam name)
+    is auto-created and its thread_id used instead — so each send lands in
+    its own topic rather than the group's General chat. Silently falls back
+    to no-thread-id if the chat isn't forum-enabled or topic creation fails."""
+    if not thread_id:
+        auto_thread_id = await _create_forum_topic(channel_id, topic)
+        if auto_thread_id:
+            thread_id = auto_thread_id
+
     pre_text = csv_get_pre_message(topic, topic, len(mcqs))
     pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
     if thread_id:
