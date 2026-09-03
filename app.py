@@ -691,6 +691,144 @@ RAPID_TASKS = {}
 #            "started_at": float, "new_cache_id": str, "error": str}
 NEW_EXAM_JOBS = {}
 
+# ============================================================
+# LMS → CHANNEL POLL SEND (website "send" icon on exam cards)
+# Reuses the exact same /csv pipeline pieces (pre-message w/ topic name,
+# polls replying to it, Style-01 PDF + inline buttons, ending message) so
+# behavior matches QuizBot's /csv command 1:1 — just triggered from LMS
+# instead of a Telegram command.
+# ============================================================
+LMS_API_SECRET = os.environ.get("LMS_API_SECRET", "")
+LMS_SEND_JOBS = {}  # job_id -> {"status", "pct", "sent", "total", "error"}
+
+async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, topic: str, mcqs: list):
+    job = LMS_SEND_JOBS[job_id]
+    try:
+        is_admin, admin_err = await _check_bot_admin(channel_id)
+        if not is_admin:
+            job["status"] = "error"
+            job["error"] = admin_err
+            return
+
+        chat_type = await _get_chat_type(channel_id)
+        ask_score = chat_type == "channel"
+        job["status"] = "running"
+
+        pre_text = csv_get_pre_message(topic, topic, len(mcqs))
+        pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
+        if thread_id:
+            pre_send_data["message_thread_id"] = thread_id
+        pre_r = await tg_post("sendMessage", pre_send_data)
+        if not pre_r.get("ok") and thread_id:
+            pre_send_data.pop("message_thread_id", None)
+            pre_r = await tg_post("sendMessage", pre_send_data)
+            thread_id = None
+        if not pre_r.get("ok"):
+            job["status"] = "error"
+            job["error"] = pre_r.get("description") or "Pre-message send failed"
+            return
+        pre_msg_id = pre_r["result"]["message_id"]
+
+        batch_cache_id = gen_session_id()
+        await db_save_mcq_cache(batch_cache_id, batch_cache_id, 0, topic, mcqs, channel_id=channel_id)
+
+        sent, first_link = await _send_csv_polls_to_channel(
+            channel_id, mcqs, topic, chat_id=0, pre_msg_id=pre_msg_id,
+            thread_id=thread_id, csv_fname=topic
+        )
+        job["sent"] = sent
+        job["pct"] = 70
+
+        if pre_msg_id and first_link:
+            try:
+                await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(topic, topic, len(mcqs), first_link))
+            except Exception as e:
+                logger.warning(f"[LMS-Send] pre-msg link edit failed: {e}")
+
+        pdf_bytes = await _generate_style1_pdf_guaranteed(mcqs, topic, chat_id=0)
+        job["pct"] = 90
+        if pdf_bytes:
+            safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+            btn_kb = await _csv_pre_buttons(batch_cache_id)
+            pdf_doc_r = await send_document(
+                channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
+                caption=csv_get_pdf_caption(topic),
+                message_thread_id=thread_id,
+                reply_to_message_id=pre_msg_id
+            )
+            if pdf_doc_r and pdf_doc_r.get("ok"):
+                pdf_msg_id = pdf_doc_r.get("result", {}).get("message_id")
+                if pdf_msg_id:
+                    try:
+                        await tg_post("editMessageReplyMarkup", {
+                            "chat_id": channel_id, "message_id": pdf_msg_id,
+                            "reply_markup": btn_kb
+                        })
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send] PDF button attach failed: {e}")
+
+        ending = csv_get_ending_message(topic, sent, first_link, ask_score=ask_score)
+        end_send_data = {
+            "chat_id": channel_id, "text": ending, "parse_mode": "HTML",
+            "disable_web_page_preview": True, "reply_to_message_id": pre_msg_id
+        }
+        if thread_id:
+            end_send_data["message_thread_id"] = thread_id
+        end_r = await tg_post("sendMessage", end_send_data)
+        if not end_r.get("ok"):
+            end_r = await tg_post("sendMessage", end_send_data)  # one retry
+        if end_r.get("ok"):
+            await db_update_cache(batch_cache_id, {
+                "channel_id": channel_id, "end_msg_id": end_r["result"]["message_id"]
+            })
+
+        job["status"] = "done"
+        job["pct"] = 100
+    except Exception as e:
+        logger.error(f"[LMS-Send] job {job_id} error: {e}")
+        job["status"] = "error"
+        job["error"] = str(e)
+
+
+@app.post("/api/lms-send-channel")
+async def lms_send_channel(request: Request):
+    """
+    LMS admin exam-card 'send' icon হিট করলে এখানে আসে।
+    Body: { secret, channel_id, thread_id?, topic, mcqs: [{question, options[4], answer, explanation}] }
+    thread_id শুধু group + topic (forum) হলে দরকার — channel বা group-এর
+    general chat হলে বাদ দেওয়া যায় (null/0/omit)।
+    """
+    if not LMS_API_SECRET:
+        logger.warning("[LMS-Send] SECURITY: LMS_API_SECRET not set -- endpoint accepting unauthenticated requests!")
+    data = await request.json()
+    if LMS_API_SECRET and data.get("secret") != LMS_API_SECRET:
+        return JSONResponse({"error": "unauthorized"}, status_code=403)
+
+    channel_id = str(data.get("channel_id") or "").strip()
+    thread_id = data.get("thread_id")
+    thread_id = int(thread_id) if thread_id else None
+    topic = (data.get("topic") or "").strip() or "Special MCQ By ATLAS"
+    mcqs = data.get("mcqs") or []
+
+    if not channel_id:
+        return JSONResponse({"error": "channel_id is required"}, status_code=400)
+    if not mcqs:
+        return JSONResponse({"error": "mcqs list is empty"}, status_code=400)
+
+    job_id = gen_session_id()
+    LMS_SEND_JOBS[job_id] = {"status": "queued", "pct": 0, "sent": 0, "total": len(mcqs), "error": None}
+    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, topic, mcqs))
+    return JSONResponse({"ok": True, "job_id": job_id})
+
+
+@app.get("/api/lms-send-channel/status/{job_id}")
+async def lms_send_channel_status(job_id: str):
+    job = LMS_SEND_JOBS.get(job_id)
+    if not job:
+        return JSONResponse({"error": "job not found"}, status_code=404)
+    return JSONResponse(job)
+
+
 # v-mhtml-live: MHTML/HTML → CSV job state for live dashboard + live TG progress msg
 # job_id -> {"status": "running"|"done"|"error", "done": int, "total": int,
 #            "pct": int, "eta_sec": int, "started_at": float, "source": str,
