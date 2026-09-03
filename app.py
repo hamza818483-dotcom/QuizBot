@@ -4093,7 +4093,10 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
                 config=types.GenerateContentConfig(max_output_tokens=8192)
             )
 
+        _dead_accounts = set()
         for idx, key in enumerate(keys_to_try):
+            if key_rotator.account_of(key) in _dead_accounts:
+                continue
             key_rotator.record_call(key)
             try:
                 _timeout = 40 if idx == 0 else 20
@@ -4115,6 +4118,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
                       or "401" in err_str):
                     key_rotator.mark_banned(key, reason=err_str[:200])
                     key_rotator.record_account_error(key)
+                    _dead_accounts.add(key_rotator.account_of(key))
                 logger.warning(f"[GeminiVerify] key {key[:12]}... failed, trying next key: {e}")
                 continue
         logger.warning(f"[GeminiVerify] all {len(keys_to_try)} Gemini key(s) failed — returning empty")
@@ -13086,6 +13090,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
             )
 
         keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _dead_accounts = set()
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
@@ -13095,6 +13100,8 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
         for idx, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
+            if key_rotator.account_of(key) in _dead_accounts:
+                continue
             key_rotator.record_call(key)
             try:
                 _dagano_timeout = 40 if idx == 0 else 25
@@ -13138,6 +13145,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
                     key_rotator.record_account_error(key)
+                    _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[Dagano] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[Dagano] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
@@ -21699,12 +21707,15 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
             )
 
         keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _dead_accounts = set()
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
         for _ki, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
+            if key_rotator.account_of(key) in _dead_accounts:
+                continue
             if _ki > 0:
                 # Jitter before switching keys — rapid deterministic
                 # back-to-back key-hopping on failure is itself part of
@@ -21745,6 +21756,7 @@ async def _qbm_gemini_raw_only(img, prompt: str) -> str:
                 if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
                     key_rotator.record_account_error(key)
+                    _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[UNMESH] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[UNMESH] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
@@ -21801,6 +21813,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
             )
 
         keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _dead_accounts = set()
         # Skip keys already confirmed daily-exhausted (by an earlier call this
         # process) when at least one non-exhausted key remains -- ordered_keys()
         # sorts exhausted keys last but doesn't remove them, so without this
@@ -21812,6 +21825,8 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
         for _ki, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
+            if key_rotator.account_of(key) in _dead_accounts:
+                continue
             if _ki > 0:
                 # Jitter before switching keys — rapid deterministic
                 # back-to-back key-hopping on failure is itself part of
@@ -21852,6 +21867,7 @@ async def _qbm_gemini_raw(img, prompt: str) -> str:
                 if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
                     key_rotator.record_account_error(key)
+                    _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
@@ -21913,6 +21929,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
             )
 
         keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _dead_accounts = set()
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
@@ -21927,6 +21944,8 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
         for _ki, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
+            if key_rotator.account_of(key) in _dead_accounts:
+                continue
             if _ki > 0:
                 # Jitter before switching keys — rapid deterministic
                 # back-to-back key-hopping on failure is itself part of
@@ -21967,6 +21986,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 if _is_auth_ban_error(full_msg):
                     key_rotator.mark_banned(key, reason=full_msg[:200])
                     key_rotator.record_account_error(key)
+                    _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
@@ -22001,12 +22021,15 @@ async def _ai_gemini_text_call(prompt: str) -> str:
             )
 
         keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _dead_accounts = set()
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
         for _ki, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
+            if key_rotator.account_of(key) in _dead_accounts:
+                continue
             if _ki > 0:
                 # Jitter before switching keys — rapid deterministic
                 # back-to-back key-hopping on failure is itself part of
@@ -22029,6 +22052,7 @@ async def _ai_gemini_text_call(prompt: str) -> str:
                 if _is_auth_ban_error(msg):
                     key_rotator.mark_banned(key, reason=msg[:200])
                     key_rotator.record_account_error(key)
+                    _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[AI] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
                 logger.warning(f"[AI] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
