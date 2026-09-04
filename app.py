@@ -1178,7 +1178,6 @@ _BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
 _BIO_MODE = contextvars.ContextVar("bio_mode", default=False)
 _BORO_MODE = contextvars.ContextVar("boro_mode", default=False)
 _MATH_MODE = contextvars.ContextVar("math_mode", default=False)
-_BCS_MODE = contextvars.ContextVar("bcs_mode", default=False)
 _CHEM_MODE = contextvars.ContextVar("chem_mode", default=False)
 
 # Per-chat AI call counter for /pdf & /pdfs dashboards — incremented at every
@@ -2070,32 +2069,6 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
     )
 
 
-def _build_bcs_prompt(topic: str) -> str:
-    """
-    /bcs -- placeholder prompt, awaiting exact spec from user (2026-09-04).
-    Wired end-to-end (mode toggle, dispatch, help text, count-range) so the
-    real prompt text can be dropped in here later without touching anything
-    else. Currently behaves like a plain /pdf-style extraction so the
-    command is usable immediately.
-    """
-    return (
-        f"You are extracting MCQs from a BCS (Bangladesh Civil Service) "
-        f"exam preparation page image. Extract every genuine MCQ present "
-        f"on this page, preserving the original question, all options, "
-        f"the correct answer, and any explanation exactly as shown.\n\n"
-        f"═══════════════════════════════\n"
-        f"🟩 OUTPUT\n"
-        f"═══════════════════════════════\n"
-        f"JSON array only, no markdown fences, no preamble. "
-        f"🚨 DO NOT include any <think>, reasoning, or explanation text "
-        f"before the JSON — output must start IMMEDIATELY with '['. "
-        f"Format:\n"
-        f'[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],'
-        f'"answer":0,"explanation":"..."}}]\n'
-        f"answer is integer 0-3 (A=0,B=1,C=2,D=3)."
-    )
-
-
 def _build_mcq_prompt(topic: str, count) -> str:
     if _CHOK_MODE.get():
         return _build_chok_prompt(topic)
@@ -2105,8 +2078,6 @@ def _build_mcq_prompt(topic: str, count) -> str:
         return _build_boro_prompt(topic)
     if _MATH_MODE.get():
         return _build_math_prompt(topic)
-    if _BCS_MODE.get():
-        return _build_bcs_prompt(topic)
     if _BIO_MODE.get():
         return _build_bio_prompt(topic)
     if _TF_MODE.get():
@@ -5006,10 +4977,6 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     elif _MATH_MODE.get():
         # /math count is entirely content-driven (page math first, then
         # simple self-made, roughly 10-25) -- never /pdf's own floor/cap.
-        _rng_min, _rng_max = 1, None
-    elif _BCS_MODE.get():
-        # /bcs -- placeholder count rule (content-driven, no cap), same as
-        # /math, until the real spec is provided.
         _rng_min, _rng_max = 1, None
     elif custom_prompt:
         # /tf supplies its own fully-formed prompt with its own count rules
@@ -14583,15 +14550,6 @@ async def handle_pdf(msg: dict):
                 "কঠিন/জটিল math বানাবে না। কাউন্ট content-driven (~10-25)।\n"
                 "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
             )
-        elif _BCS_MODE.get():
-            await send_msg(chat_id,
-                "❌ PDF ফাইলে reply করে <code>/bcs</code> দাও!\n\n"
-                "<b>Example:</b>\n"
-                "<code>/bcs -p 1-5 -c @channel -m \"Topic\"</code>\n"
-                "<code>/bcs -p 2 -c -100xxx -t 447 -m \"Group Topic\"</code>\n\n"
-                "BCS exam preparation PDF থেকে MCQ generate করবে।\n"
-                "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
-            )
         elif _TF_MODE.get():
             await send_msg(chat_id,
                 "❌ PDF ফাইলে reply করে <code>/tf</code> দাও!\n\n"
@@ -18080,6 +18038,50 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
     return mcqs
 
 
+async def _bcs_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False) -> list:
+    """/bcs extractor — exact-extraction only (never invents new MCQs),
+    single Gemini call, no Call2 verify/miss-check pass (kept lightweight
+    per spec: 'page-e ja mcq ache segulai nibe, 100%, newly banabe na').
+    Cross-page answer lookahead (answer commonly printed 1 page later) is
+    handled generically by qbm_extract_all_pages's existing cross-page
+    answer-key scan — no extra code needed here for that.
+    Topic detection is a placeholder for now (grouping method pending)."""
+    cached = _bcs_mcq_result_cache.get(cache_key) if (cache_key and not bypass_cache) else None
+    if cached:
+        logger.info(f"[BCS MCQ Cache] hit for {cache_key} — skipping extraction call")
+        return _qbm_dedup_list(cached)
+    _prompt = QBM_EXTRACT_PROMPT_DEFAULT + _QBM_CAREFUL_SCAN_ADDENDUM if careful else QBM_EXTRACT_PROMPT_DEFAULT
+    gem_txt = await _qbm_gemini_raw_only(img, _prompt, careful=careful)
+    gem = _qbm_parse_json(gem_txt) if gem_txt else []
+    result = _qbm_dedup_list(gem) if gem else []
+    if result and cache_key:
+        _bcs_mcq_result_cache[cache_key] = result
+        _cap_qbm_mcq_cache(_bcs_mcq_result_cache)
+    return result
+
+
+def _bcs_group_mcqs(extracted_pages: list) -> list:
+    """/bcs topic grouping — PLACEHOLDER (topic-detection method pending
+    from user, 2026-09-04). For now, puts every MCQ from every page into a
+    single "BCS MCQ" group so the topic-wise + merged CSV export mechanics
+    (identical structure to /unmesh's) work end-to-end immediately. Swap
+    the grouping logic here once the real topic-detection method is given
+    — everything downstream (CSV export, dashboard) already consumes the
+    same [(topic_name, mcqs), ...] shape /unmesh_group_mcqs returns, so no
+    other code needs to change.
+    """
+    flat = []
+    for _page_idx, (page_num, _, mcqs) in enumerate(extracted_pages):
+        for m in mcqs:
+            if "trailing_topic_marker" in m:
+                continue
+            m["_page_num"] = page_num
+            flat.append(m)
+    if not flat:
+        return []
+    return [("BCS MCQ", flat)]
+
+
 def _unmesh_group_mcqs(extracted_pages: list) -> list:
     """DEDICATED grouping for /unmesh (fully independent of /topic's
     _topic_group_mcqs). Same two split signals — qsn_no==1 OR the effective
@@ -21306,6 +21308,7 @@ _qbm_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict] (post-C
 # wrong-shaped result across commands.
 _topic_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
 _unmesh_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
+_bcs_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
 _chem_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
 
 def _qbm_page_content_hash(img) -> str:
@@ -23967,6 +23970,187 @@ async def _handle_unmesh_impl(msg: dict):
 
     except Exception as e:
         logger.error(f"[UNMESH] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
+async def handle_bcs(msg: dict):
+    """/bcs -p (pages) — same arg style as /unmesh. Extracts existing MCQ
+    from the page EXACTLY as printed (never invents new ones), resolves
+    answers that are printed 1 page later via the same cross-page
+    answer-key lookahead /unmesh/qbm already use. Sends topic-wise CSV +
+    a merged CSV (topic-detection method: placeholder for now, pending
+    spec — see _bcs_group_mcqs)."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        return await _handle_bcs_impl(msg)
+
+
+async def _handle_bcs_impl(msg: dict):
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF-এ reply করে /bcs দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/bcs -p 1-10</code>\n\n"
+            "📌 Page-এ থাকা MCQ hubohu extract করে (নতুন বানায় না)।\n"
+            "📌 উত্তর পরের page-এ থাকলেও auto খুঁজে নেয়।\n"
+            "📌 -p = page range (না দিলে সব page)"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+    params = _parse_pdfm_params(text)
+    page_range = params["page_range"]
+    bcs_channel_id = params["channel_id"]
+    bcs_thread_id = params["thread_id"]
+
+    _is_cache_hit = (
+        file_id in _pdf_bytes_cache
+        or (file_unique_id and _pdf_unique_id_index.get(file_unique_id) in _pdf_bytes_cache)
+    )
+    status_r = await send_msg(chat_id, ("✅ Cached PDF ব্যবহার হচ্ছে...\n📄 " + file_name) if _is_cache_hit else
+        f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
+    status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে...")
+
+        _bcs_page_status = []
+        _bcs_start_time = time.time()
+        extracted_pages = await qbm_extract_all_pages(
+            chat_id, pages, "BCS Extract", file_name, status_msg_id,
+            extractor=_bcs_extract_from_image, file_id=file_id,
+            page_status_out=_bcs_page_status, gemini_only=True
+        )
+
+        total_mcq_found = sum(
+            1 for _, _, mcqs in extracted_pages for m in mcqs if "trailing_topic_marker" not in m
+        )
+        if not total_mcq_found:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ পাওয়া যায়নি!")
+            return
+
+        topic_groups = _bcs_group_mcqs(extracted_pages)
+
+        _bcs_topic_breakdown = {name: len(mcqs) for name, mcqs in topic_groups}
+
+        _bcs_final_status = "⏳ CSV পাঠানো হচ্ছে..." if not bcs_channel_id else "⏳ Channel-এ poll পাঠানো হচ্ছে..."
+
+        async def _bcs_render_final_dashboard(extra_status: str = None):
+            if not status_msg_id:
+                return
+            text = _build_dashboard(
+                file_name, "BCS Extract", pages, _bcs_page_status, _bcs_start_time, total_mcq_found, 0,
+                ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
+                topic_breakdown=_bcs_topic_breakdown
+            )
+            if extra_status:
+                text += f"\n\n{extra_status}"
+            try:
+                await edit_msg(chat_id, status_msg_id, text)
+            except Exception:
+                pass
+
+        await _bcs_render_final_dashboard(_bcs_final_status)
+
+        if bcs_channel_id:
+            total_polls = await _post_topic_groups_to_channel(bcs_channel_id, topic_groups, bcs_thread_id)
+            await _bcs_render_final_dashboard(
+                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।"
+            )
+            return
+
+        _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+        import io as _io_bcs, csv as _csv_bcs
+        _running_count = 0
+        _cmd_msg_id = msg.get("message_id")
+        _merged_buf = _io_bcs.StringIO()
+        _merged_w = _csv_bcs.writer(_merged_buf)
+        _merged_w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                             "answer", "explanation", "type", "section"])
+        for _gi, (name, mcqs) in enumerate(topic_groups):
+            buf = _io_bcs.StringIO()
+            w = _csv_bcs.writer(buf)
+            w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                        "answer", "explanation", "type", "section"])
+            _merged_w.writerow([_clean_topic_name_for_copy(name), "", "", "", "", "", "", "", "", ""])
+            for m in mcqs:
+                opts = m.get("options", ["", "", "", ""])
+                row = [
+                    m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                    opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                    opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                    _ans_map.get(m.get("answer", "A"), "1"),
+                    _strip_img_tag(m.get("explanation", "")), "1", "1"
+                ]
+                w.writerow(row)
+                _merged_w.writerow(row)
+            safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip() or "Topic"
+            range_start = _running_count + 1
+            range_end = _running_count + len(mcqs)
+            _running_count = range_end
+            _pg_nums = sorted({m.get("_page_num") for m in mcqs if m.get("_page_num") is not None})
+            if _pg_nums:
+                page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
+            else:
+                page_range_text = "N/A"
+            await send_document(chat_id, buf.getvalue().encode("utf-8"),
+                f"{safe_name}.csv",
+                caption=(f"📂 <code>{_html_escape(name)}</code>\n"
+                         f"📄 PDF Page: {page_range_text}\n"
+                         f"🔢 MCQ Range: {range_start}–{range_end}\n"
+                         f"💎 Total: {len(mcqs)}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if len(topic_groups) > 1:
+            _merged_file_base = re.sub(r'[\\/:*?"<>|]', '_', file_name.rsplit(".", 1)[0]).strip() or "BCS"
+            await send_document(chat_id, _merged_buf.getvalue().encode("utf-8"),
+                f"{_merged_file_base}_Merged.csv",
+                caption=(f"📚 <b>All Topics Merged</b>\n"
+                         f"📂 Topics: {len(topic_groups)}\n"
+                         f"💎 Total MCQ: {total_mcq_found}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        await _bcs_render_final_dashboard(
+            f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।"
+        )
+
+    except Exception as e:
+        logger.error(f"[BCS] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
 
 
@@ -30540,7 +30724,7 @@ async def handle_message(msg: dict):
         return
     _math_reply = msg.get("reply_to_message")
     _math_is_image_reply = bool(_math_reply and (_math_reply.get("photo") or (_math_reply.get("document") and _math_reply.get("document", {}).get("mime_type", "").startswith("image/"))))
-    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm") and not text.startswith("/pdfs")) or text.startswith("/bangla") or text.startswith("/boro") or text.startswith("/bcs") or (text.startswith("/math") and not _math_is_image_reply):
+    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm") and not text.startswith("/pdfs")) or text.startswith("/bangla") or text.startswith("/boro") or (text.startswith("/math") and not _math_is_image_reply):
         if not is_auth:
             if is_private:
                 await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
@@ -30549,8 +30733,6 @@ async def handle_message(msg: dict):
             _cmd_prefix = "/bangla"
         elif text.startswith("/boro"):
             _cmd_prefix = "/boro"
-        elif text.startswith("/bcs"):
-            _cmd_prefix = "/bcs"
         elif text.startswith("/math"):
             _cmd_prefix = "/math"
         else:
@@ -30566,13 +30748,6 @@ async def handle_message(msg: dict):
                 await handle_pdf(msg)
             finally:
                 _BORO_MODE.reset(token)
-            return
-        if text.startswith("/bcs"):
-            token = _BCS_MODE.set(True)
-            try:
-                await handle_pdf(msg)
-            finally:
-                _BCS_MODE.reset(token)
             return
         if text.startswith("/math"):
             token = _MATH_MODE.set(True)
@@ -30725,6 +30900,11 @@ async def handle_message(msg: dict):
         # black-circle-with-1/2/3-white-stars icon (instead of /topic's
         # black-background banner bar)
         _spawn_command_task(uid, handle_unmesh(msg))
+    elif text.startswith("/bcs"):
+        # /bcs = exact-extraction only (never invents), cross-page answer
+        # lookahead reused from /unmesh's pipeline, topic-wise + merged CSV
+        # (topic-detection method pending — see _bcs_group_mcqs)
+        _spawn_command_task(uid, handle_bcs(msg))
     elif text.startswith("/chemt"):
         # /chemt = Call1-ONLY diagnostic for /chem: same idea as /biot but
         # for /chem's Bangla-hierarchical-numbering heading-scan pipeline.
