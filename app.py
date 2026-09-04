@@ -1180,6 +1180,21 @@ _BORO_MODE = contextvars.ContextVar("boro_mode", default=False)
 _MATH_MODE = contextvars.ContextVar("math_mode", default=False)
 _CHEM_MODE = contextvars.ContextVar("chem_mode", default=False)
 
+
+def _is_plain_pdf_mode() -> bool:
+    """True only for literal /pdf (default mode) — False for any of its
+    sibling slash-commands that share generate_mcq_from_image
+    (/bangla,/boro,/math,/tf,/chok,/extra,/pdfs,/bio,/chem). Used to scope
+    the Gemini-only requirement (per user request 2026-09-04: '/pdf ... e
+    only gemini') to plain /pdf specifically, without touching any of the
+    sibling commands' existing Groq/Gemma/fallback behavior."""
+    return not (
+        _CHOK_MODE.get() or _PDFS_MODE.get() or _TF_MODE.get() or
+        _EXTRA_MODE.get() or _BANGLA_MODE.get() or _BIO_MODE.get() or
+        _BORO_MODE.get() or _MATH_MODE.get() or _CHEM_MODE.get()
+    )
+
+
 # Per-chat AI call counter for /pdf & /pdfs dashboards — incremented at every
 # provider attempt (Gemini/Groq/fallback) inside _generate_mcq_from_image_raw,
 # read by pdf_generate_all_pages / process_pdfs_pages when building the
@@ -5437,6 +5452,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
     _LAST_GEMINI_ERROR["reason"] = ""
     _LAST_FALLBACK_ERROR["reason"] = ""
 
+    _plain_pdf = _is_plain_pdf_mode()
     _gemini_primary_mode = True
     if _gemini_primary_mode:
         _gp_tag = "/extra" if _EXTRA_MODE.get() else ("/bio" if _BIO_MODE.get() else ("/chem" if _CHEM_MODE.get() else "default"))
@@ -5450,7 +5466,12 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
         # faster second opinion from Gemma instead of waiting through the
         # full key list first, while still giving Gemini most of the shots
         # overall since it's the higher-quality primary.
-        _gemini_rounds = [6, 5, None]  # None = all remaining keys
+        # 2026-09-04 (user request): plain /pdf is Gemini-ONLY -- no Gemma/
+        # Groq/other-fallback rotation at all. Collapse to a single round
+        # that tries every available Gemini key (max_keys=None) instead of
+        # the 6/5/remaining interleave, since there's no other provider to
+        # interleave with in this mode.
+        _gemini_rounds = [None] if _plain_pdf else [6, 5, None]  # None = all remaining keys
         gemini_out = []
         for _round_idx, _round_size in enumerate(_gemini_rounds):
             try:
@@ -5477,6 +5498,9 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
             if _is_last_round:
                 break
 
+            if _plain_pdf:
+                continue  # unreachable (only 1 round in plain-pdf mode), kept for symmetry
+
             logger.warning(f"[AI-ROT] {_gp_tag} gemini round {_round_idx+1} empty (page {page_num}); trying gemma-vl before next round")
             try:
                 _bump_ai_call_count(_ai_call_chat_id, model="OpenRouterQwenVL")
@@ -5491,6 +5515,12 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
                 for _m in qwenvl_out:
                     _m.setdefault("_provider", "Gemma-4-VL")
                 return qwenvl_out, set()
+
+        if _plain_pdf:
+            # /pdf Gemini-only: every Gemini key already exhausted above,
+            # no Gemma/Groq/other-fallback rotation -- genuinely give up.
+            logger.warning(f"[AI-ROT] /pdf gemini-only: all Gemini keys exhausted for page {page_num}, no fallback (per user request)")
+            return [], set()
 
         # all Gemini rounds exhausted -- one final Gemma try before Groq
         logger.warning(f"[AI-ROT] {_gp_tag} gemini all rounds empty (page {page_num}); trying gemma-vl")
