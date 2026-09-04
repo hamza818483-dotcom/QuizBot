@@ -1178,6 +1178,7 @@ _BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
 _BIO_MODE = contextvars.ContextVar("bio_mode", default=False)
 _BORO_MODE = contextvars.ContextVar("boro_mode", default=False)
 _MATH_MODE = contextvars.ContextVar("math_mode", default=False)
+_BCS_MODE = contextvars.ContextVar("bcs_mode", default=False)
 _CHEM_MODE = contextvars.ContextVar("chem_mode", default=False)
 
 # Per-chat AI call counter for /pdf & /pdfs dashboards — incremented at every
@@ -2069,6 +2070,32 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
     )
 
 
+def _build_bcs_prompt(topic: str) -> str:
+    """
+    /bcs -- placeholder prompt, awaiting exact spec from user (2026-09-04).
+    Wired end-to-end (mode toggle, dispatch, help text, count-range) so the
+    real prompt text can be dropped in here later without touching anything
+    else. Currently behaves like a plain /pdf-style extraction so the
+    command is usable immediately.
+    """
+    return (
+        f"You are extracting MCQs from a BCS (Bangladesh Civil Service) "
+        f"exam preparation page image. Extract every genuine MCQ present "
+        f"on this page, preserving the original question, all options, "
+        f"the correct answer, and any explanation exactly as shown.\n\n"
+        f"═══════════════════════════════\n"
+        f"🟩 OUTPUT\n"
+        f"═══════════════════════════════\n"
+        f"JSON array only, no markdown fences, no preamble. "
+        f"🚨 DO NOT include any <think>, reasoning, or explanation text "
+        f"before the JSON — output must start IMMEDIATELY with '['. "
+        f"Format:\n"
+        f'[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],'
+        f'"answer":0,"explanation":"..."}}]\n'
+        f"answer is integer 0-3 (A=0,B=1,C=2,D=3)."
+    )
+
+
 def _build_mcq_prompt(topic: str, count) -> str:
     if _CHOK_MODE.get():
         return _build_chok_prompt(topic)
@@ -2078,6 +2105,8 @@ def _build_mcq_prompt(topic: str, count) -> str:
         return _build_boro_prompt(topic)
     if _MATH_MODE.get():
         return _build_math_prompt(topic)
+    if _BCS_MODE.get():
+        return _build_bcs_prompt(topic)
     if _BIO_MODE.get():
         return _build_bio_prompt(topic)
     if _TF_MODE.get():
@@ -4977,6 +5006,10 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     elif _MATH_MODE.get():
         # /math count is entirely content-driven (page math first, then
         # simple self-made, roughly 10-25) -- never /pdf's own floor/cap.
+        _rng_min, _rng_max = 1, None
+    elif _BCS_MODE.get():
+        # /bcs -- placeholder count rule (content-driven, no cap), same as
+        # /math, until the real spec is provided.
         _rng_min, _rng_max = 1, None
     elif custom_prompt:
         # /tf supplies its own fully-formed prompt with its own count rules
@@ -14548,6 +14581,15 @@ async def handle_pdf(msg: dict):
                 "আগে hubohu extract করবে (answer page-এর দেওয়া হিসেবেই), তারপর "
                 "একই টপিক থেকে সহজ (hand-calculation) numeric MCQ নিজে বানাবে। "
                 "কঠিন/জটিল math বানাবে না। কাউন্ট content-driven (~10-25)।\n"
+                "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
+            )
+        elif _BCS_MODE.get():
+            await send_msg(chat_id,
+                "❌ PDF ফাইলে reply করে <code>/bcs</code> দাও!\n\n"
+                "<b>Example:</b>\n"
+                "<code>/bcs -p 1-5 -c @channel -m \"Topic\"</code>\n"
+                "<code>/bcs -p 2 -c -100xxx -t 447 -m \"Group Topic\"</code>\n\n"
+                "BCS exam preparation PDF থেকে MCQ generate করবে।\n"
                 "<code>-t</code> থ্রেড আইডি কোটেশন সহ/ছাড়া দুই ভাবেই দেওয়া যাবে"
             )
         elif _TF_MODE.get():
@@ -30498,7 +30540,7 @@ async def handle_message(msg: dict):
         return
     _math_reply = msg.get("reply_to_message")
     _math_is_image_reply = bool(_math_reply and (_math_reply.get("photo") or (_math_reply.get("document") and _math_reply.get("document", {}).get("mime_type", "").startswith("image/"))))
-    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm") and not text.startswith("/pdfs")) or text.startswith("/bangla") or text.startswith("/boro") or (text.startswith("/math") and not _math_is_image_reply):
+    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm") and not text.startswith("/pdfs")) or text.startswith("/bangla") or text.startswith("/boro") or text.startswith("/bcs") or (text.startswith("/math") and not _math_is_image_reply):
         if not is_auth:
             if is_private:
                 await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
@@ -30507,6 +30549,8 @@ async def handle_message(msg: dict):
             _cmd_prefix = "/bangla"
         elif text.startswith("/boro"):
             _cmd_prefix = "/boro"
+        elif text.startswith("/bcs"):
+            _cmd_prefix = "/bcs"
         elif text.startswith("/math"):
             _cmd_prefix = "/math"
         else:
@@ -30522,6 +30566,13 @@ async def handle_message(msg: dict):
                 await handle_pdf(msg)
             finally:
                 _BORO_MODE.reset(token)
+            return
+        if text.startswith("/bcs"):
+            token = _BCS_MODE.set(True)
+            try:
+                await handle_pdf(msg)
+            finally:
+                _BCS_MODE.reset(token)
             return
         if text.startswith("/math"):
             token = _MATH_MODE.set(True)
