@@ -9312,7 +9312,7 @@ async def _resume_page_job(job_row: dict):
             r = await send_msg(chat_id, f"⏳ বাকি {len(remaining_pages)} page re-extract + post হচ্ছে...")
             new_status_msg_id = r.get("result", {}).get("message_id")
 
-            extracted = await qbm_extract_all_pages(chat_id, remaining_pages, topic, file_name, new_status_msg_id, file_id=file_id)
+            extracted = await qbm_extract_all_pages(chat_id, remaining_pages, topic, file_name, new_status_msg_id, file_id=file_id, gemini_only=True)
             await process_qbm_pages(
                 chat_id, uid, uname, extracted, topic, channel_id, False,
                 file_name, new_status_msg_id, thread_id, skip_extract=True,
@@ -20764,7 +20764,7 @@ async def _qbm_openrouter_call(img, prompt: str) -> str:
     return ""
 
 
-async def _qbm_call1_extract(img, careful: bool = False) -> list:
+async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = False) -> list:
     """
     CALL 1 — OWN OCR + strict-prompt MCQ extraction + inline dedup.
     Job: extract every existing MCQ on the page (option-serial strictly
@@ -20790,6 +20790,9 @@ async def _qbm_call1_extract(img, careful: bool = False) -> list:
                 m["_provider"] = "Gemini"
                 m["_call1_provider"] = "Gemini"
             return out
+        if gemini_only:
+            logger.warning("[QBM Call1] Gemini returned empty/failed — gemini_only set, no Groq/OpenRouter fallback")
+            return []
         logger.warning("[QBM Call1] Gemini returned empty/failed -> falling back to Groq for Call1")
         # 2026-08-27 (per request): use the compact Groq-only prompt when
         # the active prompt is still the stock default -- frees up much
@@ -20819,7 +20822,7 @@ async def _qbm_call1_extract(img, careful: bool = False) -> list:
         return []
 
 
-async def _qbm_lightweight_miss_check(img, call1_mcqs: list) -> list:
+async def _qbm_lightweight_miss_check(img, call1_mcqs: list, gemini_only: bool = False) -> list:
     """
     Dedicated MISS-CHECK ONLY call -- lightweight by design. Job is ONLY:
     scan the full page image once, compare against the full existing MCQ
@@ -20869,10 +20872,10 @@ OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), not
         # or returns nothing.
         gem_txt = await _qbm_gemini_raw(img, prompt)
         result = _qbm_parse_json(gem_txt) if gem_txt else []
-        if not result:
+        if not result and not gemini_only:
             txt = await _qbm_groq_call(img, prompt)
             result = _qbm_parse_json(txt) if txt else []
-        if not result:
+        if not result and not gemini_only:
             or_txt = await _qbm_openrouter_call(img, prompt)
             result = _qbm_parse_json(or_txt) if or_txt else []
         return result or []
@@ -20881,7 +20884,7 @@ OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), not
         return []
 
 
-async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
+async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = False) -> list:
     """
     CALL 2 (dispatcher) — miss-check (ONE lightweight call, always against
     the FULL list regardless of page density) followed by full verification
@@ -20900,7 +20903,7 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
     """
     if not call1_mcqs:
         return []
-    missed = await _qbm_lightweight_miss_check(img, call1_mcqs)
+    missed = await _qbm_lightweight_miss_check(img, call1_mcqs, gemini_only=gemini_only)
     for m in (missed or []):
         m.setdefault("_call1_provider", "MissCheck")
     combined = call1_mcqs + (missed or [])
@@ -20912,10 +20915,10 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list) -> list:
     # a second independent miss-scan inside the SAME call that also does
     # full verification, so any MCQ the lightweight pass missed still has
     # one more chance to be caught before this page's result is final.
-    return await _qbm_call2_single(img, combined, do_miss_check=True)
+    return await _qbm_call2_single(img, combined, do_miss_check=True, gemini_only=gemini_only)
 
 
-async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True) -> list:
+async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, gemini_only: bool = False) -> list:
     """
     CALL 2 (single chunk) — MERGED miss-check + full verification (single call,
     no separate Call 3). Job:
@@ -21049,11 +21052,11 @@ Output ONLY the full corrected JSON array, all fixes applied, same length/order 
         gem_txt = await _qbm_gemini_raw(img, prompt)
         result = _qbm_parse_json(gem_txt) if gem_txt else []
         call2_provider = "Gemini"
-        if not result:
+        if not result and not gemini_only:
             txt = await _qbm_groq_call(img, prompt)
             result = _qbm_parse_json(txt) if txt else []
             call2_provider = "Groq"
-        if not result:
+        if not result and not gemini_only:
             or_txt = await _qbm_openrouter_call(img, prompt)
             result = _qbm_parse_json(or_txt) if or_txt else []
             call2_provider = "OpenRouter"
@@ -21328,7 +21331,7 @@ def _cap_qbm_mcq_cache(cache_dict: dict = None):
         d.pop(next(iter(d)), None)
 
 
-async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False) -> list:
+async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False, gemini_only: bool = False) -> list:
     """
     2-STAGE CONNECTED PIPELINE (per page) — Call1 extract + Call2 (which
     itself makes 2 sub-calls: miss-check, then verify), so up to 3 Gemini
@@ -21362,7 +21365,7 @@ async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bo
                 logger.info(f"[QBM MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
                 call1 = cached_call1
             else:
-                call1 = await _qbm_call1_extract(img, careful=careful)
+                call1 = await _qbm_call1_extract(img, careful=careful, gemini_only=gemini_only)
                 if call1 and cache_key:
                     _qbm_mcq_result_cache[cache_key] = call1
                     _cap_qbm_mcq_cache()
@@ -21371,22 +21374,22 @@ async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bo
                 # ZERO-SKIP GUARANTEE: a single empty Call 1 could be a technical
                 # failure (image encode issue, API error) rather than a genuinely
                 # empty page -- run one independent final scan before confirming.
-                final_check = await _qbm_final_empty_page_scan(img)
+                final_check = await _qbm_final_empty_page_scan(img, gemini_only=gemini_only)
                 if not final_check:
                     if _pipeline_attempt < 2:
                         logger.warning(f"[QBM] Call1+final-scan both empty on attempt {_pipeline_attempt+1}/3 — retrying full pipeline before confirming empty page")
                         continue
                     return []  # both independent passes agree: genuinely no MCQ
-                verified = await _qbm_call2_miss_check(img, final_check)
+                verified = await _qbm_call2_miss_check(img, final_check, gemini_only=gemini_only)
                 verified = _qbm_repair_order(final_check, verified)
                 recovered_mcqs = _cap_mcq_options(_qbm_restore_opt_bboxes(final_check, verified))
-                return await _qbm_final_safety_net(img, recovered_mcqs)
+                return await _qbm_final_safety_net(img, recovered_mcqs, gemini_only=gemini_only)
 
-            call2 = await _qbm_call2_miss_check(img, call1)
+            call2 = await _qbm_call2_miss_check(img, call1, gemini_only=gemini_only)
             call2 = _qbm_repair_order(call1, call2)
             call2 = _qbm_restore_opt_bboxes(call1, call2)
             final_mcqs = _cap_mcq_options(call2)
-            return await _qbm_final_safety_net(img, final_mcqs)
+            return await _qbm_final_safety_net(img, final_mcqs, gemini_only=gemini_only)
         return []
     finally:
         _QBM_EXTRACT_HARD_CAP.release()
@@ -21651,7 +21654,7 @@ No markdown, no extra text."""
         return {}
 
 
-async def _qbm_final_safety_net(img, mcqs: list) -> list:
+async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> list:
     """
     Last-line, zero-trust, CODE-LEVEL (not prompt-level) safety net applied to
     every MCQ right before it leaves the extraction pipeline. Balances and
@@ -21683,7 +21686,7 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
         if _qbm_question_looks_truncated(q, opts):
             # Cheap, non-Gemini attempt first (Groq only, no gemini fallback here
             # -- gemini fallback now happens once for the whole page in the batch call below).
-            reread = await _qbm_reextract_truncated_question_groq_only(img, q, opts)
+            reread = "" if gemini_only else await _qbm_reextract_truncated_question_groq_only(img, q, opts)
             if reread:
                 mc["question"] = reread
             else:
@@ -21700,11 +21703,11 @@ async def _qbm_final_safety_net(img, mcqs: list) -> list:
         if not (mc.get("explanation") or "").strip():
             ans = mc.get("answer", "A")
             try:
-                mc["explanation"] = await _qbm_build_explanation_for_known_answer(mc, ans)
+                mc["explanation"] = await _qbm_build_explanation_for_known_answer(mc, ans, gemini_only=gemini_only)
             except Exception as e:
                 logger.warning(f"[QBM safety-net] Explanation backfill attempt 1 failed: {e}, retrying once")
                 try:
-                    mc["explanation"] = await _qbm_build_explanation_for_known_answer(mc, ans)
+                    mc["explanation"] = await _qbm_build_explanation_for_known_answer(mc, ans, gemini_only=gemini_only)
                 except Exception as e2:
                     logger.error(f"[QBM safety-net] Explanation backfill retry also failed: {e2}")
             if not (mc.get("explanation") or "").strip():
@@ -23193,7 +23196,7 @@ async def _handle_qbm_impl(msg: dict):
         # is fully complete, so the person picks a channel already knowing
         # exactly how many MCQs were found.
         extracted_pages = await qbm_extract_all_pages(
-            chat_id, pages, topic, file_name, status_msg_id, file_id=file_id
+            chat_id, pages, topic, file_name, status_msg_id, file_id=file_id, gemini_only=True
         )
 
         if not channel_id:
@@ -26655,9 +26658,23 @@ async def qbm_extract_all_pages(
         _page_start_ts = time.time()
         _page_ai_calls_before = _get_ai_call_count(chat_id)
 
+        async def _call_extract_fn(**kwargs):
+            # gemini_only is only accepted by extractors that opted in
+            # (_qbm_extract_from_image so far) -- other extractors
+            # (_unmesh_extract_from_image, _bcs_extract_from_image, etc.)
+            # already achieve their own gemini-only behavior internally and
+            # don't take this kwarg, so fall back to calling without it
+            # instead of raising.
+            if gemini_only:
+                try:
+                    return await _extract_fn(**kwargs, gemini_only=True)
+                except TypeError:
+                    pass
+            return await _extract_fn(**kwargs)
+
         async def _run_extract():
             _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
-            return await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
+            return await (_call_extract_fn(img=img, cache_key=_ck) if _ck else _call_extract_fn(img=img))
 
         async def _watch_cancel_inner(task):
             # Call1/Call2 (এবং lookahead/web-resolve) মিলিয়ে একটা page
@@ -26729,7 +26746,7 @@ async def qbm_extract_all_pages(
             if not is_cancelled(chat_id):
                 try:
                     _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
-                    mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
+                    mcqs = await (_call_extract_fn(img=img, cache_key=_ck) if _ck else _call_extract_fn(img=img))
                 except Exception as e2:
                     logger.error(f"[QBM Extract] Page {page_num} retry also failed: {e2}")
                     mcqs = []
@@ -26764,13 +26781,13 @@ async def qbm_extract_all_pages(
                     await asyncio.sleep(min(3 * _attempt_n, 30))
                 try:
                     _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
-                    mcqs = await _extract_fn(img, cache_key=_ck, bypass_cache=True, careful=_careful) if _ck else await _extract_fn(img, careful=_careful)
+                    mcqs = await (_call_extract_fn(img=img, cache_key=_ck, bypass_cache=True, careful=_careful) if _ck else _call_extract_fn(img=img, careful=_careful))
                 except TypeError:
                     # extractor doesn't accept bypass_cache/careful kwargs —
                     # fall back to a plain re-call (still a fresh attempt).
                     try:
                         _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
-                        mcqs = await _extract_fn(img, cache_key=_ck) if _ck else await _extract_fn(img)
+                        mcqs = await (_call_extract_fn(img=img, cache_key=_ck) if _ck else _call_extract_fn(img=img))
                     except Exception as e3:
                         logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry #{_attempt_n} also failed: {e3}")
                         mcqs = []
@@ -31975,7 +31992,7 @@ async def handle_callback(query: dict):
                         chat_id, raw_pages, pending["topic"],
                         pending.get("file_name","document.pdf"),
                         pending.get("status_msg_id"),
-                        file_id=saved_file_id
+                        file_id=saved_file_id, gemini_only=True
                     )
                     await process_qbm_pages(
                         chat_id, uid, user.get("first_name","User"), extracted,
