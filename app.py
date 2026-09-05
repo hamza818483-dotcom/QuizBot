@@ -1962,6 +1962,29 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
         "unmarked content too, exactly as if no marks existed. No marks on the page at all "
         "is the common case and needs no special handling.\n\n"
     )
+    # /chem-specific difficulty lock (user request 2026-09-04): science/
+    # chemistry content easily tempts multi-step, convoluted, or overly
+    # clever questions (multi-concept chaining, trick wording, unnecessary
+    # calculation layering). /chem must stay SIMPLE and DIRECT -- one clear
+    # fact/concept per question, no deliberately hard/tricky/pechano MCQs.
+    base = base.replace(
+        "- 3-5 MCQs should combine 2-3 distinct facts per question (options are "
+        "fact-combinations, only one fully correct) — moderate difficulty only.\n\n",
+        "- 🚫 NO HARD/TRICKY/CONVOLUTED MCQs: each question tests ONE clear fact/"
+        "concept directly — never chain 2-3 concepts together, never require "
+        "multi-step reasoning, never use deliberately confusing/tricky wording "
+        "just to make it harder. Simple, direct, unambiguous — a student who "
+        "knows the fact should recognize the answer immediately, without "
+        "having to puzzle through layered logic.\n\n"
+    )
+    base = base.replace(
+        "- Not unnecessarily hard/tricky — clarity over difficulty.\n\n",
+        "- Not unnecessarily hard/tricky — clarity over difficulty. This applies "
+        "strictly to /chem: reject any question that needs more than one "
+        "logical/calculation step, or that combines multiple facts into a "
+        "single confusing question — split into separate simple questions "
+        "instead, or drop the extra complexity entirely.\n\n"
+    )
     # Swap the OUTPUT schema to add qsn_no/topic_hint, and inject the
     # heading-detection rule right before it, reusing the exact wording
     # from the original extraction-based CHEM_EXTRACT_PROMPT so detection
