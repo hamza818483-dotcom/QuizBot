@@ -10144,21 +10144,40 @@ async def handle_wm_command(msg: dict):
 _FOOTER_HISTORY_CACHE: dict = {}
 
 
+def _tg_safe_filename(orig_filename: str, default: str = "file.pdf") -> str:
+    """Telegram's sendDocument silently mangles non-ASCII filenames server-side
+    (strips vowel-sign/virama combining marks from scripts like Bengali — this
+    happens on Telegram's end regardless of how correctly we send UTF-8 bytes,
+    confirmed 2026-09: 'মুক্তিযুদ্ধ...' arrives as 'মকতযদধ...' with matras
+    and hasant dropped). No client-side encoding trick fixes this, so instead
+    of shipping a broken/half-readable Bangla filename, use a safe ASCII name
+    (keeps the extension) — the real original name is shown intact in the
+    caption instead, where Telegram does NOT mangle text."""
+    if not orig_filename:
+        return default
+    ext = ""
+    if "." in orig_filename:
+        ext = "." + orig_filename.rsplit(".", 1)[1]
+    is_ascii = all(ord(c) < 128 for c in orig_filename)
+    if is_ascii:
+        return orig_filename
+    return f"document{ext or '.pdf'}"
+
+
 async def _apply_watermark_to_pdf(chat_id: int, file_id: str, wm_text: str, message_id: int = None,
                                     orig_filename: str = None, footer_text: str = None):
-    """Download PDF, apply watermark using existing add_watermark_to_pdf, resend
-    with the ORIGINAL filename preserved (not a generic 'watermarked.pdf') so the
-    user still recognizes which PDF this was."""
+    """Download PDF, apply watermark using existing add_watermark_to_pdf, resend.
+    Real filename (Bangla-safe) goes in the caption since Telegram's own
+    sendDocument mangles non-ASCII filenames server-side — see _tg_safe_filename."""
     try:
         pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
         wm_bytes = add_watermark_to_pdf(pdf_bytes, wm_text, footer_text=footer_text,
                                           title=(orig_filename.rsplit(".", 1)[0] if orig_filename else None))
-        out_name = orig_filename or "watermarked.pdf"
-        if not out_name.lower().endswith(".pdf"):
-            out_name += ".pdf"
+        out_name = _tg_safe_filename(orig_filename, default="watermarked.pdf")
+        name_line = f"📄 {orig_filename}\n" if orig_filename else ""
         send_res = await send_document(chat_id, wm_bytes,
             out_name,
-            caption=f"✅ Watermark applied: <b>{footer_text or wm_text}</b>",
+            caption=f"{name_line}✅ Watermark applied: <b>{footer_text or wm_text}</b>",
             mime_type="application/pdf"
         )
         if not send_res.get("ok"):
@@ -10200,12 +10219,11 @@ async def _apply_header_to_pdf(chat_id: int, file_id: str, name_text: str, messa
     try:
         pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
         out_bytes = add_header_box_to_pdf(pdf_bytes, name_text)
-        out_name = orig_filename or "header.pdf"
-        if not out_name.lower().endswith(".pdf"):
-            out_name += ".pdf"
+        out_name = _tg_safe_filename(orig_filename, default="header.pdf")
+        name_line = f"📄 {orig_filename}\n" if orig_filename else ""
         send_res = await send_document(chat_id, out_bytes,
             out_name,
-            caption=f"✅ Header applied: <b>{name_text}</b>",
+            caption=f"{name_line}✅ Header applied: <b>{name_text}</b>",
             mime_type="application/pdf"
         )
         if not send_res.get("ok"):
@@ -10249,12 +10267,11 @@ async def _apply_footer_to_pdf(chat_id: int, file_id: str, footer_text: str, mes
     try:
         pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
         out_bytes = add_footer_box_to_pdf(pdf_bytes, footer_text)
-        out_name = orig_filename or "footer.pdf"
-        if not out_name.lower().endswith(".pdf"):
-            out_name += ".pdf"
+        out_name = _tg_safe_filename(orig_filename, default="footer.pdf")
+        name_line = f"📄 {orig_filename}\n" if orig_filename else ""
         send_res = await send_document(chat_id, out_bytes,
             out_name,
-            caption=f"✅ Footer applied: <b>{footer_text}</b>",
+            caption=f"{name_line}✅ Footer applied: <b>{footer_text}</b>",
             mime_type="application/pdf"
         )
         if not send_res.get("ok"):
