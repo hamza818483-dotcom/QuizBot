@@ -607,15 +607,15 @@ async function handleTgSendDoc(request) {
       if (body.message_thread_id) formData.append('message_thread_id', String(body.message_thread_id));
       resp = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: formData });
     } else {
-      // Non-ASCII filename (Bengali/etc) — Telegram's Bot API does NOT
-      // honor the RFC 5987 filename*=UTF-8''... parameter; it only reads
-      // the plain filename="..." field. Previously we sent an ASCII
-      // fallback ("file.ext") in that plain field with the real Bangla
-      // name only in filename*, so Telegram always displayed "file.ext"
-      // and effectively ignored the rename. Fix: put the raw UTF-8 bytes
-      // of the real filename directly in the plain filename="..." field
-      // (Telegram's API is UTF-8 native and handles this correctly),
-      // dropping the RFC5987 param entirely.
+      // Non-ASCII filename (Bengali/etc) — putting raw UTF-8 bytes directly
+      // inside a quoted-string filename="..." header breaks because many
+      // HTTP/multipart parsers (incl. what Telegram's Bot API sits behind)
+      // treat header field values as Latin-1/ASCII and mangle any byte
+      // >0x7F, corrupting the Bengali name. Fix: send an ASCII-safe
+      // fallback in the plain filename="..." field (so nothing breaks even
+      // if a client ignores RFC 5987), AND include the real UTF-8 name via
+      // the standard filename*=UTF-8''<percent-encoded> extended parameter,
+      // which Telegram DOES honor for display purposes.
       const boundary = '----AtlasWM' + crypto.randomUUID().replace(/-/g, '');
       const enc = new TextEncoder();
       const parts = [];
@@ -629,8 +629,17 @@ async function handleTgSendDoc(request) {
       if (body.parse_mode) pushField('parse_mode', body.parse_mode);
       if (body.reply_to_message_id) pushField('reply_to_message_id', String(body.reply_to_message_id));
       if (body.message_thread_id) pushField('message_thread_id', String(body.message_thread_id));
+
+      // ASCII-safe fallback name (strip/replace non-ASCII, keep extension)
+      const dotIdx = filename.lastIndexOf('.');
+      const ext = dotIdx > -1 ? filename.slice(dotIdx) : '';
+      const asciiExt = /^[\x00-\x7F]*$/.test(ext) ? ext : '.pdf';
+      const asciiFallback = `file${asciiExt}`;
+      const encodedFilename = encodeURIComponent(filename);
+
       parts.push(enc.encode(
-        `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${filename}"\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="document"; ` +
+        `filename="${asciiFallback}"; filename*=UTF-8''${encodedFilename}\r\n` +
         `Content-Type: ${body.mime_type || 'application/octet-stream'}\r\n\r\n`
       ));
       parts.push(bytes);
