@@ -114,6 +114,7 @@ from core import (
     db_get_channels, db_save_channel, db_delete_channel, db_rename_channel, db_save_last_quiz, db_get_last_quiz,
     db_save_csv_job, db_update_csv_job_progress, db_finish_csv_job, db_get_incomplete_csv_jobs,
     db_save_page_job, db_update_page_job_progress, db_finish_page_job, db_get_incomplete_page_jobs,
+    db_append_partial_page_result, db_get_partial_page_results,
     build_back_url, source_msg_id,
     get_recent_errors, clear_error_logs,
     add_watermark_to_pdf,
@@ -20812,7 +20813,7 @@ async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = Fal
     """
     try:
         prompt = await qbm_get_active_prompt()
-        gem = await _qbm_gemini_extract(img, prompt, careful=careful)
+        gem = await _qbm_gemini_extract(img, prompt, careful=careful, gemini_only=gemini_only)
         if gem:
             logger.info(f"[QBM Call1] Gemini succeeded, {len(gem)} MCQ")
             out = _qbm_dedup_list(gem)
@@ -21889,7 +21890,7 @@ _QBM_CAREFUL_SCAN_ADDENDUM = (
 )
 
 
-async def _qbm_gemini_raw(img, prompt: str, careful: bool = False) -> str:
+async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: bool = False) -> str:
     """Direct Gemini call with any given prompt -> raw text (caller parses).
     Tries keys in healthiest-first order, one after another, until one
     succeeds -- a single key's 429 RESOURCE_EXHAUSTED (daily quota, only 20
@@ -21897,6 +21898,12 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False) -> str:
     any other key in the pool is still usable. If every Gemini key is
     exhausted/failing, falls back to Groq vision (qwen) so the caller still
     gets a result instead of an empty string.
+
+    gemini_only (default False): when True, skips the internal Groq
+    fallback entirely and returns "" if every Gemini key fails -- used by
+    /qbm's gemini_only callers (per user request 2026-09-04) so this
+    shared low-level function doesn't silently reintroduce Groq behind
+    their backs.
 
     careful=True: appends an explicit slow/exhaustive-scan instruction to
     the prompt and raises the thinking budget (from 0 -> 2048) so Gemini
@@ -21909,12 +21916,15 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False) -> str:
     try:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
-            return await _gen_groq_raw_text(img, prompt)
+            return "" if gemini_only else await _gen_groq_raw_text(img, prompt)
         # Same persistent, process-lifetime exhaustion memory /tf and /img
         # use -- if every key was already confirmed daily-exhausted by an
         # earlier call in this process, skip straight to Groq instead of
         # burning a fresh 429 per key on every single /qbm page.
         if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
+            if gemini_only:
+                logger.warning("[QBM] all Gemini keys already known daily-exhausted — gemini_only set, returning empty")
+                return ""
             logger.warning("[QBM] all Gemini keys already known daily-exhausted — skipping straight to Groq")
             return await _gen_groq_raw_text(img, prompt)
         from google import genai as gai
@@ -22002,11 +22012,14 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False) -> str:
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         # All Gemini keys exhausted/rate-limited/errored — fall back to Groq vision
+        if gemini_only:
+            logger.warning("[QBM] All Gemini keys exhausted — gemini_only set, returning empty (no Groq fallback)")
+            return ""
         logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision")
         return await _gen_groq_raw_text(img, prompt)
     except Exception as e:
         logger.warning(f"[QBM] Gemini raw call failed: {e}")
-        return await _gen_groq_raw_text(img, prompt)
+        return "" if gemini_only else await _gen_groq_raw_text(img, prompt)
 
 
 async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
@@ -22127,10 +22140,14 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
         return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
 
 
-async def _ai_gemini_text_call(prompt: str) -> str:
+async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False) -> str:
     """Text-only Gemini call (no image) for /ai's explanation generation.
     Same key-rotation/exhaustion handling as _qbm_gemini_raw, minus the
-    image part -- tries every non-exhausted key in order before giving up."""
+    image part -- tries every non-exhausted key in order before giving up.
+
+    gemini_only (default False): when True, skips the Groq fallback at the
+    end entirely and returns "" instead -- used by /qbm's gemini_only
+    callers so this shared utility doesn't silently reintroduce Groq."""
     try:
         from pdf_handler import key_rotator, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
@@ -22187,9 +22204,13 @@ async def _ai_gemini_text_call(prompt: str) -> str:
                 logger.warning(f"[AI] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         logger.warning("[AI] all Gemini keys exhausted/failed -- falling back to Groq text")
+        if gemini_only:
+            return ""
         return await _qbm_groq_text_call(prompt)
     except Exception as e:
         logger.warning(f"[AI] Gemini text call failed: {e}")
+        if gemini_only:
+            return ""
         return await _qbm_groq_text_call(prompt)
 
 
@@ -22493,7 +22514,7 @@ async def handle_ai(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
-async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False, careful: bool = False):
+async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False, careful: bool = False, gemini_only: bool = False):
     """Direct Gemini call with the strict extraction prompt (fallback path).
 
     2026-08-20: added optional _return_marker_info flag (default False, so
@@ -22509,7 +22530,7 @@ async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool
     thorough re-scan (higher thinking budget + explicit exhaustive-scan
     prompt addendum) -- used on 0-MCQ retry passes where speed already
     cost a miss."""
-    txt = await _qbm_gemini_raw(img, prompt or await qbm_get_active_prompt(), careful=careful)
+    txt = await _qbm_gemini_raw(img, prompt or await qbm_get_active_prompt(), careful=careful, gemini_only=gemini_only)
     # DEBUG (2026-08-20): log raw response snippet so a genuinely-empty
     # Gemini result (model says no content) can be told apart from a
     # non-JSON/refusal response that _qbm_parse_json would silently drop.
@@ -22612,7 +22633,7 @@ Line 2: ONLY the final answer letter A/B/C/D, or the word NONE if not genuinely 
 Line 3: the 165-char-max Bengali explanation (omit this line entirely if Line 2 is NONE)"""
 
         async def _one_pass() -> dict | None:
-            txt = (await (_ai_gemini_text_call(prompt) if gemini_only else _qbm_groq_text_call(prompt, model="openai/gpt-oss-120b"))).strip()
+            txt = (await (_ai_gemini_text_call(prompt, gemini_only=True) if gemini_only else _qbm_groq_text_call(prompt, model="openai/gpt-oss-120b"))).strip()
             lines = [l.strip() for l in txt.splitlines() if l.strip()]
             if len(lines) < 2:
                 return None
@@ -22676,7 +22697,7 @@ Line 1 (MAIN line, max ~200 characters): why the correct option ({answer_letter}
 Line 2 onward (one line per WRONG option, in order): briefly what that option actually is/means and why it's wrong here, specific fact each time -- never a bare "ভুল" with no reason.
 
 NEVER mention the source, page, answer key, or how the answer was determined. Output ONLY the explanation text (with real line breaks), nothing else."""
-        txt = (await (_ai_gemini_text_call(prompt) if gemini_only else _qbm_groq_text_call(prompt))).strip()
+        txt = (await (_ai_gemini_text_call(prompt, gemini_only=True) if gemini_only else _qbm_groq_text_call(prompt))).strip()
         return txt[:800]
     except Exception as e:
         logger.warning(f"[QBM] Explanation build failed: {e}")

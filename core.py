@@ -2161,7 +2161,51 @@ async def _ensure_page_job_table():
         "job_id TEXT PRIMARY KEY, job_type TEXT, uid INTEGER, chat_id INTEGER, uname TEXT, "
         "file_id TEXT, page_range TEXT, topic TEXT, mcq_count TEXT, channel_id TEXT, "
         "csv_only INTEGER, file_name TEXT, thread_id INTEGER, status_msg_id INTEGER, "
-        "resume_page_num INTEGER, status TEXT, updated_at INTEGER)")
+        "resume_page_num INTEGER, status TEXT, updated_at INTEGER, partial_data TEXT)")
+    # 2026-09-04 (user request): incremental crash-recovery -- as each page
+    # finishes, its MCQs are appended here so a mid-job restart can send out
+    # whatever was ALREADY completed immediately, instead of losing it or
+    # silently re-doing it with no output for the lost pages. ALTER TABLE
+    # is safe to run every time -- D1/SQLite errors harmlessly if the
+    # column already exists, which we swallow.
+    try:
+        await d1_run("ALTER TABLE page_jobs ADD COLUMN partial_data TEXT", [])
+    except Exception:
+        pass  # column already exists -- expected on every run after the first
+
+async def db_append_partial_page_result(job_id: str, page_num: int, mcqs: list):
+    """Appends one page's completed MCQ list to this job's partial_data
+    (JSON: {"pages": {"<page_num>": [mcq, ...], ...}}), so a crash mid-job
+    doesn't lose already-finished pages. Best-effort/non-fatal -- a failure
+    here must never interrupt the actual extraction job."""
+    try:
+        await _ensure_page_job_table()
+        row = await d1_select("SELECT partial_data FROM page_jobs WHERE job_id=?1", [job_id])
+        existing = {}
+        if row and row[0].get("partial_data"):
+            try:
+                existing = json.loads(row[0]["partial_data"])
+            except Exception:
+                existing = {}
+        existing.setdefault("pages", {})[str(page_num)] = mcqs
+        await d1_run("UPDATE page_jobs SET partial_data=?1, updated_at=?2 WHERE job_id=?3",
+                     [json.dumps(existing, ensure_ascii=False), int(time.time()), job_id])
+    except Exception as e:
+        logger.warning(f"[D1] append_partial_page_result warn (non-fatal, job continues): {e}")
+
+async def db_get_partial_page_results(job_id: str) -> dict:
+    """Returns {page_num_int: [mcq, ...], ...} for all pages already
+    completed before a crash, or {} if none saved / job_id not found."""
+    try:
+        await _ensure_page_job_table()
+        row = await d1_select("SELECT partial_data FROM page_jobs WHERE job_id=?1", [job_id])
+        if not row or not row[0].get("partial_data"):
+            return {}
+        data = json.loads(row[0]["partial_data"])
+        return {int(k): v for k, v in data.get("pages", {}).items()}
+    except Exception as e:
+        logger.warning(f"[D1] get_partial_page_results warn: {e}")
+        return {}
 
 async def db_save_page_job(job_id: str, **fields):
     try:
