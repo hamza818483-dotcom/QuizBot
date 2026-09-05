@@ -9325,6 +9325,69 @@ async def _resume_page_job(job_row: dict):
             )
             await db_finish_page_job(job_id)
 
+        elif job_type == "qbm_extract":
+            # 2026-09-04 (user request): extraction-phase checkpoint job --
+            # send out whatever pages were ALREADY completed immediately,
+            # instead of losing them, then continue extracting the rest.
+            partial = await db_get_partial_page_results(job_id)
+            logger.info(f"[QBM-Extract-Resume] Resuming job_id={job_id}: {len(partial)} page(s) already completed before restart")
+
+            resolved_channel_id = channel_id if channel_id else None
+
+            if partial:
+                await send_msg(chat_id,
+                    f"🔄 Bot restart হয়েছিল — extraction চলাকালীন থেমে গিয়েছিল।\n"
+                    f"✅ ইতিমধ্যে সম্পন্ন হওয়া {len(partial)} page এখনই পাঠানো হচ্ছে, "
+                    f"বাকি page গুলো এরপর process হবে..."
+                )
+                partial_tuples = [(p, None, mcqs) for p, mcqs in sorted(partial.items())]
+                try:
+                    await process_qbm_pages(
+                        chat_id, uid, uname, partial_tuples, f"{topic} (Recovered part 1)",
+                        resolved_channel_id, not resolved_channel_id, file_name, None, thread_id,
+                        skip_extract=True
+                    )
+                except Exception as e:
+                    logger.error(f"[QBM-Extract-Resume] Failed to send already-completed pages: {e}")
+            else:
+                await send_msg(chat_id, "🔄 Bot restart হয়েছিল — আগের /qbm extraction আবার শুরু হচ্ছে (এখনো কোনো page সম্পন্ন হয়নি)...")
+
+            pdf_bytes = await _download_pdf_cached(file_id)
+            ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range_str)
+            if not ok or not pages:
+                await send_msg(chat_id, f"❌ Resume ব্যর্থ: PDF re-render হয়নি ({pages if not ok else 'no pages'})")
+                await db_finish_page_job(job_id)
+                return
+
+            remaining_pages = [(p, img) for p, img in pages if p not in partial]
+            if not remaining_pages:
+                await db_finish_page_job(job_id)
+                return
+
+            r = await send_msg(chat_id, f"⏳ বাকি {len(remaining_pages)} page extract হচ্ছে...")
+            new_status_msg_id = r.get("result", {}).get("message_id")
+
+            new_job_id = gen_session_id()
+            await db_save_page_job(
+                new_job_id, job_type="qbm_extract", uid=uid, chat_id=chat_id, uname=uname,
+                file_id=file_id, page_range=page_range_str or "", topic=topic,
+                mcq_count="", channel_id=str(channel_id or ""),
+                csv_only=0, file_name=file_name, thread_id=thread_id or 0,
+                status_msg_id=new_status_msg_id or 0, resume_page_num=remaining_pages[0][0],
+                status="running"
+            )
+            extracted = await qbm_extract_all_pages(
+                chat_id, remaining_pages, f"{topic} (Recovered part 2)", file_name, new_status_msg_id,
+                file_id=file_id, gemini_only=True, job_id=new_job_id
+            )
+            await process_qbm_pages(
+                chat_id, uid, uname, extracted, f"{topic} (Recovered part 2)" if partial else topic,
+                resolved_channel_id, not resolved_channel_id, file_name, new_status_msg_id, thread_id,
+                skip_extract=True
+            )
+            await db_finish_page_job(new_job_id)
+            await db_finish_page_job(job_id)
+
         elif job_type == "qbm":
             logger.info(f"[QBM-Resume] Resuming job_id={job_id} from page {resume_page_num} for chat_id={chat_id}")
             await send_msg(chat_id, f"🔄 Bot restart হয়েছিল — আগের অসম্পূর্ণ /qbm কাজ page {resume_page_num} থেকে আবার শুরু হচ্ছে (আগের page গুলো আবার পোস্ট হবে না)...")
@@ -23242,13 +23305,37 @@ async def _handle_qbm_impl(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে...")
 
+        # 2026-09-04 (user request): crash-recovery checkpoint job -- covers
+        # the EXTRACTION phase itself (not just posting), since that's where
+        # most of the time/AI-calls are spent and where a mid-job restart
+        # previously lost everything already completed. Only for multi-page
+        # PDFs (single-image /qbm has nothing worth checkpointing).
+        _qbm_extract_job_id = None
+        if file_id and not is_image_reply and len(pages) > 1:
+            _qbm_extract_job_id = gen_session_id()
+            await db_save_page_job(
+                _qbm_extract_job_id, job_type="qbm_extract", uid=uid, chat_id=chat_id, uname=uname,
+                file_id=file_id, page_range=page_range or "", topic=topic,
+                mcq_count="", channel_id=str(channel_id or ""),
+                csv_only=0, file_name=file_name, thread_id=thread_id or 0,
+                status_msg_id=status_msg_id or 0, resume_page_num=pages[0][0],
+                status="running"
+            )
+
         # ── MCQ Extraction ALWAYS runs first (3-call pipeline, per page) ──
         # Channel selection + CSV file generation happen only AFTER extraction
         # is fully complete, so the person picks a channel already knowing
         # exactly how many MCQs were found.
         extracted_pages = await qbm_extract_all_pages(
-            chat_id, pages, topic, file_name, status_msg_id, file_id=file_id, gemini_only=True
+            chat_id, pages, topic, file_name, status_msg_id, file_id=file_id, gemini_only=True,
+            job_id=_qbm_extract_job_id
         )
+
+        if _qbm_extract_job_id:
+            # Extraction finished cleanly (no crash) -- this job no longer
+            # needs to be resumed, so mark it done to stop it showing up in
+            # the startup incomplete-job scan.
+            await db_finish_page_job(_qbm_extract_job_id)
 
         if not channel_id:
             channels = await db_get_channels()
@@ -26615,7 +26702,8 @@ async def qbm_extract_all_pages(
     file_name: str, status_msg_id: int = None,
     extractor=None, file_id: str = None,
     page_status_out: list = None,
-    gemini_only: bool = False
+    gemini_only: bool = False,
+    job_id: str = None
 ) -> list:
     """
     Phase 1 -- runs the full 3-call connected extraction pipeline for every
@@ -26642,6 +26730,13 @@ async def qbm_extract_all_pages(
     OpenRouter fallback -- used by /unmesh (per user request 2026-09-04:
     /unmesh must never use a non-Gemini model anywhere in its pipeline).
     Every other caller (/qbm, /onu) is unaffected (default False).
+
+    job_id (opt-in, default None): when given, each page's finished MCQs
+    are persisted to D1 (page_jobs.partial_data) as soon as that page
+    completes -- per user request 2026-09-04: 'task cholakalin restart
+    hole jotuk complete oituk sathe sathe output diye dibe'. Best-effort,
+    never blocks/fails the extraction itself. Every existing caller
+    without a job_id is completely unaffected.
     """
     _extract_fn = extractor or _qbm_extract_from_image
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
@@ -26880,6 +26975,13 @@ async def qbm_extract_all_pages(
         page_status[idx]["mcq"] = len(mcqs)
         page_status[idx]["gen_seconds"] = round(time.time() - _page_start_ts, 1)
         page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
+        if job_id and mcqs:
+            # Best-effort crash-recovery checkpoint -- never blocks/fails
+            # the actual extraction if D1 is slow/down.
+            try:
+                await db_append_partial_page_result(job_id, page_num, mcqs)
+            except Exception as e:
+                logger.warning(f"[Page-Resume] partial checkpoint save failed for page {page_num} (non-fatal): {e}")
         _counts = {}
         for _m in (mcqs or []):
             _prov = _m.get("_provider", "")
