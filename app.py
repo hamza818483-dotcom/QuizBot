@@ -1960,7 +1960,35 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
         "- ⚠️ UNLIKE /extra: marked content sets PRIORITY only, never an exclusive filter -- "
         "after covering marked lines, generate MCQs normally from the rest of the page's "
         "unmarked content too, exactly as if no marks existed. No marks on the page at all "
-        "is the common case and needs no special handling.\n\n"
+        "is the common case and needs no special handling.\n"
+        "- 🚨 MANDATORY ZERO-MISS COVERAGE OF MARKED/HIGHLIGHTED LINES: every single "
+        "highlighted/marked/boxed/underlined line or sentence on this page MUST produce "
+        "at least one MCQ -- this is not optional and not subject to the count target. "
+        "Before finalizing, go back and list every marked line separately, then verify "
+        "each one has a corresponding MCQ in your output; if any marked line was skipped, "
+        "add an MCQ for it now, even if that means exceeding the normal count. A marked "
+        "line with zero MCQs generated from it is always a mistake -- never let it happen.\n\n"
+    )
+    # /chem-specific anti-shortcut rules (user request 2026-09-04):
+    # 1) Never turn an ALREADY-PRINTED MCQ on the page into a "generated"
+    #    one by lightly rephrasing it -- that's disguised extraction, not
+    #    generation, and defeats /chem's purpose (creating genuinely new
+    #    questions from the page's information/explanatory content).
+    # 2) Reinforce (chem-specific, on top of the shared base rule) that a
+    #    topic heading/chapter title itself is never MCQ material.
+    base = base.replace(
+        "- NEVER make MCQs from topic names, chapter titles, headlines, page numbers.\n",
+        "- NEVER make MCQs from topic names, chapter titles, headlines, page numbers. "
+        "This is STRICT for /chem: the numbered heading text itself (e.g. \"১.২ পরমাণুর "
+        "গঠন\") is a section label, never a fact to quiz on -- do not ask what a heading "
+        "means/says, do not build a question whose entire content IS the heading.\n"
+        "- 🚫 NEVER regenerate an MCQ that is ALREADY PRINTED on the page as-is (question "
+        "already has its own 4 options printed on the page) by lightly rephrasing/"
+        "reordering it and presenting it as a new question -- that is disguised copying, "
+        "not generation. Only build NEW MCQs from plain informational/explanatory text "
+        "(paragraphs, definitions, facts, tables) that is NOT already formatted as a "
+        "ready-made MCQ on the page. If a ready-made MCQ block exists on the page, skip "
+        "it entirely for generation purposes (a different command handles those).\n"
     )
     # /chem-specific difficulty lock (user request 2026-09-04): science/
     # chemistry content easily tempts multi-step, convoluted, or overly
