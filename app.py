@@ -19011,7 +19011,7 @@ def _parse_chem_heading_scan(text: str) -> list:
     return headings
 
 
-async def _chem_extract_from_image(img, cache_key: tuple = None) -> list:
+async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bool = False) -> list:
     """/chem extractor — same Call1+Call2 pipeline as /topic and /unmesh, but
     topic boundaries are detected via the BOLD-BLACK-LARGER-FONT + Bangla
     hierarchical-number-prefix (১.২, ১.২.১, ২.২.১...) heading style
@@ -19029,13 +19029,16 @@ async def _chem_extract_from_image(img, cache_key: tuple = None) -> list:
         if cached:
             logger.info(f"[CHEM MCQ Cache] hit for {cache_key} — skipping Call1, still running full heading-scan + Call2 verify")
             return _qbm_dedup_list(cached)
-        gem = await _qbm_gemini_extract(img, CHEM_EXTRACT_PROMPT)
+        gem = await _qbm_gemini_extract(img, CHEM_EXTRACT_PROMPT, gemini_only=gemini_only)
         if gem:
             result = _qbm_dedup_list(gem)
             if result and cache_key:
                 _chem_mcq_result_cache[cache_key] = result
                 _cap_qbm_mcq_cache(_chem_mcq_result_cache)
             return result
+        if gemini_only:
+            logger.warning("[CHEM Call1] Gemini returned empty/failed — gemini_only set, no Groq/OpenRouter fallback")
+            return []
         txt = await _qbm_groq_call(img, CHEM_EXTRACT_PROMPT_GROQ_COMPACT)
         result = _qbm_parse_json(txt) if txt else []
         if result:
@@ -19184,7 +19187,7 @@ async def _chem_extract_from_image(img, cache_key: tuple = None) -> list:
     return mcqs
 
 
-async def _chem_generate_from_image(img, cache_key: tuple = None) -> list:
+async def _chem_generate_from_image(img, cache_key: tuple = None, gemini_only: bool = False) -> list:
     """/chem GENERATION function (creates NEW MCQs from page content, does
     NOT extract existing ones) — same generation engine as /pdf's default
     mode, via _build_chem_gen_prompt, PLUS the same independent heading-scan
@@ -19195,7 +19198,7 @@ async def _chem_generate_from_image(img, cache_key: tuple = None) -> list:
     truth to audit generated content against; the heading-scan pass is the
     only secondary pass, purely for topic-boundary reliability."""
     prompt = _build_chem_gen_prompt(DEFAULT_TOPIC, None)
-    gem = await _qbm_gemini_extract(img, prompt)
+    gem = await _qbm_gemini_extract(img, prompt, gemini_only=gemini_only)
     mcqs = _qbm_dedup_list(gem) if gem else []
     # DEBUG (2026-08-20): /chem pages were coming back 0 MCQ with zero
     # error visibility -- _qbm_gemini_extract/_qbm_groq_call/_qbm_openrouter_call
@@ -19204,16 +19207,16 @@ async def _chem_generate_from_image(img, cache_key: tuple = None) -> list:
     # Log the raw parsed-length at each provider stage so the next failing
     # run's logs show exactly which stage returned what.
     logger.warning(f"[CHEM-GEN debug] Gemini stage: {len(gem) if gem else 0} raw MCQs parsed")
-    if not mcqs:
+    if not mcqs and not gemini_only:
         txt = await _qbm_groq_call(img, prompt)
         mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
         logger.warning(f"[CHEM-GEN debug] Groq stage: raw_text_len={len(txt) if txt else 0}, parsed={len(mcqs)}")
-    if not mcqs:
+    if not mcqs and not gemini_only:
         txt3 = await _qbm_openrouter_call(img, prompt)
         mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
         logger.warning(f"[CHEM-GEN debug] OpenRouter stage: raw_text_len={len(txt3) if txt3 else 0}, parsed={len(mcqs)}")
     if not mcqs:
-        logger.warning(f"[CHEM-GEN debug] ALL 3 providers returned 0 MCQ for this page — genuinely empty result, not an exception.")
+        logger.warning(f"[CHEM-GEN debug] ALL provider(s) returned 0 MCQ for this page — genuinely empty result, not an exception.")
         return mcqs
 
     # Assign a sequential qsn_no per-page (1,2,3...) since generated MCQs
@@ -19224,7 +19227,7 @@ async def _chem_generate_from_image(img, cache_key: tuple = None) -> list:
         m["qsn_no"] = i
 
     try:
-        scan_txt = await _qbm_gemini_raw(img, _build_chem_heading_scan_prompt())
+        scan_txt = await _qbm_gemini_raw(img, _build_chem_heading_scan_prompt(), gemini_only=gemini_only)
         headings = _parse_chem_heading_scan(scan_txt)
     except Exception as e:
         logger.warning(f"[CHEM-GEN heading-scan] failed, skipping: {e}")
@@ -19709,7 +19712,7 @@ def _chem_flag_letter_ref_explanations(mcqs: list, page_num) -> None:
             )
 
 
-async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None) -> list:
+async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = False) -> list:
     """/chem GENERATION pipeline, rebuilt 2026-08-20 to mirror /bio's
     _bio_generate_per_topic_pages architecture exactly: Call 1 (batched
     heading-scan, ~1 per 3 pages) detects topic segment boundaries via
@@ -19743,7 +19746,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         _bump_chem_call("Gemini")
         try:
             prompt = _build_chem_heading_scan_prompt_v2_batched(len(batch))
-            scan_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+            scan_txt = await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only)
             all_headings = _parse_chem_heading_scan_v2(scan_txt)
             logger.warning(f"[CHEM pre-scan debug] batch pages={page_nums}: raw scan found {len(all_headings)} heading(s): {[(h.get('page_index'), h.get('heading_text'), h.get('vertical_position')) for h in all_headings]}")
         except Exception as e:
@@ -19907,7 +19910,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 return []
             try:
                 _bump_chem_call("Gemini")
-                gem, _gem_marker_only = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True)
+                gem, _gem_marker_only = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True, gemini_only=gemini_only)
                 mcqs = _qbm_dedup_list(gem) if gem else []
                 mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
                 _chem_flag_letter_ref_explanations(mcqs, page_num)
@@ -19924,33 +19927,37 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                     # far cheaper than OpenRouter's scarce 11-key quota.
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini 0 MCQ, no marker (ambiguous) -- retrying Gemini once on next key before Groq")
                     _bump_chem_call("Gemini")
-                    gem_retry, _ = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True)
+                    gem_retry, _ = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True, gemini_only=gemini_only)
                     mcqs = _qbm_dedup_list(gem_retry) if gem_retry else []
                     mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
                     _chem_flag_letter_ref_explanations(mcqs, page_num)
                     if mcqs:
                         logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini retry ({len(mcqs)} MCQ)")
                         return mcqs
-                logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini returned 0 MCQ, trying Groq")
-                _bump_chem_call("Groq")
-                txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
-                mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
-                mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
-                _chem_flag_letter_ref_explanations(mcqs, page_num)
-                if mcqs:
-                    logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Groq ({len(mcqs)} MCQ)")
-                    return mcqs
-                logger.warning(f"[CHEM-GEN v2] page {page_num}: Groq returned 0 MCQ, trying OpenRouter")
-                _bump_chem_call("OpenRouter")
-                txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
-                mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
-                mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
-                _chem_flag_letter_ref_explanations(mcqs, page_num)
-                if mcqs:
-                    logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via OpenRouter ({len(mcqs)} MCQ)")
-                    return mcqs
-                last_err = "Gemini+Groq+OpenRouter all returned 0 MCQ"
-                logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 -- ALL 3 providers (Gemini, Groq, OpenRouter) returned 0 MCQ for this segment/page.")
+                if gemini_only:
+                    last_err = "Gemini returned 0 MCQ (gemini_only, no Groq/OpenRouter fallback)"
+                    logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 -- Gemini 0 MCQ, gemini_only set, skipping Groq/OpenRouter.")
+                else:
+                    logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini returned 0 MCQ, trying Groq")
+                    _bump_chem_call("Groq")
+                    txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
+                    mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
+                    mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
+                    _chem_flag_letter_ref_explanations(mcqs, page_num)
+                    if mcqs:
+                        logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Groq ({len(mcqs)} MCQ)")
+                        return mcqs
+                    logger.warning(f"[CHEM-GEN v2] page {page_num}: Groq returned 0 MCQ, trying OpenRouter")
+                    _bump_chem_call("OpenRouter")
+                    txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
+                    mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
+                    mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
+                    _chem_flag_letter_ref_explanations(mcqs, page_num)
+                    if mcqs:
+                        logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via OpenRouter ({len(mcqs)} MCQ)")
+                        return mcqs
+                    last_err = "Gemini+Groq+OpenRouter all returned 0 MCQ"
+                    logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 -- ALL 3 providers (Gemini, Groq, OpenRouter) returned 0 MCQ for this segment/page.")
             except Exception as e:
                 # A provider error on one segment (e.g. a near-empty crop) must
                 # never kill the whole page/batch -- previously this exception
@@ -22085,19 +22092,23 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         return "" if gemini_only else await _gen_groq_raw_text(img, prompt)
 
 
-async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
+async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = False) -> str:
     """Multi-image variant of _qbm_gemini_raw -- sends several page images
     in ONE Gemini call instead of one call per image, used by /bio's
     batched heading-scan (_bio_apply_heading_scan) to cut per-page API
     calls. Same key-rotation/quota-exhaustion/Groq-fallback behavior as
     the single-image version; Groq fallback here only ever uses the FIRST
     image (Groq vision path is single-image), which is an acceptable
-    degradation for the rare full-Gemini-outage case."""
+    degradation for the rare full-Gemini-outage case.
+
+    gemini_only (default False): when True, skips the Groq fallback
+    entirely and returns "" instead -- used by /chem's gemini_only
+    callers (per user request 2026-09-04)."""
     _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
     try:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
-            return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+            return "" if gemini_only else (await _gen_groq_raw_text(imgs[0], prompt) if imgs else "")
         _all_marked_exhausted = all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
         if _all_marked_exhausted:
             # Don't blind-trust the in-memory/D1 exhaustion flag -- if it was
@@ -22197,10 +22208,12 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision (first image only)")
+        if gemini_only:
+            return ""
         return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
     except Exception as e:
         logger.warning(f"[QBM] Gemini multi-image raw call failed: {e}")
-        return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+        return "" if gemini_only else (await _gen_groq_raw_text(imgs[0], prompt) if imgs else "")
 
 
 async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False) -> str:
@@ -24474,7 +24487,7 @@ async def handle_chemt(msg: dict):
             await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ নতুন MCQ Generation শুরু হচ্ছে (নাম্বারিং heading topic detect সহ)...")
 
         extracted_pages = await _chem_generate_per_topic_pages(
-            chat_id, pages, "Chem Generate", status_msg_id
+            chat_id, pages, "Chem Generate", status_msg_id, gemini_only=True
         )
 
         if is_cancelled(chat_id):
