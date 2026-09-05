@@ -23831,7 +23831,7 @@ async def handle_biot(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
-
+async def _handle_bio_impl(msg: dict):
     chat_id = msg["chat"]["id"]
     text = msg.get("text", "")
     reply = msg.get("reply_to_message")
@@ -23913,20 +23913,27 @@ async def handle_biot(msg: dict):
         import io as _io_bio, csv as _csv_bio
         _running_count = 0
         _cmd_msg_id = msg.get("message_id")
+        _merged_buf = _io_bio.StringIO()
+        _merged_w = _csv_bio.writer(_merged_buf)
+        _merged_w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                             "answer", "explanation", "type", "section"])
         for name, mcqs in topic_groups:
             buf = _io_bio.StringIO()
             w = _csv_bio.writer(buf)
             w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                         "answer", "explanation", "type", "section"])
+            _merged_w.writerow([_clean_topic_name_for_copy(name), "", "", "", "", "", "", "", "", ""])
             for m in mcqs:
                 opts = m.get("options", ["", "", "", ""])
-                w.writerow([
+                row = [
                     m.get("question", ""), opts[0] if len(opts) > 0 else "",
                     opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
                     opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
                     _ans_map.get(m.get("answer", "A"), "1"),
                     _strip_img_tag(m.get("explanation", "")), "1", "1"
-                ])
+                ]
+                w.writerow(row)
+                _merged_w.writerow(row)
             safe_name = re.sub(r'[\\/:*?"<>|]', '_', name).strip() or "Topic"
             range_start = _running_count + 1
             range_end = _running_count + len(mcqs)
@@ -23944,6 +23951,16 @@ async def handle_biot(msg: dict):
                          f"📄 PDF Page: {page_range_text}\n"
                          f"🔢 MCQ Range: {range_start}–{range_end}\n"
                          f"💎 Total: {len(mcqs)}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if len(topic_groups) > 1:
+            _merged_file_base = re.sub(r'[\\/:*?"<>|]', '_', file_name.rsplit(".", 1)[0]).strip() or "Bio"
+            await send_document(chat_id, _merged_buf.getvalue().encode("utf-8"),
+                f"{_merged_file_base}_Merged.csv",
+                caption=(f"📚 <b>All Topics Merged</b>\n"
+                         f"📂 Topics: {len(topic_groups)}\n"
+                         f"💎 Total MCQ: {total_mcq_found}"),
                 mime_type="text/csv",
                 reply_to_message_id=_cmd_msg_id)
 
