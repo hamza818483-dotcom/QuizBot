@@ -2169,7 +2169,7 @@ async def _ensure_page_job_table():
     # is safe to run every time -- D1/SQLite errors harmlessly if the
     # column already exists, which we swallow.
     try:
-        await d1_run("ALTER TABLE page_jobs ADD COLUMN partial_data TEXT", [])
+        await d1_run("ALTER TABLE page_jobs ADD COLUMN partial_data TEXT", [], suppress_log=True)
     except Exception:
         pass  # column already exists -- expected on every run after the first
 

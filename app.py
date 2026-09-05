@@ -23588,7 +23588,7 @@ async def _handle_topic_impl(msg: dict):
             "📌 Page-এ থাকা MCQ extract করে (নতুন বানায় না), কিন্তু serial number/topic heading "
             "দেখে আলাদা টপিক ধরে প্রতিটার জন্য আলাদা CSV পাঠায়।\n"
             "📌 -p = page range (না দিলে সব page)\n"
-            "📌 -c <channel_id> = দিলে CSV না, প্রতি টপিকের নামসহ header দিয়ে channel-এ সরাসরি poll পাঠাবে"
+            "📌 -c channel_id = দিলে CSV না, প্রতি টপিকের নামসহ header দিয়ে channel-এ সরাসরি poll পাঠাবে"
         )
         return
 
@@ -23846,7 +23846,7 @@ async def _handle_bio_impl(msg: dict):
             "আলাদা CSV পাঠায়।\n"
             "📌 -p = page range (না দিলে সব page)\n"
             "📌 -m = Subject/topic name (না দিলে default)\n"
-            "📌 -c <channel_id> = দিলে CSV না, প্রতি টপিকের নামসহ header দিয়ে channel-এ সরাসরি poll পাঠাবে"
+            "📌 -c channel_id = দিলে CSV না, প্রতি টপিকের নামসহ header দিয়ে channel-এ সরাসরি poll পাঠাবে"
         )
         return
 
