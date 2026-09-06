@@ -20058,6 +20058,8 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     _chem_last_dash_text = [None]
     _topic_breakdown_live = {}
     total_mcq = 0
+    _live_active_topic = [""]  # 100% /unmesh-style: shows "📂 Current topic: X" near dashboard top
+    _chem_dash_stop = asyncio.Event()
 
     async def _chem_safe_dash_edit():
         if not status_msg_id:
@@ -20066,7 +20068,8 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0,
                                      ai_calls=_ai_call_count[0],
                                      ai_calls_breakdown=", ".join(f"{k}:{v}" for k, v in _ai_call_by_model.items()),
-                                     topic_breakdown=_topic_breakdown_live or None)
+                                     topic_breakdown=_topic_breakdown_live or None,
+                                     live_topic=_live_active_topic[0])
             if text == _chem_last_dash_text[0]:
                 return
             try:
@@ -20074,6 +20077,23 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 _chem_last_dash_text[0] = text
             except Exception:
                 pass
+
+    async def _chem_dashboard_ticker():
+        # 100% /unmesh-style ticker: refreshes the SAME message every ~4s
+        # purely for the live elapsed-time clock, independent of page
+        # completion events -- without this, elapsed time looks frozen
+        # while a page/topic is mid-generation between status changes.
+        _deadline = time.time() + 1800
+        while not _chem_dash_stop.is_set() and time.time() < _deadline:
+            try:
+                await asyncio.wait_for(_chem_dash_stop.wait(), timeout=4)
+            except asyncio.TimeoutError:
+                pass
+            if _chem_dash_stop.is_set():
+                break
+            if status_msg_id:
+                await _chem_safe_dash_edit()
+    _chem_ticker_task = _spawn_task(_chem_dashboard_ticker())
 
     _idx_by_page = {p: i for i, (p, _) in enumerate(pages)}
 
@@ -20222,6 +20242,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                     _seen_hints.append(_h)
         if _seen_hints:
             page_status[idx]["detected_topic"] = ", ".join(_seen_hints)
+            _live_active_topic[0] = _seen_hints[-1]
         total_mcq += len(mcqs)
 
     async def _run_single_page(idx, page_num, img, segments):
@@ -20370,6 +20391,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 await _chem_safe_dash_edit()
 
     clear_active_job(chat_id)
+    _chem_dash_stop.set()
     # Safety net: guarantee every slot is a real (page_num, img, mcqs) tuple
     # in strict PAGE order (never completion order -- concurrent streaming
     # can finish pages out of order, but `results` is index-fixed by page
@@ -20388,7 +20410,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         # clear "stopped" notice so the numbers the user was watching stay
         # on screen exactly as they were when Cancel was pressed.
         try:
-            text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_ai_call_count[0], ai_calls_breakdown=", ".join(f"{k}:{v}" for k, v in _ai_call_by_model.items()), topic_breakdown=_topic_breakdown_live or None)
+            text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_ai_call_count[0], ai_calls_breakdown=", ".join(f"{k}:{v}" for k, v in _ai_call_by_model.items()), topic_breakdown=_topic_breakdown_live or None, live_topic=_live_active_topic[0])
             text = text + "\n\n🛑 এই কাজ বাতিল করা হয়েছে।"
             await edit_msg(chat_id, status_msg_id, text)
         except Exception:
