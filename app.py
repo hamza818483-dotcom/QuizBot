@@ -105,7 +105,7 @@ from core import (
     BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
     CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, _tg_mode,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
-    tg_post, send_msg, send_rich_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
+    tg_post, send_msg, send_rich_msg, edit_rich_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
     send_document, send_media_group, send_poll, notify_owner, notify_owner_edit, clear_owner_job, download_tg_file,
     compress_pdf_to_target,
     db_get_settings, db_save_settings, db_save_settings_field, db_is_owner_or_admin, db_track_user, db_save_session,
@@ -15060,6 +15060,90 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
         lines.append(f"🤖 AI calls: {ai_calls}{_breakdown_str}")
     return "\n".join(lines)
 
+def _build_dashboard_md(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=None, ai_calls_breakdown=None, topic_breakdown=None, live_topic=None):
+    """_build_dashboard-er markdown/table version -- sendRichMessage/
+    editMessageText(rich_message) diye DM-e real Telegram table hishebe
+    render hoy (ছক আকারে গুছিয়ে). Same data, table layout."""
+    elapsed = int(time.time() - start_time)
+    mins, secs = divmod(elapsed, 60)
+    done = sum(1 for s in page_status if s["done"])
+    total = len(page_status)
+    pct = int(done / total * 100) if total else 0
+    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+
+    header = [
+        "### ⏳ ATLAS PDF Processing",
+        f"**File:** {file_name}  |  **Topic:** {topic}  |  **Pages:** {total}",
+    ]
+    if live_topic:
+        header.append(f"**Current topic:** {live_topic}")
+
+    rows = ["| Page | Status | Detail |", "|---|---|---|"]
+    for s in page_status:
+        pg = fmt_page(s["page"])
+        if s["done"]:
+            if s.get("failed") or s["mcq"] == 0:
+                err = (s.get("error") or "").strip()
+                err_short = (err[:60] + "…") if len(err) > 60 else err
+                detail = f"⚠️ 0 MCQ — {err_short}" if err_short else "⚠️ 0 MCQ (কারণ অজানা)"
+            else:
+                model_tag = s.get("model", "")
+                page_topic = s.get("detected_topic", "")
+                secs_gen = s.get("gen_seconds")
+                calls_n = s.get("ai_calls")
+                parts = [f"{s['mcq']} MCQ"]
+                if model_tag: parts.append(model_tag)
+                if page_topic: parts.append(f"📂{page_topic}")
+                if secs_gen is not None: parts.append(f"⏱{secs_gen}s")
+                if calls_n is not None: parts.append(f"🤖{calls_n}")
+                detail = " · ".join(parts)
+            rows.append(f"| {pg} | ✅ Done | {detail} |")
+        elif s["current"]:
+            _stage = s.get("stage") or "Processing..."
+            _pg_start = s.get("page_start_time")
+            _live_secs = int(time.time() - _pg_start) if _pg_start else 0
+            _calls_now = s.get("live_ai_calls")
+            detail = f"{_stage} · ⏱{_live_secs}s" + (f" · 🤖{_calls_now}" if _calls_now is not None else "")
+            rows.append(f"| {pg} | ⏳ Running | {detail} |")
+        else:
+            rows.append(f"| {pg} | ⬜ Waiting | — |")
+
+    footer = [
+        f"**Progress:** {pct}% `{bar}`",
+        f"**Elapsed:** {mins}:{secs:02d}  |  **MCQ done:** {total_mcq}  |  **Polls sent:** {total_polls}",
+    ]
+    if topic_breakdown:
+        footer.append("**Topic-wise:** " + ", ".join(f"{t}:{c}" for t, c in topic_breakdown.items()))
+    if ai_calls is not None:
+        _breakdown_str = f" ({ai_calls_breakdown})" if ai_calls_breakdown else ""
+        footer.append(f"**AI calls:** {ai_calls}{_breakdown_str}")
+
+    return "\n".join(header) + "\n\n" + "\n".join(rows) + "\n\n" + "\n".join(footer)
+
+async def _update_pdf_dashboard(chat_id, message_id, *dash_args, reply_markup=None, **dash_kwargs):
+    """Shared dashboard-update helper: DM (chat_id > 0) -> rich table via
+    edit_rich_msg (auto-falls back to plain HTML edit_msg on any error).
+    Group/channel (chat_id < 0) -> existing plain HTML edit_msg unchanged.
+    Single call-site swap point for all /pdf-family dashboard updates."""
+    if chat_id > 0:
+        md_text = _build_dashboard_md(*dash_args, **dash_kwargs)
+        fallback = _build_dashboard(*dash_args, **dash_kwargs)
+        result = await edit_rich_msg(chat_id, message_id, md_text, fallback_text=fallback)
+        # sendRichMessage/rich edit doesn't accept reply_markup directly --
+        # if buttons are needed, re-apply them via a lightweight follow-up
+        # editMessageReplyMarkup call so regen buttons still work in DM.
+        if reply_markup is not None:
+            try:
+                await tg_post("editMessageReplyMarkup", {
+                    "chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup
+                })
+            except Exception as e:
+                logger.warning(f"[RichMsg] editMessageReplyMarkup failed: {e}")
+        return result
+    else:
+        html_text = _build_dashboard(*dash_args, **dash_kwargs)
+        return await edit_msg(chat_id, message_id, html_text, reply_markup=reply_markup)
+
 def _pair_pages_for_extra(pages: list) -> list:
     """Combine consecutive pages 2-at-a-time into a single vertically-
     stacked composite image, for /extra mode's low-yield-per-page case.
@@ -15180,8 +15264,10 @@ async def pdf_generate_all_pages(
                 _slot_counter["n"] += 1
                 page_status[idx]["current"] = True
                 if status_msg_id:
-                    await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
+                    await _update_pdf_dashboard(chat_id, status_msg_id,
+                        file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
+                        ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
+                        reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
 
             mcqs = await _do_generate(page_num, img, slot)
 
@@ -15200,8 +15286,10 @@ async def pdf_generate_all_pages(
                 if _model_counts:
                     page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
                 if status_msg_id:
-                    await edit_msg(chat_id, status_msg_id,
-                        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
+                    await _update_pdf_dashboard(chat_id, status_msg_id,
+                        file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
+                        ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
+                        reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
 
             # After finishing this page's slot, drain ONE pending regen
             # request (if any) before this worker moves to the next fresh
@@ -15219,8 +15307,10 @@ async def pdf_generate_all_pages(
                     page_status[regen_idx]["current"] = True
                     page_status[regen_idx]["done"] = False
                     if status_msg_id:
-                        await edit_msg(chat_id, status_msg_id,
-                            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
+                        await _update_pdf_dashboard(chat_id, status_msg_id,
+                            file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
+                            ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
+                            reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
                 new_mcqs = await _do_generate(r_page_num, r_img, slot)
                 if is_cancelled(chat_id):
                     break
@@ -15232,8 +15322,10 @@ async def pdf_generate_all_pages(
                     page_status[regen_idx]["done"] = True
                     page_status[regen_idx]["mcq"] = len(new_mcqs)
                     if status_msg_id:
-                        await edit_msg(chat_id, status_msg_id,
-                            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
+                        await _update_pdf_dashboard(chat_id, status_msg_id,
+                            file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
+                            ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
+                            reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
 
     async def _watch_cancel(tasks):
         # Polls the cancel flag while pages are in flight; the moment /cancel

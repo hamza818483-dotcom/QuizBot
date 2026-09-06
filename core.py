@@ -679,6 +679,29 @@ async def send_rich_msg(chat_id, markdown_text: str, fallback_text: str = None) 
         logger.warning(f"[RichMsg] sendRichMessage failed, falling back to plain text: {e}")
     return await send_msg(chat_id, fallback_text if fallback_text else markdown_text, parse_mode="HTML")
 
+async def edit_rich_msg(chat_id, message_id: int, markdown_text: str, fallback_text: str = None) -> dict:
+    """
+    editMessageText er notun (Bot API 10.1+) `rich_message` param diye
+    existing message ke real table/rich format e update kore (richify()
+    diye markdown_text -> rich_message convert kore). Reject/error hole
+    automatically plain edit_msg (HTML) e fallback kore -- kokhono silently
+    fail kore na.
+    """
+    try:
+        from telegramify_markdown import richify
+        rich_message = richify(markdown_text)
+        result = await tg_post("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "rich_message": rich_message.to_dict(),
+        })
+        if result.get("ok"):
+            return result
+        logger.warning(f"[RichMsg] editMessageText(rich_message) rejected, falling back to plain text: {result.get('description')}")
+    except Exception as e:
+        logger.warning(f"[RichMsg] editMessageText(rich_message) failed, falling back to plain text: {e}")
+    return await edit_msg(chat_id, message_id, fallback_text if fallback_text else markdown_text, parse_mode="HTML")
+
 _TG_MSG_LIMIT = 4096
 
 def _chunk_text(text: str, limit: int = _TG_MSG_LIMIT) -> list:
