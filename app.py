@@ -20356,6 +20356,18 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 await _chem_safe_dash_edit()
 
     clear_active_job(chat_id)
+    # Safety net: guarantee every slot is a real (page_num, img, mcqs) tuple
+    # in strict PAGE order (never completion order -- concurrent streaming
+    # can finish pages out of order, but `results` is index-fixed by page
+    # position from the start, so iterating it in order always yields
+    # correct serial topic order downstream in _chem_group_mcqs/CSV). Any
+    # slot still None here means that page's task raised and was never
+    # marked done -- fill with empty MCQs so grouping/CSV never crashes
+    # and the serial order of all OTHER pages stays fully intact.
+    for _i, (pn, img) in enumerate(pages):
+        if results[_i] is None:
+            logger.warning(f"[CHEM-GEN v2] page {pn}: task never completed (unmarked) -- filling with 0 MCQ to preserve serial order.")
+            results[_i] = (pn, img, [])
     if is_cancelled(chat_id) and status_msg_id:
         # Keep the dashboard's last state visible (stats intact) instead of
         # silently letting a later unrelated edit wipe it -- just append a
