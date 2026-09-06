@@ -24743,24 +24743,28 @@ async def _handle_chem_impl(msg: dict):
             dm_user_id=msg["from"]["id"], file_name=file_name
         )
 
+        _was_cancelled = is_cancelled(chat_id)
         total_mcq_found = sum(
             1 for _, _, mcqs in extracted_pages for m in mcqs if "trailing_topic_marker" not in m
         )
         if not total_mcq_found:
             if status_msg_id:
-                await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ generate হয়নি!")
+                msg_txt = "🛑 বাতিল করা হয়েছে — কোনো MCQ তৈরি হওয়ার আগেই থেমে গেছে।" if _was_cancelled else "❌ কোনো MCQ generate হয়নি!"
+                await edit_msg(chat_id, status_msg_id, msg_txt)
             return
 
         if status_msg_id:
-            await edit_msg(chat_id, status_msg_id, f"✅ {total_mcq_found} MCQ generate হয়েছে (per-topic isolated)!\n⏳ Grouping হচ্ছে...")
+            _stage_note = "🛑 কাজ বাতিল করা হয়েছে — যতটুকু হয়েছে তা পাঠানো হচ্ছে।\n" if _was_cancelled else ""
+            await edit_msg(chat_id, status_msg_id, f"{_stage_note}✅ {total_mcq_found} MCQ generate হয়েছে (per-topic isolated)!\n⏳ Grouping হচ্ছে...")
 
         topic_groups = _chem_group_mcqs(extracted_pages)
 
         if status_msg_id:
             breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
             next_step = "channel-এ poll পাঠানো হচ্ছে..." if chem_channel_id else "CSV পাঠানো হচ্ছে..."
+            _cancel_note = "🛑 বাতিল করা হয়েছে — যতটুকু সম্পন্ন হয়েছে তার রেজাল্ট:\n" if _was_cancelled else "✅ Generation Complete!\n"
             await edit_msg(chat_id, status_msg_id,
-                f"✅ Generation Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
+                f"{_cancel_note}📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
 
         if chem_channel_id:
             total_polls = await _post_topic_groups_to_channel(chem_channel_id, topic_groups, chem_thread_id)
