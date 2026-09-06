@@ -24251,16 +24251,19 @@ async def _handle_unmesh_impl(msg: dict):
         total_mcq_found = sum(
             1 for _, _, mcqs in extracted_pages for m in mcqs if "trailing_topic_marker" not in m
         )
+        _unmesh_was_cancelled = is_cancelled(chat_id)
         if not total_mcq_found:
             if status_msg_id:
-                await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ পাওয়া যায়নি!")
+                msg_txt = "🛑 বাতিল করা হয়েছে — কোনো MCQ পাওয়ার আগেই থেমে গেছে।" if _unmesh_was_cancelled else "❌ কোনো MCQ পাওয়া যায়নি!"
+                await edit_msg(chat_id, status_msg_id, msg_txt)
             return
 
         topic_groups = _unmesh_group_mcqs(extracted_pages)
 
         _unmesh_topic_breakdown = {name: len(mcqs) for name, mcqs in topic_groups}
 
-        _unmesh_final_status = "⏳ CSV পাঠানো হচ্ছে..." if not unmesh_channel_id else "⏳ Channel-এ poll পাঠানো হচ্ছে..."
+        _unmesh_final_status = ("🛑 বাতিল করা হয়েছে — যতটুকু সম্পন্ন হয়েছে তা পাঠানো হচ্ছে..." if _unmesh_was_cancelled
+                                 else ("⏳ CSV পাঠানো হচ্ছে..." if not unmesh_channel_id else "⏳ Channel-এ poll পাঠানো হচ্ছে..."))
 
         async def _unmesh_render_final_dashboard(extra_status: str = None):
             # Rebuild the SAME live per-page dashboard (never replaced by a
