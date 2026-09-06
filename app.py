@@ -20204,7 +20204,31 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 raised {last_err} -- retrying." if _attempt < 2 else f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 raised {last_err} -- giving up, treating as 0 MCQ.")
             if _attempt < 2:
                 await asyncio.sleep(2.0 * (_attempt + 1))  # backoff: 2s, 4s
-        logger.warning(f"[CHEM-GEN v2] page {page_num}: segment produced 0 MCQ after 3 Gemini-only attempts ({last_err}).")
+        # Same "fresh-eyes final scan" /unmesh uses when its own 0-MCQ page
+        # is deemed genuinely impossible -- a differently-framed prompt
+        # (not just a retry of the same one) explicitly told two prior
+        # passes already said empty, and asked to re-check footnotes/
+        # margins/faint text before conceding. Gemini-only (gemini_only
+        # param passed through), matching /unmesh's rule that a page is
+        # never confirmed 0-MCQ without this final independent look.
+        if not is_cancelled(chat_id):
+            try:
+                _set_stage("🔎 Final fresh-eyes scan (0 MCQ so far)...")
+                await _chem_safe_dash_edit()
+                _bump_chem_call("Gemini")
+                _tok3 = _qbm_key_offset_ctx.set(_gen_key_offset + 2)
+                try:
+                    final_mcqs = await _qbm_final_empty_page_scan(crop, gemini_only=True)
+                finally:
+                    _qbm_key_offset_ctx.reset(_tok3)
+                final_mcqs = _chem_filter_verified_mcqs(final_mcqs, page_num) if final_mcqs else []
+                _chem_flag_letter_ref_explanations(final_mcqs, page_num)
+                if final_mcqs:
+                    logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via final fresh-eyes scan ({len(final_mcqs)} MCQ)")
+                    return final_mcqs
+            except Exception as e:
+                logger.warning(f"[CHEM-GEN v2] page {page_num}: final fresh-eyes scan raised {type(e).__name__}: {e}")
+        logger.warning(f"[CHEM-GEN v2] page {page_num}: segment produced 0 MCQ after 3 Gemini-only attempts + final scan ({last_err}).")
         return []
 
     def _mark_done(idx, page_num, mcqs, img):
