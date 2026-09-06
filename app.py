@@ -20152,22 +20152,36 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             segments = [(_carry_topic_by_page[page_num], 0.0, 1.0, True)]
         return segments
 
-    async def _gen_segment(crop, page_num):
-        """Generate MCQs from a (possibly cropped) image using the same
-        3-provider fallback chain /chem always used (Gemini -> Groq ->
-        OpenRouter), with WARNING-level stage logging kept from the
-        debug pass so genuinely-empty results stay diagnosable.
+    async def _gen_segment(crop, page_num, status_idxs=None):
+        """Generate MCQs from a (possibly cropped) image using Gemini only
+        (matches /pdf -- no Groq/OpenRouter fallback), with WARNING-level
+        stage logging kept from the debug pass so genuinely-empty results
+        stay diagnosable.
 
         2026-08-20: added a 2-full-cycle retry ladder (was single-shot).
-        A single Gemini->Groq->OpenRouter chain with NO retry meant one
-        transient failure (Gemini 429 landing on an exhausted key AND Groq/
-        OpenRouter also momentarily failing) permanently killed that
+        A single Gemini call with NO retry meant one transient failure
+        (429 landing on an exhausted key) permanently killed that
         segment's real topic with zero recovery attempt -- unlike /pdf's
-        4-attempt + relaxed-pass ladder. Now retries the whole 3-provider
-        chain up to 3 times with backoff before conceding empty."""
+        4-attempt + relaxed-pass ladder. Now retries up to 3 times with
+        backoff before conceding empty.
+
+        2026-09-06: status_idxs (list of page_status indices this call is
+        generating for -- 1 for a single page, 2 for a paired/combined
+        call) lets this function push LIVE stage/timer/call-count fields
+        onto page_status, mirroring /pdf's live dashboard (attempt number,
+        elapsed seconds, running AI-call count) instead of a static
+        'Processing...' label while a page/pair is in flight."""
         _current_job_chat_id_ctx.set(chat_id)
         if is_cancelled(chat_id):
             return []
+
+        def _set_stage(stage_text):
+            if not status_idxs:
+                return
+            for _i in status_idxs:
+                page_status[_i]["stage"] = stage_text
+                page_status[_i]["live_ai_calls"] = _ai_call_count[0]
+
         # Explicit key-offset slot for generation calls, isolated from
         # heading-scan's own +1000 range (see _chem_generate_per_topic_pages
         # docstring) -- keeps scan and generation from ever competing for
@@ -20179,6 +20193,8 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             if is_cancelled(chat_id):
                 return []
             try:
+                _set_stage(f"🤖 AI call করা হচ্ছে (attempt {_attempt+1}/3)...")
+                await _chem_safe_dash_edit()
                 _bump_chem_call("Gemini")
                 _tok = _qbm_key_offset_ctx.set(_gen_key_offset)
                 try:
@@ -20200,6 +20216,8 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                     # burning Groq/OpenRouter quota on it. Adds ~2-3s but is
                     # far cheaper than OpenRouter's scarce 11-key quota.
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini 0 MCQ, no marker (ambiguous) -- retrying Gemini once on next key before Groq")
+                    _set_stage("🔁 Gemini retry (ambiguous 0 MCQ)...")
+                    await _chem_safe_dash_edit()
                     _bump_chem_call("Gemini")
                     _tok2 = _qbm_key_offset_ctx.set(_gen_key_offset + 1)
                     try:
@@ -20212,30 +20230,11 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                     if mcqs:
                         logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini retry ({len(mcqs)} MCQ)")
                         return mcqs
-                if gemini_only:
-                    last_err = "Gemini returned 0 MCQ (gemini_only, no Groq/OpenRouter fallback)"
-                    logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 -- Gemini 0 MCQ, gemini_only set, skipping Groq/OpenRouter.")
-                else:
-                    logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini returned 0 MCQ, trying Groq")
-                    _bump_chem_call("Groq")
-                    txt = await _qbm_groq_call(crop, _chem_gen_prompt_v2)
-                    mcqs = _qbm_dedup_list(_qbm_parse_json(txt)) if txt else []
-                    mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
-                    _chem_flag_letter_ref_explanations(mcqs, page_num)
-                    if mcqs:
-                        logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Groq ({len(mcqs)} MCQ)")
-                        return mcqs
-                    logger.warning(f"[CHEM-GEN v2] page {page_num}: Groq returned 0 MCQ, trying OpenRouter")
-                    _bump_chem_call("OpenRouter")
-                    txt3 = await _qbm_openrouter_call(crop, _chem_gen_prompt_v2)
-                    mcqs = _qbm_dedup_list(_qbm_parse_json(txt3)) if txt3 else []
-                    mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
-                    _chem_flag_letter_ref_explanations(mcqs, page_num)
-                    if mcqs:
-                        logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via OpenRouter ({len(mcqs)} MCQ)")
-                        return mcqs
-                    last_err = "Gemini+Groq+OpenRouter all returned 0 MCQ"
-                    logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 -- ALL 3 providers (Gemini, Groq, OpenRouter) returned 0 MCQ for this segment/page.")
+                # /chem is Gemini-only (matches /pdf) -- no Groq/OpenRouter
+                # fallback branch at all, so gemini_only is always True here
+                # and this path is the sole outcome on a 0-MCQ result.
+                last_err = "Gemini returned 0 MCQ (gemini_only, no fallback provider)"
+                logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 -- Gemini 0 MCQ, gemini_only set, no fallback provider.")
             except Exception as e:
                 # A provider error on one segment (e.g. a near-empty crop) must
                 # never kill the whole page/batch -- previously this exception
@@ -20246,7 +20245,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 raised {last_err} -- retrying." if _attempt < 2 else f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 raised {last_err} -- giving up, treating as 0 MCQ.")
             if _attempt < 2:
                 await asyncio.sleep(2.0 * (_attempt + 1))  # backoff: 2s, 4s
-        logger.warning(f"[CHEM-GEN v2] page {page_num}: segment produced 0 MCQ after 3 full attempts across Gemini+Groq+OpenRouter ({last_err}).")
+        logger.warning(f"[CHEM-GEN v2] page {page_num}: segment produced 0 MCQ after 3 Gemini-only attempts ({last_err}).")
         return []
 
     def _mark_done(idx, page_num, mcqs, img):
@@ -20263,6 +20262,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         a rare multi-topic page, or has no pairable neighbor) -- one
         provider call per segment, exactly as before."""
         page_status[idx]["current"] = True
+        page_status[idx]["page_start_time"] = time.time()
         await _chem_safe_dash_edit()
         if segments:
             PAD_FRAC = 0.015
@@ -20275,7 +20275,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 y0 = int(top * img.height)
                 y1 = max(y0 + 1, int(bottom * img.height))
                 crop = img.crop((0, y0, img.width, y1))
-                seg_mcqs = await _gen_segment(crop, page_num)
+                seg_mcqs = await _gen_segment(crop, page_num, status_idxs=[idx])
                 for m in seg_mcqs:
                     m["topic_hint"] = heading_text
                     # Real heading-sourced hints must never be majority-vote
@@ -20286,7 +20286,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 all_mcqs.extend(seg_mcqs)
             mcqs = all_mcqs
         else:
-            mcqs = await _gen_segment(img, page_num)
+            mcqs = await _gen_segment(img, page_num, status_idxs=[idx])
         _renumber_by_topic(mcqs)
         _mark_done(idx, page_num, mcqs, img)
         await _chem_safe_dash_edit()
@@ -20344,6 +20344,8 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
 
         page_status[idx1]["current"] = True
         page_status[idx2]["current"] = True
+        page_status[idx1]["page_start_time"] = time.time()
+        page_status[idx2]["page_start_time"] = page_status[idx1]["page_start_time"]
         await _chem_safe_dash_edit()
 
         from PIL import Image as _PILImg
@@ -20356,7 +20358,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
 
         # Same topic continuing across both pages -- no split needed,
         # whole combined result belongs to one topic.
-        mcqs = await _gen_segment(composite, f"{page_num1}-{page_num2}")
+        mcqs = await _gen_segment(composite, f"{page_num1}-{page_num2}", status_idxs=[idx1, idx2])
         for m in mcqs:
             m["topic_hint"] = heading1
             if is_carried:
