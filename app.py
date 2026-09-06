@@ -19963,15 +19963,19 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     _ai_call_by_model = {}
     _dm_seen_topics = set()
     _dm_lock = asyncio.Lock()
+    _dm_ordered_topics = []
+    _dm_msg_id = [None]
 
     def _bump_chem_call(model):
         _ai_call_count[0] += 1
         _ai_call_by_model[model] = _ai_call_by_model.get(model, 0) + 1
 
     async def _dm_topic_update(batch_page_nums, new_topics):
-        """Send/append a live DM to the command-sender as soon as new
-        topic(s) are found in a heading-scan batch -- never blocks/raises
-        into the scan pipeline on failure."""
+        """Keep ONE DM message updated (edited, not re-sent) with the full
+        serial list of topics found so far during heading-scan. First call
+        sends the message; every subsequent call edits that same message
+        to append newly-found topic(s) -- never blocks/raises into the
+        scan pipeline on failure."""
         if not dm_user_id or not new_topics:
             return
         async with _dm_lock:
@@ -19980,12 +19984,19 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 return
             for t in fresh:
                 _dm_seen_topics.add(t)
+                _dm_ordered_topics.append(t)
+            text = "🔎 Heading-scan — এ পর্যন্ত পাওয়া topic:\n" + "\n".join(
+                f"{i}. {t}" for i, t in enumerate(_dm_ordered_topics, start=1)
+            )
             try:
-                lines = "\n".join(f"  • {t}" for t in fresh)
-                await send_msg(dm_user_id,
-                    f"🔎 Heading-scan (page {batch_page_nums[0]}-{batch_page_nums[-1]}): নতুন topic পাওয়া গেছে -\n{lines}")
+                if _dm_msg_id[0] is None:
+                    r = await send_msg(dm_user_id, text)
+                    if r.get("ok"):
+                        _dm_msg_id[0] = r.get("result", {}).get("message_id")
+                else:
+                    await edit_msg(dm_user_id, _dm_msg_id[0], text)
             except Exception as e:
-                logger.warning(f"[CHEM live-DM] failed to notify user {dm_user_id}: {e}")
+                logger.warning(f"[CHEM live-DM] failed to update user {dm_user_id}: {e}")
 
     async def _scan_batch(batch, _scan_key_offset):
         page_nums = [pn for pn, _ in batch]
