@@ -20014,10 +20014,15 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             # generation calls (see docstring) -- set on the context var
             # _qbm_gemini_raw_multi reads internally.
             _tok = _qbm_key_offset_ctx.set(_scan_key_offset)
+            # BATCH_SIZE=1 -- exactly one page per scan call, so its own
+            # account-tracking set (shared with that same page's later
+            # generation call) is used directly here.
+            _acct_tok = _qbm_page_used_accounts_ctx.set(_page_account_sets.get(page_nums[0]) if page_nums else None)
             try:
                 scan_txt = await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only)
             finally:
                 _qbm_key_offset_ctx.reset(_tok)
+                _qbm_page_used_accounts_ctx.reset(_acct_tok)
             all_headings = _parse_chem_heading_scan_v2(scan_txt)
             logger.warning(f"[CHEM pre-scan debug] batch pages={page_nums}: raw scan found {len(all_headings)} heading(s): {[(h.get('page_index'), h.get('heading_text'), h.get('vertical_position')) for h in all_headings]}")
         except Exception as e:
@@ -20096,6 +20101,16 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     _chem_ticker_task = _spawn_task(_chem_dashboard_ticker())
 
     _idx_by_page = {p: i for i, (p, _) in enumerate(pages)}
+
+    # Per-page account-diversity: scan and generation for the SAME page
+    # must use DIFFERENT Google accounts (per user request), not just a
+    # different key. One shared mutable set per page -- the scan call
+    # populates it with whichever account it actually used, and the
+    # generation call for that SAME page reads it via
+    # ordered_keys_avoiding_accounts() so it's steered onto a different
+    # account entirely (falls back to normal ordering only if every
+    # account has already been tried once for this page).
+    _page_account_sets = {pn: set() for pn, _ in pages}
 
     # ============================================================
     # STREAMING PIPELINE (2026-09-06, per user request): scan and
@@ -20277,7 +20292,17 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         async with sem:
             if is_cancelled(chat_id):
                 return
-            await _run_single_page(idx, page_num, img, segments)
+            # Own task's own context -- set/reset here is fully isolated
+            # from sibling page-tasks and the parent loop, so this page's
+            # ENTIRE generation (all segments, all internal retries) reads
+            # the SAME account-set its own scan call populated, steering
+            # every generation call for this page onto a DIFFERENT account
+            # than its own scan used.
+            _acct_tok = _qbm_page_used_accounts_ctx.set(_page_account_sets.get(page_num))
+            try:
+                await _run_single_page(idx, page_num, img, segments)
+            finally:
+                _qbm_page_used_accounts_ctx.reset(_acct_tok)
 
     for _batch_idx, _batch in enumerate(batches):
         page_nums = [pn for pn, _ in _batch]
@@ -22174,7 +22199,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
     if careful:
         prompt = (prompt or "") + _QBM_CAREFUL_SCAN_ADDENDUM
     try:
-        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
+        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today, _qbm_page_used_accounts_ctx
         if not key_rotator.keys:
             return "" if gemini_only else await _gen_groq_raw_text(img, prompt)
         # Same persistent, process-lifetime exhaustion memory /tf and /img
@@ -22211,7 +22236,8 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 )
             )
 
-        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _avoid_accts = _qbm_page_used_accounts_ctx.get() or set()
+        keys_to_try = key_rotator.ordered_keys_avoiding_accounts(_avoid_accts, offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
         _dead_accounts = set()
         # Skip keys already confirmed daily-exhausted (by an earlier call this
         # process) when at least one non-exhausted key remains -- ordered_keys()
@@ -22237,6 +22263,10 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
+                _used_acct = key_rotator.account_of(key)
+                _used_set = _qbm_page_used_accounts_ctx.get()
+                if _used_set is not None:
+                    _used_set.add(_used_acct)
                 return response.text or ""
             except Exception as e:
                 msg = str(e)
@@ -22296,7 +22326,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
     callers (per user request 2026-09-04)."""
     _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
     try:
-        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
+        from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today, _qbm_page_used_accounts_ctx
         if not key_rotator.keys:
             return "" if gemini_only else (await _gen_groq_raw_text(imgs[0], prompt) if imgs else "")
         _all_marked_exhausted = all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
@@ -22334,7 +22364,8 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                 )
             )
 
-        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _avoid_accts_multi = _qbm_page_used_accounts_ctx.get() or set()
+        keys_to_try = key_rotator.ordered_keys_avoiding_accounts(_avoid_accts_multi, offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
         _dead_accounts = set()
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
@@ -22363,6 +22394,9 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
+                _used_set_multi = _qbm_page_used_accounts_ctx.get()
+                if _used_set_multi is not None:
+                    _used_set_multi.add(key_rotator.account_of(key))
                 return response.text or ""
             except asyncio.TimeoutError:
                 logger.warning(f"[QBM] Gemini key {key[:12]}... multi-image call timed out (60s), trying next key")
