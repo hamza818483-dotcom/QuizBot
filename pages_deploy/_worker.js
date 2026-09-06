@@ -111,9 +111,27 @@ export default {
     // it doesn't care when the actual processing happens.
     if (url.pathname === '/webhook' || url.pathname.startsWith('/webhook/')) {
       const bodyText = await request.text();
+      // BUG FIX 2026-09: reusing request.headers verbatim on a NEW Request
+      // built from bodyText carries the ORIGINAL Content-Length header,
+      // which was computed for the original byte stream. bodyText.length
+      // (JS string, UTF-16 code units) != actual UTF-8 byte length for any
+      // non-ASCII text (Bengali filenames/captions etc — e.g. a 25-char
+      // Bengali string is 73 UTF-8 bytes). fetch() re-encodes the string
+      // body as UTF-8 but the stale Content-Length header (byte count of
+      // the ORIGINAL request) told the receiving server to expect fewer
+      // bytes than are actually sent, truncating/misparsing exactly at
+      // multi-byte sequences — silently corrupting Bengali (and any other
+      // non-ASCII) text inside the JSON body (e.g. document.file_name)
+      // before our own app ever sees it. Fix: strip Content-Length (and
+      // Content-Encoding, since we're forwarding decoded plain text) from
+      // the forwarded headers and let fetch() compute the correct one
+      // fresh from the actual body bytes being sent.
+      const forwardHeaders = new Headers(request.headers);
+      forwardHeaders.delete('content-length');
+      forwardHeaders.delete('content-encoding');
       const forwardReq = new Request(request.url, {
         method: request.method,
-        headers: request.headers,
+        headers: forwardHeaders,
         body: bodyText,
       });
       ctx.waitUntil(forwardToHFWithFallback(forwardReq, bodyText, env));
