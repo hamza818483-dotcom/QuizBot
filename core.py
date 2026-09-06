@@ -459,6 +459,15 @@ _TG_RATE_LIMITED_METHODS = {
 async def tg_post(method: str, data: dict) -> dict:
     if method in _TG_RATE_LIMITED_METHODS:
         await _tg_rate_limit_wait()
+    # ── Global MESSAGE_TOO_LONG guard: editMessageText has no chunking option
+    #    (only one message to edit), so truncate centrally here to catch every
+    #    call site (edit_msg, edit_rich_msg fallback, and raw tg_post calls
+    #    scattered across app.py/special_module.py/menu_module.py) without
+    #    needing to patch each one individually. sendMessage already has
+    #    per-call chunking (_chunk_text/send_msg) so it's excluded here to
+    #    avoid double-truncating text that's meant to be split, not cut. ──
+    if method == "editMessageText" and isinstance(data.get("text"), str) and len(data["text"]) > _TG_MSG_LIMIT:
+        data = dict(data, text=_truncate_for_edit(data["text"]))
     if method == "sendPoll":
         data = _sanitize_poll_options(data)
     # ── setWebhook special-case: target URL host must resolve on Telegram's
@@ -742,7 +751,18 @@ async def send_msg(chat_id, text: str, parse_mode: str = "HTML",
         result = await tg_post("sendMessage", data)
     return result
 
+def _truncate_for_edit(text: str, limit: int = _TG_MSG_LIMIT) -> str:
+    if len(text) <= limit:
+        return text
+    marker = "\n\n...(truncated)"
+    cut = limit - len(marker)
+    nl = text.rfind("\n", 0, cut)
+    if nl != -1 and nl > cut // 2:
+        cut = nl
+    return text[:cut] + marker
+
 async def edit_msg(chat_id, message_id: int, text: str, parse_mode: str = "HTML", reply_markup: dict = None) -> dict:
+    text = _truncate_for_edit(text)
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
