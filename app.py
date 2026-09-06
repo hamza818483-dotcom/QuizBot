@@ -19956,7 +19956,13 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     so the two phases never compete for the same key mid-run -- keeps
     both phases smooth/uninterrupted and avoids concentrated same-key
     load that looks like scripted/abusive usage to the provider."""
-    BATCH_SIZE = 2
+    # BATCH_SIZE=1 (was 2): a 2-page scan batch delayed page 2's topic
+    # confirmation until BOTH pages in the pair finished scanning
+    # together in one call -- true per-page independence (matching
+    # /unmesh exactly) needs each page's own scan to be a fully separate
+    # call, so page N's topic confirms and fires generation the INSTANT
+    # that single page is scanned, never waiting on a pair-mate.
+    BATCH_SIZE = 1
     batches = [pages[i:i + BATCH_SIZE] for i in range(0, len(pages), BATCH_SIZE)]
     headings_by_page = {}
     _ai_call_count = [0]
