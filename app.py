@@ -19927,7 +19927,7 @@ def _chem_flag_letter_ref_explanations(mcqs: list, page_num) -> None:
             )
 
 
-async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = False, dm_user_id: int = None) -> list:
+async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = False, dm_user_id: int = None, file_name: str = "") -> list:
     """/chem GENERATION pipeline, rebuilt 2026-08-20 to mirror /bio's
     _bio_generate_per_topic_pages architecture exactly: Call 1 (batched
     heading-scan, ~1 per 3 pages) detects topic segment boundaries via
@@ -20037,38 +20037,74 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         if _batch_new_topics:
             await _dm_topic_update(page_nums, _batch_new_topics)
 
-    if status_msg_id:
-        try:
-            await edit_msg(chat_id, status_msg_id,
-                f"🔎 Heading-scan হচ্ছে... (0/{len(batches)} batch)")
-        except Exception:
-            pass
+    results = [None] * len(pages)
+    page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
+    start_time = time.time()
 
-    _scan_done = [0]
-    _scan_lock = asyncio.Lock()
+    # 2026-09-06 (/unmesh-style live dashboard): instead of separate
+    # "heading-scan phase" batch-counter text, drive the SAME live
+    # per-page dashboard used everywhere else -- pages currently being
+    # scanned show as "current" (⏳ heading-scan...) exactly like a page
+    # mid-generation, so scan+generation reads as ONE continuous pagewise
+    # process (matching /unmesh/pdf feel) instead of two visibly separate
+    # stages.
+    _chem_dash_lock = asyncio.Lock()
+    _chem_last_dash_text = [None]
+    _topic_breakdown_live = {}
+    total_mcq = 0
+
+    async def _chem_safe_dash_edit():
+        if not status_msg_id:
+            return
+        async with _chem_dash_lock:
+            text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0,
+                                     ai_calls=_ai_call_count[0],
+                                     ai_calls_breakdown=", ".join(f"{k}:{v}" for k, v in _ai_call_by_model.items()),
+                                     topic_breakdown=_topic_breakdown_live or None)
+            if text == _chem_last_dash_text[0]:
+                return
+            try:
+                await edit_msg(chat_id, status_msg_id, text, reply_markup=_cancel_kb(chat_id))
+                _chem_last_dash_text[0] = text
+            except Exception:
+                pass
+
+    _idx_by_page = {p: i for i, (p, _) in enumerate(pages)}
 
     async def _scan_batch_tracked(b, batch_idx):
+        page_nums = [pn for pn, _ in b]
+        for pn in page_nums:
+            _i = _idx_by_page[pn]
+            page_status[_i]["current"] = True
+            page_status[_i]["page_start_time"] = time.time()
+            page_status[_i]["stage"] = "🔎 Heading-scan হচ্ছে..."
+        await _chem_safe_dash_edit()
         # Each concurrent scan batch gets its own key-offset slot (+1000
         # base to stay clear of generation's own offset range) so
         # concurrent scan calls don't collide on the same key either.
         await _scan_batch(b, _scan_key_offset=1000 + batch_idx)
-        async with _scan_lock:
-            _scan_done[0] += 1
-            if status_msg_id:
-                try:
-                    await edit_msg(chat_id, status_msg_id,
-                        f"🔎 Heading-scan হচ্ছে... ({_scan_done[0]}/{len(batches)} batch)")
-                except Exception:
-                    pass
+        for pn in page_nums:
+            _i = _idx_by_page[pn]
+            page_status[_i]["stage"] = "⏳ MCQ generation-এর জন্য অপেক্ষা..."
+            _dtopics = [
+                (h.get("heading_text") or "").strip()
+                for h in headings_by_page.get(pn, [])
+                if _is_sane_chem_heading((h.get("heading_text") or "").strip()) and _chem_heading_score(h) >= 1
+            ]
+            if _dtopics:
+                page_status[_i]["detected_topic"] = ", ".join(dict.fromkeys(_dtopics))
+                for _t in _dtopics:
+                    _topic_breakdown_live.setdefault(_t, 0)
+        await _chem_safe_dash_edit()
 
     await asyncio.gather(*[_scan_batch_tracked(b, _bi) for _bi, b in enumerate(batches)], return_exceptions=True)
 
-    if status_msg_id:
-        try:
-            await edit_msg(chat_id, status_msg_id,
-                f"✅ Heading-scan শেষ!\n⏳ MCQ generation শুরু হচ্ছে ({len(pages)} page)...")
-        except Exception:
-            pass
+    # Reset "current"/stage for the generation phase proper (pages go back
+    # to Waiting until their generation call actually starts) so the
+    # dashboard's ⏳/⬜ states stay accurate for phase 2.
+    for _s in page_status:
+        _s["current"] = False
+        _s.pop("stage", None)
 
     # Build a static "detected topics" summary from Call1's heading-scan
     # so the live dashboard shows exactly what topics were found before
@@ -20082,21 +20118,11 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             if _t and _is_sane_chem_heading(_t) and _chem_heading_score(h) >= 1 and _t not in _seen_topics:
                 _seen_topics.add(_t)
                 _detected_topics.append((_p, _t))
-    _topics_block = ""
-    if _detected_topics:
-        _topics_block = "🗂 Detected Topics (Call1):\n" + "\n".join(
-            f"  • p{p}: {t}" for p, t in _detected_topics
-        )
-
-    results = [None] * len(pages)
-    page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
-    start_time = time.time()
-    total_mcq = 0
+    for _p, _t in _detected_topics:
+        _topic_breakdown_live.setdefault(_t, 0)
     clear_cancel(chat_id)
     new_job_id(chat_id)
     set_active_job(chat_id, "/chem MCQ generation")
-    _chem_dash_lock = asyncio.Lock()
-    _chem_last_dash_text = [None]
 
     # CROSS-PAGE CONTINUITY: same carry-forward logic as /bio, so a page
     # with zero/one heading of its own (topic continuing without a new
@@ -20114,21 +20140,6 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         _carry_topic_by_page[_p] = _last_seen_heading
         if _hs:
             _last_seen_heading = _hs[-1]["heading_text"].strip()
-
-    async def _chem_safe_dash_edit():
-        if not status_msg_id:
-            return
-        async with _chem_dash_lock:
-            text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_ai_call_count[0], ai_calls_breakdown=", ".join(f"{k}:{v}" for k, v in _ai_call_by_model.items()))
-            if _topics_block:
-                text = text + "\n━━━━━━━━━━━━━━━━━━━━━━\n" + _topics_block
-            if text == _chem_last_dash_text[0]:
-                return
-            try:
-                await edit_msg(chat_id, status_msg_id, text, reply_markup=_cancel_kb(chat_id))
-                _chem_last_dash_text[0] = text
-            except Exception:
-                pass
 
     _chem_gen_prompt_v2 = _build_chem_gen_prompt(DEFAULT_TOPIC, None)
 
@@ -20266,6 +20277,16 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         page_status[idx]["current"] = False
         page_status[idx]["done"] = True
         page_status[idx]["mcq"] = len(mcqs)
+        page_status[idx]["model"] = "Gemini"
+        _seen_hints = []
+        for m in mcqs:
+            _h = (m.get("topic_hint") or "").strip()
+            if _h:
+                _topic_breakdown_live[_h] = _topic_breakdown_live.get(_h, 0) + 1
+                if _h not in _seen_hints:
+                    _seen_hints.append(_h)
+        if _seen_hints:
+            page_status[idx]["detected_topic"] = ", ".join(_seen_hints)
         total_mcq += len(mcqs)
 
     async def _run_single_page(idx, page_num, img, segments):
@@ -20509,9 +20530,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         # clear "stopped" notice so the numbers the user was watching stay
         # on screen exactly as they were when Cancel was pressed.
         try:
-            text = _build_dashboard("", topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_ai_call_count[0], ai_calls_breakdown=", ".join(f"{k}:{v}" for k, v in _ai_call_by_model.items()))
-            if _topics_block:
-                text = text + "\n━━━━━━━━━━━━━━━━━━━━━━\n" + _topics_block
+            text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_ai_call_count[0], ai_calls_breakdown=", ".join(f"{k}:{v}" for k, v in _ai_call_by_model.items()), topic_breakdown=_topic_breakdown_live or None)
             text = text + "\n\n🛑 এই কাজ বাতিল করা হয়েছে।"
             await edit_msg(chat_id, status_msg_id, text)
         except Exception:
@@ -24807,7 +24826,7 @@ async def _handle_chem_impl(msg: dict):
 
         extracted_pages = await _chem_generate_per_topic_pages(
             chat_id, pages, subject, status_msg_id, gemini_only=True,
-            dm_user_id=msg["from"]["id"]
+            dm_user_id=msg["from"]["id"], file_name=file_name
         )
 
         total_mcq_found = sum(
