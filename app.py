@@ -2420,10 +2420,19 @@ def _clean_mcq_text(text: str) -> str:
     """Strip leftover source-reference phrases the model sometimes still
     slips in despite prompt instructions, and normalize '^' exponent
     notation (e.g. '10^22', '10^-3') into proper Unicode superscripts so
-    scientific notation renders correctly in plain Telegram text/polls."""
+    scientific notation renders correctly in plain Telegram text/polls.
+
+    2026-09-06: now also runs the GENERIC structural citation-stripper
+    (_math_strip_source_citations) on top of the fixed _SOURCE_REF_RE
+    phrase list. Gemini invents new source-reference wordings constantly
+    ("ছবিতে দেওয়া লেবেল অনুযায়ী", "উপন্যাস বিভাগে", etc.) -- chasing each
+    exact phrase is a losing game, so the structural rule (any clause
+    containing a source-noun + reference-verb/suffix, regardless of exact
+    wording) catches variants the fixed list was never updated for."""
     if not text:
         return text
     t = _SOURCE_REF_RE.sub('', text)
+    t = _math_strip_source_citations(t)
 
     def _sup(m):
         sign = m.group(1) or ''
@@ -2684,8 +2693,8 @@ _MATH_CITATION_PATTERNS = [
     # lead-in and gets stripped -- regardless of exact wording,
     # punctuation, or whether a problem-number/parenthesis is present.
     re.compile(
-        r'^[^,،।]{0,80}?(?:সমস্যা|উদ্দীপক|পৃষ্ঠা|তথ্য|অনুচ্ছেদ|চিত্র|টেবিল|ছক)'
-        r'[^,،।]{0,60}?(?:অনুসারে|অনুযায়ী|[-–]তে)\s*[,،.।]?\s*'
+        r'^[^,،।]{0,80}?(?:সমস্যা|উদ্দীপক|পৃষ্ঠা|তথ্য|অনুচ্ছেদ|চিত্র|টেবিল|ছক|লেবেল|উপন্যাস|কবিতা|গল্প|নাটক|প্রবন্ধ|গ্রন্থ|বিভাগ|সারণি|উপাত্ত)'
+        r'[^,،।]{0,60}?(?:অনুসারে|অনুযায়ী|মোতাবেক|থেকে\s*জানা\s*যায়|[-–]তে)\s*[,،.।]?\s*'
     ),
 ]
 
@@ -2706,8 +2715,8 @@ def _math_strip_source_citations(text: str) -> str:
         # not anchored to ^. Catches "...প্রক্রিয়াটি ছক অনুযায়ী সম্পন্ন..."
         # where the citation phrase sits in the middle, not the start.
         cleaned = re.sub(
-            r'(?:সমস্যা|উদ্দীপক|পৃষ্ঠা|তথ্য|অনুচ্ছেদ|চিত্র|টেবিল|ছক)'
-            r'[^,،।]{0,20}?(?:অনুসারে|অনুযায়ী)\s*',
+            r'(?:সমস্যা|উদ্দীপক|পৃষ্ঠা|তথ্য|অনুচ্ছেদ|চিত্র|টেবিল|ছক|লেবেল|উপন্যাস|কবিতা|গল্প|নাটক|প্রবন্ধ|গ্রন্থ|বিভাগ|সারণি|উপাত্ত)'
+            r'[^,،।]{0,20}?(?:অনুসারে|অনুযায়ী|মোতাবেক|থেকে\s*জানা\s*যায়)\s*',
             '', cleaned
         )
         # collapse any double spaces/commas left behind by the strip
@@ -17335,8 +17344,9 @@ MATH/CHEMISTRY FORMATTING (always, in question/options/explanation): NEVER outpu
 Apply consistently, never mix LaTeX and Unicode within one MCQ. RARE EXCEPTION: only if a specific expression is genuinely impossible to represent in Unicode/plain text with reasonable clarity (e.g. a complex multi-line matrix or nested integral), keep that ONE expression in minimal LaTeX — everything else in the same MCQ still uses Unicode.
 
 FORBIDDEN SOURCE-REFERENCE PHRASES (question and explanation, always): never reference the source itself instead of stating facts directly.
-❌ "উল্লেখিত চিত্রে"/"চিত্রে দেখা যাচ্ছে"/"বক্সে"/"ছকে"/"উদ্দীপকে"/"সারণিতে"/"টপিকে"/"পৃষ্ঠায়"/"প্যাসেজে"/"অনুচ্ছেদে"/"গ্রাফে"/"দেখা যাচ্ছে"/"বলা আছে"/"উল্লেখ করা আছে"/"লক্ষ করা যায়"/"দেখানো হয়েছে"/"দেওয়া আছে"/"প্রদত্ত"
+❌ "উল্লেখিত চিত্রে"/"চিত্রে দেখা যাচ্ছে"/"বক্সে"/"ছকে"/"উদ্দীপকে"/"সারণিতে"/"টপিকে"/"পৃষ্ঠায়"/"প্যাসেজে"/"অনুচ্ছেদে"/"গ্রাফে"/"দেখা যাচ্ছে"/"বলা আছে"/"উল্লেখ করা আছে"/"লক্ষ করা যায়"/"দেখানো হয়েছে"/"দেওয়া আছে"/"প্রদত্ত"/"লেবেল অনুযায়ী"/"বিভাগে"/"অংশে"
 ❌ English: "as shown in the figure/box/table/diagram/passage", "mentioned in the text/page", "as given"
+GENERAL RULE (covers every wording, not just the list above): if a sentence's job is to point at WHERE information lives (a page, box, table, label, section, chapter type like উপন্যাস/কবিতা/গল্প/নাটক/প্রবন্ধ, ছবি, or any other container) rather than stating WHAT the information actually is, it is forbidden — rewrite it as a direct factual statement instead. This applies no matter what new phrase or noun you use to describe the container — the rule is structural, not a fixed word list.
 Always state facts directly and plainly, as general knowledge.
 
 QUESTION has a diagram/figure/chart needed to understand/answer it → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) fully containing the ENTIRE diagram + labels/arrows/text, edge to edge with small margin, never cut off. Omit if no diagram. Options never get bbox.
