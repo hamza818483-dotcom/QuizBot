@@ -20092,7 +20092,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     _carry_topic = [None]  # boxed: last confirmed heading text, flows strictly forward page-by-page
     _gen_tasks = []
     _segs_by_page = {}
-    _PARALLEL = 3  # was 2 -- generation now overlaps with later scans too, so a touch more headroom is safe
+    _PARALLEL = 2  # kept at 2 (not raised to 3) -- scan+generation already run simultaneously now, so key-usage rate is already higher than before; not stacking extra concurrency on top of that to avoid mass rate-limit/ban risk
     sem = asyncio.Semaphore(_PARALLEL)
 
     def _page_segments(page_num, img, carry):
