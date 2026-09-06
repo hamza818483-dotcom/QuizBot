@@ -19927,7 +19927,7 @@ def _chem_flag_letter_ref_explanations(mcqs: list, page_num) -> None:
             )
 
 
-async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = False, dm_user_id: int = None, file_name: str = "") -> list:
+async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = False, file_name: str = "") -> list:
     """/chem GENERATION pipeline, rebuilt 2026-08-20 to mirror /bio's
     _bio_generate_per_topic_pages architecture exactly: Call 1 (batched
     heading-scan, ~1 per 3 pages) detects topic segment boundaries via
@@ -19946,16 +19946,15 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     2-image batch. Gemini multi-image attention issue, not a prompt/
     parsing bug -- smaller batches are the reliable fix.
 
-    2026-09-06: dm_user_id (if given) gets a LIVE DM as each heading-scan
-    batch completes, showing exactly which topic(s) were just found --
-    instead of waiting for all batches to finish before any topic
-    visibility (previously the "Detected Topics" block only appeared once,
-    after the entire scan phase was done). Also: heading-scan calls now
-    run on a SEPARATE Gemini key offset from MCQ-generation calls (offset
-    +1000 for scan vs the page-index-based offset used by generation),
-    so the two phases never compete for the same key mid-run -- keeps
-    both phases smooth/uninterrupted and avoids concentrated same-key
-    load that looks like scripted/abusive usage to the provider."""
+    2026-09-06: heading-scan calls run on a SEPARATE Gemini key offset from
+    MCQ-generation calls (offset +1000 for scan vs the page-index-based
+    offset used by generation), so the two phases never compete for the
+    same key mid-run -- keeps both phases smooth/uninterrupted and avoids
+    concentrated same-key load that looks like scripted/abusive usage to
+    the provider. Detected topics show live in the single dashboard
+    message (topic_breakdown) as each one is found -- matching /unmesh's
+    one-dashboard pattern; the earlier separate live-DM topic-list message
+    was removed since it duplicated what the dashboard already shows."""
     # BATCH_SIZE=1 (was 2): a 2-page scan batch delayed page 2's topic
     # confirmation until BOTH pages in the pair finished scanning
     # together in one call -- true per-page independence (matching
@@ -19967,42 +19966,9 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     headings_by_page = {}
     _ai_call_count = [0]
     _ai_call_by_model = {}
-    _dm_seen_topics = set()
-    _dm_lock = asyncio.Lock()
-    _dm_ordered_topics = []
-    _dm_msg_id = [None]
-
     def _bump_chem_call(model):
         _ai_call_count[0] += 1
         _ai_call_by_model[model] = _ai_call_by_model.get(model, 0) + 1
-
-    async def _dm_topic_update(batch_page_nums, new_topics):
-        """Keep ONE DM message updated (edited, not re-sent) with the full
-        serial list of topics found so far during heading-scan. First call
-        sends the message; every subsequent call edits that same message
-        to append newly-found topic(s) -- never blocks/raises into the
-        scan pipeline on failure."""
-        if not dm_user_id or not new_topics:
-            return
-        async with _dm_lock:
-            fresh = [t for t in new_topics if t not in _dm_seen_topics]
-            if not fresh:
-                return
-            for t in fresh:
-                _dm_seen_topics.add(t)
-                _dm_ordered_topics.append(t)
-            text = "🔎 Heading-scan — এ পর্যন্ত পাওয়া topic:\n" + "\n".join(
-                f"{i}. {t}" for i, t in enumerate(_dm_ordered_topics, start=1)
-            )
-            try:
-                if _dm_msg_id[0] is None:
-                    r = await send_msg(dm_user_id, text)
-                    if r.get("ok"):
-                        _dm_msg_id[0] = r.get("result", {}).get("message_id")
-                else:
-                    await edit_msg(dm_user_id, _dm_msg_id[0], text)
-            except Exception as e:
-                logger.warning(f"[CHEM live-DM] failed to update user {dm_user_id}: {e}")
 
     async def _scan_batch(batch, _scan_key_offset):
         page_nums = [pn for pn, _ in batch]
@@ -20045,8 +20011,9 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 _t = (h.get("heading_text") or "").strip()
                 if _t and _is_sane_chem_heading(_t) and _chem_heading_score(h) >= 1:
                     _batch_new_topics.append(_t)
-        if _batch_new_topics:
-            await _dm_topic_update(page_nums, _batch_new_topics)
+        # Topic list is shown live in the single dashboard message
+        # (topic_breakdown=_topic_breakdown_live below) -- no separate DM,
+        # matching /unmesh's one-dashboard-only pattern (removed 2026-09-06).
 
     results = [None] * len(pages)
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
@@ -24740,7 +24707,7 @@ async def _handle_chem_impl(msg: dict):
 
         extracted_pages = await _chem_generate_per_topic_pages(
             chat_id, pages, subject, status_msg_id, gemini_only=True,
-            dm_user_id=msg["from"]["id"], file_name=file_name
+            file_name=file_name
         )
 
         _was_cancelled = is_cancelled(chat_id)
