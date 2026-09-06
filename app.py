@@ -3547,7 +3547,7 @@ def classify_ai_error(e: Exception, provider: str, page_num: int = 0) -> str:
             category = "daily_quota"
         else:
             category = "rate_limit_429"
-    elif "SUSPENDED" in err_upper or "API_KEY_INVALID" in err_upper or "401" in err_str or "403" in err_str:
+    elif _is_auth_ban_error(err_str):
         category = "suspended_banned"
     elif ("CONNECTION" in err_upper or "NETWORK" in err_upper or "DNS" in err_upper
           or "SSL" in err_upper or "RECORD LAYER" in err_upper or "READERROR" in type_name.upper()
