@@ -20071,82 +20071,31 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
 
     _idx_by_page = {p: i for i, (p, _) in enumerate(pages)}
 
-    async def _scan_batch_tracked(b, batch_idx):
-        page_nums = [pn for pn, _ in b]
-        for pn in page_nums:
-            _i = _idx_by_page[pn]
-            page_status[_i]["current"] = True
-            page_status[_i]["page_start_time"] = time.time()
-            page_status[_i]["stage"] = "🔎 Heading-scan হচ্ছে..."
-        await _chem_safe_dash_edit()
-        # Each concurrent scan batch gets its own key-offset slot (+1000
-        # base to stay clear of generation's own offset range) so
-        # concurrent scan calls don't collide on the same key either.
-        await _scan_batch(b, _scan_key_offset=1000 + batch_idx)
-        for pn in page_nums:
-            _i = _idx_by_page[pn]
-            page_status[_i]["stage"] = "⏳ MCQ generation-এর জন্য অপেক্ষা..."
-            _dtopics = [
-                (h.get("heading_text") or "").strip()
-                for h in headings_by_page.get(pn, [])
-                if _is_sane_chem_heading((h.get("heading_text") or "").strip()) and _chem_heading_score(h) >= 1
-            ]
-            if _dtopics:
-                page_status[_i]["detected_topic"] = ", ".join(dict.fromkeys(_dtopics))
-                for _t in _dtopics:
-                    _topic_breakdown_live.setdefault(_t, 0)
-        await _chem_safe_dash_edit()
+    # ============================================================
+    # STREAMING PIPELINE (2026-09-06, per user request): scan and
+    # generation now run TRULY simultaneously, page by page, instead of
+    # "scan everything, then generate everything". Batches are still
+    # SCANNED with overlapping network calls (fast), but are AWAITED in
+    # strict page order so that as soon as a page's own topic boundary
+    # is known (which only ever depends on THIS page's headings + the
+    # carry-topic handed down from earlier pages -- never on any future
+    # page), that page's generation call is fired immediately via
+    # asyncio.create_task, while later pages are still being scanned.
+    # This drops the old 2-page "pairing" call-halving optimization,
+    # because pairing needed to peek at the NEXT page's heading before
+    # deciding to combine -- which is exactly the lookahead that breaks
+    # true streaming. Every page now always gets its own single-page
+    # generation path (_run_single_page), which was already 100%
+    # content-safe before pairing was ever added.
+    _scan_tasks = [asyncio.create_task(_scan_batch(b, _scan_key_offset=1000 + _bi)) for _bi, b in enumerate(batches)]
 
-    await asyncio.gather(*[_scan_batch_tracked(b, _bi) for _bi, b in enumerate(batches)], return_exceptions=True)
+    _carry_topic = [None]  # boxed: last confirmed heading text, flows strictly forward page-by-page
+    _gen_tasks = []
+    _segs_by_page = {}
+    _PARALLEL = 3  # was 2 -- generation now overlaps with later scans too, so a touch more headroom is safe
+    sem = asyncio.Semaphore(_PARALLEL)
 
-    # Reset "current"/stage for the generation phase proper (pages go back
-    # to Waiting until their generation call actually starts) so the
-    # dashboard's ⏳/⬜ states stay accurate for phase 2.
-    for _s in page_status:
-        _s["current"] = False
-        _s.pop("stage", None)
-
-    # Build a static "detected topics" summary from Call1's heading-scan
-    # so the live dashboard shows exactly what topics were found before
-    # Call2's generation even starts -- same as /bio's _detected_topics
-    # block.
-    _detected_topics = []
-    _seen_topics = set()
-    for _p, _ in pages:
-        for h in headings_by_page.get(_p, []):
-            _t = (h.get("heading_text") or "").strip()
-            if _t and _is_sane_chem_heading(_t) and _chem_heading_score(h) >= 1 and _t not in _seen_topics:
-                _seen_topics.add(_t)
-                _detected_topics.append((_p, _t))
-    for _p, _t in _detected_topics:
-        _topic_breakdown_live.setdefault(_t, 0)
-    clear_cancel(chat_id)
-    new_job_id(chat_id)
-    set_active_job(chat_id, "/chem MCQ generation")
-
-    # CROSS-PAGE CONTINUITY: same carry-forward logic as /bio, so a page
-    # with zero/one heading of its own (topic continuing without a new
-    # marker) is told explicitly which topic it belongs to.
-    _carry_topic_by_page = {}
-    _last_seen_heading = None
-    for _p, _ in pages:
-        _hs = sorted(
-            [h for h in headings_by_page.get(_p, [])
-             if isinstance(h.get("vertical_position"), (int, float))
-             and _is_sane_chem_heading(h.get("heading_text"))
-             and _chem_heading_score(h) >= 1],
-            key=lambda h: h["vertical_position"],
-        )
-        _carry_topic_by_page[_p] = _last_seen_heading
-        if _hs:
-            _last_seen_heading = _hs[-1]["heading_text"].strip()
-
-    _chem_gen_prompt_v2 = _build_chem_gen_prompt(DEFAULT_TOPIC, None)
-
-    def _page_segments(page_num, img):
-        """Same segment-detection logic as before, factored out standalone
-        so pairing (below) can inspect a page's segment count BEFORE
-        deciding whether it's eligible to be stitched with its neighbor."""
+    def _page_segments(page_num, img, carry):
         raw_headings = headings_by_page.get(page_num, [])
         ordered = sorted(
             [h for h in raw_headings
@@ -20161,38 +20110,31 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             for i, h in enumerate(ordered):
                 start_frac = h["vertical_position"]
                 end_frac = ordered[i + 1]["vertical_position"] if i + 1 < len(ordered) else 1.0
-                # False = real detected heading (not carried/fallback)
                 segments.append((h["heading_text"].strip(), start_frac, end_frac, False))
-            _carry = _carry_topic_by_page.get(page_num)
-            _MIN_SEG_FRAC = 0.06  # below this the crop is near-blank (just the
-            # next heading's line) -- skip it: not worth a call, and an empty
-            # crop is more likely to trip a provider error that (pre-fix) could
-            # kill the whole page/batch via an unguarded gather.
-            if _carry and segments[0][1] > _MIN_SEG_FRAC:
-                segments.insert(0, (_carry, 0.0, segments[0][1], True))
-        elif _carry_topic_by_page.get(page_num):
-            segments = [(_carry_topic_by_page[page_num], 0.0, 1.0, True)]
+            _MIN_SEG_FRAC = 0.06  # below this the crop is near-blank -- skip it
+            if carry and segments[0][1] > _MIN_SEG_FRAC:
+                segments.insert(0, (carry, 0.0, segments[0][1], True))
+        elif carry:
+            segments = [(carry, 0.0, 1.0, True)]
         return segments
+
+    _chem_gen_prompt_v2 = _build_chem_gen_prompt(DEFAULT_TOPIC, None)
+
+    def _renumber_by_topic(mcqs):
+        _local = 0
+        _prev_hint = None
+        for m in mcqs:
+            if m.get("topic_hint") != _prev_hint:
+                _local = 1
+                _prev_hint = m.get("topic_hint")
+            else:
+                _local += 1
+            m["qsn_no"] = _local
 
     async def _gen_segment(crop, page_num, status_idxs=None):
         """Generate MCQs from a (possibly cropped) image using Gemini only
-        (matches /pdf -- no Groq/OpenRouter fallback), with WARNING-level
-        stage logging kept from the debug pass so genuinely-empty results
-        stay diagnosable.
-
-        2026-08-20: added a 2-full-cycle retry ladder (was single-shot).
-        A single Gemini call with NO retry meant one transient failure
-        (429 landing on an exhausted key) permanently killed that
-        segment's real topic with zero recovery attempt -- unlike /pdf's
-        4-attempt + relaxed-pass ladder. Now retries up to 3 times with
-        backoff before conceding empty.
-
-        2026-09-06: status_idxs (list of page_status indices this call is
-        generating for -- 1 for a single page, 2 for a paired/combined
-        call) lets this function push LIVE stage/timer/call-count fields
-        onto page_status, mirroring /pdf's live dashboard (attempt number,
-        elapsed seconds, running AI-call count) instead of a static
-        'Processing...' label while a page/pair is in flight."""
+        (matches /pdf -- no Groq/OpenRouter fallback). Retries up to 3
+        times with backoff before conceding empty."""
         _current_job_chat_id_ctx.set(chat_id)
         if is_cancelled(chat_id):
             return []
@@ -20204,11 +20146,6 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 page_status[_i]["stage"] = stage_text
                 page_status[_i]["live_ai_calls"] = _ai_call_count[0]
 
-        # Explicit key-offset slot for generation calls, isolated from
-        # heading-scan's own +1000 range (see _chem_generate_per_topic_pages
-        # docstring) -- keeps scan and generation from ever competing for
-        # the same key mid-run, and also spreads concurrent generation
-        # units (2 in parallel via _PARALLEL) across different keys.
         _gen_key_offset = (hash(str(page_num)) % 500)
         last_err = None
         for _attempt in range(3):
@@ -20230,13 +20167,6 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini ({len(mcqs)} MCQ)")
                     return mcqs
                 if not _gem_marker_only:
-                    # 2026-08-20: 0 MCQ with NO trailing_topic_marker is
-                    # ambiguous -- could be a genuine fluke (proven by logs:
-                    # same page/crop retried moments later via the outer
-                    # 3-attempt cycle and Gemini found 10 real MCQs). Give
-                    # Gemini one more shot on a different rotated key before
-                    # burning Groq/OpenRouter quota on it. Adds ~2-3s but is
-                    # far cheaper than OpenRouter's scarce 11-key quota.
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini 0 MCQ, no marker (ambiguous) -- retrying Gemini once on next key before Groq")
                     _set_stage("🔁 Gemini retry (ambiguous 0 MCQ)...")
                     await _chem_safe_dash_edit()
@@ -20252,17 +20182,9 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                     if mcqs:
                         logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini retry ({len(mcqs)} MCQ)")
                         return mcqs
-                # /chem is Gemini-only (matches /pdf) -- no Groq/OpenRouter
-                # fallback branch at all, so gemini_only is always True here
-                # and this path is the sole outcome on a 0-MCQ result.
                 last_err = "Gemini returned 0 MCQ (gemini_only, no fallback provider)"
                 logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 -- Gemini 0 MCQ, gemini_only set, no fallback provider.")
             except Exception as e:
-                # A provider error on one segment (e.g. a near-empty crop) must
-                # never kill the whole page/batch -- previously this exception
-                # propagated up through _run_single_page/_run_paired_pages into
-                # the outer asyncio.gather, silently wiping out sibling pages'
-                # results too (this is what caused whole topics to go missing).
                 last_err = f"{type(e).__name__}: {e}"
                 logger.warning(f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 raised {last_err} -- retrying." if _attempt < 2 else f"[CHEM-GEN v2] page {page_num}: attempt {_attempt+1}/3 raised {last_err} -- giving up, treating as 0 MCQ.")
             if _attempt < 2:
@@ -20290,9 +20212,6 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         total_mcq += len(mcqs)
 
     async def _run_single_page(idx, page_num, img, segments):
-        """Unchanged single-page path (used when a page has >1 segment i.e.
-        a rare multi-topic page, or has no pairable neighbor) -- one
-        provider call per segment, exactly as before."""
         page_status[idx]["current"] = True
         page_status[idx]["page_start_time"] = time.time()
         await _chem_safe_dash_edit()
@@ -20310,9 +20229,6 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 seg_mcqs = await _gen_segment(crop, page_num, status_idxs=[idx])
                 for m in seg_mcqs:
                     m["topic_hint"] = heading_text
-                    # Real heading-sourced hints must never be majority-vote
-                    # overwritten by a carried/fallback hint elsewhere in the
-                    # same segment run -- only carried hints are "weak".
                     if is_carried:
                         m["_carried_hint"] = True
                 all_mcqs.extend(seg_mcqs)
@@ -20323,147 +20239,63 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         _mark_done(idx, page_num, mcqs, img)
         await _chem_safe_dash_edit()
 
-    async def _run_paired_pages(idx1, page_num1, img1, seg1, idx2, page_num2, img2, seg2):
-        """99% case: each of the 2 consecutive pages has exactly ONE
-        segment (single topic, whole page). Stitch both pages into one
-        vertically-stacked composite image (same technique /extra uses
-        via _pair_pages_for_extra) and generate BOTH pages' MCQs in a
-        SINGLE provider call, halving call count for this pair.
-
-        ONLY combines when heading1 == heading2 (same topic continuing
-        across both pages) -- in that case there's nothing to split, the
-        whole result belongs to one topic, zero ambiguity.
-
-        When the two pages have DIFFERENT topics, this does NOT attempt a
-        combined call at all (a prior version asked the model to self-tag
-        which half each MCQ came from via a "source_half" field, but that
-        is a trust-the-model split, not a deterministic one -- Call1 only
-        gives us WHERE the topic boundary is on a single page's own
-        vertical_position, not a reliable way to attribute a GENERATED
-        MCQ back to page A vs page B from Call2's text output alone). To
-        guarantee zero MCQ loss and zero mis-tagging, different-topic
-        pairs always fall back to the original safe per-page calls."""
-        heading1 = seg1[0][0]
-        heading2 = seg2[0][0]
-        is_carried = bool(seg1[0][3]) or bool(seg2[0][3])
-
-        # HARD SAFETY NET (2026-08-20): a reported case showed pages with
-        # visibly different headings still reaching the combined-call path
-        # despite the heading1 != heading2 check below -- root cause never
-        # fully pinned, but the consequence is severe: page2's real topic
-        # gets mislabeled as page1's heading (composite call only ever
-        # tags results with heading1), so page2's actual topic silently
-        # has ZERO correctly-tagged MCQ anywhere, even after reconciliation
-        # retries it (the retry recovers content but the original
-        # mis-tagged MCQs from the wrongly-combined call remain sitting in
-        # page1's group too, since nothing removes them).
-        # Do a strict .strip() re-normalize + explicit non-empty check
-        # here as well, so even if seg1/seg2 upstream somehow carried
-        # equal-looking-but-different text, this is the last line of
-        # defense before a combined call is ever issued.
-        h1_norm = (heading1 or "").strip()
-        h2_norm = (heading2 or "").strip()
-        if not h1_norm or not h2_norm or h1_norm != h2_norm:
-            if h1_norm != heading1 or h2_norm != heading2:
-                logger.warning(f"[CHEM-PAIR] pages {page_num1}+{page_num2}: heading had un-stripped whitespace -- treating as DIFFERENT to be safe ('{heading1[:40]}' vs '{heading2[:40]}')")
-            logger.info(f"[CHEM-PAIR] pages {page_num1}+{page_num2}: confirmed different/empty headings at combine-time ('{heading1[:40]}' vs '{heading2[:40]}') -- falling back to separate per-page calls")
-            await asyncio.gather(
-                _run_single_page(idx1, page_num1, img1, seg1),
-                _run_single_page(idx2, page_num2, img2, seg2),
-            )
-            return
-        logger.info(f"[CHEM-PAIR] pages {page_num1}+{page_num2}: confirmed same heading at combine-time ('{heading1[:40]}') -- combining into one call")
-
-        page_status[idx1]["current"] = True
-        page_status[idx2]["current"] = True
-        page_status[idx1]["page_start_time"] = time.time()
-        page_status[idx2]["page_start_time"] = page_status[idx1]["page_start_time"]
-        await _chem_safe_dash_edit()
-
-        from PIL import Image as _PILImg
-        gap = 12
-        w = max(img1.width, img2.width)
-        h = img1.height + gap + img2.height
-        composite = _PILImg.new("RGB", (w, h), (255, 255, 255))
-        composite.paste(img1, (0, 0))
-        composite.paste(img2, (0, img1.height + gap))
-
-        # Same topic continuing across both pages -- no split needed,
-        # whole combined result belongs to one topic.
-        mcqs = await _gen_segment(composite, f"{page_num1}-{page_num2}", status_idxs=[idx1, idx2])
-        for m in mcqs:
-            m["topic_hint"] = heading1
-            if is_carried:
-                m["_carried_hint"] = True
-        _renumber_by_topic(mcqs)
-        _mark_done(idx1, page_num1, mcqs, img1)
-        _mark_done(idx2, page_num2, [], img2)
-        await _chem_safe_dash_edit()
-
-    def _renumber_by_topic(mcqs):
-        _local = 0
-        _prev_hint = None
-        for m in mcqs:
-            if m.get("topic_hint") != _prev_hint:
-                _local = 1
-                _prev_hint = m.get("topic_hint")
-            else:
-                _local += 1
-            m["qsn_no"] = _local
-
-    # Build the list of work units: pair up consecutive pages ONLY when
-    # both have exactly one segment each (single-topic whole-page case,
-    # the 99% norm per user confirmation) -- otherwise each page runs
-    # through the unchanged single-page path.
-    _units = []  # each: ("single", idx, pn, img, segs) or ("pair", idx1, pn1, img1, seg1, idx2, pn2, img2, seg2)
-    _all_segs = [_page_segments(pn, img) for pn, img in pages]
-    i = 0
-    while i < len(pages):
-        pn1, img1 = pages[i]
-        seg1 = _all_segs[i]
-        if (i + 1 < len(pages) and seg1 is not None and len(seg1) == 1
-                and not seg1[0][3]):
-            pn2, img2 = pages[i + 1]
-            seg2 = _all_segs[i + 1]
-            if seg2 is not None and len(seg2) == 1 and not seg2[0][3]:
-                # DEBUG (2026-08-20): a reported case showed pages with
-                # visibly DIFFERENT headings still getting pair-combined
-                # (log showed "page 1-2: SUCCESS" for a Call1 scan that
-                # found two distinct headings). Log both headings HERE,
-                # right at the pairing decision, so if this ever recurs
-                # the log itself proves whether seg1/seg2 already carried
-                # identical text at this point (a data bug upstream) or
-                # whether _run_paired_pages's own heading1==heading2 check
-                # is somehow not firing (a logic bug in that function).
-                h1, h2 = seg1[0][0], seg2[0][0]
-                if h1 == h2:
-                    logger.info(f"[CHEM-PAIR] pages {pn1}+{pn2}: SAME heading '{h1[:40]}' -> combining into one call")
-                else:
-                    logger.warning(f"[CHEM-PAIR] pages {pn1}+{pn2}: DIFFERENT headings ('{h1[:40]}' vs '{h2[:40]}') -> pairing unit built, _run_paired_pages must fall back to per-page calls")
-                _units.append(("pair", i, pn1, img1, seg1, i + 1, pn2, img2, seg2))
-                i += 2
-                continue
-        _units.append(("single", i, pn1, img1, seg1))
-        i += 1
-
-    _PARALLEL = 2
-    sem = asyncio.Semaphore(_PARALLEL)
-
-    async def _guarded(unit):
+    async def _guarded_page(idx, page_num, img, segments):
         async with sem:
             if is_cancelled(chat_id):
                 return
-            if unit[0] == "single":
-                _, idx, pn, img, segs = unit
-                await _run_single_page(idx, pn, img, segs)
-            else:
-                _, idx1, pn1, img1, seg1, idx2, pn2, img2, seg2 = unit
-                await _run_paired_pages(idx1, pn1, img1, seg1, idx2, pn2, img2, seg2)
+            await _run_single_page(idx, page_num, img, segments)
 
-    _gather_results = await asyncio.gather(*[_guarded(u) for u in _units], return_exceptions=True)
-    for _u, _r in zip(_units, _gather_results):
+    for _batch_idx, _batch in enumerate(batches):
+        page_nums = [pn for pn, _ in _batch]
+        for pn in page_nums:
+            _i = _idx_by_page[pn]
+            page_status[_i]["current"] = True
+            page_status[_i]["page_start_time"] = time.time()
+            page_status[_i]["stage"] = "🔎 Heading-scan হচ্ছে..."
+        await _chem_safe_dash_edit()
+
+        await _scan_tasks[_batch_idx]  # awaited in strict order -- carry-topic must flow forward correctly
+
+        for pn in page_nums:
+            _i = _idx_by_page[pn]
+            _dtopics = [
+                (h.get("heading_text") or "").strip()
+                for h in headings_by_page.get(pn, [])
+                if _is_sane_chem_heading((h.get("heading_text") or "").strip()) and _chem_heading_score(h) >= 1
+            ]
+            if _dtopics:
+                page_status[_i]["detected_topic"] = ", ".join(dict.fromkeys(_dtopics))
+                for _t in _dtopics:
+                    _topic_breakdown_live.setdefault(_t, 0)
+
+        # Topic boundary for every page in THIS batch is now fully known
+        # (own headings + carry from strictly earlier pages) -- fire
+        # generation for each page RIGHT NOW, without waiting for later
+        # batches' scans to finish.
+        for pn, img in _batch:
+            _i = _idx_by_page[pn]
+            segs = _page_segments(pn, img, _carry_topic[0])
+            _segs_by_page[pn] = segs
+            page_status[_i]["stage"] = "⏳ Generation queue-এ..."
+            if segs:
+                _carry_topic[0] = segs[-1][0]
+            _gen_tasks.append(asyncio.create_task(_guarded_page(_i, pn, img, segs)))
+        await _chem_safe_dash_edit()
+
+    _gather_results = await asyncio.gather(*_gen_tasks, return_exceptions=True)
+    for _r in _gather_results:
         if isinstance(_r, Exception):
-            logger.warning(f"[CHEM-GEN v2] unit {_u[0]} pages={_u[1:3]}: unit-level exception {type(_r).__name__}: {_r} -- results for this unit may be incomplete, other pages unaffected.")
+            logger.warning(f"[CHEM-GEN v2] page-task exception {type(_r).__name__}: {_r} -- results for that page may be incomplete, other pages unaffected.")
+
+    _detected_topics = [(pn, t) for pn, t in
+                         ((pn, (h.get("heading_text") or "").strip()) for pn, _ in pages for h in headings_by_page.get(pn, []))
+                         if t and _is_sane_chem_heading(t)]
+    _seen_dt = set()
+    _detected_topics = [(p, t) for p, t in _detected_topics if not (t in _seen_dt or _seen_dt.add(t))]
+
+    clear_cancel(chat_id)
+    new_job_id(chat_id)
+    set_active_job(chat_id, "/chem MCQ generation")
 
     # RECONCILIATION: heading-scan (Call1) detected N distinct topics --
     # the final output must contain MCQs for every one of them, never
@@ -20494,7 +20326,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 if idx is None:
                     continue
                 pn, img = pages[idx]
-                segs = _all_segs[idx] or []
+                segs = _segs_by_page.get(p) or []
                 seg = next((s for s in segs if s[0] == t), None)
                 if seg is None:
                     continue
