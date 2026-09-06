@@ -2396,6 +2396,13 @@ _SOURCE_REF_PATTERNS = [
     r'ছবিতে\s*দেখা\s*যাচ্ছে', r'উপরের\s*তথ্য\s*অনুযায়ী', r'উক্ত\s*(?:অংশে|অনুচ্ছেদে)\s*উল্লেখ\s*আছে',
     r'টপিকে\s*বলা\s*হয়েছে', r'(?<!না\s)দেখা\s*যাচ্ছে', r'লিখা\s*আছে', r'বর্ণিত\s*আছে',
     r'অনুযায়ী\s*উল্লেখ\s*করা\s*হয়েছে', r'হিসেবে\s*উল্লেখ\s*করা\s*হয়েছে',
+    # 2026-09: plain bare-noun forms with NO প্রদত্ত/উপরের prefix, seen
+    # leaking directly at the start or mid-sentence of question/explanation
+    # text — "ছক অনুযায়ী", "তথ্য অনুযায়ী", "তথ্য অনুসারে", "টেক্সট অনুযায়ী"
+    # and siblings. Also handles a leading possessive noun chain like
+    # "পৃষ্ঠার ছক অনুযায়ী" (noun + র/এর + another source-noun + verb).
+    r'(?:পৃষ্ঠার?|উদ্দীপকের?|অনুচ্ছেদের?)?\s*'
+    r'(?:ছক|তথ্য|টেবিল|চিত্র|অনুচ্ছেদ|উদ্দীপক|পৃষ্ঠা|টেক্সট)\s*(?:অনুযায়ী|অনুসারে)',
 ]
 _SOURCE_REF_RE = re.compile('|'.join(_SOURCE_REF_PATTERNS))
 _SUPERSCRIPT_MAP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
@@ -2670,22 +2677,32 @@ _MATH_CITATION_PATTERNS = [
     # lead-in and gets stripped -- regardless of exact wording,
     # punctuation, or whether a problem-number/parenthesis is present.
     re.compile(
-        r'^[^,،।]{0,80}?(?:সমস্যা|উদ্দীপক|পৃষ্ঠা|তথ্য|অনুচ্ছেদ|চিত্র|টেবিল)'
+        r'^[^,،।]{0,80}?(?:সমস্যা|উদ্দীপক|পৃষ্ঠা|তথ্য|অনুচ্ছেদ|চিত্র|টেবিল|ছক)'
         r'[^,،।]{0,60}?(?:অনুসারে|অনুযায়ী|[-–]তে)\s*[,،.।]?\s*'
     ),
 ]
 
 
 def _math_strip_source_citations(text: str) -> str:
-    """Remove any 'সমস্যা-X.X(x) অনুযায়ী' style source-citation phrasing
-    that leaked into question/explanation text despite the prompt rule
-    against it. Best-effort regex, never raises."""
+    """Remove any 'সমস্যা-X.X(x) অনুযায়ী' / 'ছক অনুযায়ী' / 'তথ্য অনুসারে'
+    style source-citation phrasing that leaked into question/explanation
+    text despite the prompt rule against it. Best-effort regex, never
+    raises. Handles both leading-clause and mid-sentence occurrences."""
     if not text:
         return text
     try:
         cleaned = text
         for pat in _MATH_CITATION_PATTERNS:
             cleaned = pat.sub('', cleaned)
+        # mid-sentence occurrences (not just leading clause) — same
+        # reference-noun + reference-verb pattern, anywhere in the text,
+        # not anchored to ^. Catches "...প্রক্রিয়াটি ছক অনুযায়ী সম্পন্ন..."
+        # where the citation phrase sits in the middle, not the start.
+        cleaned = re.sub(
+            r'(?:সমস্যা|উদ্দীপক|পৃষ্ঠা|তথ্য|অনুচ্ছেদ|চিত্র|টেবিল|ছক)'
+            r'[^,،।]{0,20}?(?:অনুসারে|অনুযায়ী)\s*',
+            '', cleaned
+        )
         # collapse any double spaces/commas left behind by the strip
         cleaned = re.sub(r'\s{2,}', ' ', cleaned)
         cleaned = re.sub(r'^[,،\s]+', '', cleaned)
@@ -2693,6 +2710,12 @@ def _math_strip_source_citations(text: str) -> str:
         return cleaned.strip()
     except Exception:
         return text
+
+
+# Generic alias — the stripper is not math-specific (used across /pdf,
+# /bio, /chem, /qbm, etc. for both question and explanation fields), the
+# _math_ prefix is legacy from where it was first written.
+_strip_source_citations = _math_strip_source_citations
 
 
 def _math_normalize_digits(text: str) -> str:
