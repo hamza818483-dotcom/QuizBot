@@ -15035,7 +15035,12 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 calls_str = f" 🤖{calls_n}" if calls_n is not None else ""
                 lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str} ✓")
         elif s["current"]:
-            lines.append(f"⏳ Page {fmt_page(s['page'])}: Processing...")
+            _stage = s.get("stage") or "Processing..."
+            _pg_start = s.get("page_start_time")
+            _live_secs = int(time.time() - _pg_start) if _pg_start else 0
+            _calls_now = s.get("live_ai_calls")
+            _calls_now_str = f" 🤖{_calls_now}" if _calls_now is not None else ""
+            lines.append(f"⏳ Page {fmt_page(s['page'])}: {_stage} ⏱{_live_secs}s{_calls_now_str}")
         else:
             lines.append(f"⬜ Page {fmt_page(s['page'])}: Waiting")
     lines += [
@@ -15459,6 +15464,10 @@ async def _process_pdf_pages_inner(
             if is_cancelled(chat_id):
                 return last_mcqs, "cancelled"
             try:
+                _idx_for_stage = next((i for i, p in enumerate(pages) if p[0] == page_num_), None)
+                if _idx_for_stage is not None:
+                    page_status[_idx_for_stage]["stage"] = f"🤖 AI call করা হচ্ছে (attempt {_pg_attempt+1}/4)..."
+                    page_status[_idx_for_stage]["live_ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
                 _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count, exclude_groq_keys=accumulated_tried_keys)
                 accumulated_tried_keys = accumulated_tried_keys | set(_LAST_TRIED_GROQ_KEYS.get("keys") or set())
                 if _mcqs:
@@ -15491,6 +15500,8 @@ async def _process_pdf_pages_inner(
         else:
             page_num, img = page_tuple
         page_status[idx]["current"] = True
+        page_status[idx]["stage"] = "⏳ শুরু হচ্ছে..."
+        page_status[idx]["page_start_time"] = time.time()
         await edit_msg(chat_id, status_msg_id,
             _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
         _page_ai_calls_before = _get_ai_call_count(chat_id)
@@ -15631,6 +15642,7 @@ async def _process_pdf_pages_inner(
                 for i, mcq in enumerate(mcqs):
                   if is_cancelled(chat_id):
                       break
+                  page_status[idx]["stage"] = f"📮 Poll পাঠানো হচ্ছে {i+1}/{len(mcqs)}..."
                   try:
                     opts = mcq.get("options", [])[:4]
                     ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
@@ -15757,6 +15769,9 @@ async def _process_pdf_pages_inner(
             page_status[idx]["done"] = True
             page_status[idx]["current"] = False
             page_status[idx]["mcq"] = len(mcqs)
+            _pg_start_ts = page_status[idx].get("page_start_time")
+            if _pg_start_ts:
+                page_status[idx]["gen_seconds"] = round(time.time() - _pg_start_ts, 1)
             _model_counts = {}
             for _m in (mcqs or []):
                 _prov = _m.get("_provider", "Unknown")
