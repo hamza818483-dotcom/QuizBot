@@ -19927,7 +19927,7 @@ def _chem_flag_letter_ref_explanations(mcqs: list, page_num) -> None:
             )
 
 
-async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = False) -> list:
+async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = False, dm_user_id: int = None) -> list:
     """/chem GENERATION pipeline, rebuilt 2026-08-20 to mirror /bio's
     _bio_generate_per_topic_pages architecture exactly: Call 1 (batched
     heading-scan, ~1 per 3 pages) detects topic segment boundaries via
@@ -19944,24 +19944,63 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     batched heading-scan call reliably misses the MIDDLE page's heading
     (page 2 of a 1-2-3 batch), while the same page detects fine in a
     2-image batch. Gemini multi-image attention issue, not a prompt/
-    parsing bug -- smaller batches are the reliable fix."""
+    parsing bug -- smaller batches are the reliable fix.
+
+    2026-09-06: dm_user_id (if given) gets a LIVE DM as each heading-scan
+    batch completes, showing exactly which topic(s) were just found --
+    instead of waiting for all batches to finish before any topic
+    visibility (previously the "Detected Topics" block only appeared once,
+    after the entire scan phase was done). Also: heading-scan calls now
+    run on a SEPARATE Gemini key offset from MCQ-generation calls (offset
+    +1000 for scan vs the page-index-based offset used by generation),
+    so the two phases never compete for the same key mid-run -- keeps
+    both phases smooth/uninterrupted and avoids concentrated same-key
+    load that looks like scripted/abusive usage to the provider."""
     BATCH_SIZE = 2
     batches = [pages[i:i + BATCH_SIZE] for i in range(0, len(pages), BATCH_SIZE)]
     headings_by_page = {}
     _ai_call_count = [0]
     _ai_call_by_model = {}
+    _dm_seen_topics = set()
+    _dm_lock = asyncio.Lock()
 
     def _bump_chem_call(model):
         _ai_call_count[0] += 1
         _ai_call_by_model[model] = _ai_call_by_model.get(model, 0) + 1
 
-    async def _scan_batch(batch):
+    async def _dm_topic_update(batch_page_nums, new_topics):
+        """Send/append a live DM to the command-sender as soon as new
+        topic(s) are found in a heading-scan batch -- never blocks/raises
+        into the scan pipeline on failure."""
+        if not dm_user_id or not new_topics:
+            return
+        async with _dm_lock:
+            fresh = [t for t in new_topics if t not in _dm_seen_topics]
+            if not fresh:
+                return
+            for t in fresh:
+                _dm_seen_topics.add(t)
+            try:
+                lines = "\n".join(f"  • {t}" for t in fresh)
+                await send_msg(dm_user_id,
+                    f"🔎 Heading-scan (page {batch_page_nums[0]}-{batch_page_nums[-1]}): নতুন topic পাওয়া গেছে -\n{lines}")
+            except Exception as e:
+                logger.warning(f"[CHEM live-DM] failed to notify user {dm_user_id}: {e}")
+
+    async def _scan_batch(batch, _scan_key_offset):
         page_nums = [pn for pn, _ in batch]
         imgs = [img for _, img in batch]
         _bump_chem_call("Gemini")
         try:
             prompt = _build_chem_heading_scan_prompt_v2_batched(len(batch))
-            scan_txt = await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only)
+            # Dedicated key-offset slot for scan calls, isolated from
+            # generation calls (see docstring) -- set on the context var
+            # _qbm_gemini_raw_multi reads internally.
+            _tok = _qbm_key_offset_ctx.set(_scan_key_offset)
+            try:
+                scan_txt = await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only)
+            finally:
+                _qbm_key_offset_ctx.reset(_tok)
             all_headings = _parse_chem_heading_scan_v2(scan_txt)
             logger.warning(f"[CHEM pre-scan debug] batch pages={page_nums}: raw scan found {len(all_headings)} heading(s): {[(h.get('page_index'), h.get('heading_text'), h.get('vertical_position')) for h in all_headings]}")
         except Exception as e:
@@ -19972,6 +20011,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             idx = h.get("page_index")
             if isinstance(idx, (int, float)) and 1 <= int(idx) <= len(batch):
                 by_index.setdefault(int(idx), []).append(h)
+        _batch_new_topics = []
         for i, (page_num, _pg_img) in enumerate(batch, start=1):
             page_headings = by_index.get(i, [])
             # Code-level OCR cross-check (see _chem_merge_ocr_heading_candidates):
@@ -19979,6 +20019,12 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
             # this specific page, never removes anything the model reported.
             page_headings = _chem_merge_ocr_heading_candidates(page_headings, _pg_img)
             headings_by_page[page_num] = page_headings
+            for h in page_headings:
+                _t = (h.get("heading_text") or "").strip()
+                if _t and _is_sane_chem_heading(_t) and _chem_heading_score(h) >= 1:
+                    _batch_new_topics.append(_t)
+        if _batch_new_topics:
+            await _dm_topic_update(page_nums, _batch_new_topics)
 
     if status_msg_id:
         try:
@@ -19990,8 +20036,11 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     _scan_done = [0]
     _scan_lock = asyncio.Lock()
 
-    async def _scan_batch_tracked(b):
-        await _scan_batch(b)
+    async def _scan_batch_tracked(b, batch_idx):
+        # Each concurrent scan batch gets its own key-offset slot (+1000
+        # base to stay clear of generation's own offset range) so
+        # concurrent scan calls don't collide on the same key either.
+        await _scan_batch(b, _scan_key_offset=1000 + batch_idx)
         async with _scan_lock:
             _scan_done[0] += 1
             if status_msg_id:
@@ -20001,7 +20050,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 except Exception:
                     pass
 
-    await asyncio.gather(*[_scan_batch_tracked(b) for b in batches], return_exceptions=True)
+    await asyncio.gather(*[_scan_batch_tracked(b, _bi) for _bi, b in enumerate(batches)], return_exceptions=True)
 
     if status_msg_id:
         try:
@@ -20119,13 +20168,23 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         _current_job_chat_id_ctx.set(chat_id)
         if is_cancelled(chat_id):
             return []
+        # Explicit key-offset slot for generation calls, isolated from
+        # heading-scan's own +1000 range (see _chem_generate_per_topic_pages
+        # docstring) -- keeps scan and generation from ever competing for
+        # the same key mid-run, and also spreads concurrent generation
+        # units (2 in parallel via _PARALLEL) across different keys.
+        _gen_key_offset = (hash(str(page_num)) % 500)
         last_err = None
         for _attempt in range(3):
             if is_cancelled(chat_id):
                 return []
             try:
                 _bump_chem_call("Gemini")
-                gem, _gem_marker_only = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True, gemini_only=gemini_only)
+                _tok = _qbm_key_offset_ctx.set(_gen_key_offset)
+                try:
+                    gem, _gem_marker_only = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True, gemini_only=gemini_only)
+                finally:
+                    _qbm_key_offset_ctx.reset(_tok)
                 mcqs = _qbm_dedup_list(gem) if gem else []
                 mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
                 _chem_flag_letter_ref_explanations(mcqs, page_num)
@@ -20142,7 +20201,11 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                     # far cheaper than OpenRouter's scarce 11-key quota.
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: Gemini 0 MCQ, no marker (ambiguous) -- retrying Gemini once on next key before Groq")
                     _bump_chem_call("Gemini")
-                    gem_retry, _ = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True, gemini_only=gemini_only)
+                    _tok2 = _qbm_key_offset_ctx.set(_gen_key_offset + 1)
+                    try:
+                        gem_retry, _ = await _qbm_gemini_extract(crop, _chem_gen_prompt_v2, _return_marker_info=True, gemini_only=gemini_only)
+                    finally:
+                        _qbm_key_offset_ctx.reset(_tok2)
                     mcqs = _qbm_dedup_list(gem_retry) if gem_retry else []
                     mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
                     _chem_flag_letter_ref_explanations(mcqs, page_num)
@@ -24730,7 +24793,8 @@ async def _handle_chem_impl(msg: dict):
             await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ নতুন MCQ Generation শুরু হচ্ছে (নাম্বারিং heading topic detect সহ)...")
 
         extracted_pages = await _chem_generate_per_topic_pages(
-            chat_id, pages, subject, status_msg_id, gemini_only=True
+            chat_id, pages, subject, status_msg_id, gemini_only=True,
+            dm_user_id=msg["from"]["id"]
         )
 
         total_mcq_found = sum(

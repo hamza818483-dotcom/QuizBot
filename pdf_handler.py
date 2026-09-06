@@ -1526,7 +1526,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
 # while still keeping some ceiling as a sanity guard against runaway usage.
 import threading as _threading
 _PDF_CONVERT_LOCK = _threading.Semaphore(6)
-_PDF_MAX_PAGES_PER_CALL = 60
+_PDF_MAX_PAGES_PER_CALL = 200
 
 
 def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
