@@ -20087,7 +20087,14 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
     # true streaming. Every page now always gets its own single-page
     # generation path (_run_single_page), which was already 100%
     # content-safe before pairing was ever added.
-    _scan_tasks = [asyncio.create_task(_scan_batch(b, _scan_key_offset=1000 + _bi)) for _bi, b in enumerate(batches)]
+    _scan_tasks = {}
+
+    def _ensure_scan_task(_bi):
+        if _bi not in _scan_tasks and _bi < len(batches):
+            _scan_tasks[_bi] = asyncio.create_task(_scan_batch(batches[_bi], _scan_key_offset=1000 + _bi))
+        return _scan_tasks.get(_bi)
+
+    _ensure_scan_task(0)
 
     _carry_topic = [None]  # boxed: last confirmed heading text, flows strictly forward page-by-page
     _gen_tasks = []
@@ -20255,6 +20262,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
         await _chem_safe_dash_edit()
 
         await _scan_tasks[_batch_idx]  # awaited in strict order -- carry-topic must flow forward correctly
+        _ensure_scan_task(_batch_idx + 1)  # prefetch ONLY the next batch's scan (lookahead=1) -- keeps scan from racing far ahead of generation, so both stay evenly paced like /unmesh
 
         for pn in page_nums:
             _i = _idx_by_page[pn]
