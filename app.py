@@ -2641,9 +2641,15 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"in any grammatical form. Also forbidden: \"দেখা যাচ্ছে\", \"লিখা আছে\", "
         f"\"বর্ণিত আছে\", \"উল্লেখ আছে\", \"দেওয়া আছে\", \"প্রদত্ত\", \"উপরে দেখানো\" and English "
         f"equivalents (\"as shown in the figure/box/table/page\", \"mentioned in the "
-        f"text/page\", \"as given above\"). Always state the fact directly, as "
-        f"general knowledge — never imply it came from a shown image/box/table/page. "
-        f"Self-check every MCQ for these roots before output; rewrite if found.\n\n"
+        f"text/page\", \"as given above\"). 🚨 \"প্রদত্ত\" itself is banned in ANY "
+        f"combination whatsoever — \"প্রদত্ত তথ্য অনুসারে\", \"প্রদত্ত ছক অনুযায়ী\", "
+        f"\"প্রদত্ত অনুচ্ছেদে\", or প্রদত্ত + any other noun/verb — none of these may "
+        f"ever appear, in the question OR the explanation. The correct source "
+        f"for a fact is NEVER stated at all — a fact is just stated as itself, "
+        f"with zero reference to where it came from. Always state the fact "
+        f"directly, as general knowledge — never imply it came from a shown "
+        f"image/box/table/page/given-data. Self-check every MCQ for these "
+        f"roots before output; rewrite if found.\n\n"
 
         f"For EACH MCQ, give 'exp_bbox': a TIGHT bounding box centered on the exact "
         f"line/paragraph/table the answer came from (minimal margin, no neighboring "
@@ -2684,6 +2690,11 @@ def _strip_q_numbering(q: str) -> str:
     return cur.strip()
 
 _SOURCE_REF_PATTERNS = [
+    # 2026-09-07: fully generic প্রদত্ত catch-all — bans "প্রদত্ত" combined with
+    # up to 2 following words (covers any noun the model invents, not just
+    # the fixed list below); stays tight (max 2 words) so it never eats
+    # unrelated downstream sentence content.
+    r'প্রদত্ত(?:\s+\S+){0,2}',
     r'প্রদত্ত\s*(?:হিসাব|গণনা|ছক|তথ্য|অনুচ্ছেদ|টেবিল|চিত্র|বর্ণনা|অংশ)(?:ে|র|েরই?)?\s*অনুসারে',
     r'প্রদত্ত\s*(?:হিসাব|গণনা|ছক|তথ্য|অনুচ্ছেদ|টেবিল|চিত্র|বর্ণনা)(?:ে|র)?নুসারে',
     r'প্রদত্ত\s+(?:হিসাব|গণনা|ছক|তথ্য|অনুচ্ছেদ|টেবিল|চিত্র|বর্ণনা)(?:ে|র)?',
