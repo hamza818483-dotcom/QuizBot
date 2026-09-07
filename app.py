@@ -715,7 +715,27 @@ async def _create_forum_topic(channel_id: str, name: str) -> int | None:
     return None
 
 
-async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool, cancel_check: callable = None) -> tuple:
+def lms_get_pre_message(subject: str, exam_title: str, topic: str, count: int, first_link: str = "") -> str:
+    """LMS Readymade-send format:
+    🟥(Sub Name)
+    ◼️(Exam Main Name)
+    ◾(Topic Name)
+    ✅MCQ Count: N
+    🔗First Poll Link: ..."""
+    sep = "▬▬▬▬▬▬▬▬▬▬"
+    text = (
+        f"🟥{subject or 'MCQ'}\n"
+        f"◼️{exam_title or ''}\n"
+        f"◾{topic or ''}\n"
+        f"{sep}\n"
+        f"✅MCQ Count: {count}\n"
+    )
+    if first_link:
+        text += f"🔗First Poll Link:\n{first_link}"
+    return text
+
+
+async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool, cancel_check: callable = None, subject: str = "", exam_title: str = "") -> tuple:
     """Sends one topic-batch: pre-message (topic name) -> polls (reply to
     pre-msg) -> Style-01 PDF + inline buttons -> ending message. Same shape
     as one /csvS batch iteration. Returns sent poll count. Raises on the
@@ -732,7 +752,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     thread_id is resolved by the caller (job-level, once per exam) — every
     topic-batch for the same exam send lands inside that single forum topic,
     rather than each batch getting its own topic."""
-    pre_text = csv_get_pre_message(topic, topic, len(mcqs))
+    pre_text = lms_get_pre_message(subject, exam_title, topic, len(mcqs))
     pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
     if thread_id:
         pre_send_data["message_thread_id"] = thread_id
@@ -761,14 +781,14 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
 
     if pre_msg_id and first_link:
         try:
-            await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(topic, topic, len(mcqs), first_link))
+            await edit_msg(channel_id, pre_msg_id, lms_get_pre_message(subject, exam_title, topic, len(mcqs), first_link))
         except Exception as e:
             logger.warning(f"[LMS-Send] pre-msg link edit failed: {e}")
 
     pdf_bytes = await _generate_style1_pdf_guaranteed(mcqs, topic, chat_id=0)
     if pdf_bytes:
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
-        btn_kb = await _csv_pre_buttons(batch_cache_id)
+        btn_kb = await _csv_pre_buttons_no_premium(batch_cache_id)
         pdf_doc_r = await send_document(
             channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
             caption=csv_get_pdf_caption(topic),
@@ -786,23 +806,8 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
                 except Exception as e:
                     logger.warning(f"[LMS-Send] PDF button attach failed: {e}")
 
-    ending = csv_get_ending_message(topic, sent, first_link, ask_score=ask_score)
-    end_send_data = {
-        "chat_id": channel_id, "text": ending, "parse_mode": "HTML",
-        "disable_web_page_preview": True, "reply_to_message_id": pre_msg_id
-    }
-    if thread_id:
-        end_send_data["message_thread_id"] = thread_id
-    end_r = await tg_post("sendMessage", end_send_data)
-    if not end_r.get("ok"):
-        end_r = await tg_post("sendMessage", end_send_data)  # one retry
-    if end_r.get("ok"):
-        await db_update_cache(batch_cache_id, {
-            "channel_id": channel_id, "end_msg_id": end_r["result"]["message_id"]
-        })
-
     return sent, first_link, batch_cache_id
-async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = ""):
+async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = ""):
     """batches: [{"topic": str, "mcqs": [...]}, ...] — one entry per topic
     (or a single entry when the exam has no topic split / no batch-size
     split requested). Sent sequentially, same as /csvS's batch loop.
@@ -874,7 +879,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             if not mcqs:
                 continue
             try:
-                sent, first_link, batch_cache_id = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check)
+                sent, first_link, batch_cache_id = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check, subject=subject, exam_title=exam_title)
                 sent_total += sent
                 all_mcqs.extend(mcqs)
                 if first_link:
@@ -1006,6 +1011,7 @@ async def lms_send_channel(request: Request):
     batches = data.get("batches") or []
     exam_id = str(data.get("exam_id") or "").strip()
     exam_title = str(data.get("exam_title") or "").strip()
+    subject = str(data.get("subject") or "").strip()
 
     if not channel_id:
         return JSONResponse({"error": "channel_id is required"}, status_code=400)
@@ -1019,7 +1025,7 @@ async def lms_send_channel(request: Request):
         "batches_done": 0, "batches_total": len(batches), "error": None,
         "exam_id": exam_id, "cancel_requested": False,
     }
-    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title))
+    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject))
     return JSONResponse({"ok": True, "job_id": job_id})
 
 
