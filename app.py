@@ -18549,7 +18549,115 @@ def _build_bio_heading_scan_prompt() -> str:
     existing ones with printed qsn_no), this scan is matched to generated
     MCQs via their page-sequential index instead of a printed serial
     number -- see _bio_apply_heading_scan below."""
-    return (
+    return _BIO_HEADING_SCAN_PROMPT_BASE
+
+
+# 2026-09-07: /bio<paper><chapter> hardcoded topic list feature.
+# BIO_CHAPTER_TOPICS[(paper, chapter)] = ["Topic 1 name", "Topic 2 name", ...]
+# in the EXACT serial order they appear in that chapter. When a command like
+# /bio11 (paper=1, chapter=1) or /bio212 (paper=2, chapter=12) is used, the
+# matching list is injected into the heading-scan prompt as a KNOWN,
+# SERIALLY-ORDERED reference list -- the model is told these are the real
+# topics in this exact sequence, and should match each detected heading
+# candidate against the NEXT expected name in the list rather than reading
+# an ambiguous/faint heading purely freeform. This does NOT skip heading-scan
+# (page/segment boundaries are still visually detected) -- it only removes
+# naming ambiguity and lets a expected-next-topic check catch a missed or
+# misread heading. Populate below per (paper, chapter) as lists are provided;
+# an unlisted (paper, chapter) falls back to fully freeform detection
+# (unchanged existing behavior).
+BIO_CHAPTER_TOPICS: dict[tuple[int, int], list[str]] = {
+    # (1, 1): ["Topic name 1", "Topic name 2", ...],
+}
+
+
+def _parse_bio_command_paper_chapter(text: str):
+    """Parse '/bio<P><C>' (e.g. /bio11 -> paper 1 ch 1, /bio212 -> paper 2
+    ch 12) from the raw command text. P is always the single first digit
+    right after 'bio'; C is whatever digit(s) follow it, 1-2 digits (chapter
+    1-24 per paper... actually 1-12 per paper here). Returns (paper, chapter)
+    ints, or None if the command has no such digit suffix (plain /bio, or
+    /bio with -p/-m flags but no leading digits) -- callers treat None as
+    "no hardcoded topic list, use freeform detection"."""
+    m = re.match(r'^/bio(\d)(\d{1,2})(?:[\s@]|$)', text.strip())
+    if not m:
+        return None
+    paper, chapter = int(m.group(1)), int(m.group(2))
+    return (paper, chapter)
+
+
+def _build_bio_heading_scan_prompt_known_topics(known_topics: list) -> str:
+    """Variant of _build_bio_heading_scan_prompt that additionally supplies
+    a hardcoded, serially-ordered list of the chapter's real topic names
+    (from BIO_CHAPTER_TOPICS). The visual 4-signal detection rules are
+    UNCHANGED -- this only adds a matching/naming layer on top: once a
+    visual candidate passes the signal-score gate, its heading_text should
+    be matched to the closest name in this known list (fixing OCR/reading
+    noise in the printed heading) rather than trusted verbatim, and if the
+    page shows nothing matching the NEXT unconsumed topic in serial order,
+    that's a hint to look harder before concluding zero headings on this
+    page."""
+    numbered = "\n".join(f"  {i+1}. {t}" for i, t in enumerate(known_topics))
+    known_block = (
+        "\n\n📚 KNOWN TOPIC LIST FOR THIS CHAPTER (pre-verified, in EXACT serial "
+        "order as they appear in the book):\n" + numbered + "\n\n"
+        "USE THIS LIST AS FOLLOWS:\n"
+        "  - These are the ONLY real topics in this chapter, in this exact order. No other "
+        "topic names should appear.\n"
+        "  - When a visual candidate line passes the 4-signal gate above, match its text "
+        "against this list and use the list's EXACT spelling/name in your heading_text output "
+        "(fixes OCR noise, font-rendering artifacts, or a partially-obscured/faint print run "
+        "that garbles a character or two) -- do not invent a name not on this list.\n"
+        "  - Track which topics from this list you've already matched on earlier pages "
+        "(earlier images in this batch). If you're now looking at a page and the NEXT "
+        "unconsumed topic in serial order hasn't appeared yet, look more carefully for it "
+        "before concluding this page has zero headings -- a faint, small, or partially-covered "
+        "heading is still real if the list confirms it should be here next.\n"
+        "  - If a candidate line's content doesn't match ANY name on this list even loosely, "
+        "treat it with normal suspicion per the content-relevance check above."
+    )
+    return _BIO_HEADING_SCAN_PROMPT_BASE + known_block
+
+
+def _build_bio_heading_scan_prompt_batched_known_topics(n_pages: int, known_topics: list) -> str:
+    """Batched (multi-page-per-call) variant that also carries the known
+    topic list -- shares the same page-index wrapping as
+    _build_bio_heading_scan_prompt_batched, applied on top of
+    _build_bio_heading_scan_prompt_known_topics instead of the plain base
+    prompt."""
+    base = _build_bio_heading_scan_prompt_known_topics(known_topics)
+    header = (
+        f"⚠️ MULTI-PAGE INPUT: you are being given {n_pages} SEPARATE page images in this call, "
+        f"in order (the 1st image is Page 1, 2nd is Page 2, ..., {n_pages}th is Page {n_pages}). "
+        f"Analyze EACH page independently using the exact same rules below — a heading detected on "
+        f"Page 2 has its own vertical_position measured within Page 2's own height (0.0-1.0), "
+        f"NEVER relative to the combined stack of all pages. Do not let content on one page "
+        f"influence heading detection on another page. Report a \"page_index\" field for every "
+        f"heading found, stating which page (1-indexed per the order above) it belongs to. When "
+        f"tracking the known-topic-list serial order below, treat these {n_pages} pages as one "
+        f"continuous sequence (Page 1's content comes before Page 2's, etc).\n\n"
+    )
+    schema_old = (
+        '[{"heading_text": "...", "vertical_position": 0.0, "centered": true, '
+        '"english_bracket_right": true, "bangla_number_prefix": true, "bold_larger_font": true, '
+        '"content_matches": true}]'
+    )
+    schema_new = (
+        '[{"page_index": 1, "heading_text": "...", "vertical_position": 0.0, "centered": true, '
+        '"english_bracket_right": true, "bangla_number_prefix": true, "bold_larger_font": true, '
+        '"content_matches": true}]'
+    )
+    body = base.replace(schema_old, schema_new)
+    body = body.replace(
+        "If there are zero genuine topic headings on this page, output exactly [].",
+        f"Output ONE combined JSON array covering all {n_pages} pages together (not one array per "
+        f"page). If a page has zero genuine topic headings, it simply contributes no entries to "
+        f"the array — if NO page has any heading at all, output exactly []."
+    )
+    return header + body
+
+
+_BIO_HEADING_SCAN_PROMPT_BASE = (
         "Find ONLY genuine topic-heading lines on this page — ignore all body/paragraph text.\n\n"
         "‼️ HARD RULE — CHECK ALL 4 SIGNALS BELOW FOR EVERY CANDIDATE BOLD LINE, IN THIS ORDER, "
         "AND SCORE IT: a candidate line that matches MORE of these signals together is more "
@@ -18799,7 +18907,7 @@ def _bio_filter_offtopic_mcqs(mcqs: list, heading_text: str) -> list:
     return mcqs
 
 
-async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None) -> list:
+async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, known_topics: list = None) -> list:
     """/bio ACCURACY FIX: 2 calls per page total.
     Call 1 (batched, ~1 per 3 pages): heading-scan detects topic segments.
     Call 2 (1 per page): single generation call with the detected segment
@@ -18822,7 +18930,8 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
         page_nums = [pn for pn, _ in batch]
         imgs = [img for _, img in batch]
         try:
-            prompt = _build_bio_heading_scan_prompt_batched(len(batch))
+            prompt = (_build_bio_heading_scan_prompt_batched_known_topics(len(batch), known_topics)
+                      if known_topics else _build_bio_heading_scan_prompt_batched(len(batch)))
             scan_txt = await _qbm_gemini_raw_multi(imgs, prompt)
             all_headings = _parse_bio_heading_scan(scan_txt)
         except Exception as e:
@@ -24074,8 +24183,13 @@ async def _handle_bio_impl(msg: dict):
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Generation শুরু হচ্ছে (topic detect সহ)...")
 
+        pc = _parse_bio_command_paper_chapter(text)
+        _known_topics = BIO_CHAPTER_TOPICS.get(pc) if pc else None
+        if pc and not _known_topics:
+            logger.info(f"[BIO] /bio{pc[0]}{pc[1]} parsed (paper {pc[0]}, chapter {pc[1]}) but no hardcoded topic list found for it -- using freeform detection.")
+
         generated_pages = await _bio_generate_per_topic_pages(
-            chat_id, pages, subject, status_msg_id
+            chat_id, pages, subject, status_msg_id, known_topics=_known_topics
         )
 
         total_mcq_found = sum(len(mcqs) for _, _, mcqs in generated_pages)
