@@ -31278,7 +31278,7 @@ async def handle_message(msg: dict):
         return
     _math_reply = msg.get("reply_to_message")
     _math_is_image_reply = bool(_math_reply and (_math_reply.get("photo") or (_math_reply.get("document") and _math_reply.get("document", {}).get("mime_type", "").startswith("image/"))))
-    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm") and not text.startswith("/pdfs")) or text.startswith("/bangla") or text.startswith("/boro") or (text.startswith("/math") and not _math_is_image_reply):
+    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm") and not text.startswith("/pdfs")) or text.startswith("/bangla") or text.startswith("/boro") or text.startswith("/rd") or (text.startswith("/math") and not _math_is_image_reply):
         if not is_auth:
             if is_private:
                 await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
@@ -31289,6 +31289,8 @@ async def handle_message(msg: dict):
             _cmd_prefix = "/boro"
         elif text.startswith("/math"):
             _cmd_prefix = "/math"
+        elif text.startswith("/rd"):
+            _cmd_prefix = "/rd"
         else:
             _cmd_prefix = "/pdf"
         arg = text.replace(_cmd_prefix, "").strip().lower()
