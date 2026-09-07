@@ -2709,6 +2709,11 @@ _SOURCE_REF_PATTERNS = [
     # "পৃষ্ঠার ছক অনুযায়ী" (noun + র/এর + another source-noun + verb).
     r'(?:পৃষ্ঠার?|উদ্দীপকের?|অনুচ্ছেদের?)?\s*'
     r'(?:ছক|তথ্য|টেবিল|চিত্র|অনুচ্ছেদ|উদ্দীপক|পৃষ্ঠা|টেক্সট)\s*(?:অনুযায়ী|অনুসারে)',
+    # 2026-09-07: brand/source-NAME + তথ্য/ছক/etc + অনুযায়ী/অনুসারে — e.g.
+    # "RETINA Exclusive তথ্য অনুযায়ী", "ATLAS ছক অনুসারে" — up to 3 preceding
+    # words (name can be English/Bangla/mixed-case) consumed along with the
+    # noun+verb, so the brand/source name itself doesn't survive the strip.
+    r'(?:[A-Za-z]+\s*){1,3}(?:ছক|তথ্য|টেবিল|চিত্র|অনুচ্ছেদ|উদ্দীপক|পৃষ্ঠা|টেক্সট)\s*(?:অনুযায়ী|অনুসারে)',
     # 2026-09-06: আরও source-reference leak patterns —
     # "ছবিতে দেওয়া লেবেল অনুযায়ী", "উপন্যাস বিভাগে", "টেক্সটের অন্যান্য গ্রন্থ অংশে",
     # "টেক্সটের কবিতা অংশে" ইত্যাদি (টেক্সট/ছবির কোনো section/label/বিভাগ reference)
