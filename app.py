@@ -15809,48 +15809,63 @@ async def _process_pdf_pages_inner(
     new_job_id(chat_id)
     set_active_job(chat_id, f"PDF MCQ generation + Poll posting ({file_name}, page-by-page)")
 
-    # /rd-ONLY prefetch: while page N's poll/CSV/image posting is happening,
-    # page N+1's generation runs concurrently in the background, so posting
-    # latency never blocks the next page's AI call. Every other command
-    # (/pdf, /qbm, /onu, /tf, /pdfs) keeps the strictly-serial behavior
-    # untouched — this dict is only ever populated when _RD_MODE is True.
+    # /rd-ONLY prefetch: while page N is posting, up to _RD_PREFETCH_WINDOW
+    # pages ahead run generation+image-encoding concurrently in the
+    # background, so posting speed never blocks/limits how far ahead
+    # generation gets. Every other command (/pdf, /qbm, /onu, /tf, /pdfs)
+    # keeps the strictly-serial behavior untouched — these structures are
+    # only ever populated when _RD_MODE is True.
+    #
+    # Window kept modest (2-5, default 3) rather than "generate the whole
+    # PDF at once" — HF Spaces runs on a shared/basic CPU tier, and racing
+    # every page's AI calls simultaneously multiplies concurrent
+    # Gemini/Groq key usage, which is what caused the mass-ban incident
+    # before. A small rolling window gets nearly all the speed benefit
+    # (posting is never the bottleneck) without that risk. RAM cost is
+    # negligible either way (a handful of page images + JPEG bytes).
+    _RD_PREFETCH_WINDOW = 3
     _rd_prefetch_tasks = {}
     # /rd-ONLY: image bytes (JPEG-encoded + hardened) computed ahead of time
     # during prefetch, so by the time the main loop reaches this page for
     # posting, the bytes are already sitting ready -- zero conversion delay
-    # right before send_photo. Kept to at most ~1 page ahead (same lifetime
-    # as _rd_prefetch_tasks), so RAM cost stays negligible; NOT done for the
-    # whole PDF up front (unnecessary memory for large PDFs, no real gain
-    # since encoding is already fast/CPU-only, never the actual bottleneck).
+    # right before send_photo.
     _rd_img_bytes_cache = {}
 
-    def _rd_kick_next(next_idx):
-        if next_idx < len(pages):
-            _next_tuple = pages[next_idx]
-            _next_page_num = _next_tuple[0]
-            if _next_page_num not in _rd_prefetch_tasks:
-                _rd_prefetch_tasks[_next_page_num] = _spawn_task(_rd_chain_gen(next_idx))
+    def _rd_fill_window(upto_idx_exclusive):
+        """Ensure prefetch tasks are running for every page in the window
+        [upto_idx_exclusive, upto_idx_exclusive + _RD_PREFETCH_WINDOW),
+        skipping any page already prefetching or already consumed by the
+        main loop. Called after the window's leading edge advances (i.e.
+        whenever any in-window page's generation finishes), so the window
+        keeps sliding forward continuously instead of only ever having one
+        task in flight."""
+        for _off in range(_RD_PREFETCH_WINDOW):
+            _i = upto_idx_exclusive + _off
+            if _i >= len(pages):
+                break
+            _pn = pages[_i][0]
+            if _pn not in _rd_prefetch_tasks:
+                _rd_prefetch_tasks[_pn] = _spawn_task(_rd_chain_gen(_i))
 
     async def _rd_chain_gen(page_idx):
-        """/rd-only chained prefetch worker: generates this page's MCQs,
-        then — the INSTANT its own generation is done, not waiting for this
-        page's poll/CSV/image posting — schedules the next page's generation
-        too. This makes generation a continuously-running pipeline that
-        always tries to stay ahead of posting, rather than a single
-        one-page lookahead that would re-block once posting catches up.
+        """/rd-only rolling-window prefetch worker: generates this page's
+        MCQs (and its JPEG image bytes, concurrently, since encoding is
+        independent of the AI call), then — the INSTANT this page's own
+        generation is done, not waiting for ANY page's poll/CSV/image
+        posting — refills the prefetch window so the next page(s) beyond
+        the current window start generating too. This keeps generation
+        running as a continuous rolling-window pipeline, always trying to
+        stay _RD_PREFETCH_WINDOW pages ahead of posting, rather than a
+        single one-page lookahead that would re-block once posting catches
+        up.
 
         Also marks page_status[page_idx] as actively in-progress (not
         "⬜ Waiting") the moment this background generation actually starts,
         so the live dashboard reflects reality — a prefetched page really is
         being generated right now, even though the main loop hasn't reached
-        it yet.
-
-        Also converts this page's image to JPEG bytes (hardened
-        image_to_bytes) concurrently with generation -- encoding is
-        independent of the AI call, so there's no reason to wait until
-        posting time to pay that (small but nonzero) cost."""
+        it yet."""
         page_status[page_idx]["current"] = True
-        page_status[page_idx]["stage"] = "🤖 AI call করা হচ্ছে (prefetch, পরবর্তী পেজের সাথে সমান্তরালে)..."
+        page_status[page_idx]["stage"] = "🤖 AI call করা হচ্ছে (prefetch, সমান্তরালে)..."
         page_status[page_idx]["page_start_time"] = time.time()
         page_status[page_idx]["_ai_calls_before"] = _get_ai_call_count(chat_id)
         _pg_tuple = pages[page_idx]
@@ -15864,7 +15879,7 @@ async def _process_pdf_pages_inner(
             result = await _gen_with_retry(_pg_img, _pg_num)
         finally:
             if _RD_MODE.get() and not is_cancelled(chat_id):
-                _rd_kick_next(page_idx + 1)
+                _rd_fill_window(page_idx + 1)
         return result
 
     async def _gen_with_retry(img_, page_num_):
@@ -15934,6 +15949,13 @@ async def _process_pdf_pages_inner(
             logger.warning(f"[PDF] Page {page_num_} relaxed pass crashed: {_relaxed_e}")
 
         return last_mcqs, last_error
+
+    # /rd: kick off the rolling window immediately, before the main loop
+    # even starts on page 1 -- so pages 2..window-size begin generating in
+    # the background right away, in parallel with page 1's own generation,
+    # instead of only starting once page 1 finishes.
+    if _RD_MODE.get() and not skip_generate:
+        _rd_fill_window(1)
 
     for idx, page_tuple in enumerate(pages):
         if is_cancelled(chat_id):
@@ -16029,16 +16051,18 @@ async def _process_pdf_pages_inner(
                     # must fully finish before the next page's generation
                     # even starts, no prefetch/overlap across pages.
                     #
-                    # /rd EXCEPTION: a self-chaining prefetch pipeline.
-                    # Generation for page N+1 is kicked off the moment page
-                    # N's generation finishes (not waiting for posting), and
-                    # THAT task, when it finishes, immediately kicks off
-                    # N+2 itself -- so generation keeps running continuously,
-                    # always trying to stay ahead, and is never re-blocked
-                    # waiting on posting speed for any later page either.
+                    # /rd EXCEPTION: rolling-window prefetch pipeline (see
+                    # _rd_fill_window/_rd_chain_gen above). Up to
+                    # _RD_PREFETCH_WINDOW pages' generation run concurrently
+                    # ahead of posting at all times, so generation never
+                    # waits on posting speed for any page.
                     _gen_task = _rd_prefetch_tasks.pop(page_num, None)
                     if _gen_task is None:
-                        _gen_task = _spawn_task(_gen_with_retry(img, page_num))
+                        # Not yet prefetched (e.g. the very first page,
+                        # before the window had a chance to start) — route
+                        # through the same window-aware worker so it also
+                        # gets image-byte prefetching and window fill-in.
+                        _gen_task = _spawn_task(_rd_chain_gen(idx)) if _RD_MODE.get() else _spawn_task(_gen_with_retry(img, page_num))
                     ACTIVE_GEN_TASK[chat_id] = _gen_task
                     try:
                         mcqs, gen_error = await _gen_task
@@ -16049,7 +16073,7 @@ async def _process_pdf_pages_inner(
                             ACTIVE_GEN_TASK.pop(chat_id, None)
 
                     if _RD_MODE.get() and not is_cancelled(chat_id):
-                        _rd_kick_next(idx + 1)
+                        _rd_fill_window(idx + 1)
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
