@@ -15766,6 +15766,29 @@ async def _process_pdf_pages_inner(
     # untouched — this dict is only ever populated when _RD_MODE is True.
     _rd_prefetch_tasks = {}
 
+    def _rd_kick_next(next_idx):
+        if next_idx < len(pages):
+            _next_tuple = pages[next_idx]
+            _next_page_num = _next_tuple[0]
+            if _next_page_num not in _rd_prefetch_tasks:
+                _rd_prefetch_tasks[_next_page_num] = _spawn_task(_rd_chain_gen(next_idx))
+
+    async def _rd_chain_gen(page_idx):
+        """/rd-only chained prefetch worker: generates this page's MCQs,
+        then — the INSTANT its own generation is done, not waiting for this
+        page's poll/CSV/image posting — schedules the next page's generation
+        too. This makes generation a continuously-running pipeline that
+        always tries to stay ahead of posting, rather than a single
+        one-page lookahead that would re-block once posting catches up."""
+        _pg_tuple = pages[page_idx]
+        _pg_num, _pg_img = _pg_tuple[0], _pg_tuple[1]
+        try:
+            result = await _gen_with_retry(_pg_img, _pg_num)
+        finally:
+            if _RD_MODE.get() and not is_cancelled(chat_id):
+                _rd_kick_next(page_idx + 1)
+        return result
+
     async def _gen_with_retry(img_, page_num_):
         """
         PERMANENT FIX — a page must NEVER be silently skipped/dropped just
@@ -15918,11 +15941,13 @@ async def _process_pdf_pages_inner(
                     # must fully finish before the next page's generation
                     # even starts, no prefetch/overlap across pages.
                     #
-                    # /rd EXCEPTION: use a prefetched task if one is already
-                    # running (kicked off after the PREVIOUS page's mcqs came
-                    # back, below), so this page's generation overlaps with
-                    # the previous page's poll/CSV/image posting instead of
-                    # waiting behind it.
+                    # /rd EXCEPTION: a self-chaining prefetch pipeline.
+                    # Generation for page N+1 is kicked off the moment page
+                    # N's generation finishes (not waiting for posting), and
+                    # THAT task, when it finishes, immediately kicks off
+                    # N+2 itself -- so generation keeps running continuously,
+                    # always trying to stay ahead, and is never re-blocked
+                    # waiting on posting speed for any later page either.
                     _gen_task = _rd_prefetch_tasks.pop(page_num, None)
                     if _gen_task is None:
                         _gen_task = _spawn_task(_gen_with_retry(img, page_num))
@@ -15935,17 +15960,8 @@ async def _process_pdf_pages_inner(
                         if ACTIVE_GEN_TASK.get(chat_id) is _gen_task:
                             ACTIVE_GEN_TASK.pop(chat_id, None)
 
-                    # /rd-ONLY: immediately kick off the NEXT page's
-                    # generation in the background so it runs concurrently
-                    # with THIS page's poll/CSV/image posting below.
                     if _RD_MODE.get() and not is_cancelled(chat_id):
-                        _next_idx = idx + 1
-                        if _next_idx < len(pages):
-                            _next_tuple = pages[_next_idx]
-                            _next_page_num, _next_img = _next_tuple[0], _next_tuple[1]
-                            if _next_page_num not in _rd_prefetch_tasks:
-                                _rd_prefetch_tasks[_next_page_num] = _spawn_task(
-                                    _gen_with_retry(_next_img, _next_page_num))
+                        _rd_kick_next(idx + 1)
             if not mcqs:
                 page_status[idx]["current"] = False
                 page_status[idx]["done"] = True
