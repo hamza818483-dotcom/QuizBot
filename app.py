@@ -932,31 +932,31 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     logger.warning(f"[LMS-Send] merged PDF send failed: {e}")
 
             # Master summary — header once (Exam Name / Total Topics / Total
-            # MCQ), then one block per topic (Topic name in quotes / First
-            # Poll Link / Quiz Link / Website Exam link), separated by a
-            # bold divider. Exam Name is NOT repeated per topic — only in
+            # MCQ), then one Telegram blockquote per topic (each topic's
+            # First Poll / Quiz / Website Exam links wrapped in its own
+            # <blockquote> so Telegram renders it as a visually distinct
+            # quoted block) — Exam Name is NOT repeated per topic, only in
             # the header. Sent last, in the same thread/chat, for BOTH group
-            # (inside the forum topic) and channel — the per-topic
-            # pre/poll/PDF/ending flow above is identical for both; only
-            # this summary is new.
+            # (inside the forum topic) and channel.
             if batch_links:
-                sep = "▬▬▬▬▬▬▬▬▬▬"
                 header = (
-                    f"🟥{exam_title or 'MCQ'}\n"
+                    f"🟥{_html_escape(exam_title or 'MCQ')}\n"
                     f"🌟Total Topic: {len(batch_links)}\n"
                     f"📌Total MCQ: {sent_total}"
                 )
                 blocks = [header]
                 for _part_n, link, count, batch_topic, quiz_link, exam_link in batch_links:
-                    blocks.append(
-                        f"✅\"{batch_topic}\"\n\n"
-                        f"🔗First Poll Link:\n{link}\n\n"
-                        f"🔗Quiz Link:\n{quiz_link}\n\n"
-                        f"🔗Website Exam Link:\n{exam_link}"
+                    quote_body = (
+                        f"✅{_html_escape(batch_topic)}\n\n"
+                        f"🔗First Poll Link:\n{_html_escape(link)}\n\n"
+                        f"🔗Quiz Link:\n{_html_escape(quiz_link)}\n\n"
+                        f"🔗Website Exam Link:\n{_html_escape(exam_link)}"
                     )
-                summary_text = f"\n{sep}\n".join(blocks)
+                    blocks.append(f"<blockquote>{quote_body}</blockquote>")
+                summary_text = "\n\n".join(blocks)
                 summary_data = {
                     "chat_id": channel_id, "text": summary_text,
+                    "parse_mode": "HTML",
                     "disable_web_page_preview": True,
                 }
                 if thread_id:
