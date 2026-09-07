@@ -814,6 +814,17 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
     subtopic. Falls back to no-thread-id if the chat isn't forum-enabled or
     topic creation fails."""
     job = LMS_SEND_JOBS[job_id]
+    dm_msg_id = None
+    dm_kb = {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": f"lmscancel_{job_id}"}]]}
+
+    def _dm_progress_text(status_line: str) -> str:
+        return (
+            f"📤 LMS Send — {exam_title or 'MCQ'}\n"
+            f"{status_line}\n"
+            f"✅ পাঠানো হয়েছে: {job.get('sent_total', 0)}\n"
+            f"📦 ব্যাচ: {job.get('batches_done', 0)}/{job.get('batches_total', len(batches))}"
+        )
+
     try:
         is_admin, admin_err = await _check_bot_admin(channel_id)
         if not is_admin:
@@ -824,6 +835,20 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         chat_type = await _get_chat_type(channel_id)
         ask_score = chat_type == "channel"
         job["status"] = "running"
+
+        # DM progress + Cancel button to the bot owner — mirrors the website
+        # card's own progress bar/Stop button, so an admin watching Telegram
+        # (not the LMS tab) can also track and stop this job.
+        try:
+            dm_r = await tg_post("sendMessage", {
+                "chat_id": OWNER_ID,
+                "text": _dm_progress_text("⏳ শুরু হচ্ছে..."),
+                "reply_markup": dm_kb,
+            })
+            if dm_r.get("ok"):
+                dm_msg_id = dm_r["result"]["message_id"]
+        except Exception as e:
+            logger.warning(f"[LMS-Send] DM progress start failed: {e}")
 
         if not thread_id:
             auto_thread_id = await _create_forum_topic(channel_id, exam_title or (batches[0].get("topic") if batches else "MCQ"))
@@ -838,6 +863,11 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         for b_idx, batch in enumerate(batches):
             if job.get("cancel_requested"):
                 job["status"] = "cancelled"
+                if dm_msg_id:
+                    try:
+                        await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("🛑 বন্ধ করা হয়েছে"))
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send] DM progress cancel-edit failed: {e}")
                 return
             topic = batch.get("topic") or "Special MCQ By ATLAS"
             mcqs = batch.get("mcqs") or []
@@ -856,11 +886,21 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job["sent_total"] = sent_total
             job["batches_done"] = b_idx + 1
             job["pct"] = int((b_idx + 1) * 100 / total_batches) if total_batches else 100
+            if dm_msg_id:
+                try:
+                    await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("⏳ চলছে..."), reply_markup=dm_kb)
+                except Exception as e:
+                    logger.warning(f"[LMS-Send] DM progress update failed: {e}")
             if job.get("cancel_requested"):
                 # Stopped mid-batch (checked above, inside the poll loop) —
                 # stop dispatching further batches right away instead of
                 # waiting for the top-of-loop check on the next iteration.
                 job["status"] = "cancelled"
+                if dm_msg_id:
+                    try:
+                        await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("🛑 বন্ধ করা হয়েছে"))
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send] DM progress cancel-edit failed: {e}")
                 return
 
         if job.get("cancel_requested"):
@@ -912,10 +952,20 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     logger.warning(f"[LMS-Send] master summary send failed: {e}")
             job["status"] = "done"
             job["pct"] = 100
+            if dm_msg_id:
+                try:
+                    await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("✅ সম্পন্ন"))
+                except Exception as e:
+                    logger.warning(f"[LMS-Send] DM progress done-edit failed: {e}")
     except Exception as e:
         logger.error(f"[LMS-Send] job {job_id} error: {e}")
         job["status"] = "error"
         job["error"] = str(e)
+        if dm_msg_id:
+            try:
+                await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text(f"❌ ত্রুটি: {e}"))
+            except Exception as e2:
+                logger.warning(f"[LMS-Send] DM progress error-edit failed: {e2}")
 
 
 @app.post("/api/lms-send-channel")
@@ -32370,6 +32420,22 @@ async def handle_callback(query: dict):
                 chosen = history[idx]
                 await footer_text_set_active(chosen)
                 await send_msg(chat_id, f"✅ Active footer set হলো: <b>{chosen}</b>", parse_mode="HTML")
+            return
+        if data.startswith("lmscancel_"):
+            # Cancel button on the DM progress message for an LMS
+            # (website-triggered) send-to-channel job. Sets the exact same
+            # cancel_requested flag the website's own Stop button uses, so
+            # either one stops the job — checked between every poll.
+            lms_job_id = data[len("lmscancel_"):]
+            lms_job = LMS_SEND_JOBS.get(lms_job_id)
+            if not lms_job:
+                await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "এই কাজ আর চলছে না।"})
+                return
+            if lms_job.get("status") not in ("queued", "running"):
+                await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "এই কাজ ইতিমধ্যে শেষ হয়ে গেছে।"})
+                return
+            lms_job["cancel_requested"] = True
+            await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বন্ধ করা হচ্ছে..."})
             return
         if data.startswith("jobcancel_"):
             rest = data[len("jobcancel_"):]
