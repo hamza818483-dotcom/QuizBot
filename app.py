@@ -32006,9 +32006,9 @@ async def handle_message(msg: dict):
         return
     if text.startswith("/rd"):
         # /rd = same generation/output as plain /pdf (single CSV, same
-        # question/explanation rules) but with a maximum-content-utilization
-        # prompt targeting an average 15+ MCQ/page instead of /pdf's
-        # default ~10-20.
+        # question/explanation rules, same 15+/no-ceiling count target as
+        # of 2026-09-08) but ALSO does topic detection + topic-wise CSV
+        # split, which plain /pdf does not.
         if not is_auth:
             if is_private:
                 await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
