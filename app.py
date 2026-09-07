@@ -939,6 +939,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             # the header. Sent last, in the same thread/chat, for BOTH group
             # (inside the forum topic) and channel.
             if batch_links:
+                sep = "▬▬▬▬▬▬▬▬▬▬"
                 header = (
                     f"🟥{_html_escape(exam_title or 'MCQ')}\n"
                     f"🌟Total Topic: {len(batch_links)}\n"
@@ -953,7 +954,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                         f"🔗Website Exam Link:\n{_html_escape(exam_link)}"
                     )
                     blocks.append(f"<blockquote>{quote_body}</blockquote>")
-                summary_text = "\n\n".join(blocks)
+                summary_text = f"\n{sep}\n".join(blocks)
                 summary_data = {
                     "chat_id": channel_id, "text": summary_text,
                     "parse_mode": "HTML",
