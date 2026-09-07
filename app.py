@@ -2718,7 +2718,7 @@ _SOURCE_REF_PATTERNS = [
     # (not just the fixed source-noun list above), e.g. "সংজ্ঞা অনুযায়ী",
     # "পার্থক্য ছক অনুযায়ী". Consumes up to 2 preceding Bengali words + the
     # verb, so a 2-word compound like "পার্থক্য ছক" is fully removed too.
-    r'(?:\S+\s+){0,3}(?:অনুযায়ী|অনুসারে)',
+    r'(?:\S+\s+){0,5}(?:অনুযায়ী|অনুসারে)',
     # 2026-09-07: fixed source-noun (পৃষ্ঠা/চিত্র/ছক/টেক্সট/অনুচ্ছেদ/উদ্দীপক)
     # possessive-prefixed + up to 3 extra descriptive words before অনুযায়ী/
     # অনুসারে — e.g. "টেক্সটের রাসায়নিক উপাদান তালিকা অনুযায়ী" — wider window
