@@ -2767,6 +2767,17 @@ def _strip_q_numbering(q: str) -> str:
     return cur.strip()
 
 _SOURCE_REF_PATTERNS = [
+    # 2026-09-08: LEADING-CLAUSE catch-all — a source-reference clause is
+    # ALWAYS at the very start of the sentence, running up to the first
+    # comma (e.g. "টেক্সটের বিগত বছরের প্রশ্ন ও উত্তরমালা অনুযায়ী, সঠিক
+    # উত্তর হলো গ।") — the fixed-word-count rules below can miss long/
+    # conjunction-joined clauses like this ("প্রশ্ন ও উত্তরমালা" has 3+
+    # words before অনুযায়ী), only partially stripping and leaving a
+    # dangling fragment ("টেক্সটের ,"). Anchored to sentence/string start
+    # (^) and requires a trailing comma, so it can never eat into an
+    # unrelated normal sentence that happens to contain অনুযায়ী/অনুসারে/
+    # মতে later on without being a leading source-clause.
+    r'^\s*[^,।\n]{0,80}?(?:অনুযায়ী|অনুসারে|মতে)\s*,\s*',
     # 2026-09-07: fully generic প্রদত্ত catch-all — bans "প্রদত্ত" combined with
     # up to 2 following words (covers any noun the model invents, not just
     # the fixed list below); stays tight (max 2 words) so it never eats
