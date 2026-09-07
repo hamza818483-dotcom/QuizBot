@@ -2461,13 +2461,15 @@ def _build_mcq_prompt(topic: str, count) -> str:
         )
     else:
         count_rule = (
-            "TARGET 10-20 MCQs (no fixed number given by user, default target): "
-            "Extract quality MCQs covering the important information on this page — "
-            "typically 10-20 for a normal page. Fewer (5-10) is fine if the page "
-            "genuinely has little content; more (up to 25) only if the page is "
-            "unusually content-rich. Do not force-pad with repetitive re-angled "
-            "versions of the same fact just to hit a higher number — quality and "
-            "genuine coverage matter more than quantity."
+            "TARGET 15-30 MCQs (no fixed number given by user, default target): "
+            "Use the ENTIRE page's content — extract quality MCQs covering every "
+            "distinct fact on the page, typically 15-30 for a normal page. Fewer "
+            "(10-15) is fine only if the page genuinely has little content; more "
+            "(up to 35) only if the page is unusually content-rich. Do not "
+            "force-pad with repetitive re-angled versions of the same fact just "
+            "to hit a higher number — but DO make sure every section/fact on the "
+            "page contributes at least one MCQ so the full page gets used, not "
+            "just the first or most obvious part."
         )
         full_coverage_rule = (
             f"\n═══════════════════════════════\n"
