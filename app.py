@@ -823,6 +823,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         total_batches = len(batches)
         sent_total = 0
         batch_links = []  # (part_num, link, count, batch_topic) — for master summary
+        all_mcqs = []  # accumulated across every batch — for group's merged PDF
         for b_idx, batch in enumerate(batches):
             if job.get("cancel_requested"):
                 job["status"] = "cancelled"
@@ -834,6 +835,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             try:
                 sent, first_link = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score)
                 sent_total += sent
+                all_mcqs.extend(mcqs)
                 if first_link:
                     batch_links.append((b_idx + 1, first_link, sent, topic))
             except Exception as e:
@@ -847,6 +849,23 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         if job.get("cancel_requested"):
             job["status"] = "cancelled"
         else:
+            # Group-only: one merged PDF covering every MCQ from every topic
+            # batch, sent right before the master summary — same pattern as
+            # /csv's own combined-PDF step.
+            if all_mcqs and chat_type != "channel":
+                try:
+                    merged_pdf_bytes = await _generate_style1_pdf_guaranteed(all_mcqs, exam_title or "MCQ", channel_id)
+                    if merged_pdf_bytes:
+                        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", exam_title or "MCQ")[:50] or "ATLAS_Sheet"
+                        merged_caption = f"📖 ATLAS Practice Sheet\n🎯 {exam_title or 'MCQ'}\n📝 মোট MCQ: {sent_total}\n🚀 Visit: Atlascourses.com"
+                        await send_document(
+                            channel_id, merged_pdf_bytes, f"{safe_title}_full_style1.pdf",
+                            caption=merged_caption,
+                            message_thread_id=thread_id,
+                        )
+                except Exception as e:
+                    logger.warning(f"[LMS-Send] merged PDF send failed: {e}")
+
             # Master summary — one message per topic sent, each block
             # separated by a bold divider, in the requested format
             # (Exam Name / Topic / MCQ count / First Poll Link). Sent last,
