@@ -1973,6 +1973,25 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
 # ============================================================
 # GENERATE MCQ FROM IMAGE — Gemini primary + OpenRouter fallback
 # ============================================================
+def _rd_output_token_cap() -> int:
+    """/rd has no MCQ ceiling (2026-09-07 user instruction), so its Gemini
+    calls need more max_output_tokens headroom than every other mode's
+    fixed 16384 cap (sized for a ~40-MCQ ceiling) -- a genuinely dense page
+    under /rd could legitimately need 40-60+ MCQs. Lazily checks app.py's
+    _RD_MODE ContextVar (can't import it at module load time -- app.py
+    imports FROM pdf_handler, not the other way around, so this has to be
+    a runtime lookup, same pattern as the existing `from app import
+    record_empty_parse` lazy import a few lines below). Falls back to the
+    normal 16384 if the import fails or _RD_MODE isn't set."""
+    try:
+        from app import _RD_MODE
+        if _RD_MODE.get():
+            return 32768
+    except Exception:
+        pass
+    return 16384
+
+
 async def generate_mcq_from_image(
     img: Image.Image,
     topic: str,
@@ -2123,14 +2142,16 @@ async def generate_mcq_from_image(
                                 mime_type="image/jpeg"
                             )
                         ],
-                        # 2026-08-29: right-sized for /math's actual target
-                        # (20-25 MCQs/page, safety ceiling 40) -- 25 dense
-                        # MCQs with full formula+step explanations run
-                        # roughly 6k-11k tokens; 16384 gives comfortable
-                        # headroom up to the 40-MCQ ceiling without the
-                        # excess that was pushing generation past Gemini's
-                        # fixed deadline (was 32768, then 24576).
-                        config=types.GenerateContentConfig(max_output_tokens=16384)
+                        # 2026-09-07: /rd has NO MCQ ceiling (unlike /math's
+                        # 40-MCQ safety ceiling this comment used to
+                        # describe) -- a genuinely dense page could need
+                        # 40-60+ MCQs, so it needs real headroom above the
+                        # 16384 default or every key would hit the same
+                        # MAX_TOKENS truncation and /rd could never
+                        # actually succeed on such a page. Only /rd gets
+                        # the larger cap; every other mode keeps 16384
+                        # unchanged.
+                        config=types.GenerateContentConfig(max_output_tokens=_rd_output_token_cap())
                     )
 
                 # 2026-08-29: 16384 token cap (right-sized for 20-25 MCQs)
@@ -2139,7 +2160,11 @@ async def generate_mcq_from_image(
                 # key too long, keeping the fast+accurate balance for the
                 # common case while still tolerating occasional slower
                 # generations for pages near the 40-MCQ ceiling.
-                _attempt_timeout = 50 if attempt == 0 else 32
+                # 2026-09-07: /rd's doubled 32768 cap gets proportionally
+                # more time too, since a genuinely 40-60-MCQ generation at
+                # that token budget takes longer than the normal case this
+                # 50/32s was sized for.
+                _attempt_timeout = (75 if attempt == 0 else 50) if _rd_output_token_cap() > 16384 else (50 if attempt == 0 else 32)
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 # 2026-08-28: detect a response that got cut off by the
