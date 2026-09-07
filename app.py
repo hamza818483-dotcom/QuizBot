@@ -2137,6 +2137,72 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
     )
 
 
+def _rd_build_gapfill_prompt(topic: str, existing_mcqs: list) -> str:
+    """/rd's DEDICATED prompt for its 2nd (retry) AI call -- built
+    separately from _build_mcq_prompt (the first-call prompt), specifically
+    for the gap-fill retry when the first pass came in under 15 MCQs.
+    Lists every question already generated so the model does NOT need to
+    re-scan/re-cover that content, and instead mines the REMAINING/missed
+    facts on the page for new, non-overlapping MCQs -- merged with (not
+    replacing) the first pass's output. Keeps all of /pdf's core quality
+    rules (language lock, source-grounding, question/explanation format)
+    unchanged; only the framing/count instruction differs from the first
+    call's prompt."""
+    existing_list = "\n".join(f"  {i+1}. {m.get('question', '')}" for i, m in enumerate(existing_mcqs))
+    return (
+        f"You are an expert MCQ-extraction engine for Bengali/English academic "
+        f"textbook pages (medical/HSC/admission-standard quality).\n"
+        f"Topic: {topic}\n\n"
+
+        f"🚨 LANGUAGE LOCK (highest priority): Detect if source text is Bengali "
+        f"or English script. Write the ENTIRE output (question/options/explanation) "
+        f"in that exact script — never translate, never mix languages, never "
+        f"default to Bengali if source is English (or vice versa).\n\n"
+
+        f"═══════════════════════════════\n"
+        f"🟧 THIS IS A GAP-FILL PASS — {len(existing_mcqs)} MCQ(s) ALREADY EXIST\n"
+        f"═══════════════════════════════\n"
+        f"The following MCQs have ALREADY been generated from this exact page in "
+        f"a previous pass — DO NOT repeat, rephrase, or re-angle any of these same "
+        f"facts:\n{existing_list}\n\n"
+        f"Your job now: re-scan this page and find whatever distinct facts/"
+        f"definitions/names/numbers/relationships were MISSED by the list above — "
+        f"content the previous pass didn't touch — and generate NEW MCQs ONLY from "
+        f"that remaining, uncovered content. Check headings, body paragraphs, "
+        f"footnotes, side-notes, tables/boxes, and small print for anything not "
+        f"already represented in the list. If truly nothing new remains on the "
+        f"page beyond what's already listed, output fewer MCQs rather than "
+        f"duplicating — but a real page rarely has zero remaining content after "
+        f"only {len(existing_mcqs)} MCQs, so look carefully before concluding that.\n\n"
+
+        f"🚨 SOURCE-GROUNDING LOCK (ABSOLUTE, HIGHEST PRIORITY): EVERY MCQ must be "
+        f"built ONLY from facts/content actually visible on THIS page image — never "
+        f"invent, assume, or pull in outside facts. If the page's real remaining "
+        f"content runs out, output fewer MCQs; a smaller but genuinely new, source-"
+        f"grounded set is always correct, duplicating the existing list or "
+        f"fabricating content is NEVER acceptable.\n\n"
+
+        f"MCQ format requirements (same as normal extraction):\n"
+        f"- 4 options (A-D), exactly one correct answer\n"
+        f"- Distractors must be plausible, same category/type as the correct answer "
+        f"— never randomly unrelated\n"
+        f"- explanation: 2-3 sentences, states WHY the correct answer is correct "
+        f"using only page content — never reference \"the page\", \"the text\", "
+        f"\"according to...\", \"as mentioned\", or similar source-referencing "
+        f"phrases; write it as a standalone fact\n"
+        f"- Never generate MCQs from topic names, chapter titles, headlines, or "
+        f"page numbers\n\n"
+
+        f"JSON array only, no markdown fences, no preamble. "
+        f"🚨 DO NOT include any <think>, reasoning, or explanation text before the "
+        f"JSON — output must start IMMEDIATELY with '['. Format:\n"
+        f'[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],'
+        f'"answer":0,"explanation":"..."}}]\n'
+        f"answer is integer 0-3 (A=0,B=1,C=2,D=3). If nothing new remains, output "
+        f"exactly []."
+    )
+
+
 def _build_mcq_prompt(topic: str, count) -> str:
     if _CHOK_MODE.get():
         return _build_chok_prompt(topic)
@@ -5129,10 +5195,12 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         _rng_min, _rng_max = 1, None
     elif _RD_MODE.get():
         # /rd: content-driven with NO ceiling, but 0 MCQ is never accepted
-        # and <10 triggers the standard 1-retry-attempt loop below (per
-        # user instruction 2026-09-07) -- same floor as /pdf's own default
-        # MIN_MCQ, just without /pdf's MAX_MCQ ceiling.
-        _rng_min, _rng_max = 10, None
+        # and <15 triggers the retry loop below (per user instruction
+        # 2026-09-07, raised from 10 -> 15) -- retries here use a gap-fill
+        # prompt (see _rd_build_gapfill_prompt below) instead of a blind
+        # re-generation, so the retry targets exactly the page content the
+        # first pass missed rather than risking duplicate MCQs.
+        _rng_min, _rng_max = 15, None
     elif _BORO_MODE.get():
         # /boro, like /bangla, is maximum-source-utilization with no cap --
         # never fall through to /pdf's own MIN_MCQ/MAX_MCQ floor/ceiling.
@@ -5161,14 +5229,35 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     while len(out) < _rng_min and attempts < _rd_max_attempts:
         attempts += 1
         logger.info(f"[MCQGen] page {page_num}: only {len(out)} MCQs (attempt {attempts}) — retrying for more")
-        retry_out, retry_tried = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=tried_groq_keys)
+        if _RD_MODE.get() and out:
+            # /rd gap-fill retry: instead of blindly re-generating the whole
+            # page again (risking duplicate MCQs on facts already covered),
+            # tell the model exactly which questions already exist and ask
+            # it to mine the REMAINING/missed content on the page for new,
+            # non-overlapping MCQs -- merged with (not replacing) what the
+            # first pass already produced, so the page's final total climbs
+            # toward _rng_min instead of just re-rolling the same content.
+            _retry_prompt = _rd_build_gapfill_prompt(topic, out)
+            retry_out, retry_tried = await _generate_mcq_from_image_raw(
+                img, topic, page_num, mcq_count, exclude_groq_keys=tried_groq_keys,
+                custom_prompt=_retry_prompt
+            )
+        else:
+            retry_out, retry_tried = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=tried_groq_keys)
         tried_groq_keys = tried_groq_keys | retry_tried
         retry_out = _cap_mcq_options(retry_out, 4)
         retry_out = _validate_mcq_structure(retry_out)
         if _TF_MODE.get():
             retry_out = _tf_validate_and_filter(retry_out)
         retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
-        if retry_out and len(retry_out) >= len(out):
+        if _RD_MODE.get():
+            # Merge (never replace) -- the gap-fill retry is meant to ADD
+            # to what's already there, not compete with it. Cross-batch
+            # dedupe still runs to drop any accidental overlap the model
+            # produced despite the gap-fill instruction.
+            if retry_out:
+                out = _dedupe_mcqs(out + retry_out) if "_dedupe_mcqs" in globals() else (out + retry_out)
+        elif retry_out and len(retry_out) >= len(out):
             out = retry_out
         if _RD_MODE.get() and len(out) == 0 and attempts >= _rd_max_attempts:
             # /rd: 0 MCQ is never an acceptable final result for a page
