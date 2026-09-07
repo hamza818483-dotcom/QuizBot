@@ -53,6 +53,11 @@ _last_good_api = None  # None = try primary first (default); else "primary" or "
 HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://hamza-02-quizbot.hf.space")
 RENDER_URL = os.environ.get("RENDER_URL", "") or os.environ.get("HF_SPACE_URL", "https://hamza-02-quizbot.hf.space")
 D1_TOKEN = os.environ.get("D1_TOKEN", "")
+# HF Spaces sets SPACE_ID automatically for every running Space -- reliable
+# signal that we're on HF (which blocks outbound access to
+# api.telegram.org), so direct-Telegram-API fallbacks can be skipped there
+# instead of burning a guaranteed-to-fail timeout on every retry.
+_ON_HUGGINGFACE = bool(os.environ.get("SPACE_ID"))
 # v4.3: GitHub Pages exam link — CF down thakleo page load hoy (static host),
 # er bhitorer JS nijei Render->CF->Supabase try kore. Beshi robust than CF-hosted /exam/.
 GH_PAGES_EXAM_URL = os.environ.get("GH_PAGES_EXAM_URL", "https://hamza818483-dotcom.github.io/QuizBot/exam.html")
@@ -803,7 +808,14 @@ async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
         logger.warning(f"[TG] sendPhoto CF returned not-ok: {result.get('error') or result}")
     except Exception as e:
         logger.warning(f"[TG] sendPhoto CF failed: {e}")
-    # ── Fallback: Direct TG API multipart (CF down হলে, shared client) ──
+    # ── Fallback: Direct TG API multipart ──
+    # SKIPPED entirely on Hugging Face Spaces: HF blocks outbound access to
+    # api.telegram.org at the network level, so this call is guaranteed to
+    # fail there -- it was previously burning up to 60s of dead time on
+    # every single retry cycle for nothing before looping back to CF. On
+    # any other host (Render, local, etc.) this fallback still runs as-is.
+    if _ON_HUGGINGFACE:
+        return {"ok": False, "error": "CF Worker failed; direct-API fallback skipped (blocked on HF Spaces)"}
     try:
         fields = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"}
         if reply_to_message_id: fields["reply_to_message_id"] = str(reply_to_message_id)
