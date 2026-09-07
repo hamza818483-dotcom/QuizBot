@@ -16165,7 +16165,7 @@ async def _process_pdf_pages_inner(
         try:
             result = await _gen_with_retry(_pg_img, _pg_num)
         finally:
-            if _RD_MODE.get() and not is_cancelled(chat_id):
+            if not is_cancelled(chat_id):
                 _rd_fill_window(page_idx + 1)
         return result
 
@@ -16241,7 +16241,7 @@ async def _process_pdf_pages_inner(
     # even starts on page 1 -- so pages 2..window-size begin generating in
     # the background right away, in parallel with page 1's own generation,
     # instead of only starting once page 1 finishes.
-    if _RD_MODE.get() and not skip_generate:
+    if not skip_generate:
         _rd_fill_window(1)
 
     for idx, page_tuple in enumerate(pages):
@@ -16260,7 +16260,7 @@ async def _process_pdf_pages_inner(
         # fresh "⏳ শুরু হচ্ছে..." and 0s elapsed for a page whose generation
         # may already be seconds (or fully) done, hiding the real prefetch
         # timing from the user.
-        _already_prefetching = _RD_MODE.get() and page_status[idx].get("page_start_time") is not None and page_status[idx].get("current")
+        _already_prefetching = page_status[idx].get("page_start_time") is not None and page_status[idx].get("current")
         if not _already_prefetching:
             page_status[idx]["current"] = True
             page_status[idx]["stage"] = "⏳ শুরু হচ্ছে..."
@@ -16349,7 +16349,7 @@ async def _process_pdf_pages_inner(
                         # before the window had a chance to start) — route
                         # through the same window-aware worker so it also
                         # gets image-byte prefetching and window fill-in.
-                        _gen_task = _spawn_task(_rd_chain_gen(idx)) if _RD_MODE.get() else _spawn_task(_gen_with_retry(img, page_num))
+                        _gen_task = _spawn_task(_rd_chain_gen(idx))
                     ACTIVE_GEN_TASK[chat_id] = _gen_task
                     try:
                         mcqs, gen_error = await _gen_task
@@ -16359,7 +16359,7 @@ async def _process_pdf_pages_inner(
                         if ACTIVE_GEN_TASK.get(chat_id) is _gen_task:
                             ACTIVE_GEN_TASK.pop(chat_id, None)
 
-                    if _RD_MODE.get() and not is_cancelled(chat_id):
+                    if not is_cancelled(chat_id):
                         _rd_fill_window(idx + 1)
             if not mcqs:
                 page_status[idx]["current"] = False
