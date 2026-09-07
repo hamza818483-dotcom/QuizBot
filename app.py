@@ -926,24 +926,28 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 except Exception as e:
                     logger.warning(f"[LMS-Send] merged PDF send failed: {e}")
 
-            # Master summary — one message per topic sent, each block
-            # separated by a bold divider, in the requested format
-            # (Exam Name / Topic / MCQ count / First Poll Link / Quiz Link /
-            # Website Exam link). Sent last, in the same thread/chat, for
-            # BOTH group (inside the forum topic) and channel — the
-            # per-topic pre/poll/PDF/ending flow above is identical for
-            # both; only this summary is new.
+            # Master summary — header once (Exam Name / Total Topics / Total
+            # MCQ), then one block per topic (Topic name in quotes / First
+            # Poll Link / Quiz Link / Website Exam link), separated by a
+            # bold divider. Exam Name is NOT repeated per topic — only in
+            # the header. Sent last, in the same thread/chat, for BOTH group
+            # (inside the forum topic) and channel — the per-topic
+            # pre/poll/PDF/ending flow above is identical for both; only
+            # this summary is new.
             if batch_links:
                 sep = "▬▬▬▬▬▬▬▬▬▬"
-                blocks = []
+                header = (
+                    f"🟥{exam_title or 'MCQ'}\n"
+                    f"🌟Total Topic: {len(batch_links)}\n"
+                    f"📌Total MCQ: {sent_total}"
+                )
+                blocks = [header]
                 for _part_n, link, count, batch_topic, quiz_link, exam_link in batch_links:
                     blocks.append(
-                        f"🟥{exam_title or 'MCQ'}\n"
-                        f"🌟Topic:\"{batch_topic}\"\n"
-                        f"✅MCQ:({count})\n\n"
+                        f"✅\"{batch_topic}\"\n\n"
                         f"🔗First Poll Link:\n{link}\n\n"
-                        f"📝Quiz Link:\n{quiz_link}\n\n"
-                        f"🌐Website Style Exam Link:\n{exam_link}"
+                        f"🔗Quiz Link:\n{quiz_link}\n\n"
+                        f"🔗Website Exam Link:\n{exam_link}"
                     )
                 summary_text = f"\n{sep}\n".join(blocks)
                 summary_data = {
