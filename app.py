@@ -2348,10 +2348,16 @@ def _rd_build_gapfill_prompt(topic: str, existing_mcqs: list) -> str:
         f"- Never generate MCQs from topic names, chapter titles, headlines, or "
         f"page numbers\n\n"
 
+        f"🟨 TOPIC TAGGING (mandatory, same as first pass): give 'main_topic' "
+        f"(and 'sub_topic' or null) for each new MCQ, decided yourself from the "
+        f"page content — use the EXACT same main_topic string as the first pass "
+        f"used for the same subject, so topics stay grouped consistently.\n\n"
+
         f"JSON array only, no markdown fences, no preamble. "
         f"🚨 DO NOT include any <think>, reasoning, or explanation text before the "
         f"JSON — output must start IMMEDIATELY with '['. Format:\n"
-        f'[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],'
+        f'[{{"main_topic":"...","sub_topic":"..." or null,"question":"...",'
+        f'"options":["A) ...","B) ...","C) ...","D) ..."],'
         f'"answer":0,"explanation":"..."}}]\n'
         f"answer is integer 0-3 (A=0,B=1,C=2,D=3). If nothing new remains, output "
         f"exactly []."
@@ -2685,13 +2691,32 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"line/paragraph/table the answer came from (minimal margin, no neighboring "
         f"unrelated content). Normalize to 0-1000 scale ([x_min,y_min,x_max,y_max], "
         f"top-left=[0,0], bottom-right=[1000,1000]). Use null if unsure.\n\n"
-        f"Return STRICT JSON array only, no prose, no markdown fences. "
+        + (
+        f"🟨 TOPIC TAGGING (mandatory, decide this yourself — no fixed list, "
+        f"no user-given rule): for EACH MCQ give 'main_topic', the specific "
+        f"subject/section this MCQ's content actually belongs to, named the way "
+        f"a textbook section heading would (e.g. 'কোষ বিভাজন', 'Newton's Laws') "
+        f"purely from what the page content is about. If the page covers more "
+        f"than one distinct sub-part of that topic, also give 'sub_topic' (or "
+        f"null if there's no meaningful sub-split). Two MCQs about the same "
+        f"underlying subject MUST get the exact same main_topic string "
+        f"(character-for-character) so they group together correctly.\n\n"
+        if _RD_MODE.get() else ""
+        )
+        + f"Return STRICT JSON array only, no prose, no markdown fences. "
         f"🚨 DO NOT include any <think>, reasoning, chain-of-thought, or "
         f"explanation text before the JSON — output must start IMMEDIATELY "
         f"with '[' and contain nothing but the JSON array. Schema:\n"
+        + (
+        f"[{{\"main_topic\":\"...\",\"sub_topic\":\"...\" or null,"
+        f"\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
+        f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"source_verbatim\":\"...\","
+        f"\"verified\":true,\"exp_bbox\":[100,200,900,350]}}]"
+        if _RD_MODE.get() else
         f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"source_verbatim\":\"...\","
         f"\"verified\":true,\"exp_bbox\":[100,200,900,350]}}]"
+        )
     )
 
 def _strip_q_numbering(q: str) -> str:
@@ -3578,6 +3603,11 @@ def _parse_mcq_json(text: str) -> list:
                 _entry["source_verbatim"] = str(it.get("source_verbatim") or "")[:200]
             if "verified" in it:
                 _entry["verified"] = it.get("verified")
+            if "main_topic" in it:
+                _entry["main_topic"] = str(it.get("main_topic") or "").strip()[:60]
+            if "sub_topic" in it:
+                _sub = it.get("sub_topic")
+                _entry["sub_topic"] = _sub.strip()[:60] if isinstance(_sub, str) and _sub.strip() else None
             out.append(_entry)
         if data and not out:
             logger.warning(f"[_parse_mcq_json] all {len(data)} items dropped during validation (missing question/options) | first item raw: {str(data[0])[:300]!r}")
@@ -5478,6 +5508,9 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         out = _filter_verified_mcqs(out, page_num, tag="/pdf")
     out = _cap_mcq_options(out, 4)
     out = _validate_mcq_structure(out)
+    if _RD_MODE.get() and out:
+        from pdf_handler import _pdfs_reconcile_mcq_topics
+        out = _pdfs_reconcile_mcq_topics(out, topic)
     if _TF_MODE.get():
         out = _tf_validate_and_filter(out)
     if _BORO_MODE.get() and "_dagano_apply_topic_reuse" in globals():
@@ -5566,6 +5599,9 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         tried_groq_keys = tried_groq_keys | retry_tried
         retry_out = _cap_mcq_options(retry_out, 4)
         retry_out = _validate_mcq_structure(retry_out)
+        if _RD_MODE.get() and retry_out:
+            from pdf_handler import _pdfs_reconcile_mcq_topics
+            retry_out = _pdfs_reconcile_mcq_topics(retry_out, topic)
         if _TF_MODE.get():
             retry_out = _tf_validate_and_filter(retry_out)
         retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
@@ -16550,7 +16586,21 @@ async def _process_pdf_pages_inner(
             for row in all_mcqs_csv:
                 writer.writerow(row)
         await send_document(chat_id, buf.getvalue().encode("utf-8"), f"{topic}_mcq.csv",
-            caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ", mime_type="text/csv")
+            caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ (Merged)", mime_type="text/csv")
+
+        # /rd: additionally send a topic-wise CSV -- Gemini decided each MCQ's
+        # topic itself per-page (no fixed user rule), tagged via
+        # _pdfs_topic/_pdfs_subtopic during generation. Marker-row format
+        # (topic/sub-topic rows + real MCQ rows), same builder /pdfs uses.
+        if _RD_MODE.get() and all_mcqs_raw and any(m.get("_pdfs_topic") for m in all_mcqs_raw):
+            _rd_topics_order, _rd_topic_map = _group_pdfs_mcqs(all_mcqs_raw, topic)
+            _rd_buf = io.StringIO()
+            _rd_writer = csv_mod.writer(_rd_buf)
+            _rd_writer.writerow(["questions","option1","option2","option3","option4","answer","explanation","type","section"])
+            for row in _build_pdfs_marker_row_csv(_rd_topics_order, _rd_topic_map):
+                _rd_writer.writerow(row[:5] + row[6:])
+            await send_document(chat_id, _rd_buf.getvalue().encode("utf-8"), f"{topic}_topicwise.csv",
+                caption=f"📂 {topic} — {len(_rd_topics_order)} topic(s), topic-wise CSV", mime_type="text/csv")
 
         # CSV file-এর নিচে একটা "📢 Channel List" বাটন — click করলে channel
         # list দেখাবে, poll পাঠানোর জন্য (existing csvchannel_ callback
