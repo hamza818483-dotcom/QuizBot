@@ -15800,7 +15800,17 @@ async def _process_pdf_pages_inner(
         page's poll/CSV/image posting — schedules the next page's generation
         too. This makes generation a continuously-running pipeline that
         always tries to stay ahead of posting, rather than a single
-        one-page lookahead that would re-block once posting catches up."""
+        one-page lookahead that would re-block once posting catches up.
+
+        Also marks page_status[page_idx] as actively in-progress (not
+        "⬜ Waiting") the moment this background generation actually starts,
+        so the live dashboard reflects reality — a prefetched page really is
+        being generated right now, even though the main loop hasn't reached
+        it yet."""
+        page_status[page_idx]["current"] = True
+        page_status[page_idx]["stage"] = "🤖 AI call করা হচ্ছে (prefetch, পরবর্তী পেজের সাথে সমান্তরালে)..."
+        page_status[page_idx]["page_start_time"] = time.time()
+        page_status[page_idx]["_ai_calls_before"] = _get_ai_call_count(chat_id)
         _pg_tuple = pages[page_idx]
         _pg_num, _pg_img = _pg_tuple[0], _pg_tuple[1]
         try:
@@ -15853,7 +15863,8 @@ async def _process_pdf_pages_inner(
                 _idx_for_stage = next((i for i, p in enumerate(pages) if p[0] == page_num_), None)
                 if _idx_for_stage is not None:
                     page_status[_idx_for_stage]["stage"] = f"🤖 AI call করা হচ্ছে (attempt {_pg_attempt+1}/4)..."
-                    page_status[_idx_for_stage]["live_ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
+                    _base = page_status[_idx_for_stage].get("_ai_calls_before", _page_ai_calls_before)
+                    page_status[_idx_for_stage]["live_ai_calls"] = _get_ai_call_count(chat_id) - _base
                 _mcqs = await generate_mcq_from_image(img_, topic, page_num_, mcq_count, exclude_groq_keys=accumulated_tried_keys)
                 accumulated_tried_keys = accumulated_tried_keys | set(_LAST_TRIED_GROQ_KEYS.get("keys") or set())
                 if _mcqs:
@@ -15887,9 +15898,17 @@ async def _process_pdf_pages_inner(
             page_num, img, mcqs = page_tuple
         else:
             page_num, img = page_tuple
-        page_status[idx]["current"] = True
-        page_status[idx]["stage"] = "⏳ শুরু হচ্ছে..."
-        page_status[idx]["page_start_time"] = time.time()
+        # /rd: if this page was already prefetched in the background, don't
+        # reset its start-time/stage — that would make the dashboard show a
+        # fresh "⏳ শুরু হচ্ছে..." and 0s elapsed for a page whose generation
+        # may already be seconds (or fully) done, hiding the real prefetch
+        # timing from the user.
+        _already_prefetching = _RD_MODE.get() and page_status[idx].get("page_start_time") is not None and page_status[idx].get("current")
+        if not _already_prefetching:
+            page_status[idx]["current"] = True
+            page_status[idx]["stage"] = "⏳ শুরু হচ্ছে..."
+            page_status[idx]["page_start_time"] = time.time()
+            page_status[idx]["_ai_calls_before"] = _get_ai_call_count(chat_id)
         await edit_msg(chat_id, status_msg_id,
             _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
         _page_ai_calls_before = _get_ai_call_count(chat_id)
@@ -16178,7 +16197,7 @@ async def _process_pdf_pages_inner(
                 _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
-            page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
+            page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - page_status[idx].get("_ai_calls_before", _page_ai_calls_before)
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
             await sb_exec(lambda: sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute())
