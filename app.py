@@ -2652,6 +2652,11 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"  ❌ \"RETINA Exclusive তথ্য অনুযায়ী...\" (brand name)\n"
         f"  ❌ \"আজমল স্যারের মতে...\" (teacher name)\n"
         f"  ❌ \"...\" বই অনুসারে (book name)\n"
+        f"🚨 SPECIFIC BANNED NAMES: the names আলীম/আলিম, মাজেদা, আজিজুর, "
+        f"আজিবুর, and আজমল must NEVER appear in a question or option, in "
+        f"ANY form (with or without স্যার/ম্যাম/মতে/বলেছেন attached) — if "
+        f"one of these names appears on the page as an author/teacher "
+        f"reference, drop the name entirely and state the fact plainly.\n"
         f"  ✅ CORRECT instead: just state the fact directly with ZERO "
         f"attribution — e.g. instead of \"সংজ্ঞা অনুযায়ী, উদ্ভিদ কোষ...\", "
         f"write \"উদ্ভিদ কোষ...\" (delete the attribution clause entirely, "
@@ -2779,13 +2784,28 @@ _TEACHER_ATTR_RE = re.compile(
     r'[^\s।,]{0,30}\s*(?:স্যারের?|ম্যামের?|ম্যাডামের?)\s*মতে,?\s*'
 )
 
+# 2026-09-07: specific known teacher/author names that must NEVER appear in
+# a question/option at all, in any form/spelling variant, whether or not
+# স্যার/ম্যাম/মতে is attached (e.g. bare "আলীম স্যার বলেছেন", "আজমল অনুসারে").
+# Matches the name optionally followed by স্যার/ম্যাম/ম্যাডাম(+possessive) and
+# an optional trailing reference clause (মতে/বলেছেন/অনুযায়ী/অনুসারে).
+_KNOWN_AUTHOR_NAMES = ["আলীম", "আলিম", "মাজেদা", "আজিজুর", "আজিবুর", "আজমল"]
+_KNOWN_AUTHOR_NAME_RE = re.compile(
+    r'(?:' + '|'.join(_KNOWN_AUTHOR_NAMES) + r')'
+    r'(?:\s*(?:স্যারের?|ম্যামের?|ম্যাডামের?))?'
+    r'(?:\s*(?:মতে|বলেছেন|অনুযায়ী|অনুসারে))?,?\s*'
+)
+
 def _strip_teacher_attribution(text: str) -> str:
     """Question/options-only guard: removes 'X স্যারের/ম্যামের মতে' clauses
     (teacher/person-name attribution) that must never appear in the question
     itself — only allowed in the explanation, which this function is never
-    called on."""
+    called on. Also strips specific known author/teacher names outright
+    (আলীম/আলিম/মাজেদা/আজিজুর/আজিবুর/আজমল), with or without স্যার/ম্যাম/মতে
+    attached, since these must never appear in a question at all."""
     if not text:
         return text
+    text = _KNOWN_AUTHOR_NAME_RE.sub('', text)
     return _TEACHER_ATTR_RE.sub('', text).strip()
 _SOURCE_REF_RE = re.compile('|'.join(_SOURCE_REF_PATTERNS))
 _SUPERSCRIPT_MAP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
