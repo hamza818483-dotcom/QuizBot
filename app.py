@@ -5128,10 +5128,11 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         # improving coverage.
         _rng_min, _rng_max = 1, None
     elif _RD_MODE.get():
-        # /rd is content-driven with NO fixed count at all (per user
-        # instruction 2026-09-07) -- never fall through to /pdf's own
-        # MIN_MCQ/MAX_MCQ floor/ceiling retry loop.
-        _rng_min, _rng_max = 1, None
+        # /rd: content-driven with NO ceiling, but 0 MCQ is never accepted
+        # and <10 triggers the standard 1-retry-attempt loop below (per
+        # user instruction 2026-09-07) -- same floor as /pdf's own default
+        # MIN_MCQ, just without /pdf's MAX_MCQ ceiling.
+        _rng_min, _rng_max = 10, None
     elif _BORO_MODE.get():
         # /boro, like /bangla, is maximum-source-utilization with no cap --
         # never fall through to /pdf's own MIN_MCQ/MAX_MCQ floor/ceiling.
@@ -5156,7 +5157,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     # run. 1 retry still gives a real second chance at hitting MIN_MCQ
     # without compounding worst-case wait time further.
     attempts = 0
-    while len(out) < _rng_min and attempts < 1:
+    _rd_max_attempts = 3 if _RD_MODE.get() else 1
+    while len(out) < _rng_min and attempts < _rd_max_attempts:
         attempts += 1
         logger.info(f"[MCQGen] page {page_num}: only {len(out)} MCQs (attempt {attempts}) — retrying for more")
         retry_out, retry_tried = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=tried_groq_keys)
@@ -5168,6 +5170,16 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
         if retry_out and len(retry_out) >= len(out):
             out = retry_out
+        if _RD_MODE.get() and len(out) == 0 and attempts >= _rd_max_attempts:
+            # /rd: 0 MCQ is never an acceptable final result for a page
+            # that has content -- give it a few extra attempts beyond the
+            # normal 1-retry cap specifically for the zero case (a
+            # genuinely blank/cover page still ends at 0 after these, but
+            # that's a real content fact, not a give-up).
+            logger.warning(f"[RD] page {page_num}: still 0 MCQ after {attempts} attempts -- one more try before accepting zero")
+            _rd_max_attempts += 1
+            if attempts >= 6:
+                break
 
     if _rng_max and len(out) > _rng_max:
         out = out[:_rng_max]
