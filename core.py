@@ -785,6 +785,11 @@ async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
                      reply_markup=None, reply_to_message_id: int = None,
                      message_thread_id: int = None) -> dict:
     # ── Primary: CF Worker (b64 proxy, shared client) ──
+    # Timeout tightened 60s -> 20s: a hung/slow proxy was blocking a full
+    # minute before ever trying the direct-API fallback below, which made
+    # every retry cycle painfully slow when the proxy was flaky. 20s is
+    # still generous for a healthy proxy but fails fast into the fallback
+    # when it isn't.
     try:
         b64 = base64.b64encode(photo_bytes).decode()
         data = {"chat_id": str(chat_id), "caption": caption, "photo_b64": b64}
@@ -792,9 +797,10 @@ async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
         if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
         if message_thread_id: data["message_thread_id"] = message_thread_id
         client = await _get_shared_http_client()
-        r = await client.post(f"{CF_WORKER_URL}/tg-sendphoto", json=data, timeout=60)
+        r = await client.post(f"{CF_WORKER_URL}/tg-sendphoto", json=data, timeout=20)
         result = r.json()
         if result.get("ok"): return result
+        logger.warning(f"[TG] sendPhoto CF returned not-ok: {result.get('error') or result}")
     except Exception as e:
         logger.warning(f"[TG] sendPhoto CF failed: {e}")
     # ── Fallback: Direct TG API multipart (CF down হলে, shared client) ──
@@ -809,7 +815,7 @@ async def send_photo(chat_id, photo_bytes: bytes, caption: str = "",
         client = await _get_shared_http_client()
         r = await client.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-            data=fields, files=files, timeout=120)
+            data=fields, files=files, timeout=60)
         return r.json()
     except Exception as e:
         logger.error(f"[TG] sendPhoto direct failed: {e}")
