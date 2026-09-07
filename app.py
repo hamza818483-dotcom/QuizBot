@@ -5132,6 +5132,40 @@ def _chok_ratio_gap_note(mcqs: list) -> str:
 MIN_MCQ = 10
 MAX_MCQ = 20
 
+def _rd_dedupe_gapfill_merge(existing: list, new_mcqs: list) -> list:
+    """/rd-SPECIFIC dedup for merging gap-fill retry MCQs into the first
+    pass's output. The bot-wide _dedupe_mcqs is a disabled no-op (see its
+    docstring), so this is a separate, narrow guard just for /rd's merge
+    step -- the one place in the bot that concatenates two AI generations
+    of the SAME page/topic where near-duplicate risk is real (the gap-fill
+    prompt asks the model not to repeat, but nothing enforces that).
+    Normalizes question text (lowercase, strip whitespace/punctuation) and
+    drops a new MCQ if its normalized text closely matches (>=85% of words
+    in common) any existing one -- catches reworded repeats, not just
+    exact copies, without needing an extra AI call to judge similarity."""
+    def _norm_words(q):
+        t = re.sub(r'[^\w\s]', ' ', (q or "").lower())
+        return set(t.split())
+    existing_word_sets = [_norm_words(m.get("question", "")) for m in existing]
+    kept = []
+    for m in new_mcqs:
+        words = _norm_words(m.get("question", ""))
+        if not words:
+            continue
+        is_dupe = False
+        for ex_words in existing_word_sets:
+            if not ex_words:
+                continue
+            overlap = len(words & ex_words) / max(len(words), len(ex_words))
+            if overlap >= 0.85:
+                is_dupe = True
+                break
+        if not is_dupe:
+            kept.append(m)
+            existing_word_sets.append(words)
+    return existing + kept
+
+
 def _dedupe_mcqs(mcqs: list) -> list:
     """DISABLED: dedup inactivated to stop false-positive MCQ drops. No-op passthrough."""
     return list(mcqs or [])
@@ -5265,11 +5299,16 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
         if _RD_MODE.get():
             # Merge (never replace) -- the gap-fill retry is meant to ADD
-            # to what's already there, not compete with it. Cross-batch
-            # dedupe still runs to drop any accidental overlap the model
-            # produced despite the gap-fill instruction.
+            # to what's already there, not compete with it.
+            # NOTE: _dedupe_mcqs is currently a disabled no-op (see its
+            # docstring above) -- there is NO code-level dedup backstop
+            # here. Overlap prevention relies entirely on the gap-fill
+            # prompt's instruction to the model ("don't repeat these
+            # questions"). If the model still produces a near-duplicate
+            # despite that instruction, it will pass through into the
+            # final merged output uncaught.
             if retry_out:
-                out = _dedupe_mcqs(out + retry_out) if "_dedupe_mcqs" in globals() else (out + retry_out)
+                out = _rd_dedupe_gapfill_merge(out, retry_out)
         elif retry_out and len(retry_out) >= len(out):
             out = retry_out
         if _RD_MODE.get() and len(out) == 0 and attempts >= _rd_max_attempts:
