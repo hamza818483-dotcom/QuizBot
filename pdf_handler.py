@@ -1805,6 +1805,23 @@ def image_to_base64(img: Image.Image) -> str:
     img.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode()
 
+def _enhance_blurry_page(img: Image.Image) -> Image.Image:
+    """/unmesh 0-MCQ retry helper: some pages are genuinely faint/blurry
+    scans (low contrast, soft focus) that a normal read can miss entirely
+    even though real content is there. Boosts contrast + sharpness +
+    slight brightness so a careful-mode retry gets a cleaner image to
+    read, instead of just re-asking the same blurry image again. Returns
+    a NEW image (never mutates the original, since the un-enhanced image
+    is still needed for posting/other uses)."""
+    from PIL import ImageEnhance, ImageFilter
+    out = img.convert("RGB") if img.mode != "RGB" else img.copy()
+    out = ImageEnhance.Contrast(out).enhance(1.5)
+    out = ImageEnhance.Sharpness(out).enhance(2.0)
+    out = ImageEnhance.Brightness(out).enhance(1.1)
+    out = out.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+    return out
+
+
 def image_to_bytes(img: Image.Image) -> bytes:
     """Converts a PDF-rendered page image to JPEG bytes for Telegram
     sendPhoto. Hardened against the real causes of silent image-send

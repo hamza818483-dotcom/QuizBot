@@ -97,7 +97,7 @@ from pdf_handler import (
     generate_new_mcq, generate_mcq_from_text, parse_pdf_command, parse_page_range,
     fmt_page, gen_session_id, get_random_ayat, get_motivation,
     key_rotator, crop_explanation_image, get_pdf_page_count,
-    _PDF_MAX_PAGES_PER_CALL
+    _PDF_MAX_PAGES_PER_CALL, _enhance_blurry_page
 )
 
 from core import (
@@ -28019,18 +28019,31 @@ async def qbm_extract_all_pages(
             while not mcqs and not is_cancelled(chat_id):
                 _attempt_n += 1
                 _careful = _attempt_n >= 4  # 2026-09-08: first 3 attempts fast/normal scan, last 2 (4th, 5th) careful/deep scan (was: only 1st fast, rest careful)
-                logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry #{_attempt_n}{' (careful mode)' if _careful else ''} (cache bypassed), will not finalize until confirmed")
+                # 2026-09-08: careful-mode attempts also try a contrast/
+                # sharpness-enhanced version of the page -- a faint/blurry
+                # scan can genuinely be unreadable at normal contrast even
+                # though real content is there; re-asking with the SAME
+                # blurry image wastes retries. Never mutates the original
+                # (still needed for posting/other uses).
+                _img_to_use = img
+                if _careful:
+                    try:
+                        _img_to_use = _enhance_blurry_page(img)
+                    except Exception as _enh_e:
+                        logger.warning(f"[QBM Extract] Page {page_num} image enhance failed, using original: {_enh_e}")
+                        _img_to_use = img
+                logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry #{_attempt_n}{' (careful mode + enhanced image)' if _careful else ''} (cache bypassed), will not finalize until confirmed")
                 if _attempt_n > 1:
                     await asyncio.sleep(min(3 * _attempt_n, 30))
                 try:
                     _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
-                    mcqs = await (_call_extract_fn(img=img, cache_key=_ck, bypass_cache=True, careful=_careful) if _ck else _call_extract_fn(img=img, careful=_careful))
+                    mcqs = await (_call_extract_fn(img=_img_to_use, cache_key=_ck, bypass_cache=True, careful=_careful) if _ck else _call_extract_fn(img=_img_to_use, careful=_careful))
                 except TypeError:
                     # extractor doesn't accept bypass_cache/careful kwargs —
                     # fall back to a plain re-call (still a fresh attempt).
                     try:
                         _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
-                        mcqs = await (_call_extract_fn(img=img, cache_key=_ck) if _ck else _call_extract_fn(img=img))
+                        mcqs = await (_call_extract_fn(img=_img_to_use, cache_key=_ck) if _ck else _call_extract_fn(img=_img_to_use))
                     except Exception as e3:
                         logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry #{_attempt_n} also failed: {e3}")
                         mcqs = []
@@ -28232,7 +28245,12 @@ async def qbm_extract_all_pages(
                 _pn, _img, _ = final_results[_fi]
                 try:
                     _qbm_key_offset_ctx.set(random.randint(0, 50))  # force a different starting key/account than any prior attempt
-                    _recovered = await _extract_fn(img=_img, careful=True)
+                    try:
+                        _enhanced_img = _enhance_blurry_page(_img)
+                    except Exception as _enh_e:
+                        logger.warning(f"[QBM Final Safety-Net] page {_pn} image enhance failed, using original: {_enh_e}")
+                        _enhanced_img = _img
+                    _recovered = await _extract_fn(img=_enhanced_img, careful=True)
                 except Exception as e:
                     logger.error(f"[QBM Final Safety-Net] page {_pn} round {_round} errored: {e}")
                     _recovered = []
