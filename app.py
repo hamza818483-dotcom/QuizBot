@@ -1177,6 +1177,7 @@ def _build_chok_prompt(topic: str) -> str:
 
 _BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
 _BIO_MODE = contextvars.ContextVar("bio_mode", default=False)
+_RD_MODE = contextvars.ContextVar("rd_mode", default=False)
 _BORO_MODE = contextvars.ContextVar("boro_mode", default=False)
 _MATH_MODE = contextvars.ContextVar("math_mode", default=False)
 _CHEM_MODE = contextvars.ContextVar("chem_mode", default=False)
@@ -5061,9 +5062,15 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         # (unmarked page) or just 1-2 (a single marked phrase). No
         # floor to retry toward, unlike the normal MIN_MCQ target.
         _rng_min, _rng_max = 0, None
-    elif _BIO_MODE.get():
+    elif _BIO_MODE.get() or _RD_MODE.get():
         # /bio, like /bangla, is maximum-source-utilization with no cap
-        # -- topic-wise full coverage, not a fixed page target.
+        # -- topic-wise full coverage, not a fixed page target. /rd reuses
+        # this same per-topic-segment generation engine (see
+        # _bio_generate_per_topic_pages) for its topic-wise+merged CSV
+        # output, so it shares this same uncapped-per-segment behavior --
+        # a page-level mcq_count target doesn't map cleanly onto a
+        # per-topic-segment crop anyway (some segments are much smaller
+        # than a full page).
         # 2026-08-20: floor dropped MIN_MCQ(10) -> 1. /bio crops the
         # page PER TOPIC SEGMENT (see _bio_generate_per_topic_pages),
         # so a single call here is often just ONE small topic's worth
@@ -24282,6 +24289,189 @@ async def _handle_bio_impl(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
+async def handle_rd(msg: dict):
+    """/rd -p (pages) [-c channel] [-m "Subject"] — same arg style as /pdf.
+    Generation behaves EXACTLY like plain /pdf (same prompt, same
+    Gemini-only + count/mcq_count rules -- reuses plain-/pdf's own
+    generation path via _RD_MODE, not /bio's uncapped topic-prompt), but
+    ALSO detects topic headings (same visual signals /bio uses: bold
+    black, larger font, horizontally centered, optional English "(...)"
+    subtitle) and, in addition to the merged output, sends ONE separate
+    CSV per detected topic PLUS one merged CSV covering everything --
+    exactly like /bio's dual output style."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        token = _RD_MODE.set(True)
+        try:
+            return await _handle_rd_impl(msg)
+        finally:
+            _RD_MODE.reset(token)
+
+
+async def _handle_rd_impl(msg: dict):
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF-এ reply করে /rd দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/rd -p 1-10 -m \"Subject\"</code>\n\n"
+            "📌 /pdf-এর মতোই MCQ generate করে (extract না), কিন্তু bold-black/বড় "
+            "ফন্ট/centered heading দেখে টপিক ধরে প্রতিটার জন্য আলাদা CSV + সব মিলিয়ে "
+            "একটা merged CSV পাঠায়।\n"
+            "📌 -p = page range (না দিলে সব page)\n"
+            "📌 -m = Subject/topic name (না দিলে default)\n"
+            "📌 -c channel_id = দিলে CSV না, প্রতি টপিকের নামসহ header দিয়ে channel-এ সরাসরি poll পাঠাবে"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+    params = _parse_pdfm_params(text)
+    page_range = params["page_range"]
+    rd_channel_id = params["channel_id"]
+    rd_thread_id = params["thread_id"]
+    subject = params.get("topic") or DEFAULT_TOPIC
+
+    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
+    status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Generation শুরু হচ্ছে (topic detect সহ)...")
+
+        # Reuses /bio's heading-scan + per-topic-segment generation engine
+        # (_bio_generate_per_topic_pages) -- the ONLY difference from /bio
+        # is _RD_MODE being set instead of _BIO_MODE, which routes
+        # _build_mcq_prompt/count-floor logic to plain-/pdf behavior
+        # instead of /bio's uncapped-topic prompt (see _RD_MODE checks
+        # near _build_mcq_prompt and the count_min/count_max block).
+        generated_pages = await _bio_generate_per_topic_pages(
+            chat_id, pages, subject, status_msg_id
+        )
+
+        total_mcq_found = sum(len(mcqs) for _, _, mcqs in generated_pages)
+        _rd_was_cancelled = is_cancelled(chat_id)
+        if not total_mcq_found:
+            if status_msg_id:
+                msg_txt = "🛑 বাতিল করা হয়েছে — কোনো MCQ generate হওয়ার আগেই থেমে গেছে।" if _rd_was_cancelled else "❌ কোনো MCQ generate হয়নি!"
+                await edit_msg(chat_id, status_msg_id, msg_txt)
+            return
+
+        if status_msg_id:
+            _stage_note = "🛑 কাজ বাতিল করা হয়েছে — যতটুকু হয়েছে তা পাঠানো হচ্ছে।\n" if _rd_was_cancelled else ""
+            await edit_msg(chat_id, status_msg_id, f"{_stage_note}✅ {total_mcq_found} MCQ generate হয়েছে (per-topic isolated)!\n⏳ Grouping হচ্ছে...")
+
+        topic_groups = _topic_group_mcqs(generated_pages)
+
+        if status_msg_id:
+            breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
+            next_step = "channel-এ poll পাঠানো হচ্ছে..." if rd_channel_id else "CSV পাঠানো হচ্ছে..."
+            _cancel_note = "🛑 বাতিল করা হয়েছে — যতটুকু সম্পন্ন হয়েছে তার রেজাল্ট:\n" if _rd_was_cancelled else "✅ Generation Complete!\n"
+            await edit_msg(chat_id, status_msg_id,
+                f"{_cancel_note}📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
+
+        if rd_channel_id:
+            total_polls = await _post_topic_groups_to_channel(rd_channel_id, topic_groups, rd_thread_id)
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+            return
+
+        _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+        import io as _io_rd, csv as _csv_rd
+        _running_count = 0
+        _cmd_msg_id = msg.get("message_id")
+        _merged_buf = _io_rd.StringIO()
+        _merged_w = _csv_rd.writer(_merged_buf)
+        _merged_w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                             "answer", "explanation", "type", "section"])
+        for name, mcqs in topic_groups:
+            buf = _io_rd.StringIO()
+            w = _csv_rd.writer(buf)
+            w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                        "answer", "explanation", "type", "section"])
+            _num_mg, _bn_name_mg = _split_topic_number_and_bangla_name(name)
+            _merged_w.writerow([_bn_name_mg, "", "", "", "", "", "", "", "", ""])
+            for m in mcqs:
+                opts = m.get("options", ["", "", "", ""])
+                row = [
+                    m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                    opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                    opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                    _ans_map.get(m.get("answer", "A"), "1"),
+                    _strip_img_tag(m.get("explanation", "")), "1", "1"
+                ]
+                w.writerow(row)
+                _merged_w.writerow(row)
+            _num_fn, _bn_name_fn = _split_topic_number_and_bangla_name(name)
+            safe_name = re.sub(r'[\\/:*?"<>|]', '_', _bn_name_fn).strip() or "Topic"
+            range_start = _running_count + 1
+            range_end = _running_count + len(mcqs)
+            _running_count = range_end
+            _pg_nums = sorted({m.get("_page_num") for m in mcqs if m.get("_page_num") is not None})
+            if _pg_nums:
+                page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
+            else:
+                page_range_text = "N/A"
+            _num, _bn_name = _split_topic_number_and_bangla_name(name)
+            _num_prefix = f"{_html_escape(_num)} " if _num else ""
+            await send_document(chat_id, buf.getvalue().encode("utf-8"),
+                f"{safe_name}.csv",
+                caption=(f"📂 {_num_prefix}<code>{_html_escape(_bn_name)}</code>\n"
+                         f"📄 PDF Page: {page_range_text}\n"
+                         f"🔢 MCQ Range: {range_start}–{range_end}\n"
+                         f"💎 Total: {len(mcqs)}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if len(topic_groups) > 1:
+            _merged_file_base = re.sub(r'[\\/:*?"<>|]', '_', file_name.rsplit(".", 1)[0]).strip() or "RD"
+            await send_document(chat_id, _merged_buf.getvalue().encode("utf-8"),
+                f"{_merged_file_base}_Merged.csv",
+                caption=(f"📚 <b>All Topics Merged</b>\n"
+                         f"📂 Topics: {len(topic_groups)}\n"
+                         f"💎 Total MCQ: {total_mcq_found}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if status_msg_id:
+            _final_note = "🛑 বাতিল করা হয়েছে — যতটুকু সম্পন্ন হয়েছে তা CSV আকারে পাঠানো হয়েছে।" if _rd_was_cancelled else f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।"
+            await edit_msg(chat_id, status_msg_id, _final_note)
+
+    except Exception as e:
+        logger.error(f"[RD] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
 async def handle_unmesh(msg: dict):
     """/unmesh -p (pages) — same arg style as /topic. Extracts existing MCQ
     like /topic, but detects topic boundaries via the WHITE-bg + BOLD BLACK
@@ -31278,7 +31468,7 @@ async def handle_message(msg: dict):
         return
     _math_reply = msg.get("reply_to_message")
     _math_is_image_reply = bool(_math_reply and (_math_reply.get("photo") or (_math_reply.get("document") and _math_reply.get("document", {}).get("mime_type", "").startswith("image/"))))
-    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm") and not text.startswith("/pdfs")) or text.startswith("/bangla") or text.startswith("/boro") or text.startswith("/rd") or (text.startswith("/math") and not _math_is_image_reply):
+    if (text.startswith("/pdf") and not text.startswith("/pdfc") and not text.startswith("/pdfm") and not text.startswith("/pdfs")) or text.startswith("/bangla") or text.startswith("/boro") or (text.startswith("/math") and not _math_is_image_reply):
         if not is_auth:
             if is_private:
                 await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
@@ -31289,8 +31479,6 @@ async def handle_message(msg: dict):
             _cmd_prefix = "/boro"
         elif text.startswith("/math"):
             _cmd_prefix = "/math"
-        elif text.startswith("/rd"):
-            _cmd_prefix = "/rd"
         else:
             _cmd_prefix = "/pdf"
         arg = text.replace(_cmd_prefix, "").strip().lower()
@@ -31313,6 +31501,17 @@ async def handle_message(msg: dict):
                 _MATH_MODE.reset(token)
             return
         await handle_pdf(msg)
+        return
+    if text.startswith("/rd"):
+        # /rd = same generation as /pdf (plain prompt, no special mode) but
+        # ALSO detects topic headings like /bio and sends topic-wise CSVs
+        # plus one merged CSV covering everything.
+        if not is_auth:
+            if is_private:
+                await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
+            return
+        clear_cancel(chat_id)
+        _spawn_command_task(uid, handle_rd(msg))
         return
     if text.startswith("/chok"):
         if not is_auth:
