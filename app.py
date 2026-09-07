@@ -715,13 +715,17 @@ async def _create_forum_topic(channel_id: str, name: str) -> int | None:
     return None
 
 
-async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool) -> tuple:
+async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool, cancel_check: callable = None) -> tuple:
     """Sends one topic-batch: pre-message (topic name) -> polls (reply to
     pre-msg) -> Style-01 PDF + inline buttons -> ending message. Same shape
     as one /csvS batch iteration. Returns sent poll count. Raises on the
     pre-message failing (fatal for this batch); PDF/ending failures are
     logged but non-fatal, matching /csv's own tolerance. Returns (sent_count,
     first_poll_link) — the link is used to build the end-of-job master summary.
+
+    cancel_check: polled between EVERY poll inside this batch (not just
+    between batches) so the LMS card's Stop button takes effect immediately
+    instead of waiting for the whole batch (up to 25+ polls) to finish first.
 
     thread_id is resolved by the caller (job-level, once per exam) — every
     topic-batch for the same exam send lands inside that single forum topic,
@@ -744,8 +748,14 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
 
     sent, first_link = await _send_csv_polls_to_channel(
         channel_id, mcqs, topic, chat_id=0, pre_msg_id=pre_msg_id,
-        thread_id=thread_id, csv_fname=topic
+        thread_id=thread_id, csv_fname=topic, extra_cancel_check=cancel_check
     )
+
+    if cancel_check and cancel_check():
+        # Stopped mid-batch — the polls already sent stay (can't unsend),
+        # but skip the PDF/ending message for this batch and let the caller's
+        # own cancel check end the job without starting the next batch.
+        return sent, first_link
 
     if pre_msg_id and first_link:
         try:
@@ -824,6 +834,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         sent_total = 0
         batch_links = []  # (part_num, link, count, batch_topic) — for master summary
         all_mcqs = []  # accumulated across every batch — for group's merged PDF
+        job_cancel_check = lambda: job.get("cancel_requested", False)
         for b_idx, batch in enumerate(batches):
             if job.get("cancel_requested"):
                 job["status"] = "cancelled"
@@ -833,7 +844,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             if not mcqs:
                 continue
             try:
-                sent, first_link = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score)
+                sent, first_link = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check)
                 sent_total += sent
                 all_mcqs.extend(mcqs)
                 if first_link:
@@ -845,6 +856,12 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job["sent_total"] = sent_total
             job["batches_done"] = b_idx + 1
             job["pct"] = int((b_idx + 1) * 100 / total_batches) if total_batches else 100
+            if job.get("cancel_requested"):
+                # Stopped mid-batch (checked above, inside the poll loop) —
+                # stop dispatching further batches right away instead of
+                # waiting for the top-of-loop check on the next iteration.
+                job["status"] = "cancelled"
+                return
 
         if job.get("cancel_requested"):
             job["status"] = "cancelled"
@@ -9400,13 +9417,17 @@ async def _send_csv_polls_to_channel(
     csv_fname: str = "",
     job_id: str = None,
     start_index: int = 0,
-    first_poll_link_so_far: str = ""
+    first_poll_link_so_far: str = "",
+    extra_cancel_check: callable = None
 ) -> tuple:
     """
     একটা batch-এর polls পাঠাও।
     job_id দেওয়া থাকলে প্রতিটা successful poll-এর পর D1-এ progress (sent_index)
     save হয় — HF restart/crash হলে bot startup-এ সেই progress পড়ে start_index
     থেকে resume করা যায়, শুরু থেকে আবার না পাঠিয়ে (duplicate এড়াতে)।
+    extra_cancel_check: chat_id-keyed CANCEL_FLAGS ছাড়া আরেকটা cancel source
+    check করার জন্য (যেমন LMS send-to-channel job-এর নিজস্ব cancel_requested
+    flag, যেটা chat_id=0 দিয়ে চলে তাই is_cancelled(chat_id) কখনো true হয় না)।
     Returns: (sent_count, first_poll_link)
     """
     settings = await db_get_settings()
@@ -9443,7 +9464,7 @@ async def _send_csv_polls_to_channel(
             # পাঠালে duplicate poll হয়ে যাবে চ্যানেলে, তাই skip।
             continue
 
-        if is_cancelled(chat_id):
+        if is_cancelled(chat_id) or (extra_cancel_check and extra_cancel_check()):
             # ইউজার DM এর live status message-এর Cancel বাটন চাপলে এখানেই
             # loop থেমে যায় — বাকি poll আর পাঠানো হবে না।
             if job_id:
