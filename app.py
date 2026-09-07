@@ -2714,6 +2714,14 @@ _SOURCE_REF_PATTERNS = [
     # words (name can be English/Bangla/mixed-case) consumed along with the
     # noun+verb, so the brand/source name itself doesn't survive the strip.
     r'(?:[A-Za-z]+\s*){1,3}(?:ছক|তথ্য|টেবিল|চিত্র|অনুচ্ছেদ|উদ্দীপক|পৃষ্ঠা|টেক্সট)\s*(?:অনুযায়ী|অনুসারে)',
+    # 2026-09-07: FULLY GENERIC bare-noun + অনুযায়ী/অনুসারে — any Bengali noun
+    # (not just the fixed source-noun list above), e.g. "সংজ্ঞা অনুযায়ী",
+    # "পার্থক্য ছক অনুযায়ী". Consumes up to 2 preceding Bengali words + the
+    # verb, so a 2-word compound like "পার্থক্য ছক" is fully removed too.
+    r'(?:\S+\s+){0,2}(?:অনুযায়ী|অনুসারে)',
+    # 2026-09-07: FULLY GENERIC "X অংশে/অনুচ্ছেদে উল্লিখিত/উল্লেখ রয়েছে/আছে যে" —
+    # e.g. "আবিষ্কার অংশে উল্লিখিত রয়েছে যে", not just উক্ত/fixed nouns.
+    r'(?:\S+\s+){0,2}(?:অংশে|অনুচ্ছেদে|টপিকে)\s*(?:উল্লিখিত|উল্লেখ)\s*(?:রয়েছে|আছে|করা\s*হয়েছে)(?:\s*যে)?',
     # 2026-09-06: আরও source-reference leak patterns —
     # "ছবিতে দেওয়া লেবেল অনুযায়ী", "উপন্যাস বিভাগে", "টেক্সটের অন্যান্য গ্রন্থ অংশে",
     # "টেক্সটের কবিতা অংশে" ইত্যাদি (টেক্সট/ছবির কোনো section/label/বিভাগ reference)
