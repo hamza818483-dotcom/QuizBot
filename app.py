@@ -941,7 +941,8 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             if batch_links:
                 sep = "▬▬▬▬▬▬▬▬▬▬"
                 header = (
-                    f"🟥{_html_escape(exam_title or 'MCQ')}\n"
+                    f"🟥{_html_escape(subject or 'MCQ')}\n"
+                    f"◼️{_html_escape(exam_title or 'MCQ')}\n"
                     f"🌟Total Topic: {len(batch_links)}\n"
                     f"📌Total MCQ: {sent_total}"
                 )
