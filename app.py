@@ -722,16 +722,9 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     pre-message failing (fatal for this batch); PDF/ending failures are
     logged but non-fatal, matching /csv's own tolerance.
 
-    If thread_id is None/0 (LMS left "Thread/Topic ID" blank for a group),
-    a new forum topic named after this batch's topic (usually the exam name)
-    is auto-created and its thread_id used instead — so each send lands in
-    its own topic rather than the group's General chat. Silently falls back
-    to no-thread-id if the chat isn't forum-enabled or topic creation fails."""
-    if not thread_id:
-        auto_thread_id = await _create_forum_topic(channel_id, topic)
-        if auto_thread_id:
-            thread_id = auto_thread_id
-
+    thread_id is resolved by the caller (job-level, once per exam) — every
+    topic-batch for the same exam send lands inside that single forum topic,
+    rather than each batch getting its own topic."""
     pre_text = csv_get_pre_message(topic, topic, len(mcqs))
     pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
     if thread_id:
@@ -798,10 +791,17 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     return sent
 
 
-async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list):
+async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = ""):
     """batches: [{"topic": str, "mcqs": [...]}, ...] — one entry per topic
     (or a single entry when the exam has no topic split / no batch-size
-    split requested). Sent sequentially, same as /csvS's batch loop."""
+    split requested). Sent sequentially, same as /csvS's batch loop.
+
+    If thread_id is None/0 (LMS left "Thread/Topic ID" blank for a group),
+    ONE forum topic named after the exam is auto-created up front and reused
+    for every batch in this job — so all topic-wise MCQs for one exam land
+    together inside a single exam-named thread, instead of one topic per
+    subtopic. Falls back to no-thread-id if the chat isn't forum-enabled or
+    topic creation fails."""
     job = LMS_SEND_JOBS[job_id]
     try:
         is_admin, admin_err = await _check_bot_admin(channel_id)
@@ -813,6 +813,11 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         chat_type = await _get_chat_type(channel_id)
         ask_score = chat_type == "channel"
         job["status"] = "running"
+
+        if not thread_id:
+            auto_thread_id = await _create_forum_topic(channel_id, exam_title or (batches[0].get("topic") if batches else "MCQ"))
+            if auto_thread_id:
+                thread_id = auto_thread_id
 
         total_batches = len(batches)
         sent_total = 0
@@ -851,14 +856,16 @@ async def lms_send_channel(request: Request):
     """
     LMS admin exam-card 'send' icon হিট করলে এখানে আসে।
     Body: {
-      secret, channel_id, thread_id?,
+      secret, channel_id, thread_id?, exam_title?,
       batches: [{ topic, mcqs: [{question, options[4], answer, explanation}] }, ...]
     }
     - Exam-এ topic-wise ভাগ থাকলে LMS প্রতিটা topic-কে আলাদা batch হিসেবে পাঠায় (/topic-এর মতো)।
     - Topic না থাকলে/না চাইলে LMS একটাই batch (সব প্রশ্ন) অথবা batch_size
       দিয়ে ভাগ করা কয়েকটা batch পাঠাতে পারে (/csvS-এর মতো) — উভয় ক্ষেত্রেই
       এখানে শুধু pre-split করা `batches` লিস্ট আসে, split logic LMS side-এ।
-    thread_id শুধু group + topic (forum) হলে দরকার।
+    thread_id শুধু group + topic (forum) হলে দরকার — ফাঁকা রাখলে exam_title
+    দিয়ে ONE forum topic auto-create হয়, আর সব topic-wise batch সেই একই
+    thread-এর ভিতরে পাঠানো হয় (প্রতি subtopic-এর জন্য আলাদা thread না)।
     """
     if not LMS_API_SECRET:
         logger.warning("[LMS-Send] SECURITY: LMS_API_SECRET not set -- endpoint accepting unauthenticated requests!")
@@ -871,6 +878,7 @@ async def lms_send_channel(request: Request):
     thread_id = int(thread_id) if thread_id else None
     batches = data.get("batches") or []
     exam_id = str(data.get("exam_id") or "").strip()
+    exam_title = str(data.get("exam_title") or "").strip()
 
     if not channel_id:
         return JSONResponse({"error": "channel_id is required"}, status_code=400)
@@ -884,7 +892,7 @@ async def lms_send_channel(request: Request):
         "batches_done": 0, "batches_total": len(batches), "error": None,
         "exam_id": exam_id, "cancel_requested": False,
     }
-    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches))
+    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title))
     return JSONResponse({"ok": True, "job_id": job_id})
 
 
