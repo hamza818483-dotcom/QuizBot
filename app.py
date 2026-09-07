@@ -5595,11 +5595,10 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         # doesn't carry custom_prompt through to its retry call).
         _rng_min, _rng_max = 1, None
     else:
-        # /pdf: minimum floor raised 10 -> 15 (matches /rd's floor) per
-        # user instruction (2026-09-08), reusing /rd's gap-fill retry
-        # ladder below so the floor is actually enforceable -- no ceiling
-        # change, MAX_MCQ unchanged.
-        _rng_min, _rng_max = 15, MAX_MCQ
+        # /pdf: minimum floor raised 10 -> 15 and ceiling removed (matches
+        # /rd exactly) per user instruction (2026-09-08) -- page content
+        # should be maximized, not truncated at a fixed 20 cap.
+        _rng_min, _rng_max = 15, None
 
     # AtlasBot-style count-enforcement retry loop. Capped at 1 extra
     # attempt (was 2) -- each retry re-runs the FULL provider chain
