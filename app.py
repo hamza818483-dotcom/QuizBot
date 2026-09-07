@@ -5595,7 +5595,11 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         # doesn't carry custom_prompt through to its retry call).
         _rng_min, _rng_max = 1, None
     else:
-        _rng_min, _rng_max = MIN_MCQ, MAX_MCQ
+        # /pdf: minimum floor raised 10 -> 15 (matches /rd's floor) per
+        # user instruction (2026-09-08), reusing /rd's gap-fill retry
+        # ladder below so the floor is actually enforceable -- no ceiling
+        # change, MAX_MCQ unchanged.
+        _rng_min, _rng_max = 15, MAX_MCQ
 
     # AtlasBot-style count-enforcement retry loop. Capped at 1 extra
     # attempt (was 2) -- each retry re-runs the FULL provider chain
@@ -5604,18 +5608,19 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     # run. 1 retry still gives a real second chance at hitting MIN_MCQ
     # without compounding worst-case wait time further.
     attempts = 0
-    _rd_max_attempts = 3 if _RD_MODE.get() else 1
+    _rd_max_attempts = 3
     while len(out) < _rng_min and attempts < _rd_max_attempts:
         attempts += 1
         logger.info(f"[MCQGen] page {page_num}: only {len(out)} MCQs (attempt {attempts}) — retrying for more")
-        if _RD_MODE.get() and out:
-            # /rd gap-fill retry: instead of blindly re-generating the whole
-            # page again (risking duplicate MCQs on facts already covered),
-            # tell the model exactly which questions already exist and ask
-            # it to mine the REMAINING/missed content on the page for new,
-            # non-overlapping MCQs -- merged with (not replacing) what the
-            # first pass already produced, so the page's final total climbs
-            # toward _rng_min instead of just re-rolling the same content.
+        if out:
+            # gap-fill retry (shared with /rd): instead of blindly
+            # re-generating the whole page again (risking duplicate MCQs
+            # on facts already covered), tell the model exactly which
+            # questions already exist and ask it to mine the
+            # REMAINING/missed content on the page for new, non-overlapping
+            # MCQs -- merged with (not replacing) what the first pass
+            # already produced, so the page's final total climbs toward
+            # _rng_min instead of just re-rolling the same content.
             _retry_prompt = _rd_build_gapfill_prompt(topic, out)
             retry_out, retry_tried = await _generate_mcq_from_image_raw(
                 img, topic, page_num, mcq_count, exclude_groq_keys=tried_groq_keys,
@@ -5637,27 +5642,20 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         if _TF_MODE.get():
             retry_out = _tf_validate_and_filter(retry_out)
         retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
-        if _RD_MODE.get():
-            # Merge (never replace) -- the gap-fill retry is meant to ADD
-            # to what's already there, not compete with it.
-            # NOTE: _dedupe_mcqs is currently a disabled no-op (see its
-            # docstring above) -- there is NO code-level dedup backstop
-            # here. Overlap prevention relies entirely on the gap-fill
-            # prompt's instruction to the model ("don't repeat these
-            # questions"). If the model still produces a near-duplicate
-            # despite that instruction, it will pass through into the
-            # final merged output uncaught.
-            if retry_out:
-                out = _rd_dedupe_gapfill_merge(out, retry_out)
-        elif retry_out and len(retry_out) >= len(out):
-            out = retry_out
-        if _RD_MODE.get() and len(out) == 0 and attempts >= _rd_max_attempts:
-            # /rd: 0 MCQ is never an acceptable final result for a page
-            # that has content -- give it a few extra attempts beyond the
-            # normal 1-retry cap specifically for the zero case (a
-            # genuinely blank/cover page still ends at 0 after these, but
-            # that's a real content fact, not a give-up).
-            logger.warning(f"[RD] page {page_num}: still 0 MCQ after {attempts} attempts -- one more try before accepting zero")
+        # Merge (never replace) -- gap-fill retry is meant to ADD to what's
+        # already there, not compete with it. NOTE: _dedupe_mcqs is
+        # currently a disabled no-op (see its docstring above) -- overlap
+        # prevention relies entirely on the gap-fill prompt's instruction
+        # to the model ("don't repeat these questions").
+        if retry_out:
+            out = _rd_dedupe_gapfill_merge(out, retry_out)
+        if len(out) == 0 and attempts >= _rd_max_attempts:
+            # 0 MCQ is never an acceptable final result for a page that has
+            # content -- give it a few extra attempts beyond the normal
+            # cap specifically for the zero case (a genuinely blank/cover
+            # page still ends at 0 after these, but that's a real content
+            # fact, not a give-up).
+            logger.warning(f"[MCQGen] page {page_num}: still 0 MCQ after {attempts} attempts -- one more try before accepting zero")
             _rd_max_attempts += 1
             if attempts >= 4:
                 # 2026-09-07: lowered from 6 -> 4 -- each attempt can itself
