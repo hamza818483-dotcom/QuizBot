@@ -729,6 +729,7 @@ def lms_get_pre_message(subject: str, exam_title: str, topic: str, count: int, f
         f"🟥{_html_escape(subject or 'MCQ')}\n"
         f"{sep}\n"
         f"◼️<b>{_html_escape(exam_title or '')}</b>\n"
+        f"{sep}\n"
         f"◾Topic:\n"
         f"<blockquote>{_html_escape(topic or '')}</blockquote>\n"
         f"{sep}\n"
@@ -768,6 +769,10 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     if not pre_r.get("ok"):
         raise RuntimeError(pre_r.get("description") or "Pre-message send failed")
     pre_msg_id = pre_r["result"]["message_id"]
+    try:
+        await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": pre_msg_id, "disable_notification": True})
+    except Exception as e:
+        logger.warning(f"[LMS-Send] pre-msg pin failed: {e}")
 
     batch_cache_id = gen_session_id()
     await db_save_mcq_cache(batch_cache_id, batch_cache_id, 0, topic, mcqs, channel_id=channel_id)
