@@ -15815,6 +15815,14 @@ async def _process_pdf_pages_inner(
     # (/pdf, /qbm, /onu, /tf, /pdfs) keeps the strictly-serial behavior
     # untouched — this dict is only ever populated when _RD_MODE is True.
     _rd_prefetch_tasks = {}
+    # /rd-ONLY: image bytes (JPEG-encoded + hardened) computed ahead of time
+    # during prefetch, so by the time the main loop reaches this page for
+    # posting, the bytes are already sitting ready -- zero conversion delay
+    # right before send_photo. Kept to at most ~1 page ahead (same lifetime
+    # as _rd_prefetch_tasks), so RAM cost stays negligible; NOT done for the
+    # whole PDF up front (unnecessary memory for large PDFs, no real gain
+    # since encoding is already fast/CPU-only, never the actual bottleneck).
+    _rd_img_bytes_cache = {}
 
     def _rd_kick_next(next_idx):
         if next_idx < len(pages):
@@ -15835,13 +15843,23 @@ async def _process_pdf_pages_inner(
         "⬜ Waiting") the moment this background generation actually starts,
         so the live dashboard reflects reality — a prefetched page really is
         being generated right now, even though the main loop hasn't reached
-        it yet."""
+        it yet.
+
+        Also converts this page's image to JPEG bytes (hardened
+        image_to_bytes) concurrently with generation -- encoding is
+        independent of the AI call, so there's no reason to wait until
+        posting time to pay that (small but nonzero) cost."""
         page_status[page_idx]["current"] = True
         page_status[page_idx]["stage"] = "🤖 AI call করা হচ্ছে (prefetch, পরবর্তী পেজের সাথে সমান্তরালে)..."
         page_status[page_idx]["page_start_time"] = time.time()
         page_status[page_idx]["_ai_calls_before"] = _get_ai_call_count(chat_id)
         _pg_tuple = pages[page_idx]
         _pg_num, _pg_img = _pg_tuple[0], _pg_tuple[1]
+        if _pg_num not in _rd_img_bytes_cache:
+            try:
+                _rd_img_bytes_cache[_pg_num] = await asyncio.to_thread(image_to_bytes, _pg_img)
+            except Exception as _enc_e:
+                logger.warning(f"[PDF] Page {_pg_num} prefetch image encode failed, will retry inline at posting time: {_enc_e}")
         try:
             result = await _gen_with_retry(_pg_img, _pg_num)
         finally:
@@ -15922,6 +15940,7 @@ async def _process_pdf_pages_inner(
             clear_active_job(chat_id)
             for _t in _rd_prefetch_tasks.values():
                 _t.cancel()
+            _rd_img_bytes_cache.clear()
             break
         if skip_generate:
             page_num, img, mcqs = page_tuple
@@ -16045,7 +16064,12 @@ async def _process_pdf_pages_inner(
                 continue
 
             cache_id = gen_session_id()
-            img_bytes = image_to_bytes(img)
+            # Use prefetched bytes if the background prefetch already
+            # encoded this page (common case); otherwise encode inline now
+            # (first page, or if prefetch encoding failed above).
+            img_bytes = _rd_img_bytes_cache.pop(page_num, None)
+            if img_bytes is None:
+                img_bytes = image_to_bytes(img)
 
             if csv_only:
                 for m in mcqs:
