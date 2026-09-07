@@ -721,7 +721,9 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     as one /csvS batch iteration. Returns sent poll count. Raises on the
     pre-message failing (fatal for this batch); PDF/ending failures are
     logged but non-fatal, matching /csv's own tolerance. Returns (sent_count,
-    first_poll_link) — the link is used to build the end-of-job master summary.
+    first_poll_link, batch_cache_id) — the cache_id is used by the caller to
+    build the Quiz Solve / Website Exam links for the end-of-job master
+    summary (same deep-link scheme as _csv_pre_buttons).
 
     cancel_check: polled between EVERY poll inside this batch (not just
     between batches) so the LMS card's Stop button takes effect immediately
@@ -755,7 +757,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
         # Stopped mid-batch — the polls already sent stay (can't unsend),
         # but skip the PDF/ending message for this batch and let the caller's
         # own cancel check end the job without starting the next batch.
-        return sent, first_link
+        return sent, first_link, batch_cache_id
 
     if pre_msg_id and first_link:
         try:
@@ -799,9 +801,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
             "channel_id": channel_id, "end_msg_id": end_r["result"]["message_id"]
         })
 
-    return sent, first_link
-
-
+    return sent, first_link, batch_cache_id
 async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = ""):
     """batches: [{"topic": str, "mcqs": [...]}, ...] — one entry per topic
     (or a single entry when the exam has no topic split / no batch-size
@@ -857,7 +857,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
 
         total_batches = len(batches)
         sent_total = 0
-        batch_links = []  # (part_num, link, count, batch_topic) — for master summary
+        batch_links = []  # (part_num, first_link, count, batch_topic, quiz_link, exam_link) — for master summary
         all_mcqs = []  # accumulated across every batch — for group's merged PDF
         job_cancel_check = lambda: job.get("cancel_requested", False)
         for b_idx, batch in enumerate(batches):
@@ -874,11 +874,14 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             if not mcqs:
                 continue
             try:
-                sent, first_link = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check)
+                sent, first_link, batch_cache_id = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check)
                 sent_total += sent
                 all_mcqs.extend(mcqs)
                 if first_link:
-                    batch_links.append((b_idx + 1, first_link, sent, topic))
+                    bot_un = await get_bot_username()
+                    quiz_link = f"https://t.me/{bot_un}?start=pdf_{batch_cache_id}"
+                    exam_link = f"{GH_PAGES_EXAM_URL}?id={batch_cache_id}"
+                    batch_links.append((b_idx + 1, first_link, sent, topic, quiz_link, exam_link))
             except Exception as e:
                 logger.error(f"[LMS-Send] batch '{topic}' failed: {e}")
                 job["error"] = f"'{topic}': {e}"
@@ -925,19 +928,22 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
 
             # Master summary — one message per topic sent, each block
             # separated by a bold divider, in the requested format
-            # (Exam Name / Topic / MCQ count / First Poll Link). Sent last,
-            # in the same thread/chat, for BOTH group (inside the forum
-            # topic) and channel — the per-topic pre/poll/PDF/ending flow
-            # above is identical for both; only this summary is new.
+            # (Exam Name / Topic / MCQ count / First Poll Link / Quiz Link /
+            # Website Exam link). Sent last, in the same thread/chat, for
+            # BOTH group (inside the forum topic) and channel — the
+            # per-topic pre/poll/PDF/ending flow above is identical for
+            # both; only this summary is new.
             if batch_links:
                 sep = "▬▬▬▬▬▬▬▬▬▬"
                 blocks = []
-                for _part_n, link, count, batch_topic in batch_links:
+                for _part_n, link, count, batch_topic, quiz_link, exam_link in batch_links:
                     blocks.append(
                         f"🟥{exam_title or 'MCQ'}\n"
                         f"🌟Topic:\"{batch_topic}\"\n"
                         f"✅MCQ:({count})\n\n"
-                        f"🔗First Poll Link:\n{link}"
+                        f"🔗First Poll Link:\n{link}\n\n"
+                        f"📝Quiz Link:\n{quiz_link}\n\n"
+                        f"🌐Website Style Exam Link:\n{exam_link}"
                     )
                 summary_text = f"\n{sep}\n".join(blocks)
                 summary_data = {
