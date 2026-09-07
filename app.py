@@ -2531,6 +2531,18 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"- Never pad with junk/filler — reuse facts only via genuinely different "
         f"question angles, never copy-paste.\n"
         f"- NEVER make MCQs from topic names, chapter titles, headlines, page numbers.\n"
+        f"- 🚫 NEVER generate a new/different MCQ derived FROM another question "
+        f"already shown on the page (i.e. don't rephrase/repurpose an existing "
+        f"question into a new one) — only extract from genuine informational "
+        f"content, not from pre-existing questions.\n"
+        f"- 🚫 NEVER build an MCQ whose subject is a mnemonic/স্মৃতিকৌশল itself, "
+        f"an author/লেখক নাম, a reference/রেফারেন্স, or a book/বইয়ের নাম — these "
+        f"may appear on the page but must never become the MCQ's own topic.\n"
+        f"- 🚫 NEVER include any source-attribution clause in the question, "
+        f"options, or explanation — e.g. '\"...\" বই অনুসারে', 'প্রদত্ত তথ্য/ছক "
+        f"অনুসারে', 'অনুযায়ী'/'অনুসারে' tied to a book/text/table/reference/"
+        f"source name. State every fact directly as standalone knowledge, "
+        f"never as something attributed to a named source.\n"
         f"- 3-5 MCQs should combine 2-3 distinct facts per question (options are "
         f"fact-combinations, only one fully correct) — moderate difficulty only.\n\n"
 
@@ -2677,6 +2689,13 @@ _SOURCE_REF_PATTERNS = [
     r'(?:উপন্যাস|কবিতা|গল্প|নাটক|প্রবন্ধ)\s*বিভাগে',
     r'টেক্সটের\s*(?:অন্যান্য\s*)?(?:গ্রন্থ|উপন্যাস|কবিতা|গল্প|নাটক|প্রবন্ধ)\s*(?:অংশে|বিভাগে)',
     r'টেক্সটের\s*\S+\s*(?:অংশে|বিভাগে)(?=\s|$)',
+    # 2026-09-07: book/author/reference-name attribution — "... বই অনুসারে",
+    # "... বইয়ের মতে", "রেফারেন্স অনুযায়ী", "লেখকের মতে" and siblings. Matches
+    # a preceding quoted or bare name + বই/গ্রন্থ/রেফারেন্স/লেখক + reference-verb.
+    r'["\'“”‘’]?[^"\'“”‘’\n।,]{0,40}["\'“”‘’]?\s*বই(?:য়ের)?\s*(?:অনুসারে|অনুযায়ী|মতে)',
+    r'(?:রেফারেন্স|তথ্যসূত্র|সূত্র)\s*(?:অনুসারে|অনুযায়ী|মতে)',
+    r'লেখকের?\s*মতে',
+    r'গ্রন্থ(?:ে|র)?\s*(?:অনুসারে|অনুযায়ী)',
 ]
 _SOURCE_REF_RE = re.compile('|'.join(_SOURCE_REF_PATTERNS))
 _SUPERSCRIPT_MAP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
