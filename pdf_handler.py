@@ -1721,9 +1721,60 @@ def image_to_base64(img: Image.Image) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 def image_to_bytes(img: Image.Image) -> bytes:
-    buf = BytesIO()
-    img.save(buf, format="JPEG", quality=85)
-    return buf.getvalue()
+    """Converts a PDF-rendered page image to JPEG bytes for Telegram
+    sendPhoto. Hardened against the real causes of silent image-send
+    failure seen in practice:
+      1. Mode issues — PDF renders can come out as RGBA/P/CMYK/LA. JPEG
+         has no alpha channel support; saving RGBA/LA/P straight to JPEG
+         either raises OSError or produces a corrupt file Telegram then
+         rejects. Fix: always flatten onto a white RGB background first.
+      2. Oversized dimensions — Telegram sendPhoto silently fails (or
+         auto-converts to a low-quality "document"-like fallback) if
+         width+height > 10000px or the aspect ratio exceeds 20:1. Fix:
+         downscale proportionally to a safe max dimension before encoding.
+      3. Payload too large — very dense/high-DPI page renders can exceed
+         Telegram's 10MB photo limit. Fix: progressively step down JPEG
+         quality (and dimensions as a last resort) until under the cap,
+         instead of sending an oversized file that gets silently dropped.
+    """
+    MAX_DIM = 4096          # safe ceiling, well under Telegram's 10000px/20:1 limits
+    MAX_BYTES = 9_500_000   # headroom under Telegram's 10MB photo cap
+
+    # 1) Normalize mode -> flatten any alpha onto white, force RGB
+    if img.mode in ("RGBA", "LA"):
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[-1])
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    # 2) Cap dimensions (proportional downscale, preserves readability)
+    w, h = img.size
+    if max(w, h) > MAX_DIM:
+        scale = MAX_DIM / max(w, h)
+        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+
+    # 3) Encode, stepping quality/size down if the result is still too big
+    for quality in (85, 75, 65, 55, 45):
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        data = buf.getvalue()
+        if len(data) <= MAX_BYTES:
+            return data
+
+    # Last resort: still too large even at lowest quality -- shrink dimensions further
+    img2 = img
+    while True:
+        w2, h2 = img2.size
+        if max(w2, h2) <= 1024:
+            break
+        img2 = img2.resize((max(1, w2 * 3 // 4), max(1, h2 * 3 // 4)), Image.LANCZOS)
+        buf = BytesIO()
+        img2.save(buf, format="JPEG", quality=60)
+        data = buf.getvalue()
+        if len(data) <= MAX_BYTES:
+            return data
+    return data
 
 # ============================================================
 # JSON PARSE HELPER (shared)
