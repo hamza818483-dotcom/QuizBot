@@ -847,12 +847,13 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         if job.get("cancel_requested"):
             job["status"] = "cancelled"
         else:
-            # Channel-only master summary — one message per topic, each block
-            # separated by a bold divider, in the exact format the LMS admin
-            # requested (Exam Name / Topic / MCQ count / First Poll Link).
-            # Groups don't get this — each batch's own ending message already
-            # covers that case there.
-            if batch_links and chat_type == "channel":
+            # Master summary — one message per topic sent, each block
+            # separated by a bold divider, in the requested format
+            # (Exam Name / Topic / MCQ count / First Poll Link). Sent last,
+            # in the same thread/chat, for BOTH group (inside the forum
+            # topic) and channel — the per-topic pre/poll/PDF/ending flow
+            # above is identical for both; only this summary is new.
+            if batch_links:
                 sep = "▬▬▬▬▬▬▬▬▬▬"
                 blocks = []
                 for _part_n, link, count, batch_topic in batch_links:
