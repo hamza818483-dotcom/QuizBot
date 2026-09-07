@@ -847,16 +847,25 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         if job.get("cancel_requested"):
             job["status"] = "cancelled"
         else:
-            # Master summary — one message listing every topic sent, in order,
-            # with its poll link and question count. Sent last, in the same
-            # thread, so admins get a single guide post after all topics land.
-            if batch_links:
-                summary_text = csv_get_master_summary(
-                    exam_title or "MCQ", sent_total, len(batch_links), batch_links
-                )
+            # Channel-only master summary — one message per topic, each block
+            # separated by a bold divider, in the exact format the LMS admin
+            # requested (Exam Name / Topic / MCQ count / First Poll Link).
+            # Groups don't get this — each batch's own ending message already
+            # covers that case there.
+            if batch_links and chat_type == "channel":
+                sep = "▬▬▬▬▬▬▬▬▬▬"
+                blocks = []
+                for _part_n, link, count, batch_topic in batch_links:
+                    blocks.append(
+                        f"🟥{exam_title or 'MCQ'}\n"
+                        f"🌟Topic:\"{batch_topic}\"\n"
+                        f"✅MCQ:({count})\n\n"
+                        f"🔗First Poll Link:\n{link}"
+                    )
+                summary_text = f"\n{sep}\n".join(blocks)
                 summary_data = {
                     "chat_id": channel_id, "text": summary_text,
-                    "parse_mode": "Markdown", "disable_web_page_preview": True,
+                    "disable_web_page_preview": True,
                 }
                 if thread_id:
                     summary_data["message_thread_id"] = thread_id
