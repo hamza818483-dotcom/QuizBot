@@ -16093,6 +16093,17 @@ async def _process_pdf_pages_inner(
     new_job_id(chat_id)
     set_active_job(chat_id, f"PDF MCQ generation + Poll posting ({file_name}, page-by-page)")
 
+    # FIX (2026-09-08): _page_ai_calls_before must exist before the prefetch
+    # window can start (below) -- prefetch tasks for pages 2+ can now begin
+    # running (via _rd_fill_window(1)) before the main per-page loop's own
+    # assignment of this variable is ever reached, since prefetching was
+    # extended from /rd-only to all /pdf modes. Without this, every prefetch
+    # task's first AI call crashed on "cannot access free variable
+    # '_page_ai_calls_before'" and silently fell back to whatever the single
+    # first-pass call returned -- which defeated the 15-floor retry ladder
+    # entirely (pages stuck at ~8 MCQs no matter how high the floor was set).
+    _page_ai_calls_before = _get_ai_call_count(chat_id)
+
     # /rd-ONLY prefetch: while page N is posting, up to _RD_PREFETCH_WINDOW
     # pages ahead run generation+image-encoding concurrently in the
     # background, so posting speed never blocks/limits how far ahead
