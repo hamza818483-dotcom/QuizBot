@@ -1330,6 +1330,15 @@ def _build_chok_prompt(topic: str) -> str:
 _BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
 _BIO_MODE = contextvars.ContextVar("bio_mode", default=False)
 _RD_MODE = contextvars.ContextVar("rd_mode", default=False)
+# /rd multi-page topic continuity: a single shared list (set per-job, NOT
+# per-async-context -- must be visible across all pages' concurrent
+# rolling-window generation calls within the same /rd job) of every
+# main_topic string confirmed so far by earlier pages. Passed into each
+# page's prompt so a topic spanning 2-3+ pages gets tagged with the EXACT
+# same string every time, instead of each page inventing its own wording
+# for the same ongoing subject. Reset to a fresh list at the start of each
+# /rd job (see handle_pdf/_process_pdf_pages_inner).
+_RD_KNOWN_TOPICS = contextvars.ContextVar("rd_known_topics", default=None)
 _BORO_MODE = contextvars.ContextVar("boro_mode", default=False)
 _MATH_MODE = contextvars.ContextVar("math_mode", default=False)
 _CHEM_MODE = contextvars.ContextVar("chem_mode", default=False)
@@ -2692,11 +2701,25 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"unrelated content). Normalize to 0-1000 scale ([x_min,y_min,x_max,y_max], "
         f"top-left=[0,0], bottom-right=[1000,1000]). Use null if unsure.\n\n"
         + (
+        (lambda _kt: (
+            f"🟦 TOPICS ALREADY SEEN ON EARLIER PAGES (use EXACT same string if this "
+            f"page continues one of these): {', '.join(_kt)}\n\n"
+            if _kt else ""
+        ))(_RD_KNOWN_TOPICS.get() or []) if _RD_MODE.get() else ""
+        )
+        + (
         f"🟨 TOPIC TAGGING (mandatory, decide this yourself — no fixed list, "
         f"no user-given rule): for EACH MCQ give 'main_topic', the specific "
         f"subject/section this MCQ's content actually belongs to, named the way "
         f"a textbook section heading would (e.g. 'কোষ বিভাজন', 'Newton's Laws') "
-        f"purely from what the page content is about. 🚨 The topic/heading text "
+        f"purely from what the page content is about. 🔁 MULTI-PAGE CONTINUITY: "
+        f"if this page's topic is the SAME subject as one listed above (a "
+        f"topic often spans 2-3+ consecutive pages), you MUST reuse that EXACT "
+        f"same main_topic string character-for-character — do NOT invent a "
+        f"slightly reworded version (e.g. adding/dropping a suffix word) just "
+        f"because this is a later page of the same topic. Only create a NEW "
+        f"main_topic string if this page genuinely starts a different subject "
+        f"not in that list. 🚨 The topic/heading text "
         f"is very often printed as WHITE TEXT ON A COLORED BOX (commonly GREEN "
         f"or DEEP GREEN, sometimes other solid colors) at the top of a section — "
         f"look carefully INSIDE these colored heading boxes and read the white "
@@ -5515,6 +5538,11 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     if _RD_MODE.get() and out:
         from pdf_handler import _pdfs_reconcile_mcq_topics
         out = _pdfs_reconcile_mcq_topics(out, topic)
+        _kt_list = _RD_KNOWN_TOPICS.get()
+        if _kt_list is not None:
+            for _t in {m.get("_pdfs_topic") for m in out if m.get("_pdfs_topic")}:
+                if _t not in _kt_list:
+                    _kt_list.append(_t)
     if _TF_MODE.get():
         out = _tf_validate_and_filter(out)
     if _BORO_MODE.get() and "_dagano_apply_topic_reuse" in globals():
@@ -5606,6 +5634,11 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         if _RD_MODE.get() and retry_out:
             from pdf_handler import _pdfs_reconcile_mcq_topics
             retry_out = _pdfs_reconcile_mcq_topics(retry_out, topic)
+            _kt_list2 = _RD_KNOWN_TOPICS.get()
+            if _kt_list2 is not None:
+                for _t in {m.get("_pdfs_topic") for m in retry_out if m.get("_pdfs_topic")}:
+                    if _t not in _kt_list2:
+                        _kt_list2.append(_t)
         if _TF_MODE.get():
             retry_out = _tf_validate_and_filter(retry_out)
         retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
@@ -12266,6 +12299,43 @@ def _build_pdfs_marker_row_csv(topics_ordered: list, topic_mcqs: dict) -> list:
     return rows
 
 
+def _rd_normalize_topic_key(name: str) -> str:
+    """Loose normalization for fuzzy-matching /rd main_topic strings that
+    should be the same subject but came out with tiny wording differences
+    across pages (extra/missing spaces, punctuation, a trailing/leading
+    common suffix word). Strips whitespace variance and common connector
+    punctuation, lowercases (safe for Bengali too -- .lower() is a no-op on
+    non-ASCII, only affects any Latin chars present)."""
+    if not name:
+        return ""
+    n = re.sub(r'[\s\-–—:।,.\(\)]+', '', name).strip().lower()
+    return n
+
+def _rd_merge_similar_topics(all_mcqs_raw: list) -> list:
+    """/rd FINAL SAFETY-NET PASS (runs once, after all pages are done):
+    the rolling known-topics list (passed into each page's prompt) already
+    prevents most cross-page topic splitting, but isn't 100% guaranteed --
+    this pass catches any remaining near-duplicate main_topic strings
+    (whitespace/punctuation-only differences) and merges them onto a single
+    canonical name (the first-seen variant), so a topic spanning multiple
+    pages never ends up split into 2+ buckets in the topic-wise CSV purely
+    over a cosmetic wording difference. Does NOT merge genuinely different
+    topics that just happen to share some words -- only exact matches after
+    normalization (whitespace/punctuation-insensitive, case-insensitive)."""
+    canonical_by_key = {}
+    for m in all_mcqs_raw:
+        t = m.get("_pdfs_topic")
+        if not t:
+            continue
+        key = _rd_normalize_topic_key(t)
+        if not key:
+            continue
+        if key not in canonical_by_key:
+            canonical_by_key[key] = t
+        else:
+            m["_pdfs_topic"] = canonical_by_key[key]
+    return all_mcqs_raw
+
 def _group_pdfs_mcqs(all_mcqs_raw: list, fallback_main: str) -> tuple:
     """Group MCQs by (main_topic -> sub_topic -> [mcqs]), preserving first-seen
     order at both levels. Returns (main_topics_ordered, topic_map)."""
@@ -16597,6 +16667,7 @@ async def _process_pdf_pages_inner(
         # _pdfs_topic/_pdfs_subtopic during generation. Marker-row format
         # (topic/sub-topic rows + real MCQ rows), same builder /pdfs uses.
         if _RD_MODE.get() and all_mcqs_raw and any(m.get("_pdfs_topic") for m in all_mcqs_raw):
+            all_mcqs_raw = _rd_merge_similar_topics(all_mcqs_raw)
             _rd_topics_order, _rd_topic_map = _group_pdfs_mcqs(all_mcqs_raw, topic)
             _rd_buf = io.StringIO()
             _rd_writer = csv_mod.writer(_rd_buf)
@@ -31999,10 +32070,12 @@ async def handle_message(msg: dict):
             return
         clear_cancel(chat_id)
         token = _RD_MODE.set(True)
+        _topics_token = _RD_KNOWN_TOPICS.set([])
         try:
             await handle_pdf(msg)
         finally:
             _RD_MODE.reset(token)
+            _RD_KNOWN_TOPICS.reset(_topics_token)
         return
     if text.startswith("/chok"):
         if not is_auth:
