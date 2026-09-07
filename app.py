@@ -2538,11 +2538,20 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"- 🚫 NEVER build an MCQ whose subject is a mnemonic/স্মৃতিকৌশল itself, "
         f"an author/লেখক নাম, a reference/রেফারেন্স, or a book/বইয়ের নাম — these "
         f"may appear on the page but must never become the MCQ's own topic.\n"
-        f"- 🚫 NEVER include any source-attribution clause in the question, "
-        f"options, or explanation — e.g. '\"...\" বই অনুসারে', 'প্রদত্ত তথ্য/ছক "
-        f"অনুসারে', 'অনুযায়ী'/'অনুসারে' tied to a book/text/table/reference/"
-        f"source name. State every fact directly as standalone knowledge, "
-        f"never as something attributed to a named source.\n"
+        f"- 🚫 NEVER include any source-attribution clause in the question or "
+        f"options — e.g. '\"...\" বই অনুসারে', 'প্রদত্ত তথ্য/ছক অনুসারে', "
+        f"'অনুযায়ী'/'অনুসারে' tied to a book/text/table/reference/source name, "
+        f"or a TEACHER/PERSON NAME's opinion (e.g. 'আজমল স্যারের মতে', 'আলিম "
+        f"স্যারের মতে', 'মাজেদা ম্যামের মতে', or any other name + স্যার/ম্যাম/"
+        f"স্যারের/ম্যামের + মতে). The QUESTION must always state the fact "
+        f"directly, as standalone knowledge — NEVER as something attributed "
+        f"to a named teacher/author/book/source.\n"
+        f"- If a teacher/author name or reference genuinely appears on the "
+        f"page tied to a fact, that attribution may ONLY appear inside the "
+        f"EXPLANATION (never the question/options) — and even there, the "
+        f"explanation's actual factual content (why the answer is correct, "
+        f"why the others are wrong) must still come from the page's real "
+        f"informational content, not just repeat the attribution itself.\n"
         f"- 3-5 MCQs should combine 2-3 distinct facts per question (options are "
         f"fact-combinations, only one fully correct) — moderate difficulty only.\n\n"
 
@@ -2697,6 +2706,26 @@ _SOURCE_REF_PATTERNS = [
     r'লেখকের?\s*মতে',
     r'গ্রন্থ(?:ে|র)?\s*(?:অনুসারে|অনুযায়ী)',
 ]
+
+# 2026-09-07: teacher/person-name attribution — "আজমল স্যারের মতে", "আলিম
+# স্যারের মতে", "মাজেদা ম্যামের মতে" and any other name + স্যার/ম্যাম + মতে.
+# Structural (name-agnostic): matches up to ~30 chars of name text immediately
+# before স্যার/ম্যাম(+এর/র)?+মতে, so any teacher's name is caught without a
+# fixed name list. Applied ONLY to question/options text (never explanation,
+# where such attribution is allowed if genuinely on the page) — see
+# _strip_teacher_attribution below.
+_TEACHER_ATTR_RE = re.compile(
+    r'[^\s।,]{0,30}\s*(?:স্যারের?|ম্যামের?|ম্যাডামের?)\s*মতে,?\s*'
+)
+
+def _strip_teacher_attribution(text: str) -> str:
+    """Question/options-only guard: removes 'X স্যারের/ম্যামের মতে' clauses
+    (teacher/person-name attribution) that must never appear in the question
+    itself — only allowed in the explanation, which this function is never
+    called on."""
+    if not text:
+        return text
+    return _TEACHER_ATTR_RE.sub('', text).strip()
 _SOURCE_REF_RE = re.compile('|'.join(_SOURCE_REF_PATTERNS))
 _SUPERSCRIPT_MAP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 _SUP_TO_NORMAL = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
@@ -3294,6 +3323,7 @@ def _validate_mcq_structure(mcqs: list) -> list:
     for m in mcqs:
         try:
             q = _clean_mcq_text((m.get("question") or "").strip())
+            q = _strip_teacher_attribution(q)
             opts = m.get("options") or []
             ans = str(m.get("answer", "A")).strip().upper()
             if not _is_mcq_text_sane(q):
@@ -3302,7 +3332,7 @@ def _validate_mcq_structure(mcqs: list) -> list:
             if not isinstance(opts, list) or len(opts) < 4:
                 drop_reasons["fewer_than_4_options"] = drop_reasons.get("fewer_than_4_options", 0) + 1
                 continue
-            opts4 = [_clean_mcq_text(str(o).strip()) for o in opts[:4]]
+            opts4 = [_strip_teacher_attribution(_clean_mcq_text(str(o).strip())) for o in opts[:4]]
             if any(not _is_mcq_text_sane(o) for o in opts4):
                 drop_reasons["option_not_sane"] = drop_reasons.get("option_not_sane", 0) + 1
                 continue
