@@ -9146,15 +9146,16 @@ async def _ensure_explanations_before_csv(mcqs: list) -> list:
         for m in mcqs:
             exp = m.get("explanation", "")
             if exp:
+                exp = _clean_mcq_text(exp)
                 exp = _math_strip_source_citations(exp)
                 exp = _math_normalize_digits(exp)
                 m["explanation"] = exp
             q = m.get("question", "")
             if q:
-                m["question"] = _math_normalize_digits(_math_strip_source_citations(q))
+                m["question"] = _math_normalize_digits(_math_strip_source_citations(_clean_mcq_text(q)))
             if isinstance(m.get("options"), list):
                 m["options"] = [
-                    _math_normalize_digits(_math_strip_source_citations(o)) if isinstance(o, str) else o
+                    _math_normalize_digits(_math_strip_source_citations(_clean_mcq_text(o))) if isinstance(o, str) else o
                     for o in m["options"]
                 ]
     except Exception as e:
