@@ -28426,6 +28426,16 @@ async def process_qbm_pages(
             img_bytes = image_to_bytes(img) if not isinstance(img, (bytes, bytearray)) else img
 
             if csv_only:
+                if not mcqs:
+                    # 2026-09-08: a page that reaches here with 0 MCQ has
+                    # already survived the full retry ladder + 3-round final
+                    # safety-net pass -- it's being accepted as genuinely
+                    # empty. Still write a placeholder row (not silence) so
+                    # the page number stays visible/traceable in the merged
+                    # CSV instead of vanishing without a trace -- makes a
+                    # real miss immediately obvious on review instead of
+                    # looking identical to "this page just doesn't exist".
+                    all_mcqs_csv.append([f"⚠️ Page {page_num}: 0 MCQ (retry ladder + safety-net exhausted)", "", "", "", "", "", "", "1", "1"])
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
                     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
@@ -28507,6 +28517,13 @@ async def process_qbm_pages(
 
                 summary_pages.append({"page": page_num, "first_poll": first_poll_link, "mcq_count": len(mcqs)})
 
+                if not mcqs:
+                    # Same placeholder-row principle as the csv_only branch
+                    # above -- a 0-MCQ page here has already survived the
+                    # full retry ladder + 3-round final safety-net, and gets
+                    # a visible marker instead of silently vanishing from
+                    # the merged CSV.
+                    all_mcqs_csv.append([f"⚠️ Page {page_num}: 0 MCQ (retry ladder + safety-net exhausted)", "", "", "", "", "", "", "1", "1"])
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
                     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
