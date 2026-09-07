@@ -16563,7 +16563,12 @@ async def _process_pdf_pages_inner(
                 # Auto Style1+Style3 PDF এখন সব page শেষে একবারই পাঠানো হবে (নিচে)
                 # each mcq already carries its own correct _pdfs_topic/
                 # _pdfs_subtopic tag from STEP 2's per-segment generation.
-                all_mcqs_raw.extend(mcqs)
+                # NOTE (2026-09-08 bugfix): all_mcqs_raw.extend(mcqs) was ALSO
+                # called right after poll-sending above (before this end-
+                # message block) -- this second call duplicated every page's
+                # MCQs into all_mcqs_raw, doubling the combined Style1/Style2
+                # PDF's MCQ count (100 real MCQ -> 200 in the final PDF).
+                # Removed here; the earlier call is sufficient.
 
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
@@ -17251,7 +17256,12 @@ async def _process_pdfs_pages_inner(
                 # Auto Style1+Style3 PDF এখন সব page শেষে একবারই পাঠানো হবে (নিচে)
                 # each mcq already carries its own correct _pdfs_topic/
                 # _pdfs_subtopic tag from STEP 2's per-segment generation.
-                all_mcqs_raw.extend(mcqs)
+                # NOTE (2026-09-08 bugfix): all_mcqs_raw.extend(mcqs) was ALSO
+                # called right after poll-sending above (before this end-
+                # message block) -- this second call duplicated every page's
+                # MCQs into all_mcqs_raw, doubling the combined Style1/Style2
+                # PDF's MCQ count (100 real MCQ -> 200 in the final PDF).
+                # Removed here; the earlier call is sufficient.
 
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
