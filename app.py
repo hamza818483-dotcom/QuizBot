@@ -718,20 +718,24 @@ async def _create_forum_topic(channel_id: str, name: str) -> int | None:
 def lms_get_pre_message(subject: str, exam_title: str, topic: str, count: int, first_link: str = "") -> str:
     """LMS Readymade-send format:
     🟥(Sub Name)
-    ◼️(Exam Main Name)
-    ◾(Topic Name)
+    ▬▬▬▬▬▬▬▬▬▬ (separator between subject & chapter/exam name)
+    ◼️<b>(Exam Main Name)</b>  (bold)
+    ◾Topic:
+    <blockquote>(Topic Name)</blockquote>  (quoted, visually separate)
     ✅MCQ Count: N
     🔗First Poll Link: ..."""
     sep = "▬▬▬▬▬▬▬▬▬▬"
     text = (
-        f"🟥{subject or 'MCQ'}\n"
-        f"◼️{exam_title or ''}\n"
-        f"◾{topic or ''}\n"
+        f"🟥{_html_escape(subject or 'MCQ')}\n"
+        f"{sep}\n"
+        f"◼️<b>{_html_escape(exam_title or '')}</b>\n"
+        f"◾Topic:\n"
+        f"<blockquote>{_html_escape(topic or '')}</blockquote>\n"
         f"{sep}\n"
         f"✅MCQ Count: {count}\n"
     )
     if first_link:
-        text += f"🔗First Poll Link:\n{first_link}"
+        text += f"🔗First Poll Link:\n{_html_escape(first_link)}"
     return text
 
 
