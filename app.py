@@ -2160,24 +2160,24 @@ def _build_mcq_prompt(topic: str, count) -> str:
     if _RD_MODE.get():
         # /rd: same overall prompt/output rules as plain /pdf (question/
         # explanation structure, source-grounding, language lock -- all
-        # unchanged below), but the target itself asks for MAXIMUM content
-        # utilization with an average 15+ MCQ/page (not /pdf's default
-        # 10-20), and not /bangla's fully-uncapped per-line-mandatory style
-        # -- still respects SOURCE-GROUNDING (fewer than 15 is fine on a
-        # genuinely sparse page).
+        # unchanged below), but the target has NO number at all (not even
+        # a soft "15+") -- purely "use all page content, generate as many
+        # genuine MCQs as the content supports." Closest to /bangla's
+        # uncapped style but without /bangla's stricter "every single line
+        # MUST produce an MCQ" mandate -- still respects SOURCE-GROUNDING
+        # (a sparse page legitimately produces fewer).
         count_rule = (
-            "MAXIMUM CONTENT UTILIZATION (average 15+ MCQs per page target): "
-            "This page likely has substantial content -- extract MCQs covering "
-            "as much of the distinct information on it as possible, aiming for "
-            "AT LEAST 15 MCQs on a normal content-rich page, more (20-35+) if "
-            "the page is especially dense. Go through the page thoroughly -- "
-            "headings, body paragraphs, footnotes, side-notes, tables/boxes, "
-            "small print -- and make sure every distinct fact/definition/name/"
-            "number/relationship contributes at least one MCQ, not just the "
-            "most obvious or first section. Only output fewer than 15 if the "
-            "page genuinely lacks that much distinct content -- the SOURCE-"
-            "GROUNDING LOCK above always wins over this target; never invent "
-            "or pad to hit the number."
+            "MAXIMUM CONTENT UTILIZATION, NO FIXED COUNT: There is no target "
+            "number, minimum, or maximum for this page -- generate as many "
+            "genuine, distinct MCQs as the page's actual content supports, by "
+            "using EVERY piece of information on it. Go through the page "
+            "thoroughly -- headings, body paragraphs, footnotes, side-notes, "
+            "tables/boxes, small print -- and make sure every distinct fact/"
+            "definition/name/number/relationship contributes at least one MCQ, "
+            "not just the most obvious or first section. A content-rich page "
+            "should naturally produce many MCQs; a sparse page should naturally "
+            "produce few -- the SOURCE-GROUNDING LOCK above always wins over "
+            "any count; never invent or pad just to reach some number."
         )
         full_coverage_rule = (
             f"\n═══════════════════════════════\n"
@@ -5126,6 +5126,11 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         # from the given crop (that instruction lives in the /bio
         # prompt itself) -- the floor was pure wasted key spend, not
         # improving coverage.
+        _rng_min, _rng_max = 1, None
+    elif _RD_MODE.get():
+        # /rd is content-driven with NO fixed count at all (per user
+        # instruction 2026-09-07) -- never fall through to /pdf's own
+        # MIN_MCQ/MAX_MCQ floor/ceiling retry loop.
         _rng_min, _rng_max = 1, None
     elif _BORO_MODE.get():
         # /boro, like /bangla, is maximum-source-utilization with no cap --
