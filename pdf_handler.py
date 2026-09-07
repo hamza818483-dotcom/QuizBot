@@ -1807,14 +1807,24 @@ def image_to_base64(img: Image.Image) -> str:
 
 def _enhance_blurry_page(img: Image.Image) -> Image.Image:
     """/unmesh 0-MCQ retry helper: some pages are genuinely faint/blurry
-    scans (low contrast, soft focus) that a normal read can miss entirely
-    even though real content is there. Boosts contrast + sharpness +
-    slight brightness so a careful-mode retry gets a cleaner image to
-    read, instead of just re-asking the same blurry image again. Returns
-    a NEW image (never mutates the original, since the un-enhanced image
-    is still needed for posting/other uses)."""
+    scans (low contrast, soft focus, or simply rendered at too low an
+    effective resolution for small text) that a normal read can miss
+    entirely even though real content is there. Upscales 1.6x (raises
+    effective DPI so small/dense text has more pixels to be read from,
+    since the PDF-render pipeline stays at its normal DPI for every other
+    page rather than raising the baseline for all pages) then boosts
+    contrast + sharpness + slight brightness, so a careful-mode retry
+    gets a cleaner, higher-resolution image to read instead of just
+    re-asking the same blurry image again. Returns a NEW image (never
+    mutates the original, since the un-enhanced image is still needed
+    for posting/other uses)."""
     from PIL import ImageEnhance, ImageFilter
     out = img.convert("RGB") if img.mode != "RGB" else img.copy()
+    _w, _h = out.size
+    _UPSCALE = 1.6
+    _MAX_DIM = 5000  # stay under Telegram/memory-safe ceilings even after upscale
+    if max(_w, _h) * _UPSCALE <= _MAX_DIM:
+        out = out.resize((round(_w * _UPSCALE), round(_h * _UPSCALE)), Image.LANCZOS)
     out = ImageEnhance.Contrast(out).enhance(1.5)
     out = ImageEnhance.Sharpness(out).enhance(2.0)
     out = ImageEnhance.Brightness(out).enhance(1.1)
