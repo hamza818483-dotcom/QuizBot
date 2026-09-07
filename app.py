@@ -16052,22 +16052,23 @@ async def _process_pdf_pages_inner(
                         caption = f"{tag}\n\n"
                     caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n🌟Page No: {fmt_page(page_num)}"
 
-                    # FIX (image-before-poll guarantee): send_photo previously
-                    # had no retry and no abort-on-failure — if it failed
-                    # once (network blip, rate-limit, etc.), the code fell
-                    # straight through to sending polls anyway with
-                    # image_msg_id still None, so polls could go out for a
-                    # page whose image was never actually posted. Now: retry
-                    # up to 3x like polls already do, and if it still fails,
-                    # skip this page's poll-sending entirely (never send
-                    # polls without their image) and alert the owner.
+                    # HARD GUARANTEE: image MUST succeed before any poll for
+                    # this page goes out. No fail, no skip, no giving up —
+                    # keep retrying with backoff until send_photo actually
+                    # succeeds. Cancel is still honored so a stuck job can be
+                    # stopped by the user.
                     photo_r = {"ok": False}
-                    for _img_attempt in range(3):
+                    _img_attempt = 0
+                    while not photo_r.get("ok"):
+                        if is_cancelled(chat_id):
+                            break
+                        _img_attempt += 1
+                        page_status[idx]["stage"] = f"🖼️ ছবি পাঠানো হচ্ছে (attempt {_img_attempt})..."
                         photo_r = await send_photo(channel_id, img_bytes, caption, message_thread_id=thread_id)
                         if photo_r.get("ok"):
                             break
-                        logger.warning(f"[PDF] Page {page_num} image send attempt {_img_attempt+1} failed, retrying...")
-                        await asyncio.sleep(2)
+                        logger.warning(f"[PDF] Page {page_num} image send attempt {_img_attempt} failed, retrying...")
+                        await asyncio.sleep(min(2 * _img_attempt, 15))
                     if photo_r.get("ok"):
                         image_msg_id = photo_r["result"]["message_id"]
                         image_file_id = photo_r["result"]["photo"][-1]["file_id"]
@@ -16075,16 +16076,6 @@ async def _process_pdf_pages_inner(
                             first_image_msg_id = image_msg_id
                             # Item 3: auto-pin the very first image of the job
                             await try_pin_message(channel_id, image_msg_id)
-                    else:
-                        page_status[idx]["current"] = False
-                        page_status[idx]["done"] = True
-                        page_status[idx]["failed"] = True
-                        page_status[idx]["error"] = "Image send ব্যর্থ (3 attempt) — poll পাঠানো স্কিপ করা হয়েছে"
-                        await notify_owner(
-                            f"⚠️ [PDF] Page {fmt_page(page_num)} ({file_name}) এর ছবি পাঠাতে ব্যর্থ (3 attempt) — "
-                            f"তাই এই পেজের poll পাঠানো হয়নি (image ছাড়া poll যাওয়া বন্ধ করা হয়েছে)।"
-                        )
-                        continue
 
                 # repair already ran inside generate_mcq_from_image() — a
                 # second call here was pure redundant duplicate work on every page
