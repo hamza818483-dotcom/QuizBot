@@ -28008,7 +28008,7 @@ async def qbm_extract_all_pages(
             # exhaustion) be told apart from a page that's genuinely blank.
             while not mcqs and not is_cancelled(chat_id):
                 _attempt_n += 1
-                _careful = _attempt_n >= 2  # 1st retry stays fast; 2nd+ uses careful mode (higher thinking budget + exhaustive-scan prompt)
+                _careful = _attempt_n >= 4  # 2026-09-08: first 3 attempts fast/normal scan, last 2 (4th, 5th) careful/deep scan (was: only 1st fast, rest careful)
                 logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry #{_attempt_n}{' (careful mode)' if _careful else ''} (cache bypassed), will not finalize until confirmed")
                 if _attempt_n > 1:
                     await asyncio.sleep(min(3 * _attempt_n, 30))
@@ -28197,6 +28197,47 @@ async def qbm_extract_all_pages(
             kept = [m for m in (mcqs or []) if id(m) in deduped_ids]
             rebuilt.append((page_num, img, kept))
         final_results = rebuilt
+
+    # FINAL SAFETY-NET PASS (2026-09-08, /unmesh + shared callers): 0 MCQ on
+    # a page is never actually acceptable -- if any page is STILL at 0 MCQ
+    # after all pages have finished their own per-page retry ladder above
+    # (5 attempts + independent empty-page scan each), don't accept it yet.
+    # Run up to 3 more whole-document rounds, each round retrying only the
+    # pages still at 0 -- each attempt already rotates through a different
+    # Gemini key/account via _qbm_gemini_raw_only's key_rotator (fresh call,
+    # never the same exhausted key twice), so a genuinely bad/rate-limited
+    # key on the first pass doesn't keep failing the same way on this pass.
+    # Only after 3 full rounds still come back empty does the page finally
+    # get accepted as 0 and the owner alerted -- never silently before that.
+    _zero_idx = [i for i, r in enumerate(final_results) if r is not None and not (r[2] or [])]
+    if _zero_idx and not is_cancelled(chat_id):
+        logger.warning(f"[QBM Final Safety-Net] {len(_zero_idx)} page(s) still 0 MCQ after per-page retry ladder — starting final whole-document passes (up to 3 rounds)")
+        for _round in range(1, 4):
+            if not _zero_idx or is_cancelled(chat_id):
+                break
+            logger.warning(f"[QBM Final Safety-Net] round {_round}/3 — retrying {len(_zero_idx)} page(s): {[final_results[i][0] for i in _zero_idx]}")
+            for _fi in _zero_idx:
+                if is_cancelled(chat_id):
+                    break
+                _pn, _img, _ = final_results[_fi]
+                try:
+                    _qbm_key_offset_ctx.set(random.randint(0, 50))  # force a different starting key/account than any prior attempt
+                    _recovered = await _extract_fn(img=_img, careful=True)
+                except Exception as e:
+                    logger.error(f"[QBM Final Safety-Net] page {_pn} round {_round} errored: {e}")
+                    _recovered = []
+                if _recovered:
+                    logger.info(f"[QBM Final Safety-Net] page {_pn} recovered {len(_recovered)} MCQ on final-pass round {_round}")
+                    final_results[_fi] = (_pn, _img, _recovered)
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+            _zero_idx = [i for i, r in enumerate(final_results) if r is not None and not (r[2] or [])]
+        if _zero_idx:
+            _still_zero_pages = [final_results[i][0] for i in _zero_idx]
+            logger.warning(f"[QBM Final Safety-Net] pages {_still_zero_pages} still 0 MCQ after 3 final rounds — accepting as genuinely empty, alerting owner")
+            try:
+                await notify_owner(f"⚠️ [QBM/{file_name}] Page(s) {_still_zero_pages} returned 0 MCQ even after per-page retry ladder + 3 final safety-net rounds — accepted as genuinely empty (all Gemini keys/rounds exhausted for these pages).")
+            except Exception:
+                pass
 
     return final_results
 
