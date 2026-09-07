@@ -2110,22 +2110,11 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
 # GENERATE MCQ FROM IMAGE — Gemini primary + OpenRouter fallback
 # ============================================================
 def _rd_output_token_cap() -> int:
-    """/rd has no MCQ ceiling (2026-09-07 user instruction), so its Gemini
-    calls need more max_output_tokens headroom than every other mode's
-    fixed 16384 cap (sized for a ~40-MCQ ceiling) -- a genuinely dense page
-    under /rd could legitimately need 40-60+ MCQs. Lazily checks app.py's
-    _RD_MODE ContextVar (can't import it at module load time -- app.py
-    imports FROM pdf_handler, not the other way around, so this has to be
-    a runtime lookup, same pattern as the existing `from app import
-    record_empty_parse` lazy import a few lines below). Falls back to the
-    normal 16384 if the import fails or _RD_MODE isn't set."""
-    try:
-        from app import _RD_MODE
-        if _RD_MODE.get():
-            return 32768
-    except Exception:
-        pass
-    return 16384
+    """2026-09-08: plain /pdf's floor was raised 10->15 (matches /rd), so
+    it now needs the same output-token headroom /rd already had -- a
+    dense page hitting the 15+ floor plus retries could truncate at the
+    old 16384 cap. Both /rd and default /pdf now use 32768."""
+    return 32768
 
 
 async def generate_mcq_from_image(
