@@ -15743,8 +15743,8 @@ async def _process_pdf_pages_inner(
         r = await send_msg(chat_id, "⏳ Processing শুরু হচ্ছে...")
         status_msg_id = r.get("result", {}).get("message_id")
 
-    await edit_msg(chat_id, status_msg_id,
-        _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
+    await _update_pdf_dashboard(chat_id, status_msg_id,
+        file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), reply_markup=_cancel_kb(chat_id))
 
     # PERMANENT FIX: dashboard previously only updated on page start/finish —
     # if one page's generation takes 30-90s, "Elapsed" looked frozen the
@@ -15765,8 +15765,8 @@ async def _process_pdf_pages_inner(
             if _dash_stop.is_set():
                 break
             try:
-                await edit_msg(chat_id, status_msg_id,
-                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
+                await _update_pdf_dashboard(chat_id, status_msg_id,
+                    file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), reply_markup=_cancel_kb(chat_id))
             except Exception:
                 pass
     _dash_ticker_task = _spawn_task(_dashboard_ticker())
@@ -15909,8 +15909,8 @@ async def _process_pdf_pages_inner(
             page_status[idx]["stage"] = "⏳ শুরু হচ্ছে..."
             page_status[idx]["page_start_time"] = time.time()
             page_status[idx]["_ai_calls_before"] = _get_ai_call_count(chat_id)
-        await edit_msg(chat_id, status_msg_id,
-            _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
+        await _update_pdf_dashboard(chat_id, status_msg_id,
+            file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), reply_markup=_cancel_kb(chat_id))
         _page_ai_calls_before = _get_ai_call_count(chat_id)
 
         try:
@@ -16198,8 +16198,8 @@ async def _process_pdf_pages_inner(
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
             page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - page_status[idx].get("_ai_calls_before", _page_ai_calls_before)
-            await edit_msg(chat_id, status_msg_id,
-                _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
+            await _update_pdf_dashboard(chat_id, status_msg_id,
+                file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), reply_markup=_cancel_kb(chat_id))
             await sb_exec(lambda: sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute())
 
         except Exception as e:
