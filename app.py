@@ -2349,14 +2349,14 @@ def _rd_build_gapfill_prompt(topic: str, existing_mcqs: list) -> str:
         f"page numbers\n\n"
 
         f"🟨 TOPIC TAGGING (mandatory, same as first pass): give 'main_topic' "
-        f"(and 'sub_topic' or null) for each new MCQ, decided yourself from the "
+        f"for each new MCQ, decided yourself from the "
         f"page content — use the EXACT same main_topic string as the first pass "
         f"used for the same subject, so topics stay grouped consistently.\n\n"
 
         f"JSON array only, no markdown fences, no preamble. "
         f"🚨 DO NOT include any <think>, reasoning, or explanation text before the "
         f"JSON — output must start IMMEDIATELY with '['. Format:\n"
-        f'[{{"main_topic":"...","sub_topic":"..." or null,"question":"...",'
+        f'[{{"main_topic":"...","question":"...",'
         f'"options":["A) ...","B) ...","C) ...","D) ..."],'
         f'"answer":0,"explanation":"..."}}]\n'
         f"answer is integer 0-3 (A=0,B=1,C=2,D=3). If nothing new remains, output "
@@ -2702,9 +2702,7 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"look carefully INSIDE these colored heading boxes and read the white "
         f"text exactly as printed; do not skip, blank-out, or guess at a topic "
         f"name just because it sits on a colored background instead of plain "
-        f"page background. If the page covers more "
-        f"than one distinct sub-part of that topic, also give 'sub_topic' (or "
-        f"null if there's no meaningful sub-split). Two MCQs about the same "
+        f"page background. Two MCQs about the same "
         f"underlying subject MUST get the exact same main_topic string "
         f"(character-for-character) so they group together correctly.\n\n"
         if _RD_MODE.get() else ""
@@ -2714,7 +2712,7 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"explanation text before the JSON — output must start IMMEDIATELY "
         f"with '[' and contain nothing but the JSON array. Schema:\n"
         + (
-        f"[{{\"main_topic\":\"...\",\"sub_topic\":\"...\" or null,"
+        f"[{{\"main_topic\":\"...\","
         f"\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"source_verbatim\":\"...\","
         f"\"verified\":true,\"exp_bbox\":[100,200,900,350]}}]"
