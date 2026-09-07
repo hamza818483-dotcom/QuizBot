@@ -2415,13 +2415,7 @@ def _build_mcq_prompt(topic: str, count) -> str:
             "produce few -- the SOURCE-GROUNDING LOCK above always wins over "
             "any count; never invent or pad just to reach some number."
         )
-        full_coverage_rule = (
-            f"\n═══════════════════════════════\n"
-            f"🟧 FULL-PAGE COVERAGE (MANDATORY — MAXIMUM CONTENT UTILIZATION)\n"
-            f"═══════════════════════════════\n"
-            f"Treat the ENTIRE image as the scope — not just the first paragraph, "
-            f"the most obvious section, or the most highlighted part. Before "
-            f"finalizing:\n"
+        _coverage_base = (
             f"1) Mentally scan the WHOLE page top-to-bottom, left-to-right, including "
             f"headings, body paragraphs, footnotes, side-notes, captions, tables/boxes, "
             f"and any small print — every distinct fact is fair game.\n"
@@ -2435,6 +2429,15 @@ def _build_mcq_prompt(topic: str, count) -> str:
             f"the rest.\n"
             f"4) If the page has multiple distinct sections/topics, every section "
             f"must contribute at least one MCQ — no section should be left at zero.\n"
+        )
+        full_coverage_rule = (
+            f"\n═══════════════════════════════\n"
+            f"🟧 FULL-PAGE COVERAGE (MANDATORY — MAXIMUM CONTENT UTILIZATION)\n"
+            f"═══════════════════════════════\n"
+            f"Treat the ENTIRE image as the scope — not just the first paragraph, "
+            f"the most obvious section, or the most highlighted part. Before "
+            f"finalizing:\n"
+            + _coverage_base +
             f"5) If a line/section has rich information, generate MORE than one MCQ "
             f"from it, covering different angles (direct fact, definition, cause-"
             f"effect, fill-in-the-blank, comparison) — this is how the 15+ average "
@@ -2725,25 +2728,17 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"look carefully INSIDE these colored heading boxes and read the white "
         f"text exactly as printed; do not skip, blank-out, or guess at a topic "
         f"name just because it sits on a colored background instead of plain "
-        f"page background. Two MCQs about the same "
-        f"underlying subject MUST get the exact same main_topic string "
-        f"(character-for-character) so they group together correctly.\n\n"
+        f"page background.\n\n"
         if _RD_MODE.get() else ""
         )
         + f"Return STRICT JSON array only, no prose, no markdown fences. "
         f"🚨 DO NOT include any <think>, reasoning, chain-of-thought, or "
         f"explanation text before the JSON — output must start IMMEDIATELY "
         f"with '[' and contain nothing but the JSON array. Schema:\n"
-        + (
-        f"[{{\"main_topic\":\"...\","
+        f"[{{" + ("\"main_topic\":\"...\"," if _RD_MODE.get() else "") +
         f"\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"source_verbatim\":\"...\","
         f"\"verified\":true,\"exp_bbox\":[100,200,900,350]}}]"
-        if _RD_MODE.get() else
-        f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
-        f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"source_verbatim\":\"...\","
-        f"\"verified\":true,\"exp_bbox\":[100,200,900,350]}}]"
-        )
     )
 
 def _strip_q_numbering(q: str) -> str:
