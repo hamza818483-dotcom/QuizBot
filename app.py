@@ -715,12 +715,13 @@ async def _create_forum_topic(channel_id: str, name: str) -> int | None:
     return None
 
 
-async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool) -> int:
+async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool) -> tuple:
     """Sends one topic-batch: pre-message (topic name) -> polls (reply to
     pre-msg) -> Style-01 PDF + inline buttons -> ending message. Same shape
     as one /csvS batch iteration. Returns sent poll count. Raises on the
     pre-message failing (fatal for this batch); PDF/ending failures are
-    logged but non-fatal, matching /csv's own tolerance.
+    logged but non-fatal, matching /csv's own tolerance. Returns (sent_count,
+    first_poll_link) — the link is used to build the end-of-job master summary.
 
     thread_id is resolved by the caller (job-level, once per exam) — every
     topic-batch for the same exam send lands inside that single forum topic,
@@ -788,7 +789,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
             "channel_id": channel_id, "end_msg_id": end_r["result"]["message_id"]
         })
 
-    return sent
+    return sent, first_link
 
 
 async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = ""):
@@ -821,6 +822,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
 
         total_batches = len(batches)
         sent_total = 0
+        batch_links = []  # (part_num, link, count, batch_topic) — for master summary
         for b_idx, batch in enumerate(batches):
             if job.get("cancel_requested"):
                 job["status"] = "cancelled"
@@ -830,8 +832,10 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             if not mcqs:
                 continue
             try:
-                sent = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score)
+                sent, first_link = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score)
                 sent_total += sent
+                if first_link:
+                    batch_links.append((b_idx + 1, first_link, sent, topic))
             except Exception as e:
                 logger.error(f"[LMS-Send] batch '{topic}' failed: {e}")
                 job["error"] = f"'{topic}': {e}"
@@ -843,6 +847,23 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         if job.get("cancel_requested"):
             job["status"] = "cancelled"
         else:
+            # Master summary — one message listing every topic sent, in order,
+            # with its poll link and question count. Sent last, in the same
+            # thread, so admins get a single guide post after all topics land.
+            if batch_links:
+                summary_text = csv_get_master_summary(
+                    exam_title or "MCQ", sent_total, len(batch_links), batch_links
+                )
+                summary_data = {
+                    "chat_id": channel_id, "text": summary_text,
+                    "parse_mode": "Markdown", "disable_web_page_preview": True,
+                }
+                if thread_id:
+                    summary_data["message_thread_id"] = thread_id
+                try:
+                    await tg_post("sendMessage", summary_data)
+                except Exception as e:
+                    logger.warning(f"[LMS-Send] master summary send failed: {e}")
             job["status"] = "done"
             job["pct"] = 100
     except Exception as e:
