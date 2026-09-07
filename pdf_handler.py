@@ -2164,7 +2164,18 @@ async def generate_mcq_from_image(
                 # more time too, since a genuinely 40-60-MCQ generation at
                 # that token budget takes longer than the normal case this
                 # 50/32s was sized for.
-                _attempt_timeout = (75 if attempt == 0 else 50) if _rd_output_token_cap() > 16384 else (50 if attempt == 0 else 32)
+                # 2026-09-07: 75/50s was overly cautious for the doubled
+                # 32768 token cap -- generation time doesn't scale linearly
+                # with the token ceiling (most pages won't actually need
+                # anywhere near 32768 tokens' worth of output; the higher
+                # cap just prevents truncation on the rare dense page).
+                # 60/40 gives real headroom over the normal 50/32 without
+                # doubling worst-case per-key wait time, which matters a
+                # lot here since /rd tries EVERY live key in sequence
+                # (max_keys=None) -- a slow/busy key eating the full
+                # timeout before falling to the next key is the actual
+                # per-page slowness risk, more than the token cap itself.
+                _attempt_timeout = (60 if attempt == 0 else 40) if _rd_output_token_cap() > 16384 else (50 if attempt == 0 else 32)
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=_attempt_timeout)
                 # 2026-08-28: detect a response that got cut off by the

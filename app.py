@@ -5319,7 +5319,12 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
             # that's a real content fact, not a give-up).
             logger.warning(f"[RD] page {page_num}: still 0 MCQ after {attempts} attempts -- one more try before accepting zero")
             _rd_max_attempts += 1
-            if attempts >= 6:
+            if attempts >= 4:
+                # 2026-09-07: lowered from 6 -> 4 -- each attempt can itself
+                # burn through many Gemini keys (max_keys=None), so 6 full
+                # attempts was a real worst-case per-page latency risk on a
+                # genuinely blank/cover page. 4 still gives real retries
+                # before accepting zero, just with a tighter ceiling.
                 break
 
     if _rng_max and len(out) > _rng_max:
