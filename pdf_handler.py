@@ -1215,6 +1215,91 @@ MUST Return ONLY valid JSON array, EVERY item MUST include main_topic + sub_topi
 [{{"main_topic":"...","sub_topic":"..." or null,"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
 
 
+def _rd_reconcile_mcq_topic(mcqs: list, fallback: str) -> list:
+    """/rd-ONLY topic backstop -- completely independent of /pdfs's
+    _pdfs_reconcile_mcq_topics (no shared code/state). Ensures every MCQ has
+    a clean, non-empty topic name (never silently dropped/blank), and moves
+    the raw model field 'main_topic' into the internal '_rd_topic' key that
+    /rd's own grouping/CSV code (below) expects. If the model didn't tag a
+    topic at all, falls back to the page's own topic label."""
+    out = []
+    for m in (mcqs or []):
+        if not isinstance(m, dict):
+            continue
+        main_t = (m.get("main_topic") or "").strip()
+        if not main_t:
+            main_t = fallback
+        m["_rd_topic"] = main_t[:60]
+        m.pop("main_topic", None)
+        m.pop("sub_topic", None)
+        out.append(m)
+    return out
+
+
+def _rd_normalize_topic_key(name: str) -> str:
+    """Loose normalization for fuzzy-matching /rd topic strings that should
+    be the same subject but came out with tiny wording differences across
+    pages (extra/missing spaces, punctuation). Lowercases (no-op on Bengali,
+    only affects Latin chars)."""
+    if not name:
+        return ""
+    return re.sub(r'[\s\-–—:।,.\(\)]+', '', name).strip().lower()
+
+
+def _rd_merge_similar_topics(all_mcqs: list) -> list:
+    """/rd FINAL SAFETY-NET PASS (runs once, after all pages are done): the
+    rolling known-topics list already prevents most cross-page topic
+    splitting, but isn't 100% guaranteed -- this catches any remaining
+    near-duplicate topic strings (whitespace/punctuation-only differences)
+    and merges them onto a single canonical name (the first-seen variant)."""
+    canonical_by_key = {}
+    for m in all_mcqs:
+        t = m.get("_rd_topic")
+        if not t:
+            continue
+        key = _rd_normalize_topic_key(t)
+        if not key:
+            continue
+        if key not in canonical_by_key:
+            canonical_by_key[key] = t
+        else:
+            m["_rd_topic"] = canonical_by_key[key]
+    return all_mcqs
+
+
+def _rd_group_by_topic(all_mcqs: list, fallback_main: str) -> tuple:
+    """/rd-ONLY grouping (independent of /pdfs's _group_pdfs_mcqs). Groups
+    MCQs by _rd_topic, preserving first-seen order. Returns
+    (topics_ordered, topic_map: {topic -> [mcqs]})."""
+    topics_ordered = []
+    topic_map = {}
+    for m in all_mcqs:
+        t = m.get("_rd_topic") or fallback_main
+        if t not in topic_map:
+            topic_map[t] = []
+            topics_ordered.append(t)
+        topic_map[t].append(m)
+    return topics_ordered, topic_map
+
+
+def _rd_build_topicwise_csv_rows(topics_ordered: list, topic_map: dict) -> list:
+    """/rd-ONLY CSV row builder (independent of /pdfs's marker-row builder).
+    One header row per topic, followed by that topic's MCQ rows."""
+    rows = []
+    for t in topics_ordered:
+        mcqs = topic_map.get(t, [])
+        if not mcqs:
+            continue
+        rows.append([t, "", "", "", "", "", "", ""])
+        for q in mcqs:
+            opts = (q.get("options", []) + ["", "", "", ""])[:4]
+            rows.append([
+                q.get("question", ""), opts[0], opts[1], opts[2], opts[3],
+                q.get("answer", "A"), q.get("explanation", ""), ""
+            ])
+    return rows
+
+
 def _pdfs_reconcile_mcq_topics(mcqs: list, fallback: str, allowed_topics: list = None) -> list:
     """Code-level backstop (not prompt-only) — runs on every /pdfs generation
     result before it's used anywhere else. Ensures every MCQ has a clean,

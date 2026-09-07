@@ -5531,11 +5531,11 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     out = _cap_mcq_options(out, 4)
     out = _validate_mcq_structure(out)
     if _RD_MODE.get() and out:
-        from pdf_handler import _pdfs_reconcile_mcq_topics
-        out = _pdfs_reconcile_mcq_topics(out, topic)
+        from pdf_handler import _rd_reconcile_mcq_topic
+        out = _rd_reconcile_mcq_topic(out, topic)
         _kt_list = _RD_KNOWN_TOPICS.get()
         if _kt_list is not None:
-            for _t in {m.get("_pdfs_topic") for m in out if m.get("_pdfs_topic")}:
+            for _t in {m.get("_rd_topic") for m in out if m.get("_rd_topic")}:
                 if _t not in _kt_list:
                     _kt_list.append(_t)
     if _TF_MODE.get():
@@ -5627,11 +5627,11 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         retry_out = _cap_mcq_options(retry_out, 4)
         retry_out = _validate_mcq_structure(retry_out)
         if _RD_MODE.get() and retry_out:
-            from pdf_handler import _pdfs_reconcile_mcq_topics
-            retry_out = _pdfs_reconcile_mcq_topics(retry_out, topic)
+            from pdf_handler import _rd_reconcile_mcq_topic
+            retry_out = _rd_reconcile_mcq_topic(retry_out, topic)
             _kt_list2 = _RD_KNOWN_TOPICS.get()
             if _kt_list2 is not None:
-                for _t in {m.get("_pdfs_topic") for m in retry_out if m.get("_pdfs_topic")}:
+                for _t in {m.get("_rd_topic") for m in retry_out if m.get("_rd_topic")}:
                     if _t not in _kt_list2:
                         _kt_list2.append(_t)
         if _TF_MODE.get():
@@ -12294,43 +12294,6 @@ def _build_pdfs_marker_row_csv(topics_ordered: list, topic_mcqs: dict) -> list:
     return rows
 
 
-def _rd_normalize_topic_key(name: str) -> str:
-    """Loose normalization for fuzzy-matching /rd main_topic strings that
-    should be the same subject but came out with tiny wording differences
-    across pages (extra/missing spaces, punctuation, a trailing/leading
-    common suffix word). Strips whitespace variance and common connector
-    punctuation, lowercases (safe for Bengali too -- .lower() is a no-op on
-    non-ASCII, only affects any Latin chars present)."""
-    if not name:
-        return ""
-    n = re.sub(r'[\s\-–—:।,.\(\)]+', '', name).strip().lower()
-    return n
-
-def _rd_merge_similar_topics(all_mcqs_raw: list) -> list:
-    """/rd FINAL SAFETY-NET PASS (runs once, after all pages are done):
-    the rolling known-topics list (passed into each page's prompt) already
-    prevents most cross-page topic splitting, but isn't 100% guaranteed --
-    this pass catches any remaining near-duplicate main_topic strings
-    (whitespace/punctuation-only differences) and merges them onto a single
-    canonical name (the first-seen variant), so a topic spanning multiple
-    pages never ends up split into 2+ buckets in the topic-wise CSV purely
-    over a cosmetic wording difference. Does NOT merge genuinely different
-    topics that just happen to share some words -- only exact matches after
-    normalization (whitespace/punctuation-insensitive, case-insensitive)."""
-    canonical_by_key = {}
-    for m in all_mcqs_raw:
-        t = m.get("_pdfs_topic")
-        if not t:
-            continue
-        key = _rd_normalize_topic_key(t)
-        if not key:
-            continue
-        if key not in canonical_by_key:
-            canonical_by_key[key] = t
-        else:
-            m["_pdfs_topic"] = canonical_by_key[key]
-    return all_mcqs_raw
-
 def _group_pdfs_mcqs(all_mcqs_raw: list, fallback_main: str) -> tuple:
     """Group MCQs by (main_topic -> sub_topic -> [mcqs]), preserving first-seen
     order at both levels. Returns (main_topics_ordered, topic_map)."""
@@ -16658,30 +16621,19 @@ async def _process_pdf_pages_inner(
             caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ (Merged)", mime_type="text/csv")
 
         # /rd: additionally send a topic-wise CSV -- Gemini decided each MCQ's
-        # topic itself per-page (no fixed user rule), tagged via
-        # _pdfs_topic/_pdfs_subtopic during generation. Marker-row format
-        # (topic/sub-topic rows + real MCQ rows), same builder /pdfs uses.
-        if _RD_MODE.get() and all_mcqs_raw and any(m.get("_pdfs_topic") for m in all_mcqs_raw):
+        # topic itself per-page (no fixed user rule), tagged via _rd_topic
+        # during generation. Fully independent of /pdfs's grouping/CSV code.
+        if _RD_MODE.get() and all_mcqs_raw and any(m.get("_rd_topic") for m in all_mcqs_raw):
+            from pdf_handler import _rd_merge_similar_topics, _rd_group_by_topic, _rd_build_topicwise_csv_rows
             all_mcqs_raw = _rd_merge_similar_topics(all_mcqs_raw)
-            _rd_topics_order, _rd_topic_map = _group_pdfs_mcqs(all_mcqs_raw, topic)
+            _rd_topics_order, _rd_topic_map = _rd_group_by_topic(all_mcqs_raw, topic)
             _rd_buf = io.StringIO()
             _rd_writer = csv_mod.writer(_rd_buf)
-            _rd_writer.writerow(["questions","option1","option2","option3","option4","answer","explanation","type","section"])
-            for row in _build_pdfs_marker_row_csv(_rd_topics_order, _rd_topic_map):
-                _rd_writer.writerow(row[:5] + row[6:])
+            _rd_writer.writerow(["questions","option1","option2","option3","option4","answer","explanation","section"])
+            for row in _rd_build_topicwise_csv_rows(_rd_topics_order, _rd_topic_map):
+                _rd_writer.writerow(row)
             await send_document(chat_id, _rd_buf.getvalue().encode("utf-8"), f"{topic}_topicwise.csv",
                 caption=f"📂 {topic} — {len(_rd_topics_order)} topic(s), topic-wise CSV", mime_type="text/csv")
-
-        # CSV file-এর নিচে একটা "📢 Channel List" বাটন — click করলে channel
-        # list দেখাবে, poll পাঠানোর জন্য (existing csvchannel_ callback
-        # reuse করা হচ্ছে)।
-        if all_mcqs_raw:
-            _csv_cache_id = gen_session_id()
-            await db_save_mcq_cache(_csv_cache_id, _csv_cache_id, 0, topic, all_mcqs_raw)
-            await send_msg(chat_id, "📢 Poll আকারে channel-এ পাঠাতে চাও?",
-                reply_markup={"inline_keyboard": [[
-                    {"text": "📢 Channel List", "callback_data": f"csvpdflist_{_csv_cache_id}_{uid}"}
-                ]]})
 
     if not csv_only and not summary_pages and is_cancelled(chat_id):
         await send_msg(chat_id, "🛑 কাজ বাতিল করা হয়েছে — কোনো পেজ শেষ হওয়ার আগেই থামানো হয়েছে, তাই কোনো ফলাফল নেই।")
