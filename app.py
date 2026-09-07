@@ -2174,6 +2174,9 @@ def _rd_build_gapfill_prompt(topic: str, existing_mcqs: list) -> str:
         f"page beyond what's already listed, output fewer MCQs rather than "
         f"duplicating — but a real page rarely has zero remaining content after "
         f"only {len(existing_mcqs)} MCQs, so look carefully before concluding that.\n\n"
+        f"🚨 MANDATORY SERIAL ORDER: output these new MCQs in the same top-to-"
+        f"bottom order their source content appears on the page (same rule as "
+        f"the first pass) — do not output them in a random or reshuffled order.\n\n"
 
         f"🚨 SOURCE-GROUNDING LOCK (ABSOLUTE, HIGHEST PRIORITY): EVERY MCQ must be "
         f"built ONLY from facts/content actually visible on THIS page image — never "
@@ -2268,7 +2271,17 @@ def _build_mcq_prompt(topic: str, count) -> str:
             f"5) If a line/section has rich information, generate MORE than one MCQ "
             f"from it, covering different angles (direct fact, definition, cause-"
             f"effect, fill-in-the-blank, comparison) — this is how the 15+ average "
-            f"target gets reached on content-rich pages.\n\n"
+            f"target gets reached on content-rich pages.\n"
+            f"6) 🚨 MANDATORY SERIAL ORDER: generate and output MCQs in the EXACT "
+            f"same top-to-bottom order the content appears on the page — the FIRST "
+            f"MCQ in your output must come from the topmost content on the page, "
+            f"the LAST MCQ from the bottommost content, and everything in between "
+            f"following that same visual sequence. Never jump ahead to a later "
+            f"section then come back to an earlier one, and never group all MCQs "
+            f"from one area together out of page order. If multiple facts sit at "
+            f"roughly the same vertical position (e.g. a table row, a multi-column "
+            f"layout), keep left-to-right order within that position before moving "
+            f"further down.\n\n"
         )
     elif count_min and count_max:
         count_rule = (
