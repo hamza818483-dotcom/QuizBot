@@ -16534,12 +16534,9 @@ async def _process_pdf_pages_inner(
                     "chat_id": channel_id,
                     "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
                     "reply_markup": {"inline_keyboard": [
-                        [{"text": "📝 Quiz Solve", "url": quiz_url},
-                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
                         [{"text": "🔄 Poll Again", "url": poll_url},
-                         {"text": "🆕 New Poll", "url": new_poll_url}],
-                        [{"text": "🌐 Website Exam", "url": exam_url},
-                         {"text": "📄 Solve PDF", "url": solve_pdf_url}]
+                         {"text": "📝 Quiz Solve", "url": quiz_url},
+                         {"text": "🌐 Website Exam", "url": exam_url}]
                     ]},
                     "reply_to_message_id": image_msg_id
                 }
@@ -17227,12 +17224,9 @@ async def _process_pdfs_pages_inner(
                     "chat_id": channel_id,
                     "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
                     "reply_markup": {"inline_keyboard": [
-                        [{"text": "📝 Quiz Solve", "url": quiz_url},
-                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
                         [{"text": "🔄 Poll Again", "url": poll_url},
-                         {"text": "🆕 New Poll", "url": new_poll_url}],
-                        [{"text": "🌐 Website Exam", "url": exam_url},
-                         {"text": "📄 Solve PDF", "url": solve_pdf_url}]
+                         {"text": "📝 Quiz Solve", "url": quiz_url},
+                         {"text": "🌐 Website Exam", "url": exam_url}]
                     ]},
                     "reply_to_message_id": image_msg_id
                 }
