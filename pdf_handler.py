@@ -880,6 +880,17 @@ class GeminiKeyRotator:
                     order.append(acct)
                 by_acct[acct].append(k)
             rebuilt = []
+            # Global tight load-balance: order ACCOUNTS themselves by their
+            # least-used key's call count too (not just random shuffle
+            # order), so an idle account's keys surface before an
+            # already-hot account's keys across the WHOLE healthy pool --
+            # not just within one account's own slice. random.shuffle above
+            # still randomizes ties (accounts with equal min-usage), so the
+            # anti-fingerprint randomization is preserved; this only breaks
+            # ties by actual usage instead of leaving it to chance, so every
+            # healthy key gets pulled into rotation instead of idle keys
+            # sitting unused while a few absorb most of the traffic.
+            order.sort(key=lambda acct: min(self.key_daily_call_count(k) for k in by_acct[acct]))
             for acct in order:
                 group = by_acct[acct]
                 if len(group) > 1:
