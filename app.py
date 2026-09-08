@@ -22915,7 +22915,10 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
                 ],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=12288,
+                    # 2026-09-08 FIX: same truncation issue as _qbm_gemini_raw --
+                    # 12288 cut off dense-page JSON mid-array, causing
+                    # deterministic 0-MCQ on the same page every retry.
+                    max_output_tokens=24576,
                     response_mime_type="application/json",
                     thinking_config=types.ThinkingConfig(thinking_budget=768 if careful else 0)
                 )
@@ -23050,7 +23053,16 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 ],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=12288,
+                    # 2026-09-08 FIX: 12288 was truncating output JSON mid-array
+                    # on dense pages (many MCQs + long verbatim "Explanation:"
+                    # text) -- output gets cut before the closing "]", the
+                    # array becomes invalid JSON, repair-parser can't recover
+                    # a coherent list, page comes back as 0 MCQ EVERY retry
+                    # (deterministic, not key/quota related -- same page always
+                    # produces the same length output and hits the same wall).
+                    # Raised to 24576 to give headroom for a full 20+ MCQ page
+                    # with long explanations.
+                    max_output_tokens=24576,
                     response_mime_type="application/json",
                     thinking_config=types.ThinkingConfig(thinking_budget=768 if careful else 0)
                 )
