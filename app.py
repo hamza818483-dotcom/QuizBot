@@ -32604,7 +32604,20 @@ async def handle_message(msg: dict):
             n_warmup = sum(1 for k in not_banned_not_cooling_not_exhausted if key_rotator.is_warming_up(k))
             n_overcap = sum(1 for k in not_banned_not_cooling_not_exhausted if key_rotator.account_over_daily_cap(k))
             n_active = len(not_banned_not_cooling_not_exhausted) - len({k for k in not_banned_not_cooling_not_exhausted if key_rotator.account_circuit_open(k) or key_rotator.is_stagger_locked(k)})
-            lines.append(f"  ↳ এর মধ্যে actively usable: {n_active} | 🔒 stagger-locked: {n_stagger} | ⛔ circuit-paused: {n_circuit} | 🐣 warming-up: {n_warmup} | 📈 over daily-cap: {n_overcap}")
+            # Low-healthy safety net (matches GeminiKeyRotator.ordered_keys):
+            # once healthy keys drop below 20, today-exhausted keys become
+            # usable too (not blocked) — reflect that here so /keys shows
+            # the real usable count instead of always excluding exhausted.
+            _low_healthy_note = ""
+            if gem_healthy < 20:
+                gem_exhausted_set = {k for k in gemini_keys if k not in gem_banned_set and _is_gemini_key_exhausted_today(k)}
+                n_exhausted_usable = len(gem_exhausted_set) - len({
+                    k for k in gem_exhausted_set
+                    if key_rotator.account_circuit_open(k) or key_rotator.is_stagger_locked(k)
+                })
+                n_active += n_exhausted_usable
+                _low_healthy_note = f" (🔓 low-healthy safety net active: +{n_exhausted_usable} exhausted key usable)"
+            lines.append(f"  ↳ এর মধ্যে actively usable: {n_active} | 🔒 stagger-locked: {n_stagger} | ⛔ circuit-paused: {n_circuit} | 🐣 warming-up: {n_warmup} | 📈 over daily-cap: {n_overcap}{_low_healthy_note}")
             if gem_banned_set:
                 reasons = key_rotator._ban_reasons
                 meta = getattr(key_rotator, "_ban_meta", {})
