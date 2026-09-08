@@ -828,7 +828,14 @@ class GeminiKeyRotator:
         live_keys = [k for k in live_keys if k not in stagger_locked]
         not_exhausted = [k for k in live_keys if not _is_gemini_key_exhausted_today(k)]
         exhausted = [k for k in live_keys if _is_gemini_key_exhausted_today(k)]
-        pool = not_exhausted if not_exhausted else live_keys
+        # Low-healthy-pool safety net: once healthy (non-exhausted) keys drop
+        # below 20, don't wait for zero — start blending in today-exhausted
+        # keys as usable too (safely, still ordered after true-healthy ones
+        # below), so a shrinking healthy pool doesn't get overloaded while
+        # plenty of other keys sit idle just because they got marked
+        # exhausted once today.
+        _low_healthy = len(not_exhausted) < 20
+        pool = not_exhausted if (not_exhausted and not _low_healthy) else live_keys
         cooled = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
         cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
         under_rpm = [k for k in cooled if self._prune_and_count(k, now) < self.warmup_rpm_limit(k)]
@@ -881,7 +888,7 @@ class GeminiKeyRotator:
                 rebuilt.extend(group)
             healthy = rebuilt
             self.current = (self.current + 1) % max(len(self.keys), 1)
-        return healthy + over_cap + over_rpm + cooling + (exhausted if not_exhausted else []) + stagger_locked + circuit_open
+        return healthy + over_cap + over_rpm + cooling + (exhausted if (not_exhausted or _low_healthy) else []) + stagger_locked + circuit_open
 
     def ordered_keys_avoiding_accounts(self, avoid_accounts: set, offset: int = 0):
         """Same as ordered_keys(), but as a PURE tie-breaker within the
