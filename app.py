@@ -21919,6 +21919,23 @@ async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = Fal
     try:
         prompt = await qbm_get_active_prompt()
         gem = await _qbm_gemini_extract(img, prompt, careful=careful, gemini_only=gemini_only)
+        # 2026-09-08 ROOT-CAUSE FIX: plain /qbm's prompt can still legally
+        # emit a {"trailing_topic_marker": "..."} sentinel for a page that
+        # starts/ends with a bare section heading and zero MCQs (e.g. a page
+        # that opens on "Adjective & Its Classification" with no questions
+        # above it, or ends on a new heading with none below it) -- the
+        # /unmesh topic-grouping path already strips these before treating
+        # the list as real MCQs, but this plain Call1 path did not, so
+        # `gem` came back non-empty (it "understood" the page and found a
+        # heading) while containing ZERO actual question/option data. That
+        # satisfied `if gem:` below and skipped the ZERO-SKIP-GUARANTEE
+        # retry+final-safety-net entirely -- the page was then silently
+        # confirmed "done" with 0 real MCQs, which is indistinguishable
+        # from the alert's "genuinely empty" verdict but is actually a
+        # false negative. Strip marker-only junk here so a heading-only
+        # page correctly reports as empty and goes through the full
+        # zero-skip retry ladder like any other empty result.
+        gem = [m for m in (gem or []) if not (isinstance(m, dict) and "trailing_topic_marker" in m and len(m) == 1)]
         if gem:
             logger.info(f"[QBM Call1] Gemini succeeded, {len(gem)} MCQ")
             out = _qbm_dedup_list(gem)
@@ -23099,7 +23116,32 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 _used_set = _qbm_page_used_accounts_ctx.get()
                 if _used_set is not None:
                     _used_set.add(_used_acct)
-                return response.text or ""
+                # 2026-09-08 ROOT-CAUSE DIAGNOSTIC: response.text can be
+                # empty/short for reasons that never surface as an exception
+                # -- SAFETY block, MAX_TOKENS cutoff, RECITATION block, or a
+                # genuinely empty candidate list. Without this, those pages
+                # look identical to "model legitimately found 0 MCQ" in every
+                # downstream log. Log candidate finish_reason + safety
+                # ratings whenever text comes back empty or suspiciously
+                # short, so a repeat failure is diagnosable instead of
+                # invisible.
+                _rtext = response.text or ""
+                if len(_rtext) < 50:
+                    try:
+                        _cands = getattr(response, "candidates", None) or []
+                        _diag = []
+                        for _c in _cands:
+                            _fr = getattr(_c, "finish_reason", None)
+                            _sr = getattr(_c, "safety_ratings", None)
+                            _diag.append(f"finish_reason={_fr} safety_ratings={_sr}")
+                        _pf = getattr(response, "prompt_feedback", None)
+                        logger.warning(
+                            f"[QBM-diag] EMPTY/short Gemini response ({len(_rtext)} chars) for key {key[:12]}... "
+                            f"| candidates={_diag} | prompt_feedback={_pf} | raw_text={_rtext[:200]!r}"
+                        )
+                    except Exception as _diag_err:
+                        logger.warning(f"[QBM-diag] failed to introspect empty response: {_diag_err}")
+                return _rtext
             except Exception as e:
                 msg = str(e)
                 # SDK's str(e) sometimes truncates the JSON body before the
@@ -23131,6 +23173,15 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                     _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
+                # 2026-09-08 ROOT-CAUSE DIAGNOSTIC: response.text raises
+                # (rather than returning "") when the SDK finds no valid
+                # text part -- classic signature of a SAFETY / RECITATION /
+                # PROHIBITED_CONTENT block, or MAX_TOKENS with zero completed
+                # parts. Indistinguishable from a normal transient error in
+                # the log below without this -- flag it so a content-block
+                # on a specific page is diagnosable, not silently retried.
+                if "response.text" in msg or "finish_reason" in msg.lower() or "Invalid operation" in msg or "quick accessor" in msg:
+                    logger.warning(f"[QBM-diag] Gemini key {key[:12]}... response.text accessor FAILED (likely SAFETY/RECITATION/MAX_TOKENS block, not quota): {full_msg[:800]}")
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         # All Gemini keys exhausted/rate-limited/errored — fall back to Groq vision
@@ -23229,7 +23280,15 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                 _used_set_multi = _qbm_page_used_accounts_ctx.get()
                 if _used_set_multi is not None:
                     _used_set_multi.add(key_rotator.account_of(key))
-                return response.text or ""
+                _rtext_multi = response.text or ""
+                if len(_rtext_multi) < 50:
+                    try:
+                        _cands = getattr(response, "candidates", None) or []
+                        _diag = [f"finish_reason={getattr(c,'finish_reason',None)} safety_ratings={getattr(c,'safety_ratings',None)}" for c in _cands]
+                        logger.warning(f"[QBM-diag] EMPTY/short multi-image Gemini response ({len(_rtext_multi)} chars) | candidates={_diag} | prompt_feedback={getattr(response,'prompt_feedback',None)}")
+                    except Exception as _diag_err:
+                        logger.warning(f"[QBM-diag] failed to introspect empty multi-image response: {_diag_err}")
+                return _rtext_multi
             except asyncio.TimeoutError:
                 logger.warning(f"[QBM] Gemini key {key[:12]}... multi-image call timed out (60s), trying next key")
                 continue
@@ -23261,6 +23320,8 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                     _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
+                if "response.text" in msg or "finish_reason" in msg.lower() or "Invalid operation" in msg or "quick accessor" in msg:
+                    logger.warning(f"[QBM-diag] Gemini key {key[:12]}... (multi-image) response.text accessor FAILED (likely SAFETY/RECITATION/MAX_TOKENS block, not quota): {full_msg[:800]}")
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision (first image only)")
