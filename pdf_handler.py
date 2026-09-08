@@ -332,10 +332,9 @@ class GeminiKeyRotator:
     # whose first-ever-seen timestamp is within WARMUP_DAYS gets a reduced
     # RPM ceiling and is excluded from the account concurrency pool,
     # ramping linearly up to full trust by day WARMUP_DAYS.
-    WARMUP_DAYS = 7  # widened 5 -> 7 (2026-09-03 second pass): the mass-ban
-    # keys were mostly 0.3-0.8d old, well inside even the old 5-day window,
-    # but banned anyway -- extending the window keeps them throttled longer
-    # while GLOBAL_CONCURRENT_CAP is restored for already-trusted keys.
+    WARMUP_DAYS = 3  # narrowed 7 -> 3 (2026-09-08): reach full trust faster
+    # so healthy-key throughput recovers sooner, while still ramping new
+    # keys instead of throwing them straight into full-rate rotation.
     WARMUP_DAY0_RPM_FRACTION = 0.15  # day 0: only 15% of RPM_PER_KEY allowed
     # (tightened from 0.2 -- brand-new keys get even less initial load)
     WARMUP_MAX_CONCURRENT = 1  # a warming-up key never gets more than 1
