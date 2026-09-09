@@ -759,16 +759,15 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
         QUIZ_SESSIONS[session["uid"]] = session
         asyncio.create_task(_persist_quiz_session(session))
 
-        # Timer: auto-skip after timer expires. NOTE: must wait LONGER than the
-        # poll's own open_period (timer+5) so this never fires while the poll
-        # can still legitimately receive an answer -- firing earlier caused a
-        # race where a real, on-time answer arrived just after the session
-        # had already moved on via timeout, producing a pid mismatch and a
-        # stalled quiz (no next question sent).
+        # Timer: auto-skip right after the poll itself closes. Poll stays
+        # open for session["timer"]+5s (open_period below), so waiting only
+        # 1s more here (not +6) still guarantees the poll is already closed
+        # and can't receive a real answer anymore -- but gets the next
+        # question out near-instantly instead of a long extra wait.
         async def _quiz_timeout():
-            await asyncio.sleep(session["timer"] + 6)
+            await asyncio.sleep(session["timer"] + 5.5)
             s = QUIZ_SESSIONS.get(session["uid"])
-            if not s or s["pid"] != poll_id or s["cur"] != session["cur"]:
+            if not s or s.get("_stopped") or s["pid"] != poll_id or s["cur"] != session["cur"]:
                 return
             # Auto-advance — skip হিসেবে count করো
             for qr in s["q_results"]:
@@ -778,9 +777,10 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
             s["skip"] += 1
             s["cur"] += 1
             QUIZ_SESSIONS[s["uid"]] = s
-            # 1s gap দিয়ে next question auto-send
-            await asyncio.sleep(1)
-            await send_quiz_question(chat_id, s)
+            if s["cur"] >= s["tot"]:
+                await finish_d1_quiz(s)
+            else:
+                await send_quiz_question(chat_id, s, force=True)
         if session["uid"] in QUIZ_TIMERS:
             QUIZ_TIMERS[session["uid"]].cancel()
         QUIZ_TIMERS[session["uid"]] = asyncio.create_task(_quiz_timeout())
