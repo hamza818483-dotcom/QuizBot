@@ -8542,6 +8542,7 @@ def csv_get_pre_message(main_topic: str, batch_topic: str, count: int, first_lin
         f"✅Topic:\n<b>{batch_text}</b>\n"
         f"{sep}\n"
         f"📌MCQ Count: {count}\n"
+        f"{sep}\n"
     )
     if first_link:
         text += f"🔗First Poll Link:\n{first_link}"
@@ -16501,7 +16502,7 @@ async def _process_pdf_pages_inner(
                     caption = ""
                     if tag:
                         caption = f"{tag}\n\n"
-                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n🌟Page No: {fmt_page(page_num)}"
+                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n▬▬▬▬▬▬▬▬▬▬\n🌟Page No: {fmt_page(page_num)}\n▬▬▬▬▬▬▬▬▬▬\n✅MCQ: {len(mcqs)}"
 
                     # HARD GUARANTEE: image MUST succeed before any poll for
                     # this page goes out. No fail, no skip, no giving up —
@@ -16576,6 +16577,16 @@ async def _process_pdf_pages_inner(
                   except Exception as _mcq_e:
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
+                if image_msg_id and first_poll_link:
+                    try:
+                        _img_caption_final = caption + f"\n▬▬▬▬▬▬▬▬▬▬\n🔗First Poll Link:\n{first_poll_link}"
+                        await tg_post("editMessageCaption", {
+                            "chat_id": channel_id, "message_id": image_msg_id,
+                            "caption": _img_caption_final
+                        })
+                    except Exception as e:
+                        logger.warning(f"[PDF] Page {page_num} image caption poll-link edit failed: {e}")
+
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
                 try:
@@ -16605,13 +16616,16 @@ async def _process_pdf_pages_inner(
                 new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{cache_id}"
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
+                _end_sep = "▬▬▬▬▬▬▬▬▬▬"
                 end_data = {
                     "chat_id": channel_id,
-                    "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
+                    "text": f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}",
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "🔄 Poll Again", "url": poll_url},
-                         {"text": "📝 Quiz Solve", "url": quiz_url},
-                         {"text": "🌐 Website Exam", "url": exam_url}]
+                         {"text": "🔄 Quiz Again", "url": quiz_url}],
+                        [{"text": "🆕 New Poll", "url": new_poll_url},
+                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
+                        [{"text": "🌐 Website Exam", "url": exam_url}]
                     ]},
                     "reply_to_message_id": image_msg_id
                 }
@@ -17209,7 +17223,7 @@ async def _process_pdfs_pages_inner(
                     caption = ""
                     if tag:
                         caption = f"{tag}\n\n"
-                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {page_topic_name}\n🌟Page No: {fmt_page(page_num)}"
+                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name}\n▬▬▬▬▬▬▬▬▬▬\n🌟Page No: {fmt_page(page_num)}\n▬▬▬▬▬▬▬▬▬▬\n✅MCQ: {len(mcqs)}"
 
                     photo_r = await send_photo(channel_id, img_bytes, caption, message_thread_id=thread_id)
                     if photo_r.get("ok"):
@@ -17267,6 +17281,16 @@ async def _process_pdfs_pages_inner(
                   except Exception as _mcq_e:
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
+                if image_msg_id and first_poll_link:
+                    try:
+                        _img_caption_final = caption + f"\n▬▬▬▬▬▬▬▬▬▬\n🔗First Poll Link:\n{first_poll_link}"
+                        await tg_post("editMessageCaption", {
+                            "chat_id": channel_id, "message_id": image_msg_id,
+                            "caption": _img_caption_final
+                        })
+                    except Exception as e:
+                        logger.warning(f"[PDF] Page {page_num} image caption poll-link edit failed: {e}")
+
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
                 try:
@@ -17296,13 +17320,16 @@ async def _process_pdfs_pages_inner(
                 new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{cache_id}"
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
+                _end_sep = "▬▬▬▬▬▬▬▬▬▬"
                 end_data = {
                     "chat_id": channel_id,
-                    "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
+                    "text": f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}",
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "🔄 Poll Again", "url": poll_url},
-                         {"text": "📝 Quiz Solve", "url": quiz_url},
-                         {"text": "🌐 Website Exam", "url": exam_url}]
+                         {"text": "🔄 Quiz Again", "url": quiz_url}],
+                        [{"text": "🆕 New Poll", "url": new_poll_url},
+                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
+                        [{"text": "🌐 Website Exam", "url": exam_url}]
                     ]},
                     "reply_to_message_id": image_msg_id
                 }
