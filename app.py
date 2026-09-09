@@ -8542,6 +8542,7 @@ def csv_get_pre_message(main_topic: str, batch_topic: str, count: int, first_lin
         f"✅Topic:\n<b>{batch_text}</b>\n"
         f"{sep}\n"
         f"📌MCQ Count: {count}\n"
+        f"{sep}\n"
     )
     if first_link:
         text += f"🔗First Poll Link:\n{first_link}"
@@ -16540,7 +16541,7 @@ async def _process_pdf_pages_inner(
                     caption = ""
                     if tag:
                         caption = f"{tag}\n\n"
-                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}"
+                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n▬▬▬▬▬▬▬▬▬▬\n🌟Page No: {fmt_page(page_num)}\n▬▬▬▬▬▬▬▬▬▬\n✅MCQ: {len(mcqs)}"
 
                     # HARD GUARANTEE: image MUST succeed before any poll for
                     # this page goes out. No fail, no skip, no giving up —
@@ -16655,7 +16656,7 @@ async def _process_pdf_pages_inner(
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
                 _end_sep = "▬▬▬▬▬▬▬▬▬▬"
-                end_caption = f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}"
+                end_caption = f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}"
                 end_kb = {"inline_keyboard": [
                     [{"text": "🔄 Poll Again", "url": poll_url},
                      {"text": "🔄 Quiz Again", "url": quiz_url}],
@@ -17311,7 +17312,7 @@ async def _process_pdfs_pages_inner(
                     caption = ""
                     if tag:
                         caption = f"{tag}\n\n"
-                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}"
+                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name}\n▬▬▬▬▬▬▬▬▬▬\n🌟Page No: {fmt_page(page_num)}\n▬▬▬▬▬▬▬▬▬▬\n✅MCQ: {len(mcqs)}"
 
                     photo_r = await send_photo(channel_id, img_bytes, caption, message_thread_id=thread_id)
                     if photo_r.get("ok"):
@@ -17411,7 +17412,7 @@ async def _process_pdfs_pages_inner(
                 _end_sep = "▬▬▬▬▬▬▬▬▬▬"
                 end_data = {
                     "chat_id": channel_id,
-                    "text": f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}",
+                    "text": f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}",
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "🔄 Poll Again", "url": poll_url},
                          {"text": "🔄 Quiz Again", "url": quiz_url}],
