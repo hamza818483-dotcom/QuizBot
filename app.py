@@ -16250,11 +16250,19 @@ async def _process_pdf_pages_inner(
                 _rd_img_bytes_cache[_pg_num] = await asyncio.to_thread(image_to_bytes, _pg_img)
             except Exception as _enc_e:
                 logger.warning(f"[PDF] Page {_pg_num} prefetch image encode failed, will retry inline at posting time: {_enc_e}")
-        try:
-            result = await _gen_with_retry(_pg_img, _pg_num)
-        finally:
-            if not is_cancelled(chat_id):
-                _rd_fill_window(page_idx + 1)
+        # FIX (2026-09-09): window fill must NOT be re-triggered here on every
+        # individual task's own completion -- since prefetch tasks finish out
+        # of order (fast pages before the slow page the main loop is still
+        # blocked on), every early finisher was sliding the window further
+        # forward, chain-reacting into 8-10+ concurrent tasks instead of the
+        # intended 3 (main loop's actual read position never bounded it).
+        # The ONLY place that should advance the window is the main loop
+        # itself, right after it consumes (awaits) each page in order --
+        # see the call to _rd_fill_window(idx + 1) in the serial section
+        # below. That keeps the window correctly pinned to "3 ahead of
+        # whichever page is currently being sent", not "3 ahead of whichever
+        # page happened to finish fastest".
+        result = await _gen_with_retry(_pg_img, _pg_num)
         return result
 
     async def _gen_with_retry(img_, page_num_):
