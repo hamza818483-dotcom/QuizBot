@@ -16617,32 +16617,82 @@ async def _process_pdf_pages_inner(
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
                 _end_sep = "▬▬▬▬▬▬▬▬▬▬"
-                end_data = {
-                    "chat_id": channel_id,
-                    "text": f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}",
-                    "reply_markup": {"inline_keyboard": [
-                        [{"text": "🔄 Poll Again", "url": poll_url},
-                         {"text": "🔄 Quiz Again", "url": quiz_url}],
-                        [{"text": "🆕 New Poll", "url": new_poll_url},
-                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
-                        [{"text": "🌐 Website Exam", "url": exam_url}]
-                    ]},
-                    "reply_to_message_id": image_msg_id
-                }
-                if thread_id:
-                    end_data["message_thread_id"] = thread_id
+                end_caption = f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}"
+                end_kb = {"inline_keyboard": [
+                    [{"text": "🔄 Poll Again", "url": poll_url},
+                     {"text": "🔄 Quiz Again", "url": quiz_url}],
+                    [{"text": "🆕 New Poll", "url": new_poll_url},
+                     {"text": "🆕 New Quiz", "url": new_quiz_url}],
+                    [{"text": "🌐 Website Exam", "url": exam_url}]
+                ]}
+
+                # PDF-attached end message, built INLINE at send-time (NOT
+                # pre-built by background prefetch -- that path was reverted
+                # 2026-09-09 for causing Playwright crash/relaunch storms).
+                _end_pdf_bytes = None
+                if mcqs:
+                    try:
+                        _end_pdf_bytes = await _generate_style1_pdf_guaranteed(
+                            mcqs, f"{topic} — {fmt_page(page_num)}", chat_id=0
+                        )
+                    except Exception as _pdf_e:
+                        logger.warning(f"[EndMsg] Page {page_num} inline PDF build failed: {_pdf_e}")
+
                 end_r = {"ok": False}
-                for _end_attempt in range(3):
-                    end_r = await tg_post("sendMessage", end_data)
+                if _end_pdf_bytes:
+                    safe_ptitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                    for _end_attempt in range(3):
+                        end_r = await send_document(
+                            channel_id, _end_pdf_bytes, f"{safe_ptitle}_{fmt_page(page_num)}_style1.pdf",
+                            caption=end_caption,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=image_msg_id
+                        )
+                        if end_r.get("ok"):
+                            break
+                        _end_err = (end_r.get("description") or end_r.get("error") or "")
+                        if "message to be replied not found" in _end_err.lower():
+                            logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
+                            end_r = await send_document(
+                                channel_id, _end_pdf_bytes, f"{safe_ptitle}_{fmt_page(page_num)}_style1.pdf",
+                                caption=end_caption,
+                                message_thread_id=thread_id
+                            )
+                            if end_r.get("ok"):
+                                break
+                        logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
+                        await asyncio.sleep(2)
                     if end_r.get("ok"):
-                        break
-                    _end_err = (end_r.get("description") or end_r.get("error") or "")
-                    if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
-                        logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
-                        end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
-                        continue
-                    logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
-                    await asyncio.sleep(2)
+                        _end_msg_id = end_r.get("result", {}).get("message_id")
+                        if _end_msg_id:
+                            try:
+                                await tg_post("editMessageReplyMarkup", {
+                                    "chat_id": channel_id, "message_id": _end_msg_id,
+                                    "reply_markup": end_kb
+                                })
+                            except Exception as e:
+                                logger.warning(f"[EndMsg] Page {page_num} button attach failed: {e}")
+
+                if not end_r.get("ok"):
+                    end_data = {
+                        "chat_id": channel_id,
+                        "text": end_caption,
+                        "reply_markup": end_kb,
+                        "reply_to_message_id": image_msg_id
+                    }
+                    if thread_id:
+                        end_data["message_thread_id"] = thread_id
+                    for _end_attempt in range(3):
+                        end_r = await tg_post("sendMessage", end_data)
+                        if end_r.get("ok"):
+                            break
+                        _end_err = (end_r.get("description") or end_r.get("error") or "")
+                        if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
+                            logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
+                            end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
+                            continue
+                        logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
+                        await asyncio.sleep(2)
                 if end_r.get("ok"):
                     await db_update_cache(cache_id, {"end_msg_id": end_r["result"]["message_id"]})
                 else:
@@ -17321,32 +17371,82 @@ async def _process_pdfs_pages_inner(
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
                 _end_sep = "▬▬▬▬▬▬▬▬▬▬"
-                end_data = {
-                    "chat_id": channel_id,
-                    "text": f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}",
-                    "reply_markup": {"inline_keyboard": [
-                        [{"text": "🔄 Poll Again", "url": poll_url},
-                         {"text": "🔄 Quiz Again", "url": quiz_url}],
-                        [{"text": "🆕 New Poll", "url": new_poll_url},
-                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
-                        [{"text": "🌐 Website Exam", "url": exam_url}]
-                    ]},
-                    "reply_to_message_id": image_msg_id
-                }
-                if thread_id:
-                    end_data["message_thread_id"] = thread_id
+                end_caption = f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}"
+                end_kb = {"inline_keyboard": [
+                    [{"text": "🔄 Poll Again", "url": poll_url},
+                     {"text": "🔄 Quiz Again", "url": quiz_url}],
+                    [{"text": "🆕 New Poll", "url": new_poll_url},
+                     {"text": "🆕 New Quiz", "url": new_quiz_url}],
+                    [{"text": "🌐 Website Exam", "url": exam_url}]
+                ]}
+
+                # PDF-attached end message, built INLINE at send-time (NOT
+                # pre-built by background prefetch -- that path was reverted
+                # 2026-09-09 for causing Playwright crash/relaunch storms).
+                _end_pdf_bytes = None
+                if mcqs:
+                    try:
+                        _end_pdf_bytes = await _generate_style1_pdf_guaranteed(
+                            mcqs, f"{topic} — {fmt_page(page_num)}", chat_id=0
+                        )
+                    except Exception as _pdf_e:
+                        logger.warning(f"[EndMsg] Page {page_num} inline PDF build failed: {_pdf_e}")
+
                 end_r = {"ok": False}
-                for _end_attempt in range(3):
-                    end_r = await tg_post("sendMessage", end_data)
+                if _end_pdf_bytes:
+                    safe_ptitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                    for _end_attempt in range(3):
+                        end_r = await send_document(
+                            channel_id, _end_pdf_bytes, f"{safe_ptitle}_{fmt_page(page_num)}_style1.pdf",
+                            caption=end_caption,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=image_msg_id
+                        )
+                        if end_r.get("ok"):
+                            break
+                        _end_err = (end_r.get("description") or end_r.get("error") or "")
+                        if "message to be replied not found" in _end_err.lower():
+                            logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
+                            end_r = await send_document(
+                                channel_id, _end_pdf_bytes, f"{safe_ptitle}_{fmt_page(page_num)}_style1.pdf",
+                                caption=end_caption,
+                                message_thread_id=thread_id
+                            )
+                            if end_r.get("ok"):
+                                break
+                        logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
+                        await asyncio.sleep(2)
                     if end_r.get("ok"):
-                        break
-                    _end_err = (end_r.get("description") or end_r.get("error") or "")
-                    if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
-                        logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
-                        end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
-                        continue
-                    logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
-                    await asyncio.sleep(2)
+                        _end_msg_id = end_r.get("result", {}).get("message_id")
+                        if _end_msg_id:
+                            try:
+                                await tg_post("editMessageReplyMarkup", {
+                                    "chat_id": channel_id, "message_id": _end_msg_id,
+                                    "reply_markup": end_kb
+                                })
+                            except Exception as e:
+                                logger.warning(f"[EndMsg] Page {page_num} button attach failed: {e}")
+
+                if not end_r.get("ok"):
+                    end_data = {
+                        "chat_id": channel_id,
+                        "text": end_caption,
+                        "reply_markup": end_kb,
+                        "reply_to_message_id": image_msg_id
+                    }
+                    if thread_id:
+                        end_data["message_thread_id"] = thread_id
+                    for _end_attempt in range(3):
+                        end_r = await tg_post("sendMessage", end_data)
+                        if end_r.get("ok"):
+                            break
+                        _end_err = (end_r.get("description") or end_r.get("error") or "")
+                        if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
+                            logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
+                            end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
+                            continue
+                        logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
+                        await asyncio.sleep(2)
                 if end_r.get("ok"):
                     await db_update_cache(cache_id, {"end_msg_id": end_r["result"]["message_id"]})
                 else:
