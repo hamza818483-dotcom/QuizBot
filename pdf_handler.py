@@ -258,16 +258,7 @@ def _save_ban_meta(meta: dict):
 
 
 class GeminiKeyRotator:
-    COOLDOWN_SECONDS = 30  # narrowed 60 -> 30 (2026-09-09): many keys sat
-    # idle in cooldown at once (RPM_PER_KEY=15/min ceiling trips cooldown
-    # even on healthy keys under normal multi-page concurrent load) -- a
-    # full 60s idle for a key that's often ready again well under 30s
-    # wastes real throughput while plenty of accounts/keys sit unused.
-    # retry_after_seconds (server-supplied, usually longer for genuine
-    # quota trips) still overrides this when present -- this only
-    # shortens the flat fallback used for ordinary per-minute rate-limit
-    # bumps, not real daily-quota exhaustion (handled separately via
-    # daily_exhausted / _mark_gemini_key_exhausted_today).
+    COOLDOWN_SECONDS = 60
     RPM_PER_KEY = 15  # proactive per-minute ceiling; skip a key before it 429s
     RPM_WINDOW_SECONDS = 60
 
@@ -344,13 +335,8 @@ class GeminiKeyRotator:
     WARMUP_DAYS = 3  # narrowed 7 -> 3 (2026-09-08): reach full trust faster
     # so healthy-key throughput recovers sooner, while still ramping new
     # keys instead of throwing them straight into full-rate rotation.
-    WARMUP_DAY0_RPM_FRACTION = 0.30  # raised 0.15 -> 0.30 (2026-09-09): too
-    # many keys sitting near-idle in early warmup made the "unused keys"
-    # problem worse. Safe to raise because WARMUP_MAX_CONCURRENT=1 (below)
-    # is the real abuse-signal limiter -- a warming key never gets more
-    # than 1 simultaneous call regardless of this RPM number, so doubling
-    # the RPM ceiling here only lets a warming key get through more SERIAL
-    # calls per minute, not more concurrent ones.
+    WARMUP_DAY0_RPM_FRACTION = 0.15  # day 0: only 15% of RPM_PER_KEY allowed
+    # (tightened from 0.2 -- brand-new keys get even less initial load)
     WARMUP_MAX_CONCURRENT = 1  # a warming-up key never gets more than 1
     # simultaneous in-flight call, regardless of ACCOUNT_CONCURRENT_CAP.
 
@@ -634,36 +620,20 @@ class GeminiKeyRotator:
         return self._account_slot_cond
 
     async def acquire_account_slot_blocking(self, key: str):
-        """Blocking version of acquire_account_slot: waits until this key's
-        account has a free concurrent slot under ACCOUNT_CONCURRENT_CAP, OR
-        up to ACCOUNT_SLOT_WAIT_TIMEOUT seconds elapse, whichever comes
-        first. The old acquire_account_slot's caller gave up after ~2s and
-        proceeded anyway, which meant the cap was cosmetic under real load.
-        A prior "wait indefinitely, no timeout" version fixed that but
-        introduced its own risk: if an account-inflight slot is ever left
-        stuck (unreleased due to some edge case, or simply every current
-        holder genuinely taking a long time under concurrent prefetch
-        load), every other call needing that same account's slot could
-        stall indefinitely with no way to recover (observed: /rd's 3-page
-        rolling prefetch window left 4 pages stuck ~80s+ each all reporting
-        "attempt 1" and not moving). A bounded wait keeps the cap's real
-        purpose (avoid bursting an account) while guaranteeing the system
-        can never fully wedge -- after the timeout, proceed anyway (same
-        graceful-degrade philosophy as the old ~2s version, just with a
-        longer, more deliberate bound given AI calls can legitimately take
-        30-60s each)."""
-        ACCOUNT_SLOT_WAIT_TIMEOUT = 25
+        """Hard-blocking version of acquire_account_slot: waits indefinitely
+        (no timeout/give-up) until this key's account has a free concurrent
+        slot under ACCOUNT_CONCURRENT_CAP. The old acquire_account_slot's
+        caller gave up after ~2s and proceeded anyway, which meant the cap
+        was cosmetic under real load -- a 5-key account WOULD end up with
+        more than ACCOUNT_CONCURRENT_CAP calls in flight simultaneously
+        whenever the 2s wait elapsed. This guarantees the cap actually
+        holds, at the cost of calls queueing longer under heavy same-account
+        load -- the correct trade-off given the whole point of the cap is
+        exactly this kind of enforcement."""
         cond = self._get_account_slot_cond()
-        try:
-            async with cond:
-                async def _wait_for_slot():
-                    while not self.acquire_account_slot(key):
-                        await cond.wait()
-                await asyncio.wait_for(_wait_for_slot(), timeout=ACCOUNT_SLOT_WAIT_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.warning(f"[Gemini] acquire_account_slot_blocking timed out after {ACCOUNT_SLOT_WAIT_TIMEOUT}s for account {self.account_of(key)} -- proceeding anyway to avoid a permanent stall (cap may be briefly exceeded).")
-            acct = self.account_of(key)
-            self._account_inflight[acct] = self._account_inflight.get(acct, 0) + 1
+        async with cond:
+            while not self.acquire_account_slot(key):
+                await cond.wait()
 
     async def release_account_slot_blocking(self, key: str):
         cond = self._get_account_slot_cond()
@@ -680,26 +650,14 @@ class GeminiKeyRotator:
         """Blocks until fewer than DISTINCT_ACCOUNT_CONCURRENT_CAP distinct
         accounts are currently in-flight, OR this account already holds a
         slot (re-entrant per account -- multiple calls on the SAME account
-        don't count against account diversity, only different accounts do),
-        OR up to DISTINCT_SLOT_WAIT_TIMEOUT seconds elapse -- same bounded-
-        wait safety net as acquire_account_slot_blocking, so this gate can
-        never fully wedge the pipeline if slots are ever slow to free up
-        under heavy concurrent prefetch load.
+        don't count against account diversity, only different accounts do).
         Caller must pair with release_distinct_account_slot in a finally."""
-        DISTINCT_SLOT_WAIT_TIMEOUT = 25
         cond = self._get_distinct_account_cond()
-        try:
-            async def _wait_for_slot():
-                async with cond:
-                    while (acct not in self._distinct_accounts_inflight
-                           and len(self._distinct_accounts_inflight) >= self.DISTINCT_ACCOUNT_CONCURRENT_CAP):
-                        await cond.wait()
-                    self._distinct_accounts_inflight.add(acct)
-            await asyncio.wait_for(_wait_for_slot(), timeout=DISTINCT_SLOT_WAIT_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.warning(f"[Gemini] acquire_distinct_account_slot timed out after {DISTINCT_SLOT_WAIT_TIMEOUT}s for account {acct} -- proceeding anyway to avoid a permanent stall.")
-            async with cond:
-                self._distinct_accounts_inflight.add(acct)
+        async with cond:
+            while (acct not in self._distinct_accounts_inflight
+                   and len(self._distinct_accounts_inflight) >= self.DISTINCT_ACCOUNT_CONCURRENT_CAP):
+                await cond.wait()
+            self._distinct_accounts_inflight.add(acct)
 
     async def release_distinct_account_slot(self, acct: str):
         cond = self._get_distinct_account_cond()

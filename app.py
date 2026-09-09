@@ -596,7 +596,6 @@ PDF_AUTO_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB) — /pdf 
 import contextvars
 import itertools
 CANCEL_FLAGS = {}  # chat_id -> bool, checked by long loops between steps
-CANCEL_REASON = {}  # chat_id -> str, human-readable source of the last cancel (who/what triggered it) -- surfaced in 0-MCQ alerts so a cancelled-job report is immediately traceable instead of just saying "cancelled"
 ACTIVE_JOB_LABEL = {}  # chat_id -> human-readable label of the job currently running
 CURRENT_JOB_ID = {}  # chat_id -> int, id of the job currently running in that chat
 
@@ -632,7 +631,6 @@ def is_cancelled(chat_id=None):
 
 def clear_cancel(chat_id):
     CANCEL_FLAGS[chat_id] = False
-    CANCEL_REASON.pop(chat_id, None)
 
 def new_job_id(chat_id) -> int:
     """প্রতিটা নতুন job (/pdf, /qbm, /tf, /txt ...) শুরু হওয়ার সময় একটা
@@ -664,8 +662,6 @@ async def handle_cancel_command(msg: dict):
     uid = msg.get("from", {}).get("id")
     if not await db_is_owner_or_admin(uid):
         return
-    logger.warning(f"[Cancel] /cancel command triggered by uid={uid} in chat={chat_id}")
-    CANCEL_REASON[chat_id] = f"/cancel command by uid={uid}"
     CANCEL_FLAGS[chat_id] = True
     running_label = ACTIVE_JOB_LABEL.get(chat_id)
     if running_label:
@@ -8546,7 +8542,6 @@ def csv_get_pre_message(main_topic: str, batch_topic: str, count: int, first_lin
         f"✅Topic:\n<b>{batch_text}</b>\n"
         f"{sep}\n"
         f"📌MCQ Count: {count}\n"
-        f"{sep}\n"
     )
     if first_link:
         text += f"🔗First Poll Link:\n{first_link}"
@@ -11264,16 +11259,6 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
 # HTML → PDF (Chromium)
 # ============================================================
 _PDF_SEMAPHORE = asyncio.Semaphore(8)
-# /rd prefetch-only: the shared single Playwright browser instance (see
-# _get_pw_browser below) was observed crashing/closing under the ADDED
-# concurrency from /rd's per-page PDF prefetch (multiple pages' PDFs now
-# building at once, stacking on top of whatever else was already using
-# _PDF_SEMAPHORE's 8-way concurrency) -- symptom: "Target page, context or
-# browser has been closed" + repeated relaunch loop, stalling even the
-# FIRST page. Serializing prefetch PDF builds behind their own lock (one at
-# a time, independent of _PDF_SEMAPHORE's broader 8-way allowance) removes
-# that specific added load without touching any other PDF caller.
-_RD_PREFETCH_PDF_LOCK = asyncio.Lock()
 
 _last_pdf_error = {"msg": ""}
 
@@ -11418,27 +11403,14 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                     last_err = e
                     logger.warning(f"[PDF Gen] new_page failed (attempt {attempt+1}/3): {e}, forcing browser relaunch")
                     async with _PW_LOCK:
-                        # Re-check under the lock: another concurrent caller
-                        # may have ALREADY relaunched a fresh, healthy
-                        # browser while we were waiting for the lock -- if
-                        # so, just reuse it instead of tearing it down again.
-                        # Without this check, several callers hitting the
-                        # same transient close all stop+relaunch in turn
-                        # (thundering herd), repeatedly killing browsers that
-                        # were already fine and stalling every concurrent
-                        # PDF build behind it.
-                        _cur = _PW_BROWSER["browser"]
-                        if _cur is not None and _cur.is_connected():
+                        try:
+                            if _PW_BROWSER["playwright"]:
+                                await _PW_BROWSER["playwright"].stop()
+                        except Exception:
                             pass
-                        else:
-                            try:
-                                if _PW_BROWSER["playwright"]:
-                                    await _PW_BROWSER["playwright"].stop()
-                            except Exception:
-                                pass
-                            _PW_BROWSER["browser"] = None
-                            _PW_BROWSER["playwright"] = None
-                    await asyncio.sleep(0.5 * (attempt + 1) + random.uniform(0, 0.5))
+                        _PW_BROWSER["browser"] = None
+                        _PW_BROWSER["playwright"] = None
+                    await asyncio.sleep(0.5 * (attempt + 1))
             if page is None:
                 raise last_err or Exception("Failed to open browser page after retries")
             if progress_cb:
@@ -16249,56 +16221,28 @@ async def _process_pdf_pages_inner(
             if _pn not in _rd_prefetch_tasks:
                 _rd_prefetch_tasks[_pn] = _spawn_task(_rd_chain_gen(_i))
 
-    async def _rd_prefetch_pdf_build(page_idx, _pg_num, _res_mcqs):
-        """Builds this page's Style1 PDF in the background, fully detached
-        from _rd_chain_gen's return -- so the main loop can move on to
-        posting (image+polls) the INSTANT MCQs are ready, instead of also
-        waiting for the PDF. Still serializes behind _RD_PREFETCH_PDF_LOCK
-        (shared Playwright browser safety), but that serialization no
-        longer blocks page-posting for ANY page -- it only delays when the
-        PDF shows up in _rd_pdf_bytes_cache (posting-time code already
-        falls back to building it inline if it's not cached yet by the
-        time that page is reached)."""
-        try:
-            page_status[page_idx]["stage"] = "\U0001F4C4 PDF \u09a4\u09c8\u09b0\u09bf \u09b9\u099a\u09cd\u099b\u09c7 (prefetch, \u09b8\u09ae\u09be\u09a8\u09cd\u09a4\u09b0\u09be\u09b2\u09c7)..."
-            async with _RD_PREFETCH_PDF_LOCK:
-                _rd_pdf_bytes_cache[_pg_num] = await _generate_style1_pdf_guaranteed(
-                    _res_mcqs, f"{topic} — {fmt_page(_pg_num)}", chat_id=0
-                )
-        except Exception as _pdf_e:
-            logger.warning(f"[PDF] Page {_pg_num} prefetch PDF build failed, will build inline at posting time: {_pdf_e}")
-
     async def _rd_chain_gen(page_idx):
         """/rd-only rolling-window prefetch worker: generates this page's
         MCQs (and its JPEG image bytes, concurrently, since encoding is
-        independent of the AI call), then hands the PDF build off to a
-        DETACHED background task (_rd_prefetch_pdf_build) so this function
-        returns the INSTANT MCQs are ready -- the main loop can post
-        (image+polls) for this page right away instead of also waiting for
-        the PDF, which previously could queue up behind OTHER pages' PDF
-        builds on the shared _RD_PREFETCH_PDF_LOCK and stall page 1 itself
-        for minutes. Also refills the prefetch window the moment MCQ
-        generation (the true bottleneck) is done, keeping the rolling
-        window always _RD_PREFETCH_WINDOW pages ahead of posting.
+        independent of the AI call), then builds this page's Style1 PDF
+        too (also independent of posting order) — then, the INSTANT this
+        page's own generation+PDF is done, not waiting for ANY page's
+        poll/CSV/image posting — refills the prefetch window so the next
+        page(s) beyond the current window start generating too. This keeps
+        generation running as a continuous rolling-window pipeline, always
+        trying to stay _RD_PREFETCH_WINDOW pages ahead of posting, rather
+        than a single one-page lookahead that would re-block once posting
+        catches up.
 
         Also marks page_status[page_idx] as actively in-progress (not
-        "\u2b1c Waiting") the moment this background generation actually starts,
+        "⬜ Waiting") the moment this background generation actually starts,
         so the live dashboard reflects reality — a prefetched page really is
         being generated right now, even though the main loop hasn't reached
         it yet."""
         page_status[page_idx]["current"] = True
-        page_status[page_idx]["stage"] = "\U0001F916 AI call \u0995\u09b0\u09be \u09b9\u099a\u09cd\u099b\u09c7 (prefetch, \u09b8\u09ae\u09be\u09a8\u09cd\u09a4\u09b0\u09be\u09b2\u09c7)..."
+        page_status[page_idx]["stage"] = "🤖 AI call করা হচ্ছে (prefetch, সমান্তরালে)..."
         page_status[page_idx]["page_start_time"] = time.time()
         page_status[page_idx]["_ai_calls_before"] = _get_ai_call_count(chat_id)
-        # Give this concurrent prefetch slot its own Gemini key-rotation
-        # starting point (same pattern /qbm's parallel window already uses)
-        # -- without this, every concurrently-running prefetch task reads
-        # the rotator's shared `current` pointer independently and they all
-        # tend to land on the same "healthiest" key at once, hammering ONE
-        # key/account instead of spreading the _RD_PREFETCH_WINDOW pages'
-        # calls across different keys/accounts. `page_idx` is unique per
-        # page so each page in the window gets a distinct offset.
-        _rd_key_offset_tok = _qbm_key_offset_ctx.set(page_idx)
         _pg_tuple = pages[page_idx]
         _pg_num, _pg_img = _pg_tuple[0], _pg_tuple[1]
         if _pg_num not in _rd_img_bytes_cache:
@@ -16310,11 +16254,14 @@ async def _process_pdf_pages_inner(
             result = await _gen_with_retry(_pg_img, _pg_num)
             _res_mcqs = result[0] if isinstance(result, tuple) else result
             if _res_mcqs and _pg_num not in _rd_pdf_bytes_cache:
-                # Detached: do NOT await this here -- see
-                # _rd_prefetch_pdf_build's docstring for why.
-                _spawn_task(_rd_prefetch_pdf_build(page_idx, _pg_num, _res_mcqs))
+                try:
+                    page_status[page_idx]["stage"] = "📄 PDF তৈরি হচ্ছে (prefetch, সমান্তরালে)..."
+                    _rd_pdf_bytes_cache[_pg_num] = await _generate_style1_pdf_guaranteed(
+                        _res_mcqs, f"{topic} — {fmt_page(_pg_num)}", chat_id=0
+                    )
+                except Exception as _pdf_e:
+                    logger.warning(f"[PDF] Page {_pg_num} prefetch PDF build failed, will build inline at posting time: {_pdf_e}")
         finally:
-            _qbm_key_offset_ctx.reset(_rd_key_offset_tok)
             if not is_cancelled(chat_id):
                 _rd_fill_window(page_idx + 1)
         return result
@@ -16518,10 +16465,9 @@ async def _process_pdf_pages_inner(
                 page_status[idx]["failed"] = True
                 page_status[idx]["error"] = gen_error or "Unknown"
                 logger.warning(f"[PDF] Page {page_num} produced 0 MCQ after retries — reason: {gen_error}")
-                _cancel_src = f" ({CANCEL_REASON.get(chat_id)})" if gen_error == "cancelled" and CANCEL_REASON.get(chat_id) else ""
                 await notify_owner(
                     f"⚠️ [PDF] Page {fmt_page(page_num)} ({file_name}) থেকে 0 MCQ।\n"
-                    f"কারণ: {(gen_error or 'অজানা — সব provider খালি ফলাফল দিয়েছে')}{_cancel_src}"
+                    f"কারণ: {gen_error or 'অজানা — সব provider খালি ফলাফল দিয়েছে'}"
                 )
                 continue
 
@@ -16556,7 +16502,7 @@ async def _process_pdf_pages_inner(
                     caption = ""
                     if tag:
                         caption = f"{tag}\n\n"
-                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n▬▬▬▬▬▬▬▬▬▬\n🌟Page No: {fmt_page(page_num)}\n▬▬▬▬▬▬▬▬▬▬\n✅MCQ: {len(mcqs)}"
+                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n🌟Page No: {fmt_page(page_num)}"
 
                     # HARD GUARANTEE: image MUST succeed before any poll for
                     # this page goes out. No fail, no skip, no giving up —
@@ -16632,16 +16578,6 @@ async def _process_pdf_pages_inner(
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
 
-                if image_msg_id and first_poll_link:
-                    try:
-                        _img_caption_final = caption + f"\n▬▬▬▬▬▬▬▬▬▬\n🔗First Poll Link:\n{first_poll_link}"
-                        await tg_post("editMessageCaption", {
-                            "chat_id": channel_id, "message_id": image_msg_id,
-                            "caption": _img_caption_final
-                        })
-                    except Exception as e:
-                        logger.warning(f"[PDF] Page {page_num} image caption poll-link edit failed: {e}")
-
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
                 try:
                     await db_update_cache(cache_id, {"poll_msg_ids": poll_msg_ids})
@@ -16670,14 +16606,11 @@ async def _process_pdf_pages_inner(
                 new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{cache_id}"
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
-                _end_sep = "▬▬▬▬▬▬▬▬▬▬"
-                end_caption = f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}"
+                end_caption = f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}"
                 end_kb = {"inline_keyboard": [
                     [{"text": "🔄 Poll Again", "url": poll_url},
-                     {"text": "🔄 Quiz Again", "url": quiz_url}],
-                    [{"text": "🆕 New Poll", "url": new_poll_url},
-                     {"text": "🆕 New Quiz", "url": new_quiz_url}],
-                    [{"text": "🌐 Website Exam", "url": exam_url}]
+                     {"text": "📝 Quiz Solve", "url": quiz_url},
+                     {"text": "🌐 Website Exam", "url": exam_url}]
                 ]}
 
                 # /rd-ONLY (this branch is the same one _rd_pdf_bytes_cache
@@ -17289,10 +17222,9 @@ async def _process_pdfs_pages_inner(
                 page_status[idx]["failed"] = True
                 page_status[idx]["error"] = gen_error or "Unknown"
                 logger.warning(f"[PDF] Page {page_num} produced 0 MCQ after retries — reason: {gen_error}")
-                _cancel_src = f" ({CANCEL_REASON.get(chat_id)})" if gen_error == "cancelled" and CANCEL_REASON.get(chat_id) else ""
                 await notify_owner(
                     f"⚠️ [PDF] Page {fmt_page(page_num)} ({file_name}) থেকে 0 MCQ।\n"
-                    f"কারণ: {(gen_error or 'অজানা — সব provider খালি ফলাফল দিয়েছে')}{_cancel_src}"
+                    f"কারণ: {gen_error or 'অজানা — সব provider খালি ফলাফল দিয়েছে'}"
                 )
                 continue
 
@@ -17328,7 +17260,7 @@ async def _process_pdfs_pages_inner(
                     caption = ""
                     if tag:
                         caption = f"{tag}\n\n"
-                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name}\n▬▬▬▬▬▬▬▬▬▬\n🌟Page No: {fmt_page(page_num)}\n▬▬▬▬▬▬▬▬▬▬\n✅MCQ: {len(mcqs)}"
+                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {page_topic_name}\n🌟Page No: {fmt_page(page_num)}"
 
                     photo_r = await send_photo(channel_id, img_bytes, caption, message_thread_id=thread_id)
                     if photo_r.get("ok"):
@@ -17387,16 +17319,6 @@ async def _process_pdfs_pages_inner(
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
 
-                if image_msg_id and first_poll_link:
-                    try:
-                        _img_caption_final = caption + f"\n▬▬▬▬▬▬▬▬▬▬\n🔗First Poll Link:\n{first_poll_link}"
-                        await tg_post("editMessageCaption", {
-                            "chat_id": channel_id, "message_id": image_msg_id,
-                            "caption": _img_caption_final
-                        })
-                    except Exception as e:
-                        logger.warning(f"[PDF] Page {page_num} image caption poll-link edit failed: {e}")
-
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
                 try:
                     await db_update_cache(cache_id, {"poll_msg_ids": poll_msg_ids})
@@ -17425,16 +17347,13 @@ async def _process_pdfs_pages_inner(
                 new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{cache_id}"
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
-                _end_sep = "▬▬▬▬▬▬▬▬▬▬"
                 end_data = {
                     "chat_id": channel_id,
-                    "text": f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}",
+                    "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "🔄 Poll Again", "url": poll_url},
-                         {"text": "🔄 Quiz Again", "url": quiz_url}],
-                        [{"text": "🆕 New Poll", "url": new_poll_url},
-                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
-                        [{"text": "🌐 Website Exam", "url": exam_url}]
+                         {"text": "📝 Quiz Solve", "url": quiz_url},
+                         {"text": "🌐 Website Exam", "url": exam_url}]
                     ]},
                     "reply_to_message_id": image_msg_id
                 }
@@ -33113,8 +33032,6 @@ async def handle_callback(query: dict):
                 # নতুন job শুরু হয়ে গেছে) — তাই এটা কিছু cancel করবে না।
                 await send_msg(chat_id, "ℹ️ এই কাজটি ইতিমধ্যে শেষ হয়ে গেছে, তাই এই বাটন আর কার্যকর নয়।")
                 return
-            logger.warning(f"[Cancel] Cancel button pressed by uid={uid} in chat={target_chat}, job_id={button_job_id or running_job_id}")
-            CANCEL_REASON[target_chat] = f"Cancel button by uid={uid} (job_id={button_job_id or running_job_id})"
             CANCEL_FLAGS[target_chat] = True
             _active_task = ACTIVE_GEN_TASK.get(target_chat)
             if _active_task and not _active_task.done():
