@@ -16195,15 +16195,6 @@ async def _process_pdf_pages_inner(
     # posting, the bytes are already sitting ready -- zero conversion delay
     # right before send_photo.
     _rd_img_bytes_cache = {}
-    # /rd-ONLY: this page's Style1 PDF built ahead of time (right after this
-    # page's own MCQ generation finishes, in the same background prefetch
-    # task) -- PDF content only depends on the MCQs themselves, not on
-    # anything from posting (poll links etc.), so it can be fully assembled
-    # while earlier pages are still being posted. By the time the main loop
-    # reaches this page, image+MCQs+PDF are ALL sitting ready; only the
-    # end-message (which needs the real first-poll-link from posting) is
-    # built at send-time.
-    _rd_pdf_bytes_cache = {}
 
     def _rd_fill_window(upto_idx_exclusive):
         """Ensure prefetch tasks are running for every page in the window
@@ -16224,15 +16215,14 @@ async def _process_pdf_pages_inner(
     async def _rd_chain_gen(page_idx):
         """/rd-only rolling-window prefetch worker: generates this page's
         MCQs (and its JPEG image bytes, concurrently, since encoding is
-        independent of the AI call), then builds this page's Style1 PDF
-        too (also independent of posting order) — then, the INSTANT this
-        page's own generation+PDF is done, not waiting for ANY page's
-        poll/CSV/image posting — refills the prefetch window so the next
-        page(s) beyond the current window start generating too. This keeps
-        generation running as a continuous rolling-window pipeline, always
-        trying to stay _RD_PREFETCH_WINDOW pages ahead of posting, rather
-        than a single one-page lookahead that would re-block once posting
-        catches up.
+        independent of the AI call), then — the INSTANT this page's own
+        generation is done, not waiting for ANY page's poll/CSV/image
+        posting — refills the prefetch window so the next page(s) beyond
+        the current window start generating too. This keeps generation
+        running as a continuous rolling-window pipeline, always trying to
+        stay _RD_PREFETCH_WINDOW pages ahead of posting, rather than a
+        single one-page lookahead that would re-block once posting catches
+        up.
 
         Also marks page_status[page_idx] as actively in-progress (not
         "⬜ Waiting") the moment this background generation actually starts,
@@ -16252,15 +16242,6 @@ async def _process_pdf_pages_inner(
                 logger.warning(f"[PDF] Page {_pg_num} prefetch image encode failed, will retry inline at posting time: {_enc_e}")
         try:
             result = await _gen_with_retry(_pg_img, _pg_num)
-            _res_mcqs = result[0] if isinstance(result, tuple) else result
-            if _res_mcqs and _pg_num not in _rd_pdf_bytes_cache:
-                try:
-                    page_status[page_idx]["stage"] = "📄 PDF তৈরি হচ্ছে (prefetch, সমান্তরালে)..."
-                    _rd_pdf_bytes_cache[_pg_num] = await _generate_style1_pdf_guaranteed(
-                        _res_mcqs, f"{topic} — {fmt_page(_pg_num)}", chat_id=0
-                    )
-                except Exception as _pdf_e:
-                    logger.warning(f"[PDF] Page {_pg_num} prefetch PDF build failed, will build inline at posting time: {_pdf_e}")
         finally:
             if not is_cancelled(chat_id):
                 _rd_fill_window(page_idx + 1)
@@ -16606,96 +16587,45 @@ async def _process_pdf_pages_inner(
                 new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{cache_id}"
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
-                end_caption = f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}"
-                end_kb = {"inline_keyboard": [
-                    [{"text": "🔄 Poll Again", "url": poll_url},
-                     {"text": "📝 Quiz Solve", "url": quiz_url},
-                     {"text": "🌐 Website Exam", "url": exam_url}]
-                ]}
-
-                # /rd-ONLY (this branch is the same one _rd_pdf_bytes_cache
-                # is populated in): use this page's PDF if the background
-                # prefetch already built it (common case -- built while
-                # EARLIER pages were still being posted, in parallel with
-                # this page's own image-convert + MCQ generation); otherwise
-                # build it inline now (first page, or prefetch build failed).
-                # End message = the PDF itself with caption/buttons attached,
-                # matching /rd -c's group-topic end message shape -- image
-                # convert, MCQ generation, PDF, and (once posted) the end
-                # message are all fully ready in sequence per page.
-                _end_pdf_bytes = _rd_pdf_bytes_cache.pop(page_num, None)
-                if _end_pdf_bytes is None and mcqs:
-                    try:
-                        _end_pdf_bytes = await _generate_style1_pdf_guaranteed(
-                            mcqs, f"{topic} — {fmt_page(page_num)}", chat_id=0
-                        )
-                    except Exception as _pdf_e:
-                        logger.warning(f"[EndMsg] Page {page_num} inline PDF build failed: {_pdf_e}")
-
+                end_data = {
+                    "chat_id": channel_id,
+                    "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
+                    "reply_markup": {"inline_keyboard": [
+                        [{"text": "🔄 Poll Again", "url": poll_url},
+                         {"text": "📝 Quiz Solve", "url": quiz_url},
+                         {"text": "🌐 Website Exam", "url": exam_url}]
+                    ]},
+                    "reply_to_message_id": image_msg_id
+                }
+                if thread_id:
+                    end_data["message_thread_id"] = thread_id
                 end_r = {"ok": False}
-                if _end_pdf_bytes:
-                    safe_ptitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
-                    for _end_attempt in range(3):
-                        end_r = await send_document(
-                            channel_id, _end_pdf_bytes, f"{safe_ptitle}_{fmt_page(page_num)}_style1.pdf",
-                            caption=end_caption,
-                            message_thread_id=thread_id,
-                            reply_to_message_id=image_msg_id
-                        )
-                        if end_r.get("ok"):
-                            break
-                        _end_err = (end_r.get("description") or end_r.get("error") or "")
-                        if "message to be replied not found" in _end_err.lower():
-                            logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
-                            end_r = await send_document(
-                                channel_id, _end_pdf_bytes, f"{safe_ptitle}_{fmt_page(page_num)}_style1.pdf",
-                                caption=end_caption,
-                                message_thread_id=thread_id
-                            )
-                            if end_r.get("ok"):
-                                break
-                        logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
-                        await asyncio.sleep(2)
+                for _end_attempt in range(3):
+                    end_r = await tg_post("sendMessage", end_data)
                     if end_r.get("ok"):
-                        _end_msg_id = end_r.get("result", {}).get("message_id")
-                        if _end_msg_id:
-                            try:
-                                await tg_post("editMessageReplyMarkup", {
-                                    "chat_id": channel_id, "message_id": _end_msg_id,
-                                    "reply_markup": end_kb
-                                })
-                            except Exception as e:
-                                logger.warning(f"[EndMsg] Page {page_num} button attach failed: {e}")
-
-                if not end_r.get("ok"):
-                    # PDF genuinely unavailable/failed to send -- fall back
-                    # to the old plain-text end message so the page still
-                    # ends with a usable message+buttons.
-                    end_data = {
-                        "chat_id": channel_id,
-                        "text": end_caption,
-                        "reply_markup": end_kb,
-                        "reply_to_message_id": image_msg_id
-                    }
-                    if thread_id:
-                        end_data["message_thread_id"] = thread_id
-                    for _end_attempt in range(3):
-                        end_r = await tg_post("sendMessage", end_data)
-                        if end_r.get("ok"):
-                            break
-                        _end_err = (end_r.get("description") or end_r.get("error") or "")
-                        if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
-                            logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
-                            end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
-                            continue
-                        logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
-                        await asyncio.sleep(2)
+                        break
+                    _end_err = (end_r.get("description") or end_r.get("error") or "")
+                    if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
+                        logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
+                        end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
+                        continue
+                    logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
+                    await asyncio.sleep(2)
                 if end_r.get("ok"):
                     await db_update_cache(cache_id, {"end_msg_id": end_r["result"]["message_id"]})
                 else:
                     err_desc = end_r.get("description") or end_r.get("error") or "unknown"
                     logger.error(f"[EndMsg] Page {page_num} FINAL FAIL: {err_desc}")
-                    await notify_owner(f"⚠️ End message failed for page {fmt_page(page_num)}, topic: {topic}\nReason: {err_desc}")
+                    if "reply" in str(err_desc).lower() or "not found" in str(err_desc).lower():
+                        # Reply target message missing/deleted -> retry once without reply_to_message_id
+                        end_data.pop("reply_to_message_id", None)
+                        retry_r = await tg_post("sendMessage", end_data)
+                        if retry_r.get("ok"):
+                            await db_update_cache(cache_id, {"end_msg_id": retry_r["result"]["message_id"]})
+                        else:
+                            await notify_owner(f"⚠️ End message failed for page {fmt_page(page_num)}, topic: {topic}\nReason: {err_desc}")
+                    else:
+                        await notify_owner(f"⚠️ End message failed for page {fmt_page(page_num)}, topic: {topic}\nReason: {err_desc}")
 
                 # Auto Style1+Style3 PDF এখন সব page শেষে একবারই পাঠানো হবে (নিচে)
                 # each mcq already carries its own correct _pdfs_topic/
