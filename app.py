@@ -32072,6 +32072,9 @@ async def handle_message(msg: dict):
         if collected:
             return
 
+    if text.startswith("/merge"):
+        await handle_merge_command(msg)
+        return
     if text == "/start":
         await handle_start(msg)
         return
@@ -32580,8 +32583,6 @@ async def handle_message(msg: dict):
             await handle_d1_send(msg)
         else:
             await send_msg(chat_id, "❌ Owner only!")
-    elif text.startswith("/merge"):
-        await handle_merge_command(msg)
     elif text == "/convert":
         await handle_convert_command(msg)
     elif text.startswith("/error") or text.startswith("/errors"):
