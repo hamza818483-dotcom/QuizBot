@@ -814,6 +814,10 @@ async def handle_quiz_poll_answer(pa: dict):
         return
 
     session = QUIZ_SESSIONS[uid]
+    if session.get("_stopped"):
+        logger.info(f"[Quiz] poll_answer ignored, quiz stopped uid={uid}")
+        return
+
     poll_id = pa.get("poll_id", "")
     if session.get("pid") != poll_id:
         # Usually a late/stale answer for an already-passed question. But if
@@ -832,8 +836,8 @@ async def handle_quiz_poll_answer(pa: dict):
         async def _stall_recovery():
             await asyncio.sleep(0.5)
             s2 = QUIZ_SESSIONS.get(uid)
-            if not s2 or s2.get("cur") != _snap_cur or s2.get("pid") != _snap_pid:
-                return  # already advanced normally — no stall after all
+            if not s2 or s2.get("_stopped") or s2.get("cur") != _snap_cur or s2.get("pid") != _snap_pid:
+                return  # already advanced normally, or quiz was stopped meanwhile
             logger.warning(f"[Quiz] Force-recovering stalled D1 quiz uid={uid} cur={_snap_cur}")
             q_result = None
             for qr in s2["q_results"]:
@@ -985,6 +989,50 @@ async def handle_quiz_next(uid: int):
             else:
                 await asyncio.sleep(0.5)
                 await send_quiz_question(session["chat_id"], session, force=True)
+
+
+async def stop_quiz_for_user(uid: int) -> bool:
+    """/stopquiz (or bare 'stopquiz' text) — pause a running D1 quiz for this
+    user and show a Resume button. Returns True if a quiz was actually
+    running and got paused, False if there was nothing to stop."""
+    session = QUIZ_SESSIONS.get(uid)
+    if not session or session.get("_stopped"):
+        return False
+
+    if uid in QUIZ_TIMERS:
+        QUIZ_TIMERS[uid].cancel()
+        del QUIZ_TIMERS[uid]
+
+    # চলতি poll_id ছোড়া রাখলে stopped অবস্থাতেও কেউ উত্তর দিলে সেটা যেন
+    # গোনা না হয় — pid clear করে দাও, handle_quiz_poll_answer তখন mismatch
+    # পেয়ে সাইলেন্টলি ignore করবে (কোনো force-advance হবে না কারণ session
+    # আর QUIZ_SESSIONS-এ live guard মেলাবে না)।
+    session["_stopped"] = True
+    session["_sending_for"] = None
+    session["_advancing"] = None
+    QUIZ_SESSIONS[uid] = session
+
+    await tg_post("sendMessage", {
+        "chat_id": session["chat_id"],
+        "text": f"⏸️ Quiz থামানো হয়েছে ({session['cur']}/{session['tot']})।",
+        "reply_markup": {
+            "inline_keyboard": [[
+                {"text": "▶️ Resume Quiz", "callback_data": f"quizresume_{uid}"}
+            ]]
+        }
+    })
+    return True
+
+
+async def resume_quiz_for_user(uid: int, chat_id: int):
+    """Resume a previously /stopquiz-paused D1 quiz from where it left off."""
+    session = QUIZ_SESSIONS.get(uid)
+    if not session or not session.get("_stopped"):
+        return False
+    session["_stopped"] = False
+    QUIZ_SESSIONS[uid] = session
+    await send_quiz_question(chat_id, session, force=True)
+    return True
 
 
 async def finish_d1_quiz(session: dict):

@@ -405,6 +405,7 @@ from quiz import (
     start_d1_quiz, send_quiz_question as send_d1_quiz_question,
     handle_quiz_poll_answer, handle_quiz_next, finish_d1_quiz,
     handle_d1_leaderboard, handle_d1_history, handle_d1_mistake,
+    stop_quiz_for_user, resume_quiz_for_user,
 )
 from special_module import (
     show_special_channel_list, show_special_main_menu, handle_special_callback, handle_special_text_input,
@@ -32800,6 +32801,10 @@ async def handle_message(msg: dict):
         await handle_quiz_create(msg)
     elif text == "/qlist":
         await handle_qlist(msg)
+    elif text.lower() in ("/stopquiz", "stopquiz"):
+        stopped = await stop_quiz_for_user(uid)
+        if not stopped:
+            await send_msg(chat_id, "কোনো চলমান quiz নেই।")
     elif text.startswith("/qdel"):
         await handle_qdel(msg)
     elif text.startswith("/pre"):
@@ -33269,6 +33274,14 @@ async def handle_callback(query: dict):
             cache_id = data.replace("pollagain_", "")
             _spawn_task(handle_poll_again(cache_id, user, chat_id))
 
+        elif data.startswith("quizresume_"):
+            resume_uid = int(data.split("_", 1)[1])
+            if resume_uid != uid:
+                await tg_post("answerCallbackQuery", {"callback_query_id": query["id"], "text": "এটা তোমার quiz না।", "show_alert": True})
+                return
+            ok = await resume_quiz_for_user(resume_uid, chat_id)
+            if not ok:
+                await send_msg(chat_id, "এই quiz আর resume করা যাবে না।")
         elif data.startswith("qsame_"):
             cache_id = data.replace("qsame_", "")
             _spawn_task(handle_quiz_same(cache_id, user, chat_id))
