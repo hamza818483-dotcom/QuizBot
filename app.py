@@ -16163,6 +16163,16 @@ async def _process_pdf_pages_inner(
     new_job_id(chat_id)
     set_active_job(chat_id, f"PDF MCQ generation + Poll posting ({file_name}, page-by-page)")
 
+    # FIX (2026-09-09): _current_job_chat_id_ctx must be set BEFORE prefetch
+    # can start (below, _rd_fill_window(1) runs prefetch tasks that call the
+    # real AI generation + _bump_ai_call_count immediately) -- previously this
+    # was only set much later in the function, so every prefetch task's AI
+    # calls were bumped under _ai_call_chat_id=None (or a stale value),
+    # never under this job's real chat_id -- causing per-page "🤖0" and a
+    # total AI-call count that always read 0 on the /rd,/pdf dashboard.
+    _reset_ai_call_count(chat_id)
+    _current_job_chat_id_ctx.set(chat_id)
+
     # FIX (2026-09-08): _page_ai_calls_before must exist before the prefetch
     # window can start (below) -- prefetch tasks for pages 2+ can now begin
     # running (via _rd_fill_window(1)) before the main per-page loop's own
@@ -16911,8 +16921,9 @@ async def _process_pdfs_pages_inner(
     start_time = time.time()
     total_mcq = sum(len(p[2]) for p in pages) if skip_generate else 0
     total_polls = 0
-    _reset_ai_call_count(chat_id)
-    _current_job_chat_id_ctx.set(chat_id)
+    # NOTE: reset + context-set moved earlier (before prefetch can start) —
+    # removed duplicate here so it doesn't wipe out calls prefetch already
+    # made in the meantime.
 
     if not status_msg_id:
         r = await send_msg(chat_id, "⏳ Processing শুরু হচ্ছে...")
