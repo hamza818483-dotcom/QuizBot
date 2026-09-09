@@ -11259,6 +11259,16 @@ async def handle_bmexam_start(chat_id: int, uid: int, uname: str, count_choice: 
 # HTML → PDF (Chromium)
 # ============================================================
 _PDF_SEMAPHORE = asyncio.Semaphore(8)
+# /rd prefetch-only: the shared single Playwright browser instance (see
+# _get_pw_browser below) was observed crashing/closing under the ADDED
+# concurrency from /rd's per-page PDF prefetch (multiple pages' PDFs now
+# building at once, stacking on top of whatever else was already using
+# _PDF_SEMAPHORE's 8-way concurrency) -- symptom: "Target page, context or
+# browser has been closed" + repeated relaunch loop, stalling even the
+# FIRST page. Serializing prefetch PDF builds behind their own lock (one at
+# a time, independent of _PDF_SEMAPHORE's broader 8-way allowance) removes
+# that specific added load without touching any other PDF caller.
+_RD_PREFETCH_PDF_LOCK = asyncio.Lock()
 
 _last_pdf_error = {"msg": ""}
 
@@ -11403,14 +11413,27 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                     last_err = e
                     logger.warning(f"[PDF Gen] new_page failed (attempt {attempt+1}/3): {e}, forcing browser relaunch")
                     async with _PW_LOCK:
-                        try:
-                            if _PW_BROWSER["playwright"]:
-                                await _PW_BROWSER["playwright"].stop()
-                        except Exception:
+                        # Re-check under the lock: another concurrent caller
+                        # may have ALREADY relaunched a fresh, healthy
+                        # browser while we were waiting for the lock -- if
+                        # so, just reuse it instead of tearing it down again.
+                        # Without this check, several callers hitting the
+                        # same transient close all stop+relaunch in turn
+                        # (thundering herd), repeatedly killing browsers that
+                        # were already fine and stalling every concurrent
+                        # PDF build behind it.
+                        _cur = _PW_BROWSER["browser"]
+                        if _cur is not None and _cur.is_connected():
                             pass
-                        _PW_BROWSER["browser"] = None
-                        _PW_BROWSER["playwright"] = None
-                    await asyncio.sleep(0.5 * (attempt + 1))
+                        else:
+                            try:
+                                if _PW_BROWSER["playwright"]:
+                                    await _PW_BROWSER["playwright"].stop()
+                            except Exception:
+                                pass
+                            _PW_BROWSER["browser"] = None
+                            _PW_BROWSER["playwright"] = None
+                    await asyncio.sleep(0.5 * (attempt + 1) + random.uniform(0, 0.5))
             if page is None:
                 raise last_err or Exception("Failed to open browser page after retries")
             if progress_cb:
@@ -16265,9 +16288,14 @@ async def _process_pdf_pages_inner(
             if _res_mcqs and _pg_num not in _rd_pdf_bytes_cache:
                 try:
                     page_status[page_idx]["stage"] = "📄 PDF তৈরি হচ্ছে (prefetch, সমান্তরালে)..."
-                    _rd_pdf_bytes_cache[_pg_num] = await _generate_style1_pdf_guaranteed(
-                        _res_mcqs, f"{topic} — {fmt_page(_pg_num)}", chat_id=0
-                    )
+                    # Serialized (see _RD_PREFETCH_PDF_LOCK definition) --
+                    # prevents multiple in-window pages' PDF builds from
+                    # piling onto the shared Playwright browser instance at
+                    # the same moment.
+                    async with _RD_PREFETCH_PDF_LOCK:
+                        _rd_pdf_bytes_cache[_pg_num] = await _generate_style1_pdf_guaranteed(
+                            _res_mcqs, f"{topic} — {fmt_page(_pg_num)}", chat_id=0
+                        )
                 except Exception as _pdf_e:
                     logger.warning(f"[PDF] Page {_pg_num} prefetch PDF build failed, will build inline at posting time: {_pdf_e}")
         finally:
