@@ -10438,6 +10438,19 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                         await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(topic, batch_topic, len(batch), first_link))
                     except Exception as e:
                         logger.warning(f"[CSV-Topicwise] pre-msg link edit failed: {e}")
+                # Pre-message (with the first poll link now added in) pinned —
+                # every topic's pre-msg (image-caption version too, if this
+                # batch ever sends one) gets pinned so it stays visible at
+                # the top of the forum topic even as later topics' polls push
+                # it down.
+                if pre_msg_id:
+                    try:
+                        await tg_post("pinChatMessage", {
+                            "chat_id": channel_id, "message_id": pre_msg_id,
+                            "disable_notification": True
+                        })
+                    except Exception as e:
+                        logger.warning(f"[CSV-Topicwise] pre-msg pin failed: {e}")
 
                 batch_pdf_bytes = await _generate_style1_pdf_guaranteed(batch, batch_topic, chat_id)
                 ending = csv_get_ending_message(batch_topic, sent, first_link, ask_score=ask_score)
