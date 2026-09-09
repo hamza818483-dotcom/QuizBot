@@ -16616,6 +16616,16 @@ async def _process_pdf_pages_inner(
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
 
+                if image_msg_id and first_poll_link:
+                    try:
+                        _img_caption_final = caption + f"\n🔗First Poll Link:\n{first_poll_link}"
+                        await tg_post("editMessageCaption", {
+                            "chat_id": channel_id, "message_id": image_msg_id,
+                            "caption": _img_caption_final
+                        })
+                    except Exception as e:
+                        logger.warning(f"[PDF] Page {page_num} image caption poll-link edit failed: {e}")
+
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
                 try:
                     await db_update_cache(cache_id, {"poll_msg_ids": poll_msg_ids})
@@ -17359,6 +17369,16 @@ async def _process_pdfs_pages_inner(
                   except Exception as _mcq_e:
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
+
+                if image_msg_id and first_poll_link:
+                    try:
+                        _img_caption_final = caption + f"\n🔗First Poll Link:\n{first_poll_link}"
+                        await tg_post("editMessageCaption", {
+                            "chat_id": channel_id, "message_id": image_msg_id,
+                            "caption": _img_caption_final
+                        })
+                    except Exception as e:
+                        logger.warning(f"[PDF] Page {page_num} image caption poll-link edit failed: {e}")
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
                 try:
