@@ -16243,6 +16243,15 @@ async def _process_pdf_pages_inner(
         page_status[page_idx]["stage"] = "🤖 AI call করা হচ্ছে (prefetch, সমান্তরালে)..."
         page_status[page_idx]["page_start_time"] = time.time()
         page_status[page_idx]["_ai_calls_before"] = _get_ai_call_count(chat_id)
+        # Give this concurrent prefetch slot its own Gemini key-rotation
+        # starting point (same pattern /qbm's parallel window already uses)
+        # -- without this, every concurrently-running prefetch task reads
+        # the rotator's shared `current` pointer independently and they all
+        # tend to land on the same "healthiest" key at once, hammering ONE
+        # key/account instead of spreading the _RD_PREFETCH_WINDOW pages'
+        # calls across different keys/accounts. `page_idx` is unique per
+        # page so each page in the window gets a distinct offset.
+        _rd_key_offset_tok = _qbm_key_offset_ctx.set(page_idx)
         _pg_tuple = pages[page_idx]
         _pg_num, _pg_img = _pg_tuple[0], _pg_tuple[1]
         if _pg_num not in _rd_img_bytes_cache:
@@ -16262,6 +16271,7 @@ async def _process_pdf_pages_inner(
                 except Exception as _pdf_e:
                     logger.warning(f"[PDF] Page {_pg_num} prefetch PDF build failed, will build inline at posting time: {_pdf_e}")
         finally:
+            _qbm_key_offset_ctx.reset(_rd_key_offset_tok)
             if not is_cancelled(chat_id):
                 _rd_fill_window(page_idx + 1)
         return result
