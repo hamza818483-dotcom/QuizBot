@@ -8691,6 +8691,26 @@ async def _csv_pre_buttons_no_premium(cache_id: str) -> dict:
         [{"text": "🌐 Website Exam", "url": exam_url}],
     ]}
 
+def _rd_group_end_kb(cache_id: str) -> dict:
+    """/rd -c (group forum-topic, per-page-poll end message) 3-row button:
+    Row1: Poll Again / Quiz Again (callback -- replays this SAME cached MCQ
+          set, no AI call).
+    Row2: New Poll / New Quiz -- CSV-origin caches have no source image to
+          regenerate from, so these ALSO replay the same cached MCQ set
+          (distinct callback prefix csvpollnew_/csvquiznew_ so behavior can
+          diverge later if a real regenerate path is added) -- i.e. once
+          generated, every subsequent tap reuses the cached MCQs instead of
+          calling AI again.
+    Row3: Website Exam (URL button, GH Pages exam link)."""
+    exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+    return {"inline_keyboard": [
+        [{"text": "🔄 Poll Again", "callback_data": f"pollagain_{cache_id}"},
+         {"text": "🔄 Quiz Again", "callback_data": f"qsame_{cache_id}"}],
+        [{"text": "🆕 New Poll", "callback_data": f"csvpollnew_{cache_id}"},
+         {"text": "🆕 New Quiz", "callback_data": f"csvquiznew_{cache_id}"}],
+        [{"text": "🌐 Website Exam", "url": exam_url}],
+    ]}
+
 def _get_first_poll_link(channel_id: str, msg_id: int) -> str:
     """Poll message link বানাও"""
     cid = str(channel_id)
@@ -10420,17 +10440,34 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                         logger.warning(f"[CSV-Topicwise] pre-msg link edit failed: {e}")
 
                 batch_pdf_bytes = await _generate_style1_pdf_guaranteed(batch, batch_topic, chat_id)
+                ending = csv_get_ending_message(batch_topic, sent, first_link, ask_score=ask_score)
+                end_msg_id_saved = None
                 if batch_pdf_bytes:
+                    # /rd -c (group forum-topic) per-topic end message: the
+                    # PDF of this topic's polls IS the end message itself
+                    # (caption = the usual ending text), with the 3-row
+                    # Poll Again/Quiz Again, New Poll/New Quiz, Website Exam
+                    # keyboard attached directly -- instead of a separate
+                    # PDF-with-basic-buttons message followed by a plain
+                    # text end message.
                     safe_btitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", batch_topic)[:50] or "ATLAS_Sheet"
-                    btn_kb = await _csv_pre_buttons_no_premium(batch_cache_id)
+                    btn_kb = _rd_group_end_kb(batch_cache_id)
                     pdf_doc_r = await send_document(
                         channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
-                        caption=csv_get_pdf_caption(batch_topic),
+                        caption=ending,
                         message_thread_id=thread_id,
                         reply_to_message_id=pre_msg_id
                     )
+                    if not (pdf_doc_r and pdf_doc_r.get("ok")):
+                        pdf_doc_r = await send_document(  # one retry
+                            channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
+                            caption=ending,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=pre_msg_id
+                        )
                     if pdf_doc_r and pdf_doc_r.get("ok"):
                         pdf_msg_id = pdf_doc_r.get("result", {}).get("message_id")
+                        end_msg_id_saved = pdf_msg_id
                         if pdf_msg_id:
                             try:
                                 await tg_post("editMessageReplyMarkup", {
@@ -10439,25 +10476,32 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                                 })
                             except Exception as e:
                                 logger.warning(f"[CSV-Topicwise] PDF button attach failed: {e}")
-
-                ending = csv_get_ending_message(batch_topic, sent, first_link, ask_score=ask_score)
-                end_send_data2 = {
-                    "chat_id": channel_id,
-                    "text": ending,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True
-                }
-                if pre_msg_id:
-                    end_send_data2["reply_to_message_id"] = pre_msg_id
-                if thread_id:
-                    end_send_data2["message_thread_id"] = thread_id
-                end_r = await tg_post("sendMessage", end_send_data2)
-                if not end_r.get("ok"):
+                    end_r = pdf_doc_r
+                else:
+                    # PDF generation genuinely failed -- fall back to the
+                    # old plain-text end message (with the same new keyboard)
+                    # so the topic still ends with a usable message+buttons.
+                    end_send_data2 = {
+                        "chat_id": channel_id,
+                        "text": ending,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                        "reply_markup": _rd_group_end_kb(batch_cache_id)
+                    }
+                    if pre_msg_id:
+                        end_send_data2["reply_to_message_id"] = pre_msg_id
+                    if thread_id:
+                        end_send_data2["message_thread_id"] = thread_id
                     end_r = await tg_post("sendMessage", end_send_data2)
+                    if not end_r.get("ok"):
+                        end_r = await tg_post("sendMessage", end_send_data2)
+                    if end_r.get("ok"):
+                        end_msg_id_saved = end_r["result"]["message_id"]
+
                 if end_r.get("ok"):
                     await db_update_cache(batch_cache_id, {
                         "channel_id": channel_id,
-                        "end_msg_id": end_r["result"]["message_id"]
+                        "end_msg_id": end_msg_id_saved
                     })
                     if loading_id:
                         await edit_msg(chat_id, loading_id,
@@ -33067,6 +33111,16 @@ async def handle_callback(query: dict):
             cache_id = data.replace("qsame_", "")
             _spawn_task(handle_quiz_same(cache_id, user, chat_id))
 
+        elif data.startswith("csvpollnew_"):
+            # /rd -c (topicwise → group forum topic) end-msg "New Poll" button.
+            # CSV-origin caches have no source image, so this is NOT an
+            # AI-regeneration (unlike image-based pollnew_) -- it replays
+            # the SAME already-cached MCQ set as a fresh poll round. Once a
+            # topic's MCQs exist in cache, every subsequent "New Poll" tap
+            # reuses that same cached data instead of calling AI again.
+            cache_id = data.replace("csvpollnew_", "")
+            _spawn_task(handle_poll_again(cache_id, user, chat_id))
+
         elif data.startswith("pollnew_"):
             cache_id = data.replace("pollnew_", "")
             if uid in _QUIZ_START_LOCK:
@@ -33077,6 +33131,17 @@ async def handle_callback(query: dict):
         elif data.startswith("polllb_"):
             cache_id = data.replace("polllb_", "")
             await handle_poll_leaderboard(cache_id, uid, chat_id)
+
+        elif data.startswith("csvquiznew_"):
+            # /rd -c end-msg "New Quiz" button — same rationale as
+            # csvpollnew_ above: no source image to regenerate from, so this
+            # replays the SAME cached MCQ set as a fresh quiz round instead
+            # of calling AI again.
+            cache_id = data.replace("csvquiznew_", "")
+            if uid in _QUIZ_START_LOCK:
+                return
+            _QUIZ_START_LOCK.add(uid)
+            _spawn_task(_run_quiz_start_debounced(handle_quiz_same(cache_id, user, chat_id), uid))
 
         elif data.startswith("qnew_"):
             cache_id = data.replace("qnew_", "")
