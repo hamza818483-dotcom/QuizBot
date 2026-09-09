@@ -11572,9 +11572,40 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                     page_heights_mm = None
 
                 if page_heights_mm:
-                    # Render each .abpage as its own single-page PDF at its
-                    # exact needed height, then merge -- this is what actually
-                    # produces a compact, per-page-sized final PDF.
+                    # FIX (page size not maintained across the merged PDF):
+                    # each .abpage was previously exported at its own
+                    # tight-fit height (h_mm), so a multi-page PDF could mix
+                    # several different page heights in one file -- broken
+                    # for printing/viewing consistency (page size must be
+                    # uniform throughout a document). Normalize every
+                    # QUESTION page (the recurring, same-layout pages) to ONE
+                    # shared height -- the max across all measured question
+                    # pages -- so those pages are consistently sized end to
+                    # end. The trailing single answers-page is a different
+                    # layout (one long table, legitimately much taller) and
+                    # is intentionally left at its own real height rather
+                    # than forced to match, since matching would either
+                    # truncate it or balloon every question page to match its
+                    # size.
+                    _is_answers_flags = await asyncio.wait_for(page.evaluate("""
+                        () => Array.from(document.querySelectorAll('.abpage'))
+                            .map(pg => pg.classList.contains('answers-page'))
+                    """), timeout=10)
+                    _q_heights = [
+                        h for h, is_ans in zip(page_heights_mm, _is_answers_flags)
+                        if h is not None and not is_ans
+                    ]
+                    if _q_heights:
+                        _uniform_h_mm = max(_q_heights)
+                        page_heights_mm = [
+                            (h if (is_ans or h is None) else _uniform_h_mm)
+                            for h, is_ans in zip(page_heights_mm, _is_answers_flags)
+                        ]
+                    # Render each .abpage as its own single-page PDF at the
+                    # shared uniform height (question pages) or its own real
+                    # height (answers page), then merge -- this produces a
+                    # compact, CONSISTENTLY-sized final PDF across all
+                    # question pages.
                     # NOTE: page_ranges alone is unreliable here since without
                     # per-page CSS sizing every .abpage still flows through the
                     # single static @page rule and may not land on a clean
