@@ -16245,26 +16245,45 @@ async def _process_pdf_pages_inner(
             if _pn not in _rd_prefetch_tasks:
                 _rd_prefetch_tasks[_pn] = _spawn_task(_rd_chain_gen(_i))
 
+    async def _rd_prefetch_pdf_build(page_idx, _pg_num, _res_mcqs):
+        """Builds this page's Style1 PDF in the background, fully detached
+        from _rd_chain_gen's return -- so the main loop can move on to
+        posting (image+polls) the INSTANT MCQs are ready, instead of also
+        waiting for the PDF. Still serializes behind _RD_PREFETCH_PDF_LOCK
+        (shared Playwright browser safety), but that serialization no
+        longer blocks page-posting for ANY page -- it only delays when the
+        PDF shows up in _rd_pdf_bytes_cache (posting-time code already
+        falls back to building it inline if it's not cached yet by the
+        time that page is reached)."""
+        try:
+            page_status[page_idx]["stage"] = "\U0001F4C4 PDF \u09a4\u09c8\u09b0\u09bf \u09b9\u099a\u09cd\u099b\u09c7 (prefetch, \u09b8\u09ae\u09be\u09a8\u09cd\u09a4\u09b0\u09be\u09b2\u09c7)..."
+            async with _RD_PREFETCH_PDF_LOCK:
+                _rd_pdf_bytes_cache[_pg_num] = await _generate_style1_pdf_guaranteed(
+                    _res_mcqs, f"{topic} — {fmt_page(_pg_num)}", chat_id=0
+                )
+        except Exception as _pdf_e:
+            logger.warning(f"[PDF] Page {_pg_num} prefetch PDF build failed, will build inline at posting time: {_pdf_e}")
+
     async def _rd_chain_gen(page_idx):
         """/rd-only rolling-window prefetch worker: generates this page's
         MCQs (and its JPEG image bytes, concurrently, since encoding is
-        independent of the AI call), then builds this page's Style1 PDF
-        too (also independent of posting order) — then, the INSTANT this
-        page's own generation+PDF is done, not waiting for ANY page's
-        poll/CSV/image posting — refills the prefetch window so the next
-        page(s) beyond the current window start generating too. This keeps
-        generation running as a continuous rolling-window pipeline, always
-        trying to stay _RD_PREFETCH_WINDOW pages ahead of posting, rather
-        than a single one-page lookahead that would re-block once posting
-        catches up.
+        independent of the AI call), then hands the PDF build off to a
+        DETACHED background task (_rd_prefetch_pdf_build) so this function
+        returns the INSTANT MCQs are ready -- the main loop can post
+        (image+polls) for this page right away instead of also waiting for
+        the PDF, which previously could queue up behind OTHER pages' PDF
+        builds on the shared _RD_PREFETCH_PDF_LOCK and stall page 1 itself
+        for minutes. Also refills the prefetch window the moment MCQ
+        generation (the true bottleneck) is done, keeping the rolling
+        window always _RD_PREFETCH_WINDOW pages ahead of posting.
 
         Also marks page_status[page_idx] as actively in-progress (not
-        "⬜ Waiting") the moment this background generation actually starts,
+        "\u2b1c Waiting") the moment this background generation actually starts,
         so the live dashboard reflects reality — a prefetched page really is
         being generated right now, even though the main loop hasn't reached
         it yet."""
         page_status[page_idx]["current"] = True
-        page_status[page_idx]["stage"] = "🤖 AI call করা হচ্ছে (prefetch, সমান্তরালে)..."
+        page_status[page_idx]["stage"] = "\U0001F916 AI call \u0995\u09b0\u09be \u09b9\u099a\u09cd\u099b\u09c7 (prefetch, \u09b8\u09ae\u09be\u09a8\u09cd\u09a4\u09b0\u09be\u09b2\u09c7)..."
         page_status[page_idx]["page_start_time"] = time.time()
         page_status[page_idx]["_ai_calls_before"] = _get_ai_call_count(chat_id)
         # Give this concurrent prefetch slot its own Gemini key-rotation
@@ -16287,18 +16306,9 @@ async def _process_pdf_pages_inner(
             result = await _gen_with_retry(_pg_img, _pg_num)
             _res_mcqs = result[0] if isinstance(result, tuple) else result
             if _res_mcqs and _pg_num not in _rd_pdf_bytes_cache:
-                try:
-                    page_status[page_idx]["stage"] = "📄 PDF তৈরি হচ্ছে (prefetch, সমান্তরালে)..."
-                    # Serialized (see _RD_PREFETCH_PDF_LOCK definition) --
-                    # prevents multiple in-window pages' PDF builds from
-                    # piling onto the shared Playwright browser instance at
-                    # the same moment.
-                    async with _RD_PREFETCH_PDF_LOCK:
-                        _rd_pdf_bytes_cache[_pg_num] = await _generate_style1_pdf_guaranteed(
-                            _res_mcqs, f"{topic} — {fmt_page(_pg_num)}", chat_id=0
-                        )
-                except Exception as _pdf_e:
-                    logger.warning(f"[PDF] Page {_pg_num} prefetch PDF build failed, will build inline at posting time: {_pdf_e}")
+                # Detached: do NOT await this here -- see
+                # _rd_prefetch_pdf_build's docstring for why.
+                _spawn_task(_rd_prefetch_pdf_build(page_idx, _pg_num, _res_mcqs))
         finally:
             _qbm_key_offset_ctx.reset(_rd_key_offset_tok)
             if not is_cancelled(chat_id):
