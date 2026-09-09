@@ -651,9 +651,23 @@ async function handleTgSendDoc(request) {
       // including all non-ASCII bytes, passes through untouched.
       const safeFilename = filename.replace(/"/g, "'");
 
+      // FIX (Bangla/non-ASCII filename showing broken/garbled on Telegram):
+      // raw UTF-8 bytes inside filename="..." are NOT reliably honored --
+      // per HTTP spec, a plain filename="..." parameter is Latin-1 only, so
+      // some Telegram clients decode the raw UTF-8 bytes as Latin-1 and
+      // render mojibake instead of the real Bangla text. The spec-correct
+      // fix is RFC 5987/6266's filename*=UTF-8''<percent-encoded-bytes>
+      // parameter alongside a plain ASCII filename="..." fallback (for any
+      // client that ignores filename*) -- send BOTH so every client picks
+      // the one it understands and the Bangla name renders correctly.
+      const asciiFallback = safeFilename.replace(/[^\x00-\x7F]/g, '_');
+      const encodedFilenameStar = encodeURIComponent(safeFilename)
+        .replace(/['()]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())
+        .replace(/\*/g, '%2A');
+
       parts.push(enc.encode(
         `--${boundary}\r\nContent-Disposition: form-data; name="document"; ` +
-        `filename="${safeFilename}"\r\n` +
+        `filename="${asciiFallback}"; filename*=UTF-8''${encodedFilenameStar}\r\n` +
         `Content-Type: ${body.mime_type || 'application/octet-stream'}\r\n\r\n`
       ));
       parts.push(bytes);
