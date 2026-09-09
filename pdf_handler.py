@@ -344,8 +344,13 @@ class GeminiKeyRotator:
     WARMUP_DAYS = 3  # narrowed 7 -> 3 (2026-09-08): reach full trust faster
     # so healthy-key throughput recovers sooner, while still ramping new
     # keys instead of throwing them straight into full-rate rotation.
-    WARMUP_DAY0_RPM_FRACTION = 0.15  # day 0: only 15% of RPM_PER_KEY allowed
-    # (tightened from 0.2 -- brand-new keys get even less initial load)
+    WARMUP_DAY0_RPM_FRACTION = 0.30  # raised 0.15 -> 0.30 (2026-09-09): too
+    # many keys sitting near-idle in early warmup made the "unused keys"
+    # problem worse. Safe to raise because WARMUP_MAX_CONCURRENT=1 (below)
+    # is the real abuse-signal limiter -- a warming key never gets more
+    # than 1 simultaneous call regardless of this RPM number, so doubling
+    # the RPM ceiling here only lets a warming key get through more SERIAL
+    # calls per minute, not more concurrent ones.
     WARMUP_MAX_CONCURRENT = 1  # a warming-up key never gets more than 1
     # simultaneous in-flight call, regardless of ACCOUNT_CONCURRENT_CAP.
 
