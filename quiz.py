@@ -759,13 +759,15 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
         QUIZ_SESSIONS[session["uid"]] = session
         asyncio.create_task(_persist_quiz_session(session))
 
-        # Timer: auto-skip right after the poll itself closes. Poll stays
-        # open for session["timer"]+5s (open_period below), so waiting only
-        # 1s more here (not +6) still guarantees the poll is already closed
-        # and can't receive a real answer anymore -- but gets the next
-        # question out near-instantly instead of a long extra wait.
+        # Timer: auto-skip after timer expires. NOTE: must wait LONGER than the
+        # poll's own open_period (timer+5) so this never fires while the poll
+        # can still legitimately receive an answer -- firing earlier (history:
+        # commit 0276fda, timer+2 vs open_period timer+5) caused a race where a
+        # real, on-time answer arrived just after the session had already moved
+        # on via timeout, producing a pid mismatch and a permanently stalled
+        # quiz. Keep a full 1s safety margin past open_period (timer+6).
         async def _quiz_timeout():
-            await asyncio.sleep(session["timer"] + 5.5)
+            await asyncio.sleep(session["timer"] + 6)
             s = QUIZ_SESSIONS.get(session["uid"])
             if not s or s.get("_stopped") or s["pid"] != poll_id or s["cur"] != session["cur"]:
                 return
