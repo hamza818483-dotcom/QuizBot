@@ -258,7 +258,16 @@ def _save_ban_meta(meta: dict):
 
 
 class GeminiKeyRotator:
-    COOLDOWN_SECONDS = 60
+    COOLDOWN_SECONDS = 30  # narrowed 60 -> 30 (2026-09-09): many keys sat
+    # idle in cooldown at once (RPM_PER_KEY=15/min ceiling trips cooldown
+    # even on healthy keys under normal multi-page concurrent load) -- a
+    # full 60s idle for a key that's often ready again well under 30s
+    # wastes real throughput while plenty of accounts/keys sit unused.
+    # retry_after_seconds (server-supplied, usually longer for genuine
+    # quota trips) still overrides this when present -- this only
+    # shortens the flat fallback used for ordinary per-minute rate-limit
+    # bumps, not real daily-quota exhaustion (handled separately via
+    # daily_exhausted / _mark_gemini_key_exhausted_today).
     RPM_PER_KEY = 15  # proactive per-minute ceiling; skip a key before it 429s
     RPM_WINDOW_SECONDS = 60
 
