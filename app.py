@@ -16334,12 +16334,15 @@ async def _process_pdf_pages_inner(
 
         return last_mcqs, last_error
 
-    # /rd: kick off the rolling window immediately, before the main loop
-    # even starts on page 1 -- so pages 2..window-size begin generating in
-    # the background right away, in parallel with page 1's own generation,
-    # instead of only starting once page 1 finishes.
-    if not skip_generate:
-        _rd_fill_window(1)
+    # FIX (2026-09-09, per user instruction): do NOT kick off the rolling
+    # window before page 1 even starts -- page 1 must run and finish fully
+    # ALONE first. Only once page 1 is done (during ITS OWN posting/sending
+    # gap) should pages 2..window-size begin generating in the background --
+    # that already happens naturally via the main loop's own
+    # _rd_fill_window(idx + 1) call right after it consumes page 1 below.
+    # (Previously this fired _rd_fill_window(1) here, starting page
+    # 2/3/4's generation simultaneously with page 1 at job launch --
+    # exactly what was NOT wanted.)
 
     for idx, page_tuple in enumerate(pages):
         if is_cancelled(chat_id):
