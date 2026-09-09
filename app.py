@@ -32025,7 +32025,7 @@ async def process_update(update: dict):
         elif "callback_query" in update:
             await handle_callback(update["callback_query"])
         elif "poll_answer" in update:
-            await handle_poll_answer(update["poll_answer"])
+            _spawn_task(handle_poll_answer(update["poll_answer"]))
         elif "chat_member" in update:
             cm = update["chat_member"]
             old_status = cm.get("old_chat_member", {}).get("status")

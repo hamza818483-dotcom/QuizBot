@@ -780,7 +780,7 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
             if s["cur"] >= s["tot"]:
                 await finish_d1_quiz(s)
             else:
-                await send_quiz_question(chat_id, s, force=True)
+                await send_quiz_question(chat_id, s)
         if session["uid"] in QUIZ_TIMERS:
             QUIZ_TIMERS[session["uid"]].cancel()
         QUIZ_TIMERS[session["uid"]] = asyncio.create_task(_quiz_timeout())
