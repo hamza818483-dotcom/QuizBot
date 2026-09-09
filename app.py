@@ -16644,7 +16644,8 @@ async def _process_pdf_pages_inner(
                 new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{cache_id}"
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
-                end_caption = f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}"
+                _end_sep = "▬▬▬▬▬▬▬▬▬▬"
+                end_caption = f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}"
                 end_kb = {"inline_keyboard": [
                     [{"text": "🔄 Poll Again", "url": poll_url},
                      {"text": "🔄 Quiz Again", "url": quiz_url}],
@@ -17387,9 +17388,10 @@ async def _process_pdfs_pages_inner(
                 new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{cache_id}"
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
+                _end_sep = "▬▬▬▬▬▬▬▬▬▬"
                 end_data = {
                     "chat_id": channel_id,
-                    "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
+                    "text": f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}",
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "🔄 Poll Again", "url": poll_url},
                          {"text": "🔄 Quiz Again", "url": quiz_url}],
