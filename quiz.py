@@ -808,6 +808,7 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
 
 async def handle_quiz_poll_answer(pa: dict):
     """Handle poll answer for D1 quiz system"""
+    logger.info(f"[Quiz][TRACE] handle_quiz_poll_answer CALLED raw={pa}")
     uid = pa.get("user", {}).get("id")
     logger.info(f"[Quiz][TRACE] handle_quiz_poll_answer ENTER uid={uid} poll_id={pa.get('poll_id')} option_ids={pa.get('option_ids')}")
     logger.info(f"[Quiz] poll_answer received uid={uid} poll_id={pa.get('poll_id')} in_sessions={uid in QUIZ_SESSIONS if uid else False}")

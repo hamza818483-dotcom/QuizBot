@@ -32025,6 +32025,7 @@ async def process_update(update: dict):
         elif "callback_query" in update:
             await handle_callback(update["callback_query"])
         elif "poll_answer" in update:
+            logger.info(f"[Webhook][TRACE] poll_answer update_id={update.get('update_id')} raw={update['poll_answer']}")
             _spawn_task(handle_poll_answer(update["poll_answer"]))
         elif "chat_member" in update:
             cm = update["chat_member"]
