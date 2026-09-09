@@ -219,7 +219,7 @@ async function runCronCheck(env) {
             await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-              body: `url=${encodeURIComponent(RENDER_URL_2 + '/webhook')}&drop_pending_updates=false` + (WEBHOOK_SECRET ? `&secret_token=${encodeURIComponent(WEBHOOK_SECRET)}` : '')
+              body: `url=${encodeURIComponent(RENDER_URL_2 + '/webhook')}&drop_pending_updates=false&allowed_updates=${encodeURIComponent(JSON.stringify(["message","channel_post","message_reaction","callback_query","poll_answer","poll","chat_member","chat_join_request"]))}` + (WEBHOOK_SECRET ? `&secret_token=${encodeURIComponent(WEBHOOK_SECRET)}` : '')
             });
             await new Promise(r => setTimeout(r, 2000));
             const confirmRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo`);
@@ -249,7 +249,7 @@ async function runCronCheck(env) {
           await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: `url=${encodeURIComponent(RENDER_URL + '/webhook')}&drop_pending_updates=false` + (WEBHOOK_SECRET ? `&secret_token=${encodeURIComponent(WEBHOOK_SECRET)}` : '')
+            body: `url=${encodeURIComponent(RENDER_URL + '/webhook')}&drop_pending_updates=false&allowed_updates=${encodeURIComponent(JSON.stringify(["message","channel_post","message_reaction","callback_query","poll_answer","poll","chat_member","chat_join_request"]))}` + (WEBHOOK_SECRET ? `&secret_token=${encodeURIComponent(WEBHOOK_SECRET)}` : '')
           });
           console.log('[cron][CF-failover] Primary recovered, switched back');
           if (OWNER_ID) {
