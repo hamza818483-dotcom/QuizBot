@@ -596,6 +596,7 @@ PDF_AUTO_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB) — /pdf 
 import contextvars
 import itertools
 CANCEL_FLAGS = {}  # chat_id -> bool, checked by long loops between steps
+CANCEL_REASON = {}  # chat_id -> str, human-readable source of the last cancel (who/what triggered it) -- surfaced in 0-MCQ alerts so a cancelled-job report is immediately traceable instead of just saying "cancelled"
 ACTIVE_JOB_LABEL = {}  # chat_id -> human-readable label of the job currently running
 CURRENT_JOB_ID = {}  # chat_id -> int, id of the job currently running in that chat
 
@@ -631,6 +632,7 @@ def is_cancelled(chat_id=None):
 
 def clear_cancel(chat_id):
     CANCEL_FLAGS[chat_id] = False
+    CANCEL_REASON.pop(chat_id, None)
 
 def new_job_id(chat_id) -> int:
     """প্রতিটা নতুন job (/pdf, /qbm, /tf, /txt ...) শুরু হওয়ার সময় একটা
@@ -662,6 +664,8 @@ async def handle_cancel_command(msg: dict):
     uid = msg.get("from", {}).get("id")
     if not await db_is_owner_or_admin(uid):
         return
+    logger.warning(f"[Cancel] /cancel command triggered by uid={uid} in chat={chat_id}")
+    CANCEL_REASON[chat_id] = f"/cancel command by uid={uid}"
     CANCEL_FLAGS[chat_id] = True
     running_label = ACTIVE_JOB_LABEL.get(chat_id)
     if running_label:
@@ -16514,9 +16518,10 @@ async def _process_pdf_pages_inner(
                 page_status[idx]["failed"] = True
                 page_status[idx]["error"] = gen_error or "Unknown"
                 logger.warning(f"[PDF] Page {page_num} produced 0 MCQ after retries — reason: {gen_error}")
+                _cancel_src = f" ({CANCEL_REASON.get(chat_id)})" if gen_error == "cancelled" and CANCEL_REASON.get(chat_id) else ""
                 await notify_owner(
                     f"⚠️ [PDF] Page {fmt_page(page_num)} ({file_name}) থেকে 0 MCQ।\n"
-                    f"কারণ: {gen_error or 'অজানা — সব provider খালি ফলাফল দিয়েছে'}"
+                    f"কারণ: {(gen_error or 'অজানা — সব provider খালি ফলাফল দিয়েছে')}{_cancel_src}"
                 )
                 continue
 
@@ -17284,9 +17289,10 @@ async def _process_pdfs_pages_inner(
                 page_status[idx]["failed"] = True
                 page_status[idx]["error"] = gen_error or "Unknown"
                 logger.warning(f"[PDF] Page {page_num} produced 0 MCQ after retries — reason: {gen_error}")
+                _cancel_src = f" ({CANCEL_REASON.get(chat_id)})" if gen_error == "cancelled" and CANCEL_REASON.get(chat_id) else ""
                 await notify_owner(
                     f"⚠️ [PDF] Page {fmt_page(page_num)} ({file_name}) থেকে 0 MCQ।\n"
-                    f"কারণ: {gen_error or 'অজানা — সব provider খালি ফলাফল দিয়েছে'}"
+                    f"কারণ: {(gen_error or 'অজানা — সব provider খালি ফলাফল দিয়েছে')}{_cancel_src}"
                 )
                 continue
 
@@ -33107,6 +33113,8 @@ async def handle_callback(query: dict):
                 # নতুন job শুরু হয়ে গেছে) — তাই এটা কিছু cancel করবে না।
                 await send_msg(chat_id, "ℹ️ এই কাজটি ইতিমধ্যে শেষ হয়ে গেছে, তাই এই বাটন আর কার্যকর নয়।")
                 return
+            logger.warning(f"[Cancel] Cancel button pressed by uid={uid} in chat={target_chat}, job_id={button_job_id or running_job_id}")
+            CANCEL_REASON[target_chat] = f"Cancel button by uid={uid} (job_id={button_job_id or running_job_id})"
             CANCEL_FLAGS[target_chat] = True
             _active_task = ACTIVE_GEN_TASK.get(target_chat)
             if _active_task and not _active_task.done():
