@@ -31263,11 +31263,36 @@ async def handle_merge_command(msg: dict):
                 import io as _io
                 writer = PdfWriter()
                 total_pages = 0
+                # file_ids ধারাবাহিকভাবে user যে order এ পাঠিয়েছে সেই order-এই
+                # আসে (append হয় প্রতিটা /merge reply-তে) -- এই loop সেই order
+                # অক্ষুণ্ণ রেখে page যোগ করে, তাই merge করা PDF-এ serial ঠিক থাকে।
                 for fid in pdf_file_ids:
                     pdf_bytes = await download_tg_file(fid)
                     reader = PdfReader(_io.BytesIO(pdf_bytes))
                     for page in reader.pages:
-                        writer.add_page(page)
+                        # FIX (page size not preserved on merge): add_page()
+                        # alone can let a page's effective size get flattened
+                        # to whatever the writer's default/last page size is
+                        # in some pypdf/viewer combinations when source PDFs
+                        # have different page sizes. Re-assert this page's
+                        # OWN original mediabox (and crop/trim/bleed/art boxes
+                        # if present) right after adding it, so every page in
+                        # the merged output keeps its exact original size --
+                        # whatever size each source PDF/image page already
+                        # was -- instead of being resized to match others.
+                        added_page = writer.add_page(page)
+                        try:
+                            added_page.mediabox = page.mediabox
+                            if page.cropbox is not None:
+                                added_page.cropbox = page.cropbox
+                            if page.trimbox is not None:
+                                added_page.trimbox = page.trimbox
+                            if page.bleedbox is not None:
+                                added_page.bleedbox = page.bleedbox
+                            if page.artbox is not None:
+                                added_page.artbox = page.artbox
+                        except Exception:
+                            pass
                     total_pages += len(reader.pages)
                 out_buf = _io.BytesIO()
                 writer.write(out_buf)
