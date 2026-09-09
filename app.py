@@ -16647,8 +16647,10 @@ async def _process_pdf_pages_inner(
                 end_caption = f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}"
                 end_kb = {"inline_keyboard": [
                     [{"text": "🔄 Poll Again", "url": poll_url},
-                     {"text": "📝 Quiz Solve", "url": quiz_url},
-                     {"text": "🌐 Website Exam", "url": exam_url}]
+                     {"text": "🔄 Quiz Again", "url": quiz_url}],
+                    [{"text": "🆕 New Poll", "url": new_poll_url},
+                     {"text": "🆕 New Quiz", "url": new_quiz_url}],
+                    [{"text": "🌐 Website Exam", "url": exam_url}]
                 ]}
 
                 # /rd-ONLY (this branch is the same one _rd_pdf_bytes_cache
@@ -17390,8 +17392,10 @@ async def _process_pdfs_pages_inner(
                     "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "🔄 Poll Again", "url": poll_url},
-                         {"text": "📝 Quiz Solve", "url": quiz_url},
-                         {"text": "🌐 Website Exam", "url": exam_url}]
+                         {"text": "🔄 Quiz Again", "url": quiz_url}],
+                        [{"text": "🆕 New Poll", "url": new_poll_url},
+                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
+                        [{"text": "🌐 Website Exam", "url": exam_url}]
                     ]},
                     "reply_to_message_id": image_msg_id
                 }
