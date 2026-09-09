@@ -816,16 +816,55 @@ async def handle_quiz_poll_answer(pa: dict):
     session = QUIZ_SESSIONS[uid]
     poll_id = pa.get("poll_id", "")
     if session.get("pid") != poll_id:
-        # A poll_answer for any pid other than the CURRENT question's pid is
-        # always a late/stale answer for an already-passed question (user
-        # tapped after the timer moved on, or Telegram delivered it late) —
-        # never a real answer to act on. Silently ignore it: the current
-        # question already has its own live timer/answer path handling
-        # advancement, so nothing here should force-advance or notify the
-        # owner. Force-advancing on a stale answer previously caused
-        # runaway loops that skipped many questions in seconds whenever a
-        # user's client kept delivering delayed answers.
-        logger.info(f"[Quiz] stale/late poll_answer ignored uid={uid} got={poll_id} expected={session.get('pid')} cur={session.get('cur')}")
+        # Usually a late/stale answer for an already-passed question. But if
+        # this pid was actually the CURRENT question's pid a moment ago (i.e.
+        # session["pid"] genuinely lagged/never got set due to a race), the
+        # user's real answer would otherwise be dropped with no recovery —
+        # unlike the legacy qs_get quiz path, which already force-advances
+        # on stall. Mirror that: snapshot state, wait briefly, and only if
+        # NOTHING else has advanced the session in the meantime, treat this
+        # as the real answer and force-advance so the quiz never gets stuck.
+        logger.info(f"[Quiz] pid mismatch uid={uid} got={poll_id} expected={session.get('pid')} cur={session.get('cur')}")
+        _snap_cur = session.get("cur")
+        _snap_pid = session.get("pid")
+        _opt_ids = pa.get("option_ids", [])
+
+        async def _stall_recovery():
+            await asyncio.sleep(0.5)
+            s2 = QUIZ_SESSIONS.get(uid)
+            if not s2 or s2.get("cur") != _snap_cur or s2.get("pid") != _snap_pid:
+                return  # already advanced normally — no stall after all
+            logger.warning(f"[Quiz] Force-recovering stalled D1 quiz uid={uid} cur={_snap_cur}")
+            q_result = None
+            for qr in s2["q_results"]:
+                if qr["index"] == s2["cur"]:
+                    q_result = qr
+                    break
+            if q_result:
+                if not _opt_ids:
+                    q_result["type"] = "skip"
+                elif _opt_ids[0] == s2["cor"]:
+                    q_result["type"] = "right"
+                else:
+                    q_result["type"] = "wrong"
+            if not _opt_ids:
+                s2["skip"] += 1
+            elif _opt_ids[0] == s2["cor"]:
+                s2["right"] += 1
+            else:
+                s2["wrong"] += 1
+            s2["cur"] += 1
+            s2["_sending_for"] = None
+            s2["_advancing"] = None
+            if uid in QUIZ_TIMERS:
+                QUIZ_TIMERS[uid].cancel()
+            QUIZ_SESSIONS[uid] = s2
+            if s2["cur"] >= s2["tot"]:
+                await finish_d1_quiz(s2)
+            else:
+                await send_quiz_question(s2["chat_id"], s2, force=True)
+
+        asyncio.create_task(_stall_recovery())
         return
 
     # Claim this advance so a concurrent _stall_recovery task for the same
