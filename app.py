@@ -16540,7 +16540,7 @@ async def _process_pdf_pages_inner(
                     caption = ""
                     if tag:
                         caption = f"{tag}\n\n"
-                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n🌟Page No: {fmt_page(page_num)}"
+                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n🌟Page No: {fmt_page(page_num)}"
 
                     # HARD GUARANTEE: image MUST succeed before any poll for
                     # this page goes out. No fail, no skip, no giving up —
@@ -16618,7 +16618,7 @@ async def _process_pdf_pages_inner(
 
                 if image_msg_id and first_poll_link:
                     try:
-                        _img_caption_final = caption + f"\n🔗First Poll Link:\n{first_poll_link}"
+                        _img_caption_final = caption + f"\n▬▬▬▬▬▬▬▬▬▬\n🔗First Poll Link:\n{first_poll_link}"
                         await tg_post("editMessageCaption", {
                             "chat_id": channel_id, "message_id": image_msg_id,
                             "caption": _img_caption_final
@@ -17311,7 +17311,7 @@ async def _process_pdfs_pages_inner(
                     caption = ""
                     if tag:
                         caption = f"{tag}\n\n"
-                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {page_topic_name}\n🌟Page No: {fmt_page(page_num)}"
+                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name}\n🌟Page No: {fmt_page(page_num)}"
 
                     photo_r = await send_photo(channel_id, img_bytes, caption, message_thread_id=thread_id)
                     if photo_r.get("ok"):
@@ -17372,7 +17372,7 @@ async def _process_pdfs_pages_inner(
 
                 if image_msg_id and first_poll_link:
                     try:
-                        _img_caption_final = caption + f"\n🔗First Poll Link:\n{first_poll_link}"
+                        _img_caption_final = caption + f"\n▬▬▬▬▬▬▬▬▬▬\n🔗First Poll Link:\n{first_poll_link}"
                         await tg_post("editMessageCaption", {
                             "chat_id": channel_id, "message_id": image_msg_id,
                             "caption": _img_caption_final
