@@ -30619,6 +30619,16 @@ async def _advance_quiz(uid: int):
     else:
         await _send_quiz_question(uid)
 
+# ============================================================
+# ⚠️ STABLE — DO NOT MODIFY WITHOUT EXPLICIT PERMISSION ⚠️
+# handle_poll_answer() auto-advance flow (Sep 2026) is CONFIRMED
+# WORKING as of this version. The routing order below
+# (LIVE_POLL_MAP -> LIVE_QUIZ_STATE legacy -> D1 QUIZ_SESSIONS ->
+# legacy qs_get/_seq_stall_recovery) is load-bearing. Do NOT
+# reorder these checks, remove the [PollAnswer][TRACE] logs, or
+# "simplify" this function. If auto-advance breaks again, add
+# logging and reproduce first — do not guess-edit this block.
+# ============================================================
 async def handle_poll_answer(pa: dict):
     try:
         logger.info(f"[PollAnswer][TRACE] ENTER poll_id={pa.get('poll_id')} uid={pa.get('user',{}).get('id')} option_ids={pa.get('option_ids')}")
