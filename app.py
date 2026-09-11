@@ -24958,7 +24958,6 @@ async def _handle_topic_impl(msg: dict):
             w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                         "answer", "explanation", "type", "section"])
             _num_mg, _bn_name_mg = _split_topic_number_and_bangla_name(name)
-            w.writerow([_bn_name_mg, "", "", "", "", "", "", "", "", ""])
             _merged_w.writerow([_bn_name_mg, "", "", "", "", "", "", "", "", ""])
             for m in mcqs:
                 opts = m.get("options", ["", "", "", ""])
