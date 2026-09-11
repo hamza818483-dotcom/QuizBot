@@ -18689,7 +18689,7 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
     nearest topic heading (topic_hint), used by /topic to detect topic
     boundaries and split into separate per-topic CSVs.
 
-    Call 1: Gemini->Groq->OpenRouter full extraction (as before). SKIPPED
+    Call 1: Gemini-only extraction (no fallback). SKIPPED
     on a cache hit (cache_key given and found in _topic_mcq_result_cache)
     -- same re-run-same-PDF speedup /qbm has, kept in its OWN cache
     namespace since topic_hint/qsn_no fields differ from /qbm's shape.
@@ -18706,23 +18706,11 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
             logger.info(f"[TOPIC MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
             return _qbm_dedup_list(cached)
         gem = await _qbm_gemini_extract(img, TOPIC_EXTRACT_PROMPT)
-        if gem:
-            result = _qbm_dedup_list(gem)
-            if result and cache_key:
-                _topic_mcq_result_cache[cache_key] = result
-                _cap_qbm_mcq_cache(_topic_mcq_result_cache)
-            return result
-        txt = await _qbm_groq_call(img, TOPIC_EXTRACT_PROMPT_GROQ_COMPACT)
-        result = _qbm_parse_json(txt) if txt else []
-        if result:
-            result = _qbm_dedup_list(result)
-            if result and cache_key:
-                _topic_mcq_result_cache[cache_key] = result
-                _cap_qbm_mcq_cache(_topic_mcq_result_cache)
-            return result
-        txt3 = await _qbm_openrouter_call(img, TOPIC_EXTRACT_PROMPT)
-        result3 = _qbm_parse_json(txt3) if txt3 else []
-        return _qbm_dedup_list(result3)
+        result = _qbm_dedup_list(gem) if gem else []
+        if result and cache_key:
+            _topic_mcq_result_cache[cache_key] = result
+            _cap_qbm_mcq_cache(_topic_mcq_result_cache)
+        return result
 
     mcqs = await _run_extract_call()
     if not mcqs:
