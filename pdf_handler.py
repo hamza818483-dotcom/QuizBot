@@ -1432,9 +1432,7 @@ async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: s
             else:
                 logger.warning(f"[{log_tag}] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
                 _consecutive_infra_fails += 1
-                if _consecutive_infra_fails >= 3:
-                    logger.warning(f"[{log_tag}] {_consecutive_infra_fails} consecutive infra failures — backend looks down, stopping early instead of exhausting all {max_retries} keys")
-                    break
+                key_rotator.mark_rate_limited(key, daily_exhausted=False, retry_after_seconds=30)
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
@@ -1613,9 +1611,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
             else:
                 logger.warning(f"[PDFS-C2] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
                 _consecutive_infra_fails += 1
-                if _consecutive_infra_fails >= 3:
-                    logger.warning(f"[PDFS-C2] Page {page}: {_consecutive_infra_fails} consecutive infra failures — backend looks down, stopping early instead of exhausting all {max_retries} keys")
-                    break
+                key_rotator.mark_rate_limited(key, daily_exhausted=False, retry_after_seconds=30)
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
@@ -2426,9 +2422,7 @@ async def generate_mcq_from_image(
             # instead keep cycling through every remaining live key.
             logger.warning(f"[Gemini] Attempt {attempt+1} failed (both models): {err_label}")
             _consecutive_infra_fails += 1
-            if _consecutive_infra_fails >= 3:
-                logger.warning(f"[Gemini] Page {page}: {_consecutive_infra_fails} consecutive infra failures (timeout/503/504) — backend looks down, stopping early instead of exhausting all {max_retries} keys")
-                break
+            key_rotator.mark_rate_limited(key, daily_exhausted=False, retry_after_seconds=30)
         if attempt < max_retries - 1:
             # 2026-08-28 (user request): exponential backoff on transient
             # infra failures (timeout/503/504-style) instead of a flat 1s
