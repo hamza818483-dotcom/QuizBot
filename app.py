@@ -24924,26 +24924,6 @@ async def _handle_topic_impl(msg: dict):
 
         topic_groups = _topic_group_mcqs(extracted_pages)
 
-        _missing_exp = [m for _, mcqs in topic_groups for m in mcqs if len((m.get("explanation") or "").strip()) < 80]
-        if _missing_exp:
-            if status_msg_id:
-                await edit_msg(chat_id, status_msg_id,
-                    f"✅ Extraction Complete! Total MCQ: {total_mcq_found}\n⏳ {len(_missing_exp)}টি ব্যাখ্যা তৈরি হচ্ছে (AI)...")
-            _exp_done = {"n": 0}
-            _last_edit = {"t": 0.0}
-
-            def _exp_progress(n):
-                _exp_done["n"] = n
-                now = time.monotonic()
-                if status_msg_id and (now - _last_edit["t"] > 4 or n >= len(_missing_exp)):
-                    _last_edit["t"] = now
-                    asyncio.create_task(edit_msg(chat_id, status_msg_id,
-                        f"⏳ ব্যাখ্যা তৈরি হচ্ছে: {n}/{len(_missing_exp)}"))
-            try:
-                await _ai_generate_all_explanations(_missing_exp, progress_cb=_exp_progress, chat_id=chat_id)
-            except Exception as e:
-                logger.warning(f"[TOPIC] explanation fill failed: {e}")
-
         if status_msg_id:
             breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
             next_step = "channel-এ poll পাঠানো হচ্ছে..." if topic_channel_id else "CSV পাঠানো হচ্ছে..."
