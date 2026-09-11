@@ -18329,7 +18329,7 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": the text inside the widest, full-page-width BLACK/DARK BACKGROUND banner bar that this MCQ falls under (e.g. "বাংলাদেশ পরিচিতি", "বর্তমান ও পুরাতন নাম, ভৌগোলিক উপনাম", "বাংলাদেশের অবস্থান, আয়তন ও সীমানা") — this is the actual topic name and is CRITICAL, used to detect topic boundaries. Rules:\n'
-    '  a) Do NOT use smaller sub-headers like university/organization names (জাহাঙ্গীরনগর বিশ্ববিদ্যালয়, রাজশাহী বিশ্ববিদ্যালয়, জগন্নাথ বিশ্ববিদ্যালয়, চাকুরি, BUP) or unit labels (বি ইউনিট, এ ইউনিট, এফ ইউনিট, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself.\n'
+    '  a) Do NOT use smaller sub-headers like university/organization names (জাহাঙ্গীরনগর বিশ্ববিদ্যালয়, রাজশাহী বিশ্ববিদ্যালয়, জগন্নাথ বিশ্ববিদ্যালয়, চাকুরি, BUP) or unit labels (বি ইউনিট, এ ইউনিট, এফ ইউনিট, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself. ABSOLUTE RULE: ANY text containing the word "বিশ্ববিদ্যালয়" (university), regardless of full-page-width black-bg styling or any other visual marker, is NEVER a topic_hint under any circumstance — it is always a university/institution name tag and must be ignored as a topic candidate; if such a black-bg bar contains "বিশ্ববিদ্যালয়", treat it as if it were NOT a banner at all and keep the previously active topic_hint.\n'
     '  b) If a new black-bg banner appears anywhere on THIS page (even partway down, even if a different banner was active at the top of the page), every MCQ from that point onward gets the NEW banner text; MCQs above it on the same page keep the banner that was already active for them.\n'
     '  b2) TWO-COLUMN pages specifically: the left and right columns can each have their OWN active banner, independent of each other — e.g. left column may still be finishing an earlier topic (no new banner in the left column at all) while the right column already starts a completely new banner from its very first MCQ. Determine each MCQ\'s topic_hint by which banner is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current banner. Do not assume a banner that appears in one column also applies to the other column\'s MCQs above the same vertical height.\n'
     '  b3) STRICT RULE — within a single page, a topic must be treated as fully finished in BOTH columns before any MCQ can belong to the next topic. Concretely: if the left column still has MCQs of an OLD topic that haven\'t been read yet (because you are still scanning the right column, or the right column\'s items appear higher up visually), those left-column OLD-topic MCQs do NOT get replaced by a new banner just because the new banner happens to appear next to or between them and the right column. Read each column fully top-to-bottom on its own; a column keeps its topic exactly until ITS OWN text hits a new banner — never inherit a topic change from the other column\'s position on the page.\n'
@@ -24960,20 +24960,28 @@ async def _handle_topic_impl(msg: dict):
         import io as _io_topic, csv as _csv_topic
         _running_count = 0
         _cmd_msg_id = msg.get("message_id")
+        _merged_buf = _io_topic.StringIO()
+        _merged_w = _csv_topic.writer(_merged_buf)
+        _merged_w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                             "answer", "explanation", "type", "section"])
         for name, mcqs in topic_groups:
             buf = _io_topic.StringIO()
             w = _csv_topic.writer(buf)
             w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                         "answer", "explanation", "type", "section"])
+            _num_mg, _bn_name_mg = _split_topic_number_and_bangla_name(name)
+            _merged_w.writerow([_bn_name_mg, "", "", "", "", "", "", "", "", ""])
             for m in mcqs:
                 opts = m.get("options", ["", "", "", ""])
-                w.writerow([
+                row = [
                     m.get("question", ""), opts[0] if len(opts) > 0 else "",
                     opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
                     opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
                     _ans_map.get(m.get("answer", "A"), "1"),
                     _strip_img_tag(m.get("explanation", "")), "1", "1"
-                ])
+                ]
+                w.writerow(row)
+                _merged_w.writerow(row)
             _num_fn, _bn_name_fn = _split_topic_number_and_bangla_name(name)
             safe_name = re.sub(r'[\\/:*?"<>|]', '_', _bn_name_fn).strip() or "Topic"
             range_start = _running_count + 1
@@ -24992,6 +25000,16 @@ async def _handle_topic_impl(msg: dict):
                          f"📄 PDF Page: {page_range_text}\n"
                          f"🔢 MCQ Range: {range_start}–{range_end}\n"
                          f"💎 Total: {len(mcqs)}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if len(topic_groups) > 1:
+            _merged_file_base = re.sub(r'[\\/:*?"<>|]', '_', file_name.rsplit(".", 1)[0]).strip() or "Topic"
+            await send_document(chat_id, _merged_buf.getvalue().encode("utf-8"),
+                f"{_merged_file_base}_Merged.csv",
+                caption=(f"📚 <b>All Topics Merged</b>\n"
+                         f"📂 Topics: {len(topic_groups)}\n"
+                         f"💎 Total MCQ: {total_mcq_found}"),
                 mime_type="text/csv",
                 reply_to_message_id=_cmd_msg_id)
 
