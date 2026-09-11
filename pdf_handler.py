@@ -2423,6 +2423,17 @@ async def generate_mcq_from_image(
             logger.warning(f"[Gemini] Attempt {attempt+1} failed (both models): {err_label}")
             _consecutive_infra_fails += 1
             key_rotator.mark_rate_limited(key, daily_exhausted=False, retry_after_seconds=30)
+            # 2026-09-12: comment above promised backend-outage detection
+            # but never implemented it -- 3 straight timeout/503/504 fails
+            # across DIFFERENT keys means the Gemini backend itself is
+            # overloaded (every key fails identically), not a per-key
+            # problem. Burning all ~111 keys in that state means 40-60s
+            # timeout x 111 attempts before ever trying Groq -- exactly
+            # the multi-minute stall seen in production. Bail out early so
+            # the caller falls to Groq/other providers immediately.
+            if _consecutive_infra_fails >= 3:
+                logger.error(f"[Gemini] {_consecutive_infra_fails} consecutive timeout/503/504 failures across different keys — treating as backend-wide outage, stopping early (tried {attempt+1}/{max_retries} keys) to fall back to Groq")
+                break
         if attempt < max_retries - 1:
             # 2026-08-28 (user request): exponential backoff on transient
             # infra failures (timeout/503/504-style) instead of a flat 1s
