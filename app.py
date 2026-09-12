@@ -10380,11 +10380,11 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             job_id = f"csvtopic_{cache_id}"
             total_batches = len(_topics_order)
             batch_links = []
-            first_pre_msg_id = None
+            master_msg_id = None
             all_batch_mcqs = []
 
             _existing = await d1_select(
-                "SELECT sent_index, status FROM csv_poll_jobs WHERE job_id=?1", [job_id]
+                "SELECT sent_index, status, master_msg_id FROM csv_poll_jobs WHERE job_id=?1", [job_id]
             )
             resume_from_batch = 0
             if _existing and _existing[0].get("status") == "running":
@@ -10394,6 +10394,9 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     if loading_id:
                         await edit_msg(chat_id, loading_id,
                             f"📄 {csv_fname}\n🔄 আগের অসম্পূর্ণ কাজ resume হচ্ছে (topic {resume_from_batch+1}/{total_batches} থেকে)...")
+                    _existing_master_id = _existing[0].get("master_msg_id")
+                    if _existing_master_id:
+                        master_msg_id = _existing_master_id
             else:
                 await db_save_csv_job(
                     job_id, cache_id=cache_id, channel_id=channel_id, chat_id=chat_id, uid=uid,
@@ -10401,6 +10404,31 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     thread_id=thread_id or 0, loading_id=loading_id or 0,
                     sent_index=0, total=total_batches, first_poll_link="", status="running"
                 )
+
+            # 2026-09-13 (user request): master summary (all topic names +
+            # MCQ counts) now goes out FIRST, before any topic's polls --
+            # every per-topic pre-message below replies to THIS message,
+            # and each topic's link is filled into the master summary (via
+            # edit) as that topic finishes, instead of the old order where
+            # the summary was a recap sent at the very end.
+            if master_msg_id is None and total_batches > 1:
+                _initial_summary = csv_get_master_summary(topic, total, total_batches,
+                    [(i, "⏳ চলমান...", len(_topic_groups[t]), t) for i, t in enumerate(_topics_order, 1)])
+                _master_send_data = {"chat_id": channel_id, "text": _initial_summary, "disable_web_page_preview": True}
+                if thread_id:
+                    _master_send_data["message_thread_id"] = thread_id
+                _master_r = await tg_post("sendMessage", _master_send_data)
+                if not _master_r.get("ok") and thread_id:
+                    _master_send_data.pop("message_thread_id", None)
+                    _master_r = await tg_post("sendMessage", _master_send_data)
+                    thread_id = None
+                master_msg_id = _master_r.get("result", {}).get("message_id") if _master_r.get("ok") else None
+                if master_msg_id:
+                    try:
+                        await try_pin_message(channel_id, master_msg_id)
+                    except Exception as e:
+                        logger.warning(f"[CSV-Topicwise] master summary pin failed: {e}")
+                    await db_update_csv_job_progress(job_id, 0, master_msg_id=master_msg_id)
 
             for b_idx, batch_topic in enumerate(_topics_order, 1):
                 batch = _topic_groups[batch_topic]
@@ -10419,6 +10447,8 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
 
                 pre_text = csv_get_pre_message(topic, batch_topic, len(batch))
                 pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
+                if master_msg_id:
+                    pre_send_data["reply_to_message_id"] = master_msg_id
                 if thread_id:
                     pre_send_data["message_thread_id"] = thread_id
                 pre_r = await tg_post("sendMessage", pre_send_data)
@@ -10427,8 +10457,6 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     pre_r = await tg_post("sendMessage", pre_send_data)
                     thread_id = None
                 pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
-                if first_pre_msg_id is None:
-                    first_pre_msg_id = pre_msg_id
                 all_batch_mcqs.extend(batch)
 
                 sent, first_link = await _send_csv_polls_to_channel(
@@ -10529,6 +10557,16 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 batch_links.append((b_idx, first_link, len(batch), batch_topic))
                 await db_update_csv_job_progress(job_id, b_idx)
 
+                # 2026-09-13: live-update the master summary (edit) with
+                # this topic's real link, replacing the "⏳ চলমান..." placeholder,
+                # instead of only sending the full summary once at the very end.
+                if master_msg_id:
+                    try:
+                        await edit_msg(channel_id, master_msg_id,
+                            csv_get_master_summary(topic, total, total_batches, batch_links))
+                    except Exception as e:
+                        logger.warning(f"[CSV-Topicwise] master summary live-update failed: {e}")
+
                 if loading_id:
                     await edit_msg(chat_id, loading_id,
                         f"⏳ Topic {b_idx}/{total_batches} ({batch_topic}) done — {sent} polls sent")
@@ -10538,7 +10576,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             if total_batches > 1:
                 # /sheet কমান্ডের topicwise PDF (style1, _pdfs_topic দিয়ে
                 # গ্রুপ করা) এর সাথে হুবহু একই বিল্ডার ব্যবহার করে একটাই
-                # সম্মিলিত PDF — master summary টেক্সট মেসেজের ঠিক আগে।
+                # সম্মিলিত PDF।
                 try:
                     _combined_topics_order, _combined_topic_map = _group_pdfs_mcqs(all_batch_mcqs, topic)
                     _combined_html = _build_topicwise_pdf_html(_combined_topics_order, _combined_topic_map, topic)
@@ -10557,19 +10595,16 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 except Exception as e:
                     logger.warning(f"[CSV-Topicwise] combined PDF failed, skipping: {e}")
 
-                summary = csv_get_master_summary(topic, total, total_batches, batch_links)
-                sum_send_data = {
-                    "chat_id": channel_id,
-                    "text": summary,
-                    "disable_web_page_preview": True
-                }
-                if first_pre_msg_id:
-                    sum_send_data["reply_to_message_id"] = first_pre_msg_id
-                if thread_id:
-                    sum_send_data["message_thread_id"] = thread_id
-                sum_r = await tg_post("sendMessage", sum_send_data)
-                if sum_r.get("ok"):
-                    await try_pin_message(channel_id, sum_r["result"]["message_id"])
+                # Master summary was already sent first and live-updated
+                # per topic above (2026-09-13) — final edit here just
+                # ensures the closing text is the fully-settled version
+                # (in case the last live-update above raced/failed).
+                if master_msg_id:
+                    try:
+                        await edit_msg(channel_id, master_msg_id,
+                            csv_get_master_summary(topic, total, total_batches, batch_links))
+                    except Exception as e:
+                        logger.warning(f"[CSV-Topicwise] final master summary update failed: {e}")
 
             if loading_id:
                 await edit_msg(chat_id, loading_id,

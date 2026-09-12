@@ -2150,6 +2150,24 @@ async def _ensure_csv_job_table():
         "mode TEXT, batch_size INTEGER, topic TEXT, csv_fname TEXT, thread_id INTEGER, "
         "loading_id INTEGER, sent_index INTEGER, total INTEGER, first_poll_link TEXT, "
         "status TEXT, updated_at INTEGER)")
+    # 2026-09-13: master_msg_id added later than the original table -- guard
+    # with a checked flag (like the Gemini banned-keys migration above) so
+    # the ALTER only ever runs once instead of hitting "duplicate column"
+    # on every call.
+    global _CSV_JOB_MASTER_COL_CHECKED
+    try:
+        _CSV_JOB_MASTER_COL_CHECKED
+    except NameError:
+        _CSV_JOB_MASTER_COL_CHECKED = False
+    if not _CSV_JOB_MASTER_COL_CHECKED:
+        try:
+            _cols = await d1_select("PRAGMA table_info(csv_poll_jobs)", [])
+            _colnames = {c.get("name") for c in (_cols or [])}
+            if "master_msg_id" not in _colnames:
+                await d1_run("ALTER TABLE csv_poll_jobs ADD COLUMN master_msg_id INTEGER", [])
+        except Exception:
+            pass
+        _CSV_JOB_MASTER_COL_CHECKED = True
 
 async def db_save_csv_job(job_id: str, **fields):
     """Job শুরু হওয়ার সময় বা progress update হওয়ার সময় কল হয়। fields-এ যা
@@ -2169,19 +2187,22 @@ async def db_save_csv_job(job_id: str, **fields):
     except Exception as e:
         logger.warning(f"[D1] save_csv_job warn (non-fatal, job continues): {e}")
 
-async def db_update_csv_job_progress(job_id: str, sent_index: int, first_poll_link: str = None):
+async def db_update_csv_job_progress(job_id: str, sent_index: int, first_poll_link: str = None, master_msg_id: int = None):
     try:
         await _ensure_csv_job_table()
+        _sets = ["sent_index=?1", "updated_at=?2"]
+        _vals = [sent_index, int(time.time())]
         if first_poll_link:
-            await d1_run(
-                "UPDATE csv_poll_jobs SET sent_index=?1, first_poll_link=?2, updated_at=?3 WHERE job_id=?4",
-                [sent_index, first_poll_link, int(time.time()), job_id]
-            )
-        else:
-            await d1_run(
-                "UPDATE csv_poll_jobs SET sent_index=?1, updated_at=?2 WHERE job_id=?3",
-                [sent_index, int(time.time()), job_id]
-            )
+            _sets.append(f"first_poll_link=?{len(_vals)+1}")
+            _vals.append(first_poll_link)
+        if master_msg_id:
+            _sets.append(f"master_msg_id=?{len(_vals)+1}")
+            _vals.append(master_msg_id)
+        _vals.append(job_id)
+        await d1_run(
+            f"UPDATE csv_poll_jobs SET {','.join(_sets)} WHERE job_id=?{len(_vals)}",
+            _vals
+        )
     except Exception as e:
         logger.warning(f"[D1] update_csv_job_progress warn (non-fatal): {e}")
 
