@@ -8593,10 +8593,14 @@ def csv_get_master_summary(topic: str, total: int,
                             total_batches: int, batch_links: list) -> str:
     """
     batch_links = [(part_num, link, count, batch_topic), ...]
+    link states: "" (pending, not started yet -- no link line shown),
+    "⏳ চলমান..." (this ONE topic currently running), or the real poll
+    link (topic finished). Topic name + MCQ count are always shown
+    (already known from the CSV) regardless of state.
     Format per topic (separated by a line separator):
         🔰Topic-01
         📍(topic name)(count)
-        {link}
+        {link line, only if link is non-empty}
     Last 3 lines (Exam Batch/Whatsapp/Website) wrapped in an HTML
     <blockquote> -- caller MUST send/edit this text with parse_mode=HTML.
     """
@@ -8610,7 +8614,10 @@ def csv_get_master_summary(topic: str, total: int,
     for entry in batch_links:
         part_n, link, count = entry[0], entry[1], entry[2]
         batch_topic = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
-        text += f"🔰Topic-{part_n:02d}\n📍({batch_topic})({count})\n{link}\n{sep}\n\n"
+        text += f"🔰Topic-{part_n:02d}\n📍({batch_topic})({count})\n"
+        if link:
+            text += f"{link}\n"
+        text += f"{sep}\n\n"
     text += (
         "<blockquote>"
         "📌 এটলাসের Exam Batch এ অসংখ্য প্রশ্ন প্রাক্টিসের সুযোগ আছে।\n"
@@ -10389,7 +10396,6 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
         if _is_topicwise:
             job_id = f"csvtopic_{cache_id}"
             total_batches = len(_topics_order)
-            batch_links = []
             master_msg_id = None
             all_batch_mcqs = []
 
@@ -10416,14 +10422,14 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 )
 
             # 2026-09-13 (user request): master summary (all topic names +
-            # MCQ counts) now goes out FIRST, before any topic's polls --
-            # every per-topic pre-message below replies to THIS message,
-            # and each topic's link is filled into the master summary (via
-            # edit) as that topic finishes, instead of the old order where
-            # the summary was a recap sent at the very end.
+            # MCQ counts, ALWAYS known from the CSV) now goes out FIRST,
+            # before any topic's polls -- every per-topic pre-message below
+            # replies to THIS message. Only the LINK per topic changes
+            # state over time: "" (pending, not started) -> "⏳ চলমান..."
+            # (this one topic actively running) -> real link (done).
+            batch_links = [[i, "", len(_topic_groups[t]), t] for i, t in enumerate(_topics_order, 1)]
             if master_msg_id is None and total_batches > 1:
-                _initial_summary = csv_get_master_summary(topic, total, total_batches,
-                    [(i, "⏳ চলমান...", len(_topic_groups[t]), t) for i, t in enumerate(_topics_order, 1)])
+                _initial_summary = csv_get_master_summary(topic, total, total_batches, batch_links)
                 _master_send_data = {"chat_id": channel_id, "text": _initial_summary, "parse_mode": "HTML", "disable_web_page_preview": True}
                 if thread_id:
                     _master_send_data["message_thread_id"] = thread_id
@@ -10455,6 +10461,17 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 batch_cache_id = gen_session_id()
                 await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
 
+                # 2026-09-13: mark ONLY this topic as "⏳ চলমান..." in the
+                # master summary right before starting it -- every other
+                # topic keeps its own real state (pending="" or done=link).
+                if master_msg_id:
+                    batch_links[b_idx - 1][1] = "⏳ চলমান..."
+                    try:
+                        await edit_msg(channel_id, master_msg_id,
+                            csv_get_master_summary(topic, total, total_batches, batch_links))
+                    except Exception as e:
+                        logger.warning(f"[CSV-Topicwise] master summary running-state update failed: {e}")
+
                 pre_text = csv_get_pre_message(topic, batch_topic, len(batch))
                 pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
                 if master_msg_id:
@@ -10479,19 +10496,8 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                         await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(topic, batch_topic, len(batch), first_link))
                     except Exception as e:
                         logger.warning(f"[CSV-Topicwise] pre-msg link edit failed: {e}")
-                # Pre-message (with the first poll link now added in) pinned —
-                # every topic's pre-msg (image-caption version too, if this
-                # batch ever sends one) gets pinned so it stays visible at
-                # the top of the forum topic even as later topics' polls push
-                # it down.
-                if pre_msg_id:
-                    try:
-                        await tg_post("pinChatMessage", {
-                            "chat_id": channel_id, "message_id": pre_msg_id,
-                            "disable_notification": True
-                        })
-                    except Exception as e:
-                        logger.warning(f"[CSV-Topicwise] pre-msg pin failed: {e}")
+                # 2026-09-13 (user request): only the master summary stays
+                # pinned -- per-topic pre-messages are no longer pinned.
 
                 batch_pdf_bytes = await _generate_style1_pdf_guaranteed(batch, batch_topic, chat_id)
                 # 2026-09-13 (user request): end message split into TWO
@@ -10583,12 +10589,12 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     await send_msg(chat_id,
                         f"⚠️ '{batch_topic}' এর end message + button পাঠানো ব্যর্থ হয়েছে: {end_r.get('description', 'unknown error')}")
 
-                batch_links.append((b_idx, first_link, len(batch), batch_topic))
+                batch_links[b_idx - 1][1] = first_link
                 await db_update_csv_job_progress(job_id, b_idx)
 
                 # 2026-09-13: live-update the master summary (edit) with
-                # this topic's real link, replacing the "⏳ চলমান..." placeholder,
-                # instead of only sending the full summary once at the very end.
+                # this topic's real link, replacing its "⏳ চলমান..." state,
+                # instead of only sending the full summary once at the end.
                 if master_msg_id:
                     try:
                         await edit_msg(channel_id, master_msg_id,
