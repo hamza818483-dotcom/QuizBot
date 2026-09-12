@@ -8693,23 +8693,24 @@ async def _csv_pre_buttons_no_premium(cache_id: str) -> dict:
         [{"text": "🌐 Website Exam", "url": exam_url}],
     ]}
 
-def _rd_group_end_kb(cache_id: str) -> dict:
-    """/rd -c (group forum-topic, per-page-poll end message) 3-row button:
-    Row1: Poll Again / Quiz Again (callback -- replays this SAME cached MCQ
-          set, no AI call).
-    Row2: New Poll / New Quiz -- CSV-origin caches have no source image to
-          regenerate from, so these ALSO replay the same cached MCQ set
-          (distinct callback prefix csvpollnew_/csvquiznew_ so behavior can
-          diverge later if a real regenerate path is added) -- i.e. once
-          generated, every subsequent tap reuses the cached MCQs instead of
-          calling AI again.
-    Row3: Website Exam (URL button, GH Pages exam link)."""
+async def _rd_group_end_kb(cache_id: str) -> dict:
+    """/rd -c (group forum-topic/channel, per-topic CSV-poll end message)
+    2-row button (2026-09-13 update, user request):
+    Row1: Poll Again / Quiz Solve — URL deep-links (?start=poll_/pdf_) that
+          open the bot's OWN DM, not a channel callback. A channel-posted
+          callback_data button fires in the channel chat itself, which is
+          wrong for a per-user quiz/poll session — DM is required.
+    Row2: Website Exam (URL button, GH Pages exam link).
+    New Poll / New Quiz REMOVED per user request — CSV-origin per-topic
+    channel posts should not offer regenerate options, only replay
+    (Poll Again/Quiz Solve) and the website exam."""
+    bot_un = await get_bot_username()
     exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+    poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+    quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
     return {"inline_keyboard": [
-        [{"text": "🔄 Poll Again", "callback_data": f"pollagain_{cache_id}"},
-         {"text": "🔄 Quiz Again", "callback_data": f"qsame_{cache_id}"}],
-        [{"text": "🆕 New Poll", "callback_data": f"csvpollnew_{cache_id}"},
-         {"text": "🆕 New Quiz", "callback_data": f"csvquiznew_{cache_id}"}],
+        [{"text": "🔄 Poll Again", "url": poll_url},
+         {"text": "🎯 Quiz Solve", "url": quiz_url}],
         [{"text": "🌐 Website Exam", "url": exam_url}],
     ]}
 
@@ -10460,13 +10461,13 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 if batch_pdf_bytes:
                     # /rd -c (group forum-topic) per-topic end message: the
                     # PDF of this topic's polls IS the end message itself
-                    # (caption = the usual ending text), with the 3-row
-                    # Poll Again/Quiz Again, New Poll/New Quiz, Website Exam
+                    # (caption = the usual ending text), with the 2-row
+                    # Poll Again/Quiz Solve (DM deep-links), Website Exam
                     # keyboard attached directly -- instead of a separate
                     # PDF-with-basic-buttons message followed by a plain
                     # text end message.
                     safe_btitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", batch_topic)[:50] or "ATLAS_Sheet"
-                    btn_kb = _rd_group_end_kb(batch_cache_id)
+                    btn_kb = await _rd_group_end_kb(batch_cache_id)
                     pdf_doc_r = await send_document(
                         channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
                         caption=ending,
@@ -10501,7 +10502,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                         "text": ending,
                         "parse_mode": "HTML",
                         "disable_web_page_preview": True,
-                        "reply_markup": _rd_group_end_kb(batch_cache_id)
+                        "reply_markup": await _rd_group_end_kb(batch_cache_id)
                     }
                     if pre_msg_id:
                         end_send_data2["reply_to_message_id"] = pre_msg_id
