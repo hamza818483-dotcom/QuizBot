@@ -8694,16 +8694,17 @@ async def _csv_pre_buttons_no_premium(cache_id: str) -> dict:
     ]}
 
 async def _rd_group_end_kb(cache_id: str) -> dict:
-    """/rd -c (group forum-topic/channel, per-topic CSV-poll end message)
-    2-row button (2026-09-13 update, user request):
+    """/csv per-topic CSV-poll end message — 2-row button, used identically
+    for BOTH plain channel and group forum-topic (-t) posts (2026-09-13,
+    user request — the two paths now share this exact keyboard):
     Row1: Poll Again / Quiz Solve — URL deep-links (?start=poll_/pdf_) that
-          open the bot's OWN DM, not a channel callback. A channel-posted
-          callback_data button fires in the channel chat itself, which is
-          wrong for a per-user quiz/poll session — DM is required.
+          open the bot's OWN DM. Poll Again lets the student retake the
+          SAME poll set; Quiz Solve lets them solve the same MCQs in
+          quiz-mode — both in DM, never posted/replayed inside the
+          channel/group itself.
     Row2: Website Exam (URL button, GH Pages exam link).
-    New Poll / New Quiz REMOVED per user request — CSV-origin per-topic
-    channel posts should not offer regenerate options, only replay
-    (Poll Again/Quiz Solve) and the website exam."""
+    New Poll / New Quiz permanently removed from /csv everywhere (both
+    channel and group) per user request."""
     bot_un = await get_bot_username()
     exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
     poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
@@ -10484,16 +10485,20 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                         logger.warning(f"[CSV-Topicwise] pre-msg pin failed: {e}")
 
                 batch_pdf_bytes = await _generate_style1_pdf_guaranteed(batch, batch_topic, chat_id)
-                ending = csv_get_ending_message(batch_topic, sent, first_link, ask_score=ask_score)
+                # 2026-09-13 (user request): end message split into TWO
+                # separate messages. Msg-1 (PDF + caption, no score-ask)
+                # is identical for channel and group. Msg-2 (score-ask +
+                # first poll link) is sent ONLY for plain channels
+                # (ask_score == chat_type=="channel") -- groups never get
+                # a score-ask message at all.
+                ending = csv_get_ending_message(batch_topic, sent, "", ask_score=False)
                 end_msg_id_saved = None
                 if batch_pdf_bytes:
-                    # /rd -c (group forum-topic) per-topic end message: the
-                    # PDF of this topic's polls IS the end message itself
-                    # (caption = the usual ending text), with the 2-row
-                    # Poll Again/Quiz Solve (DM deep-links), Website Exam
-                    # keyboard attached directly -- instead of a separate
-                    # PDF-with-basic-buttons message followed by a plain
-                    # text end message.
+                    # Per-topic end message (msg-1): the PDF of this topic's
+                    # polls IS the end message itself (caption = ending
+                    # text, no score-ask), with the 2-row Poll Again/Quiz
+                    # Solve (DM deep-links) + Website Exam keyboard attached
+                    # directly. Identical for channel and group forum-topic.
                     safe_btitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", batch_topic)[:50] or "ATLAS_Sheet"
                     btn_kb = await _rd_group_end_kb(batch_cache_id)
                     pdf_doc_r = await send_document(
@@ -10547,6 +10552,21 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                         "channel_id": channel_id,
                         "end_msg_id": end_msg_id_saved
                     })
+                    # 2026-09-13: 2nd end message — score-ask + first poll
+                    # link — ONLY for plain channels, never for groups.
+                    if ask_score:
+                        try:
+                            score_text = csv_get_ending_message(batch_topic, sent, first_link, ask_score=True)
+                            _score_send_data = {
+                                "chat_id": channel_id, "text": score_text,
+                                "parse_mode": "HTML", "disable_web_page_preview": True,
+                                "reply_to_message_id": end_msg_id_saved
+                            }
+                            if thread_id:
+                                _score_send_data["message_thread_id"] = thread_id
+                            await tg_post("sendMessage", _score_send_data)
+                        except Exception as e:
+                            logger.warning(f"[CSV-Topicwise] score-ask 2nd end message failed: {e}")
                     if loading_id:
                         await edit_msg(chat_id, loading_id,
                             f"📄 {csv_fname}\n✅ Topic {b_idx}/{total_batches} ({batch_topic}) — end message পাঠানো হয়েছে")
