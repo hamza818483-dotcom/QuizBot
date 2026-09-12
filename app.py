@@ -8593,12 +8593,15 @@ def csv_get_master_summary(topic: str, total: int,
                             total_batches: int, batch_links: list) -> str:
     """
     batch_links = [(part_num, link, count, batch_topic), ...]
-    Format per topic:
+    Format per topic (separated by a line separator):
         🔰Topic-01
         📍(topic name)(count)
         {link}
+    Last 3 lines (Exam Batch/Whatsapp/Website) wrapped in an HTML
+    <blockquote> -- caller MUST send/edit this text with parse_mode=HTML.
     """
     main_text = topic or "Special MCQ By ATLAS"
+    sep = "▬▬▬▬▬▬▬▬▬▬"
     text = (
         f"🟥{main_text}\n"
         f"🌟মোট প্রশ্ন: {total}\n"
@@ -8607,11 +8610,13 @@ def csv_get_master_summary(topic: str, total: int,
     for entry in batch_links:
         part_n, link, count = entry[0], entry[1], entry[2]
         batch_topic = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
-        text += f"🔰Topic-{part_n:02d}\n📍({batch_topic})({count})\n{link}\n\n"
+        text += f"🔰Topic-{part_n:02d}\n📍({batch_topic})({count})\n{link}\n{sep}\n\n"
     text += (
-        "📌 *এটলাসের Exam Batch* এ অসংখ্য প্রশ্ন প্রাক্টিসের সুযোগ আছে।\n"
-        "💬 *Whatsapp:* wa.me/8801999681290\n"
-        "🌟 *Website:* Atlascourses.com"
+        "<blockquote>"
+        "📌 এটলাসের Exam Batch এ অসংখ্য প্রশ্ন প্রাক্টিসের সুযোগ আছে।\n"
+        "💬 Whatsapp: wa.me/8801999681290\n"
+        "🌟 Website: Atlascourses.com"
+        "</blockquote>"
     )
     return text
 
@@ -10419,7 +10424,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             if master_msg_id is None and total_batches > 1:
                 _initial_summary = csv_get_master_summary(topic, total, total_batches,
                     [(i, "⏳ চলমান...", len(_topic_groups[t]), t) for i, t in enumerate(_topics_order, 1)])
-                _master_send_data = {"chat_id": channel_id, "text": _initial_summary, "disable_web_page_preview": True}
+                _master_send_data = {"chat_id": channel_id, "text": _initial_summary, "parse_mode": "HTML", "disable_web_page_preview": True}
                 if thread_id:
                     _master_send_data["message_thread_id"] = thread_id
                 _master_r = await tg_post("sendMessage", _master_send_data)
