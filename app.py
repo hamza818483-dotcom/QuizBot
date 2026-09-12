@@ -33625,6 +33625,16 @@ async def handle_callback(query: dict):
             channel = "_".join(parts[1:-2])
             if uid != orig_uid:
                 return
+            # 2026-09-13 (user request): once a channel is picked, the
+            # "📢 Channel select করো:" message's buttons should disappear
+            # instead of staying clickable/stale on screen.
+            try:
+                await tg_post("editMessageReplyMarkup", {
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "reply_markup": {"inline_keyboard": []}
+                })
+            except Exception as e:
+                logger.warning(f"[CSV] channel-select button removal failed: {e}")
             enqueue_csv_to_channel(cache_id_ch, channel, chat_id, uid)
 
         elif data.startswith("rapidch_"):
