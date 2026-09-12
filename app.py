@@ -8593,18 +8593,21 @@ def csv_get_master_summary(topic: str, total: int,
                             total_batches: int, batch_links: list) -> str:
     """
     batch_links = [(part_num, link, count, batch_topic), ...]
-    batch_topic শো করা হয় Part number এর বদলে (CSV থেকে আসা topic name)।
+    Format per topic:
+        🔰Topic-01
+        📍(topic name)(count)
+        {link}
     """
     main_text = topic or "Special MCQ By ATLAS"
     text = (
         f"🟥{main_text}\n"
         f"🌟মোট প্রশ্ন: {total}\n"
-        f"📦 মোট ব্যাচ: {total_batches}\n\n"
+        f"📦 মোট টপিক সংখ্যা: {total_batches}\n\n"
     )
     for entry in batch_links:
         part_n, link, count = entry[0], entry[1], entry[2]
-        label = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
-        text += f"📍{label}: ({count}টি প্রশ্ন)\n{link}\n\n"
+        batch_topic = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
+        text += f"🔰Topic-{part_n:02d}\n📍({batch_topic})({count})\n{link}\n\n"
     text += (
         "📌 *এটলাসের Exam Batch* এ অসংখ্য প্রশ্ন প্রাক্টিসের সুযোগ আছে।\n"
         "💬 *Whatsapp:* wa.me/8801999681290\n"
