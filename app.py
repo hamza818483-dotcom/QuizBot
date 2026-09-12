@@ -8595,8 +8595,9 @@ def csv_get_master_summary(topic: str, total: int,
     batch_links = [(part_num, link, count, batch_topic), ...]
     batch_topic শো করা হয় Part number এর বদলে (CSV থেকে আসা topic name)।
     """
+    main_text = topic or "Special MCQ By ATLAS"
     text = (
-        f"🟥Poll Topic: \"{topic}\"\n"
+        f"🟥{main_text}\n"
         f"🌟মোট প্রশ্ন: {total}\n"
         f"📦 মোট ব্যাচ: {total_batches}\n\n"
     )
