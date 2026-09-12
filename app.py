@@ -33591,7 +33591,12 @@ async def handle_callback(query: dict):
                 if _csv3_row:
                     kb2["inline_keyboard"].append(_csv3_row)
                 kb2["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}])
-                await send_msg(chat_id, "📢 Channel select করো:", reply_markup=kb2)
+                # 2026-09-13 (user request): edit THIS SAME message into the
+                # channel list instead of sending a separate new message.
+                await tg_post("editMessageText", {
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "text": "📢 Channel select করো:", "reply_markup": kb2
+                })
 
         elif data.startswith("csvpdflist_"):
             # csvpdflist_{cache_id}_{uid} — /pdf বা /pdfs job শেষে CSV-এর নিচে
