@@ -889,6 +889,34 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         batch_links = []  # (part_num, first_link, count, batch_topic, quiz_link, exam_link) — for master summary
         all_mcqs = []  # accumulated across every batch — for group's merged PDF
         job_cancel_check = lambda: job.get("cancel_requested", False)
+
+        # Master summary sent FIRST (pending topics, no links yet), then
+        # live-edited after every batch — same pattern as /csv's own
+        # pre-summary + per-batch edit, adapted to this job's simpler
+        # (part_num, link, count, topic) tuple shape.
+        master_msg_id = None
+        master_chat_id_for_edit = channel_id
+
+        def _live_master_summary_text() -> str:
+            pending_links = list(batch_links)
+            for i in range(len(pending_links), total_batches):
+                topic_i = (batches[i].get("topic") or "Special MCQ By ATLAS")
+                pending_links.append((i + 1, "⏳ চলমান..." if i == len(batch_links) else "", 0, topic_i))
+            return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links)
+
+        try:
+            master_r = await tg_post("sendMessage", {
+                "chat_id": channel_id,
+                "text": _live_master_summary_text(),
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                **({"message_thread_id": thread_id} if thread_id else {}),
+            })
+            if master_r.get("ok"):
+                master_msg_id = master_r["result"]["message_id"]
+        except Exception as e:
+            logger.warning(f"[LMS-Send] initial master summary send failed: {e}")
+
         for b_idx, batch in enumerate(batches):
             if job.get("cancel_requested"):
                 job["status"] = "cancelled"
@@ -918,6 +946,11 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job["sent_total"] = sent_total
             job["batches_done"] = b_idx + 1
             job["pct"] = int((b_idx + 1) * 100 / total_batches) if total_batches else 100
+            if master_msg_id:
+                try:
+                    await edit_msg(master_chat_id_for_edit, master_msg_id, _live_master_summary_text())
+                except Exception as e:
+                    logger.warning(f"[LMS-Send] master summary live-edit failed: {e}")
             if dm_msg_id:
                 try:
                     await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("⏳ চলছে..."), reply_markup=dm_kb)
@@ -980,17 +1013,23 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     )
                     blocks.append(f"<blockquote>{quote_body}</blockquote>")
                 summary_text = f"\n{sep}\n".join(blocks)
-                summary_data = {
-                    "chat_id": channel_id, "text": summary_text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                }
-                if thread_id:
-                    summary_data["message_thread_id"] = thread_id
-                try:
-                    await tg_post("sendMessage", summary_data)
-                except Exception as e:
-                    logger.warning(f"[LMS-Send] master summary send failed: {e}")
+                if master_msg_id:
+                    try:
+                        await edit_msg(master_chat_id_for_edit, master_msg_id, summary_text)
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send] final master summary edit failed: {e}")
+                else:
+                    summary_data = {
+                        "chat_id": channel_id, "text": summary_text,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                    }
+                    if thread_id:
+                        summary_data["message_thread_id"] = thread_id
+                    try:
+                        await tg_post("sendMessage", summary_data)
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send] master summary send failed: {e}")
             job["status"] = "done"
             job["pct"] = 100
             if dm_msg_id:
