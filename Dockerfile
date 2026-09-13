@@ -36,34 +36,23 @@ RUN pip install --no-cache-dir -r requirements.txt
 # pins a version at write-time; this always overrides it with whatever is
 # newest when the image is built.
 RUN pip install --no-cache-dir -U yt-dlp yt-dlp-ejs
-# 2026-09-13 UPDATED: no longer installing Deno -- yt-dlp's
-# --remote-components ejs:github fetches the EJS solver from GitHub at
-# runtime instead, which solves the same nsig/signature challenge as the
-# Deno JS runtime did, without needing a JS runtime installed/on PATH in
-# this image. Simpler build, one less moving part to keep updated.
-# Docs: https://github.com/yt-dlp/yt-dlp/wiki/EJS
+# 2026-09-13: Deno kept installed as a fallback JS runtime. Primary path
+# is yt-dlp's --remote-components ejs:github (no local runtime needed),
+# but that requires the container to reach GitHub at request time -- on
+# an unstable network tier that can itself fail. Deno being present lets
+# the app retry with --js-runtimes deno if the remote-component path
+# fails, instead of having only one way to solve the nsig challenge.
+RUN curl -fsSL https://deno.land/install.sh | sh -s -- -y \
+    && ln -sf /root/.deno/bin/deno /usr/local/bin/deno
+ENV PATH="/root/.deno/bin:${PATH}"
 
-# 2026-09-13 (user request): free workaround for HF Space FREE TIER's
-# unstable outbound connection to YouTube's CDN (confirmed root cause of
-# the persistent 'SSL: UNEXPECTED_EOF_WHILE_READING' errors -- fails even
-# on the very first webpage/API fetch, every retry, on this hosting tier).
-# Cloudflare WARP is a genuinely free VPN (no account/payment needed --
-# 'warp-cli registration new' self-registers) whose IPs YouTube does NOT
-# blacklist the way it does most datacenter proxies. Installed here as a
-# local SOCKS5 proxy (127.0.0.1:40000); the app sets YT_PROXY to point at
-# it automatically IF the daemon starts successfully at runtime (see
-# entrypoint script) -- if WARP can't run in this container (e.g. no
-# NET_ADMIN capability), /cut simply falls back to a direct connection,
-# exactly as before this change, so it can't make things worse.
-RUN apt-get update && apt-get install -y gnupg \
-    && curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ bookworm main" > /etc/apt/sources.list.d/cloudflare-client.list \
-    && apt-get update && apt-get install -y cloudflare-warp \
-    && rm -rf /var/lib/apt/lists/* \
-    || echo "[build] WARP install failed/unavailable -- /cut will use a direct connection instead"
-COPY scripts/start_warp.sh /app/scripts/start_warp.sh
-RUN chmod +x /app/scripts/start_warp.sh || true \
-    && mkdir -p /var/lib/cloudflare-warp
+# 2026-09-13: Cloudflare WARP was tried as a free proxy workaround for HF
+# free-tier's unstable outbound connection to YouTube's CDN, and removed
+# after live testing confirmed it: HF Space containers don't grant the
+# NET_ADMIN capability WARP's tunnel needs, so it can never come up here
+# (not a "might work" -- /warpstatus confirmed it stayed down). Use an
+# external proxy service via the YT_PROXY env var instead (see app.py) --
+# that only needs a plain outbound socket connection, no kernel tunnel.
 # Rebuild Pillow from source against system libraqm so raqm (complex script
 # shaping — needed for correct Bengali conjuncts) is actually linked in;
 # prebuilt PyPI wheels ship without raqm. If this ever fails to build, the
@@ -77,6 +66,6 @@ COPY . .
 
 RUN mkdir -p /app/data /app/logs
 
-CMD ["/bin/sh", "-c", "/app/scripts/start_warp.sh 2>&1 & uvicorn app:app --host 0.0.0.0 --port 7860"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
 
 # bust=1781027802

@@ -9347,51 +9347,50 @@ _CUT_CACHE_MAX = 5
 
 _YT_LINK_RE = re.compile(r"(https?://(?:www\.)?(?:youtube\.com/watch\?v=[\w-]+|youtu\.be/[\w-]+|youtube\.com/shorts/[\w-]+)[^\s]*)", re.IGNORECASE)
 
-async def handle_warpstatus_command(msg: dict):
-    """/warpstatus — reports whether the free Cloudflare WARP SOCKS5 proxy
-    (scripts/start_warp.sh, started alongside the app for /cut <yt-link>
-    to work around HF free-tier's unstable YouTube connection) actually
-    came up in this container, without needing to read deploy logs."""
+async def handle_ytproxystatus_command(msg: dict):
+    """/ytproxystatus -- reports whether an external YT_PROXY is configured
+    for /cut <yt-link>. Cloudflare WARP was tried and removed: HF Space
+    containers don't grant the NET_ADMIN capability WARP's tunnel needs,
+    so it could never come up here -- confirmed via live testing, not a
+    theoretical limitation. An external proxy service (set YT_PROXY to an
+    http:// or socks5:// URL) is the working alternative since it only
+    needs a plain outbound socket connection, no kernel-level tunnel."""
     chat_id = msg["chat"]["id"]
-    ready_path = "/app/data/warp_ready"
-    if not os.path.exists(ready_path):
+    yt_proxy = os.environ.get("YT_PROXY")
+    if not yt_proxy:
         await send_msg(chat_id,
-            "🔴 <b>WARP proxy: বন্ধ আছে</b>\n"
-            "/cut ইউটিউব link direct connection দিয়ে চলবে (proxy ছাড়া)।\n"
-            "এই container-এ WARP চালু হতে পারেনি — সম্ভবত NET_ADMIN permission নেই।",
+            "🔴 <b>YT_PROXY: সেট করা নেই</b>\n"
+            "/cut ইউটিউব link direct connection দিয়ে চলবে (proxy ছাড়া) -- "
+            "HF free tier-এ network unstable হলে এটা fail করতে পারে।\n\n"
+            "একটা proxy service (HTTP/SOCKS5) নিয়ে YT_PROXY env var-এ সেই URL "
+            "সেট করলে /cut সেটার মধ্য দিয়ে route করবে।",
             parse_mode="HTML")
         return
-    with open(ready_path, "r") as f:
-        proxy_url = f.read().strip()
-    import tempfile, subprocess as _sp
+    import subprocess as _sp
     try:
         proc = await asyncio.create_subprocess_exec(
-            "curl", "-s", "--max-time", "5", "-x", proxy_url,
-            "https://www.cloudflare.com/cdn-cgi/trace",
+            "curl", "-s", "--max-time", "8", "-x", yt_proxy,
+            "https://www.youtube.com/generate_204",
+            "-o", "/dev/null", "-w", "%{http_code}",
             stdout=_sp.PIPE, stderr=_sp.PIPE
         )
-        out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-        out = out_b.decode(errors="ignore")
-        live_ok = "warp=on" in out
+        out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=12)
+        code = out_b.decode(errors="ignore").strip()
+        live_ok = code in ("204", "200")
     except Exception as e:
-        live_ok = None
-        out = str(e)
+        live_ok = False
+        code = str(e)
     if live_ok:
         await send_msg(chat_id,
-            f"🟢 <b>WARP proxy: চালু আছে</b>\n"
-            f"🔗 {proxy_url}\n"
-            f"✅ Live check: Cloudflare-এর মধ্য দিয়ে route হচ্ছে এখনো\n"
+            f"🟢 <b>YT_PROXY: চালু আছে এবং YouTube-এ পৌঁছাতে পারছে</b>\n"
+            f"🔗 {yt_proxy}\n"
             f"👉 /cut এখন এই proxy দিয়ে YouTube video download করবে।",
-            parse_mode="HTML")
-    elif live_ok is False:
-        await send_msg(chat_id,
-            f"🟡 <b>WARP proxy: startup-এ চালু হয়েছিল, এখন সাড়া দিচ্ছে না</b>\n"
-            f"🔗 {proxy_url}\n"
-            f"⚠️ Live check ব্যর্থ — connection drop হয়ে থাকতে পারে। /cut fail করলে container restart দিলে আবার চেষ্টা হবে।",
             parse_mode="HTML")
     else:
         await send_msg(chat_id,
-            f"🟡 <b>WARP proxy: ready ছিল, কিন্তু এখন check করতে ব্যর্থ</b>\n{out[:200]}",
+            f"🟡 <b>YT_PROXY সেট আছে কিন্তু live check ব্যর্থ</b>\n"
+            f"🔗 {yt_proxy}\nResponse: {code}\n"
+            f"Proxy service নিজে down থাকতে পারে, বা credentials ভুল।",
             parse_mode="HTML")
 
 async def handle_cut_command(msg: dict):
@@ -9509,23 +9508,13 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
                 # less moving part than --js-runtimes deno.
                 "--remote-components", "ejs:github",
             ]
-            # 2026-09-13 (user request): actual root cause confirmed to be
-            # HuggingFace Space FREE TIER's outbound network to YouTube's
-            # CDN being unstable (SSL EOF mid-handshake, even on the very
-            # first webpage/API fetch, on every retry) -- a hosting-infra
-            # limitation, not something fixable in code.
-            # Priority: 1) explicit YT_PROXY env var (external proxy the
-            # person set up themselves) 2) the free Cloudflare WARP SOCKS5
-            # proxy start_warp.sh brings up at container start, if it came
-            # up successfully (ready-marker file present) 3) neither ->
-            # falls back to a direct connection, unchanged from before.
+            # 2026-09-13: Cloudflare WARP was tried as a free proxy
+            # workaround and removed -- confirmed via live testing that
+            # HF Space containers don't grant WARP's tunnel the NET_ADMIN
+            # capability it needs, so it could never come up here. Only
+            # an explicit external YT_PROXY (HTTP/SOCKS5 proxy service)
+            # is used now, since that only needs a plain outbound socket.
             yt_proxy = os.environ.get("YT_PROXY")
-            if not yt_proxy:
-                try:
-                    with open("/app/data/warp_ready", "r") as wf:
-                        yt_proxy = wf.read().strip() or None
-                except FileNotFoundError:
-                    yt_proxy = None
             if yt_proxy:
                 cmd += ["--proxy", yt_proxy]
             if cookies_path:
@@ -33145,15 +33134,16 @@ async def handle_message(msg: dict):
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_cut_command(msg))
-    elif text.startswith("/warpstatus"):
-        # 2026-09-13 (user request): quick way to check if the free
-        # Cloudflare WARP proxy (workaround for HF free-tier's unstable
-        # YouTube connection) actually came up in this container, without
-        # digging through deploy logs.
+    elif text.startswith("/ytproxystatus"):
+        # 2026-09-13: quick way to check if an external YT_PROXY is
+        # configured and reachable for /cut <yt-link>. Cloudflare WARP
+        # was tried and removed -- HF Space containers don't grant the
+        # NET_ADMIN capability WARP's tunnel needs, confirmed via live
+        # testing, not just theory.
         if not is_auth:
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
-        _spawn_command_task(uid, handle_warpstatus_command(msg))
+        _spawn_command_task(uid, handle_ytproxystatus_command(msg))
     elif text.startswith("/csvS"):
         # /csvS অবশ্যই /csv এর আগে check করতে হবে
         if not is_auth:
