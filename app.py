@@ -914,11 +914,13 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             sep = "▬▬▬▬▬▬▬▬▬▬"
             total_mcq = 0
             blocks = []
+            _serial = 0
             for batch in batches:
                 topic = (batch.get("topic") or "Special MCQ By ATLAS").strip()
                 mcqs = batch.get("mcqs") or []
                 if not mcqs:
                     continue
+                _serial += 1
                 total_mcq += len(mcqs)
                 cache_id = gen_session_id()
                 await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs, channel_id=channel_id)
@@ -927,7 +929,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
                 quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
                 quote_body = (
-                    f"<b>{_html_escape(topic)}</b>\n"
+                    f"<b>{_serial}. {_html_escape(topic)}</b>\n"
                     f"📌 মোট MCQ: {len(mcqs)}\n"
                     f"───────────\n"
                     f"🔰Poll Practice:\n{poll_link}\n"
