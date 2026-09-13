@@ -741,7 +741,7 @@ def lms_get_pre_message(subject: str, exam_title: str, topic: str, count: int, f
     return text
 
 
-async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool, cancel_check: callable = None, subject: str = "", exam_title: str = "") -> tuple:
+async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool, cancel_check: callable = None, subject: str = "", exam_title: str = "", reply_to_message_id: int = None) -> tuple:
     """Sends one topic-batch: pre-message (topic name) -> polls (reply to
     pre-msg) -> Style-01 PDF + inline buttons -> ending message. Same shape
     as one /csvS batch iteration. Returns sent poll count. Raises on the
@@ -762,11 +762,18 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
     if thread_id:
         pre_send_data["message_thread_id"] = thread_id
+    if reply_to_message_id:
+        pre_send_data["reply_to_message_id"] = reply_to_message_id
     pre_r = await tg_post("sendMessage", pre_send_data)
     if not pre_r.get("ok") and thread_id:
         pre_send_data.pop("message_thread_id", None)
         pre_r = await tg_post("sendMessage", pre_send_data)
         thread_id = None
+    if not pre_r.get("ok") and reply_to_message_id:
+        # Reply target may be gone/unreachable in this chat — retry once
+        # plain so the batch itself doesn't fail over a cosmetic reply-link.
+        pre_send_data.pop("reply_to_message_id", None)
+        pre_r = await tg_post("sendMessage", pre_send_data)
     if not pre_r.get("ok"):
         raise RuntimeError(pre_r.get("description") or "Pre-message send failed")
     pre_msg_id = pre_r["result"]["message_id"]
@@ -931,7 +938,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             if not mcqs:
                 continue
             try:
-                sent, first_link, batch_cache_id = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check, subject=subject, exam_title=exam_title)
+                sent, first_link, batch_cache_id = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check, subject=subject, exam_title=exam_title, reply_to_message_id=master_msg_id)
                 sent_total += sent
                 all_mcqs.extend(mcqs)
                 if first_link:
