@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     tesseract-ocr-ben \
     fonts-noto \
     curl \
+    unzip \
     gcc \
     python3-dev \
     chromium \
