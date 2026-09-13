@@ -28,3 +28,4 @@ numpy
 opencv-python-headless
 telegramify-markdown
 PyMuPDF
+yt-dlp

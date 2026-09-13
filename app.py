@@ -9345,18 +9345,163 @@ async def _handle_clean_command_inner(msg: dict):
 _cut_pdf_cache = {}  # file_id -> pdf_bytes (small in-memory cache to skip re-download)
 _CUT_CACHE_MAX = 5
 
+_YT_LINK_RE = re.compile(r"(https?://(?:www\.)?(?:youtube\.com/watch\?v=[\w-]+|youtu\.be/[\w-]+|youtube\.com/shorts/[\w-]+)[^\s]*)", re.IGNORECASE)
+
 async def handle_cut_command(msg: dict):
-    """Dispatch /cut to the PDF or CSV handler based on the replied file's extension."""
+    """Dispatch /cut based on what's being replied to:
+    - Document (.csv) -> CSV row-range cut
+    - Document (.pdf or other) -> PDF page-range cut
+    - Plain text/message containing a YouTube link -> video time-range cut
+      (2026-09-13, user request): /cut <start>-<end> replying to a message
+      with a YouTube link downloads that segment and sends it back."""
     reply = msg.get("reply_to_message")
     chat_id = msg["chat"]["id"]
-    doc = reply.get("document") if reply else None
-    if not doc:
-        await send_msg(chat_id, "❌ PDF বা CSV ফাইলে reply করে <code>/cut</code> দাও", parse_mode="HTML")
+    if not reply:
+        await send_msg(chat_id, "❌ PDF/CSV ফাইলে অথবা YouTube link-সহ মেসেজে reply করে <code>/cut</code> দাও", parse_mode="HTML")
         return
-    file_name = (doc.get("file_name") or "").lower()
-    if file_name.endswith(".csv"):
-        return await handle_cut_csv_command(msg)
-    return await handle_cut_pdf_command(msg)
+    doc = reply.get("document")
+    if doc:
+        file_name = (doc.get("file_name") or "").lower()
+        if file_name.endswith(".csv"):
+            return await handle_cut_csv_command(msg)
+        return await handle_cut_pdf_command(msg)
+    reply_text = reply.get("text") or reply.get("caption") or ""
+    yt_m = _YT_LINK_RE.search(reply_text)
+    if yt_m:
+        return await handle_cut_youtube_command(msg, yt_m.group(1))
+    await send_msg(chat_id, "❌ PDF/CSV ফাইলে অথবা YouTube link-সহ মেসেজে reply করে <code>/cut</code> দাও", parse_mode="HTML")
+    return
+
+
+_YT_CUT_TIME_RE = re.compile(
+    r"^/cut\s+(\d{1,2}:\d{2}(?::\d{2})?|\d+)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?|\d+)\s*$",
+    re.IGNORECASE)
+
+def _yt_cut_parse_time(s: str) -> int:
+    """'ss' or 'mm:ss' or 'hh:mm:ss' -> total seconds."""
+    parts = [int(p) for p in s.split(":")]
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    return parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+async def handle_cut_youtube_command(msg: dict, yt_url: str):
+    """/cut <start>-<end> replying to a message containing a YouTube link.
+    Downloads ONLY that time segment (yt-dlp --download-sections, so the
+    whole video is never pulled first) then re-encodes precisely with
+    ffmpeg -ss/-to, and sends the result back as a document (video files
+    over Telegram's 50MB bot-upload ceiling are rejected up front instead
+    of failing deep inside the upload)."""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    text = msg.get("text", "").strip()
+
+    m = _YT_CUT_TIME_RE.match(text)
+    if not m:
+        await send_msg(chat_id,
+            "❌ Usage: YouTube link-সহ মেসেজে reply করে —\n"
+            "<code>/cut 30-90</code> (সেকেন্ড) অথবা\n"
+            "<code>/cut 1:30-2:45</code> (মিনিট:সেকেন্ড)",
+            parse_mode="HTML")
+        return
+
+    start_s = _yt_cut_parse_time(m.group(1))
+    end_s = _yt_cut_parse_time(m.group(2))
+    if end_s <= start_s:
+        await send_msg(chat_id, "❌ End time অবশ্যই start time-এর চেয়ে বড় হতে হবে।")
+        return
+    duration = end_s - start_s
+    if duration > 600:
+        await send_msg(chat_id, "❌ একবারে সর্বোচ্চ ১০ মিনিট (600s) cut করা যাবে — Telegram-এর 50MB upload limit-এর কারণে।")
+        return
+
+    status_r = await send_msg(chat_id, f"⏳ YouTube video download হচ্ছে... ({m.group(1)}–{m.group(2)})")
+    status_id = status_r.get("result", {}).get("message_id")
+
+    import tempfile, subprocess, shutil, uuid as _uuid_mod
+    work_dir = tempfile.mkdtemp(prefix="ytcut_")
+    try:
+        raw_path = os.path.join(work_dir, f"raw_{_uuid_mod.uuid4().hex}.mp4")
+        out_path = os.path.join(work_dir, f"cut_{_uuid_mod.uuid4().hex}.mp4")
+
+        # yt-dlp: only download the needed section (+2s padding either side
+        # so ffmpeg's re-encode has clean keyframes to cut from), capped at
+        # 720p so a 10-min segment has a realistic chance of staying under
+        # Telegram's 50MB bot-upload ceiling.
+        pad_start = max(0, start_s - 2)
+        section = f"*{pad_start}-{end_s + 2}"
+        ytdlp_cmd = [
+            "yt-dlp", "--no-playlist", "-f", "bv*[height<=720]+ba/b[height<=720]",
+            "--download-sections", section, "--force-keyframes-at-cuts",
+            "-o", raw_path, yt_url
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        _, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=180)
+        if proc.returncode != 0 or not os.path.exists(raw_path):
+            err_tail = (stderr_b or b"").decode(errors="ignore")[-400:]
+            logger.warning(f"[cut-yt] yt-dlp failed: {err_tail}")
+            if status_id:
+                await edit_msg(chat_id, status_id, "❌ Video download ব্যর্থ হয়েছে — link ঠিক আছে কিনা দেখো।")
+            return
+
+        if status_id:
+            await edit_msg(chat_id, status_id, f"✂️ Cut করা হচ্ছে... ({duration}s)")
+
+        # ffmpeg trims the padded download down to the EXACT requested
+        # range (-ss relative to the padded clip start).
+        ss_in_clip = start_s - pad_start
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", raw_path,
+            "-ss", str(ss_in_clip), "-t", str(duration),
+            "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart",
+            out_path
+        ]
+        fproc = await asyncio.create_subprocess_exec(
+            *ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        _, ferr_b = await asyncio.wait_for(fproc.communicate(), timeout=180)
+        if fproc.returncode != 0 or not os.path.exists(out_path):
+            err_tail = (ferr_b or b"").decode(errors="ignore")[-400:]
+            logger.warning(f"[cut-yt] ffmpeg failed: {err_tail}")
+            if status_id:
+                await edit_msg(chat_id, status_id, "❌ Video cut করতে ব্যর্থ হয়েছে।")
+            return
+
+        out_size = os.path.getsize(out_path)
+        if out_size > 50 * 1024 * 1024:
+            if status_id:
+                await edit_msg(chat_id, status_id,
+                    f"❌ Cut করা video {out_size/1024/1024:.1f}MB — Telegram bot-এর 50MB limit-এর বেশি। "
+                    f"ছোট time range দিয়ে আবার চেষ্টা করো।")
+            return
+
+        if status_id:
+            await edit_msg(chat_id, status_id, "📤 পাঠানো হচ্ছে...")
+        with open(out_path, "rb") as f:
+            video_bytes = f.read()
+        await send_document(chat_id, video_bytes, f"cut_{m.group(1).replace(':','.')}-{m.group(2).replace(':','.')}.mp4",
+            caption=f"✂️ {m.group(1)}–{m.group(2)} ({duration}s)", mime_type="video/mp4")
+        if status_id:
+            try:
+                await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_id})
+            except Exception:
+                pass
+    except asyncio.TimeoutError:
+        if status_id:
+            await edit_msg(chat_id, status_id, "❌ সময় শেষ — video অনেক বড় বা download ধীর।")
+    except FileNotFoundError as e:
+        logger.error(f"[cut-yt] missing binary: {e}")
+        if status_id:
+            await edit_msg(chat_id, status_id, "❌ yt-dlp/ffmpeg server-এ install নেই — admin-কে জানাও।")
+    except Exception as e:
+        logger.error(f"[cut-yt] unexpected error: {e}")
+        if status_id:
+            await edit_msg(chat_id, status_id, f"❌ ব্যর্থ হয়েছে: {e}")
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 async def handle_cut_pdf_command(msg: dict):
