@@ -9347,51 +9347,99 @@ _CUT_CACHE_MAX = 5
 
 _YT_LINK_RE = re.compile(r"(https?://(?:www\.)?(?:youtube\.com/watch\?v=[\w-]+|youtu\.be/[\w-]+|youtube\.com/shorts/[\w-]+)[^\s]*)", re.IGNORECASE)
 
+def _get_yt_proxy_list():
+    """Returns a list of proxy URLs to try in order for /cut <yt-link>.
+    Supports two env var formats so either a single proxy or a full
+    rotation list (e.g. a Webshare free-plan batch) can be configured:
+    - YT_PROXY: one URL, e.g. http://user:pass@host:port
+    - YT_PROXY_LIST: multiple, one per line or comma-separated, each
+      either a full URL or raw 'host:port:user:pass' (Webshare's own
+      export format) -- both are normalized to http://user:pass@host:port.
+    If both are set, YT_PROXY_LIST entries come first (more IPs to try
+    before falling back to the single one), duplicates removed.
+    """
+    urls = []
+
+    def _normalize(entry):
+        entry = entry.strip()
+        if not entry:
+            return None
+        if entry.startswith("http://") or entry.startswith("https://") or entry.startswith("socks5"):
+            return entry
+        # raw Webshare format: host:port:user:pass
+        parts = entry.split(":")
+        if len(parts) == 4:
+            host, port, user, pw = parts
+            return f"http://{user}:{pw}@{host}:{port}"
+        return None
+
+    raw_list = os.environ.get("YT_PROXY_LIST", "")
+    for chunk in re.split(r"[\n,]", raw_list):
+        norm = _normalize(chunk)
+        if norm and norm not in urls:
+            urls.append(norm)
+
+    single = os.environ.get("YT_PROXY", "")
+    norm_single = _normalize(single)
+    if norm_single and norm_single not in urls:
+        urls.append(norm_single)
+
+    return urls
+
 async def handle_ytproxystatus_command(msg: dict):
-    """/ytproxystatus -- reports whether an external YT_PROXY is configured
-    for /cut <yt-link>. Cloudflare WARP was tried and removed: HF Space
-    containers don't grant the NET_ADMIN capability WARP's tunnel needs,
-    so it could never come up here -- confirmed via live testing, not a
-    theoretical limitation. An external proxy service (set YT_PROXY to an
-    http:// or socks5:// URL) is the working alternative since it only
-    needs a plain outbound socket connection, no kernel-level tunnel."""
+    """/ytproxystatus -- checks every proxy configured via YT_PROXY /
+    YT_PROXY_LIST for /cut <yt-link> and reports which ones are alive.
+    Cloudflare WARP was tried and removed: HF Space containers don't
+    grant the NET_ADMIN capability WARP's tunnel needs, so it could
+    never come up here -- confirmed via live testing, not a theoretical
+    limitation. An external proxy service is the working alternative
+    since it only needs a plain outbound socket connection, no
+    kernel-level tunnel."""
     chat_id = msg["chat"]["id"]
-    yt_proxy = os.environ.get("YT_PROXY")
-    if not yt_proxy:
+    proxies = _get_yt_proxy_list()
+    if not proxies:
         await send_msg(chat_id,
-            "🔴 <b>YT_PROXY: সেট করা নেই</b>\n"
+            "🔴 <b>কোনো proxy সেট করা নেই</b>\n"
             "/cut ইউটিউব link direct connection দিয়ে চলবে (proxy ছাড়া) -- "
             "HF free tier-এ network unstable হলে এটা fail করতে পারে।\n\n"
-            "একটা proxy service (HTTP/SOCKS5) নিয়ে YT_PROXY env var-এ সেই URL "
-            "সেট করলে /cut সেটার মধ্য দিয়ে route করবে।",
+            "YT_PROXY (একটা) অথবা YT_PROXY_LIST (একাধিক, comma/newline "
+            "দিয়ে আলাদা) env var সেট করলে /cut সেগুলোর মধ্য দিয়ে route করবে।",
             parse_mode="HTML")
         return
+
+    status_r = await send_msg(chat_id, f"⏳ {len(proxies)}টি proxy check হচ্ছে...")
+    status_id = status_r.get("result", {}).get("message_id")
+
     import subprocess as _sp
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "curl", "-s", "--max-time", "8", "-x", yt_proxy,
-            "https://www.youtube.com/generate_204",
-            "-o", "/dev/null", "-w", "%{http_code}",
-            stdout=_sp.PIPE, stderr=_sp.PIPE
-        )
-        out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=12)
-        code = out_b.decode(errors="ignore").strip()
-        live_ok = code in ("204", "200")
-    except Exception as e:
-        live_ok = False
-        code = str(e)
-    if live_ok:
-        await send_msg(chat_id,
-            f"🟢 <b>YT_PROXY: চালু আছে এবং YouTube-এ পৌঁছাতে পারছে</b>\n"
-            f"🔗 {yt_proxy}\n"
-            f"👉 /cut এখন এই proxy দিয়ে YouTube video download করবে।",
-            parse_mode="HTML")
+    results = []
+    for i, proxy in enumerate(proxies, 1):
+        safe_label = re.sub(r"://[^@]+@", "://***@", proxy)  # hide credentials in output
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "--max-time", "8", "-x", proxy,
+                "https://www.youtube.com/generate_204",
+                "-o", "/dev/null", "-w", "%{http_code}",
+                stdout=_sp.PIPE, stderr=_sp.PIPE
+            )
+            out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=12)
+            code = out_b.decode(errors="ignore").strip()
+            ok = code in ("204", "200")
+        except Exception:
+            ok = False
+            code = "timeout/error"
+        results.append((safe_label, ok, code))
+
+    alive = sum(1 for _, ok, _ in results if ok)
+    lines = [f"{'🟢' if ok else '🔴'} {label} ({code})" for label, ok, code in results]
+    summary = (
+        f"<b>{alive}/{len(proxies)} proxy কাজ করছে</b>\n\n" + "\n".join(lines) + "\n\n"
+        + ("👉 /cut প্রথম যেটা কাজ করছে সেটা দিয়ে শুরু করবে, fail করলে পরের গুলো try করবে।"
+           if alive else "⚠️ একটাও কাজ করছে না -- সব IP block/dead, নতুন proxy list দরকার হতে পারে।")
+    )
+    if status_id:
+        await edit_msg(chat_id, status_id, summary, parse_mode="HTML")
     else:
-        await send_msg(chat_id,
-            f"🟡 <b>YT_PROXY সেট আছে কিন্তু live check ব্যর্থ</b>\n"
-            f"🔗 {yt_proxy}\nResponse: {code}\n"
-            f"Proxy service নিজে down থাকতে পারে, বা credentials ভুল।",
-            parse_mode="HTML")
+        await send_msg(chat_id, summary, parse_mode="HTML")
 
 async def handle_cut_command(msg: dict):
     """Dispatch /cut based on what's being replied to:
@@ -9487,7 +9535,7 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
             with open(cookies_path, "w", encoding="utf-8") as cf:
                 cf.write(yt_cookies_content)
 
-        def _build_ytdlp_cmd():
+        def _build_ytdlp_cmd(proxy=None):
             cmd = [
                 "yt-dlp", "--no-playlist", "-f", "bv*+ba/b",
                 "--download-sections", section, "--force-keyframes-at-cuts",
@@ -9508,31 +9556,36 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
                 # less moving part than --js-runtimes deno.
                 "--remote-components", "ejs:github",
             ]
-            # 2026-09-13: Cloudflare WARP was tried as a free proxy
-            # workaround and removed -- confirmed via live testing that
-            # HF Space containers don't grant WARP's tunnel the NET_ADMIN
-            # capability it needs, so it could never come up here. Only
-            # an explicit external YT_PROXY (HTTP/SOCKS5 proxy service)
-            # is used now, since that only needs a plain outbound socket.
-            yt_proxy = os.environ.get("YT_PROXY")
-            if yt_proxy:
-                cmd += ["--proxy", yt_proxy]
+            if proxy:
+                cmd += ["--proxy", proxy]
             if cookies_path:
                 cmd += ["--cookies", cookies_path]
             cmd += ["-o", raw_path, yt_url]
-            return cmd, yt_proxy
+            return cmd
+
+        # 2026-09-13: Cloudflare WARP was tried as a free proxy workaround
+        # and removed -- confirmed via live testing that HF Space
+        # containers don't grant WARP's tunnel the NET_ADMIN capability
+        # it needs, so it could never come up here. A rotating list of
+        # external proxies (YT_PROXY / YT_PROXY_LIST, e.g. a Webshare
+        # free-plan batch) is used instead, since each only needs a
+        # plain outbound socket -- no kernel-level tunnel. [None] means
+        # "try with no proxy at all" if nothing is configured.
+        proxy_list = _get_yt_proxy_list() or [None]
 
         # 2026-09-13: transient SSL/network errors (EOF, connection reset)
         # to YouTube are common and NOT the same as a real download
-        # failure -- retry a couple of times before giving up, instead of
-        # immediately reporting failure on the first flaky connection.
-        MAX_YTDLP_ATTEMPTS = 3
+        # failure -- retry across the proxy list before giving up, instead
+        # of immediately reporting failure on the first flaky connection
+        # or the first dead IP in the list.
+        MAX_YTDLP_ATTEMPTS = max(3, len(proxy_list))
         last_err_tail = ""
         dl_ok = False
         for attempt in range(1, MAX_YTDLP_ATTEMPTS + 1):
-            _cmd, _used_proxy = _build_ytdlp_cmd()
-            if attempt == 1 and _used_proxy:
-                logger.info(f"[cut-yt] routing through proxy: {_used_proxy}")
+            _used_proxy = proxy_list[(attempt - 1) % len(proxy_list)]
+            _cmd = _build_ytdlp_cmd(_used_proxy)
+            _safe_proxy_label = re.sub(r"://[^@]+@", "://***@", _used_proxy) if _used_proxy else None
+            logger.info(f"[cut-yt] attempt {attempt}/{MAX_YTDLP_ATTEMPTS} -- proxy: {_safe_proxy_label or 'none (direct)'}")
             proc = await asyncio.create_subprocess_exec(
                 *_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
@@ -9584,11 +9637,19 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
             last_err_tail = err_tail
             transient = any(s in err_tail for s in [
                 "SSL", "EOF occurred", "ConnectionReset", "Connection reset",
-                "TimeoutError", "Temporary failure"
+                "TimeoutError", "Temporary failure", "Connection refused",
+                "Proxy", "407", "Could not connect"
             ])
+            # 2026-09-13: with multiple proxies configured, a failure on
+            # one IP (dead, blocked, or auth-rejected) shouldn't stop the
+            # whole /cut -- keep rotating through proxy_list even for
+            # errors that wouldn't otherwise count as "transient" on a
+            # single fixed connection, since the next IP may simply work.
+            has_more_proxies = len(proxy_list) > 1 and attempt < MAX_YTDLP_ATTEMPTS
+            should_retry = (transient or has_more_proxies) and attempt < MAX_YTDLP_ATTEMPTS
             logger.warning(f"[cut-yt] yt-dlp attempt {attempt}/{MAX_YTDLP_ATTEMPTS} failed"
-                            f"{' (transient, retrying)' if transient and attempt < MAX_YTDLP_ATTEMPTS else ''}: {err_tail}")
-            if not transient:
+                            f"{' (retrying)' if should_retry else ''}: {err_tail}")
+            if not should_retry:
                 break
             if os.path.exists(raw_path):
                 os.remove(raw_path)
@@ -9612,7 +9673,7 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
                     await edit_msg(chat_id, status_id, "❌ YouTube bot-detection block করেছে — YT_COOKIES ঠিক আছে কিনা দেখো (expire হয়ে থাকতে পারে)।")
             elif "ssl" in ll or "eof occurred" in ll:
                 if status_id:
-                    proxy_hint = "" if os.environ.get("YT_PROXY") else " (YT_PROXY env var দিয়ে proxy set করা যায়)"
+                    proxy_hint = "" if _get_yt_proxy_list() else " (YT_PROXY বা YT_PROXY_LIST env var দিয়ে proxy set করা যায়)"
                     await edit_msg(chat_id, status_id,
                         f"❌ Network/SSL সমস্যা — hosting-এর outbound connection অস্থির{proxy_hint}। কয়েকবার চেষ্টা করেও হয়নি।")
             else:
