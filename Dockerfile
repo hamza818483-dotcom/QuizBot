@@ -29,6 +29,12 @@ ENV CHROMIUM_PATH=/usr/bin/chromium
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# 2026-09-13: force latest yt-dlp at build time -- YouTube changes its
+# player/cipher frequently and an outdated yt-dlp breaks silently
+# (extraction failures, wrongly-blamed as network/SSL errors). requirements.txt
+# pins a version at write-time; this always overrides it with whatever is
+# newest when the image is built.
+RUN pip install --no-cache-dir -U yt-dlp
 # Rebuild Pillow from source against system libraqm so raqm (complex script
 # shaping — needed for correct Bengali conjuncts) is actually linked in;
 # prebuilt PyPI wheels ship without raqm. If this ever fails to build, the

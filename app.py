@@ -9446,6 +9446,15 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
                 "yt-dlp", "--no-playlist", "-f", "bv*+ba/b",
                 "--download-sections", section, "--force-keyframes-at-cuts",
                 "--newline", "--progress-template", "download:PROG %(progress._percent_str)s",
+                # 2026-09-13: hardening against the observed
+                # 'SSL: UNEXPECTED_EOF_WHILE_READING' errors --
+                # --force-ipv4 avoids flaky IPv6 paths some hosts have,
+                # --retries/--fragment-retries make yt-dlp's OWN internal
+                # retry (separate from our attempt-loop) more persistent,
+                # and --socket-timeout fails fast on a stalled connection
+                # instead of hanging until our outer 180s timeout.
+                "--force-ipv4", "--retries", "5", "--fragment-retries", "5",
+                "--socket-timeout", "30",
             ]
             if cookies_path:
                 cmd += ["--cookies", cookies_path]
