@@ -1246,8 +1246,15 @@ async def lms_send_links(request: Request):
             send_data["message_thread_id"] = thread_id
         r = await tg_post("sendMessage", send_data)
         if not r.get("ok"):
+            logger.error(f"[LMS-Send-Links] sendMessage failed: {r.get('description')}")
             return JSONResponse({"error": r.get("description") or "Telegram send failed"}, status_code=502)
-        return JSONResponse({"ok": True})
+        sent_chat = r.get("result", {}).get("chat", {})
+        sent_msg_id = r.get("result", {}).get("message_id")
+        logger.info(
+            f"[LMS-Send-Links] posted OK -> chat_id={channel_id} resolved_chat={sent_chat.get('id')} "
+            f"type={sent_chat.get('type')} title={sent_chat.get('title')!r} message_id={sent_msg_id}"
+        )
+        return JSONResponse({"ok": True, "message_id": sent_msg_id, "chat": sent_chat})
     except Exception as e:
         logger.error(f"[LMS-Send-Links] error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
