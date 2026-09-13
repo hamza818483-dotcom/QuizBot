@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<link rel="preconnect" href="https://wbdyjpjbczfunyhhmtry.supabase.co">
+<link rel="preconnect" href="https://atlasquizbotpro.hamza818483.workers.dev">
+<link rel="dns-prefetch" href="https://wbdyjpjbczfunyhhmtry.supabase.co">
+<link rel="dns-prefetch" href="https://atlasquizbotpro.hamza818483.workers.dev">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ATLAS Quick Practice</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0A0D1E;--card-bg:#12162E;
+  --border:#2A2E4A;--divider:#1E2240;
+  --accent:#5A5FE0;--accent-light:rgba(90,95,224,0.12);
+  --text:#E8EAFF;--text-secondary:#7A82C8;--text-tertiary:#4A5080;
+  --success:#22D47A;--success-light:rgba(34,212,122,0.12);
+  --error:#F87171;--error-light:rgba(248,113,113,0.12);
+  --warning:#FBBF24;--muted:#1A1E3A;
+  --radius:14px;--radius-sm:10px;--radius-full:999px;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-tap-highlight-color:transparent;}
+.screen{display:none;}
+.screen.active{display:flex;flex-direction:column;animation:fadeIn .25s ease;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+
+/* LOADING / EMPTY / ERROR */
+#loadingScreen,#emptyScreen{min-height:100vh;align-items:center;justify-content:center;text-align:center;gap:10px;padding:20px;}
+.spin{display:inline-block;animation:spin 1s linear infinite;font-size:22px;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.muted-txt{color:var(--text-secondary);font-size:13px;}
+
+/* TOP BAR */
+.topbar{position:sticky;top:0;z-index:30;background:var(--card-bg);border-bottom:1px solid var(--border);padding:10px 14px;display:flex;align-items:center;gap:10px;}
+.icon-btn{height:36px;width:36px;flex-shrink:0;border-radius:var(--radius-full);border:1px solid var(--border);background:transparent;color:var(--text);display:flex;align-items:center;justify-content:center;font-size:16px;cursor:pointer;}
+.icon-btn:active{background:var(--muted);}
+.prog-wrap{flex:1;}
+.prog-label{font-size:11px;color:var(--text-secondary);margin-bottom:4px;}
+.prog-bar{height:6px;border-radius:var(--radius-full);background:var(--muted);overflow:hidden;}
+.prog-fill{height:100%;background:linear-gradient(90deg,var(--success),var(--accent));transition:width .4s;}
+.finish-btn{flex-shrink:0;padding:8px 14px;border-radius:var(--radius-full);border:none;background:var(--error);color:#fff;font-weight:800;font-size:12px;cursor:pointer;white-space:nowrap;}
+
+/* QUESTION AREA */
+.qwrap{max-width:640px;width:100%;margin:0 auto;padding:18px 16px 100px;flex:1;overflow-y:auto;}
+.qmeta{display:inline-flex;align-items:center;gap:6px;background:var(--accent-light);color:#A8AEFF;font-size:11px;font-weight:800;padding:6px 12px;border-radius:var(--radius-full);margin-bottom:14px;}
+.qtext{font-size:16px;font-weight:800;line-height:1.6;margin-bottom:18px;}
+.options{display:flex;flex-direction:column;gap:10px;}
+.opt-btn{display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:var(--radius);border:2px solid var(--border);background:var(--card-bg);color:var(--text);font-size:14px;text-align:left;cursor:pointer;transition:all .15s;}
+.opt-btn:active{transform:scale(.98);}
+.opt-btn .letter{height:28px;width:28px;flex-shrink:0;border-radius:var(--radius-full);background:var(--muted);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;}
+.opt-btn.correct{border-color:var(--success);background:var(--success-light);}
+.opt-btn.correct .letter{background:var(--success);color:#04331A;}
+.opt-btn.wrong{border-color:var(--error);background:var(--error-light);}
+.opt-btn.wrong .letter{background:var(--error);color:#3A0A0A;}
+.opt-btn.dim{opacity:.45;}
+.opt-btn[disabled]{cursor:default;}
+
+.explain{margin-top:16px;padding:14px;border-radius:var(--radius);background:var(--muted);border-left:4px solid var(--accent);font-size:13px;line-height:1.6;animation:fadeIn .2s ease;}
+.explain-lbl{font-size:10.5px;font-weight:900;color:var(--accent);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px;}
+
+/* BOTTOM NAV */
+.bottombar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--bg);border-top:1px solid var(--border);padding:12px 16px;}
+.bottombar-inner{max-width:640px;margin:0 auto;display:flex;gap:10px;}
+.nav-btn{flex:1;padding:13px;border-radius:var(--radius);font-weight:800;font-size:14px;border:2px solid var(--border);background:var(--card-bg);color:var(--text);cursor:pointer;}
+.nav-btn:disabled{opacity:.35;}
+.nav-btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
+
+/* FINISH SCREEN */
+#finishScreen{min-height:100vh;align-items:center;justify-content:center;text-align:center;gap:20px;padding:24px;}
+.trophy{height:78px;width:78px;border-radius:var(--radius-full);background:linear-gradient(135deg,#FBBF24,#F59E0B);display:flex;align-items:center;justify-content:center;font-size:36px;box-shadow:0 8px 24px rgba(251,191,36,0.35);}
+.finish-title{font-size:20px;font-weight:900;}
+.finish-sub{font-size:13px;color:var(--text-secondary);margin-top:4px;}
+.stat-row{display:flex;gap:10px;}
+.stat-box{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 20px;min-width:82px;}
+.stat-val{font-size:20px;font-weight:900;}
+.stat-lbl{font-size:10px;color:var(--text-secondary);margin-top:3px;}
+.finish-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;}
+.pill-btn{padding:13px 24px;border-radius:var(--radius-full);font-weight:800;font-size:13px;cursor:pointer;border:none;}
+.pill-btn.primary{background:var(--accent);color:#fff;}
+.pill-btn.outline{background:transparent;border:2px solid var(--accent);color:var(--accent);}
+.brand-footer{margin-top:6px;font-size:11px;color:var(--text-tertiary);}
+</style>
+</head>
+<body>
+
+<div id="loadingScreen" class="screen active" style="display:flex;">
+  <div class="spin">⏳</div>
+  <div class="muted-txt">লোড হচ্ছে...</div>
+</div>
+
+<div id="emptyScreen" class="screen">
+  <div class="muted-txt" id="emptyMsg">এই কুইজে কোনো প্রশ্ন পাওয়া যায়নি।</div>
+</div>
+
+<div id="playScreen" class="screen" style="min-height:100vh;">
+  <div class="topbar">
+    <button class="icon-btn" onclick="history.back()">←</button>
+    <div class="prog-wrap">
+      <div class="prog-label" id="progLabel">প্রশ্ন 1/1</div>
+      <div class="prog-bar"><div class="prog-fill" id="progFill" style="width:0%"></div></div>
+    </div>
+    <button class="finish-btn" onclick="finishQuiz()">শেষ করো</button>
+  </div>
+
+  <div class="qwrap">
+    <div class="qmeta" id="qMeta">📘 বিষয়</div>
+    <div class="qtext" id="qText"></div>
+    <div class="options" id="optionsBox"></div>
+    <div class="explain" id="explainBox" style="display:none;">
+      <div class="explain-lbl">ব্যাখ্যা</div>
+      <div id="explainText"></div>
+    </div>
+  </div>
+
+  <div class="bottombar">
+    <div class="bottombar-inner">
+      <button class="nav-btn" id="prevBtn" onclick="goPrev()">আগের</button>
+      <button class="nav-btn primary" id="nextBtn" onclick="goNext()">পরবর্তী →</button>
+    </div>
+  </div>
+</div>
+
+<div id="finishScreen" class="screen">
+  <div class="trophy">🏆</div>
+  <div>
+    <div class="finish-title">কুইজ শেষ! 🎉</div>
+    <div class="finish-sub" id="finishSub">মোট 0টি প্রশ্ন খেলেছেন</div>
+  </div>
+  <div class="stat-row">
+    <div class="stat-box"><div class="stat-val" id="statCorrect" style="color:var(--success);">0</div><div class="stat-lbl">সঠিক</div></div>
+    <div class="stat-box"><div class="stat-val" id="statWrong" style="color:var(--error);">0</div><div class="stat-lbl">ভুল</div></div>
+    <div class="stat-box"><div class="stat-val" id="statSkip" style="color:var(--warning);">0</div><div class="stat-lbl">বাদ</div></div>
+  </div>
+  <div class="finish-actions">
+    <button class="pill-btn outline" onclick="restartQuiz()">আবার খেলো</button>
+    <button class="pill-btn primary" onclick="location.href='https://atlascourses.com'">Atlascourses.com</button>
+  </div>
+  <div class="brand-footer">Powered by ATLAS</div>
+</div>
+
+<script>
+// ── CONFIG (same bot-independent fallback chain as exam.html) ──
+const _qs = new URLSearchParams(location.search);
+const CACHE_ID  = _qs.get('id') || '';
+const HF_URL    = 'https://hamza-02-quizbot.hf.space';
+const HF_DIRECT = 'https://atlasquizbotpro.hamza818483.workers.dev';
+
+const SB_URL  = 'https://wbdyjpjbczfunyhhmtry.supabase.co';
+const SB_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
+const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
+const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
+
+const LETTERS = ['A','B','C','D','E'];
+
+function pdfCacheRowToExam(c){
+  return { topic: c.topic || 'Quiz', mcqs: c.mcq_data || [] };
+}
+function backupRowToExam(b){
+  const ANS=['A','B','C','D','E'];
+  return { topic: b.name || 'Quiz', mcqs: (b.questions||[]).map(q=>({
+    question:q.question||'', options:q.options||[],
+    answer:ANS[q.answer_index??0]||'A', explanation:q.explanation||'',
+  })) };
+}
+async function fetchFromWorker(){
+  const r = await fetch(`${HF_URL}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(20000) });
+  const d = await r.json();
+  if (d && d.mcqs && d.mcqs.length > 0) return d;
+  if (d && d.error) throw new Error(d.error);
+  throw new Error('empty');
+}
+async function fetchFromRenderDirect(){
+  const r = await fetch(`${HF_DIRECT}/api/exam/${CACHE_ID}`, { signal: AbortSignal.timeout(20000) });
+  const d = await r.json();
+  if (d && d.mcqs && d.mcqs.length > 0) return d;
+  if (d && d.error) throw new Error(d.error);
+  throw new Error('empty');
+}
+async function fetchFromSupabaseDirect(url, key){
+  const r = await fetch(`${url}/rest/v1/pdf_mcq_cache?id=eq.${CACHE_ID}&select=*`,
+    { headers:{ apikey:key, Authorization:`Bearer ${key}` }, signal: AbortSignal.timeout(10000) });
+  const data = await r.json();
+  if (data && data[0]) return pdfCacheRowToExam(data[0]);
+  throw new Error('not found in pdf_mcq_cache');
+}
+async function fetchFromSupabaseBackup(url, key){
+  const r = await fetch(`${url}/rest/v1/quiz_backups?quiz_id=eq.${CACHE_ID}&select=*`,
+    { headers:{ apikey:key, Authorization:`Bearer ${key}` }, signal: AbortSignal.timeout(10000) });
+  const data = await r.json();
+  if (data && data[0]) return backupRowToExam(data[0]);
+  throw new Error('not found in quiz_backups');
+}
+async function fetchExamData(){
+  try { const d = await fetchFromWorker(); if(d){ try{localStorage.setItem('atlas_qp_cache_'+CACHE_ID, JSON.stringify(d));}catch(e){} } return d; }
+  catch(e){ console.warn('[quick] worker failed:', e.message); }
+
+  try { const d = await fetchFromRenderDirect(); if(d){ try{localStorage.setItem('atlas_qp_cache_'+CACHE_ID, JSON.stringify(d));}catch(e){} } return d; }
+  catch(e){ console.warn('[quick] render direct failed:', e.message); }
+
+  const attempts = [
+    () => fetchFromSupabaseDirect(SB_URL, SB_KEY),
+    () => fetchFromSupabaseBackup(SB_URL, SB_KEY),
+    () => fetchFromSupabaseDirect(SB2_URL, SB2_KEY),
+    () => fetchFromSupabaseBackup(SB2_URL, SB2_KEY),
+  ];
+  for (const attempt of attempts) {
+    try { const d = await attempt(); if(d){ try{localStorage.setItem('atlas_qp_cache_'+CACHE_ID, JSON.stringify(d));}catch(e){} } return d; }
+    catch(e){ console.warn('[quick] fallback failed:', e.message); }
+  }
+  try { const cached = localStorage.getItem('atlas_qp_cache_'+CACHE_ID); if (cached) return JSON.parse(cached); }
+  catch(e){}
+  return null;
+}
+
+// ── STATE ──
+let mcqs = [], topic = 'Quiz', current = 0, answered = [];
+
+function showScreen(id){
+  document.querySelectorAll('.screen').forEach(el=>el.style.display='none');
+  document.querySelectorAll('.screen').forEach(el=>el.classList.remove('active'));
+  const el = document.getElementById(id);
+  el.style.display = (id==='playScreen') ? 'flex' : 'flex';
+  el.classList.add('active');
+}
+
+function ansToIndex(ans){
+  if (typeof ans === 'number') return ans;
+  const s = String(ans||'A').trim().toUpperCase();
+  return LETTERS.indexOf(s) >= 0 ? LETTERS.indexOf(s) : 0;
+}
+
+function renderQuestion(){
+  const q = mcqs[current];
+  document.getElementById('progLabel').textContent = `প্রশ্ন ${current+1}/${mcqs.length}`;
+  document.getElementById('progFill').style.width = `${((current+1)/mcqs.length)*100}%`;
+  document.getElementById('qMeta').textContent = `📘 ${topic}`;
+  document.getElementById('qText').textContent = q.question || '';
+
+  const box = document.getElementById('optionsBox');
+  box.innerHTML = '';
+  const correctIdx = ansToIndex(q.answer);
+  const ans = answered[current];
+
+  (q.options||[]).forEach((opt, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'opt-btn';
+    btn.disabled = !!ans;
+    if (ans) {
+      if (i === correctIdx) btn.classList.add('correct');
+      else if (i === ans.selectedIdx) btn.classList.add('wrong');
+      else btn.classList.add('dim');
+    }
+    btn.innerHTML = `<span class="letter">${LETTERS[i]||''}</span><span>${opt}</span>`;
+    btn.onclick = () => selectOption(i);
+    box.appendChild(btn);
+  });
+
+  const explainBox = document.getElementById('explainBox');
+  if (ans && q.explanation) {
+    explainBox.style.display = 'block';
+    document.getElementById('explainText').textContent = q.explanation;
+  } else {
+    explainBox.style.display = 'none';
+  }
+
+  document.getElementById('prevBtn').disabled = current === 0;
+  document.getElementById('nextBtn').textContent = current === mcqs.length-1 ? 'শেষ করো' : 'পরবর্তী →';
+}
+
+function selectOption(idx){
+  if (answered[current]) return;
+  const q = mcqs[current];
+  const correctIdx = ansToIndex(q.answer);
+  answered[current] = { selectedIdx: idx, correct: idx === correctIdx };
+  renderQuestion();
+}
+
+function goPrev(){
+  if (current > 0) { current--; renderQuestion(); }
+}
+function goNext(){
+  if (!answered[current]) { selectOption(-1); /* mark as skipped-attempt visual, but don't block progress */ }
+  if (current < mcqs.length - 1) { current++; renderQuestion(); }
+  else { finishQuiz(); }
+}
+
+function finishQuiz(){
+  const correct = answered.filter(a => a && a.correct).length;
+  const wrong = answered.filter(a => a && !a.correct && a.selectedIdx >= 0).length;
+  const skipped = mcqs.length - correct - wrong;
+  document.getElementById('statCorrect').textContent = correct;
+  document.getElementById('statWrong').textContent = wrong;
+  document.getElementById('statSkip').textContent = skipped;
+  document.getElementById('finishSub').textContent = `মোট ${mcqs.length}টি প্রশ্নের মধ্যে খেলেছেন`;
+  showScreen('finishScreen');
+}
+
+function restartQuiz(){
+  current = 0;
+  answered = new Array(mcqs.length).fill(null);
+  showScreen('playScreen');
+  renderQuestion();
+}
+
+async function init(){
+  if (!CACHE_ID) {
+    document.getElementById('emptyMsg').textContent = 'কোনো কুইজ আইডি পাওয়া যায়নি।';
+    showScreen('emptyScreen');
+    return;
+  }
+  const data = await fetchExamData();
+  if (!data || !data.mcqs || data.mcqs.length === 0) {
+    showScreen('emptyScreen');
+    return;
+  }
+  mcqs = data.mcqs;
+  topic = data.topic || 'Quiz';
+  answered = new Array(mcqs.length).fill(null);
+  current = 0;
+  showScreen('playScreen');
+  renderQuestion();
+}
+
+init();
+</script>
+</body>
+</html>

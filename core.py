@@ -61,6 +61,7 @@ _ON_HUGGINGFACE = bool(os.environ.get("SPACE_ID"))
 # v4.3: GitHub Pages exam link — CF down thakleo page load hoy (static host),
 # er bhitorer JS nijei Render->CF->Supabase try kore. Beshi robust than CF-hosted /exam/.
 GH_PAGES_EXAM_URL = os.environ.get("GH_PAGES_EXAM_URL", "https://hamza818483-dotcom.github.io/QuizBot/exam.html")
+GH_PAGES_QUICK_URL = os.environ.get("GH_PAGES_QUICK_URL", "https://hamza818483-dotcom.github.io/QuizBot/quick.html")
 
 # Render এ চললে directly TG API, HF এ চললে CF proxy (HF তে TG blocked)
 _running_on = os.environ.get("RUNNING_ON", "") or "HuggingFace Space"

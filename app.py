@@ -103,7 +103,7 @@ from pdf_handler import (
 from core import (
     logger, app, sb, sb_exec,
     BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
-    CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, _tg_mode,
+    CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, GH_PAGES_QUICK_URL, _tg_mode,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, send_rich_msg, edit_rich_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
     send_document, send_media_group, send_poll, notify_owner, notify_owner_edit, clear_owner_job, download_tg_file,
@@ -925,11 +925,18 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 poll_link = f"https://t.me/{bot_un}?start=poll_{cache_id}"
                 quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
                 exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+                quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
                 quote_body = (
-                    f"✅{_html_escape(topic)} ({len(mcqs)})\n\n"
-                    f"🔰Poll Practice:\n{poll_link}\n\n"
-                    f"🔗Quiz Solve:\n{quiz_link}\n\n"
-                    f"🌐Website Exam:\n{exam_link}"
+                    f"<b>{_html_escape(topic)}</b>\n"
+                    f"📌 মোট MCQ: {len(mcqs)}\n"
+                    f"───────────\n"
+                    f"🔰Poll Practice:\n{poll_link}\n"
+                    f"───────────\n"
+                    f"🔗Quiz Solve:\n{quiz_link}\n"
+                    f"───────────\n"
+                    f"🌐Website Exam:\n{exam_link}\n"
+                    f"───────────\n"
+                    f"⚡Quick Practice:\n{quick_link}"
                 )
                 blocks.append(f"<blockquote>{quote_body}</blockquote>")
 
