@@ -816,6 +816,20 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
                 except Exception as e:
                     logger.warning(f"[LMS-Send] PDF button attach failed: {e}")
 
+    if ask_score:
+        try:
+            end_data = {
+                "chat_id": channel_id,
+                "text": csv_get_ending_message(topic, len(mcqs), first_link, ask_score=True),
+                "parse_mode": "HTML",
+                "reply_to_message_id": pre_msg_id,
+            }
+            if thread_id:
+                end_data["message_thread_id"] = thread_id
+            await tg_post("sendMessage", end_data)
+        except Exception as e:
+            logger.warning(f"[LMS-Send] score-ask ending message failed: {e}")
+
     return sent, first_link, batch_cache_id
 async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = ""):
     """batches: [{"topic": str, "mcqs": [...]}, ...] — one entry per topic
