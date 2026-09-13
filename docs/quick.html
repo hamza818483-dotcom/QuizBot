@@ -11,18 +11,18 @@
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 :root{
-  --bg:#0A0D1E;--card-bg:#12162E;--card-hover:#1A1E3A;
-  --border:#2A2E4A;--divider:#1E2240;
-  --accent:#5A5FE0;--accent-light:rgba(90,95,224,0.12);--accent-glow:rgba(90,95,224,0.4);
-  --atlas-bg:#0D1033;--atlas-card:#151A3E;--atlas-border:#3A3F6E;
-  --atlas-text:#A8AEFF;--atlas-glow:rgba(90,95,224,0.2);--atlas-glow-strong:rgba(90,95,224,0.6);
-  --text:#E8EAFF;--text-secondary:#7A82C8;--text-tertiary:#4A5080;
-  --success:#22D47A;--success-light:rgba(34,212,122,0.12);--success-glow:rgba(34,212,122,0.3);
-  --error:#F87171;--error-light:rgba(248,113,113,0.12);
-  --warning:#FBBF24;--muted:#1A1E3A;
-  --option-bg:#1A1E3A;--option-border:#2A2E4A;
-  --btn-bg:#1A1E3A;--overlay:rgba(0,0,0,0.78);
-  --shadow-sm:0 1px 6px rgba(0,0,0,0.3);--shadow-md:0 4px 20px rgba(0,0,0,0.5);--shadow-lg:0 8px 40px rgba(0,0,0,0.6);
+  --bg:#F5F6FB;--card-bg:#FFFFFF;--card-hover:#EDEFF9;
+  --border:#E1E4F2;--divider:#E9EBF6;
+  --accent:#5A5FE0;--accent-light:rgba(90,95,224,0.10);--accent-glow:rgba(90,95,224,0.25);
+  --atlas-bg:#EEF0FB;--atlas-card:#FFFFFF;--atlas-border:#D6DAF2;
+  --atlas-text:#5A5FE0;--atlas-glow:rgba(90,95,224,0.15);--atlas-glow-strong:rgba(90,95,224,0.35);
+  --text:#1E2140;--text-secondary:#5C6088;--text-tertiary:#9498BC;
+  --success:#16A34A;--success-light:rgba(22,163,74,0.10);--success-glow:rgba(22,163,74,0.25);
+  --error:#DC2626;--error-light:rgba(220,38,38,0.10);
+  --warning:#D97706;--muted:#EEF0FA;
+  --option-bg:#F7F8FD;--option-border:#E1E4F2;
+  --btn-bg:#F0F1FA;--overlay:rgba(0,0,0,0.45);
+  --shadow-sm:0 1px 6px rgba(20,20,50,0.06);--shadow-md:0 4px 20px rgba(20,20,50,0.08);--shadow-lg:0 8px 40px rgba(20,20,50,0.12);
   --radius:14px;--radius-sm:10px;--radius-full:999px;
 }
 *{box-sizing:border-box;margin:0;padding:0;}
@@ -49,7 +49,7 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 
 /* QUESTION AREA */
 .qwrap{max-width:640px;width:100%;margin:0 auto;padding:18px 16px 100px;flex:1;overflow-y:auto;}
-.qmeta{display:inline-flex;align-items:center;gap:6px;background:var(--accent-light);color:#A8AEFF;font-size:11px;font-weight:800;padding:6px 12px;border-radius:var(--radius-full);margin-bottom:14px;}
+.qmeta{display:inline-flex;align-items:center;gap:6px;background:var(--accent-light);color:var(--accent);font-size:11px;font-weight:800;padding:6px 12px;border-radius:var(--radius-full);margin-bottom:14px;}
 .qtext{font-size:16px;font-weight:800;line-height:1.6;margin-bottom:18px;}
 .options{display:flex;flex-direction:column;gap:10px;}
 .opt-btn{display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:var(--radius);border:2px solid var(--border);background:var(--card-bg);color:var(--text);font-size:14px;text-align:left;cursor:pointer;transition:all .15s;}
