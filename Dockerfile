@@ -68,7 +68,8 @@ RUN apt-get update && apt-get install -y gnupg \
     && rm -rf /var/lib/apt/lists/* \
     || echo "[build] WARP install failed/unavailable -- /cut will use a direct connection instead"
 COPY scripts/start_warp.sh /app/scripts/start_warp.sh
-RUN chmod +x /app/scripts/start_warp.sh || true
+RUN chmod +x /app/scripts/start_warp.sh || true \
+    && mkdir -p /var/lib/cloudflare-warp
 # Rebuild Pillow from source against system libraqm so raqm (complex script
 # shaping — needed for correct Bengali conjuncts) is actually linked in;
 # prebuilt PyPI wheels ship without raqm. If this ever fails to build, the
@@ -82,6 +83,6 @@ COPY . .
 
 RUN mkdir -p /app/data /app/logs
 
-CMD ["/bin/sh", "-c", "/app/scripts/start_warp.sh & uvicorn app:app --host 0.0.0.0 --port 7860"]
+CMD ["/bin/sh", "-c", "/app/scripts/start_warp.sh 2>&1 & uvicorn app:app --host 0.0.0.0 --port 7860"]
 
 # bust=1781027802
