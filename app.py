@@ -9469,17 +9469,25 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
             # HuggingFace Space FREE TIER's outbound network to YouTube's
             # CDN being unstable (SSL EOF mid-handshake, even on the very
             # first webpage/API fetch, on every retry) -- a hosting-infra
-            # limitation, not something fixable in code. YT_PROXY env var
-            # lets the person route yt-dlp through an external proxy
-            # (http://, https://, or socks5://...) if they have one, as a
-            # workaround until/unless they upgrade tier.
+            # limitation, not something fixable in code.
+            # Priority: 1) explicit YT_PROXY env var (external proxy the
+            # person set up themselves) 2) the free Cloudflare WARP SOCKS5
+            # proxy start_warp.sh brings up at container start, if it came
+            # up successfully (ready-marker file present) 3) neither ->
+            # falls back to a direct connection, unchanged from before.
             yt_proxy = os.environ.get("YT_PROXY")
+            if not yt_proxy:
+                try:
+                    with open("/app/data/warp_ready", "r") as wf:
+                        yt_proxy = wf.read().strip() or None
+                except FileNotFoundError:
+                    yt_proxy = None
             if yt_proxy:
                 cmd += ["--proxy", yt_proxy]
             if cookies_path:
                 cmd += ["--cookies", cookies_path]
             cmd += ["-o", raw_path, yt_url]
-            return cmd
+            return cmd, yt_proxy
 
         # 2026-09-13: transient SSL/network errors (EOF, connection reset)
         # to YouTube are common and NOT the same as a real download
@@ -9489,8 +9497,11 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
         last_err_tail = ""
         dl_ok = False
         for attempt in range(1, MAX_YTDLP_ATTEMPTS + 1):
+            _cmd, _used_proxy = _build_ytdlp_cmd()
+            if attempt == 1 and _used_proxy:
+                logger.info(f"[cut-yt] routing through proxy: {_used_proxy}")
             proc = await asyncio.create_subprocess_exec(
-                *_build_ytdlp_cmd(), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                *_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             stderr_lines = []
             _last_reported_pct = {"v": -1}
