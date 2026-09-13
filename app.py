@@ -868,7 +868,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
             logger.warning(f"[LMS-Send] score-ask ending message failed: {e}")
 
     return sent, first_link, batch_cache_id
-async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = ""):
+async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = "", links_only: bool = False):
     """batches: [{"topic": str, "mcqs": [...]}, ...] — one entry per topic
     (or a single entry when the exam has no topic split / no batch-size
     split requested). Sent sequentially, same as /csvS's batch loop.
@@ -878,7 +878,15 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
     for every batch in this job — so all topic-wise MCQs for one exam land
     together inside a single exam-named thread, instead of one topic per
     subtopic. Falls back to no-thread-id if the chat isn't forum-enabled or
-    topic creation fails."""
+    topic creation fails.
+
+    links_only=True: no polls are sent to the channel at all. For every
+    batch an MCQ cache row is still created (so its deep-links resolve),
+    then ONE single message is posted: header + one <blockquote> per topic
+    with Poll Practice (bot DM deep-link)/Quiz Solve/Website Exam links.
+    Reuses this same job system (proven working /api/lms-send-channel path)
+    instead of a separate route, purely branching behavior inside the job.
+    """
     job = LMS_SEND_JOBS[job_id]
     dm_msg_id = None
     dm_kb = {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": f"lmscancel_{job_id}"}]]}
@@ -890,6 +898,81 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             f"✅ পাঠানো হয়েছে: {job.get('sent_total', 0)}\n"
             f"📦 ব্যাচ: {job.get('batches_done', 0)}/{job.get('batches_total', len(batches))}"
         )
+
+    if links_only:
+        # Simple synchronous-style path (still inside the spawned task so
+        # the caller gets an immediate job_id back like normal, but there's
+        # no polling loop -- just cache rows + one message).
+        try:
+            is_admin, admin_err = await _check_bot_admin(channel_id)
+            if not is_admin:
+                job["status"] = "error"
+                job["error"] = admin_err
+                return
+            job["status"] = "running"
+            bot_un = await get_bot_username()
+            sep = "▬▬▬▬▬▬▬▬▬▬"
+            total_mcq = 0
+            blocks = []
+            for batch in batches:
+                topic = (batch.get("topic") or "Special MCQ By ATLAS").strip()
+                mcqs = batch.get("mcqs") or []
+                if not mcqs:
+                    continue
+                total_mcq += len(mcqs)
+                cache_id = gen_session_id()
+                await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs, channel_id=channel_id)
+                poll_link = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+                quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+                exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+                quote_body = (
+                    f"✅{_html_escape(topic)} ({len(mcqs)})\n\n"
+                    f"🔰Poll Practice:\n{poll_link}\n\n"
+                    f"🔗Quiz Solve:\n{quiz_link}\n\n"
+                    f"🌐Website Exam:\n{exam_link}"
+                )
+                blocks.append(f"<blockquote>{quote_body}</blockquote>")
+
+            if not blocks:
+                job["status"] = "error"
+                job["error"] = "no MCQs to send"
+                return
+
+            header = (
+                f"🟥{_html_escape(subject or 'MCQ')}\n"
+                f"◼️{_html_escape(exam_title or 'MCQ')}\n"
+                f"🌟Total Topic: {len(blocks)}\n"
+                f"📌Total MCQ: {total_mcq}"
+            )
+            post_text = f"\n{sep}\n".join([header] + blocks)
+            send_data = {
+                "chat_id": channel_id, "text": post_text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            if thread_id:
+                send_data["message_thread_id"] = thread_id
+            r = await tg_post("sendMessage", send_data)
+            if not r.get("ok"):
+                job["status"] = "error"
+                job["error"] = r.get("description") or "Telegram send failed"
+                logger.error(f"[LMS-Send-Links] sendMessage failed: {job['error']}")
+                return
+            sent_chat = r.get("result", {}).get("chat", {})
+            sent_msg_id = r.get("result", {}).get("message_id")
+            logger.info(
+                f"[LMS-Send-Links] posted OK -> chat_id={channel_id} resolved_chat={sent_chat.get('id')} "
+                f"type={sent_chat.get('type')} title={sent_chat.get('title')!r} message_id={sent_msg_id}"
+            )
+            job["status"] = "done"
+            job["pct"] = 100
+            job["sent_total"] = total_mcq
+            job["batches_done"] = len(blocks)
+        except Exception as e:
+            logger.error(f"[LMS-Send-Links] job {job_id} error: {e}")
+            job["status"] = "error"
+            job["error"] = str(e)
+        return
 
     try:
         is_admin, admin_err = await _check_bot_admin(channel_id)
@@ -1119,6 +1202,7 @@ async def lms_send_channel(request: Request):
     exam_id = str(data.get("exam_id") or "").strip()
     exam_title = str(data.get("exam_title") or "").strip()
     subject = str(data.get("subject") or "").strip()
+    links_only = bool(data.get("links_only"))
 
     if not channel_id:
         return JSONResponse({"error": "channel_id is required"}, status_code=400)
@@ -1132,7 +1216,7 @@ async def lms_send_channel(request: Request):
         "batches_done": 0, "batches_total": len(batches), "error": None,
         "exam_id": exam_id, "cancel_requested": False,
     }
-    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject))
+    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject, links_only=links_only))
     return JSONResponse({"ok": True, "job_id": job_id})
 
 
@@ -1162,104 +1246,6 @@ async def lms_send_channel_active_by_exam(exam_id: str):
         if job.get("exam_id") == exam_id and job.get("status") in ("queued", "running"):
             return JSONResponse({"ok": True, "job_id": jid, **job})
     return JSONResponse({"ok": True, "job_id": None})
-
-
-@app.post("/api/lms-send-links")
-async def lms_send_links(request: Request):
-    """LMS 'links only' send mode. No polls are sent to the channel at all —
-    for every batch (topic/part) an MCQ cache row is created (same
-    db_save_mcq_cache used by the normal LMS-Send path) purely so its
-    deep-links resolve, then ONE single message is posted to the channel:
-    main exam name + subject header, followed by one line-separated block
-    per topic/subtopic containing:
-      🔰Poll Practice (DM deep-link, ?start=poll_ — practises the MCQs as
-         polls inside the bot's own DM, since none were posted to the channel)
-      🔗Quiz Solve (?start=pdf_ deep-link)
-      🌐Website Exam (GH_PAGES_EXAM_URL)
-    Body: same shape as /api/lms-send-channel (secret, channel_id, thread_id?,
-    batches, exam_id?, exam_title?, subject?).
-    Responds synchronously (no background job) since there's no poll-sending
-    loop to run — just cache-row creation + one message send.
-    """
-    logger.info("[LMS-Send-Links] request received")
-    if not LMS_API_SECRET:
-        logger.warning("[LMS-Send-Links] SECURITY: LMS_API_SECRET not set -- endpoint accepting unauthenticated requests!")
-    data = await request.json()
-    if LMS_API_SECRET and data.get("secret") != LMS_API_SECRET:
-        return JSONResponse({"error": "unauthorized"}, status_code=403)
-
-    channel_id = str(data.get("channel_id") or "").strip()
-    thread_id = data.get("thread_id")
-    thread_id = int(thread_id) if thread_id else None
-    batches = data.get("batches") or []
-    exam_title = str(data.get("exam_title") or "").strip()
-    subject = str(data.get("subject") or "").strip()
-
-    if not channel_id:
-        return JSONResponse({"error": "channel_id is required"}, status_code=400)
-    if not batches or not any(b.get("mcqs") for b in batches):
-        return JSONResponse({"error": "batches (with mcqs) is required"}, status_code=400)
-
-    try:
-        is_admin, admin_err = await _check_bot_admin(channel_id)
-        if not is_admin:
-            return JSONResponse({"error": admin_err}, status_code=400)
-
-        bot_un = await get_bot_username()
-        sep = "▬▬▬▬▬▬▬▬▬▬"
-        total_mcq = 0
-        blocks = []
-        for batch in batches:
-            topic = (batch.get("topic") or "Special MCQ By ATLAS").strip()
-            mcqs = batch.get("mcqs") or []
-            if not mcqs:
-                continue
-            total_mcq += len(mcqs)
-            cache_id = gen_session_id()
-            await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs, channel_id=channel_id)
-            poll_link = f"https://t.me/{bot_un}?start=poll_{cache_id}"
-            quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
-            exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
-            quote_body = (
-                f"✅{_html_escape(topic)} ({len(mcqs)})\n\n"
-                f"🔰Poll Practice:\n{poll_link}\n\n"
-                f"🔗Quiz Solve:\n{quiz_link}\n\n"
-                f"🌐Website Exam:\n{exam_link}"
-            )
-            blocks.append(f"<blockquote>{quote_body}</blockquote>")
-
-        if not blocks:
-            return JSONResponse({"error": "no MCQs to send"}, status_code=400)
-
-        header = (
-            f"🟥{_html_escape(subject or 'MCQ')}\n"
-            f"◼️{_html_escape(exam_title or 'MCQ')}\n"
-            f"🌟Total Topic: {len(blocks)}\n"
-            f"📌Total MCQ: {total_mcq}"
-        )
-        post_text = f"\n{sep}\n".join([header] + blocks)
-        send_data = {
-            "chat_id": channel_id, "text": post_text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
-        if thread_id:
-            send_data["message_thread_id"] = thread_id
-        r = await tg_post("sendMessage", send_data)
-        if not r.get("ok"):
-            logger.error(f"[LMS-Send-Links] sendMessage failed: {r.get('description')}")
-            return JSONResponse({"error": r.get("description") or "Telegram send failed"}, status_code=502)
-        sent_chat = r.get("result", {}).get("chat", {})
-        sent_msg_id = r.get("result", {}).get("message_id")
-        logger.info(
-            f"[LMS-Send-Links] posted OK -> chat_id={channel_id} resolved_chat={sent_chat.get('id')} "
-            f"type={sent_chat.get('type')} title={sent_chat.get('title')!r} message_id={sent_msg_id}"
-        )
-        return JSONResponse({"ok": True, "message_id": sent_msg_id, "chat": sent_chat})
-    except Exception as e:
-        logger.error(f"[LMS-Send-Links] error: {e}")
-        return JSONResponse({"error": str(e)}, status_code=500)
-
 
 
 # v-mhtml-live: MHTML/HTML → CSV job state for live dashboard + live TG progress msg
