@@ -1012,10 +1012,11 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         if job.get("cancel_requested"):
             job["status"] = "cancelled"
         else:
-            # Group-only: one merged PDF covering every MCQ from every topic
-            # batch, sent right before the master summary — same pattern as
-            # /csv's own combined-PDF step.
-            if all_mcqs and chat_type != "channel":
+            # One merged PDF covering every MCQ from every topic/part batch,
+            # sent right before the final master summary edit — same pattern
+            # as /csv's own combined-PDF step. Sent for both group and
+            # channel (channel was previously skipped).
+            if all_mcqs:
                 try:
                     merged_pdf_bytes = await _generate_style1_pdf_guaranteed(all_mcqs, exam_title or "MCQ", channel_id)
                     if merged_pdf_bytes:
