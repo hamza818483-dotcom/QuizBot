@@ -948,8 +948,9 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 return
 
             header = (
-                f"🟥{_html_escape(subject or 'MCQ')}\n"
-                f"◼️{_html_escape(exam_title or 'MCQ')}\n"
+                f"🟥<b>{_html_escape(subject or 'MCQ')}</b>\n"
+                f"◼️<b>{_html_escape(exam_title or 'MCQ')}</b>\n"
+                f"{sep}\n"
                 f"🌟Total Topic: {len(blocks)}\n"
                 f"📌Total MCQ: {total_mcq}"
             )
