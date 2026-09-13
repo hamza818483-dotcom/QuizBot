@@ -1181,6 +1181,7 @@ async def lms_send_links(request: Request):
     Responds synchronously (no background job) since there's no poll-sending
     loop to run — just cache-row creation + one message send.
     """
+    logger.info("[LMS-Send-Links] request received")
     if not LMS_API_SECRET:
         logger.warning("[LMS-Send-Links] SECURITY: LMS_API_SECRET not set -- endpoint accepting unauthenticated requests!")
     data = await request.json()
