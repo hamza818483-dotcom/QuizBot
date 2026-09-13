@@ -741,6 +741,40 @@ def lms_get_pre_message(subject: str, exam_title: str, topic: str, count: int, f
     return text
 
 
+def lms_get_ending_message(main_topic: str, part_topic: str, count: int, first_link: str = "", ask_score: bool = True) -> str:
+    """LMS Readymade-send score-ask ending message, exact requested format:
+    🟥Main Topic Name
+    ◼️Part number
+    ▬▬▬▬▬▬▬▬▬▬
+    📊 মোট পোল: N
+    ▬▬▬▬▬▬▬▬▬▬
+    ⁉️তোমার স্কোর কত? 🤔
+    (?/N )
+
+    ✅কমেন্টে লিখো! 👇
+
+    🔰পোল যেখান থেকে শুরু হয়েছে:
+    {first_link}
+    """
+    sep = "▬▬▬▬▬▬▬▬▬▬"
+    text = (
+        f"🟥{_html_escape(main_topic or 'MCQ')}\n"
+        f"◼️{_html_escape(part_topic or '')}\n"
+        f"{sep}\n"
+        f"📊 মোট পোল: {count}\n"
+    )
+    if ask_score:
+        text += (
+            f"{sep}\n"
+            f"⁉️তোমার স্কোর কত? 🤔\n"
+            f"(?/{count} )\n\n"
+            f"✅কমেন্টে লিখো! 👇\n"
+        )
+    if first_link:
+        text += f"\n🔰পোল যেখান থেকে শুরু হয়েছে:\n{_html_escape(first_link)}"
+    return text
+
+
 async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool, cancel_check: callable = None, subject: str = "", exam_title: str = "", reply_to_message_id: int = None) -> tuple:
     """Sends one topic-batch: pre-message (topic name) -> polls (reply to
     pre-msg) -> Style-01 PDF + inline buttons -> ending message. Same shape
@@ -827,7 +861,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
         try:
             end_data = {
                 "chat_id": channel_id,
-                "text": csv_get_ending_message(topic, len(mcqs), first_link, ask_score=True),
+                "text": lms_get_ending_message(exam_title, topic, len(mcqs), first_link, ask_score=True),
                 "parse_mode": "HTML",
                 "reply_to_message_id": pre_msg_id,
             }
