@@ -1164,6 +1164,95 @@ async def lms_send_channel_active_by_exam(exam_id: str):
     return JSONResponse({"ok": True, "job_id": None})
 
 
+@app.post("/api/lms-send-links")
+async def lms_send_links(request: Request):
+    """LMS 'links only' send mode. No polls are sent to the channel at all —
+    for every batch (topic/part) an MCQ cache row is created (same
+    db_save_mcq_cache used by the normal LMS-Send path) purely so its
+    deep-links resolve, then ONE single message is posted to the channel:
+    main exam name + subject header, followed by one line-separated block
+    per topic/subtopic containing:
+      🔰Poll Practice (DM deep-link, ?start=poll_ — practises the MCQs as
+         polls inside the bot's own DM, since none were posted to the channel)
+      🔗Quiz Solve (?start=pdf_ deep-link)
+      🌐Website Exam (GH_PAGES_EXAM_URL)
+    Body: same shape as /api/lms-send-channel (secret, channel_id, thread_id?,
+    batches, exam_id?, exam_title?, subject?).
+    Responds synchronously (no background job) since there's no poll-sending
+    loop to run — just cache-row creation + one message send.
+    """
+    if not LMS_API_SECRET:
+        logger.warning("[LMS-Send-Links] SECURITY: LMS_API_SECRET not set -- endpoint accepting unauthenticated requests!")
+    data = await request.json()
+    if LMS_API_SECRET and data.get("secret") != LMS_API_SECRET:
+        return JSONResponse({"error": "unauthorized"}, status_code=403)
+
+    channel_id = str(data.get("channel_id") or "").strip()
+    thread_id = data.get("thread_id")
+    thread_id = int(thread_id) if thread_id else None
+    batches = data.get("batches") or []
+    exam_title = str(data.get("exam_title") or "").strip()
+    subject = str(data.get("subject") or "").strip()
+
+    if not channel_id:
+        return JSONResponse({"error": "channel_id is required"}, status_code=400)
+    if not batches or not any(b.get("mcqs") for b in batches):
+        return JSONResponse({"error": "batches (with mcqs) is required"}, status_code=400)
+
+    try:
+        is_admin, admin_err = await _check_bot_admin(channel_id)
+        if not is_admin:
+            return JSONResponse({"error": admin_err}, status_code=400)
+
+        bot_un = await get_bot_username()
+        sep = "▬▬▬▬▬▬▬▬▬▬"
+        total_mcq = 0
+        blocks = []
+        for batch in batches:
+            topic = (batch.get("topic") or "Special MCQ By ATLAS").strip()
+            mcqs = batch.get("mcqs") or []
+            if not mcqs:
+                continue
+            total_mcq += len(mcqs)
+            cache_id = gen_session_id()
+            await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs, channel_id=channel_id)
+            poll_link = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+            quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+            exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+            quote_body = (
+                f"✅{_html_escape(topic)} ({len(mcqs)})\n\n"
+                f"🔰Poll Practice:\n{poll_link}\n\n"
+                f"🔗Quiz Solve:\n{quiz_link}\n\n"
+                f"🌐Website Exam:\n{exam_link}"
+            )
+            blocks.append(f"<blockquote>{quote_body}</blockquote>")
+
+        if not blocks:
+            return JSONResponse({"error": "no MCQs to send"}, status_code=400)
+
+        header = (
+            f"🟥{_html_escape(subject or 'MCQ')}\n"
+            f"◼️{_html_escape(exam_title or 'MCQ')}\n"
+            f"🌟Total Topic: {len(blocks)}\n"
+            f"📌Total MCQ: {total_mcq}"
+        )
+        post_text = f"\n{sep}\n".join([header] + blocks)
+        send_data = {
+            "chat_id": channel_id, "text": post_text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if thread_id:
+            send_data["message_thread_id"] = thread_id
+        r = await tg_post("sendMessage", send_data)
+        if not r.get("ok"):
+            return JSONResponse({"error": r.get("description") or "Telegram send failed"}, status_code=502)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        logger.error(f"[LMS-Send-Links] error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 
 # v-mhtml-live: MHTML/HTML → CSV job state for live dashboard + live TG progress msg
 # job_id -> {"status": "running"|"done"|"error", "done": int, "total": int,
