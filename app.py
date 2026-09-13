@@ -811,10 +811,6 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     if not pre_r.get("ok"):
         raise RuntimeError(pre_r.get("description") or "Pre-message send failed")
     pre_msg_id = pre_r["result"]["message_id"]
-    try:
-        await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": pre_msg_id, "disable_notification": True})
-    except Exception as e:
-        logger.warning(f"[LMS-Send] pre-msg pin failed: {e}")
 
     batch_cache_id = gen_session_id()
     await db_save_mcq_cache(batch_cache_id, batch_cache_id, 0, topic, mcqs, channel_id=channel_id)
@@ -955,6 +951,10 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             })
             if master_r.get("ok"):
                 master_msg_id = master_r["result"]["message_id"]
+                try:
+                    await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": master_msg_id, "disable_notification": True})
+                except Exception as e:
+                    logger.warning(f"[LMS-Send] master summary pin failed: {e}")
         except Exception as e:
             logger.warning(f"[LMS-Send] initial master summary send failed: {e}")
 
