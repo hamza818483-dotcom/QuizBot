@@ -9416,8 +9416,9 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
         await send_msg(chat_id, "❌ একবারে সর্বোচ্চ ১০ মিনিট (600s) cut করা যাবে — Telegram-এর 50MB upload limit-এর কারণে।")
         return
 
-    status_r = await send_msg(chat_id, f"⏳ YouTube video download হচ্ছে... ({m.group(1)}–{m.group(2)})")
+    status_r = await send_msg(chat_id, f"⏳ YouTube video download হচ্ছে... ({m.group(1)}–{m.group(2)})\n📊 0% | ⏱️ 0s")
     status_id = status_r.get("result", {}).get("message_id")
+    _start_time = time.time()
 
     import tempfile, subprocess, shutil, uuid as _uuid_mod
     work_dir = tempfile.mkdtemp(prefix="ytcut_")
@@ -9426,44 +9427,120 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
         out_path = os.path.join(work_dir, f"cut_{_uuid_mod.uuid4().hex}.mp4")
 
         # yt-dlp: only download the needed section (+2s padding either side
-        # so ffmpeg's re-encode has clean keyframes to cut from), capped at
-        # 720p so a 10-min segment has a realistic chance of staying under
-        # Telegram's 50MB bot-upload ceiling.
+        # so ffmpeg's re-encode has clean keyframes to cut from).
+        # 2026-09-13 (user request): no quality cap -- "bv*+ba/b" pulls the
+        # best video+audio yt-dlp can find (up to whatever YouTube serves,
+        # e.g. 1080p/4K on non-premium accounts); the 50MB post-cut size
+        # check further down is what actually decides if it can be sent.
         pad_start = max(0, start_s - 2)
         section = f"*{pad_start}-{end_s + 2}"
-        ytdlp_cmd = [
-            "yt-dlp", "--no-playlist", "-f", "bv*[height<=720]+ba/b[height<=720]",
-            "--download-sections", section, "--force-keyframes-at-cuts",
-        ]
-        # 2026-09-13 (user request): YouTube frequently blocks server IPs
-        # with "Sign in to confirm you're not a bot" without cookies.
-        # YT_COOKIES env var holds the exported cookies.txt content
-        # (Netscape format) as plain text -- written to a temp file per
-        # request since yt-dlp only accepts a file path, not raw content.
         yt_cookies_content = os.environ.get("YT_COOKIES")
         cookies_path = None
         if yt_cookies_content:
             cookies_path = os.path.join(work_dir, "cookies.txt")
             with open(cookies_path, "w", encoding="utf-8") as cf:
                 cf.write(yt_cookies_content)
-            ytdlp_cmd += ["--cookies", cookies_path]
-        ytdlp_cmd += ["-o", raw_path, yt_url]
-        proc = await asyncio.create_subprocess_exec(
-            *ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        _, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=180)
-        if proc.returncode != 0 or not os.path.exists(raw_path):
-            err_tail = (stderr_b or b"").decode(errors="ignore")[-400:]
-            logger.warning(f"[cut-yt] yt-dlp failed: {err_tail}")
+
+        def _build_ytdlp_cmd():
+            cmd = [
+                "yt-dlp", "--no-playlist", "-f", "bv*+ba/b",
+                "--download-sections", section, "--force-keyframes-at-cuts",
+                "--newline", "--progress-template", "download:PROG %(progress._percent_str)s",
+            ]
+            if cookies_path:
+                cmd += ["--cookies", cookies_path]
+            cmd += ["-o", raw_path, yt_url]
+            return cmd
+
+        # 2026-09-13: transient SSL/network errors (EOF, connection reset)
+        # to YouTube are common and NOT the same as a real download
+        # failure -- retry a couple of times before giving up, instead of
+        # immediately reporting failure on the first flaky connection.
+        MAX_YTDLP_ATTEMPTS = 3
+        last_err_tail = ""
+        dl_ok = False
+        for attempt in range(1, MAX_YTDLP_ATTEMPTS + 1):
+            proc = await asyncio.create_subprocess_exec(
+                *_build_ytdlp_cmd(), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stderr_lines = []
+            _last_reported_pct = {"v": -1}
+
+            async def _read_stdout():
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    line_s = line.decode(errors="ignore").strip()
+                    if line_s.startswith("PROG"):
+                        pct_str = line_s.replace("PROG", "").strip().replace("%", "")
+                        try:
+                            pct = int(float(pct_str))
+                        except ValueError:
+                            continue
+                        if pct != _last_reported_pct["v"] and pct % 5 == 0 and status_id:
+                            _last_reported_pct["v"] = pct
+                            elapsed = int(time.time() - _start_time)
+                            try:
+                                await edit_msg(chat_id, status_id,
+                                    f"⏳ YouTube video download হচ্ছে... ({m.group(1)}–{m.group(2)})\n📊 {pct}% | ⏱️ {elapsed}s")
+                            except Exception:
+                                pass
+
+            async def _read_stderr():
+                while True:
+                    line = await proc.stderr.readline()
+                    if not line:
+                        break
+                    stderr_lines.append(line)
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(_read_stdout(), _read_stderr(), proc.wait()),
+                    timeout=180
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                last_err_tail = "timeout"
+                continue
+
+            err_tail = b"".join(stderr_lines).decode(errors="ignore")[-400:]
+            if proc.returncode == 0 and os.path.exists(raw_path):
+                dl_ok = True
+                break
+            last_err_tail = err_tail
+            transient = any(s in err_tail for s in [
+                "SSL", "EOF occurred", "ConnectionReset", "Connection reset",
+                "TimeoutError", "Temporary failure"
+            ])
+            logger.warning(f"[cut-yt] yt-dlp attempt {attempt}/{MAX_YTDLP_ATTEMPTS} failed"
+                            f"{' (transient, retrying)' if transient and attempt < MAX_YTDLP_ATTEMPTS else ''}: {err_tail}")
+            if not transient:
+                break
+            if os.path.exists(raw_path):
+                os.remove(raw_path)
             if status_id:
-                if "sign in" in err_tail.lower() or "bot" in err_tail.lower():
-                    await edit_msg(chat_id, status_id, "❌ YouTube bot-detection block করেছে — YT_COOKIES env var set করা লাগবে।")
+                try:
+                    await edit_msg(chat_id, status_id,
+                        f"⚠️ Network সমস্যা — আবার চেষ্টা হচ্ছে ({attempt}/{MAX_YTDLP_ATTEMPTS})...")
+                except Exception:
+                    pass
+            await asyncio.sleep(2)
+
+        if not dl_ok:
+            logger.warning(f"[cut-yt] yt-dlp all attempts failed: {last_err_tail}")
+            if status_id:
+                if "sign in" in last_err_tail.lower() or "confirm you" in last_err_tail.lower():
+                    await edit_msg(chat_id, status_id, "❌ YouTube bot-detection block করেছে — YT_COOKIES ঠিক আছে কিনা দেখো (expire হয়ে থাকতে পারে)।")
+                elif "SSL" in last_err_tail or "EOF occurred" in last_err_tail:
+                    await edit_msg(chat_id, status_id, "❌ Network/SSL সমস্যা — কয়েকবার চেষ্টা করেও download হয়নি। একটু পরে আবার চেষ্টা করো।")
                 else:
                     await edit_msg(chat_id, status_id, "❌ Video download ব্যর্থ হয়েছে — link ঠিক আছে কিনা দেখো।")
             return
 
+        elapsed = int(time.time() - _start_time)
         if status_id:
-            await edit_msg(chat_id, status_id, f"✂️ Cut করা হচ্ছে... ({duration}s)")
+            await edit_msg(chat_id, status_id, f"✂️ Cut করা হচ্ছে... ({duration}s) | ⏱️ মোট {elapsed}s")
 
         # ffmpeg trims the padded download down to the EXACT requested
         # range (-ss relative to the padded clip start).
@@ -9487,18 +9564,47 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
 
         out_size = os.path.getsize(out_path)
         if out_size > 50 * 1024 * 1024:
+            # 2026-09-13: no pre-download quality cap anymore (max quality
+            # requested) -- so a too-big result is handled here instead,
+            # by re-encoding down (scale+bitrate cap) until it fits, rather
+            # than failing outright on the first oversized attempt.
             if status_id:
                 await edit_msg(chat_id, status_id,
-                    f"❌ Cut করা video {out_size/1024/1024:.1f}MB — Telegram bot-এর 50MB limit-এর বেশি। "
-                    f"ছোট time range দিয়ে আবার চেষ্টা করো।")
-            return
+                    f"⚠️ {out_size/1024/1024:.1f}MB — 50MB limit-এর জন্য quality কমিয়ে আবার encode হচ্ছে...")
+            for scale_h in (720, 480, 360):
+                retry_path = os.path.join(work_dir, f"retry_{scale_h}.mp4")
+                retry_cmd = [
+                    "ffmpeg", "-y", "-i", raw_path,
+                    "-ss", str(ss_in_clip), "-t", str(duration),
+                    "-vf", f"scale=-2:{scale_h}",
+                    "-c:v", "libx264", "-crf", "28", "-preset", "fast",
+                    "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+                    retry_path
+                ]
+                rproc = await asyncio.create_subprocess_exec(
+                    *retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                await asyncio.wait_for(rproc.communicate(), timeout=180)
+                if rproc.returncode == 0 and os.path.exists(retry_path):
+                    retry_size = os.path.getsize(retry_path)
+                    if retry_size <= 50 * 1024 * 1024:
+                        out_path = retry_path
+                        out_size = retry_size
+                        break
+            if out_size > 50 * 1024 * 1024:
+                if status_id:
+                    await edit_msg(chat_id, status_id,
+                        f"❌ কমপ্রেস করেও {out_size/1024/1024:.1f}MB — 50MB-এর নিচে আনা যায়নি। "
+                        f"ছোট time range দিয়ে আবার চেষ্টা করো।")
+                return
 
         if status_id:
             await edit_msg(chat_id, status_id, "📤 পাঠানো হচ্ছে...")
         with open(out_path, "rb") as f:
             video_bytes = f.read()
+        total_elapsed = int(time.time() - _start_time)
         await send_document(chat_id, video_bytes, f"cut_{m.group(1).replace(':','.')}-{m.group(2).replace(':','.')}.mp4",
-            caption=f"✂️ {m.group(1)}–{m.group(2)} ({duration}s)", mime_type="video/mp4")
+            caption=f"✂️ {m.group(1)}–{m.group(2)} ({duration}s) | ⏱️ {total_elapsed}s | 📦 {out_size/1024/1024:.1f}MB", mime_type="video/mp4")
         if status_id:
             try:
                 await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_id})
