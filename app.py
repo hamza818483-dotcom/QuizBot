@@ -9455,6 +9455,15 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
                 # instead of hanging until our outer 180s timeout.
                 "--force-ipv4", "--retries", "5", "--fragment-retries", "5",
                 "--socket-timeout", "30",
+                # 2026-09-13 ROOT CAUSE FIX: as of 2026 YouTube requires a
+                # JS runtime (yt-dlp's EJS system) to solve the nsig/
+                # signature challenge -- without it, yt-dlp signs the media
+                # URL wrong and YouTube aborts mid-download, which surfaced
+                # as the SSL/EOF errors above (misleading -- real cause was
+                # missing JS runtime, not network flakiness). Deno is now
+                # installed in the Docker image; --js-runtimes makes the
+                # choice explicit instead of relying on autodetection.
+                "--js-runtimes", "deno",
             ]
             if cookies_path:
                 cmd += ["--cookies", cookies_path]
@@ -9513,7 +9522,7 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
                 last_err_tail = "timeout"
                 continue
 
-            err_tail = b"".join(stderr_lines).decode(errors="ignore")[-400:]
+            err_tail = b"".join(stderr_lines).decode(errors="ignore")[-2000:]
             if proc.returncode == 0 and os.path.exists(raw_path):
                 dl_ok = True
                 break
@@ -9537,13 +9546,20 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
             await asyncio.sleep(2)
 
         if not dl_ok:
-            logger.warning(f"[cut-yt] yt-dlp all attempts failed: {last_err_tail}")
-            if status_id:
-                if "sign in" in last_err_tail.lower() or "confirm you" in last_err_tail.lower():
+            logger.warning(f"[cut-yt] yt-dlp all attempts failed. Full last stderr:\n{last_err_tail}")
+            ll = last_err_tail.lower()
+            if "no supported javascript runtime" in ll or "nsig extraction failed" in ll:
+                logger.error("[cut-yt] ROOT CAUSE: JS runtime (Deno) not detected by yt-dlp — check Dockerfile deno install")
+                if status_id:
+                    await edit_msg(chat_id, status_id, "❌ yt-dlp-এর JS runtime (Deno) কাজ করছে না — admin-কে জানাও।")
+            elif "sign in" in ll or "confirm you" in ll:
+                if status_id:
                     await edit_msg(chat_id, status_id, "❌ YouTube bot-detection block করেছে — YT_COOKIES ঠিক আছে কিনা দেখো (expire হয়ে থাকতে পারে)।")
-                elif "SSL" in last_err_tail or "EOF occurred" in last_err_tail:
+            elif "ssl" in ll or "eof occurred" in ll:
+                if status_id:
                     await edit_msg(chat_id, status_id, "❌ Network/SSL সমস্যা — কয়েকবার চেষ্টা করেও download হয়নি। একটু পরে আবার চেষ্টা করো।")
-                else:
+            else:
+                if status_id:
                     await edit_msg(chat_id, status_id, "❌ Video download ব্যর্থ হয়েছে — link ঠিক আছে কিনা দেখো।")
             return
 

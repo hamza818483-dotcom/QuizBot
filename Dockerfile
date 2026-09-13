@@ -34,7 +34,19 @@ RUN pip install --no-cache-dir -r requirements.txt
 # (extraction failures, wrongly-blamed as network/SSL errors). requirements.txt
 # pins a version at write-time; this always overrides it with whatever is
 # newest when the image is built.
-RUN pip install --no-cache-dir -U yt-dlp
+RUN pip install --no-cache-dir -U yt-dlp yt-dlp-ejs
+# 2026-09-13 ROOT CAUSE FIX for the observed 'SSL: UNEXPECTED_EOF_
+# WHILE_READING' errors on /cut <yt-link>: as of 2026, YouTube extraction
+# requires a JS runtime (yt-dlp's "EJS" system) to solve the nsig/
+# signature challenge. Without one, yt-dlp still LOOKS like it works
+# (extracts title/formats fine) but signs the actual media URL wrong --
+# YouTube then aborts that connection mid-download, which surfaces as an
+# SSL/EOF error even though the real cause is a missing JS runtime, not
+# network flakiness. Deno is yt-dlp's officially recommended runtime.
+# Docs: https://github.com/yt-dlp/yt-dlp/wiki/EJS
+RUN curl -fsSL https://deno.land/install.sh | sh -s -- -y \
+    && ln -sf /root/.deno/bin/deno /usr/local/bin/deno
+ENV PATH="/root/.deno/bin:${PATH}"
 # Rebuild Pillow from source against system libraqm so raqm (complex script
 # shaping — needed for correct Bengali conjuncts) is actually linked in;
 # prebuilt PyPI wheels ship without raqm. If this ever fails to build, the
