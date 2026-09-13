@@ -9502,15 +9502,12 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
                 # instead of hanging until our outer 180s timeout.
                 "--force-ipv4", "--retries", "5", "--fragment-retries", "5",
                 "--socket-timeout", "30",
-                # 2026-09-13 ROOT CAUSE FIX: as of 2026 YouTube requires a
-                # JS runtime (yt-dlp's EJS system) to solve the nsig/
-                # signature challenge -- without it, yt-dlp signs the media
-                # URL wrong and YouTube aborts mid-download, which surfaced
-                # as the SSL/EOF errors above (misleading -- real cause was
-                # missing JS runtime, not network flakiness). Deno is now
-                # installed in the Docker image; --js-runtimes makes the
-                # choice explicit instead of relying on autodetection.
-                "--js-runtimes", "deno",
+                # 2026-09-13 UPDATED: switched from a local Deno JS runtime
+                # to yt-dlp's remote EJS component (fetched from GitHub) --
+                # solves the same nsig/signature challenge without needing
+                # Deno installed/on PATH in the image at all, so it's one
+                # less moving part than --js-runtimes deno.
+                "--remote-components", "ejs:github",
             ]
             # 2026-09-13 (user request): actual root cause confirmed to be
             # HuggingFace Space FREE TIER's outbound network to YouTube's
@@ -9618,9 +9615,9 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
             logger.warning(f"[cut-yt] yt-dlp all attempts failed. Full last stderr:\n{last_err_tail}")
             ll = last_err_tail.lower()
             if "no supported javascript runtime" in ll or "nsig extraction failed" in ll:
-                logger.error("[cut-yt] ROOT CAUSE: JS runtime (Deno) not detected by yt-dlp — check Dockerfile deno install")
+                logger.error("[cut-yt] ROOT CAUSE: EJS remote component (ejs:github) not working — check network access to GitHub from container")
                 if status_id:
-                    await edit_msg(chat_id, status_id, "❌ yt-dlp-এর JS runtime (Deno) কাজ করছে না — admin-কে জানাও।")
+                    await edit_msg(chat_id, status_id, "❌ yt-dlp-এর signature solver কাজ করছে না — admin-কে জানাও।")
             elif "sign in" in ll or "confirm you" in ll:
                 if status_id:
                     await edit_msg(chat_id, status_id, "❌ YouTube bot-detection block করেছে — YT_COOKIES ঠিক আছে কিনা দেখো (expire হয়ে থাকতে পারে)।")

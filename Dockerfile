@@ -36,18 +36,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # pins a version at write-time; this always overrides it with whatever is
 # newest when the image is built.
 RUN pip install --no-cache-dir -U yt-dlp yt-dlp-ejs
-# 2026-09-13 ROOT CAUSE FIX for the observed 'SSL: UNEXPECTED_EOF_
-# WHILE_READING' errors on /cut <yt-link>: as of 2026, YouTube extraction
-# requires a JS runtime (yt-dlp's "EJS" system) to solve the nsig/
-# signature challenge. Without one, yt-dlp still LOOKS like it works
-# (extracts title/formats fine) but signs the actual media URL wrong --
-# YouTube then aborts that connection mid-download, which surfaces as an
-# SSL/EOF error even though the real cause is a missing JS runtime, not
-# network flakiness. Deno is yt-dlp's officially recommended runtime.
+# 2026-09-13 UPDATED: no longer installing Deno -- yt-dlp's
+# --remote-components ejs:github fetches the EJS solver from GitHub at
+# runtime instead, which solves the same nsig/signature challenge as the
+# Deno JS runtime did, without needing a JS runtime installed/on PATH in
+# this image. Simpler build, one less moving part to keep updated.
 # Docs: https://github.com/yt-dlp/yt-dlp/wiki/EJS
-RUN curl -fsSL https://deno.land/install.sh | sh -s -- -y \
-    && ln -sf /root/.deno/bin/deno /usr/local/bin/deno
-ENV PATH="/root/.deno/bin:${PATH}"
 
 # 2026-09-13 (user request): free workaround for HF Space FREE TIER's
 # unstable outbound connection to YouTube's CDN (confirmed root cause of
