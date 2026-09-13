@@ -9434,8 +9434,20 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
         ytdlp_cmd = [
             "yt-dlp", "--no-playlist", "-f", "bv*[height<=720]+ba/b[height<=720]",
             "--download-sections", section, "--force-keyframes-at-cuts",
-            "-o", raw_path, yt_url
         ]
+        # 2026-09-13 (user request): YouTube frequently blocks server IPs
+        # with "Sign in to confirm you're not a bot" without cookies.
+        # YT_COOKIES env var holds the exported cookies.txt content
+        # (Netscape format) as plain text -- written to a temp file per
+        # request since yt-dlp only accepts a file path, not raw content.
+        yt_cookies_content = os.environ.get("YT_COOKIES")
+        cookies_path = None
+        if yt_cookies_content:
+            cookies_path = os.path.join(work_dir, "cookies.txt")
+            with open(cookies_path, "w", encoding="utf-8") as cf:
+                cf.write(yt_cookies_content)
+            ytdlp_cmd += ["--cookies", cookies_path]
+        ytdlp_cmd += ["-o", raw_path, yt_url]
         proc = await asyncio.create_subprocess_exec(
             *ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
@@ -9444,7 +9456,10 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
             err_tail = (stderr_b or b"").decode(errors="ignore")[-400:]
             logger.warning(f"[cut-yt] yt-dlp failed: {err_tail}")
             if status_id:
-                await edit_msg(chat_id, status_id, "❌ Video download ব্যর্থ হয়েছে — link ঠিক আছে কিনা দেখো।")
+                if "sign in" in err_tail.lower() or "bot" in err_tail.lower():
+                    await edit_msg(chat_id, status_id, "❌ YouTube bot-detection block করেছে — YT_COOKIES env var set করা লাগবে।")
+                else:
+                    await edit_msg(chat_id, status_id, "❌ Video download ব্যর্থ হয়েছে — link ঠিক আছে কিনা দেখো।")
             return
 
         if status_id:
