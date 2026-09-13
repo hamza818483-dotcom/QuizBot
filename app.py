@@ -9465,6 +9465,17 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
                 # choice explicit instead of relying on autodetection.
                 "--js-runtimes", "deno",
             ]
+            # 2026-09-13 (user request): actual root cause confirmed to be
+            # HuggingFace Space FREE TIER's outbound network to YouTube's
+            # CDN being unstable (SSL EOF mid-handshake, even on the very
+            # first webpage/API fetch, on every retry) -- a hosting-infra
+            # limitation, not something fixable in code. YT_PROXY env var
+            # lets the person route yt-dlp through an external proxy
+            # (http://, https://, or socks5://...) if they have one, as a
+            # workaround until/unless they upgrade tier.
+            yt_proxy = os.environ.get("YT_PROXY")
+            if yt_proxy:
+                cmd += ["--proxy", yt_proxy]
             if cookies_path:
                 cmd += ["--cookies", cookies_path]
             cmd += ["-o", raw_path, yt_url]
@@ -9557,7 +9568,9 @@ async def handle_cut_youtube_command(msg: dict, yt_url: str):
                     await edit_msg(chat_id, status_id, "❌ YouTube bot-detection block করেছে — YT_COOKIES ঠিক আছে কিনা দেখো (expire হয়ে থাকতে পারে)।")
             elif "ssl" in ll or "eof occurred" in ll:
                 if status_id:
-                    await edit_msg(chat_id, status_id, "❌ Network/SSL সমস্যা — কয়েকবার চেষ্টা করেও download হয়নি। একটু পরে আবার চেষ্টা করো।")
+                    proxy_hint = "" if os.environ.get("YT_PROXY") else " (YT_PROXY env var দিয়ে proxy set করা যায়)"
+                    await edit_msg(chat_id, status_id,
+                        f"❌ Network/SSL সমস্যা — hosting-এর outbound connection অস্থির{proxy_hint}। কয়েকবার চেষ্টা করেও হয়নি।")
             else:
                 if status_id:
                     await edit_msg(chat_id, status_id, "❌ Video download ব্যর্থ হয়েছে — link ঠিক আছে কিনা দেখো।")
