@@ -1028,6 +1028,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         # (part_num, link, count, topic) tuple shape.
         master_msg_id = None
         master_chat_id_for_edit = channel_id
+        master_is_photo = False
 
         def _live_master_summary_text() -> str:
             pending_links = list(batch_links)
@@ -1038,15 +1039,29 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links, subject=subject or "MCQ")
 
         try:
-            master_r = await tg_post("sendMessage", {
-                "chat_id": channel_id,
-                "text": _live_master_summary_text(),
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-                **({"message_thread_id": thread_id} if thread_id else {}),
-            })
+            cover_bytes = await _generate_lms_cover_image(subject or "MCQ", exam_title or "MCQ")
+            caption_txt = _live_master_summary_text()
+            if cover_bytes and len(caption_txt) <= 1024:
+                master_r = await send_photo(
+                    channel_id, cover_bytes,
+                    caption=caption_txt,
+                    message_thread_id=thread_id or None,
+                )
+                master_is_photo_ok = True
+            else:
+                if cover_bytes and len(caption_txt) > 1024:
+                    logger.warning("[LMS-Send] master summary too long for photo caption (>1024) — falling back to text message")
+                master_r = await tg_post("sendMessage", {
+                    "chat_id": channel_id,
+                    "text": caption_txt,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                    **({"message_thread_id": thread_id} if thread_id else {}),
+                })
+                master_is_photo_ok = False
             if master_r.get("ok"):
                 master_msg_id = master_r["result"]["message_id"]
+                master_is_photo = master_is_photo_ok
                 try:
                     await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": master_msg_id, "disable_notification": True})
                 except Exception as e:
@@ -1085,7 +1100,10 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job["pct"] = int((b_idx + 1) * 100 / total_batches) if total_batches else 100
             if master_msg_id:
                 try:
-                    await edit_msg(master_chat_id_for_edit, master_msg_id, _live_master_summary_text())
+                    if master_is_photo:
+                        await edit_msg_caption(master_chat_id_for_edit, master_msg_id, _live_master_summary_text())
+                    else:
+                        await edit_msg(master_chat_id_for_edit, master_msg_id, _live_master_summary_text())
                 except Exception as e:
                     logger.warning(f"[LMS-Send] master summary live-edit failed: {e}")
             if dm_msg_id:
@@ -12101,6 +12119,93 @@ async def _apply_saved_watermark(pdf_bytes: bytes) -> bytes:
     except Exception as e:
         logger.warning(f"[AutoWatermark] apply failed: {e}")
     return pdf_bytes
+
+async def _generate_lms_cover_image(subject: str, exam_title: str, chapter: str = "") -> bytes | None:
+    """Fixed-template 16:9 cover image for the LMS master summary post —
+    only the Subject/Chapter/Exam title text changes call to call, the
+    layout/design/colors stay constant. Rendered via the same Playwright
+    instance used for PDF generation, screenshotted instead of printed."""
+    subj_txt = _html_escape(subject or "MCQ")
+    exam_txt = _html_escape(exam_title or "")
+    chap_txt = _html_escape(chapter or "")
+    html_s = f"""<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">
+<style>
+  @font-face {{ font-family: 'HindSiliguri'; src: local('Hind Siliguri'); }}
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  html, body {{ width:1280px; height:720px; overflow:hidden; }}
+  body {{
+    font-family: 'HindSiliguri', 'Noto Sans Bengali', sans-serif;
+    width:1280px; height:720px;
+    background: linear-gradient(135deg, #7f1d1d 0%, #991b1b 45%, #b91c1c 100%);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    position:relative; color:#fff; text-align:center; padding:60px;
+  }}
+  .brand {{
+    position:absolute; top:40px; left:50%; transform:translateX(-50%);
+    font-size:30px; font-weight:700; letter-spacing:4px; opacity:0.9;
+  }}
+  .subject {{
+    font-size:34px; font-weight:600; background:rgba(255,255,255,0.15);
+    padding:10px 34px; border-radius:40px; margin-bottom:34px;
+  }}
+  .exam {{
+    font-size:56px; font-weight:800; line-height:1.25; max-width:1080px;
+    text-shadow: 0 3px 10px rgba(0,0,0,0.25);
+  }}
+  .chapter {{
+    font-size:30px; font-weight:500; margin-top:28px; opacity:0.92;
+    max-width:1000px;
+  }}
+  .footer {{
+    position:absolute; bottom:40px; font-size:24px; font-weight:600;
+    letter-spacing:2px; opacity:0.85;
+  }}
+</style></head>
+<body>
+  <div class="brand">🟥 ATLAS</div>
+  <div class="subject">{subj_txt}</div>
+  <div class="exam">{exam_txt}</div>
+  {f'<div class="chapter">{chap_txt}</div>' if chap_txt else ''}
+  <div class="footer">Atlascourses.com</div>
+</body></html>"""
+
+    async with _PDF_SEMAPHORE:
+        import tempfile
+        temp_path = None
+        page = None
+        try:
+            for attempt in range(3):
+                try:
+                    browser = await _get_pw_browser()
+                    page = await asyncio.wait_for(browser.new_page(viewport={"width": 1280, "height": 720}), timeout=15)
+                    break
+                except Exception as e:
+                    logger.warning(f"[LMS-Cover] new_page failed (attempt {attempt+1}/3): {e}")
+                    await asyncio.sleep(0.5 * (attempt + 1))
+            if page is None:
+                return None
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
+                f.write(html_s)
+                temp_path = f.name
+            await page.goto(f"file://{os.path.abspath(temp_path)}", wait_until="networkidle", timeout=15000)
+            await asyncio.wait_for(page.evaluate("document.fonts.ready"), timeout=10)
+            img_bytes = await page.screenshot(type="jpeg", quality=90)
+            return img_bytes
+        except Exception as e:
+            logger.warning(f"[LMS-Cover] generation failed: {e}")
+            return None
+        finally:
+            try:
+                if page:
+                    await page.close()
+            except Exception:
+                pass
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+
 
 async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = False, page_width_mm: int = 420) -> bytes:
     """Playwright-based HTML->PDF, ported 1:1 from AtlasMasterBot's
