@@ -1133,9 +1133,13 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             # (inside the forum topic) and channel.
             if batch_links:
                 sep = "▬▬▬▬▬▬▬▬▬▬"
+                subj_txt = _html_escape(subject or "MCQ")
+                exam_txt = _html_escape(exam_title or "MCQ")
                 header = (
-                    f"🟥{_html_escape(subject or 'MCQ')}\n"
-                    f"◼️{_html_escape(exam_title or 'MCQ')}\n"
+                    f"🟥<b>{subj_txt}</b>\n"
+                    f"{sep}\n"
+                    f"◼️<b>{exam_txt}</b>\n"
+                    f"{sep}\n"
                     f"🌟Total Topic: {len(batch_links)}\n"
                     f"📌Total MCQ: {sent_total}"
                 )
@@ -1149,11 +1153,31 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     )
                     blocks.append(f"<blockquote>{quote_body}</blockquote>")
                 summary_text = f"\n{sep}\n".join(blocks)
+                # Final summary is now a SEPARATE message that replies to the
+                # master (pinned) summary post -- not an in-place edit of it --
+                # so the master post stays as the pinned index and this final
+                # message links back to it via a reply.
                 if master_msg_id:
+                    if all(link for _p, link, _c, *_r in batch_links):
+                        summary_text += (
+                            f"\n{sep}\n"
+                            f"🔗Summary Post:\n{_html_escape(_get_first_poll_link(channel_id, master_msg_id))}"
+                        )
+                    final_data = {
+                        "chat_id": channel_id, "text": summary_text,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                        "reply_to_message_id": master_msg_id,
+                    }
+                    if thread_id:
+                        final_data["message_thread_id"] = thread_id
                     try:
-                        await edit_msg(master_chat_id_for_edit, master_msg_id, summary_text)
+                        r = await tg_post("sendMessage", final_data)
+                        if not r.get("ok") and thread_id:
+                            final_data.pop("message_thread_id", None)
+                            await tg_post("sendMessage", final_data)
                     except Exception as e:
-                        logger.warning(f"[LMS-Send] final master summary edit failed: {e}")
+                        logger.warning(f"[LMS-Send] final summary reply send failed: {e}")
                 else:
                     summary_data = {
                         "chat_id": channel_id, "text": summary_text,
