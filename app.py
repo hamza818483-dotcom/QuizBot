@@ -1156,14 +1156,6 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     f"📌Total MCQ: {sent_total}"
                 )
                 blocks = [header]
-                for _part_n, link, count, batch_topic, quiz_link, exam_link in batch_links:
-                    quote_body = (
-                        f"✅{_html_escape(batch_topic)}\n\n"
-                        f"🔗First Poll Link:\n{_html_escape(link)}\n\n"
-                        f"🔗Quiz Link:\n{_html_escape(quiz_link)}\n\n"
-                        f"🔗Website Exam Link:\n{_html_escape(exam_link)}"
-                    )
-                    blocks.append(f"<blockquote>{quote_body}</blockquote>")
                 if pdf_links:
                     pdf_lines = "\n".join(
                         f"📄{_html_escape(lbl)}:\n{_html_escape(lnk)}" for lbl, lnk in pdf_links
