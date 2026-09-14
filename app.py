@@ -1168,7 +1168,15 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                             f"📄{_html_escape(lbl)}:\n{_html_escape(lnk)}" for lbl, lnk in pdf_links
                         ))
                     if all(link for _p, link, _c, *_r in batch_links):
-                        quote_lines.append(f"🔗Summary Post:\n{_html_escape(_get_first_poll_link(channel_id, master_msg_id))}")
+                        # LMS names batch-size-split parts "... (Part-XX)" —
+                        # anything else came from topic-wise splitting.
+                        is_part_split = all(re.search(r"\(Part-\d+\)\s*$", (b.get("topic") or "")) for b in batches) if batches else False
+                        links_label = "সকল পার্টের লিংক:" if is_part_split else "সকল টপিকের লিংক:"
+                        link_lines = "\n".join(
+                            f"🔗{_html_escape(batch_topic)}:\n{_html_escape(link)}"
+                            for _p, link, _c, batch_topic, *_r in batch_links
+                        )
+                        quote_lines.append(f"{links_label}\n\n{link_lines}")
                     if quote_lines:
                         summary_text += f"\n{sep}\n<blockquote>" + "\n\n".join(quote_lines) + "</blockquote>"
                     final_data = {
