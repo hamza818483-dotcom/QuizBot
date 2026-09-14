@@ -1034,7 +1034,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 topic_i = (batches[i].get("topic") or "Special MCQ By ATLAS")
                 count_i = len(batches[i].get("mcqs") or [])
                 pending_links.append((i + 1, "⏳ চলমান..." if i == len(batch_links) else "", count_i, topic_i))
-            return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links)
+            return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links, subject=subject or "MCQ")
 
         try:
             master_r = await tg_post("sendMessage", {
@@ -8804,7 +8804,8 @@ def csv_get_ending_message(topic: str, count: int, first_link: str = "", ask_sco
     return base
 
 def csv_get_master_summary(topic: str, total: int,
-                            total_batches: int, batch_links: list) -> str:
+                            total_batches: int, batch_links: list,
+                            subject: str = None) -> str:
     """
     batch_links = [(part_num, link, count, batch_topic), ...]
     link states: "" (pending, not started yet -- no link line shown),
@@ -8817,14 +8818,28 @@ def csv_get_master_summary(topic: str, total: int,
         {link line, only if link is non-empty}
     Last 3 lines (Exam Batch/Whatsapp/Website) wrapped in an HTML
     <blockquote> -- caller MUST send/edit this text with parse_mode=HTML.
+
+    subject (optional, LMS-send path only): when given, the header shows
+    subject and exam/topic title as two bold, line-separated lines instead
+    of the single plain line other /csv callers use.
     """
     main_text = topic or "Special MCQ By ATLAS"
     sep = "▬▬▬▬▬▬▬▬▬▬"
-    text = (
-        f"🟥{main_text}\n"
-        f"🌟মোট প্রশ্ন: {total}\n"
-        f"📦 মোট টপিক সংখ্যা: {total_batches}\n\n"
-    )
+    if subject:
+        text = (
+            f"🟥<b>{_html_escape(subject)}</b>\n"
+            f"{sep}\n"
+            f"◼️<b>{_html_escape(main_text)}</b>\n"
+            f"{sep}\n"
+            f"🌟মোট প্রশ্ন: {total}\n"
+            f"📦 মোট টপিক সংখ্যা: {total_batches}\n\n"
+        )
+    else:
+        text = (
+            f"🟥{main_text}\n"
+            f"🌟মোট প্রশ্ন: {total}\n"
+            f"📦 মোট টপিক সংখ্যা: {total_batches}\n\n"
+        )
     for entry in batch_links:
         part_n, link, count = entry[0], entry[1], entry[2]
         batch_topic = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
