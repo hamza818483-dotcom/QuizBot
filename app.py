@@ -1032,7 +1032,8 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             pending_links = list(batch_links)
             for i in range(len(pending_links), total_batches):
                 topic_i = (batches[i].get("topic") or "Special MCQ By ATLAS")
-                pending_links.append((i + 1, "⏳ চলমান..." if i == len(batch_links) else "", 0, topic_i))
+                count_i = len(batches[i].get("mcqs") or [])
+                pending_links.append((i + 1, "⏳ চলমান..." if i == len(batch_links) else "", count_i, topic_i))
             return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links)
 
         try:
