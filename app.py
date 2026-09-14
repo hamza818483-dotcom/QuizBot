@@ -18,6 +18,7 @@ import traceback
 import asyncio
 import time
 import random
+import math
 import string
 import re
 import html as _html_mod
@@ -1107,23 +1108,35 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         if job.get("cancel_requested"):
             job["status"] = "cancelled"
         else:
-            # One merged PDF covering every MCQ from every topic/part batch,
-            # sent right before the final master summary edit — same pattern
-            # as /csv's own combined-PDF step. Sent for both group and
-            # channel (channel was previously skipped).
+            # PDFs split 15-MCQs-per-file, named by part, sent after all
+            # polls finish (one giant merged PDF was unreliable/silently
+            # failing for large multi-part sends — chunking avoids that).
+            pdf_links = []  # (chunk_label, t.me link) — for final summary
             if all_mcqs:
-                try:
-                    merged_pdf_bytes = await _generate_style1_pdf_guaranteed(all_mcqs, exam_title or "MCQ", channel_id)
-                    if merged_pdf_bytes:
-                        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", exam_title or "MCQ")[:50] or "ATLAS_Sheet"
-                        merged_caption = f"📖 ATLAS Practice Sheet\n🎯 {exam_title or 'MCQ'}\n📝 মোট MCQ: {sent_total}\n🚀 Visit: Atlascourses.com"
-                        await send_document(
-                            channel_id, merged_pdf_bytes, f"{safe_title}_full_style1.pdf",
-                            caption=merged_caption,
-                            message_thread_id=thread_id,
-                        )
-                except Exception as e:
-                    logger.warning(f"[LMS-Send] merged PDF send failed: {e}")
+                CHUNK_SIZE = 15
+                total_chunks = max(1, math.ceil(len(all_mcqs) / CHUNK_SIZE))
+                safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", exam_title or "MCQ")[:50] or "ATLAS_Sheet"
+                for c_idx in range(total_chunks):
+                    chunk = all_mcqs[c_idx * CHUNK_SIZE:(c_idx + 1) * CHUNK_SIZE]
+                    if not chunk:
+                        continue
+                    chunk_label = f"Part-{c_idx + 1:02d}"
+                    chunk_topic = f"{exam_title or 'MCQ'} ({chunk_label})"
+                    try:
+                        chunk_pdf_bytes = await _generate_style1_pdf_guaranteed(chunk, chunk_topic, channel_id)
+                        if chunk_pdf_bytes:
+                            chunk_caption = f"📖 ATLAS Practice Sheet\n🎯 {chunk_topic}\n📝 মোট MCQ: {len(chunk)}\n🚀 Visit: Atlascourses.com"
+                            doc_r = await send_document(
+                                channel_id, chunk_pdf_bytes, f"{safe_title}_{chunk_label}_style1.pdf",
+                                caption=chunk_caption,
+                                message_thread_id=thread_id,
+                            )
+                            if doc_r and doc_r.get("ok"):
+                                doc_msg_id = doc_r.get("result", {}).get("message_id")
+                                if doc_msg_id:
+                                    pdf_links.append((chunk_label, _get_first_poll_link(channel_id, doc_msg_id)))
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send] chunk PDF '{chunk_label}' failed: {e}")
 
             # Master summary — header once (Exam Name / Total Topics / Total
             # MCQ), then one Telegram blockquote per topic (each topic's
@@ -1153,6 +1166,11 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                         f"🔗Website Exam Link:\n{_html_escape(exam_link)}"
                     )
                     blocks.append(f"<blockquote>{quote_body}</blockquote>")
+                if pdf_links:
+                    pdf_lines = "\n".join(
+                        f"📄{_html_escape(lbl)}:\n{_html_escape(lnk)}" for lbl, lnk in pdf_links
+                    )
+                    blocks.append(f"<blockquote>{pdf_lines}</blockquote>")
                 summary_text = f"\n{sep}\n".join(blocks)
                 # Final summary is now a SEPARATE message that replies to the
                 # master (pinned) summary post -- not an in-place edit of it --
