@@ -1156,22 +1156,21 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     f"📌Total MCQ: {sent_total}"
                 )
                 blocks = [header]
-                if pdf_links:
-                    pdf_lines = "\n".join(
-                        f"📄{_html_escape(lbl)}:\n{_html_escape(lnk)}" for lbl, lnk in pdf_links
-                    )
-                    blocks.append(f"<blockquote>{pdf_lines}</blockquote>")
                 summary_text = f"\n{sep}\n".join(blocks)
                 # Final summary is now a SEPARATE message that replies to the
                 # master (pinned) summary post -- not an in-place edit of it --
                 # so the master post stays as the pinned index and this final
                 # message links back to it via a reply.
                 if master_msg_id:
+                    quote_lines = []
+                    if pdf_links:
+                        quote_lines.append("\n".join(
+                            f"📄{_html_escape(lbl)}:\n{_html_escape(lnk)}" for lbl, lnk in pdf_links
+                        ))
                     if all(link for _p, link, _c, *_r in batch_links):
-                        summary_text += (
-                            f"\n{sep}\n"
-                            f"🔗Summary Post:\n{_html_escape(_get_first_poll_link(channel_id, master_msg_id))}"
-                        )
+                        quote_lines.append(f"🔗Summary Post:\n{_html_escape(_get_first_poll_link(channel_id, master_msg_id))}")
+                    if quote_lines:
+                        summary_text += f"\n{sep}\n<blockquote>" + "\n\n".join(quote_lines) + "</blockquote>"
                     final_data = {
                         "chat_id": channel_id, "text": summary_text,
                         "parse_mode": "HTML",
