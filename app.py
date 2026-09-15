@@ -776,7 +776,7 @@ def lms_get_ending_message(main_topic: str, part_topic: str, count: int, first_l
     return text
 
 
-async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool, cancel_check: callable = None, subject: str = "", exam_title: str = "", reply_to_message_id: int = None) -> tuple:
+async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool, cancel_check: callable = None, subject: str = "", exam_title: str = "", reply_to_message_id: int = None, is_channel: bool = False) -> tuple:
     """Sends one topic-batch: pre-message (topic name) -> polls (reply to
     pre-msg) -> Style-01 PDF + inline buttons -> ending message. Same shape
     as one /csvS batch iteration. Returns sent poll count. Raises on the
@@ -839,7 +839,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
         btn_kb = await _csv_pre_buttons_no_premium(batch_cache_id)
         pdf_doc_r = await send_document(
             channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
-            caption=csv_get_pdf_caption(topic),
+            caption=csv_get_pdf_caption(topic, is_channel=is_channel),
             message_thread_id=thread_id,
             reply_to_message_id=pre_msg_id
         )
@@ -1083,7 +1083,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             if not mcqs:
                 continue
             try:
-                sent, first_link, batch_cache_id = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check, subject=subject, exam_title=exam_title, reply_to_message_id=master_msg_id)
+                sent, first_link, batch_cache_id = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check, subject=subject, exam_title=exam_title, reply_to_message_id=master_msg_id, is_channel=(chat_type == "channel"))
                 sent_total += sent
                 all_mcqs.extend(mcqs)
                 if first_link:
@@ -1154,49 +1154,46 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 except Exception as e:
                     logger.warning(f"[LMS-Send] merged PDF send failed: {e}")
 
-            # Master summary — header once (Exam Name / Total Topics / Total
-            # MCQ), then one Telegram blockquote per topic (each topic's
-            # First Poll / Quiz / Website Exam links wrapped in its own
-            # <blockquote> so Telegram renders it as a visually distinct
-            # quoted block) — Exam Name is NOT repeated per topic, only in
-            # the header. Sent last, in the same thread/chat, for BOTH group
-            # (inside the forum topic) and channel.
+            # End message = EXACT duplicate of the pinned master summary
+            # content (same header + full per-topic list, A-to-Z, now with
+            # every real link resolved) PLUS a per-topic "First Poll Link +
+            # Website Link" quoted block, PLUS the MediAtlas marketing quote.
+            # Sent as a reply to the pinned master so it links back to it.
             if batch_links:
                 sep = "▬▬▬▬▬▬▬▬▬▬"
-                subj_txt = _html_escape(subject or "MCQ")
-                exam_txt = _html_escape(exam_title or "MCQ")
-                header = (
-                    f"🟥<b>{subj_txt}</b>\n"
-                    f"{sep}\n"
-                    f"◼️<b>{exam_txt}</b>\n"
-                    f"{sep}\n"
-                    f"🌟Total Topic: {len(batch_links)}\n"
-                    f"📌Total MCQ: {sent_total}"
-                )
-                blocks = [header]
-                summary_text = f"\n{sep}\n".join(blocks)
-                # Final summary is now a SEPARATE message that replies to the
-                # master (pinned) summary post -- not an in-place edit of it --
-                # so the master post stays as the pinned index and this final
-                # message links back to it via a reply.
+                summary_text = _live_master_summary_text()
+
+                quote_lines = []
+                if pdf_links:
+                    quote_lines.append("\n".join(
+                        f"📄{_html_escape(lbl)}:\n{_html_escape(lnk)}" for lbl, lnk in pdf_links
+                    ))
+                # Per-topic First Poll Link + Website Link, quoted, separate
+                # from the MediAtlas marketing quote below.
+                link_block_lines = []
+                for _p, link, _c, batch_topic, *rest in batch_links:
+                    exam_link = rest[1] if len(rest) > 1 else ""
+                    line = f"🔰{_html_escape(batch_topic)}"
+                    if link:
+                        line += f"\n🔗First Poll Link:\n{_html_escape(link)}"
+                    if exam_link:
+                        line += f"\n🌐Website Link:\n{_html_escape(exam_link)}"
+                    link_block_lines.append(line)
+                if link_block_lines:
+                    quote_lines.append("\n\n".join(link_block_lines))
+                if quote_lines:
+                    summary_text += f"\n{sep}\n<blockquote>" + "\n\n".join(quote_lines) + "</blockquote>"
+
+                # MediAtlas marketing quote — channel only, same as PDF caption.
+                if chat_type == "channel":
+                    summary_text += (
+                        "\n\n<blockquote>"
+                        "🟦মূলবইয়ের প্রতিটি পেইজ থেকে MCQ প্রাক্টিসের দেড় লক্ষ প্রশ্নের প্যাকেজ বিস্তারিত:\n"
+                        "https://t.me/MediAtlas/7627"
+                        "</blockquote>"
+                    )
+
                 if master_msg_id:
-                    quote_lines = []
-                    if pdf_links:
-                        quote_lines.append("\n".join(
-                            f"📄{_html_escape(lbl)}:\n{_html_escape(lnk)}" for lbl, lnk in pdf_links
-                        ))
-                    if all(link for _p, link, _c, *_r in batch_links):
-                        # LMS names batch-size-split parts "... (Part-XX)" —
-                        # anything else came from topic-wise splitting.
-                        is_part_split = all(re.search(r"\(Part-\d+\)\s*$", (b.get("topic") or "")) for b in batches) if batches else False
-                        links_label = "সকল পার্টের লিংক:" if is_part_split else "সকল টপিকের লিংক:"
-                        link_lines = "\n".join(
-                            f"🔗{_html_escape(batch_topic)}:\n{_html_escape(link)}"
-                            for _p, link, _c, batch_topic, *_r in batch_links
-                        )
-                        quote_lines.append(f"{links_label}\n\n{link_lines}")
-                    if quote_lines:
-                        summary_text += f"\n{sep}\n<blockquote>" + "\n\n".join(quote_lines) + "</blockquote>"
                     final_data = {
                         "chat_id": channel_id, "text": summary_text,
                         "parse_mode": "HTML",
@@ -8798,12 +8795,20 @@ def csv_get_pre_message(main_topic: str, batch_topic: str, count: int, first_lin
         text += f"✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো"
     return text
 
-def csv_get_pdf_caption(topic: str) -> str:
+def csv_get_pdf_caption(topic: str, is_channel: bool = False) -> str:
     topic_text = topic or "Special MCQ By ATLAS"
-    return (
+    text = (
         f"📌Topic:{topic_text}\n"
         f"✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো"
     )
+    if is_channel:
+        text += (
+            "\n\n<blockquote>"
+            "🟦মূলবইয়ের প্রতিটি পেইজ থেকে MCQ প্রাক্টিসের দেড় লক্ষ প্রশ্নের প্যাকেজ বিস্তারিত:\n"
+            "https://t.me/MediAtlas/7627"
+            "</blockquote>"
+        )
+    return text
 
 def csv_get_comment_prompt_message(topic: str, count: int) -> str:
     topic_text = topic or "Special MCQ By ATLAS"
