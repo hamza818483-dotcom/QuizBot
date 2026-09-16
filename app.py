@@ -15307,6 +15307,133 @@ async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> li
         return mcqs
 
 
+def _build_dagano_final_audit_prompt(topic: str, page_nums: list, existing_by_page: dict) -> str:
+    """/dagano's OWN standalone prompt for the final whole-job audit pass
+    -- deliberately SHORT and SEPARATE from the main generation prompt
+    (_build_dagano_prompt_batched), not appended to it. Runs once per
+    3-page block, AFTER every page has already been generated. Main job
+    is finding MISSED marks (marked/highlighted/underlined content that
+    got no MCQ at all) -- wrong-source MCQs are rare but also checked."""
+    existing_lines = []
+    for pn in page_nums:
+        items = existing_by_page.get(pn, [])
+        if not items:
+            existing_lines.append(f"Page {pn}: (no MCQ generated yet)")
+            continue
+        qs = "; ".join(f"Q{i+1}: {(m.get('question') or '')[:120]}" for i, m in enumerate(items))
+        existing_lines.append(f"Page {pn}: {qs}")
+    existing_block = "\n".join(existing_lines)
+    return (
+        f"Topic: {topic}\n"
+        f"These {len(page_nums)} page images (in order: {page_nums}) were already "
+        f"processed for MCQs from marked/highlighted/underlined/boxed content "
+        f"only. Already-generated MCQs per page:\n{existing_block}\n\n"
+        f"Do TWO checks:\n"
+        f"1) MISSED MARKS (main check): look for any marked/highlighted/"
+        f"underlined/boxed/circled/starred line on these pages that has NO "
+        f"MCQ above covering it. For each one found, write a new complete "
+        f"MCQ from it.\n"
+        f"2) WRONG-SOURCE (secondary check): if any MCQ above is clearly "
+        f"NOT from marked content (i.e. was made from plain/unmarked text), "
+        f"or contains a fact not present on its page, output a corrected "
+        f"replacement for it (same page, fixed to match only the actual "
+        f"marked source text).\n\n"
+        f"Output STRICT JSON only, no prose:\n"
+        f'{{"new_mcqs":[{{"page_index":<1-based index into {page_nums}>,'
+        f'"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},'
+        f'"answer":"A/B/C/D","main_explanation":"...","extra_info":"...",'
+        f'"topic_key":"..."}}],'
+        f'"fixed_mcqs":[{{"page_index":<1-based>,"original_question":"<exact '
+        f'Q text from the list above to replace>","question":"...",'
+        f'"options":{{"A":"...","B":"...","C":"...","D":"..."}},'
+        f'"answer":"A/B/C/D","main_explanation":"...","extra_info":"...",'
+        f'"topic_key":"..."}}]}}\n'
+        f"If nothing missed and nothing wrong, return "
+        f'{{"new_mcqs":[],"fixed_mcqs":[]}}. Never invent facts outside '
+        f"these pages."
+    )
+
+
+async def _dagano_final_batch_audit(topic: str, page_block: list) -> dict:
+    """/dagano's MANDATORY final audit -- runs once per 3-page block AFTER
+    the whole job's generation is complete (not conditional, always runs).
+    page_block: list of (page_num, img, mcqs) for up to 3 consecutive
+    pages. Returns {page_num: {"add": [...], "fix": [(orig_q, mcq), ...]}}
+    for the caller to merge into the final results. Own dedicated Gemini
+    multi-image call, independent of the main generation and the
+    conditional 2nd-pass."""
+    page_nums = [pn for pn, _im, _m in page_block]
+    imgs = [im for _pn, im, _m in page_block]
+    existing_by_page = {pn: mcqs for pn, _im, mcqs in page_block}
+    prompt = _build_dagano_final_audit_prompt(topic, page_nums, existing_by_page)
+    try:
+        txt = await _dagano_gemini_raw_multi(imgs, prompt)
+        if not txt:
+            txt = await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+        if not txt:
+            return {}
+        import json as _json
+        cleaned = txt.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+        try:
+            data = _json.loads(cleaned)
+        except Exception:
+            m = re.search(r'\{.*\}', cleaned, re.DOTALL)
+            data = _json.loads(m.group(0)) if m else {}
+        if not isinstance(data, dict):
+            return {}
+
+        result = {}
+
+        def _idx_to_page(idx):
+            try:
+                idx = int(idx)
+            except Exception:
+                return None
+            if 1 <= idx <= len(page_nums):
+                return page_nums[idx - 1]
+            return None
+
+        new_mcqs = data.get("new_mcqs") or []
+        added = 0
+        for m in new_mcqs:
+            if not isinstance(m, dict):
+                continue
+            pn = _idx_to_page(m.get("page_index"))
+            if pn is None:
+                continue
+            m.pop("page_index", None)
+            m["_provider"] = "Gemini"
+            result.setdefault(pn, {"add": [], "fix": []})["add"].append(m)
+            added += 1
+
+        fixed_mcqs = data.get("fixed_mcqs") or []
+        fixed = 0
+        for m in fixed_mcqs:
+            if not isinstance(m, dict):
+                continue
+            pn = _idx_to_page(m.get("page_index"))
+            if pn is None:
+                continue
+            orig_q = (m.get("original_question") or "").strip()
+            m.pop("page_index", None)
+            m.pop("original_question", None)
+            m["_provider"] = "Gemini"
+            result.setdefault(pn, {"add": [], "fix": []})["fix"].append((orig_q, m))
+            fixed += 1
+
+        if added or fixed:
+            logger.info(f"[DaganoFinalAudit] pages {page_nums}: found {added} missed-mark MCQ(s), {fixed} wrong-source fix(es)")
+        return result
+    except Exception as e:
+        logger.warning(f"[DaganoFinalAudit] pages {page_nums} failed, skipping: {e}")
+        return {}
+
+
 async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
     """/dagano's BATCHED generation call -- Gemini primary (own dedicated
     caller with explicit output-token cap), Groq/OpenRouter fallback only
@@ -15570,7 +15697,62 @@ async def dagano_generate_all_pages(
     finally:
         _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
 
-    return [r for r in results_by_idx if r is not None]
+    final_results = [r for r in results_by_idx if r is not None]
+
+    # MANDATORY final audit -- runs once per 3-page block AFTER the whole
+    # job's generation is done, always (not conditional). Finds marked
+    # content that got missed entirely (main goal) and fixes any rare
+    # wrong-source MCQ, without dropping anything.
+    if final_results and not is_cancelled(chat_id):
+        if status_msg_id:
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)) + "\n\n🔍 Final audit চলছে (মিস হওয়া মার্ক খোঁজা হচ্ছে)...",
+                    reply_markup=_cancel_kb(chat_id))
+            except Exception:
+                pass
+        by_page = {pn: (im, mcqs) for pn, im, mcqs in final_results}
+        for block_start in range(0, len(final_results), 3):
+            if is_cancelled(chat_id):
+                break
+            block = final_results[block_start:block_start + 3]
+            try:
+                audit = await _dagano_final_batch_audit(topic, block)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"[DaganoFinalAudit] block starting at {block_start} failed, skipping: {e}")
+                continue
+            for pn, ops in audit.items():
+                if pn not in by_page:
+                    continue
+                im, mcqs = by_page[pn]
+                for orig_q, fixed_m in ops.get("fix", []):
+                    replaced = False
+                    for i, existing in enumerate(mcqs):
+                        if (existing.get("question") or "").strip() == orig_q:
+                            mcqs[i] = fixed_m
+                            replaced = True
+                            break
+                    if not replaced and fixed_m not in mcqs:
+                        mcqs.append(fixed_m)
+                new_ones = ops.get("add", [])
+                if new_ones:
+                    new_ones = _cap_mcq_options(new_ones, 4)
+                    new_ones = _validate_mcq_structure(new_ones)
+                    mcqs.extend(new_ones)
+                by_page[pn] = (im, mcqs)
+                total_mcq_box["n"] = sum(len(m) for _im, m in by_page.values())
+        final_results = [(pn, by_page[pn][0], by_page[pn][1]) for pn, _im, _m in final_results]
+        if status_msg_id:
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)),
+                    reply_markup=_cancel_kb(chat_id))
+            except Exception:
+                pass
+
+    return final_results
 
 
 async def handle_dagano(msg: dict):
