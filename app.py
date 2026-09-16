@@ -8869,12 +8869,12 @@ def csv_get_master_summary(topic: str, total: int,
         part_n, link, count = entry[0], entry[1], entry[2]
         batch_topic = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
         exam_link = entry[5] if len(entry) > 5 and entry[5] else ""
-        text += f"🔰Topic-{part_n:02d}\n📍({batch_topic})({count})\n"
+        block = f"🔰Topic-{part_n:02d}\n📍({batch_topic})({count})"
         if link:
-            text += f"🔗First Poll Link:\n{link}\n"
+            block += f"\n🔗First Poll Link:\n{link}"
         if exam_link:
-            text += f"🌐Website Link:\n{exam_link}\n"
-        text += f"{sep}\n\n"
+            block += f"\n🌐Website Link:\n{exam_link}"
+        text += "<blockquote>" + block + "</blockquote>\n" + f"{sep}\n\n"
     text += (
         "<blockquote>"
         "📌 এটলাসের Exam Batch এ অসংখ্য প্রশ্ন প্রাক্টিসের সুযোগ আছে।\n"
