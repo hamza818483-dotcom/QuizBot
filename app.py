@@ -14749,9 +14749,11 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
     try:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
+            _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
             return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
         if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
             logger.warning("[Dagano] all Gemini keys already known daily-exhausted — skipping straight to Groq")
+            _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
             return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
         from google import genai as gai
         from google.genai import types
@@ -14801,6 +14803,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 if finish_reason is not None and str(finish_reason).upper().find("MAX_TOKENS") >= 0:
                     logger.warning(f"[Dagano] Gemini response hit max_output_tokens (truncated) for key {key[:12]}... -- treating as technical failure, trying next key")
                     continue
+                _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
                 return response.text or ""
             except asyncio.TimeoutError:
                 logger.warning(f"[Dagano] Gemini key {key[:12]}... multi-image call timed out (60s), trying next key")
@@ -14836,9 +14839,11 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 logger.warning(f"[Dagano] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         logger.warning("[Dagano] All Gemini keys exhausted — falling back to Groq vision (first image only)")
+        _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
         return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
     except Exception as e:
         logger.warning(f"[Dagano] Gemini multi-image raw call failed: {e}")
+        _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
         return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
 
 
@@ -15053,8 +15058,9 @@ def _build_dagano_prompt_standalone(topic: str) -> str:
         f"═══════════════════════════════\n"
         f"Before outputting, silently re-check EVERY drafted MCQ against "
         f"all of these, and FIX or DROP any that fail:\n"
-        f"1. Is the question's source line genuinely marked/highlighted/"
-        f"boxed/colored (not plain/original-bold text)?\n"
+        f"1. Is the question's source line genuinely marked — highlighted/"
+        f"colored, underlined, boxed/circled, or has a star/tick/arrow "
+        f"pointing to it (not plain/original-bold text)?\n"
         f"2. Does the question/explanation avoid ALL page-number, roman/"
         f"serial-layout, or source-citation wording (\"as stated on this "
         f"page\", \"বর্ণিত আছে\", \"এই পৃষ্ঠায়\")?\n"
@@ -15186,9 +15192,10 @@ def _build_dagano_prompt_batched(topic: str, n: int) -> str:
         f"Before outputting, silently re-check EVERY drafted MCQ (on its "
         f"own page_index) against all of these, and FIX or DROP any that "
         f"fail:\n"
-        f"1. Is the question's source line genuinely marked/highlighted/"
-        f"boxed/colored on THAT SAME page (not plain/original-bold text, "
-        f"not borrowed from another page_index)?\n"
+        f"1. Is the question's source line genuinely marked — highlighted/"
+        f"colored, underlined, boxed/circled, or has a star/tick/arrow — "
+        f"on THAT SAME page (not plain/original-bold text, not borrowed "
+        f"from another page_index)?\n"
         f"2. Does the question/explanation avoid ALL page-number, roman/"
         f"serial-layout, or source-citation wording (\"as stated on this "
         f"page\", \"বর্ণিত আছে\", \"এই পৃষ্ঠায়\")?\n"
@@ -15257,8 +15264,9 @@ async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> li
             f"exact page image (Topic: {topic}). The first-pass generation "
             f"showed signs of rule violations, so re-verify carefully.\n\n"
             f"For EACH numbered MCQ, FAIL it if ANY of these are true:\n"
-            f"- Its source line is NOT genuinely marked/highlighted/boxed/"
-            f"colored on this page (plain/original-bold text does not count)\n"
+            f"- Its source line is NOT genuinely marked — highlighted/"
+            f"colored, underlined, boxed/circled, or starred/ticked/arrowed "
+            f"— on this page (plain/original-bold text does not count)\n"
             f"- Any fact in question/options/explanation was invented, "
             f"pulled from outside/general knowledge, or is about a "
             f"different topic than what's on this page\n"
@@ -15646,6 +15654,8 @@ async def _handle_dagano_impl(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ মার্ক করা content থেকে নতুন MCQ generate হচ্ছে...")
 
+        _reset_ai_call_count(chat_id)
+        _current_job_chat_id_ctx.set(chat_id)
         generated_pages = await dagano_generate_all_pages(chat_id, pages, topic, file_name, status_msg_id)
         pdf_bytes = None
 
