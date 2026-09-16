@@ -15241,7 +15241,7 @@ def _dagano_apply_topic_reuse(mcqs: list) -> list:
     return mcqs
 
 
-async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> list:
+async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> tuple:
     """/dagano's CONDITIONAL 2nd call -- fires ONLY when code-level checks
     show the model's self-verification in the 1st call likely failed
     badly (>25% of raw MCQs dropped by _dagano_code_level_3pass_verify).
@@ -15249,9 +15249,12 @@ async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> li
     is NEVER called -- /dagano stays at exactly 1 API call per 2-page
     batch. This is a single consolidated audit over ALL surviving MCQs
     for this page in ONE call (not one call per MCQ), re-checking marking
-    source + fact-fidelity + page-reference wording together."""
+    source + fact-fidelity + page-reference wording together.
+    Returns (kept_mcqs, dropped_question_texts) -- the dropped texts are
+    passed on to the final whole-job audit so it knows exactly which
+    marked content on this page still needs a fresh MCQ."""
     if not mcqs:
-        return mcqs
+        return mcqs, []
     try:
         numbered = "\n".join(
             f"{idx+1}. Q: {m.get('question','')[:200]}\n"
@@ -15279,7 +15282,7 @@ async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> li
         )
         txt = await _gen_groq_raw_text(img, audit_prompt)
         if not txt:
-            return mcqs
+            return mcqs, []
         import json as _json
         cleaned = txt.strip()
         if cleaned.startswith("```"):
@@ -15293,27 +15296,34 @@ async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> li
             m = re.search(r'\[[\d,\s]*\]', cleaned)
             bad_indices = _json.loads(m.group(0)) if m else []
         if not isinstance(bad_indices, list) or not bad_indices:
-            return mcqs
+            return mcqs, []
         bad_set = {int(x) for x in bad_indices if isinstance(x, (int, float)) or (isinstance(x, str) and x.strip().isdigit())}
         if not bad_set:
-            return mcqs
+            return mcqs, []
         kept = [m for idx, m in enumerate(mcqs) if (idx + 1) not in bad_set]
+        dropped_texts = [m.get("question", "") for idx, m in enumerate(mcqs) if (idx + 1) in bad_set]
         removed = len(mcqs) - len(kept)
         if removed:
             logger.info(f"[DaganoSecondPass] page {page_num}: removed {removed} more MCQ(s) on conditional 2nd-call audit")
-        return kept
+        return kept, dropped_texts
     except Exception as e:
         logger.warning(f"[DaganoSecondPass] page {page_num} skipped: {e}")
-        return mcqs
+        return mcqs, []
 
 
-def _build_dagano_final_audit_prompt(topic: str, page_nums: list, existing_by_page: dict) -> str:
+def _build_dagano_final_audit_prompt(topic: str, page_nums: list, existing_by_page: dict, flagged_by_page: dict = None) -> str:
     """/dagano's OWN standalone prompt for the final whole-job audit pass
     -- deliberately SHORT and SEPARATE from the main generation prompt
     (_build_dagano_prompt_batched), not appended to it. Runs once per
     3-page block, AFTER every page has already been generated. Main job
     is finding MISSED marks (marked/highlighted/underlined content that
-    got no MCQ at all) -- wrong-source MCQs are rare but also checked."""
+    got no MCQ at all) -- wrong-source MCQs are rare but also checked.
+    flagged_by_page (optional): {page_num: [dropped_question_text, ...]}
+    -- questions that the conditional 2nd-pass audit already REJECTED
+    during generation for failing the marked-source condition. These
+    pages are explicitly called out as high-priority: the rejected
+    content's mark is very likely still uncovered and needs a fresh MCQ."""
+    flagged_by_page = flagged_by_page or {}
     existing_lines = []
     for pn in page_nums:
         items = existing_by_page.get(pn, [])
@@ -15323,16 +15333,36 @@ def _build_dagano_final_audit_prompt(topic: str, page_nums: list, existing_by_pa
         qs = "; ".join(f"Q{i+1}: {(m.get('question') or '')[:120]}" for i, m in enumerate(items))
         existing_lines.append(f"Page {pn}: {qs}")
     existing_block = "\n".join(existing_lines)
+
+    flagged_block = ""
+    flagged_lines = []
+    for pn in page_nums:
+        dropped = flagged_by_page.get(pn) or []
+        if dropped:
+            drop_txt = "; ".join(d[:120] for d in dropped)
+            flagged_lines.append(f"Page {pn}: {drop_txt}")
+    if flagged_lines:
+        flagged_block = (
+            f"\n⚠️ HIGH-PRIORITY -- these pages had MCQs REJECTED earlier for "
+            f"NOT actually matching a mark (condition failed during "
+            f"generation), so their real marked content is very likely still "
+            f"missing a proper MCQ. Check these pages first and make sure "
+            f"the actual marked line (not the rejected/invented content) "
+            f"gets a correct new MCQ:\n" + "\n".join(flagged_lines) + "\n"
+        )
+
     return (
         f"Topic: {topic}\n"
         f"These {len(page_nums)} page images (in order: {page_nums}) were already "
         f"processed for MCQs from marked/highlighted/underlined/boxed content "
-        f"only. Already-generated MCQs per page:\n{existing_block}\n\n"
+        f"only. Already-generated MCQs per page:\n{existing_block}\n"
+        f"{flagged_block}\n"
         f"Do TWO checks:\n"
         f"1) MISSED MARKS (main check): look for any marked/highlighted/"
         f"underlined/boxed/circled/starred line on these pages that has NO "
         f"MCQ above covering it. For each one found, write a new complete "
-        f"MCQ from it.\n"
+        f"MCQ from it. Give extra attention to any page listed above as "
+        f"HIGH-PRIORITY.\n"
         f"2) WRONG-SOURCE (secondary check): if any MCQ above is clearly "
         f"NOT from marked content (i.e. was made from plain/unmarked text), "
         f"or contains a fact not present on its page, output a corrected "
@@ -15354,18 +15384,21 @@ def _build_dagano_final_audit_prompt(topic: str, page_nums: list, existing_by_pa
     )
 
 
-async def _dagano_final_batch_audit(topic: str, page_block: list) -> dict:
+async def _dagano_final_batch_audit(topic: str, page_block: list, flagged_by_page: dict = None) -> dict:
     """/dagano's MANDATORY final audit -- runs once per 3-page block AFTER
     the whole job's generation is complete (not conditional, always runs).
     page_block: list of (page_num, img, mcqs) for up to 3 consecutive
-    pages. Returns {page_num: {"add": [...], "fix": [(orig_q, mcq), ...]}}
+    pages. flagged_by_page: {page_num: [dropped_question_text, ...]} from
+    the conditional 2nd-pass rejections during generation, so this audit
+    knows exactly which pages' marked content is still likely uncovered.
+    Returns {page_num: {"add": [...], "fix": [(orig_q, mcq), ...]}}
     for the caller to merge into the final results. Own dedicated Gemini
     multi-image call, independent of the main generation and the
     conditional 2nd-pass."""
     page_nums = [pn for pn, _im, _m in page_block]
     imgs = [im for _pn, im, _m in page_block]
     existing_by_page = {pn: mcqs for pn, _im, mcqs in page_block}
-    prompt = _build_dagano_final_audit_prompt(topic, page_nums, existing_by_page)
+    prompt = _build_dagano_final_audit_prompt(topic, page_nums, existing_by_page, flagged_by_page)
     try:
         txt = await _dagano_gemini_raw_multi(imgs, prompt)
         if not txt:
@@ -15434,14 +15467,19 @@ async def _dagano_final_batch_audit(topic: str, page_block: list) -> dict:
         return {}
 
 
-async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
+async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> tuple:
     """/dagano's BATCHED generation call -- Gemini primary (own dedicated
     caller with explicit output-token cap), Groq/OpenRouter fallback only
     on true technical failure (mirrors /extra's proven-safe 2-page-per-
-    call pattern). Returns {page_index (1-based int): [mcq]}."""
+    call pattern). Returns (by_index, flagged_by_index) where by_index is
+    {page_index (1-based int): [mcq]} and flagged_by_index is
+    {page_index: [dropped_question_text, ...]} -- questions the
+    conditional 2nd-pass rejected for failing the marked-source
+    condition, so the final whole-job audit can prioritize re-covering
+    that exact content."""
     n = len(imgs)
     if n == 0:
-        return {}
+        return {}, {}
     prompt = _build_dagano_prompt_batched(topic, n)
     try:
         gem_txt = await _dagano_gemini_raw_multi(imgs, prompt)
@@ -15466,6 +15504,7 @@ async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
             idx = int(idx)
             m["_provider"] = provider
             by_index.setdefault(idx, []).append(m)
+        flagged_by_index = {}
         for idx in list(by_index.keys()):
             raw = by_index[idx]
             raw_count = len(raw)
@@ -15484,13 +15523,16 @@ async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
                 drop_ratio = 1 - (len(out) / raw_count)
                 if drop_ratio > 0.25 and idx - 1 < len(imgs):
                     logger.info(f"[Dagano] page {idx}: {drop_ratio:.0%} dropped by code checks -- firing conditional 2nd-pass audit call")
-                    out = await _dagano_second_pass_audit(out, imgs[idx - 1], topic, idx)
+                    out, dropped_texts = await _dagano_second_pass_audit(out, imgs[idx - 1], topic, idx)
+                    if dropped_texts:
+                        flagged_by_index[idx] = dropped_texts
             out = _dagano_apply_topic_reuse(out)
             by_index[idx] = out
-        return by_index
+        return by_index, flagged_by_index
     except Exception as e:
         logger.warning(f"[Dagano batch] failed: {e}")
-        return {}
+        return {}, {}
+
 
 
 async def _dagano_gen_from_image(img, topic, page_num):
@@ -15539,7 +15581,7 @@ async def _dagano_gen_from_image(img, topic, page_num):
         drop_ratio = 1 - (len(out) / raw_count)
         if drop_ratio > 0.25:
             logger.info(f"[Dagano-Standalone] page {page_num}: {drop_ratio:.0%} dropped by code checks -- firing conditional 2nd-pass audit call")
-            out = await _dagano_second_pass_audit(out, img, topic, page_num)
+            out, _dropped = await _dagano_second_pass_audit(out, img, topic, page_num)
     out = _dagano_apply_topic_reuse(out)
 
     return out
@@ -15566,6 +15608,7 @@ async def dagano_generate_all_pages(
     MAX_WORKERS = 2
     lock = asyncio.Lock()
     total_mcq_box = {"n": 0}
+    flagged_by_page = {}  # real page_num -> [dropped_question_text, ...] from conditional 2nd-pass rejections
 
     def _idx_of(page_num):
         return next(i for i, (p, _) in enumerate(pages) if p == page_num)
@@ -15577,7 +15620,7 @@ async def dagano_generate_all_pages(
                 await edit_msg(chat_id, status_msg_id,
                     _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
 
-    async def _mark_done(page_num, img, mcqs):
+    async def _mark_done(page_num, img, mcqs, dropped_texts=None):
         async with lock:
             idx = _idx_of(page_num)
             results_by_idx[idx] = (page_num, img, mcqs)
@@ -15585,6 +15628,8 @@ async def dagano_generate_all_pages(
             page_status[idx]["current"] = False
             page_status[idx]["done"] = True
             page_status[idx]["mcq"] = len(mcqs)
+            if dropped_texts:
+                flagged_by_page.setdefault(page_num, []).extend(dropped_texts)
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id,
                     _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
@@ -15636,12 +15681,12 @@ async def dagano_generate_all_pages(
                 imgs = [im for _, im in pending]
                 n = len(imgs)
                 try:
-                    by_index = await _dagano_gen_from_images_batch(imgs, topic)
+                    by_index, flagged_by_index = await _dagano_gen_from_images_batch(imgs, topic)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
                     logger.error(f"[Dagano Generate] batch error: {e}")
-                    by_index = {}
+                    by_index, flagged_by_index = {}, {}
 
                 if not by_index and n > 0:
                     for pg, im in pending:
@@ -15652,7 +15697,7 @@ async def dagano_generate_all_pages(
 
                 first_pg, first_im = pending[0]
                 first_mcqs = await _audited(by_index.get(1, []), first_im, first_pg)
-                await _mark_done(first_pg, first_im, first_mcqs)
+                await _mark_done(first_pg, first_im, first_mcqs, dropped_texts=flagged_by_index.get(1))
 
                 if n == 1:
                     pending = []
@@ -15661,7 +15706,7 @@ async def dagano_generate_all_pages(
                 second_pg, second_im = pending[1]
                 if first_mcqs:
                     second_mcqs = await _audited(by_index.get(2, []), second_im, second_pg)
-                    await _mark_done(second_pg, second_im, second_mcqs)
+                    await _mark_done(second_pg, second_im, second_mcqs, dropped_texts=flagged_by_index.get(2))
                     pending = []
                 else:
                     try:
@@ -15673,7 +15718,7 @@ async def dagano_generate_all_pages(
                         pending = [(second_pg, second_im), third]
                     else:
                         second_mcqs = await _audited(by_index.get(2, []), second_im, second_pg)
-                        await _mark_done(second_pg, second_im, second_mcqs)
+                        await _mark_done(second_pg, second_im, second_mcqs, dropped_texts=flagged_by_index.get(2))
                         pending = []
 
     tasks = [_spawn_task(_worker()) for _ in range(MAX_WORKERS)]
@@ -15717,7 +15762,7 @@ async def dagano_generate_all_pages(
                 break
             block = final_results[block_start:block_start + 3]
             try:
-                audit = await _dagano_final_batch_audit(topic, block)
+                audit = await _dagano_final_batch_audit(topic, block, flagged_by_page=flagged_by_page)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
