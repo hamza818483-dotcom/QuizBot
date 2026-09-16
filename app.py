@@ -1168,19 +1168,6 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     quote_lines.append("\n".join(
                         f"📄{_html_escape(lbl)}:\n{_html_escape(lnk)}" for lbl, lnk in pdf_links
                     ))
-                # Per-topic First Poll Link + Website Link, quoted, separate
-                # from the MediAtlas marketing quote below.
-                link_block_lines = []
-                for _p, link, _c, batch_topic, *rest in batch_links:
-                    exam_link = rest[1] if len(rest) > 1 else ""
-                    line = f"🔰{_html_escape(batch_topic)}"
-                    if link:
-                        line += f"\n🔗First Poll Link:\n{_html_escape(link)}"
-                    if exam_link:
-                        line += f"\n🌐Website Link:\n{_html_escape(exam_link)}"
-                    link_block_lines.append(line)
-                if link_block_lines:
-                    quote_lines.append("\n\n".join(link_block_lines))
                 if quote_lines:
                     summary_text += f"\n{sep}\n<blockquote>" + "\n\n".join(quote_lines) + "</blockquote>"
 
@@ -8881,9 +8868,12 @@ def csv_get_master_summary(topic: str, total: int,
     for entry in batch_links:
         part_n, link, count = entry[0], entry[1], entry[2]
         batch_topic = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
+        exam_link = entry[5] if len(entry) > 5 and entry[5] else ""
         text += f"🔰Topic-{part_n:02d}\n📍({batch_topic})({count})\n"
         if link:
-            text += f"{link}\n"
+            text += f"🔗First Poll Link:\n{link}\n"
+        if exam_link:
+            text += f"🌐Website Link:\n{exam_link}\n"
         text += f"{sep}\n\n"
     text += (
         "<blockquote>"
