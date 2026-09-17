@@ -22027,6 +22027,39 @@ _OPTION_LETTER_REF_RE = re.compile(
 )
 
 
+# /chem-specific CODE-LEVEL backstop (user request 2026-09-17): the prompt
+# rule tells the model to skip শিক্ষার্থীর কাজ / সমাধানকৃত সমস্যা / ব্যাবহারিক
+# sections, but a model can still slip a generated MCQ through under
+# pressure -- this regex catches any MCQ whose question or explanation text
+# still contains one of these three labels and drops it outright (unlike
+# the letter-ref check above, this one auto-removes rather than just logs,
+# since these labels are an unambiguous, safe string match with no risk of
+# false-positive damage to legitimate content).
+_CHEM_SKIP_SECTION_RE = re.compile(r'শিক্ষার্থীর\s*কাজ|সমাধানকৃত\s*সমস্যা|ব্যাবহারিক')
+
+
+def _chem_drop_skip_section_mcqs(mcqs: list, page_num) -> list:
+    """CODE-LEVEL filter: removes any MCQ whose question/explanation text
+    references one of the skip-section labels, as a safety net on top of
+    the prompt-level SKIP THESE SECTION TYPES rule. Marked/highlighted
+    content is still generated normally by the model (the prompt rule's
+    override), so this filter only ever catches genuine slip-throughs of
+    plain unmarked skip-section content -- it does not re-check marking
+    status itself (that's a visual signal only the model call can see)."""
+    kept = []
+    for m in mcqs:
+        q = m.get("question") or ""
+        exp = m.get("explanation") or ""
+        if _CHEM_SKIP_SECTION_RE.search(q) or _CHEM_SKIP_SECTION_RE.search(exp):
+            logger.warning(
+                f"[CHEM SKIP-SECTION DROP] page {page_num}: MCQ referenced a "
+                f"skip-section label, dropped -- question: '{q[:60]}'"
+            )
+            continue
+        kept.append(m)
+    return kept
+
+
 def _chem_flag_letter_ref_explanations(mcqs: list, page_num) -> None:
     """CODE-LEVEL check (logging only, never auto-edits/drops -- unlike the
     source-grounding filter, rewriting explanation prose correctly is not
@@ -22295,6 +22328,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                     _qbm_key_offset_ctx.reset(_tok)
                 mcqs = _qbm_dedup_list(gem) if gem else []
                 mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
+                mcqs = _chem_drop_skip_section_mcqs(mcqs, page_num)
                 _chem_flag_letter_ref_explanations(mcqs, page_num)
                 if mcqs:
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini ({len(mcqs)} MCQ)")
@@ -22311,6 +22345,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                         _qbm_key_offset_ctx.reset(_tok2)
                     mcqs = _qbm_dedup_list(gem_retry) if gem_retry else []
                     mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
+                    mcqs = _chem_drop_skip_section_mcqs(mcqs, page_num)
                     _chem_flag_letter_ref_explanations(mcqs, page_num)
                     if mcqs:
                         logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini retry ({len(mcqs)} MCQ)")
@@ -22340,6 +22375,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 finally:
                     _qbm_key_offset_ctx.reset(_tok3)
                 final_mcqs = _chem_filter_verified_mcqs(final_mcqs, page_num) if final_mcqs else []
+                final_mcqs = _chem_drop_skip_section_mcqs(final_mcqs, page_num) if final_mcqs else []
                 _chem_flag_letter_ref_explanations(final_mcqs, page_num)
                 if final_mcqs:
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via final fresh-eyes scan ({len(final_mcqs)} MCQ)")
