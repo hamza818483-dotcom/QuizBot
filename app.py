@@ -2459,6 +2459,10 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
         "2. \"সমাধানকৃত সমস্যা\" — solved-problem sections. Skip entirely; do not "
         "generate a new MCQ from a solved-problem's setup, working, or answer.\n"
         "3. \"ব্যাবহারিক\" — practical/lab-work sections. Skip entirely.\n"
+        "4. \"উদ্দীপক\" — stimulus/scenario blocks (the short passage/case given before "
+        "a set of board-style questions). Skip the stimulus text itself entirely for "
+        "generation; do not build a new MCQ whose content is really just the উদ্দীপক "
+        "passage restated.\n"
         "🔑 DETECTION CLUE: text under \"শিক্ষার্থীর কাজ\" or \"সমাধানকৃত সমস্যা\" is "
         "commonly structured with Bangla decimal-style sub-numbering like ১.২, ২.৩ "
         "(a Bangla digit, dot, Bangla digit) marking sub-items inside the block -- "
@@ -2469,10 +2473,11 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
         "-- per the MUST-PRIORITY and ZERO-MISS rules above, a marked line ALWAYS gets an "
         "MCQ regardless of which section it sits inside. The section-skip only applies to "
         "the plain/unmarked remainder of these sections.\n"
-        "❗ Also: never build a new MCQ that is really just a reworded version of a "
-        "question already printed inside one of these sections (e.g. rephrasing a "
-        "\"শিক্ষার্থীর কাজ\" prompt as if it were freshly generated) -- this is the same "
-        "disguised-copying violation as the already-printed-MCQ rule above.\n\n"
+        "❗ Also: never build a new MCQ that is really just a reworded version of content "
+        "already printed inside one of these sections (e.g. rephrasing a \"শিক্ষার্থীর "
+        "কাজ\" prompt, or restating an \"উদ্দীপক\" passage, as if it were freshly "
+        "generated) -- this is the same disguised-copying violation as the "
+        "already-printed-MCQ rule above.\n\n"
     )
     base = base.replace(old_schema_marker, section_skip_rule + old_schema_marker) if old_schema_marker in base else base + section_skip_rule
     # Add topic_hint to the JSON schema example, right before the closing
@@ -22060,7 +22065,7 @@ _OPTION_LETTER_REF_RE = re.compile(
 # the letter-ref check above, this one auto-removes rather than just logs,
 # since these labels are an unambiguous, safe string match with no risk of
 # false-positive damage to legitimate content).
-_CHEM_SKIP_SECTION_RE = re.compile(r'শিক্ষার্থীর\s*কাজ|সমাধানকৃত\s*সমস্যা|ব্যাবহারিক')
+_CHEM_SKIP_SECTION_RE = re.compile(r'শিক্ষার্থীর\s*কাজ|সমাধানকৃত\s*সমস্যা|ব্যাবহারিক|উদ্দীপক')
 
 
 def _chem_drop_skip_section_mcqs(mcqs: list, page_num) -> list:
