@@ -2442,6 +2442,39 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
         base = base.replace(old_schema_marker, heading_rule + old_schema_marker)
     else:
         base = base + heading_rule
+    # /chem-specific section-skip rule (user request 2026-09-17): certain
+    # textbook section types must never be used as source content for
+    # generation, UNLESS the content inside them carries an explicit mark
+    # (highlight/underline/box/color) -- marked content always overrides
+    # the skip, per the MUST-PRIORITY rule already injected above.
+    section_skip_rule = (
+        "\n═══════════════════════════════\n"
+        "🚫 SKIP THESE SECTION TYPES (unless marked)\n"
+        "═══════════════════════════════\n"
+        "Do NOT generate MCQs from content under these section headings, even though "
+        "they're ordinary body text and not chapter/topic headings themselves:\n"
+        "1. \"শিক্ষার্থীর কাজ\" — any content under this label (student activity/task "
+        "instructions) is off-limits for generation. Skip the entire block under this "
+        "label until the next real content or next section label.\n"
+        "2. \"সমাধানকৃত সমস্যা\" — solved-problem sections. Skip entirely; do not "
+        "generate a new MCQ from a solved-problem's setup, working, or answer.\n"
+        "3. \"ব্যাবহারিক\" — practical/lab-work sections. Skip entirely.\n"
+        "🔑 DETECTION CLUE: text under \"শিক্ষার্থীর কাজ\" or \"সমাধানকৃত সমস্যা\" is "
+        "commonly structured with Bangla decimal-style sub-numbering like ১.২, ২.৩ "
+        "(a Bangla digit, dot, Bangla digit) marking sub-items inside the block -- "
+        "if you see this numbering pattern following one of these two labels, treat "
+        "everything under that numbering as part of the skip-block too.\n"
+        "⚠️ OVERRIDE: this skip rule is CANCELLED for any specific line/sentence inside "
+        "one of these sections that is itself highlighted/underlined/marked/boxed/colored "
+        "-- per the MUST-PRIORITY and ZERO-MISS rules above, a marked line ALWAYS gets an "
+        "MCQ regardless of which section it sits inside. The section-skip only applies to "
+        "the plain/unmarked remainder of these sections.\n"
+        "❗ Also: never build a new MCQ that is really just a reworded version of a "
+        "question already printed inside one of these sections (e.g. rephrasing a "
+        "\"শিক্ষার্থীর কাজ\" prompt as if it were freshly generated) -- this is the same "
+        "disguised-copying violation as the already-printed-MCQ rule above.\n\n"
+    )
+    base = base.replace(old_schema_marker, section_skip_rule + old_schema_marker) if old_schema_marker in base else base + section_skip_rule
     # Add topic_hint to the JSON schema example, right before the closing
     # of the object (exp_bbox already stripped above, so append directly
     # after explanation).
