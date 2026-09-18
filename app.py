@@ -2685,13 +2685,19 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"line/paragraph/table the answer came from (minimal margin, no neighboring "
         f"unrelated content). Normalize to 0-1000 scale ([x_min,y_min,x_max,y_max], "
         f"top-left=[0,0], bottom-right=[1000,1000]). Use null if unsure.\n\n"
+        f"{_RD_MODE.get() and (chr(0x1F7E6) + ' TOPIC DETECTION (no fixed visual marker required)') or ''}"
+        f"{_RD_MODE.get() and chr(10) or ''}"
+        f"{_RD_MODE.get() and ('For EACH MCQ, also give '+chr(39)+'topic_hint'+chr(39)+': the specific subject/topic name (in the source language) that this MCQ genuinely belongs to, based on YOUR OWN judgment of the page content and any heading/section text visible near it — there is no fixed visual rule (no required bold/number/star marker); use whatever heading or contextual grouping is naturally present, or infer the topic from the surrounding content if no explicit heading exists. Every MCQ from the same subject/section must get the EXACT SAME topic_hint string. If the whole page is genuinely one single topic, use that one topic name for all MCQs.') or ''}"
+        f"{_RD_MODE.get() and chr(10)+chr(10) or ''}"
         f"Return STRICT JSON array only, no prose, no markdown fences. "
         f"🚨 DO NOT include any <think>, reasoning, chain-of-thought, or "
         f"explanation text before the JSON — output must start IMMEDIATELY "
         f"with '[' and contain nothing but the JSON array. Schema:\n"
         f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"source_verbatim\":\"...\","
-        f"\"verified\":true,\"exp_bbox\":[100,200,900,350]}}]"
+        f"\"verified\":true,\"exp_bbox\":[100,200,900,350]"
+        f"{_RD_MODE.get() and ',\"topic_hint\":\"...\"' or ''}"
+        f"}}]"
     )
 
 def _strip_q_numbering(q: str) -> str:
