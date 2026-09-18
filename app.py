@@ -948,7 +948,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
                     exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
                     quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
-                    pdf_link = f"{CF_WORKER_URL}/api/premium-pdf-view/{cache_id}"
+                    pdf_link = f"{HF_SPACE_URL}/api/premium-pdf-view/{cache_id}"
                     quote_body = (
                         f"<b>{_serial}. {_html_escape(topic)}</b>\n"
                         f"📌 মোট MCQ: {len(mcqs)}\n"
