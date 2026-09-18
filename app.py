@@ -33592,14 +33592,20 @@ async def handle_message(msg: dict):
                 "resume_indices": remaining_indices,
             }
             await qs_del(uid)
-        await send_msg(
-            chat_id,
-            "⏸️ থামানো হয়েছে।",
-            reply_markup={"inline_keyboard": [[
-                {"text": "▶️ আবার শুরু করুন", "callback_data": "dmresume_last"},
-                {"text": "⛔ বন্ধ করুন", "callback_data": "dmstopclose"},
-            ]]},
-        )
+            await send_msg(
+                chat_id,
+                "⏸️ থামানো হয়েছে।",
+                reply_markup={"inline_keyboard": [[
+                    {"text": "▶️ আবার শুরু করুন", "callback_data": "dmresume_last"},
+                    {"text": "⛔ বন্ধ করুন", "callback_data": "dmstopclose"},
+                ]]},
+            )
+        # else: no active /q quiz — a Poll Practice loop may be running instead.
+        # Just set the flag; that loop detects it on its next iteration, saves
+        # the correct resume_index into DM_LAST_SESSION itself, and sends its
+        # own stop message + resume button. Sending a second generic message
+        # here with a stale/empty DM_LAST_SESSION caused "আবার শুরু করুন" to
+        # restart from question 1 instead of where it actually stopped.
         return
     if text.startswith("/merge"):
         await handle_merge_command(msg)
