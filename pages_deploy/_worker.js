@@ -448,21 +448,11 @@ async function r2ImageGet(url, env) {
 // every view after that (including ones while HF is down) is served
 // straight from R2, since the PDF for a given cache_id never changes once
 // generated.
-async function handlePremiumPdfView(request, url, env) {
-  const id = url.pathname.replace('/api/premium-pdf-view/', '').split('?')[0].trim();
-  if (!id) return jsonResp({ ok: false, error: 'No id' }, 400);
-
+async function _fetchPremiumPdfBytes(id, env) {
   if (env.PDF_BUCKET) {
     try {
       const obj = await env.PDF_BUCKET.get(`premium-pdfs/${id}.pdf`);
-      if (obj) {
-        return new Response(obj.body, {
-          headers: {
-            'Content-Type': 'application/pdf',
-            'Content-Disposition': `inline; filename="premium_${id}.pdf"`,
-          },
-        });
-      }
+      if (obj) return await obj.arrayBuffer();
     } catch (e) {
       console.warn('[premium-pdf] R2 read failed, falling back to HF:', e.message);
     }
@@ -483,19 +473,53 @@ async function handlePremiumPdfView(request, url, env) {
             console.warn('[premium-pdf] R2 write failed (non-fatal):', e.message);
           }
         }
-        return new Response(pdfBuf, {
-          headers: {
-            'Content-Type': 'application/pdf',
-            'Content-Disposition': `inline; filename="premium_${id}.pdf"`,
-          },
-        });
+        return pdfBuf;
       }
     } catch (e) {
       console.warn(`[premium-pdf] backend (${RENDER}) unreachable, trying next:`, e.message);
     }
   }
+  return null;
+}
 
-  return jsonResp({ ok: false, error: 'PDF not cached yet and bot backend is unreachable — open this link once while the bot is online to generate it.' }, 502);
+async function handlePremiumPdfView(request, url, env) {
+  const id = url.pathname.replace('/api/premium-pdf-view/', '').split('?')[0].trim();
+  if (!id) return jsonResp({ ok: false, error: 'No id' }, 400);
+
+  // ?raw=1 -> serve the actual PDF bytes (used by the wrapper page's <iframe>/download link)
+  if (url.searchParams.get('raw') === '1') {
+    const pdfBuf = await _fetchPremiumPdfBytes(id, env);
+    if (!pdfBuf) {
+      return jsonResp({ ok: false, error: 'PDF not cached yet and bot backend is unreachable — open this link once while the bot is online to generate it.' }, 502);
+    }
+    return new Response(pdfBuf, {
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `inline; filename="premium_${id}.pdf"`,
+      },
+    });
+  }
+
+  // Default: HTML wrapper with embedded PDF preview + sticky bottom download bar
+  const rawUrl = `/api/premium-pdf-view/${id}?raw=1`;
+  const html = `<!DOCTYPE html>
+<html lang="bn"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Premium PDF</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#1e1e1e;font-family:system-ui,-apple-system,sans-serif;}
+  #pdfFrame{position:fixed;top:0;left:0;right:0;bottom:64px;width:100%;height:calc(100% - 64px);border:none;}
+  .dlbar{position:fixed;left:0;right:0;bottom:0;height:64px;background:#111;display:flex;align-items:center;justify-content:center;box-shadow:0 -2px 10px rgba(0,0,0,.4);z-index:10;}
+  .dlbtn{display:flex;align-items:center;gap:8px;background:#16a34a;color:#fff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:600;font-size:16px;}
+  .dlbtn:active{background:#15803d;}
+</style></head>
+<body>
+  <iframe id="pdfFrame" src="${rawUrl}"></iframe>
+  <div class="dlbar">
+    <a class="dlbtn" href="${rawUrl}" download="premium_${id}.pdf">⬇ Download PDF</a>
+  </div>
+</body></html>`;
+  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
 }
 
 async function r2Put(request, env) {
