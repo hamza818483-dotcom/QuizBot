@@ -869,7 +869,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
             logger.warning(f"[LMS-Send] score-ask ending message failed: {e}")
 
     return sent, first_link, batch_cache_id
-async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = "", links_only: bool = False):
+async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = "", links_only: bool = False, exam_groups: list = None):
     """batches: [{"topic": str, "mcqs": [...]}, ...] — one entry per topic
     (or a single entry when the exam has no topic split / no batch-size
     split requested). Sent sequentially, same as /csvS's batch loop.
@@ -904,6 +904,14 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         # Simple synchronous-style path (still inside the spawned task so
         # the caller gets an immediate job_id back like normal, but there's
         # no polling loop -- just cache rows + one message).
+        #
+        # `exam_groups` (optional): for a bulk multi-exam "one single post"
+        # send, the caller passes exam_groups=[{"exam_title","subject","batches"},...]
+        # instead of a flat `batches` list -- each exam's topics get their
+        # own numbered run inside ONE combined Telegram message, with an
+        # exam-title sub-header before that exam's topic blocks.
+        # When exam_groups is absent, behaves exactly as before (single
+        # exam, `batches`/`exam_title`/`subject` used directly).
         try:
             is_admin, admin_err = await _check_bot_admin(channel_id)
             if not is_admin:
@@ -913,50 +921,76 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job["status"] = "running"
             bot_un = await get_bot_username()
             sep = "▬▬▬▬▬▬▬▬▬▬"
-            total_mcq = 0
-            blocks = []
-            _serial = 0
-            for batch in batches:
-                topic = (batch.get("topic") or "Special MCQ By ATLAS").strip()
-                mcqs = batch.get("mcqs") or []
-                if not mcqs:
-                    continue
-                _serial += 1
-                total_mcq += len(mcqs)
-                cache_id = gen_session_id()
-                await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs, channel_id=channel_id)
-                poll_link = f"https://t.me/{bot_un}?start=poll_{cache_id}"
-                quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
-                exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
-                quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
-                quote_body = (
-                    f"<b>{_serial}. {_html_escape(topic)}</b>\n"
-                    f"📌 মোট MCQ: {len(mcqs)}\n"
-                    f"───────────\n"
-                    f"🔰Poll Practice:\n{poll_link}\n"
-                    f"───────────\n"
-                    f"🔗Quiz Solve:\n{quiz_link}\n"
-                    f"───────────\n"
-                    f"🌐Website Exam:\n{exam_link}\n"
-                    f"───────────\n"
-                    f"⚡Quick Practice:\n{quick_link}"
-                )
-                blocks.append(f"<blockquote>{quote_body}</blockquote>")
 
-            if not blocks:
+            groups = exam_groups if exam_groups else [{
+                "exam_title": exam_title, "subject": subject, "batches": batches,
+            }]
+
+            total_mcq = 0
+            total_topics = 0
+            section_texts = []
+            for g in groups:
+                g_batches = g.get("batches") or []
+                g_title = (g.get("exam_title") or "MCQ").strip()
+                g_subject = (g.get("subject") or "").strip()
+                blocks = []
+                _serial = 0
+                for batch in g_batches:
+                    topic = (batch.get("topic") or "Special MCQ By ATLAS").strip()
+                    mcqs = batch.get("mcqs") or []
+                    if not mcqs:
+                        continue
+                    _serial += 1
+                    total_mcq += len(mcqs)
+                    cache_id = gen_session_id()
+                    await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs, channel_id=channel_id)
+                    poll_link = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+                    quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+                    exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+                    quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
+                    quote_body = (
+                        f"<b>{_serial}. {_html_escape(topic)}</b>\n"
+                        f"📌 মোট MCQ: {len(mcqs)}\n"
+                        f"───────────\n"
+                        f"<a href=\"{poll_link}\"><b>🔰 Poll Practice</b></a>\n"
+                        f"───────────\n"
+                        f"<a href=\"{quiz_link}\"><b>🔗 Quiz Solve</b></a>\n"
+                        f"───────────\n"
+                        f"<a href=\"{exam_link}\"><b>🌐 Website Exam</b></a>\n"
+                        f"───────────\n"
+                        f"<a href=\"{quick_link}\"><b>⚡ Quick Practice</b></a>"
+                    )
+                    blocks.append(f"<blockquote>{quote_body}</blockquote>")
+                if not blocks:
+                    continue
+                total_topics += len(blocks)
+                g_header = (
+                    f"🟥<b>{_html_escape(g_subject or 'MCQ')}</b>\n"
+                    f"{sep}\n"
+                    f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>\n"
+                    f"{sep}\n"
+                    f"🌟Total Topic: {len(blocks)}\n"
+                    f"📌Total MCQ: {sum(len(b.get('mcqs') or []) for b in g_batches)}"
+                )
+                section_texts.append(f"\n{sep}\n".join([g_header] + blocks))
+
+            if not section_texts:
                 job["status"] = "error"
                 job["error"] = "no MCQs to send"
                 return
 
-            header = (
-                f"🟥<b>{_html_escape(subject or 'MCQ')}</b>\n"
-                f"{sep}\n"
-                f"◼️<b>{_html_escape(exam_title or 'MCQ')}</b>\n"
-                f"{sep}\n"
-                f"🌟Total Topic: {len(blocks)}\n"
-                f"📌Total MCQ: {total_mcq}"
-            )
-            post_text = f"\n{sep}\n".join([header] + blocks)
+            if len(groups) > 1:
+                overall_header = (
+                    f"🟪<b>{len(groups)}টি Exam — এক পোস্টে</b>\n"
+                    f"{sep}\n"
+                    f"🌟মোট Topic: {total_topics}\n"
+                    f"📌মোট MCQ: {total_mcq}\n"
+                    f"{sep}{sep}"
+                )
+                post_text = overall_header + f"\n{sep}{sep}\n".join(section_texts)
+            else:
+                post_text = section_texts[0]
+
             send_data = {
                 "chat_id": channel_id, "text": post_text,
                 "parse_mode": "HTML",
@@ -979,7 +1013,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job["status"] = "done"
             job["pct"] = 100
             job["sent_total"] = total_mcq
-            job["batches_done"] = len(blocks)
+            job["batches_done"] = total_topics
         except Exception as e:
             logger.error(f"[LMS-Send-Links] job {job_id} error: {e}")
             job["status"] = "error"
@@ -1256,20 +1290,31 @@ async def lms_send_channel(request: Request):
     exam_title = str(data.get("exam_title") or "").strip()
     subject = str(data.get("subject") or "").strip()
     links_only = bool(data.get("links_only"))
+    # Bulk "one single post for several exams" mode: LMS sends
+    # exam_groups=[{"exam_title","subject","batches"},...] instead of a
+    # flat batches list. Only meaningful together with links_only.
+    exam_groups = data.get("exam_groups") or None
 
     if not channel_id:
         return JSONResponse({"error": "channel_id is required"}, status_code=400)
-    if not batches or not any(b.get("mcqs") for b in batches):
-        return JSONResponse({"error": "batches (with mcqs) is required"}, status_code=400)
+    if exam_groups:
+        if not any(any(b.get("mcqs") for b in (g.get("batches") or [])) for g in exam_groups):
+            return JSONResponse({"error": "exam_groups (with mcqs) is required"}, status_code=400)
+        total_q = sum(len(b.get("mcqs") or []) for g in exam_groups for b in (g.get("batches") or []))
+        batches_total = sum(len(g.get("batches") or []) for g in exam_groups)
+    else:
+        if not batches or not any(b.get("mcqs") for b in batches):
+            return JSONResponse({"error": "batches (with mcqs) is required"}, status_code=400)
+        total_q = sum(len(b.get("mcqs") or []) for b in batches)
+        batches_total = len(batches)
 
-    total_q = sum(len(b.get("mcqs") or []) for b in batches)
     job_id = gen_session_id()
     LMS_SEND_JOBS[job_id] = {
         "status": "queued", "pct": 0, "sent_total": 0, "total": total_q,
-        "batches_done": 0, "batches_total": len(batches), "error": None,
+        "batches_done": 0, "batches_total": batches_total, "error": None,
         "exam_id": exam_id, "cancel_requested": False,
     }
-    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject, links_only=links_only))
+    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject, links_only=links_only, exam_groups=exam_groups))
     return JSONResponse({"ok": True, "job_id": job_id})
 
 
