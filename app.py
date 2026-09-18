@@ -703,6 +703,8 @@ NEW_EXAM_JOBS = {}
 # ============================================================
 LMS_API_SECRET = os.environ.get("LMS_API_SECRET", "")
 LMS_SEND_JOBS = {}  # job_id -> {"status", "pct", "sent_total", "total", "batches_done", "batches_total", "error"}
+DM_STOP_FLAGS = {}   # uid -> True while user has requested /stop (checked inside Poll Practice loop)
+DM_LAST_SESSION = {}  # uid -> {"cache_id": str, "kind": "poll"|"quiz"} — last active DM poll/quiz, for resume button
 
 async def _create_forum_topic(channel_id: str, name: str) -> int | None:
     """Creates a new forum topic in a supergroup (forum mode must be ON) and
@@ -31158,6 +31160,10 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
         await send_msg(chat_id, "❌ Cache পাওয়া যায়নি!")
         return
 
+    uid = user.get("id")
+    DM_STOP_FLAGS[uid] = False
+    DM_LAST_SESSION[uid] = {"cache_id": cache_id, "kind": "poll"}
+
     mcqs = cache["mcq_data"]
     topic = cache["topic"]
     page = cache["page_number"]
@@ -31180,7 +31186,11 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
 
     poll_fail_count = 0
     skipped_empty = 0
+    stopped_by_user = False
     for i, mcq in enumerate(mcqs):
+        if DM_STOP_FLAGS.get(uid):
+            stopped_by_user = True
+            break
         opts = mcq.get("options", [])
         q_raw = (mcq.get("question") or "").strip()
         if not q_raw or len(opts) < 2 or all(not (o or "").strip() for o in opts):
@@ -31215,6 +31225,20 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
             f"⚠️ Poll Practice ({cache_id[:8]}): {poll_fail_count}/{total} poll পাঠাতে ব্যর্থ, "
             f"{skipped_empty} টা empty question/option থাকায় skip করা হয়েছে। Render logs চেক করুন।"
         )
+
+    if stopped_by_user:
+        DM_STOP_FLAGS.pop(uid, None)
+        await send_msg(
+            chat_id,
+            f"⏸️ <b>Poll Practice থামানো হয়েছে!</b>\n\n🎯 Topic: {topic}\n"
+            f"📝 {i}/{total} টি poll পাঠানো হয়েছিল থামানোর আগে।",
+            parse_mode="HTML",
+            reply_markup={"inline_keyboard": [[
+                {"text": "▶️ আবার শুরু করুন", "callback_data": f"dmresume_{cache_id}"},
+                {"text": "⛔ বন্ধ করুন", "callback_data": "dmstopclose"},
+            ]]},
+        )
+        return
 
     end_text = (
         f"✅ <b>Poll শেষ!</b>\n\n🎯 Topic: {topic}\n"
@@ -31704,6 +31728,7 @@ async def start_sequential_quiz(chat_id: int, uid: int, uname: str,
 
     settings = await db_get_settings()
     await qs_del(uid)
+    DM_LAST_SESSION[uid] = {"cache_id": cache_id, "kind": "quiz"}
 
     state = {
         "cache_id": cache_id, "mcqs": mcqs,
@@ -33541,6 +33566,20 @@ async def handle_message(msg: dict):
         if collected:
             return
 
+    if msg["chat"].get("type") == "private" and text.lower() in ("/stop", "stop", "থামো", "থামাও"):
+        uid = msg["from"]["id"]
+        chat_id = msg["chat"]["id"]
+        DM_STOP_FLAGS[uid] = True
+        await qs_del(uid)  # also stop an active Quiz Solve session, if any
+        await send_msg(
+            chat_id,
+            "⏸️ থামানো হয়েছে।",
+            reply_markup={"inline_keyboard": [[
+                {"text": "▶️ আবার শুরু করুন", "callback_data": "dmresume_last"},
+                {"text": "⛔ বন্ধ করুন", "callback_data": "dmstopclose"},
+            ]]},
+        )
+        return
     if text.startswith("/merge"):
         await handle_merge_command(msg)
         return
@@ -34325,6 +34364,26 @@ async def handle_callback(query: dict):
                 chosen = history[idx]
                 await footer_text_set_active(chosen)
                 await send_msg(chat_id, f"✅ Active footer set হলো: <b>{chosen}</b>", parse_mode="HTML")
+            return
+        if data == "dmstopclose":
+            await edit_msg(chat_id, msg_id, "⛔ বন্ধ করা হয়েছে।")
+            return
+        if data == "dmresume_last" or data.startswith("dmresume_"):
+            if data == "dmresume_last":
+                sess = DM_LAST_SESSION.get(uid)
+                if not sess:
+                    await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "কোনো আগের session পাওয়া যায়নি।"})
+                    return
+                resume_cache_id, kind = sess["cache_id"], sess["kind"]
+            else:
+                resume_cache_id = data[len("dmresume_"):]
+                sess = DM_LAST_SESSION.get(uid)
+                kind = sess["kind"] if sess and sess.get("cache_id") == resume_cache_id else "poll"
+            DM_STOP_FLAGS[uid] = False
+            if kind == "quiz":
+                _spawn_task(start_sequential_quiz(chat_id, uid, uname, resume_cache_id))
+            else:
+                _spawn_task(handle_poll_again(resume_cache_id, query["from"], chat_id))
             return
         if data.startswith("lmscancel_"):
             # Cancel button on the DM progress message for an LMS
