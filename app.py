@@ -930,16 +930,15 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             total_topics = 0
             section_texts = []
             for g in groups:
-                g_batches = g.get("batches") or []
+                g_batches = [b for b in (g.get("batches") or []) if b.get("mcqs")]
                 g_title = (g.get("exam_title") or "MCQ").strip()
                 g_subject = (g.get("subject") or "").strip()
+                single_part = len(g_batches) == 1
                 blocks = []
                 _serial = 0
                 for batch in g_batches:
                     topic = (batch.get("topic") or "Special MCQ By ATLAS").strip()
                     mcqs = batch.get("mcqs") or []
-                    if not mcqs:
-                        continue
                     _serial += 1
                     total_mcq += len(mcqs)
                     cache_id = gen_session_id()
@@ -948,8 +947,12 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
                     exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
                     quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
+                    # When this exam has only one part/topic, its name is
+                    # already identical to the exam title shown in the
+                    # header just above — skip repeating it here.
+                    title_line = "" if single_part else f"<b>{_serial}. {_html_escape(topic)}</b>\n"
                     quote_body = (
-                        f"<b>{_serial}. {_html_escape(topic)}</b>\n"
+                        f"{title_line}"
                         f"📌 মোট MCQ: {len(mcqs)}\n"
                         f"───────────\n"
                         f"<a href=\"{poll_link}\"><b>🔰 Poll Practice</b></a>\n"
@@ -964,6 +967,12 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 if not blocks:
                     continue
                 total_topics += len(blocks)
+                # When this exam has only one part, its MCQ count is already
+                # shown inside that one block above — skip the "মোট Part: 1"
+                # summary line and the header's MCQ-count line too (both
+                # would just repeat what the single block already says).
+                part_line = "" if single_part else f"🌟মোট Part: {len(blocks)}\n"
+                mcq_line = "" if single_part else f"📌Total MCQ: {sum(len(b.get('mcqs') or []) for b in g_batches)}"
                 if len(groups) > 1:
                     # Subject is common across all exams in single-post mode
                     # (guaranteed by the caller) — shown once at the very top
@@ -971,18 +980,18 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     g_header = (
                         f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>\n"
                         f"{sep}\n"
-                        f"🌟মোট Part: {len(blocks)}\n"
-                        f"📌Total MCQ: {sum(len(b.get('mcqs') or []) for b in g_batches)}"
-                    )
+                        f"{part_line}"
+                        f"{mcq_line}"
+                    ).rstrip("\n")
                 else:
                     g_header = (
                         f"🟥<b>{_html_escape(g_subject or 'MCQ')}</b>\n"
                         f"{sep}\n"
                         f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>\n"
                         f"{sep}\n"
-                        f"🌟মোট Part: {len(blocks)}\n"
-                        f"📌Total MCQ: {sum(len(b.get('mcqs') or []) for b in g_batches)}"
-                    )
+                        f"{part_line}"
+                        f"{mcq_line}"
+                    ).rstrip("\n")
                 section_texts.append(f"\n{sep}\n".join([g_header] + blocks))
 
             if not section_texts:
