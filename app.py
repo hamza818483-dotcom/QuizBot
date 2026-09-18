@@ -24414,13 +24414,15 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
         img_b64 = image_to_base64(img)
         img_bytes = base64.b64decode(img_b64)
 
+        _model_ctx = {"m": "gemini-3.5-flash"}
+
         def _call(key):
             client = gai.Client(
                 api_key=key,
                 http_options=types.HttpOptions(timeout=38000)
             )
             return client.models.generate_content(
-                model="gemini-3.5-flash",
+                model=_model_ctx["m"],
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
@@ -24441,6 +24443,8 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
+        _ovl_streak = 0  # consecutive 503/504 (model-wide overload, NOT a key problem)
+        _fallback_used = False
         for _ki, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
@@ -24456,6 +24460,7 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
             try:
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
+                _ovl_streak = 0
                 key_rotator.mark_healthy(key)
                 _used = _qbm_page_used_accounts_ctx.get()
                 if _used is not None:
@@ -24488,6 +24493,24 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
                     key_rotator.record_account_error(key)
                     _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[UNMESH] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
+                    continue
+                _is_ovl = any(t in full_msg for t in ("503", "504", "UNAVAILABLE", "DEADLINE_EXCEEDED")) or isinstance(e, asyncio.TimeoutError)
+                if _is_ovl:
+                    _ovl_streak += 1
+                    logger.warning(f"[UNMESH] Gemini overload ({_ovl_streak} in a row) on {_model_ctx['m']}: {full_msg[:80]}")
+                    if _ovl_streak >= 3:
+                        # Model-wide overload: hopping through 100+ keys is pointless.
+                        if not _fallback_used:
+                            _fallback_used = True
+                            _model_ctx["m"] = "gemini-2.5-flash"
+                            _ovl_streak = 0
+                            logger.warning("[UNMESH] switching to gemini-2.5-flash fallback")
+                            await asyncio.sleep(2)
+                        else:
+                            logger.warning("[UNMESH] both models overloaded -- backing off, returning empty")
+                            return ""
+                    else:
+                        await asyncio.sleep(random.uniform(1.5, 3.5))
                     continue
                 logger.warning(f"[UNMESH] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
