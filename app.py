@@ -948,7 +948,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
                     exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
                     quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
-                    pdf_link = f"{CF_WORKER_URL}/api/solve-pdf-view/{cache_id}"
+                    pdf_link = f"{CF_WORKER_URL}/api/premium-pdf-view/{cache_id}"
                     quote_body = (
                         f"<b>{_serial}. {_html_escape(topic)}</b>\n"
                         f"📌 মোট MCQ: {len(mcqs)}\n"
@@ -35334,6 +35334,28 @@ async def tg_image_proxy(file_id: str):
                         headers={"Cache-Control": "public, max-age=86400"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=404)
+
+@app.get("/api/premium-pdf-view/{cache_id}")
+async def premium_pdf_view(cache_id: str):
+    """GET version for the 'Premium PDF' link in lms-send-channel — opens the
+    LMS-matching style1 PDF (green palette, ported from src/lib/solvePdf.ts)
+    straight in browser, same as /sheet style1, using the cached mcq_data."""
+    try:
+        cache = await db_get_mcq_cache(cache_id)
+        if not cache:
+            return JSONResponse({"error": "Cache not found"}, status_code=404)
+        data_adapted = _adapt_mcqs_for_print(cache["mcq_data"])
+        html = PRINT_STYLE_BUILDERS["style1"](data_adapted, cache["topic"])
+        pdf_bytes = await _html_to_pdf(html)
+        pdf_bytes = await _apply_saved_watermark(pdf_bytes)
+        if not pdf_bytes:
+            return JSONResponse({"error": "PDF generation failed"}, status_code=500)
+        return Response(
+            content=pdf_bytes, media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="premium_{cache_id}.pdf"'}
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/api/solve-pdf-view/{cache_id}")
 async def solve_pdf_view(cache_id: str):
