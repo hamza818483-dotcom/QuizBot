@@ -958,7 +958,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                         f"───────────\n"
                         f"<a href=\"{exam_link}\"><b>🌐 Website Exam</b></a>\n"
                         f"───────────\n"
-                        f"<a href=\"{quick_link}\"><b>⚡ Quick Practice</b></a>"
+                        f"<a href=\"{quick_link}\"><b>⚡ Rapid Practice Game</b></a>"
                     )
                     blocks.append(f"<blockquote>{quote_body}</blockquote>")
                 if not blocks:
