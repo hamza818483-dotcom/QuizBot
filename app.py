@@ -962,26 +962,16 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 if not blocks:
                     continue
                 total_topics += len(blocks)
-                # Each part's own MCQ count is already shown inside its
-                # block above — the per-exam header only needs the part
-                # count, not a repeated total-MCQ line.
-                part_line = f"🌟মোট Part: {len(blocks)}"
                 if len(groups) > 1:
                     # Subject is common across all exams in single-post mode
                     # (guaranteed by the caller) — shown once at the very top
                     # instead of repeating per exam.
-                    g_header = (
-                        f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>\n"
-                        f"{sep}\n"
-                        f"{part_line}"
-                    )
+                    g_header = f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>"
                 else:
                     g_header = (
                         f"🟥<b>{_html_escape(g_subject or 'MCQ')}</b>\n"
                         f"{sep}\n"
-                        f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>\n"
-                        f"{sep}\n"
-                        f"{part_line}"
+                        f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>"
                     )
                 section_texts.append(f"\n{sep}\n".join([g_header] + blocks))
 
