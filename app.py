@@ -994,11 +994,6 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 common_subject = (groups[0].get("subject") or "").strip()
                 overall_header = (
                     f"🟥<b>{_html_escape(common_subject or 'MCQ')}</b>\n"
-                    f"{sep}\n"
-                    f"🟪<b>{len(groups)}টি Exam — এক পোস্টে</b>\n"
-                    f"{sep}\n"
-                    f"🌟মোট Topic: {total_topics}\n"
-                    f"📌মোট MCQ: {total_mcq}\n"
                     f"{sep}{sep}"
                 )
                 post_text = overall_header + f"\n{sep}{sep}\n".join(section_texts)
