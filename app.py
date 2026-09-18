@@ -31144,14 +31144,14 @@ def _poll_end_kb(cache_id: str, cache: dict) -> dict:
         kb["inline_keyboard"].append([{"text": "↩️ Back to Source", "url": back_url}])
     return kb
 
-async def handle_poll_again(cache_id: str, user: dict, chat_id: int):
+async def handle_poll_again(cache_id: str, user: dict, chat_id: int, start_index: int = 0):
     try:
-        await _handle_poll_again_inner(cache_id, user, chat_id)
+        await _handle_poll_again_inner(cache_id, user, chat_id, start_index=start_index)
     except Exception as e:
         logger.error(f"[PollAgain] CRASHED cache={cache_id[:8]}: {e}")
         await notify_owner(f"⚠️ Poll Solve crashed (cache={cache_id[:8]}): {e}")
 
-async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
+async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int, start_index: int = 0):
     settings = await db_get_settings()
     tag = settings.get("tag", "")
     exp_footer = settings.get("exp_footer", "")
@@ -31162,32 +31162,38 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
 
     uid = user.get("id")
     DM_STOP_FLAGS[uid] = False
-    DM_LAST_SESSION[uid] = {"cache_id": cache_id, "kind": "poll"}
+    DM_LAST_SESSION[uid] = {"cache_id": cache_id, "kind": "poll", "resume_index": start_index}
 
     mcqs = cache["mcq_data"]
     topic = cache["topic"]
     page = cache["page_number"]
     total = len(mcqs)
 
-    pre_caption = (
-        f"🔄 <b>Poll Practice শুরু হচ্ছে!</b>\n\n"
-        f"🌟 Topic: {topic}\n📝 Total MCQ: {total}\n\n⏱️ Are you ready?"
-    )
     img_id = cache.get("image_file_id")
-    if img_id:
-        r = await send_photo_by_id(chat_id, img_id, pre_caption, parse_mode="HTML")
-        if not r.get("ok"):
-            await send_msg(chat_id, pre_caption, parse_mode="HTML")
+    if start_index > 0:
+        await send_msg(chat_id, f"▶️ <b>Poll Practice আবার শুরু!</b>\n\n🌟 Topic: {topic}\n📝 {start_index+1}/{total} নম্বর প্রশ্ন থেকে চলবে।", parse_mode="HTML")
     else:
-        await send_msg(chat_id, pre_caption)
+        pre_caption = (
+            f"🔄 <b>Poll Practice শুরু হচ্ছে!</b>\n\n"
+            f"🌟 Topic: {topic}\n📝 Total MCQ: {total}\n\n⏱️ Are you ready?"
+        )
+        if img_id:
+            r = await send_photo_by_id(chat_id, img_id, pre_caption, parse_mode="HTML")
+            if not r.get("ok"):
+                await send_msg(chat_id, pre_caption, parse_mode="HTML")
+        else:
+            await send_msg(chat_id, pre_caption)
 
-    await send_msg(chat_id, "3️⃣ 2️⃣ 1️⃣ 🚀 শুরু!")
-    await asyncio.sleep(1)
+        await send_msg(chat_id, "3️⃣ 2️⃣ 1️⃣ 🚀 শুরু!")
+        await asyncio.sleep(1)
 
     poll_fail_count = 0
     skipped_empty = 0
     stopped_by_user = False
+    i = start_index
     for i, mcq in enumerate(mcqs):
+        if i < start_index:
+            continue
         if DM_STOP_FLAGS.get(uid):
             stopped_by_user = True
             break
@@ -31228,6 +31234,7 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int):
 
     if stopped_by_user:
         DM_STOP_FLAGS.pop(uid, None)
+        DM_LAST_SESSION[uid] = {"cache_id": cache_id, "kind": "poll", "resume_index": i}
         await send_msg(
             chat_id,
             f"⏸️ <b>Poll Practice থামানো হয়েছে!</b>\n\n🎯 Topic: {topic}\n"
@@ -33570,7 +33577,22 @@ async def handle_message(msg: dict):
         uid = msg["from"]["id"]
         chat_id = msg["chat"]["id"]
         DM_STOP_FLAGS[uid] = True
-        await qs_del(uid)  # also stop an active Quiz Solve session, if any
+        quiz_st = await qs_get(uid)
+        if quiz_st:
+            t = quiz_st.get("timer_task")
+            if t and not t.done():
+                t.cancel()
+            src_indices = quiz_st.get("src_indices")
+            all_len = len(quiz_st.get("mcqs") or [])
+            remaining_indices = (
+                src_indices[quiz_st["idx"]:] if src_indices is not None
+                else list(range(quiz_st["idx"], all_len))
+            )
+            DM_LAST_SESSION[uid] = {
+                "cache_id": quiz_st["cache_id"], "kind": "quiz",
+                "resume_indices": remaining_indices,
+            }
+            await qs_del(uid)
         await send_msg(
             chat_id,
             "⏸️ থামানো হয়েছে।",
@@ -34381,9 +34403,11 @@ async def handle_callback(query: dict):
                 kind = sess["kind"] if sess and sess.get("cache_id") == resume_cache_id else "poll"
             DM_STOP_FLAGS[uid] = False
             if kind == "quiz":
-                _spawn_task(start_sequential_quiz(chat_id, uid, uname, resume_cache_id))
+                resume_indices = (sess or {}).get("resume_indices")
+                _spawn_task(start_sequential_quiz(chat_id, uid, uname, resume_cache_id, indices=resume_indices))
             else:
-                _spawn_task(handle_poll_again(resume_cache_id, query["from"], chat_id))
+                resume_index = (sess or {}).get("resume_index", 0)
+                _spawn_task(handle_poll_again(resume_cache_id, query["from"], chat_id, start_index=resume_index))
             return
         if data.startswith("lmscancel_"):
             # Cancel button on the DM progress message for an LMS
