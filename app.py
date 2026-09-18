@@ -704,7 +704,25 @@ NEW_EXAM_JOBS = {}
 LMS_API_SECRET = os.environ.get("LMS_API_SECRET", "")
 LMS_SEND_JOBS = {}  # job_id -> {"status", "pct", "sent_total", "total", "batches_done", "batches_total", "error"}
 DM_STOP_FLAGS = {}   # uid -> True while user has requested /stop (checked inside Poll Practice loop)
-DM_LAST_SESSION = {}  # uid -> {"cache_id": str, "kind": "poll"|"quiz"} — last active DM poll/quiz, for resume button
+DM_LAST_SESSION = {}  # uid -> in-memory mirror, kept in sync with D1 (see dm_session_set/get below)
+
+async def dm_session_set(uid: int, session: dict):
+    """Persist a user's last poll/quiz session to D1 (survives HF restarts)
+    while also updating the in-memory mirror for zero-latency reads inside
+    hot loops. D1 write is fire-and-forget so it never slows the poll loop."""
+    DM_LAST_SESSION[uid] = session
+    asyncio.create_task(d1_set(f"dm_session_{uid}", session, ttl=86400 * 3))
+
+async def dm_session_get(uid: int) -> dict:
+    """Read a user's last session — memory first (covers the common case of
+    same-process resume), falling back to D1 (covers resume after a restart,
+    when memory was wiped but D1 still has it)."""
+    if uid in DM_LAST_SESSION:
+        return DM_LAST_SESSION[uid]
+    sess = await d1_get(f"dm_session_{uid}")
+    if sess:
+        DM_LAST_SESSION[uid] = sess
+    return sess
 
 async def _create_forum_topic(channel_id: str, name: str) -> int | None:
     """Creates a new forum topic in a supergroup (forum mode must be ON) and
@@ -31191,7 +31209,7 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int, star
 
     uid = user.get("id")
     DM_STOP_FLAGS[uid] = False
-    DM_LAST_SESSION[uid] = {"cache_id": cache_id, "kind": "poll", "resume_index": start_index}
+    await dm_session_set(uid, {"cache_id": cache_id, "kind": "poll", "resume_index": start_index})
 
     mcqs = cache["mcq_data"]
     topic = cache["topic"]
@@ -31263,7 +31281,7 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int, star
 
     if stopped_by_user:
         DM_STOP_FLAGS.pop(uid, None)
-        DM_LAST_SESSION[uid] = {"cache_id": cache_id, "kind": "poll", "resume_index": i}
+        await dm_session_set(uid, {"cache_id": cache_id, "kind": "poll", "resume_index": i})
         await send_msg(
             chat_id,
             f"⏸️ <b>Poll Practice থামানো হয়েছে!</b>\n\n🎯 Topic: {topic}\n"
@@ -31764,7 +31782,7 @@ async def start_sequential_quiz(chat_id: int, uid: int, uname: str,
 
     settings = await db_get_settings()
     await qs_del(uid)
-    DM_LAST_SESSION[uid] = {"cache_id": cache_id, "kind": "quiz"}
+    await dm_session_set(uid, {"cache_id": cache_id, "kind": "quiz"})
 
     state = {
         "cache_id": cache_id, "mcqs": mcqs,
@@ -33622,10 +33640,10 @@ async def handle_message(msg: dict):
                 src_indices[quiz_st["idx"]:] if src_indices is not None
                 else list(range(quiz_st["idx"], all_len))
             )
-            DM_LAST_SESSION[uid] = {
+            await dm_session_set(uid, {
                 "cache_id": quiz_st["cache_id"], "kind": "quiz",
                 "resume_indices": remaining_indices,
-            }
+            })
             await qs_del(uid)
             await send_msg(
                 chat_id,
@@ -34432,14 +34450,14 @@ async def handle_callback(query: dict):
             return
         if data == "dmresume_last" or data.startswith("dmresume_"):
             if data == "dmresume_last":
-                sess = DM_LAST_SESSION.get(uid)
+                sess = await dm_session_get(uid)
                 if not sess:
                     await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "কোনো আগের session পাওয়া যায়নি।"})
                     return
                 resume_cache_id, kind = sess["cache_id"], sess["kind"]
             else:
                 resume_cache_id = data[len("dmresume_"):]
-                sess = DM_LAST_SESSION.get(uid)
+                sess = await dm_session_get(uid)
                 kind = sess["kind"] if sess and sess.get("cache_id") == resume_cache_id else "poll"
             DM_STOP_FLAGS[uid] = False
             if kind == "quiz":
