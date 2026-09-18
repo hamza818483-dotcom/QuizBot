@@ -964,14 +964,25 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 if not blocks:
                     continue
                 total_topics += len(blocks)
-                g_header = (
-                    f"🟥<b>{_html_escape(g_subject or 'MCQ')}</b>\n"
-                    f"{sep}\n"
-                    f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>\n"
-                    f"{sep}\n"
-                    f"🌟Total Topic: {len(blocks)}\n"
-                    f"📌Total MCQ: {sum(len(b.get('mcqs') or []) for b in g_batches)}"
-                )
+                if len(groups) > 1:
+                    # Subject is common across all exams in single-post mode
+                    # (guaranteed by the caller) — shown once at the very top
+                    # instead of repeating per exam.
+                    g_header = (
+                        f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>\n"
+                        f"{sep}\n"
+                        f"🌟Total Topic: {len(blocks)}\n"
+                        f"📌Total MCQ: {sum(len(b.get('mcqs') or []) for b in g_batches)}"
+                    )
+                else:
+                    g_header = (
+                        f"🟥<b>{_html_escape(g_subject or 'MCQ')}</b>\n"
+                        f"{sep}\n"
+                        f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>\n"
+                        f"{sep}\n"
+                        f"🌟Total Topic: {len(blocks)}\n"
+                        f"📌Total MCQ: {sum(len(b.get('mcqs') or []) for b in g_batches)}"
+                    )
                 section_texts.append(f"\n{sep}\n".join([g_header] + blocks))
 
             if not section_texts:
@@ -980,7 +991,10 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 return
 
             if len(groups) > 1:
+                common_subject = (groups[0].get("subject") or "").strip()
                 overall_header = (
+                    f"🟥<b>{_html_escape(common_subject or 'MCQ')}</b>\n"
+                    f"{sep}\n"
                     f"🟪<b>{len(groups)}টি Exam — এক পোস্টে</b>\n"
                     f"{sep}\n"
                     f"🌟মোট Topic: {total_topics}\n"
