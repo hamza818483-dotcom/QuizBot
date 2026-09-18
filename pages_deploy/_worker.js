@@ -76,23 +76,30 @@ export default {
     }
 
     const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
-                     '/api/leaderboard', '/api/solve-pdf', '/api/tg-image', '/api/new-exam/status'];
+                     '/api/leaderboard', '/api/solve-pdf', '/api/premium-pdf-view',
+                     '/api/tg-image', '/api/new-exam/status'];
     if (HF_ONLY.some(p => url.pathname.startsWith(p))) {
-      const RENDER = env.RENDER_URL || env.HF_SPACE_URL || 'https://hamza-02-quizbot.hf.space';
-      const renderReq = new Request(RENDER + url.pathname + url.search, {
-        method: request.method,
-        headers: request.headers,
-        body: request.method !== 'GET' ? request.body : undefined,
-      });
-      try {
-        const r = await fetch(renderReq, { signal: AbortSignal.timeout(20000) });
-        if (r.ok) return r;
-        // Backend responded but with an error (5xx) — still worth trying the
-        // direct fallback path below rather than returning its error as-is.
-      } catch(e) {
-        console.warn('[HF_ONLY] backend unreachable, trying direct fallback:', e.message);
+      const hosts = [env.RENDER_URL || env.HF_SPACE_URL || 'https://hamza-02-quizbot.hf.space', env.RENDER_URL_2].filter(Boolean);
+      for (const RENDER of hosts) {
+        const renderReq = new Request(RENDER + url.pathname + url.search, {
+          method: request.method,
+          headers: request.headers,
+          body: request.method !== 'GET' ? request.body : undefined,
+        });
+        try {
+          const r = await fetch(renderReq, { signal: AbortSignal.timeout(20000) });
+          if (r.ok) return r;
+          // Backend responded but with an error (5xx) — try next host before
+          // falling back to the DB-only path below.
+        } catch(e) {
+          console.warn(`[HF_ONLY] backend (${RENDER}) unreachable, trying next:`, e.message);
+        }
       }
-      // ── Backend down/erroring: try direct D1 + Supabase(x2) fallback ──
+      // ── All bot hosts down/erroring: try direct D1 + Supabase(x2) fallback
+      //    (covers routes with a DB-only equivalent; PDF-generation routes
+      //    like /api/solve-pdf and /api/premium-pdf-view have none, since
+      //    Chromium rendering can't run on a Worker — those simply fail here
+      //    if every bot host is down). ──
       const fb = await handleExamBackendFallback(request, url, env);
       if (fb) return fb;
       return jsonResp({ ok: false, error: 'Backend unavailable, no fallback path for this route' }, 502);
