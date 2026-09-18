@@ -949,6 +949,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
                     quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
                     pdf_link = f"{CF_WORKER_URL_2}/api/premium-pdf-view/{cache_id}"
+                    asyncio.create_task(_prewarm_premium_pdf(pdf_link))
                     quote_body = (
                         f"<b>{_serial}. {_html_escape(topic)}</b>\n"
                         f"📌 মোট MCQ: {len(mcqs)}\n"
@@ -12120,6 +12121,18 @@ _PDF_SEMAPHORE = asyncio.Semaphore(8)
 # Capped FIFO so this can't grow unbounded across a long-running process.
 _PREMIUM_PDF_CACHE: dict = {}
 _PREMIUM_PDF_CACHE_MAX = 300
+
+async def _prewarm_premium_pdf(pdf_link: str):
+    """Fire-and-forget self-GET right after sending, so the CF Pages proxy
+    generates the PDF once and caches it to R2 immediately. Without this,
+    the link only warms on the viewer's first click -- if the backend
+    (Render/HF) happens to be down at that moment, the click 502s. This
+    call happens right after generation while the backend is guaranteed up."""
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            await c.get(pdf_link)
+    except Exception as e:
+        logger.warning(f"[premium-pdf] prewarm failed (non-fatal): {e}")
 
 def _premium_pdf_cache_put(cache_id: str, pdf_bytes: bytes):
     if cache_id in _PREMIUM_PDF_CACHE:
