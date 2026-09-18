@@ -889,7 +889,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
             logger.warning(f"[LMS-Send] score-ask ending message failed: {e}")
 
     return sent, first_link, batch_cache_id
-async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = "", links_only: bool = False, exam_groups: list = None):
+async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = "", links_only: bool = False, exam_groups: list = None, links_variant: str = "full"):
     """batches: [{"topic": str, "mcqs": [...]}, ...] — one entry per topic
     (or a single entry when the exam has no topic split / no batch-size
     split requested). Sent sequentially, same as /csvS's batch loop.
@@ -904,9 +904,16 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
     links_only=True: no polls are sent to the channel at all. For every
     batch an MCQ cache row is still created (so its deep-links resolve),
     then ONE single message is posted: header + one <blockquote> per topic
-    with Poll Practice (bot DM deep-link)/Quiz Solve/Website Exam links.
-    Reuses this same job system (proven working /api/lms-send-channel path)
-    instead of a separate route, purely branching behavior inside the job.
+    with links. Reuses this same job system (proven working
+    /api/lms-send-channel path) instead of a separate route, purely
+    branching behavior inside the job.
+
+    links_variant (only relevant when links_only=True):
+      "full"          — Poll Practice, Quiz Solve, Website Exam, Rapid
+                        Practice Game, Premium PDF (existing behavior).
+      "poll_quiz_pdf" — only Poll Practice, Quiz Solve, Premium PDF; no
+                        Website Exam / Rapid Practice Game link anywhere,
+                        including the footer's "Website:" line.
     """
     job = LMS_SEND_JOBS[job_id]
     dm_msg_id = None
@@ -941,6 +948,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job["status"] = "running"
             bot_un = await get_bot_username()
             sep = "▬▬▬▬▬▬▬▬▬▬"
+            poll_quiz_pdf_only = (links_variant == "poll_quiz_pdf")
 
             groups = exam_groups if exam_groups else [{
                 "exam_title": exam_title, "subject": subject, "batches": batches,
@@ -964,24 +972,36 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs, channel_id=channel_id)
                     poll_link = f"https://t.me/{bot_un}?start=poll_{cache_id}"
                     quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
-                    exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
-                    quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
                     pdf_link = f"{CF_WORKER_URL_2}/api/premium-pdf-view/{cache_id}"
                     asyncio.create_task(_prewarm_premium_pdf(f"{pdf_link}?raw=1"))
-                    quote_body = (
-                        f"<b>{_serial}. {_html_escape(topic)}</b>\n"
-                        f"📌 মোট MCQ: {len(mcqs)}\n"
-                        f"───────────\n"
-                        f"<a href=\"{poll_link}\"><b>🔰 Poll Practice</b></a>"
-                        f"   "
-                        f"<a href=\"{quiz_link}\"><b>🔗 Quiz Solve</b></a>\n"
-                        f"───────────\n"
-                        f"<a href=\"{exam_link}\"><b>🌐 Website Exam</b></a>"
-                        f"   "
-                        f"<a href=\"{quick_link}\"><b>⚡ Rapid Practice Game</b></a>\n"
-                        f"───────────\n"
-                        f"<a href=\"{pdf_link}\"><b>📄 Premium PDF</b></a>"
-                    )
+                    if poll_quiz_pdf_only:
+                        quote_body = (
+                            f"<b>{_serial}. {_html_escape(topic)}</b>\n"
+                            f"📌 মোট MCQ: {len(mcqs)}\n"
+                            f"───────────\n"
+                            f"<a href=\"{poll_link}\"><b>🔰 Poll Practice</b></a>"
+                            f"   "
+                            f"<a href=\"{quiz_link}\"><b>🔗 Quiz Solve</b></a>\n"
+                            f"───────────\n"
+                            f"<a href=\"{pdf_link}\"><b>📄 Premium PDF</b></a>"
+                        )
+                    else:
+                        exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+                        quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
+                        quote_body = (
+                            f"<b>{_serial}. {_html_escape(topic)}</b>\n"
+                            f"📌 মোট MCQ: {len(mcqs)}\n"
+                            f"───────────\n"
+                            f"<a href=\"{poll_link}\"><b>🔰 Poll Practice</b></a>"
+                            f"   "
+                            f"<a href=\"{quiz_link}\"><b>🔗 Quiz Solve</b></a>\n"
+                            f"───────────\n"
+                            f"<a href=\"{exam_link}\"><b>🌐 Website Exam</b></a>"
+                            f"   "
+                            f"<a href=\"{quick_link}\"><b>⚡ Rapid Practice Game</b></a>\n"
+                            f"───────────\n"
+                            f"<a href=\"{pdf_link}\"><b>📄 Premium PDF</b></a>"
+                        )
                     blocks.append(f"<blockquote>{quote_body}</blockquote>")
                 if not blocks:
                     continue
@@ -1313,6 +1333,10 @@ async def lms_send_channel(request: Request):
     exam_title = str(data.get("exam_title") or "").strip()
     subject = str(data.get("subject") or "").strip()
     links_only = bool(data.get("links_only"))
+    # "full" (default) = Poll/Quiz/Website/Rapid/PDF links; "poll_quiz_pdf" =
+    # only Poll Practice, Quiz Solve, Premium PDF (no Website Exam anywhere,
+    # including the summary's "Website:" footer line).
+    links_variant = str(data.get("links_variant") or "full").strip()
     # Bulk "one single post for several exams" mode: LMS sends
     # exam_groups=[{"exam_title","subject","batches"},...] instead of a
     # flat batches list. Only meaningful together with links_only.
@@ -1337,7 +1361,7 @@ async def lms_send_channel(request: Request):
         "batches_done": 0, "batches_total": batches_total, "error": None,
         "exam_id": exam_id, "cancel_requested": False,
     }
-    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject, links_only=links_only, exam_groups=exam_groups))
+    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject, links_only=links_only, exam_groups=exam_groups, links_variant=links_variant))
     return JSONResponse({"ok": True, "job_id": job_id})
 
 
