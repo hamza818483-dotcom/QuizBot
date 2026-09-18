@@ -761,14 +761,15 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
 
         # Timer: auto-skip after timer expires. NOTE: must wait LONGER than the
         # poll's own open_period (timer+5) so this never fires while the poll
-        # can still legitimately receive an answer -- firing earlier caused a
-        # race where a real, on-time answer arrived just after the session
-        # had already moved on via timeout, producing a pid mismatch and a
-        # stalled quiz (no next question sent).
+        # can still legitimately receive an answer -- firing earlier (history:
+        # commit 0276fda, timer+2 vs open_period timer+5) caused a race where a
+        # real, on-time answer arrived just after the session had already moved
+        # on via timeout, producing a pid mismatch and a permanently stalled
+        # quiz. Keep a full 1s safety margin past open_period (timer+6).
         async def _quiz_timeout():
             await asyncio.sleep(session["timer"] + 6)
             s = QUIZ_SESSIONS.get(session["uid"])
-            if not s or s["pid"] != poll_id or s["cur"] != session["cur"]:
+            if not s or s.get("_stopped") or s["pid"] != poll_id or s["cur"] != session["cur"]:
                 return
             # Auto-advance — skip হিসেবে count করো
             for qr in s["q_results"]:
@@ -778,9 +779,10 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
             s["skip"] += 1
             s["cur"] += 1
             QUIZ_SESSIONS[s["uid"]] = s
-            # 1s gap দিয়ে next question auto-send
-            await asyncio.sleep(1)
-            await send_quiz_question(chat_id, s)
+            if s["cur"] >= s["tot"]:
+                await finish_d1_quiz(s)
+            else:
+                await send_quiz_question(chat_id, s)
         if session["uid"] in QUIZ_TIMERS:
             QUIZ_TIMERS[session["uid"]].cancel()
         QUIZ_TIMERS[session["uid"]] = asyncio.create_task(_quiz_timeout())
@@ -806,6 +808,7 @@ async def send_quiz_question(chat_id: int, session: dict, force: bool = False):
 
 async def handle_quiz_poll_answer(pa: dict):
     """Handle poll answer for D1 quiz system"""
+    logger.info(f"[Quiz][TRACE] handle_quiz_poll_answer CALLED raw={pa}")
     uid = pa.get("user", {}).get("id")
     logger.info(f"[Quiz][TRACE] handle_quiz_poll_answer ENTER uid={uid} poll_id={pa.get('poll_id')} option_ids={pa.get('option_ids')}")
     logger.info(f"[Quiz] poll_answer received uid={uid} poll_id={pa.get('poll_id')} in_sessions={uid in QUIZ_SESSIONS if uid else False}")
@@ -814,18 +817,61 @@ async def handle_quiz_poll_answer(pa: dict):
         return
 
     session = QUIZ_SESSIONS[uid]
+    if session.get("_stopped"):
+        logger.info(f"[Quiz] poll_answer ignored, quiz stopped uid={uid}")
+        return
+
     poll_id = pa.get("poll_id", "")
     if session.get("pid") != poll_id:
-        # A poll_answer for any pid other than the CURRENT question's pid is
-        # always a late/stale answer for an already-passed question (user
-        # tapped after the timer moved on, or Telegram delivered it late) —
-        # never a real answer to act on. Silently ignore it: the current
-        # question already has its own live timer/answer path handling
-        # advancement, so nothing here should force-advance or notify the
-        # owner. Force-advancing on a stale answer previously caused
-        # runaway loops that skipped many questions in seconds whenever a
-        # user's client kept delivering delayed answers.
-        logger.info(f"[Quiz] stale/late poll_answer ignored uid={uid} got={poll_id} expected={session.get('pid')} cur={session.get('cur')}")
+        # Usually a late/stale answer for an already-passed question. But if
+        # this pid was actually the CURRENT question's pid a moment ago (i.e.
+        # session["pid"] genuinely lagged/never got set due to a race), the
+        # user's real answer would otherwise be dropped with no recovery —
+        # unlike the legacy qs_get quiz path, which already force-advances
+        # on stall. Mirror that: snapshot state, wait briefly, and only if
+        # NOTHING else has advanced the session in the meantime, treat this
+        # as the real answer and force-advance so the quiz never gets stuck.
+        logger.info(f"[Quiz] pid mismatch uid={uid} got={poll_id} expected={session.get('pid')} cur={session.get('cur')}")
+        _snap_cur = session.get("cur")
+        _snap_pid = session.get("pid")
+        _opt_ids = pa.get("option_ids", [])
+
+        async def _stall_recovery():
+            await asyncio.sleep(0.5)
+            s2 = QUIZ_SESSIONS.get(uid)
+            if not s2 or s2.get("_stopped") or s2.get("cur") != _snap_cur or s2.get("pid") != _snap_pid:
+                return  # already advanced normally, or quiz was stopped meanwhile
+            logger.warning(f"[Quiz] Force-recovering stalled D1 quiz uid={uid} cur={_snap_cur}")
+            q_result = None
+            for qr in s2["q_results"]:
+                if qr["index"] == s2["cur"]:
+                    q_result = qr
+                    break
+            if q_result:
+                if not _opt_ids:
+                    q_result["type"] = "skip"
+                elif _opt_ids[0] == s2["cor"]:
+                    q_result["type"] = "right"
+                else:
+                    q_result["type"] = "wrong"
+            if not _opt_ids:
+                s2["skip"] += 1
+            elif _opt_ids[0] == s2["cor"]:
+                s2["right"] += 1
+            else:
+                s2["wrong"] += 1
+            s2["cur"] += 1
+            s2["_sending_for"] = None
+            s2["_advancing"] = None
+            if uid in QUIZ_TIMERS:
+                QUIZ_TIMERS[uid].cancel()
+            QUIZ_SESSIONS[uid] = s2
+            if s2["cur"] >= s2["tot"]:
+                await finish_d1_quiz(s2)
+            else:
+                await send_quiz_question(s2["chat_id"], s2, force=True)
+
+        asyncio.create_task(_stall_recovery())
         return
 
     # Claim this advance so a concurrent _stall_recovery task for the same
@@ -946,6 +992,50 @@ async def handle_quiz_next(uid: int):
             else:
                 await asyncio.sleep(0.5)
                 await send_quiz_question(session["chat_id"], session, force=True)
+
+
+async def stop_quiz_for_user(uid: int) -> bool:
+    """/stopquiz (or bare 'stopquiz' text) — pause a running D1 quiz for this
+    user and show a Resume button. Returns True if a quiz was actually
+    running and got paused, False if there was nothing to stop."""
+    session = QUIZ_SESSIONS.get(uid)
+    if not session or session.get("_stopped"):
+        return False
+
+    if uid in QUIZ_TIMERS:
+        QUIZ_TIMERS[uid].cancel()
+        del QUIZ_TIMERS[uid]
+
+    # চলতি poll_id ছোড়া রাখলে stopped অবস্থাতেও কেউ উত্তর দিলে সেটা যেন
+    # গোনা না হয় — pid clear করে দাও, handle_quiz_poll_answer তখন mismatch
+    # পেয়ে সাইলেন্টলি ignore করবে (কোনো force-advance হবে না কারণ session
+    # আর QUIZ_SESSIONS-এ live guard মেলাবে না)।
+    session["_stopped"] = True
+    session["_sending_for"] = None
+    session["_advancing"] = None
+    QUIZ_SESSIONS[uid] = session
+
+    await tg_post("sendMessage", {
+        "chat_id": session["chat_id"],
+        "text": f"⏸️ Quiz থামানো হয়েছে ({session['cur']}/{session['tot']})।",
+        "reply_markup": {
+            "inline_keyboard": [[
+                {"text": "▶️ Resume Quiz", "callback_data": f"quizresume_{uid}"}
+            ]]
+        }
+    })
+    return True
+
+
+async def resume_quiz_for_user(uid: int, chat_id: int):
+    """Resume a previously /stopquiz-paused D1 quiz from where it left off."""
+    session = QUIZ_SESSIONS.get(uid)
+    if not session or not session.get("_stopped"):
+        return False
+    session["_stopped"] = False
+    QUIZ_SESSIONS[uid] = session
+    await send_quiz_question(chat_id, session, force=True)
+    return True
 
 
 async def finish_d1_quiz(session: dict):

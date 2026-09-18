@@ -332,10 +332,9 @@ class GeminiKeyRotator:
     # whose first-ever-seen timestamp is within WARMUP_DAYS gets a reduced
     # RPM ceiling and is excluded from the account concurrency pool,
     # ramping linearly up to full trust by day WARMUP_DAYS.
-    WARMUP_DAYS = 7  # widened 5 -> 7 (2026-09-03 second pass): the mass-ban
-    # keys were mostly 0.3-0.8d old, well inside even the old 5-day window,
-    # but banned anyway -- extending the window keeps them throttled longer
-    # while GLOBAL_CONCURRENT_CAP is restored for already-trusted keys.
+    WARMUP_DAYS = 3  # narrowed 7 -> 3 (2026-09-08): reach full trust faster
+    # so healthy-key throughput recovers sooner, while still ramping new
+    # keys instead of throwing them straight into full-rate rotation.
     WARMUP_DAY0_RPM_FRACTION = 0.15  # day 0: only 15% of RPM_PER_KEY allowed
     # (tightened from 0.2 -- brand-new keys get even less initial load)
     WARMUP_MAX_CONCURRENT = 1  # a warming-up key never gets more than 1
@@ -828,7 +827,14 @@ class GeminiKeyRotator:
         live_keys = [k for k in live_keys if k not in stagger_locked]
         not_exhausted = [k for k in live_keys if not _is_gemini_key_exhausted_today(k)]
         exhausted = [k for k in live_keys if _is_gemini_key_exhausted_today(k)]
-        pool = not_exhausted if not_exhausted else live_keys
+        # Low-healthy-pool safety net: once healthy (non-exhausted) keys drop
+        # below 20, don't wait for zero — start blending in today-exhausted
+        # keys as usable too (safely, still ordered after true-healthy ones
+        # below), so a shrinking healthy pool doesn't get overloaded while
+        # plenty of other keys sit idle just because they got marked
+        # exhausted once today.
+        _low_healthy = len(not_exhausted) < 20
+        pool = not_exhausted if (not_exhausted and not _low_healthy) else live_keys
         cooled = [k for k in pool if self._cooldown_until.get(k, 0) <= now]
         cooling = [k for k in pool if self._cooldown_until.get(k, 0) > now]
         under_rpm = [k for k in cooled if self._prune_and_count(k, now) < self.warmup_rpm_limit(k)]
@@ -874,6 +880,17 @@ class GeminiKeyRotator:
                     order.append(acct)
                 by_acct[acct].append(k)
             rebuilt = []
+            # Global tight load-balance: order ACCOUNTS themselves by their
+            # least-used key's call count too (not just random shuffle
+            # order), so an idle account's keys surface before an
+            # already-hot account's keys across the WHOLE healthy pool --
+            # not just within one account's own slice. random.shuffle above
+            # still randomizes ties (accounts with equal min-usage), so the
+            # anti-fingerprint randomization is preserved; this only breaks
+            # ties by actual usage instead of leaving it to chance, so every
+            # healthy key gets pulled into rotation instead of idle keys
+            # sitting unused while a few absorb most of the traffic.
+            order.sort(key=lambda acct: min(self.key_daily_call_count(k) for k in by_acct[acct]))
             for acct in order:
                 group = by_acct[acct]
                 if len(group) > 1:
@@ -881,7 +898,7 @@ class GeminiKeyRotator:
                 rebuilt.extend(group)
             healthy = rebuilt
             self.current = (self.current + 1) % max(len(self.keys), 1)
-        return healthy + over_cap + over_rpm + cooling + (exhausted if not_exhausted else []) + stagger_locked + circuit_open
+        return healthy + over_cap + over_rpm + cooling + (exhausted if (not_exhausted or _low_healthy) else []) + stagger_locked + circuit_open
 
     def ordered_keys_avoiding_accounts(self, avoid_accounts: set, offset: int = 0):
         """Same as ordered_keys(), but as a PURE tie-breaker within the
@@ -1050,7 +1067,7 @@ MCQ_PROMPT_WITH_COUNT = """📝 এই page-টা থেকে MCQ বানা
 💥অপশন: ৪টি, সবগুলোই factual, একটাই সঠিক উত্তর (হ্যাঁ/না/সত্য/মিথ্যা না)
 💥উত্তর: A/B/C/D — সব প্রশ্নে একই letter না, ছড়িয়ে দাও
 -MUST বানাতে হবে exactly {count} টি MCQ, কম বেশি নয়
-💥ব্যাখ্যা (MAX 165 শব্দ): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, শুধু page content থেকে (বাইরের knowledge না), source-reference phrase ("টেক্সট অনুসারে" ইত্যাদি) ছাড়া সরাসরি fact আকারে।
+💥ব্যাখ্যা (MAX 165 শব্দ): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, তার সাথে page-এ থাকা প্রশ্ন-প্রাসঙ্গিক অতিরিক্ত তথ্য (related fact, সংজ্ঞা, উদাহরণ, সংখ্যা/তারিখ ইত্যাদি যা page-এ আছে এবং এই প্রশ্নের সাথে সরাসরি সম্পর্কিত) যোগ করে ব্যাখ্যা সমৃদ্ধ করবে — অপ্রাসঙ্গিক তথ্য কখনো যোগ করবে না। শুধু page content থেকে (বাইরের knowledge না), source-reference phrase ("টেক্সট অনুসারে", "পেজের তথ্য অনুযায়ী", "প্যাসেজ অনুযায়ী" ইত্যাদি — কোনো ধরনের উৎস-নির্দেশক বাক্যাংশ) সম্পূর্ণ নিষিদ্ধ, সরাসরি fact আকারে লিখবে।
 
 Topic: {topic}
 Page: {page}
@@ -1071,12 +1088,12 @@ MCQ_PROMPT_MAX = """📝 এই page-টা থেকে MCQ বানাও।
 - ভাষা: প্রতিটা MCQ (question, options, explanation) যে অংশ/লাইন/অনুচ্ছেদ থেকে বানানো হচ্ছে, ঠিক সেই অংশটা page-এ যে ভাষায় লেখা (বাংলা/ইংরেজি), MCQ-টাও ঠিক সেই ভাষাতেই লিখবে — কখনো translate করবে না। Page-এর কিছু অংশ বাংলা, কিছু অংশ ইংরেজি (mixed) হলে, প্রতিটা MCQ তার নিজের source-অংশের ভাষা অনুসরণ করবে (একই page-এ কিছু MCQ বাংলা, কিছু ইংরেজি — এটাই সঠিক, জোর করে একভাষায় আনা যাবে না)।
 🔴🔴 ABSOLUTE CONTENT-LOCK (সর্বোচ্চ গুরুত্বপূর্ণ নিয়ম, ১০০০% মানতে হবে): question, প্রতিটা option, ব্যাখ্যা — সব কিছুর প্রতিটা word/fact/number/নাম শুধুমাত্র এই page-এ চোখে দেখা যাওয়া content থেকেই আসবে। নিজের জ্ঞান/training data/সাধারণ জ্ঞান থেকে এক ফোঁটাও তথ্য যোগ করা সম্পূর্ণ নিষিদ্ধ — বিষয়টা যতই সহজ/পরিচিত মনে হোক না কেন। কোনো option সম্পূর্ণ করতে page-এ নেই এমন কোনো তথ্য (এমনকি সঠিক তথ্য হলেও) বসাতে হলে, সেই MCQ-টাই সম্পূর্ণ বাদ দাও — কখনো নিজে থেকে বানিয়ে/অনুমান করে বসাবে না। প্রতিটা MCQ লেখার আগে নিজেকে যাচাই করো: "এই question ও প্রতিটা option-এর প্রতিটা শব্দ কি আমি এই page-এর ছবিতে হুবহু দেখতে পাচ্ছি?" — উত্তর "না" হলে সেই MCQ বাদ দাও।
 
-📊 COUNT: default target কমপক্ষে ১৫টি MCQ (user নির্দিষ্ট সংখ্যা না দিলে) — page-এ তথ্য বেশি থাকলে ৩৫ পর্যন্ত যেতে পারো, ৬-১০টায় থেমে যাওয়া চলবে না যতক্ষণ page-এ আরও extract-যোগ্য তথ্য আছে। তথ্য সত্যিই কম থাকলে minimum 10, একদম sparse হলে minimum 5।
+📊 COUNT: MANDATORY minimum ১৫টি MCQ, কোনো upper limit নেই — page-এ যত তথ্য আছে সবটাই MCQ-তে রূপান্তর করো। ১৫-এর নিচে কোনো অবস্থাতেই থামা যাবে না যদি page-এ MCQ বানানোর মতো তথ্য অবশিষ্ট থাকে — প্রতিটা লাইন/প্যারাগ্রাফ/বক্স/সারণি থেকে একাধিক প্রশ্ন বানিয়ে (আলাদা angle থেকে জিজ্ঞেস করে — direct fact, reverse, cause-effect, comparison) হলেও ১৫ পূরণ করো, আর তথ্য বেশি থাকলে থেমো না, যতটা সম্ভব বের করো। শুধুমাত্র page সত্যিই blank/cover-page হলে (কার্যত কোনো তথ্য নেই) কম MCQ গ্রহণযোগ্য।
 
 💥প্রশ্ন: ছোট (১-২ লাইন), সব ধরনের angle থেকে (direct fact, reverse, cause-effect, comparison, "কোনটি সঠিক নয়" ইত্যাদি মিক্স)
 💥অপশন: ৪টি, সবগুলোই factual, একটাই সঠিক উত্তর (হ্যাঁ/না/সত্য/মিথ্যা না)
 💥উত্তর: A/B/C/D — সব প্রশ্নে একই letter না, ছড়িয়ে দাও
-💥ব্যাখ্যা (MAX 165 শব্দ): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, শুধু page content থেকে (বাইরের knowledge না), source-reference phrase ("টেক্সট অনুসারে" ইত্যাদি) ছাড়া সরাসরি fact আকারে।
+💥ব্যাখ্যা (MAX 165 শব্দ): সঠিক উত্তর কেন সঠিক + বাকি ৩টা কেন ভুল, তার সাথে page-এ থাকা প্রশ্ন-প্রাসঙ্গিক অতিরিক্ত তথ্য (related fact, সংজ্ঞা, উদাহরণ, সংখ্যা/তারিখ ইত্যাদি যা page-এ আছে এবং এই প্রশ্নের সাথে সরাসরি সম্পর্কিত) যোগ করে ব্যাখ্যা সমৃদ্ধ করবে — অপ্রাসঙ্গিক তথ্য কখনো যোগ করবে না। শুধু page content থেকে (বাইরের knowledge না), source-reference phrase ("টেক্সট অনুসারে", "পেজের তথ্য অনুযায়ী", "প্যাসেজ অনুযায়ী" ইত্যাদি — কোনো ধরনের উৎস-নির্দেশক বাক্যাংশ) সম্পূর্ণ নিষিদ্ধ, সরাসরি fact আকারে লিখবে।
 
 Topic: {topic}
 Page: {page}
@@ -1215,6 +1232,91 @@ MUST Return ONLY valid JSON array, EVERY item MUST include main_topic + sub_topi
 [{{"main_topic":"...","sub_topic":"..." or null,"question":"...","options":["option1","option2","option3","option4"],"answer":"B","explanation":"..."}}]"""
 
 
+def _rd_reconcile_mcq_topic(mcqs: list, fallback: str) -> list:
+    """/rd-ONLY topic backstop -- completely independent of /pdfs's
+    _pdfs_reconcile_mcq_topics (no shared code/state). Ensures every MCQ has
+    a clean, non-empty topic name (never silently dropped/blank), and moves
+    the raw model field 'main_topic' into the internal '_rd_topic' key that
+    /rd's own grouping/CSV code (below) expects. If the model didn't tag a
+    topic at all, falls back to the page's own topic label."""
+    out = []
+    for m in (mcqs or []):
+        if not isinstance(m, dict):
+            continue
+        main_t = (m.get("main_topic") or "").strip()
+        if not main_t:
+            main_t = fallback
+        m["_rd_topic"] = main_t[:60]
+        m.pop("main_topic", None)
+        m.pop("sub_topic", None)
+        out.append(m)
+    return out
+
+
+def _rd_normalize_topic_key(name: str) -> str:
+    """Loose normalization for fuzzy-matching /rd topic strings that should
+    be the same subject but came out with tiny wording differences across
+    pages (extra/missing spaces, punctuation). Lowercases (no-op on Bengali,
+    only affects Latin chars)."""
+    if not name:
+        return ""
+    return re.sub(r'[\s\-–—:।,.\(\)]+', '', name).strip().lower()
+
+
+def _rd_merge_similar_topics(all_mcqs: list) -> list:
+    """/rd FINAL SAFETY-NET PASS (runs once, after all pages are done): the
+    rolling known-topics list already prevents most cross-page topic
+    splitting, but isn't 100% guaranteed -- this catches any remaining
+    near-duplicate topic strings (whitespace/punctuation-only differences)
+    and merges them onto a single canonical name (the first-seen variant)."""
+    canonical_by_key = {}
+    for m in all_mcqs:
+        t = m.get("_rd_topic")
+        if not t:
+            continue
+        key = _rd_normalize_topic_key(t)
+        if not key:
+            continue
+        if key not in canonical_by_key:
+            canonical_by_key[key] = t
+        else:
+            m["_rd_topic"] = canonical_by_key[key]
+    return all_mcqs
+
+
+def _rd_group_by_topic(all_mcqs: list, fallback_main: str) -> tuple:
+    """/rd-ONLY grouping (independent of /pdfs's _group_pdfs_mcqs). Groups
+    MCQs by _rd_topic, preserving first-seen order. Returns
+    (topics_ordered, topic_map: {topic -> [mcqs]})."""
+    topics_ordered = []
+    topic_map = {}
+    for m in all_mcqs:
+        t = m.get("_rd_topic") or fallback_main
+        if t not in topic_map:
+            topic_map[t] = []
+            topics_ordered.append(t)
+        topic_map[t].append(m)
+    return topics_ordered, topic_map
+
+
+def _rd_build_topicwise_csv_rows(topics_ordered: list, topic_map: dict) -> list:
+    """/rd-ONLY CSV row builder (independent of /pdfs's marker-row builder).
+    One header row per topic, followed by that topic's MCQ rows."""
+    rows = []
+    for t in topics_ordered:
+        mcqs = topic_map.get(t, [])
+        if not mcqs:
+            continue
+        rows.append([t, "", "", "", "", "", "", ""])
+        for q in mcqs:
+            opts = (q.get("options", []) + ["", "", "", ""])[:4]
+            rows.append([
+                q.get("question", ""), opts[0], opts[1], opts[2], opts[3],
+                q.get("answer", "A"), q.get("explanation", ""), ""
+            ])
+    return rows
+
+
 def _pdfs_reconcile_mcq_topics(mcqs: list, fallback: str, allowed_topics: list = None) -> list:
     """Code-level backstop (not prompt-only) — runs on every /pdfs generation
     result before it's used anywhere else. Ensures every MCQ has a clean,
@@ -1330,6 +1432,7 @@ async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: s
             else:
                 logger.warning(f"[{log_tag}] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
                 _consecutive_infra_fails += 1
+                key_rotator.mark_rate_limited(key, daily_exhausted=False, retry_after_seconds=30)
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
@@ -1508,6 +1611,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
             else:
                 logger.warning(f"[PDFS-C2] Attempt {attempt+1} failed: {type(e).__name__}: {err_str}")
                 _consecutive_infra_fails += 1
+                key_rotator.mark_rate_limited(key, daily_exhausted=False, retry_after_seconds=30)
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
             continue
@@ -1719,6 +1823,33 @@ def image_to_base64(img: Image.Image) -> str:
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode()
+
+def _enhance_blurry_page(img: Image.Image) -> Image.Image:
+    """/unmesh 0-MCQ retry helper: some pages are genuinely faint/blurry
+    scans (low contrast, soft focus, or simply rendered at too low an
+    effective resolution for small text) that a normal read can miss
+    entirely even though real content is there. Upscales 1.6x (raises
+    effective DPI so small/dense text has more pixels to be read from,
+    since the PDF-render pipeline stays at its normal DPI for every other
+    page rather than raising the baseline for all pages) then boosts
+    contrast + sharpness + slight brightness, so a careful-mode retry
+    gets a cleaner, higher-resolution image to read instead of just
+    re-asking the same blurry image again. Returns a NEW image (never
+    mutates the original, since the un-enhanced image is still needed
+    for posting/other uses)."""
+    from PIL import ImageEnhance, ImageFilter
+    out = img.convert("RGB") if img.mode != "RGB" else img.copy()
+    _w, _h = out.size
+    _UPSCALE = 1.6
+    _MAX_DIM = 5000  # stay under Telegram/memory-safe ceilings even after upscale
+    if max(_w, _h) * _UPSCALE <= _MAX_DIM:
+        out = out.resize((round(_w * _UPSCALE), round(_h * _UPSCALE)), Image.LANCZOS)
+    out = ImageEnhance.Contrast(out).enhance(1.5)
+    out = ImageEnhance.Sharpness(out).enhance(2.0)
+    out = ImageEnhance.Brightness(out).enhance(1.1)
+    out = out.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+    return out
+
 
 def image_to_bytes(img: Image.Image) -> bytes:
     """Converts a PDF-rendered page image to JPEG bytes for Telegram
@@ -2025,22 +2156,11 @@ async def _openrouter_fallback(img: Image.Image, prompt: str, page: int) -> list
 # GENERATE MCQ FROM IMAGE — Gemini primary + OpenRouter fallback
 # ============================================================
 def _rd_output_token_cap() -> int:
-    """/rd has no MCQ ceiling (2026-09-07 user instruction), so its Gemini
-    calls need more max_output_tokens headroom than every other mode's
-    fixed 16384 cap (sized for a ~40-MCQ ceiling) -- a genuinely dense page
-    under /rd could legitimately need 40-60+ MCQs. Lazily checks app.py's
-    _RD_MODE ContextVar (can't import it at module load time -- app.py
-    imports FROM pdf_handler, not the other way around, so this has to be
-    a runtime lookup, same pattern as the existing `from app import
-    record_empty_parse` lazy import a few lines below). Falls back to the
-    normal 16384 if the import fails or _RD_MODE isn't set."""
-    try:
-        from app import _RD_MODE
-        if _RD_MODE.get():
-            return 32768
-    except Exception:
-        pass
-    return 16384
+    """2026-09-08: plain /pdf's floor was raised 10->15 (matches /rd), so
+    it now needs the same output-token headroom /rd already had -- a
+    dense page hitting the 15+ floor plus retries could truncate at the
+    old 16384 cap. Both /rd and default /pdf now use 32768."""
+    return 32768
 
 
 async def generate_mcq_from_image(
@@ -2302,6 +2422,18 @@ async def generate_mcq_from_image(
             # instead keep cycling through every remaining live key.
             logger.warning(f"[Gemini] Attempt {attempt+1} failed (both models): {err_label}")
             _consecutive_infra_fails += 1
+            key_rotator.mark_rate_limited(key, daily_exhausted=False, retry_after_seconds=30)
+            # 2026-09-12: comment above promised backend-outage detection
+            # but never implemented it -- 3 straight timeout/503/504 fails
+            # across DIFFERENT keys means the Gemini backend itself is
+            # overloaded (every key fails identically), not a per-key
+            # problem. Burning all ~111 keys in that state means 40-60s
+            # timeout x 111 attempts before ever trying Groq -- exactly
+            # the multi-minute stall seen in production. Bail out early so
+            # the caller falls to Groq/other providers immediately.
+            if _consecutive_infra_fails >= 3:
+                logger.error(f"[Gemini] {_consecutive_infra_fails} consecutive timeout/503/504 failures across different keys — treating as backend-wide outage, stopping early (tried {attempt+1}/{max_retries} keys) to fall back to Groq")
+                break
         if attempt < max_retries - 1:
             # 2026-08-28 (user request): exponential backoff on transient
             # infra failures (timeout/503/504-style) instead of a flat 1s

@@ -18,6 +18,7 @@ import traceback
 import asyncio
 import time
 import random
+import math
 import string
 import re
 import html as _html_mod
@@ -97,13 +98,13 @@ from pdf_handler import (
     generate_new_mcq, generate_mcq_from_text, parse_pdf_command, parse_page_range,
     fmt_page, gen_session_id, get_random_ayat, get_motivation,
     key_rotator, crop_explanation_image, get_pdf_page_count,
-    _PDF_MAX_PAGES_PER_CALL
+    _PDF_MAX_PAGES_PER_CALL, _enhance_blurry_page
 )
 
 from core import (
     logger, app, sb, sb_exec,
     BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
-    CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, _tg_mode,
+    CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, GH_PAGES_QUICK_URL, _tg_mode,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, send_rich_msg, edit_rich_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
     send_document, send_media_group, send_poll, notify_owner, notify_owner_edit, clear_owner_job, download_tg_file,
@@ -405,6 +406,7 @@ from quiz import (
     start_d1_quiz, send_quiz_question as send_d1_quiz_question,
     handle_quiz_poll_answer, handle_quiz_next, finish_d1_quiz,
     handle_d1_leaderboard, handle_d1_history, handle_d1_mistake,
+    stop_quiz_for_user, resume_quiz_for_user,
 )
 from special_module import (
     show_special_channel_list, show_special_main_menu, handle_special_callback, handle_special_text_input,
@@ -740,7 +742,41 @@ def lms_get_pre_message(subject: str, exam_title: str, topic: str, count: int, f
     return text
 
 
-async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool, cancel_check: callable = None, subject: str = "", exam_title: str = "") -> tuple:
+def lms_get_ending_message(main_topic: str, part_topic: str, count: int, first_link: str = "", ask_score: bool = True) -> str:
+    """LMS Readymade-send score-ask ending message, exact requested format:
+    🟥Main Topic Name
+    ◼️Part number
+    ▬▬▬▬▬▬▬▬▬▬
+    📊 মোট পোল: N
+    ▬▬▬▬▬▬▬▬▬▬
+    ⁉️তোমার স্কোর কত? 🤔
+    (?/N )
+
+    ✅কমেন্টে লিখো! 👇
+
+    🔰পোল যেখান থেকে শুরু হয়েছে:
+    {first_link}
+    """
+    sep = "▬▬▬▬▬▬▬▬▬▬"
+    text = (
+        f"🟥{_html_escape(main_topic or 'MCQ')}\n"
+        f"◼️{_html_escape(part_topic or '')}\n"
+        f"{sep}\n"
+        f"📊 মোট পোল: {count}\n"
+    )
+    if ask_score:
+        text += (
+            f"{sep}\n"
+            f"⁉️তোমার স্কোর কত? 🤔\n"
+            f"(?/{count} )\n\n"
+            f"✅কমেন্টে লিখো! 👇\n"
+        )
+    if first_link:
+        text += f"\n🔰পোল যেখান থেকে শুরু হয়েছে:\n{_html_escape(first_link)}"
+    return text
+
+
+async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs: list, ask_score: bool, cancel_check: callable = None, subject: str = "", exam_title: str = "", reply_to_message_id: int = None, is_channel: bool = False) -> tuple:
     """Sends one topic-batch: pre-message (topic name) -> polls (reply to
     pre-msg) -> Style-01 PDF + inline buttons -> ending message. Same shape
     as one /csvS batch iteration. Returns sent poll count. Raises on the
@@ -761,18 +797,21 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
     if thread_id:
         pre_send_data["message_thread_id"] = thread_id
+    if reply_to_message_id:
+        pre_send_data["reply_to_message_id"] = reply_to_message_id
     pre_r = await tg_post("sendMessage", pre_send_data)
     if not pre_r.get("ok") and thread_id:
         pre_send_data.pop("message_thread_id", None)
         pre_r = await tg_post("sendMessage", pre_send_data)
         thread_id = None
+    if not pre_r.get("ok") and reply_to_message_id:
+        # Reply target may be gone/unreachable in this chat — retry once
+        # plain so the batch itself doesn't fail over a cosmetic reply-link.
+        pre_send_data.pop("reply_to_message_id", None)
+        pre_r = await tg_post("sendMessage", pre_send_data)
     if not pre_r.get("ok"):
         raise RuntimeError(pre_r.get("description") or "Pre-message send failed")
     pre_msg_id = pre_r["result"]["message_id"]
-    try:
-        await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": pre_msg_id, "disable_notification": True})
-    except Exception as e:
-        logger.warning(f"[LMS-Send] pre-msg pin failed: {e}")
 
     batch_cache_id = gen_session_id()
     await db_save_mcq_cache(batch_cache_id, batch_cache_id, 0, topic, mcqs, channel_id=channel_id)
@@ -800,7 +839,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
         btn_kb = await _csv_pre_buttons_no_premium(batch_cache_id)
         pdf_doc_r = await send_document(
             channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
-            caption=csv_get_pdf_caption(topic),
+            caption=csv_get_pdf_caption(topic, is_channel=is_channel),
             message_thread_id=thread_id,
             reply_to_message_id=pre_msg_id
         )
@@ -815,8 +854,22 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
                 except Exception as e:
                     logger.warning(f"[LMS-Send] PDF button attach failed: {e}")
 
+    if ask_score:
+        try:
+            end_data = {
+                "chat_id": channel_id,
+                "text": lms_get_ending_message(exam_title, topic, len(mcqs), first_link, ask_score=True),
+                "parse_mode": "HTML",
+                "reply_to_message_id": pre_msg_id,
+            }
+            if thread_id:
+                end_data["message_thread_id"] = thread_id
+            await tg_post("sendMessage", end_data)
+        except Exception as e:
+            logger.warning(f"[LMS-Send] score-ask ending message failed: {e}")
+
     return sent, first_link, batch_cache_id
-async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = ""):
+async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = "", links_only: bool = False, exam_groups: list = None):
     """batches: [{"topic": str, "mcqs": [...]}, ...] — one entry per topic
     (or a single entry when the exam has no topic split / no batch-size
     split requested). Sent sequentially, same as /csvS's batch loop.
@@ -826,7 +879,15 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
     for every batch in this job — so all topic-wise MCQs for one exam land
     together inside a single exam-named thread, instead of one topic per
     subtopic. Falls back to no-thread-id if the chat isn't forum-enabled or
-    topic creation fails."""
+    topic creation fails.
+
+    links_only=True: no polls are sent to the channel at all. For every
+    batch an MCQ cache row is still created (so its deep-links resolve),
+    then ONE single message is posted: header + one <blockquote> per topic
+    with Poll Practice (bot DM deep-link)/Quiz Solve/Website Exam links.
+    Reuses this same job system (proven working /api/lms-send-channel path)
+    instead of a separate route, purely branching behavior inside the job.
+    """
     job = LMS_SEND_JOBS[job_id]
     dm_msg_id = None
     dm_kb = {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": f"lmscancel_{job_id}"}]]}
@@ -838,6 +899,125 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             f"✅ পাঠানো হয়েছে: {job.get('sent_total', 0)}\n"
             f"📦 ব্যাচ: {job.get('batches_done', 0)}/{job.get('batches_total', len(batches))}"
         )
+
+    if links_only:
+        # Simple synchronous-style path (still inside the spawned task so
+        # the caller gets an immediate job_id back like normal, but there's
+        # no polling loop -- just cache rows + one message).
+        #
+        # `exam_groups` (optional): for a bulk multi-exam "one single post"
+        # send, the caller passes exam_groups=[{"exam_title","subject","batches"},...]
+        # instead of a flat `batches` list -- each exam's topics get their
+        # own numbered run inside ONE combined Telegram message, with an
+        # exam-title sub-header before that exam's topic blocks.
+        # When exam_groups is absent, behaves exactly as before (single
+        # exam, `batches`/`exam_title`/`subject` used directly).
+        try:
+            is_admin, admin_err = await _check_bot_admin(channel_id)
+            if not is_admin:
+                job["status"] = "error"
+                job["error"] = admin_err
+                return
+            job["status"] = "running"
+            bot_un = await get_bot_username()
+            sep = "▬▬▬▬▬▬▬▬▬▬"
+
+            groups = exam_groups if exam_groups else [{
+                "exam_title": exam_title, "subject": subject, "batches": batches,
+            }]
+
+            total_mcq = 0
+            total_topics = 0
+            section_texts = []
+            for g in groups:
+                g_batches = [b for b in (g.get("batches") or []) if b.get("mcqs")]
+                g_title = (g.get("exam_title") or "MCQ").strip()
+                g_subject = (g.get("subject") or "").strip()
+                blocks = []
+                _serial = 0
+                for batch in g_batches:
+                    topic = (batch.get("topic") or "Special MCQ By ATLAS").strip()
+                    mcqs = batch.get("mcqs") or []
+                    _serial += 1
+                    total_mcq += len(mcqs)
+                    cache_id = gen_session_id()
+                    await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs, channel_id=channel_id)
+                    poll_link = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+                    quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+                    exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+                    quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
+                    quote_body = (
+                        f"<b>{_serial}. {_html_escape(topic)}</b>\n"
+                        f"📌 মোট MCQ: {len(mcqs)}\n"
+                        f"───────────\n"
+                        f"<a href=\"{poll_link}\"><b>🔰 Poll Practice</b></a>"
+                        f"   "
+                        f"<a href=\"{quiz_link}\"><b>🔗 Quiz Solve</b></a>\n"
+                        f"───────────\n"
+                        f"<a href=\"{exam_link}\"><b>🌐 Website Exam</b></a>"
+                        f"   "
+                        f"<a href=\"{quick_link}\"><b>⚡ Rapid Practice Game</b></a>"
+                    )
+                    blocks.append(f"<blockquote>{quote_body}</blockquote>")
+                if not blocks:
+                    continue
+                total_topics += len(blocks)
+                if len(groups) > 1:
+                    # Subject is common across all exams in single-post mode
+                    # (guaranteed by the caller) — shown once at the very top
+                    # instead of repeating per exam.
+                    g_header = f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>"
+                else:
+                    g_header = (
+                        f"🟥<b>{_html_escape(g_subject or 'MCQ')}</b>\n"
+                        f"{sep}\n"
+                        f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>"
+                    )
+                section_texts.append(f"\n{sep}\n".join([g_header] + blocks))
+
+            if not section_texts:
+                job["status"] = "error"
+                job["error"] = "no MCQs to send"
+                return
+
+            if len(groups) > 1:
+                common_subject = (groups[0].get("subject") or "").strip()
+                overall_header = (
+                    f"🟥<b>{_html_escape(common_subject or 'MCQ')}</b>\n"
+                    f"{sep}{sep}"
+                )
+                post_text = overall_header + f"\n{sep}{sep}\n".join(section_texts)
+            else:
+                post_text = section_texts[0]
+
+            send_data = {
+                "chat_id": channel_id, "text": post_text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            if thread_id:
+                send_data["message_thread_id"] = thread_id
+            r = await tg_post("sendMessage", send_data)
+            if not r.get("ok"):
+                job["status"] = "error"
+                job["error"] = r.get("description") or "Telegram send failed"
+                logger.error(f"[LMS-Send-Links] sendMessage failed: {job['error']}")
+                return
+            sent_chat = r.get("result", {}).get("chat", {})
+            sent_msg_id = r.get("result", {}).get("message_id")
+            logger.info(
+                f"[LMS-Send-Links] posted OK -> chat_id={channel_id} resolved_chat={sent_chat.get('id')} "
+                f"type={sent_chat.get('type')} title={sent_chat.get('title')!r} message_id={sent_msg_id}"
+            )
+            job["status"] = "done"
+            job["pct"] = 100
+            job["sent_total"] = total_mcq
+            job["batches_done"] = total_topics
+        except Exception as e:
+            logger.error(f"[LMS-Send-Links] job {job_id} error: {e}")
+            job["status"] = "error"
+            job["error"] = str(e)
+        return
 
     try:
         is_admin, admin_err = await _check_bot_admin(channel_id)
@@ -874,6 +1054,54 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         batch_links = []  # (part_num, first_link, count, batch_topic, quiz_link, exam_link) — for master summary
         all_mcqs = []  # accumulated across every batch — for group's merged PDF
         job_cancel_check = lambda: job.get("cancel_requested", False)
+
+        # Master summary sent FIRST (pending topics, no links yet), then
+        # live-edited after every batch — same pattern as /csv's own
+        # pre-summary + per-batch edit, adapted to this job's simpler
+        # (part_num, link, count, topic) tuple shape.
+        master_msg_id = None
+        master_chat_id_for_edit = channel_id
+        master_is_photo = False
+
+        def _live_master_summary_text() -> str:
+            pending_links = list(batch_links)
+            for i in range(len(pending_links), total_batches):
+                topic_i = (batches[i].get("topic") or "Special MCQ By ATLAS")
+                count_i = len(batches[i].get("mcqs") or [])
+                pending_links.append((i + 1, "⏳ চলমান..." if i == len(batch_links) else "", count_i, topic_i))
+            return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links, subject=subject or "MCQ")
+
+        try:
+            cover_bytes = await _generate_lms_cover_image(subject or "MCQ", exam_title or "MCQ")
+            caption_txt = _live_master_summary_text()
+            if cover_bytes and len(caption_txt) <= 1024:
+                master_r = await send_photo(
+                    channel_id, cover_bytes,
+                    caption=caption_txt,
+                    message_thread_id=thread_id or None,
+                )
+                master_is_photo_ok = True
+            else:
+                if cover_bytes and len(caption_txt) > 1024:
+                    logger.warning("[LMS-Send] master summary too long for photo caption (>1024) — falling back to text message")
+                master_r = await tg_post("sendMessage", {
+                    "chat_id": channel_id,
+                    "text": caption_txt,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                    **({"message_thread_id": thread_id} if thread_id else {}),
+                })
+                master_is_photo_ok = False
+            if master_r.get("ok"):
+                master_msg_id = master_r["result"]["message_id"]
+                master_is_photo = master_is_photo_ok
+                try:
+                    await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": master_msg_id, "disable_notification": True})
+                except Exception as e:
+                    logger.warning(f"[LMS-Send] master summary pin failed: {e}")
+        except Exception as e:
+            logger.warning(f"[LMS-Send] initial master summary send failed: {e}")
+
         for b_idx, batch in enumerate(batches):
             if job.get("cancel_requested"):
                 job["status"] = "cancelled"
@@ -888,7 +1116,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             if not mcqs:
                 continue
             try:
-                sent, first_link, batch_cache_id = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check, subject=subject, exam_title=exam_title)
+                sent, first_link, batch_cache_id = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check, subject=subject, exam_title=exam_title, reply_to_message_id=master_msg_id, is_channel=(chat_type == "channel"))
                 sent_total += sent
                 all_mcqs.extend(mcqs)
                 if first_link:
@@ -903,6 +1131,14 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job["sent_total"] = sent_total
             job["batches_done"] = b_idx + 1
             job["pct"] = int((b_idx + 1) * 100 / total_batches) if total_batches else 100
+            if master_msg_id:
+                try:
+                    if master_is_photo:
+                        await edit_msg_caption(master_chat_id_for_edit, master_msg_id, _live_master_summary_text())
+                    else:
+                        await edit_msg(master_chat_id_for_edit, master_msg_id, _live_master_summary_text())
+                except Exception as e:
+                    logger.warning(f"[LMS-Send] master summary live-edit failed: {e}")
             if dm_msg_id:
                 try:
                     await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("⏳ চলছে..."), reply_markup=dm_kb)
@@ -923,59 +1159,88 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         if job.get("cancel_requested"):
             job["status"] = "cancelled"
         else:
-            # Group-only: one merged PDF covering every MCQ from every topic
-            # batch, sent right before the master summary — same pattern as
-            # /csv's own combined-PDF step.
-            if all_mcqs and chat_type != "channel":
+            # Single merged PDF: exam title on page 1, then each part's MCQs
+            # grouped under its own part-name heading (existing combined
+            # topic-wise PDF builder — same watermark system as everywhere
+            # else). Replaces the old giant-flat-merge / per-chunk approach.
+            pdf_links = []  # (label, t.me link) — for final summary
+            if all_mcqs:
+                topic_groups = [
+                    (batch.get("topic") or f"Part-{i+1:02d}", batch.get("mcqs") or [])
+                    for i, batch in enumerate(batches)
+                    if batch.get("mcqs")
+                ]
+                safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", exam_title or "MCQ")[:50] or "ATLAS_Sheet"
                 try:
-                    merged_pdf_bytes = await _generate_style1_pdf_guaranteed(all_mcqs, exam_title or "MCQ", channel_id)
+                    merged_pdf_bytes = await _generate_combined_topicwise_pdf(topic_groups, exam_title or "MCQ", channel_id)
                     if merged_pdf_bytes:
-                        safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", exam_title or "MCQ")[:50] or "ATLAS_Sheet"
                         merged_caption = f"📖 ATLAS Practice Sheet\n🎯 {exam_title or 'MCQ'}\n📝 মোট MCQ: {sent_total}\n🚀 Visit: Atlascourses.com"
-                        await send_document(
+                        doc_r = await send_document(
                             channel_id, merged_pdf_bytes, f"{safe_title}_full_style1.pdf",
                             caption=merged_caption,
                             message_thread_id=thread_id,
                         )
+                        if doc_r and doc_r.get("ok"):
+                            doc_msg_id = doc_r.get("result", {}).get("message_id")
+                            if doc_msg_id:
+                                pdf_links.append(("Full PDF", _get_first_poll_link(channel_id, doc_msg_id)))
                 except Exception as e:
                     logger.warning(f"[LMS-Send] merged PDF send failed: {e}")
 
-            # Master summary — header once (Exam Name / Total Topics / Total
-            # MCQ), then one Telegram blockquote per topic (each topic's
-            # First Poll / Quiz / Website Exam links wrapped in its own
-            # <blockquote> so Telegram renders it as a visually distinct
-            # quoted block) — Exam Name is NOT repeated per topic, only in
-            # the header. Sent last, in the same thread/chat, for BOTH group
-            # (inside the forum topic) and channel.
+            # End message = EXACT duplicate of the pinned master summary
+            # content (same header + full per-topic list, A-to-Z, now with
+            # every real link resolved) PLUS a per-topic "First Poll Link +
+            # Website Link" quoted block, PLUS the MediAtlas marketing quote.
+            # Sent as a reply to the pinned master so it links back to it.
             if batch_links:
                 sep = "▬▬▬▬▬▬▬▬▬▬"
-                header = (
-                    f"🟥{_html_escape(subject or 'MCQ')}\n"
-                    f"◼️{_html_escape(exam_title or 'MCQ')}\n"
-                    f"🌟Total Topic: {len(batch_links)}\n"
-                    f"📌Total MCQ: {sent_total}"
-                )
-                blocks = [header]
-                for _part_n, link, count, batch_topic, quiz_link, exam_link in batch_links:
-                    quote_body = (
-                        f"✅{_html_escape(batch_topic)}\n\n"
-                        f"🔗First Poll Link:\n{_html_escape(link)}\n\n"
-                        f"🔗Quiz Link:\n{_html_escape(quiz_link)}\n\n"
-                        f"🔗Website Exam Link:\n{_html_escape(exam_link)}"
+                summary_text = _live_master_summary_text()
+
+                quote_lines = []
+                if pdf_links:
+                    quote_lines.append("\n".join(
+                        f"📄{_html_escape(lbl)}:\n{_html_escape(lnk)}" for lbl, lnk in pdf_links
+                    ))
+                if quote_lines:
+                    summary_text += f"\n{sep}\n<blockquote>" + "\n\n".join(quote_lines) + "</blockquote>"
+
+                # MediAtlas marketing quote — channel only, same as PDF caption.
+                if chat_type == "channel":
+                    summary_text += (
+                        "\n\n<blockquote>"
+                        "🟦মূলবইয়ের প্রতিটি পেইজ থেকে MCQ প্রাক্টিসের দেড় লক্ষ প্রশ্নের প্যাকেজ বিস্তারিত:\n"
+                        "https://t.me/MediAtlas/7627"
+                        "</blockquote>"
                     )
-                    blocks.append(f"<blockquote>{quote_body}</blockquote>")
-                summary_text = f"\n{sep}\n".join(blocks)
-                summary_data = {
-                    "chat_id": channel_id, "text": summary_text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                }
-                if thread_id:
-                    summary_data["message_thread_id"] = thread_id
-                try:
-                    await tg_post("sendMessage", summary_data)
-                except Exception as e:
-                    logger.warning(f"[LMS-Send] master summary send failed: {e}")
+
+                if master_msg_id:
+                    final_data = {
+                        "chat_id": channel_id, "text": summary_text,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                        "reply_to_message_id": master_msg_id,
+                    }
+                    if thread_id:
+                        final_data["message_thread_id"] = thread_id
+                    try:
+                        r = await tg_post("sendMessage", final_data)
+                        if not r.get("ok") and thread_id:
+                            final_data.pop("message_thread_id", None)
+                            await tg_post("sendMessage", final_data)
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send] final summary reply send failed: {e}")
+                else:
+                    summary_data = {
+                        "chat_id": channel_id, "text": summary_text,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                    }
+                    if thread_id:
+                        summary_data["message_thread_id"] = thread_id
+                    try:
+                        await tg_post("sendMessage", summary_data)
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send] master summary send failed: {e}")
             job["status"] = "done"
             job["pct"] = 100
             if dm_msg_id:
@@ -1023,20 +1288,32 @@ async def lms_send_channel(request: Request):
     exam_id = str(data.get("exam_id") or "").strip()
     exam_title = str(data.get("exam_title") or "").strip()
     subject = str(data.get("subject") or "").strip()
+    links_only = bool(data.get("links_only"))
+    # Bulk "one single post for several exams" mode: LMS sends
+    # exam_groups=[{"exam_title","subject","batches"},...] instead of a
+    # flat batches list. Only meaningful together with links_only.
+    exam_groups = data.get("exam_groups") or None
 
     if not channel_id:
         return JSONResponse({"error": "channel_id is required"}, status_code=400)
-    if not batches or not any(b.get("mcqs") for b in batches):
-        return JSONResponse({"error": "batches (with mcqs) is required"}, status_code=400)
+    if exam_groups:
+        if not any(any(b.get("mcqs") for b in (g.get("batches") or [])) for g in exam_groups):
+            return JSONResponse({"error": "exam_groups (with mcqs) is required"}, status_code=400)
+        total_q = sum(len(b.get("mcqs") or []) for g in exam_groups for b in (g.get("batches") or []))
+        batches_total = sum(len(g.get("batches") or []) for g in exam_groups)
+    else:
+        if not batches or not any(b.get("mcqs") for b in batches):
+            return JSONResponse({"error": "batches (with mcqs) is required"}, status_code=400)
+        total_q = sum(len(b.get("mcqs") or []) for b in batches)
+        batches_total = len(batches)
 
-    total_q = sum(len(b.get("mcqs") or []) for b in batches)
     job_id = gen_session_id()
     LMS_SEND_JOBS[job_id] = {
         "status": "queued", "pct": 0, "sent_total": 0, "total": total_q,
-        "batches_done": 0, "batches_total": len(batches), "error": None,
+        "batches_done": 0, "batches_total": batches_total, "error": None,
         "exam_id": exam_id, "cancel_requested": False,
     }
-    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject))
+    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject, links_only=links_only, exam_groups=exam_groups))
     return JSONResponse({"ok": True, "job_id": job_id})
 
 
@@ -1066,7 +1343,6 @@ async def lms_send_channel_active_by_exam(exam_id: str):
         if job.get("exam_id") == exam_id and job.get("status") in ("queued", "running"):
             return JSONResponse({"ok": True, "job_id": jid, **job})
     return JSONResponse({"ok": True, "job_id": None})
-
 
 
 # v-mhtml-live: MHTML/HTML → CSV job state for live dashboard + live TG progress msg
@@ -1330,6 +1606,15 @@ def _build_chok_prompt(topic: str) -> str:
 _BANGLA_MODE = contextvars.ContextVar("bangla_mode", default=False)
 _BIO_MODE = contextvars.ContextVar("bio_mode", default=False)
 _RD_MODE = contextvars.ContextVar("rd_mode", default=False)
+# /rd multi-page topic continuity: a single shared list (set per-job, NOT
+# per-async-context -- must be visible across all pages' concurrent
+# rolling-window generation calls within the same /rd job) of every
+# main_topic string confirmed so far by earlier pages. Passed into each
+# page's prompt so a topic spanning 2-3+ pages gets tagged with the EXACT
+# same string every time, instead of each page inventing its own wording
+# for the same ongoing subject. Reset to a fresh list at the start of each
+# /rd job (see handle_pdf/_process_pdf_pages_inner).
+_RD_KNOWN_TOPICS = contextvars.ContextVar("rd_known_topics", default=None)
 _BORO_MODE = contextvars.ContextVar("boro_mode", default=False)
 _MATH_MODE = contextvars.ContextVar("math_mode", default=False)
 _CHEM_MODE = contextvars.ContextVar("chem_mode", default=False)
@@ -2190,6 +2475,14 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
         "  A line is a topic_hint when i AND ii are both true; iii is appended when present.\n"
         "- If a new numbered heading appears anywhere on this page, every MCQ generated from "
         "content below it gets the NEW heading; MCQs from content above it keep the prior heading.\n"
+        "🔒 STRICT CONTENT ISOLATION: every MCQ's question/options/explanation must come ONLY "
+        "from the content physically located under its OWN topic_hint's heading — never pull a "
+        "fact from a different topic segment on the same page, even one that seems related or "
+        "adjacent. Each topic heading marks a hard boundary: content below heading X is X's "
+        "content only, until heading Y appears; a heading-Y MCQ must never be built from "
+        "content that sits above heading Y (i.e. still under heading X). When in doubt about "
+        "which segment a line of content belongs to, use its position relative to the nearest "
+        "heading ABOVE it, not proximity to a heading below.\n"
         "- If this page has genuinely no numbered heading visible anywhere (pure continuation "
         "page), use \"\" (empty string) for topic_hint on every MCQ from this page.\n"
         "- If a heading appears with no generatable content following it on this page at all, "
@@ -2201,6 +2494,57 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
         base = base.replace(old_schema_marker, heading_rule + old_schema_marker)
     else:
         base = base + heading_rule
+    # /chem-specific section-skip rule (user request 2026-09-17): certain
+    # textbook section types must never be used as source content for
+    # generation, UNLESS the content inside them carries an explicit mark
+    # (highlight/underline/box/color) -- marked content always overrides
+    # the skip, per the MUST-PRIORITY rule already injected above.
+    section_skip_rule = (
+        "\n═══════════════════════════════\n"
+        "🚫 ONLY GENERATE FROM VALID FACTUAL SOURCE CONTENT\n"
+        "═══════════════════════════════\n"
+        "🎯 GENERAL PRINCIPLE: only generate MCQs from plain factual/explanatory "
+        "content (definitions, descriptions, processes, data, tables). NEVER generate "
+        "an MCQ from something that is ITSELF already a question, an exercise/task "
+        "prompt, or a figure/image caption/label — these are not factual source "
+        "material, they're instructions or references pointing AT the actual content. "
+        "This applies anywhere on the page, not only under the named labels below.\n\n"
+        "The 4 named section types below are the concrete cases of this principle. For "
+        "each, apply this exact 3-part zone logic:\n\n"
+        "▶️ START (when the skip-zone begins): the moment you see the section's own "
+        "label text printed on the page (e.g. the literal words \"শিক্ষার্থীর কাজ\", "
+        "\"সমাধানকৃত সমস্যা\", \"ব্যাবহারিক\", or \"উদ্দীপক\" — often followed by a "
+        "dash and a number like \"-১.৯\"). Everything from that label onward is inside "
+        "the skip-zone.\n"
+        "⏹️ END (when the skip-zone ends): the skip-zone ends at whichever comes first — "
+        "(a) a NEW section label of any kind appears (a different named type above, OR "
+        "a numbered topic heading like ১.১১, OR a distinct labeled sub-note such as "
+        "\"টিপস:\"/\"Tips:\" that visually starts its own separate line/point), OR "
+        "(b) the page itself ends. A sub-note like \"টিপস:\" that appears INSIDE what "
+        "looks like the same visual box/border as a skip-section is still its OWN "
+        "separate label and ends the skip-zone right there — box/border lines on the "
+        "page are a printing/layout artifact, not a content boundary; only the actual "
+        "text labels define zones.\n"
+        "1. \"শিক্ষার্থীর কাজ\" (student activity/task)\n"
+        "2. \"সমাধানকৃত সমস্যা\" (solved-problem) — skip includes its setup/working/answer\n"
+        "3. \"ব্যাবহারিক\" (practical/lab-work)\n"
+        "4. \"উদ্দীপক\" (stimulus/scenario passage before board-style questions) — skip "
+        "the stimulus text itself\n"
+        "🔑 DETECTION CLUE: text under label 1 or 2 is commonly structured with "
+        "Bangla decimal-style sub-numbering like ১.২, ২.৩ (Bangla digit, dot, Bangla "
+        "digit) — this numbering pattern is normal WITHIN that skip-zone, it does not "
+        "by itself end the zone (only an actual new label per the END rule does).\n"
+        "✅ EXCEPTION (applies inside any active skip-zone): any specific line/sentence "
+        "that is itself highlighted/underlined/marked/boxed/colored gets an MCQ anyway — "
+        "per the MUST-PRIORITY and ZERO-MISS rules above, marking always wins over the "
+        "skip-zone, no matter which of the 4 types the zone is or where in it the line "
+        "sits. Only the plain/unmarked remainder of the zone stays skipped.\n"
+        "❗ Never build a new MCQ that is really just a reworded version of content "
+        "already printed as a question, task prompt, or stimulus passage — that is "
+        "disguised copying, not generation, same as the already-printed-MCQ rule "
+        "above.\n\n"
+    )
+    base = base.replace(old_schema_marker, section_skip_rule + old_schema_marker) if old_schema_marker in base else base + section_skip_rule
     # Add topic_hint to the JSON schema example, right before the closing
     # of the object (exp_bbox already stripped above, so append directly
     # after explanation).
@@ -2245,7 +2589,13 @@ def _build_chem_gen_prompt(topic: str, count) -> str:
         f"printed in the book) exactly as much as circling a whole "
         f"paragraph\n"
         f"- A star, tick/✓, arrow, or other hand-drawn mark next to the text "
-        f"pointing to it\n\n"
+        f"pointing to it\n"
+        f"- A colored VERTICAL BAR/LINE drawn in the margin alongside a "
+        f"paragraph or block of text (any color marker/highlighter) -- this "
+        f"marks the ENTIRE paragraph/block next to it as marked content, "
+        f"even though the bar itself is beside the text rather than over "
+        f"or under it. Treat every line the bar runs alongside as marked.\n"
+        f"\n"
         f"🚫 DO NOT generate any MCQ from plain/unmarked text, even if it "
         f"looks important, is a definition, is bold/italic in the ORIGINAL "
         f"book printing, or seems exam-relevant. Bold/italic that is part "
@@ -2348,10 +2698,16 @@ def _rd_build_gapfill_prompt(topic: str, existing_mcqs: list) -> str:
         f"- Never generate MCQs from topic names, chapter titles, headlines, or "
         f"page numbers\n\n"
 
+        f"🟨 TOPIC TAGGING (mandatory, same as first pass): give 'main_topic' "
+        f"for each new MCQ, decided yourself from the "
+        f"page content — use the EXACT same main_topic string as the first pass "
+        f"used for the same subject, so topics stay grouped consistently.\n\n"
+
         f"JSON array only, no markdown fences, no preamble. "
         f"🚨 DO NOT include any <think>, reasoning, or explanation text before the "
         f"JSON — output must start IMMEDIATELY with '['. Format:\n"
-        f'[{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],'
+        f'[{{"main_topic":"...","question":"...",'
+        f'"options":["A) ...","B) ...","C) ...","D) ..."],'
         f'"answer":0,"explanation":"..."}}]\n'
         f"answer is integer 0-3 (A=0,B=1,C=2,D=3). If nothing new remains, output "
         f"exactly []."
@@ -2400,13 +2756,7 @@ def _build_mcq_prompt(topic: str, count) -> str:
             "produce few -- the SOURCE-GROUNDING LOCK above always wins over "
             "any count; never invent or pad just to reach some number."
         )
-        full_coverage_rule = (
-            f"\n═══════════════════════════════\n"
-            f"🟧 FULL-PAGE COVERAGE (MANDATORY — MAXIMUM CONTENT UTILIZATION)\n"
-            f"═══════════════════════════════\n"
-            f"Treat the ENTIRE image as the scope — not just the first paragraph, "
-            f"the most obvious section, or the most highlighted part. Before "
-            f"finalizing:\n"
+        _coverage_base = (
             f"1) Mentally scan the WHOLE page top-to-bottom, left-to-right, including "
             f"headings, body paragraphs, footnotes, side-notes, captions, tables/boxes, "
             f"and any small print — every distinct fact is fair game.\n"
@@ -2420,6 +2770,15 @@ def _build_mcq_prompt(topic: str, count) -> str:
             f"the rest.\n"
             f"4) If the page has multiple distinct sections/topics, every section "
             f"must contribute at least one MCQ — no section should be left at zero.\n"
+        )
+        full_coverage_rule = (
+            f"\n═══════════════════════════════\n"
+            f"🟧 FULL-PAGE COVERAGE (MANDATORY — MAXIMUM CONTENT UTILIZATION)\n"
+            f"═══════════════════════════════\n"
+            f"Treat the ENTIRE image as the scope — not just the first paragraph, "
+            f"the most obvious section, or the most highlighted part. Before "
+            f"finalizing:\n"
+            + _coverage_base +
             f"5) If a line/section has rich information, generate MORE than one MCQ "
             f"from it, covering different angles (direct fact, definition, cause-"
             f"effect, fill-in-the-blank, comparison) — this is how the 15+ average "
@@ -2685,15 +3044,40 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"line/paragraph/table the answer came from (minimal margin, no neighboring "
         f"unrelated content). Normalize to 0-1000 scale ([x_min,y_min,x_max,y_max], "
         f"top-left=[0,0], bottom-right=[1000,1000]). Use null if unsure.\n\n"
-        f"{_RD_MODE.get() and (chr(0x1F7E6) + ' TOPIC DETECTION (no fixed visual marker required)') or ''}"
-        f"{_RD_MODE.get() and chr(10) or ''}"
-        f"{_RD_MODE.get() and ('For EACH MCQ, also give '+chr(39)+'topic_hint'+chr(39)+': the specific subject/topic name (in the source language) that this MCQ genuinely belongs to, based on YOUR OWN judgment of the page content and any heading/section text visible near it — there is no fixed visual rule (no required bold/number/star marker); use whatever heading or contextual grouping is naturally present, or infer the topic from the surrounding content if no explicit heading exists. Every MCQ from the same subject/section must get the EXACT SAME topic_hint string. If the whole page is genuinely one single topic, use that one topic name for all MCQs.') or ''}"
-        f"{_RD_MODE.get() and chr(10)+chr(10) or ''}"
-        f"Return STRICT JSON array only, no prose, no markdown fences. "
+        + (
+        (lambda _kt: (
+            f"🟦 TOPICS ALREADY SEEN ON EARLIER PAGES (use EXACT same string if this "
+            f"page continues one of these): {', '.join(_kt)}\n\n"
+            if _kt else ""
+        ))(_RD_KNOWN_TOPICS.get() or []) if _RD_MODE.get() else ""
+        )
+        + (
+        f"🟨 TOPIC TAGGING (mandatory, decide this yourself — no fixed list, "
+        f"no user-given rule): for EACH MCQ give 'main_topic', the specific "
+        f"subject/section this MCQ's content actually belongs to, named the way "
+        f"a textbook section heading would (e.g. 'কোষ বিভাজন', 'Newton's Laws') "
+        f"purely from what the page content is about. 🔁 MULTI-PAGE CONTINUITY: "
+        f"if this page's topic is the SAME subject as one listed above (a "
+        f"topic often spans 2-3+ consecutive pages), you MUST reuse that EXACT "
+        f"same main_topic string character-for-character — do NOT invent a "
+        f"slightly reworded version (e.g. adding/dropping a suffix word) just "
+        f"because this is a later page of the same topic. Only create a NEW "
+        f"main_topic string if this page genuinely starts a different subject "
+        f"not in that list. 🚨 The topic/heading text "
+        f"is very often printed as WHITE TEXT ON A COLORED BOX (commonly GREEN "
+        f"or DEEP GREEN, sometimes other solid colors) at the top of a section — "
+        f"look carefully INSIDE these colored heading boxes and read the white "
+        f"text exactly as printed; do not skip, blank-out, or guess at a topic "
+        f"name just because it sits on a colored background instead of plain "
+        f"page background.\n\n"
+        if _RD_MODE.get() else ""
+        )
+        + f"Return STRICT JSON array only, no prose, no markdown fences. "
         f"🚨 DO NOT include any <think>, reasoning, chain-of-thought, or "
         f"explanation text before the JSON — output must start IMMEDIATELY "
         f"with '[' and contain nothing but the JSON array. Schema:\n"
-        f"[{{\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
+        f"[{{" + ("\"main_topic\":\"...\"," if _RD_MODE.get() else "") +
+        f"\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"source_verbatim\":\"...\","
         f"\"verified\":true,\"exp_bbox\":[100,200,900,350]"
         f"{_RD_MODE.get() and ',\"topic_hint\":\"...\"' or ''}"
@@ -2726,6 +3110,19 @@ def _strip_q_numbering(q: str) -> str:
     return cur.strip()
 
 _SOURCE_REF_PATTERNS = [
+    # 2026-09-08: LEADING-CLAUSE catch-all — a source-reference clause is
+    # ALWAYS at the very start of the sentence, ending right after
+    # অনুযায়ী/অনুসারে/মতে with a comma OR simply a space before the next
+    # word (model doesn't always punctuate with a comma) — e.g. "টেক্সটের
+    # বিগত বছরের প্রশ্ন ও উত্তরমালা অনুযায়ী, সঠিক উত্তর হলো গ।" or the same
+    # without a comma. The fixed-word-count rules below can miss long/
+    # conjunction-joined clauses like this ("প্রশ্ন ও উত্তরমালা" has 3+
+    # words before অনুযায়ী), only partially stripping and leaving a
+    # dangling fragment ("টেক্সটের ,"). Anchored to sentence/string start
+    # (^) so it can never eat into an unrelated normal sentence that
+    # happens to contain অনুযায়ী/অনুসারে/মতে later on without being a
+    # leading source-clause.
+    r'^\s*[^,।\n]{0,80}?(?:অনুযায়ী|অনুসারে|মতে)\s*,?\s*',
     # 2026-09-07: fully generic প্রদত্ত catch-all — bans "প্রদত্ত" combined with
     # up to 2 following words (covers any noun the model invents, not just
     # the fixed list below); stays tight (max 2 words) so it never eats
@@ -3584,6 +3981,11 @@ def _parse_mcq_json(text: str) -> list:
                 _entry["source_verbatim"] = str(it.get("source_verbatim") or "")[:200]
             if "verified" in it:
                 _entry["verified"] = it.get("verified")
+            if "main_topic" in it:
+                _entry["main_topic"] = str(it.get("main_topic") or "").strip()[:60]
+            if "sub_topic" in it:
+                _sub = it.get("sub_topic")
+                _entry["sub_topic"] = _sub.strip()[:60] if isinstance(_sub, str) and _sub.strip() else None
             out.append(_entry)
         if data and not out:
             logger.warning(f"[_parse_mcq_json] all {len(data)} items dropped during validation (missing question/options) | first item raw: {str(data[0])[:300]!r}")
@@ -5484,6 +5886,14 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         out = _filter_verified_mcqs(out, page_num, tag="/pdf")
     out = _cap_mcq_options(out, 4)
     out = _validate_mcq_structure(out)
+    if _RD_MODE.get() and out:
+        from pdf_handler import _rd_reconcile_mcq_topic
+        out = _rd_reconcile_mcq_topic(out, topic)
+        _kt_list = _RD_KNOWN_TOPICS.get()
+        if _kt_list is not None:
+            for _t in {m.get("_rd_topic") for m in out if m.get("_rd_topic")}:
+                if _t not in _kt_list:
+                    _kt_list.append(_t)
     if _TF_MODE.get():
         out = _tf_validate_and_filter(out)
     if _BORO_MODE.get() and "_dagano_apply_topic_reuse" in globals():
@@ -5541,7 +5951,10 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         # doesn't carry custom_prompt through to its retry call).
         _rng_min, _rng_max = 1, None
     else:
-        _rng_min, _rng_max = MIN_MCQ, MAX_MCQ
+        # /pdf: minimum floor raised 10 -> 15 and ceiling removed (matches
+        # /rd exactly) per user instruction (2026-09-08) -- page content
+        # should be maximized, not truncated at a fixed 20 cap.
+        _rng_min, _rng_max = 15, None
 
     # AtlasBot-style count-enforcement retry loop. Capped at 1 extra
     # attempt (was 2) -- each retry re-runs the FULL provider chain
@@ -5550,18 +5963,19 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     # run. 1 retry still gives a real second chance at hitting MIN_MCQ
     # without compounding worst-case wait time further.
     attempts = 0
-    _rd_max_attempts = 3 if _RD_MODE.get() else 1
+    _rd_max_attempts = 3
     while len(out) < _rng_min and attempts < _rd_max_attempts:
         attempts += 1
         logger.info(f"[MCQGen] page {page_num}: only {len(out)} MCQs (attempt {attempts}) — retrying for more")
-        if _RD_MODE.get() and out:
-            # /rd gap-fill retry: instead of blindly re-generating the whole
-            # page again (risking duplicate MCQs on facts already covered),
-            # tell the model exactly which questions already exist and ask
-            # it to mine the REMAINING/missed content on the page for new,
-            # non-overlapping MCQs -- merged with (not replacing) what the
-            # first pass already produced, so the page's final total climbs
-            # toward _rng_min instead of just re-rolling the same content.
+        if out:
+            # gap-fill retry (shared with /rd): instead of blindly
+            # re-generating the whole page again (risking duplicate MCQs
+            # on facts already covered), tell the model exactly which
+            # questions already exist and ask it to mine the
+            # REMAINING/missed content on the page for new, non-overlapping
+            # MCQs -- merged with (not replacing) what the first pass
+            # already produced, so the page's final total climbs toward
+            # _rng_min instead of just re-rolling the same content.
             _retry_prompt = _rd_build_gapfill_prompt(topic, out)
             retry_out, retry_tried = await _generate_mcq_from_image_raw(
                 img, topic, page_num, mcq_count, exclude_groq_keys=tried_groq_keys,
@@ -5572,30 +5986,31 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         tried_groq_keys = tried_groq_keys | retry_tried
         retry_out = _cap_mcq_options(retry_out, 4)
         retry_out = _validate_mcq_structure(retry_out)
+        if _RD_MODE.get() and retry_out:
+            from pdf_handler import _rd_reconcile_mcq_topic
+            retry_out = _rd_reconcile_mcq_topic(retry_out, topic)
+            _kt_list2 = _RD_KNOWN_TOPICS.get()
+            if _kt_list2 is not None:
+                for _t in {m.get("_rd_topic") for m in retry_out if m.get("_rd_topic")}:
+                    if _t not in _kt_list2:
+                        _kt_list2.append(_t)
         if _TF_MODE.get():
             retry_out = _tf_validate_and_filter(retry_out)
         retry_out = _dedupe_mcqs(retry_out) if "_dedupe_mcqs" in globals() else retry_out
-        if _RD_MODE.get():
-            # Merge (never replace) -- the gap-fill retry is meant to ADD
-            # to what's already there, not compete with it.
-            # NOTE: _dedupe_mcqs is currently a disabled no-op (see its
-            # docstring above) -- there is NO code-level dedup backstop
-            # here. Overlap prevention relies entirely on the gap-fill
-            # prompt's instruction to the model ("don't repeat these
-            # questions"). If the model still produces a near-duplicate
-            # despite that instruction, it will pass through into the
-            # final merged output uncaught.
-            if retry_out:
-                out = _rd_dedupe_gapfill_merge(out, retry_out)
-        elif retry_out and len(retry_out) >= len(out):
-            out = retry_out
-        if _RD_MODE.get() and len(out) == 0 and attempts >= _rd_max_attempts:
-            # /rd: 0 MCQ is never an acceptable final result for a page
-            # that has content -- give it a few extra attempts beyond the
-            # normal 1-retry cap specifically for the zero case (a
-            # genuinely blank/cover page still ends at 0 after these, but
-            # that's a real content fact, not a give-up).
-            logger.warning(f"[RD] page {page_num}: still 0 MCQ after {attempts} attempts -- one more try before accepting zero")
+        # Merge (never replace) -- gap-fill retry is meant to ADD to what's
+        # already there, not compete with it. NOTE: _dedupe_mcqs is
+        # currently a disabled no-op (see its docstring above) -- overlap
+        # prevention relies entirely on the gap-fill prompt's instruction
+        # to the model ("don't repeat these questions").
+        if retry_out:
+            out = _rd_dedupe_gapfill_merge(out, retry_out)
+        if len(out) == 0 and attempts >= _rd_max_attempts:
+            # 0 MCQ is never an acceptable final result for a page that has
+            # content -- give it a few extra attempts beyond the normal
+            # cap specifically for the zero case (a genuinely blank/cover
+            # page still ends at 0 after these, but that's a real content
+            # fact, not a give-up).
+            logger.warning(f"[MCQGen] page {page_num}: still 0 MCQ after {attempts} attempts -- one more try before accepting zero")
             _rd_max_attempts += 1
             if attempts >= 4:
                 # 2026-09-07: lowered from 6 -> 4 -- each attempt can itself
@@ -8470,6 +8885,7 @@ def csv_get_pre_message(main_topic: str, batch_topic: str, count: int, first_lin
         f"✅Topic:\n<b>{batch_text}</b>\n"
         f"{sep}\n"
         f"📌MCQ Count: {count}\n"
+        f"{sep}\n"
     )
     if first_link:
         text += f"🔗First Poll Link:\n{first_link}"
@@ -8477,12 +8893,20 @@ def csv_get_pre_message(main_topic: str, batch_topic: str, count: int, first_lin
         text += f"✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো"
     return text
 
-def csv_get_pdf_caption(topic: str) -> str:
+def csv_get_pdf_caption(topic: str, is_channel: bool = False) -> str:
     topic_text = topic or "Special MCQ By ATLAS"
-    return (
+    text = (
         f"📌Topic:{topic_text}\n"
         f"✅কুইজ/পোল/ওয়েবসাইট এক্সাম দিয়ে বারবার প্রাক্টিস করো"
     )
+    if is_channel:
+        text += (
+            "\n\n<blockquote>"
+            "🟦মূলবইয়ের প্রতিটি পেইজ থেকে MCQ প্রাক্টিসের দেড় লক্ষ প্রশ্নের প্যাকেজ বিস্তারিত:\n"
+            "https://t.me/MediAtlas/7627"
+            "</blockquote>"
+        )
+    return text
 
 def csv_get_comment_prompt_message(topic: str, count: int) -> str:
     topic_text = topic or "Special MCQ By ATLAS"
@@ -8516,24 +8940,58 @@ def csv_get_ending_message(topic: str, count: int, first_link: str = "", ask_sco
     return base
 
 def csv_get_master_summary(topic: str, total: int,
-                            total_batches: int, batch_links: list) -> str:
+                            total_batches: int, batch_links: list,
+                            subject: str = None) -> str:
     """
     batch_links = [(part_num, link, count, batch_topic), ...]
-    batch_topic শো করা হয় Part number এর বদলে (CSV থেকে আসা topic name)।
+    link states: "" (pending, not started yet -- no link line shown),
+    "⏳ চলমান..." (this ONE topic currently running), or the real poll
+    link (topic finished). Topic name + MCQ count are always shown
+    (already known from the CSV) regardless of state.
+    Format per topic (separated by a line separator):
+        🔰Topic-01
+        📍(topic name)(count)
+        {link line, only if link is non-empty}
+    Last 3 lines (Exam Batch/Whatsapp/Website) wrapped in an HTML
+    <blockquote> -- caller MUST send/edit this text with parse_mode=HTML.
+
+    subject (optional, LMS-send path only): when given, the header shows
+    subject and exam/topic title as two bold, line-separated lines instead
+    of the single plain line other /csv callers use.
     """
-    text = (
-        f"🟥Poll Topic: \"{topic}\"\n"
-        f"🌟মোট প্রশ্ন: {total}\n"
-        f"📦 মোট ব্যাচ: {total_batches}\n\n"
-    )
+    main_text = topic or "Special MCQ By ATLAS"
+    sep = "▬▬▬▬▬▬▬▬▬▬"
+    if subject:
+        text = (
+            f"🟥<b>{_html_escape(subject)}</b>\n"
+            f"{sep}\n"
+            f"◼️<b>{_html_escape(main_text)}</b>\n"
+            f"{sep}\n"
+            f"🌟মোট প্রশ্ন: {total}\n"
+            f"📦 মোট টপিক সংখ্যা: {total_batches}\n\n"
+        )
+    else:
+        text = (
+            f"🟥{main_text}\n"
+            f"🌟মোট প্রশ্ন: {total}\n"
+            f"📦 মোট টপিক সংখ্যা: {total_batches}\n\n"
+        )
     for entry in batch_links:
         part_n, link, count = entry[0], entry[1], entry[2]
-        label = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
-        text += f"📍{label}: ({count}টি প্রশ্ন)\n{link}\n\n"
+        batch_topic = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
+        exam_link = entry[5] if len(entry) > 5 and entry[5] else ""
+        block = f"🔰Topic-{part_n:02d}\n📍({batch_topic})({count})"
+        if link:
+            block += f"\n🔗First Poll Link:\n{link}"
+        if exam_link:
+            block += f"\n🌐Website Link:\n{exam_link}"
+        text += "<blockquote>" + block + "</blockquote>\n" + f"{sep}\n\n"
     text += (
-        "📌 *এটলাসের Exam Batch* এ অসংখ্য প্রশ্ন প্রাক্টিসের সুযোগ আছে।\n"
-        "💬 *Whatsapp:* wa.me/8801999681290\n"
-        "🌟 *Website:* Atlascourses.com"
+        "<blockquote>"
+        "📌 এটলাসের Exam Batch এ অসংখ্য প্রশ্ন প্রাক্টিসের সুযোগ আছে।\n"
+        "💬 Whatsapp: wa.me/8801999681290\n"
+        "🌟 Website: Atlascourses.com"
+        "</blockquote>"
     )
     return text
 
@@ -8616,6 +9074,28 @@ async def _csv_pre_buttons_no_premium(cache_id: str) -> dict:
     return {"inline_keyboard": [
         [{"text": "📝 Quiz Solve", "url": quiz_url},
          {"text": "🔄 Poll Again", "url": poll_url}],
+        [{"text": "🌐 Website Exam", "url": exam_url}],
+    ]}
+
+async def _rd_group_end_kb(cache_id: str) -> dict:
+    """/csv per-topic CSV-poll end message — 2-row button, used identically
+    for BOTH plain channel and group forum-topic (-t) posts (2026-09-13,
+    user request — the two paths now share this exact keyboard):
+    Row1: Poll Again / Quiz Solve — URL deep-links (?start=poll_/pdf_) that
+          open the bot's OWN DM. Poll Again lets the student retake the
+          SAME poll set; Quiz Solve lets them solve the same MCQs in
+          quiz-mode — both in DM, never posted/replayed inside the
+          channel/group itself.
+    Row2: Website Exam (URL button, GH Pages exam link).
+    New Poll / New Quiz permanently removed from /csv everywhere (both
+    channel and group) per user request."""
+    bot_un = await get_bot_username()
+    exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+    poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+    quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+    return {"inline_keyboard": [
+        [{"text": "🔄 Poll Again", "url": poll_url},
+         {"text": "🎯 Quiz Solve", "url": quiz_url}],
         [{"text": "🌐 Website Exam", "url": exam_url}],
     ]}
 
@@ -9084,15 +9564,16 @@ async def _ensure_explanations_before_csv(mcqs: list) -> list:
         for m in mcqs:
             exp = m.get("explanation", "")
             if exp:
+                exp = _clean_mcq_text(exp)
                 exp = _math_strip_source_citations(exp)
                 exp = _math_normalize_digits(exp)
                 m["explanation"] = exp
             q = m.get("question", "")
             if q:
-                m["question"] = _math_normalize_digits(_math_strip_source_citations(q))
+                m["question"] = _math_normalize_digits(_math_strip_source_citations(_clean_mcq_text(q)))
             if isinstance(m.get("options"), list):
                 m["options"] = [
-                    _math_normalize_digits(_math_strip_source_citations(o)) if isinstance(o, str) else o
+                    _math_normalize_digits(_math_strip_source_citations(_clean_mcq_text(o))) if isinstance(o, str) else o
                     for o in m["options"]
                 ]
     except Exception as e:
@@ -9232,18 +9713,427 @@ async def _handle_clean_command_inner(msg: dict):
 _cut_pdf_cache = {}  # file_id -> pdf_bytes (small in-memory cache to skip re-download)
 _CUT_CACHE_MAX = 5
 
+_YT_LINK_RE = re.compile(r"(https?://(?:www\.)?(?:youtube\.com/watch\?v=[\w-]+|youtu\.be/[\w-]+|youtube\.com/shorts/[\w-]+)[^\s]*)", re.IGNORECASE)
+
+def _get_yt_proxy_list():
+    """Returns a list of proxy URLs to try in order for /cut <yt-link>.
+    Supports two env var formats so either a single proxy or a full
+    rotation list (e.g. a Webshare free-plan batch) can be configured:
+    - YT_PROXY: one URL, e.g. http://user:pass@host:port
+    - YT_PROXY_LIST: multiple, one per line or comma-separated, each
+      either a full URL or raw 'host:port:user:pass' (Webshare's own
+      export format) -- both are normalized to http://user:pass@host:port.
+    If both are set, YT_PROXY_LIST entries come first (more IPs to try
+    before falling back to the single one), duplicates removed.
+    """
+    urls = []
+
+    def _normalize(entry):
+        entry = entry.strip()
+        if not entry:
+            return None
+        if entry.startswith("http://") or entry.startswith("https://") or entry.startswith("socks5"):
+            return entry
+        # raw Webshare format: host:port:user:pass
+        parts = entry.split(":")
+        if len(parts) == 4:
+            host, port, user, pw = parts
+            return f"http://{user}:{pw}@{host}:{port}"
+        return None
+
+    raw_list = os.environ.get("YT_PROXY_LIST", "")
+    for chunk in re.split(r"[\n,]", raw_list):
+        norm = _normalize(chunk)
+        if norm and norm not in urls:
+            urls.append(norm)
+
+    single = os.environ.get("YT_PROXY", "")
+    norm_single = _normalize(single)
+    if norm_single and norm_single not in urls:
+        urls.append(norm_single)
+
+    return urls
+
+async def handle_ytproxystatus_command(msg: dict):
+    """/ytproxystatus -- checks every proxy configured via YT_PROXY /
+    YT_PROXY_LIST for /cut <yt-link> and reports which ones are alive.
+    Cloudflare WARP was tried and removed: HF Space containers don't
+    grant the NET_ADMIN capability WARP's tunnel needs, so it could
+    never come up here -- confirmed via live testing, not a theoretical
+    limitation. An external proxy service is the working alternative
+    since it only needs a plain outbound socket connection, no
+    kernel-level tunnel."""
+    chat_id = msg["chat"]["id"]
+    proxies = _get_yt_proxy_list()
+    if not proxies:
+        await send_msg(chat_id,
+            "🔴 <b>কোনো proxy সেট করা নেই</b>\n"
+            "/cut ইউটিউব link direct connection দিয়ে চলবে (proxy ছাড়া) -- "
+            "HF free tier-এ network unstable হলে এটা fail করতে পারে।\n\n"
+            "YT_PROXY (একটা) অথবা YT_PROXY_LIST (একাধিক, comma/newline "
+            "দিয়ে আলাদা) env var সেট করলে /cut সেগুলোর মধ্য দিয়ে route করবে।",
+            parse_mode="HTML")
+        return
+
+    status_r = await send_msg(chat_id, f"⏳ {len(proxies)}টি proxy check হচ্ছে...")
+    status_id = status_r.get("result", {}).get("message_id")
+
+    import subprocess as _sp
+    results = []
+    for i, proxy in enumerate(proxies, 1):
+        safe_label = re.sub(r"://[^@]+@", "://***@", proxy)  # hide credentials in output
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "--max-time", "8", "-x", proxy,
+                "https://www.youtube.com/generate_204",
+                "-o", "/dev/null", "-w", "%{http_code}",
+                stdout=_sp.PIPE, stderr=_sp.PIPE
+            )
+            out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=12)
+            code = out_b.decode(errors="ignore").strip()
+            ok = code in ("204", "200")
+        except Exception:
+            ok = False
+            code = "timeout/error"
+        results.append((safe_label, ok, code))
+
+    alive = sum(1 for _, ok, _ in results if ok)
+    lines = [f"{'🟢' if ok else '🔴'} {label} ({code})" for label, ok, code in results]
+    summary = (
+        f"<b>{alive}/{len(proxies)} proxy কাজ করছে</b>\n\n" + "\n".join(lines) + "\n\n"
+        + ("👉 /cut প্রথম যেটা কাজ করছে সেটা দিয়ে শুরু করবে, fail করলে পরের গুলো try করবে।"
+           if alive else "⚠️ একটাও কাজ করছে না -- সব IP block/dead, নতুন proxy list দরকার হতে পারে।")
+    )
+    if status_id:
+        await edit_msg(chat_id, status_id, summary, parse_mode="HTML")
+    else:
+        await send_msg(chat_id, summary, parse_mode="HTML")
+
 async def handle_cut_command(msg: dict):
-    """Dispatch /cut to the PDF or CSV handler based on the replied file's extension."""
+    """Dispatch /cut based on what's being replied to:
+    - Document (.csv) -> CSV row-range cut
+    - Document (.pdf or other) -> PDF page-range cut
+    - Plain text/message containing a YouTube link -> video time-range cut
+      (2026-09-13, user request): /cut <start>-<end> replying to a message
+      with a YouTube link downloads that segment and sends it back."""
     reply = msg.get("reply_to_message")
     chat_id = msg["chat"]["id"]
-    doc = reply.get("document") if reply else None
-    if not doc:
-        await send_msg(chat_id, "❌ PDF বা CSV ফাইলে reply করে <code>/cut</code> দাও", parse_mode="HTML")
+    if not reply:
+        await send_msg(chat_id, "❌ PDF/CSV ফাইলে অথবা YouTube link-সহ মেসেজে reply করে <code>/cut</code> দাও", parse_mode="HTML")
         return
-    file_name = (doc.get("file_name") or "").lower()
-    if file_name.endswith(".csv"):
-        return await handle_cut_csv_command(msg)
-    return await handle_cut_pdf_command(msg)
+    doc = reply.get("document")
+    if doc:
+        file_name = (doc.get("file_name") or "").lower()
+        if file_name.endswith(".csv"):
+            return await handle_cut_csv_command(msg)
+        return await handle_cut_pdf_command(msg)
+    reply_text = reply.get("text") or reply.get("caption") or ""
+    yt_m = _YT_LINK_RE.search(reply_text)
+    if yt_m:
+        return await handle_cut_youtube_command(msg, yt_m.group(1))
+    await send_msg(chat_id, "❌ PDF/CSV ফাইলে অথবা YouTube link-সহ মেসেজে reply করে <code>/cut</code> দাও", parse_mode="HTML")
+    return
+
+
+_YT_CUT_TIME_RE = re.compile(
+    r"^/cut\s+(\d{1,2}:\d{2}(?::\d{2})?|\d+)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?|\d+)\s*$",
+    re.IGNORECASE)
+
+def _yt_cut_parse_time(s: str) -> int:
+    """'ss' or 'mm:ss' or 'hh:mm:ss' -> total seconds."""
+    parts = [int(p) for p in s.split(":")]
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    return parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+async def handle_cut_youtube_command(msg: dict, yt_url: str):
+    """/cut <start>-<end> replying to a message containing a YouTube link.
+    Downloads ONLY that time segment (yt-dlp --download-sections, so the
+    whole video is never pulled first) then re-encodes precisely with
+    ffmpeg -ss/-to, and sends the result back as a document (video files
+    over Telegram's 50MB bot-upload ceiling are rejected up front instead
+    of failing deep inside the upload)."""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    text = msg.get("text", "").strip()
+
+    m = _YT_CUT_TIME_RE.match(text)
+    if not m:
+        await send_msg(chat_id,
+            "❌ Usage: YouTube link-সহ মেসেজে reply করে —\n"
+            "<code>/cut 30-90</code> (সেকেন্ড) অথবা\n"
+            "<code>/cut 1:30-2:45</code> (মিনিট:সেকেন্ড)",
+            parse_mode="HTML")
+        return
+
+    start_s = _yt_cut_parse_time(m.group(1))
+    end_s = _yt_cut_parse_time(m.group(2))
+    if end_s <= start_s:
+        await send_msg(chat_id, "❌ End time অবশ্যই start time-এর চেয়ে বড় হতে হবে।")
+        return
+    duration = end_s - start_s
+    if duration > 600:
+        await send_msg(chat_id, "❌ একবারে সর্বোচ্চ ১০ মিনিট (600s) cut করা যাবে — Telegram-এর 50MB upload limit-এর কারণে।")
+        return
+
+    status_r = await send_msg(chat_id, f"⏳ YouTube video download হচ্ছে... ({m.group(1)}–{m.group(2)})\n📊 0% | ⏱️ 0s")
+    status_id = status_r.get("result", {}).get("message_id")
+    _start_time = time.time()
+
+    import tempfile, subprocess, shutil, uuid as _uuid_mod
+    work_dir = tempfile.mkdtemp(prefix="ytcut_")
+    try:
+        raw_path = os.path.join(work_dir, f"raw_{_uuid_mod.uuid4().hex}.mp4")
+        out_path = os.path.join(work_dir, f"cut_{_uuid_mod.uuid4().hex}.mp4")
+
+        # yt-dlp: only download the needed section (+2s padding either side
+        # so ffmpeg's re-encode has clean keyframes to cut from).
+        # 2026-09-13 (user request): no quality cap -- "bv*+ba/b" pulls the
+        # best video+audio yt-dlp can find (up to whatever YouTube serves,
+        # e.g. 1080p/4K on non-premium accounts); the 50MB post-cut size
+        # check further down is what actually decides if it can be sent.
+        pad_start = max(0, start_s - 2)
+        section = f"*{pad_start}-{end_s + 2}"
+        yt_cookies_content = os.environ.get("YT_COOKIES")
+        cookies_path = None
+        if yt_cookies_content:
+            cookies_path = os.path.join(work_dir, "cookies.txt")
+            with open(cookies_path, "w", encoding="utf-8") as cf:
+                cf.write(yt_cookies_content)
+
+        def _build_ytdlp_cmd(proxy=None):
+            cmd = [
+                "yt-dlp", "--no-playlist", "-f", "bv*+ba/b",
+                "--download-sections", section, "--force-keyframes-at-cuts",
+                "--newline", "--progress-template", "download:PROG %(progress._percent_str)s",
+                # 2026-09-13: hardening against the observed
+                # 'SSL: UNEXPECTED_EOF_WHILE_READING' errors --
+                # --force-ipv4 avoids flaky IPv6 paths some hosts have,
+                # --retries/--fragment-retries make yt-dlp's OWN internal
+                # retry (separate from our attempt-loop) more persistent,
+                # and --socket-timeout fails fast on a stalled connection
+                # instead of hanging until our outer 180s timeout.
+                "--force-ipv4", "--retries", "5", "--fragment-retries", "5",
+                "--socket-timeout", "30",
+                # 2026-09-13 UPDATED: switched from a local Deno JS runtime
+                # to yt-dlp's remote EJS component (fetched from GitHub) --
+                # solves the same nsig/signature challenge without needing
+                # Deno installed/on PATH in the image at all, so it's one
+                # less moving part than --js-runtimes deno.
+                "--remote-components", "ejs:github",
+            ]
+            if proxy:
+                cmd += ["--proxy", proxy]
+            if cookies_path:
+                cmd += ["--cookies", cookies_path]
+            cmd += ["-o", raw_path, yt_url]
+            return cmd
+
+        # 2026-09-13: Cloudflare WARP was tried as a free proxy workaround
+        # and removed -- confirmed via live testing that HF Space
+        # containers don't grant WARP's tunnel the NET_ADMIN capability
+        # it needs, so it could never come up here. A rotating list of
+        # external proxies (YT_PROXY / YT_PROXY_LIST, e.g. a Webshare
+        # free-plan batch) is used instead, since each only needs a
+        # plain outbound socket -- no kernel-level tunnel. [None] means
+        # "try with no proxy at all" if nothing is configured.
+        proxy_list = _get_yt_proxy_list() or [None]
+
+        # 2026-09-13: transient SSL/network errors (EOF, connection reset)
+        # to YouTube are common and NOT the same as a real download
+        # failure -- retry across the proxy list before giving up, instead
+        # of immediately reporting failure on the first flaky connection
+        # or the first dead IP in the list.
+        MAX_YTDLP_ATTEMPTS = max(3, len(proxy_list))
+        last_err_tail = ""
+        dl_ok = False
+        for attempt in range(1, MAX_YTDLP_ATTEMPTS + 1):
+            _used_proxy = proxy_list[(attempt - 1) % len(proxy_list)]
+            _cmd = _build_ytdlp_cmd(_used_proxy)
+            _safe_proxy_label = re.sub(r"://[^@]+@", "://***@", _used_proxy) if _used_proxy else None
+            logger.info(f"[cut-yt] attempt {attempt}/{MAX_YTDLP_ATTEMPTS} -- proxy: {_safe_proxy_label or 'none (direct)'}")
+            proc = await asyncio.create_subprocess_exec(
+                *_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stderr_lines = []
+            _last_reported_pct = {"v": -1}
+
+            async def _read_stdout():
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    line_s = line.decode(errors="ignore").strip()
+                    if line_s.startswith("PROG"):
+                        pct_str = line_s.replace("PROG", "").strip().replace("%", "")
+                        try:
+                            pct = int(float(pct_str))
+                        except ValueError:
+                            continue
+                        if pct != _last_reported_pct["v"] and pct % 5 == 0 and status_id:
+                            _last_reported_pct["v"] = pct
+                            elapsed = int(time.time() - _start_time)
+                            try:
+                                await edit_msg(chat_id, status_id,
+                                    f"⏳ YouTube video download হচ্ছে... ({m.group(1)}–{m.group(2)})\n📊 {pct}% | ⏱️ {elapsed}s")
+                            except Exception:
+                                pass
+
+            async def _read_stderr():
+                while True:
+                    line = await proc.stderr.readline()
+                    if not line:
+                        break
+                    stderr_lines.append(line)
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(_read_stdout(), _read_stderr(), proc.wait()),
+                    timeout=180
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                last_err_tail = "timeout"
+                continue
+
+            err_tail = b"".join(stderr_lines).decode(errors="ignore")[-2000:]
+            if proc.returncode == 0 and os.path.exists(raw_path):
+                dl_ok = True
+                break
+            last_err_tail = err_tail
+            transient = any(s in err_tail for s in [
+                "SSL", "EOF occurred", "ConnectionReset", "Connection reset",
+                "TimeoutError", "Temporary failure", "Connection refused",
+                "Proxy", "407", "Could not connect"
+            ])
+            # 2026-09-13: with multiple proxies configured, a failure on
+            # one IP (dead, blocked, or auth-rejected) shouldn't stop the
+            # whole /cut -- keep rotating through proxy_list even for
+            # errors that wouldn't otherwise count as "transient" on a
+            # single fixed connection, since the next IP may simply work.
+            has_more_proxies = len(proxy_list) > 1 and attempt < MAX_YTDLP_ATTEMPTS
+            should_retry = (transient or has_more_proxies) and attempt < MAX_YTDLP_ATTEMPTS
+            logger.warning(f"[cut-yt] yt-dlp attempt {attempt}/{MAX_YTDLP_ATTEMPTS} failed"
+                            f"{' (retrying)' if should_retry else ''}: {err_tail}")
+            if not should_retry:
+                break
+            if os.path.exists(raw_path):
+                os.remove(raw_path)
+            if status_id:
+                try:
+                    await edit_msg(chat_id, status_id,
+                        f"⚠️ Network সমস্যা — আবার চেষ্টা হচ্ছে ({attempt}/{MAX_YTDLP_ATTEMPTS})...")
+                except Exception:
+                    pass
+            await asyncio.sleep(2)
+
+        if not dl_ok:
+            logger.warning(f"[cut-yt] yt-dlp all attempts failed. Full last stderr:\n{last_err_tail}")
+            ll = last_err_tail.lower()
+            if "no supported javascript runtime" in ll or "nsig extraction failed" in ll:
+                logger.error("[cut-yt] ROOT CAUSE: EJS remote component (ejs:github) not working — check network access to GitHub from container")
+                if status_id:
+                    await edit_msg(chat_id, status_id, "❌ yt-dlp-এর signature solver কাজ করছে না — admin-কে জানাও।")
+            elif "sign in" in ll or "confirm you" in ll:
+                if status_id:
+                    await edit_msg(chat_id, status_id, "❌ YouTube bot-detection block করেছে — YT_COOKIES ঠিক আছে কিনা দেখো (expire হয়ে থাকতে পারে)।")
+            elif "ssl" in ll or "eof occurred" in ll:
+                if status_id:
+                    proxy_hint = "" if _get_yt_proxy_list() else " (YT_PROXY বা YT_PROXY_LIST env var দিয়ে proxy set করা যায়)"
+                    await edit_msg(chat_id, status_id,
+                        f"❌ Network/SSL সমস্যা — hosting-এর outbound connection অস্থির{proxy_hint}। কয়েকবার চেষ্টা করেও হয়নি।")
+            else:
+                if status_id:
+                    await edit_msg(chat_id, status_id, "❌ Video download ব্যর্থ হয়েছে — link ঠিক আছে কিনা দেখো।")
+            return
+
+        elapsed = int(time.time() - _start_time)
+        if status_id:
+            await edit_msg(chat_id, status_id, f"✂️ Cut করা হচ্ছে... ({duration}s) | ⏱️ মোট {elapsed}s")
+
+        # ffmpeg trims the padded download down to the EXACT requested
+        # range (-ss relative to the padded clip start).
+        ss_in_clip = start_s - pad_start
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", raw_path,
+            "-ss", str(ss_in_clip), "-t", str(duration),
+            "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart",
+            out_path
+        ]
+        fproc = await asyncio.create_subprocess_exec(
+            *ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        _, ferr_b = await asyncio.wait_for(fproc.communicate(), timeout=180)
+        if fproc.returncode != 0 or not os.path.exists(out_path):
+            err_tail = (ferr_b or b"").decode(errors="ignore")[-400:]
+            logger.warning(f"[cut-yt] ffmpeg failed: {err_tail}")
+            if status_id:
+                await edit_msg(chat_id, status_id, "❌ Video cut করতে ব্যর্থ হয়েছে।")
+            return
+
+        out_size = os.path.getsize(out_path)
+        if out_size > 50 * 1024 * 1024:
+            # 2026-09-13: no pre-download quality cap anymore (max quality
+            # requested) -- so a too-big result is handled here instead,
+            # by re-encoding down (scale+bitrate cap) until it fits, rather
+            # than failing outright on the first oversized attempt.
+            if status_id:
+                await edit_msg(chat_id, status_id,
+                    f"⚠️ {out_size/1024/1024:.1f}MB — 50MB limit-এর জন্য quality কমিয়ে আবার encode হচ্ছে...")
+            for scale_h in (720, 480, 360):
+                retry_path = os.path.join(work_dir, f"retry_{scale_h}.mp4")
+                retry_cmd = [
+                    "ffmpeg", "-y", "-i", raw_path,
+                    "-ss", str(ss_in_clip), "-t", str(duration),
+                    "-vf", f"scale=-2:{scale_h}",
+                    "-c:v", "libx264", "-crf", "28", "-preset", "fast",
+                    "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+                    retry_path
+                ]
+                rproc = await asyncio.create_subprocess_exec(
+                    *retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                await asyncio.wait_for(rproc.communicate(), timeout=180)
+                if rproc.returncode == 0 and os.path.exists(retry_path):
+                    retry_size = os.path.getsize(retry_path)
+                    if retry_size <= 50 * 1024 * 1024:
+                        out_path = retry_path
+                        out_size = retry_size
+                        break
+            if out_size > 50 * 1024 * 1024:
+                if status_id:
+                    await edit_msg(chat_id, status_id,
+                        f"❌ কমপ্রেস করেও {out_size/1024/1024:.1f}MB — 50MB-এর নিচে আনা যায়নি। "
+                        f"ছোট time range দিয়ে আবার চেষ্টা করো।")
+                return
+
+        if status_id:
+            await edit_msg(chat_id, status_id, "📤 পাঠানো হচ্ছে...")
+        with open(out_path, "rb") as f:
+            video_bytes = f.read()
+        total_elapsed = int(time.time() - _start_time)
+        await send_document(chat_id, video_bytes, f"cut_{m.group(1).replace(':','.')}-{m.group(2).replace(':','.')}.mp4",
+            caption=f"✂️ {m.group(1)}–{m.group(2)} ({duration}s) | ⏱️ {total_elapsed}s | 📦 {out_size/1024/1024:.1f}MB", mime_type="video/mp4")
+        if status_id:
+            try:
+                await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_id})
+            except Exception:
+                pass
+    except asyncio.TimeoutError:
+        if status_id:
+            await edit_msg(chat_id, status_id, "❌ সময় শেষ — video অনেক বড় বা download ধীর।")
+    except FileNotFoundError as e:
+        logger.error(f"[cut-yt] missing binary: {e}")
+        if status_id:
+            await edit_msg(chat_id, status_id, "❌ yt-dlp/ffmpeg server-এ install নেই — admin-কে জানাও।")
+    except Exception as e:
+        logger.error(f"[cut-yt] unexpected error: {e}")
+        if status_id:
+            await edit_msg(chat_id, status_id, f"❌ ব্যর্থ হয়েছে: {e}")
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 async def handle_cut_pdf_command(msg: dict):
@@ -10283,12 +11173,11 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
         if _is_topicwise:
             job_id = f"csvtopic_{cache_id}"
             total_batches = len(_topics_order)
-            batch_links = []
-            first_pre_msg_id = None
+            master_msg_id = None
             all_batch_mcqs = []
 
             _existing = await d1_select(
-                "SELECT sent_index, status FROM csv_poll_jobs WHERE job_id=?1", [job_id]
+                "SELECT sent_index, status, master_msg_id FROM csv_poll_jobs WHERE job_id=?1", [job_id]
             )
             resume_from_batch = 0
             if _existing and _existing[0].get("status") == "running":
@@ -10298,6 +11187,9 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     if loading_id:
                         await edit_msg(chat_id, loading_id,
                             f"📄 {csv_fname}\n🔄 আগের অসম্পূর্ণ কাজ resume হচ্ছে (topic {resume_from_batch+1}/{total_batches} থেকে)...")
+                    _existing_master_id = _existing[0].get("master_msg_id")
+                    if _existing_master_id:
+                        master_msg_id = _existing_master_id
             else:
                 await db_save_csv_job(
                     job_id, cache_id=cache_id, channel_id=channel_id, chat_id=chat_id, uid=uid,
@@ -10305,6 +11197,31 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     thread_id=thread_id or 0, loading_id=loading_id or 0,
                     sent_index=0, total=total_batches, first_poll_link="", status="running"
                 )
+
+            # 2026-09-13 (user request): master summary (all topic names +
+            # MCQ counts, ALWAYS known from the CSV) now goes out FIRST,
+            # before any topic's polls -- every per-topic pre-message below
+            # replies to THIS message. Only the LINK per topic changes
+            # state over time: "" (pending, not started) -> "⏳ চলমান..."
+            # (this one topic actively running) -> real link (done).
+            batch_links = [[i, "", len(_topic_groups[t]), t] for i, t in enumerate(_topics_order, 1)]
+            if master_msg_id is None and total_batches > 1:
+                _initial_summary = csv_get_master_summary(topic, total, total_batches, batch_links)
+                _master_send_data = {"chat_id": channel_id, "text": _initial_summary, "parse_mode": "HTML", "disable_web_page_preview": True}
+                if thread_id:
+                    _master_send_data["message_thread_id"] = thread_id
+                _master_r = await tg_post("sendMessage", _master_send_data)
+                if not _master_r.get("ok") and thread_id:
+                    _master_send_data.pop("message_thread_id", None)
+                    _master_r = await tg_post("sendMessage", _master_send_data)
+                    thread_id = None
+                master_msg_id = _master_r.get("result", {}).get("message_id") if _master_r.get("ok") else None
+                if master_msg_id:
+                    try:
+                        await try_pin_message(channel_id, master_msg_id)
+                    except Exception as e:
+                        logger.warning(f"[CSV-Topicwise] master summary pin failed: {e}")
+                    await db_update_csv_job_progress(job_id, 0, master_msg_id=master_msg_id)
 
             for b_idx, batch_topic in enumerate(_topics_order, 1):
                 batch = _topic_groups[batch_topic]
@@ -10321,8 +11238,21 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 batch_cache_id = gen_session_id()
                 await db_save_mcq_cache(batch_cache_id, batch_cache_id, b_idx, batch_topic, batch)
 
+                # 2026-09-13: mark ONLY this topic as "⏳ চলমান..." in the
+                # master summary right before starting it -- every other
+                # topic keeps its own real state (pending="" or done=link).
+                if master_msg_id:
+                    batch_links[b_idx - 1][1] = "⏳ চলমান..."
+                    try:
+                        await edit_msg(channel_id, master_msg_id,
+                            csv_get_master_summary(topic, total, total_batches, batch_links))
+                    except Exception as e:
+                        logger.warning(f"[CSV-Topicwise] master summary running-state update failed: {e}")
+
                 pre_text = csv_get_pre_message(topic, batch_topic, len(batch))
                 pre_send_data = {"chat_id": channel_id, "text": pre_text, "parse_mode": "HTML"}
+                if master_msg_id:
+                    pre_send_data["reply_to_message_id"] = master_msg_id
                 if thread_id:
                     pre_send_data["message_thread_id"] = thread_id
                 pre_r = await tg_post("sendMessage", pre_send_data)
@@ -10331,8 +11261,6 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     pre_r = await tg_post("sendMessage", pre_send_data)
                     thread_id = None
                 pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
-                if first_pre_msg_id is None:
-                    first_pre_msg_id = pre_msg_id
                 all_batch_mcqs.extend(batch)
 
                 sent, first_link = await _send_csv_polls_to_channel(
@@ -10345,19 +11273,42 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                         await edit_msg(channel_id, pre_msg_id, csv_get_pre_message(topic, batch_topic, len(batch), first_link))
                     except Exception as e:
                         logger.warning(f"[CSV-Topicwise] pre-msg link edit failed: {e}")
+                # 2026-09-13 (user request): only the master summary stays
+                # pinned -- per-topic pre-messages are no longer pinned.
 
                 batch_pdf_bytes = await _generate_style1_pdf_guaranteed(batch, batch_topic, chat_id)
+                # 2026-09-13 (user request): end message split into TWO
+                # separate messages. Msg-1 (PDF + caption, no score-ask)
+                # is identical for channel and group. Msg-2 (score-ask +
+                # first poll link) is sent ONLY for plain channels
+                # (ask_score == chat_type=="channel") -- groups never get
+                # a score-ask message at all.
+                ending = csv_get_ending_message(batch_topic, sent, "", ask_score=False)
+                end_msg_id_saved = None
                 if batch_pdf_bytes:
+                    # Per-topic end message (msg-1): the PDF of this topic's
+                    # polls IS the end message itself (caption = ending
+                    # text, no score-ask), with the 2-row Poll Again/Quiz
+                    # Solve (DM deep-links) + Website Exam keyboard attached
+                    # directly. Identical for channel and group forum-topic.
                     safe_btitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", batch_topic)[:50] or "ATLAS_Sheet"
-                    btn_kb = await _csv_pre_buttons_no_premium(batch_cache_id)
+                    btn_kb = await _rd_group_end_kb(batch_cache_id)
                     pdf_doc_r = await send_document(
                         channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
-                        caption=csv_get_pdf_caption(batch_topic),
+                        caption=ending,
                         message_thread_id=thread_id,
                         reply_to_message_id=pre_msg_id
                     )
+                    if not (pdf_doc_r and pdf_doc_r.get("ok")):
+                        pdf_doc_r = await send_document(  # one retry
+                            channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
+                            caption=ending,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=pre_msg_id
+                        )
                     if pdf_doc_r and pdf_doc_r.get("ok"):
                         pdf_msg_id = pdf_doc_r.get("result", {}).get("message_id")
+                        end_msg_id_saved = pdf_msg_id
                         if pdf_msg_id:
                             try:
                                 await tg_post("editMessageReplyMarkup", {
@@ -10366,26 +11317,48 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                                 })
                             except Exception as e:
                                 logger.warning(f"[CSV-Topicwise] PDF button attach failed: {e}")
-
-                ending = csv_get_ending_message(batch_topic, sent, first_link, ask_score=ask_score)
-                end_send_data2 = {
-                    "chat_id": channel_id,
-                    "text": ending,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True
-                }
-                if pre_msg_id:
-                    end_send_data2["reply_to_message_id"] = pre_msg_id
-                if thread_id:
-                    end_send_data2["message_thread_id"] = thread_id
-                end_r = await tg_post("sendMessage", end_send_data2)
-                if not end_r.get("ok"):
+                    end_r = pdf_doc_r
+                else:
+                    # PDF generation genuinely failed -- fall back to the
+                    # old plain-text end message (with the same new keyboard)
+                    # so the topic still ends with a usable message+buttons.
+                    end_send_data2 = {
+                        "chat_id": channel_id,
+                        "text": ending,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                        "reply_markup": await _rd_group_end_kb(batch_cache_id)
+                    }
+                    if pre_msg_id:
+                        end_send_data2["reply_to_message_id"] = pre_msg_id
+                    if thread_id:
+                        end_send_data2["message_thread_id"] = thread_id
                     end_r = await tg_post("sendMessage", end_send_data2)
+                    if not end_r.get("ok"):
+                        end_r = await tg_post("sendMessage", end_send_data2)
+                    if end_r.get("ok"):
+                        end_msg_id_saved = end_r["result"]["message_id"]
+
                 if end_r.get("ok"):
                     await db_update_cache(batch_cache_id, {
                         "channel_id": channel_id,
-                        "end_msg_id": end_r["result"]["message_id"]
+                        "end_msg_id": end_msg_id_saved
                     })
+                    # 2026-09-13: 2nd end message — score-ask + first poll
+                    # link — ONLY for plain channels, never for groups.
+                    if ask_score:
+                        try:
+                            score_text = csv_get_ending_message(batch_topic, sent, first_link, ask_score=True)
+                            _score_send_data = {
+                                "chat_id": channel_id, "text": score_text,
+                                "parse_mode": "HTML", "disable_web_page_preview": True,
+                                "reply_to_message_id": end_msg_id_saved
+                            }
+                            if thread_id:
+                                _score_send_data["message_thread_id"] = thread_id
+                            await tg_post("sendMessage", _score_send_data)
+                        except Exception as e:
+                            logger.warning(f"[CSV-Topicwise] score-ask 2nd end message failed: {e}")
                     if loading_id:
                         await edit_msg(chat_id, loading_id,
                             f"📄 {csv_fname}\n✅ Topic {b_idx}/{total_batches} ({batch_topic}) — end message পাঠানো হয়েছে")
@@ -10393,8 +11366,18 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                     await send_msg(chat_id,
                         f"⚠️ '{batch_topic}' এর end message + button পাঠানো ব্যর্থ হয়েছে: {end_r.get('description', 'unknown error')}")
 
-                batch_links.append((b_idx, first_link, len(batch), batch_topic))
+                batch_links[b_idx - 1][1] = first_link
                 await db_update_csv_job_progress(job_id, b_idx)
+
+                # 2026-09-13: live-update the master summary (edit) with
+                # this topic's real link, replacing its "⏳ চলমান..." state,
+                # instead of only sending the full summary once at the end.
+                if master_msg_id:
+                    try:
+                        await edit_msg(channel_id, master_msg_id,
+                            csv_get_master_summary(topic, total, total_batches, batch_links))
+                    except Exception as e:
+                        logger.warning(f"[CSV-Topicwise] master summary live-update failed: {e}")
 
                 if loading_id:
                     await edit_msg(chat_id, loading_id,
@@ -10405,7 +11388,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             if total_batches > 1:
                 # /sheet কমান্ডের topicwise PDF (style1, _pdfs_topic দিয়ে
                 # গ্রুপ করা) এর সাথে হুবহু একই বিল্ডার ব্যবহার করে একটাই
-                # সম্মিলিত PDF — master summary টেক্সট মেসেজের ঠিক আগে।
+                # সম্মিলিত PDF।
                 try:
                     _combined_topics_order, _combined_topic_map = _group_pdfs_mcqs(all_batch_mcqs, topic)
                     _combined_html = _build_topicwise_pdf_html(_combined_topics_order, _combined_topic_map, topic)
@@ -10424,19 +11407,16 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 except Exception as e:
                     logger.warning(f"[CSV-Topicwise] combined PDF failed, skipping: {e}")
 
-                summary = csv_get_master_summary(topic, total, total_batches, batch_links)
-                sum_send_data = {
-                    "chat_id": channel_id,
-                    "text": summary,
-                    "disable_web_page_preview": True
-                }
-                if first_pre_msg_id:
-                    sum_send_data["reply_to_message_id"] = first_pre_msg_id
-                if thread_id:
-                    sum_send_data["message_thread_id"] = thread_id
-                sum_r = await tg_post("sendMessage", sum_send_data)
-                if sum_r.get("ok"):
-                    await try_pin_message(channel_id, sum_r["result"]["message_id"])
+                # Master summary was already sent first and live-updated
+                # per topic above (2026-09-13) — final edit here just
+                # ensures the closing text is the fully-settled version
+                # (in case the last live-update above raced/failed).
+                if master_msg_id:
+                    try:
+                        await edit_msg(channel_id, master_msg_id,
+                            csv_get_master_summary(topic, total, total_batches, batch_links))
+                    except Exception as e:
+                        logger.warning(f"[CSV-Topicwise] final master summary update failed: {e}")
 
             if loading_id:
                 await edit_msg(chat_id, loading_id,
@@ -11245,6 +12225,93 @@ async def _apply_saved_watermark(pdf_bytes: bytes) -> bytes:
     except Exception as e:
         logger.warning(f"[AutoWatermark] apply failed: {e}")
     return pdf_bytes
+
+async def _generate_lms_cover_image(subject: str, exam_title: str, chapter: str = "") -> bytes | None:
+    """Fixed-template 16:9 cover image for the LMS master summary post —
+    only the Subject/Chapter/Exam title text changes call to call, the
+    layout/design/colors stay constant. Rendered via the same Playwright
+    instance used for PDF generation, screenshotted instead of printed."""
+    subj_txt = _html_escape(subject or "MCQ")
+    exam_txt = _html_escape(exam_title or "")
+    chap_txt = _html_escape(chapter or "")
+    html_s = f"""<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">
+<style>
+  @font-face {{ font-family: 'HindSiliguri'; src: local('Hind Siliguri'); }}
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  html, body {{ width:1280px; height:720px; overflow:hidden; }}
+  body {{
+    font-family: 'HindSiliguri', 'Noto Sans Bengali', sans-serif;
+    width:1280px; height:720px;
+    background: linear-gradient(135deg, #7f1d1d 0%, #991b1b 45%, #b91c1c 100%);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    position:relative; color:#fff; text-align:center; padding:60px;
+  }}
+  .brand {{
+    position:absolute; top:40px; left:50%; transform:translateX(-50%);
+    font-size:30px; font-weight:700; letter-spacing:4px; opacity:0.9;
+  }}
+  .subject {{
+    font-size:34px; font-weight:600; background:rgba(255,255,255,0.15);
+    padding:10px 34px; border-radius:40px; margin-bottom:34px;
+  }}
+  .exam {{
+    font-size:56px; font-weight:800; line-height:1.25; max-width:1080px;
+    text-shadow: 0 3px 10px rgba(0,0,0,0.25);
+  }}
+  .chapter {{
+    font-size:30px; font-weight:500; margin-top:28px; opacity:0.92;
+    max-width:1000px;
+  }}
+  .footer {{
+    position:absolute; bottom:40px; font-size:24px; font-weight:600;
+    letter-spacing:2px; opacity:0.85;
+  }}
+</style></head>
+<body>
+  <div class="brand">🟥 ATLAS</div>
+  <div class="subject">{subj_txt}</div>
+  <div class="exam">{exam_txt}</div>
+  {f'<div class="chapter">{chap_txt}</div>' if chap_txt else ''}
+  <div class="footer">Atlascourses.com</div>
+</body></html>"""
+
+    async with _PDF_SEMAPHORE:
+        import tempfile
+        temp_path = None
+        page = None
+        try:
+            for attempt in range(3):
+                try:
+                    browser = await _get_pw_browser()
+                    page = await asyncio.wait_for(browser.new_page(viewport={"width": 1280, "height": 720}), timeout=15)
+                    break
+                except Exception as e:
+                    logger.warning(f"[LMS-Cover] new_page failed (attempt {attempt+1}/3): {e}")
+                    await asyncio.sleep(0.5 * (attempt + 1))
+            if page is None:
+                return None
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
+                f.write(html_s)
+                temp_path = f.name
+            await page.goto(f"file://{os.path.abspath(temp_path)}", wait_until="networkidle", timeout=15000)
+            await asyncio.wait_for(page.evaluate("document.fonts.ready"), timeout=10)
+            img_bytes = await page.screenshot(type="jpeg", quality=90)
+            return img_bytes
+        except Exception as e:
+            logger.warning(f"[LMS-Cover] generation failed: {e}")
+            return None
+        finally:
+            try:
+                if page:
+                    await page.close()
+            except Exception:
+                pass
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+
 
 async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = False, page_width_mm: int = 420) -> bytes:
     """Playwright-based HTML->PDF, ported 1:1 from AtlasMasterBot's
@@ -13604,7 +14671,13 @@ def _build_extra_prompt_standalone(topic: str) -> str:
         f"printed in the book) exactly as much as circling a whole "
         f"paragraph\n"
         f"- A star, tick/✓, arrow, or other hand-drawn mark next to the text "
-        f"pointing to it\n\n"
+        f"pointing to it\n"
+        f"- A colored VERTICAL BAR/LINE drawn in the margin alongside a "
+        f"paragraph or block of text (any color marker/highlighter) -- this "
+        f"marks the ENTIRE paragraph/block next to it as marked content, "
+        f"even though the bar itself is beside the text rather than over "
+        f"or under it. Treat every line the bar runs alongside as marked.\n"
+        f"\n"
         f"🚫 DO NOT generate any MCQ from plain/unmarked text, even if it "
         f"looks important, is a definition, is bold/italic in the ORIGINAL "
         f"book printing, or seems exam-relevant. Bold/italic that is part "
@@ -13678,7 +14751,13 @@ def _build_extra_prompt_batched(topic: str, n: int) -> str:
         f"printed in the book) exactly as much as circling a whole "
         f"paragraph\n"
         f"- A star, tick/✓, arrow, or other hand-drawn mark next to the text "
-        f"pointing to it\n\n"
+        f"pointing to it\n"
+        f"- A colored VERTICAL BAR/LINE drawn in the margin alongside a "
+        f"paragraph or block of text (any color marker/highlighter) -- this "
+        f"marks the ENTIRE paragraph/block next to it as marked content, "
+        f"even though the bar itself is beside the text rather than over "
+        f"or under it. Treat every line the bar runs alongside as marked.\n"
+        f"\n"
         f"🚫 DO NOT generate any MCQ from plain/unmarked text, even if it "
         f"looks important, is a definition, is bold/italic in the ORIGINAL "
         f"book printing, or seems exam-relevant. Bold/italic that is part "
@@ -13793,9 +14872,11 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
     try:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
+            _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
             return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
         if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
             logger.warning("[Dagano] all Gemini keys already known daily-exhausted — skipping straight to Groq")
+            _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
             return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
         from google import genai as gai
         from google.genai import types
@@ -13845,6 +14926,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 if finish_reason is not None and str(finish_reason).upper().find("MAX_TOKENS") >= 0:
                     logger.warning(f"[Dagano] Gemini response hit max_output_tokens (truncated) for key {key[:12]}... -- treating as technical failure, trying next key")
                     continue
+                _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
                 return response.text or ""
             except asyncio.TimeoutError:
                 logger.warning(f"[Dagano] Gemini key {key[:12]}... multi-image call timed out (60s), trying next key")
@@ -13880,9 +14962,11 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 logger.warning(f"[Dagano] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         logger.warning("[Dagano] All Gemini keys exhausted — falling back to Groq vision (first image only)")
+        _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
         return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
     except Exception as e:
         logger.warning(f"[Dagano] Gemini multi-image raw call failed: {e}")
+        _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
         return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
 
 
@@ -14021,7 +15105,13 @@ def _build_dagano_prompt_standalone(topic: str) -> str:
         f"- Pen underline drawn under the text (any ink color)\n"
         f"- A box, circle, bracket, or other hand-drawn boundary around the text\n"
         f"- A star, tick, arrow, or other hand-drawn mark next to the text "
-        f"pointing to it\n\n"
+        f"pointing to it\n"
+        f"- A colored VERTICAL BAR/LINE drawn in the margin alongside a "
+        f"paragraph or block of text (any color marker/highlighter) -- this "
+        f"marks the ENTIRE paragraph/block next to it as marked content, "
+        f"even though the bar itself is beside the text rather than over "
+        f"or under it. Treat every line the bar runs alongside as marked.\n"
+        f"\n"
         f"🚫 DO NOT generate any MCQ from plain/unmarked text, even if it "
         f"looks important, is a definition, or is bold/italic in the "
         f"ORIGINAL book printing. Bold/italic that is part of the book's "
@@ -14097,8 +15187,10 @@ def _build_dagano_prompt_standalone(topic: str) -> str:
         f"═══════════════════════════════\n"
         f"Before outputting, silently re-check EVERY drafted MCQ against "
         f"all of these, and FIX or DROP any that fail:\n"
-        f"1. Is the question's source line genuinely marked/highlighted/"
-        f"boxed/colored (not plain/original-bold text)?\n"
+        f"1. Is the question's source line genuinely marked — highlighted/"
+        f"colored, underlined, boxed/circled, has a star/tick/arrow "
+        f"pointing to it, OR sits alongside a colored margin bar/line "
+        f"(not plain/original-bold text)?\n"
         f"2. Does the question/explanation avoid ALL page-number, roman/"
         f"serial-layout, or source-citation wording (\"as stated on this "
         f"page\", \"বর্ণিত আছে\", \"এই পৃষ্ঠায়\")?\n"
@@ -14230,9 +15322,10 @@ def _build_dagano_prompt_batched(topic: str, n: int) -> str:
         f"Before outputting, silently re-check EVERY drafted MCQ (on its "
         f"own page_index) against all of these, and FIX or DROP any that "
         f"fail:\n"
-        f"1. Is the question's source line genuinely marked/highlighted/"
-        f"boxed/colored on THAT SAME page (not plain/original-bold text, "
-        f"not borrowed from another page_index)?\n"
+        f"1. Is the question's source line genuinely marked — highlighted/"
+        f"colored, underlined, boxed/circled, or has a star/tick/arrow — "
+        f"on THAT SAME page (not plain/original-bold text, not borrowed "
+        f"from another page_index)?\n"
         f"2. Does the question/explanation avoid ALL page-number, roman/"
         f"serial-layout, or source-citation wording (\"as stated on this "
         f"page\", \"বর্ণিত আছে\", \"এই পৃষ্ঠায়\")?\n"
@@ -14278,7 +15371,7 @@ def _dagano_apply_topic_reuse(mcqs: list) -> list:
     return mcqs
 
 
-async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> list:
+async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> tuple:
     """/dagano's CONDITIONAL 2nd call -- fires ONLY when code-level checks
     show the model's self-verification in the 1st call likely failed
     badly (>25% of raw MCQs dropped by _dagano_code_level_3pass_verify).
@@ -14286,9 +15379,12 @@ async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> li
     is NEVER called -- /dagano stays at exactly 1 API call per 2-page
     batch. This is a single consolidated audit over ALL surviving MCQs
     for this page in ONE call (not one call per MCQ), re-checking marking
-    source + fact-fidelity + page-reference wording together."""
+    source + fact-fidelity + page-reference wording together.
+    Returns (kept_mcqs, dropped_question_texts) -- the dropped texts are
+    passed on to the final whole-job audit so it knows exactly which
+    marked content on this page still needs a fresh MCQ."""
     if not mcqs:
-        return mcqs
+        return mcqs, []
     try:
         numbered = "\n".join(
             f"{idx+1}. Q: {m.get('question','')[:200]}\n"
@@ -14301,8 +15397,9 @@ async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> li
             f"exact page image (Topic: {topic}). The first-pass generation "
             f"showed signs of rule violations, so re-verify carefully.\n\n"
             f"For EACH numbered MCQ, FAIL it if ANY of these are true:\n"
-            f"- Its source line is NOT genuinely marked/highlighted/boxed/"
-            f"colored on this page (plain/original-bold text does not count)\n"
+            f"- Its source line is NOT genuinely marked — highlighted/"
+            f"colored, underlined, boxed/circled, or starred/ticked/arrowed "
+            f"— on this page (plain/original-bold text does not count)\n"
             f"- Any fact in question/options/explanation was invented, "
             f"pulled from outside/general knowledge, or is about a "
             f"different topic than what's on this page\n"
@@ -14315,7 +15412,7 @@ async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> li
         )
         txt = await _gen_groq_raw_text(img, audit_prompt)
         if not txt:
-            return mcqs
+            return mcqs, []
         import json as _json
         cleaned = txt.strip()
         if cleaned.startswith("```"):
@@ -14329,28 +15426,190 @@ async def _dagano_second_pass_audit(mcqs: list, img, topic: str, page_num) -> li
             m = re.search(r'\[[\d,\s]*\]', cleaned)
             bad_indices = _json.loads(m.group(0)) if m else []
         if not isinstance(bad_indices, list) or not bad_indices:
-            return mcqs
+            return mcqs, []
         bad_set = {int(x) for x in bad_indices if isinstance(x, (int, float)) or (isinstance(x, str) and x.strip().isdigit())}
         if not bad_set:
-            return mcqs
+            return mcqs, []
         kept = [m for idx, m in enumerate(mcqs) if (idx + 1) not in bad_set]
+        dropped_texts = [m.get("question", "") for idx, m in enumerate(mcqs) if (idx + 1) in bad_set]
         removed = len(mcqs) - len(kept)
         if removed:
             logger.info(f"[DaganoSecondPass] page {page_num}: removed {removed} more MCQ(s) on conditional 2nd-call audit")
-        return kept
+        return kept, dropped_texts
     except Exception as e:
         logger.warning(f"[DaganoSecondPass] page {page_num} skipped: {e}")
-        return mcqs
+        return mcqs, []
 
 
-async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
+def _build_dagano_final_audit_prompt(topic: str, page_nums: list, existing_by_page: dict, flagged_by_page: dict = None) -> str:
+    """/dagano's OWN standalone prompt for the final whole-job audit pass
+    -- deliberately SHORT and SEPARATE from the main generation prompt
+    (_build_dagano_prompt_batched), not appended to it. Runs once per
+    3-page block, AFTER every page has already been generated. Main job
+    is finding MISSED marks (marked/highlighted/underlined content that
+    got no MCQ at all) -- wrong-source MCQs are rare but also checked.
+    flagged_by_page (optional): {page_num: [dropped_question_text, ...]}
+    -- questions that the conditional 2nd-pass audit already REJECTED
+    during generation for failing the marked-source condition. These
+    pages are explicitly called out as high-priority: the rejected
+    content's mark is very likely still uncovered and needs a fresh MCQ."""
+    flagged_by_page = flagged_by_page or {}
+    existing_lines = []
+    for pn in page_nums:
+        items = existing_by_page.get(pn, [])
+        if not items:
+            existing_lines.append(f"Page {pn}: (no MCQ generated yet)")
+            continue
+        qs = "; ".join(f"Q{i+1}: {(m.get('question') or '')[:120]}" for i, m in enumerate(items))
+        existing_lines.append(f"Page {pn}: {qs}")
+    existing_block = "\n".join(existing_lines)
+
+    flagged_block = ""
+    flagged_lines = []
+    for pn in page_nums:
+        dropped = flagged_by_page.get(pn) or []
+        if dropped:
+            drop_txt = "; ".join(d[:120] for d in dropped)
+            flagged_lines.append(f"Page {pn}: {drop_txt}")
+    if flagged_lines:
+        flagged_block = (
+            f"\n⚠️ HIGH-PRIORITY -- these pages had MCQs REJECTED earlier for "
+            f"NOT actually matching a mark (condition failed during "
+            f"generation), so their real marked content is very likely still "
+            f"missing a proper MCQ. Check these pages first and make sure "
+            f"the actual marked line (not the rejected/invented content) "
+            f"gets a correct new MCQ:\n" + "\n".join(flagged_lines) + "\n"
+        )
+
+    return (
+        f"Topic: {topic}\n"
+        f"These {len(page_nums)} page images (in order: {page_nums}) were already "
+        f"processed for MCQs from marked/highlighted/underlined/boxed content "
+        f"only. Already-generated MCQs per page:\n{existing_block}\n"
+        f"{flagged_block}\n"
+        f"Do TWO checks:\n"
+        f"1) MISSED MARKS (main check): look for any marked/highlighted/"
+        f"underlined/boxed/circled/starred line on these pages that has NO "
+        f"MCQ above covering it. For each one found, write a new complete "
+        f"MCQ from it. Give extra attention to any page listed above as "
+        f"HIGH-PRIORITY.\n"
+        f"2) WRONG-SOURCE (secondary check): if any MCQ above is clearly "
+        f"NOT from marked content (i.e. was made from plain/unmarked text), "
+        f"or contains a fact not present on its page, output a corrected "
+        f"replacement for it (same page, fixed to match only the actual "
+        f"marked source text).\n\n"
+        f"Output STRICT JSON only, no prose:\n"
+        f'{{"new_mcqs":[{{"page_index":<1-based index into {page_nums}>,'
+        f'"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},'
+        f'"answer":"A/B/C/D","main_explanation":"...","extra_info":"...",'
+        f'"topic_key":"..."}}],'
+        f'"fixed_mcqs":[{{"page_index":<1-based>,"original_question":"<exact '
+        f'Q text from the list above to replace>","question":"...",'
+        f'"options":{{"A":"...","B":"...","C":"...","D":"..."}},'
+        f'"answer":"A/B/C/D","main_explanation":"...","extra_info":"...",'
+        f'"topic_key":"..."}}]}}\n'
+        f"If nothing missed and nothing wrong, return "
+        f'{{"new_mcqs":[],"fixed_mcqs":[]}}. Never invent facts outside '
+        f"these pages."
+    )
+
+
+async def _dagano_final_batch_audit(topic: str, page_block: list, flagged_by_page: dict = None) -> dict:
+    """/dagano's MANDATORY final audit -- runs once per 3-page block AFTER
+    the whole job's generation is complete (not conditional, always runs).
+    page_block: list of (page_num, img, mcqs) for up to 3 consecutive
+    pages. flagged_by_page: {page_num: [dropped_question_text, ...]} from
+    the conditional 2nd-pass rejections during generation, so this audit
+    knows exactly which pages' marked content is still likely uncovered.
+    Returns {page_num: {"add": [...], "fix": [(orig_q, mcq), ...]}}
+    for the caller to merge into the final results. Own dedicated Gemini
+    multi-image call, independent of the main generation and the
+    conditional 2nd-pass."""
+    page_nums = [pn for pn, _im, _m in page_block]
+    imgs = [im for _pn, im, _m in page_block]
+    existing_by_page = {pn: mcqs for pn, _im, mcqs in page_block}
+    prompt = _build_dagano_final_audit_prompt(topic, page_nums, existing_by_page, flagged_by_page)
+    try:
+        txt = await _dagano_gemini_raw_multi(imgs, prompt)
+        if not txt:
+            txt = await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+        if not txt:
+            return {}
+        import json as _json
+        cleaned = txt.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+        try:
+            data = _json.loads(cleaned)
+        except Exception:
+            m = re.search(r'\{.*\}', cleaned, re.DOTALL)
+            data = _json.loads(m.group(0)) if m else {}
+        if not isinstance(data, dict):
+            return {}
+
+        result = {}
+
+        def _idx_to_page(idx):
+            try:
+                idx = int(idx)
+            except Exception:
+                return None
+            if 1 <= idx <= len(page_nums):
+                return page_nums[idx - 1]
+            return None
+
+        new_mcqs = data.get("new_mcqs") or []
+        added = 0
+        for m in new_mcqs:
+            if not isinstance(m, dict):
+                continue
+            pn = _idx_to_page(m.get("page_index"))
+            if pn is None:
+                continue
+            m.pop("page_index", None)
+            m["_provider"] = "Gemini"
+            result.setdefault(pn, {"add": [], "fix": []})["add"].append(m)
+            added += 1
+
+        fixed_mcqs = data.get("fixed_mcqs") or []
+        fixed = 0
+        for m in fixed_mcqs:
+            if not isinstance(m, dict):
+                continue
+            pn = _idx_to_page(m.get("page_index"))
+            if pn is None:
+                continue
+            orig_q = (m.get("original_question") or "").strip()
+            m.pop("page_index", None)
+            m.pop("original_question", None)
+            m["_provider"] = "Gemini"
+            result.setdefault(pn, {"add": [], "fix": []})["fix"].append((orig_q, m))
+            fixed += 1
+
+        if added or fixed:
+            logger.info(f"[DaganoFinalAudit] pages {page_nums}: found {added} missed-mark MCQ(s), {fixed} wrong-source fix(es)")
+        return result
+    except Exception as e:
+        logger.warning(f"[DaganoFinalAudit] pages {page_nums} failed, skipping: {e}")
+        return {}
+
+
+async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> tuple:
     """/dagano's BATCHED generation call -- Gemini primary (own dedicated
     caller with explicit output-token cap), Groq/OpenRouter fallback only
     on true technical failure (mirrors /extra's proven-safe 2-page-per-
-    call pattern). Returns {page_index (1-based int): [mcq]}."""
+    call pattern). Returns (by_index, flagged_by_index) where by_index is
+    {page_index (1-based int): [mcq]} and flagged_by_index is
+    {page_index: [dropped_question_text, ...]} -- questions the
+    conditional 2nd-pass rejected for failing the marked-source
+    condition, so the final whole-job audit can prioritize re-covering
+    that exact content."""
     n = len(imgs)
     if n == 0:
-        return {}
+        return {}, {}
     prompt = _build_dagano_prompt_batched(topic, n)
     try:
         gem_txt = await _dagano_gemini_raw_multi(imgs, prompt)
@@ -14375,6 +15634,7 @@ async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
             idx = int(idx)
             m["_provider"] = provider
             by_index.setdefault(idx, []).append(m)
+        flagged_by_index = {}
         for idx in list(by_index.keys()):
             raw = by_index[idx]
             raw_count = len(raw)
@@ -14393,13 +15653,16 @@ async def _dagano_gen_from_images_batch(imgs: list, topic: str) -> dict:
                 drop_ratio = 1 - (len(out) / raw_count)
                 if drop_ratio > 0.25 and idx - 1 < len(imgs):
                     logger.info(f"[Dagano] page {idx}: {drop_ratio:.0%} dropped by code checks -- firing conditional 2nd-pass audit call")
-                    out = await _dagano_second_pass_audit(out, imgs[idx - 1], topic, idx)
+                    out, dropped_texts = await _dagano_second_pass_audit(out, imgs[idx - 1], topic, idx)
+                    if dropped_texts:
+                        flagged_by_index[idx] = dropped_texts
             out = _dagano_apply_topic_reuse(out)
             by_index[idx] = out
-        return by_index
+        return by_index, flagged_by_index
     except Exception as e:
         logger.warning(f"[Dagano batch] failed: {e}")
-        return {}
+        return {}, {}
+
 
 
 async def _dagano_gen_from_image(img, topic, page_num):
@@ -14448,7 +15711,7 @@ async def _dagano_gen_from_image(img, topic, page_num):
         drop_ratio = 1 - (len(out) / raw_count)
         if drop_ratio > 0.25:
             logger.info(f"[Dagano-Standalone] page {page_num}: {drop_ratio:.0%} dropped by code checks -- firing conditional 2nd-pass audit call")
-            out = await _dagano_second_pass_audit(out, img, topic, page_num)
+            out, _dropped = await _dagano_second_pass_audit(out, img, topic, page_num)
     out = _dagano_apply_topic_reuse(out)
 
     return out
@@ -14475,6 +15738,7 @@ async def dagano_generate_all_pages(
     MAX_WORKERS = 2
     lock = asyncio.Lock()
     total_mcq_box = {"n": 0}
+    flagged_by_page = {}  # real page_num -> [dropped_question_text, ...] from conditional 2nd-pass rejections
 
     def _idx_of(page_num):
         return next(i for i, (p, _) in enumerate(pages) if p == page_num)
@@ -14486,7 +15750,7 @@ async def dagano_generate_all_pages(
                 await edit_msg(chat_id, status_msg_id,
                     _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
 
-    async def _mark_done(page_num, img, mcqs):
+    async def _mark_done(page_num, img, mcqs, dropped_texts=None):
         async with lock:
             idx = _idx_of(page_num)
             results_by_idx[idx] = (page_num, img, mcqs)
@@ -14494,6 +15758,8 @@ async def dagano_generate_all_pages(
             page_status[idx]["current"] = False
             page_status[idx]["done"] = True
             page_status[idx]["mcq"] = len(mcqs)
+            if dropped_texts:
+                flagged_by_page.setdefault(page_num, []).extend(dropped_texts)
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id,
                     _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
@@ -14545,12 +15811,12 @@ async def dagano_generate_all_pages(
                 imgs = [im for _, im in pending]
                 n = len(imgs)
                 try:
-                    by_index = await _dagano_gen_from_images_batch(imgs, topic)
+                    by_index, flagged_by_index = await _dagano_gen_from_images_batch(imgs, topic)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
                     logger.error(f"[Dagano Generate] batch error: {e}")
-                    by_index = {}
+                    by_index, flagged_by_index = {}, {}
 
                 if not by_index and n > 0:
                     for pg, im in pending:
@@ -14561,7 +15827,7 @@ async def dagano_generate_all_pages(
 
                 first_pg, first_im = pending[0]
                 first_mcqs = await _audited(by_index.get(1, []), first_im, first_pg)
-                await _mark_done(first_pg, first_im, first_mcqs)
+                await _mark_done(first_pg, first_im, first_mcqs, dropped_texts=flagged_by_index.get(1))
 
                 if n == 1:
                     pending = []
@@ -14570,7 +15836,7 @@ async def dagano_generate_all_pages(
                 second_pg, second_im = pending[1]
                 if first_mcqs:
                     second_mcqs = await _audited(by_index.get(2, []), second_im, second_pg)
-                    await _mark_done(second_pg, second_im, second_mcqs)
+                    await _mark_done(second_pg, second_im, second_mcqs, dropped_texts=flagged_by_index.get(2))
                     pending = []
                 else:
                     try:
@@ -14582,7 +15848,7 @@ async def dagano_generate_all_pages(
                         pending = [(second_pg, second_im), third]
                     else:
                         second_mcqs = await _audited(by_index.get(2, []), second_im, second_pg)
-                        await _mark_done(second_pg, second_im, second_mcqs)
+                        await _mark_done(second_pg, second_im, second_mcqs, dropped_texts=flagged_by_index.get(2))
                         pending = []
 
     tasks = [_spawn_task(_worker()) for _ in range(MAX_WORKERS)]
@@ -14606,7 +15872,62 @@ async def dagano_generate_all_pages(
     finally:
         _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
 
-    return [r for r in results_by_idx if r is not None]
+    final_results = [r for r in results_by_idx if r is not None]
+
+    # MANDATORY final audit -- runs once per 3-page block AFTER the whole
+    # job's generation is done, always (not conditional). Finds marked
+    # content that got missed entirely (main goal) and fixes any rare
+    # wrong-source MCQ, without dropping anything.
+    if final_results and not is_cancelled(chat_id):
+        if status_msg_id:
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)) + "\n\n🔍 Final audit চলছে (মিস হওয়া মার্ক খোঁজা হচ্ছে)...",
+                    reply_markup=_cancel_kb(chat_id))
+            except Exception:
+                pass
+        by_page = {pn: (im, mcqs) for pn, im, mcqs in final_results}
+        for block_start in range(0, len(final_results), 3):
+            if is_cancelled(chat_id):
+                break
+            block = final_results[block_start:block_start + 3]
+            try:
+                audit = await _dagano_final_batch_audit(topic, block, flagged_by_page=flagged_by_page)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"[DaganoFinalAudit] block starting at {block_start} failed, skipping: {e}")
+                continue
+            for pn, ops in audit.items():
+                if pn not in by_page:
+                    continue
+                im, mcqs = by_page[pn]
+                for orig_q, fixed_m in ops.get("fix", []):
+                    replaced = False
+                    for i, existing in enumerate(mcqs):
+                        if (existing.get("question") or "").strip() == orig_q:
+                            mcqs[i] = fixed_m
+                            replaced = True
+                            break
+                    if not replaced and fixed_m not in mcqs:
+                        mcqs.append(fixed_m)
+                new_ones = ops.get("add", [])
+                if new_ones:
+                    new_ones = _cap_mcq_options(new_ones, 4)
+                    new_ones = _validate_mcq_structure(new_ones)
+                    mcqs.extend(new_ones)
+                by_page[pn] = (im, mcqs)
+                total_mcq_box["n"] = sum(len(m) for _im, m in by_page.values())
+        final_results = [(pn, by_page[pn][0], by_page[pn][1]) for pn, _im, _m in final_results]
+        if status_msg_id:
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                    _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)),
+                    reply_markup=_cancel_kb(chat_id))
+            except Exception:
+                pass
+
+    return final_results
 
 
 async def handle_dagano(msg: dict):
@@ -14690,6 +16011,8 @@ async def _handle_dagano_impl(msg: dict):
             await edit_msg(chat_id, status_msg_id,
                 f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ মার্ক করা content থেকে নতুন MCQ generate হচ্ছে...")
 
+        _reset_ai_call_count(chat_id)
+        _current_job_chat_id_ctx.set(chat_id)
         generated_pages = await dagano_generate_all_pages(chat_id, pages, topic, file_name, status_msg_id)
         pdf_bytes = None
 
@@ -16033,6 +17356,27 @@ async def _process_pdf_pages_inner(
     new_job_id(chat_id)
     set_active_job(chat_id, f"PDF MCQ generation + Poll posting ({file_name}, page-by-page)")
 
+    # FIX (2026-09-09): _current_job_chat_id_ctx must be set BEFORE prefetch
+    # can start (below, _rd_fill_window(1) runs prefetch tasks that call the
+    # real AI generation + _bump_ai_call_count immediately) -- previously this
+    # was only set much later in the function, so every prefetch task's AI
+    # calls were bumped under _ai_call_chat_id=None (or a stale value),
+    # never under this job's real chat_id -- causing per-page "🤖0" and a
+    # total AI-call count that always read 0 on the /rd,/pdf dashboard.
+    _reset_ai_call_count(chat_id)
+    _current_job_chat_id_ctx.set(chat_id)
+
+    # FIX (2026-09-08): _page_ai_calls_before must exist before the prefetch
+    # window can start (below) -- prefetch tasks for pages 2+ can now begin
+    # running (via _rd_fill_window(1)) before the main per-page loop's own
+    # assignment of this variable is ever reached, since prefetching was
+    # extended from /rd-only to all /pdf modes. Without this, every prefetch
+    # task's first AI call crashed on "cannot access free variable
+    # '_page_ai_calls_before'" and silently fell back to whatever the single
+    # first-pass call returned -- which defeated the 15-floor retry ladder
+    # entirely (pages stuck at ~8 MCQs no matter how high the floor was set).
+    _page_ai_calls_before = _get_ai_call_count(chat_id)
+
     # /rd-ONLY prefetch: while page N is posting, up to _RD_PREFETCH_WINDOW
     # pages ahead run generation+image-encoding concurrently in the
     # background, so posting speed never blocks/limits how far ahead
@@ -16099,11 +17443,19 @@ async def _process_pdf_pages_inner(
                 _rd_img_bytes_cache[_pg_num] = await asyncio.to_thread(image_to_bytes, _pg_img)
             except Exception as _enc_e:
                 logger.warning(f"[PDF] Page {_pg_num} prefetch image encode failed, will retry inline at posting time: {_enc_e}")
-        try:
-            result = await _gen_with_retry(_pg_img, _pg_num)
-        finally:
-            if _RD_MODE.get() and not is_cancelled(chat_id):
-                _rd_fill_window(page_idx + 1)
+        # FIX (2026-09-09): window fill must NOT be re-triggered here on every
+        # individual task's own completion -- since prefetch tasks finish out
+        # of order (fast pages before the slow page the main loop is still
+        # blocked on), every early finisher was sliding the window further
+        # forward, chain-reacting into 8-10+ concurrent tasks instead of the
+        # intended 3 (main loop's actual read position never bounded it).
+        # The ONLY place that should advance the window is the main loop
+        # itself, right after it consumes (awaits) each page in order --
+        # see the call to _rd_fill_window(idx + 1) in the serial section
+        # below. That keeps the window correctly pinned to "3 ahead of
+        # whichever page is currently being sent", not "3 ahead of whichever
+        # page happened to finish fastest".
+        result = await _gen_with_retry(_pg_img, _pg_num)
         return result
 
     async def _gen_with_retry(img_, page_num_):
@@ -16174,12 +17526,15 @@ async def _process_pdf_pages_inner(
 
         return last_mcqs, last_error
 
-    # /rd: kick off the rolling window immediately, before the main loop
-    # even starts on page 1 -- so pages 2..window-size begin generating in
-    # the background right away, in parallel with page 1's own generation,
-    # instead of only starting once page 1 finishes.
-    if _RD_MODE.get() and not skip_generate:
-        _rd_fill_window(1)
+    # FIX (2026-09-09, per user instruction): do NOT kick off the rolling
+    # window before page 1 even starts -- page 1 must run and finish fully
+    # ALONE first. Only once page 1 is done (during ITS OWN posting/sending
+    # gap) should pages 2..window-size begin generating in the background --
+    # that already happens naturally via the main loop's own
+    # _rd_fill_window(idx + 1) call right after it consumes page 1 below.
+    # (Previously this fired _rd_fill_window(1) here, starting page
+    # 2/3/4's generation simultaneously with page 1 at job launch --
+    # exactly what was NOT wanted.)
 
     for idx, page_tuple in enumerate(pages):
         if is_cancelled(chat_id):
@@ -16197,7 +17552,7 @@ async def _process_pdf_pages_inner(
         # fresh "⏳ শুরু হচ্ছে..." and 0s elapsed for a page whose generation
         # may already be seconds (or fully) done, hiding the real prefetch
         # timing from the user.
-        _already_prefetching = _RD_MODE.get() and page_status[idx].get("page_start_time") is not None and page_status[idx].get("current")
+        _already_prefetching = page_status[idx].get("page_start_time") is not None and page_status[idx].get("current")
         if not _already_prefetching:
             page_status[idx]["current"] = True
             page_status[idx]["stage"] = "⏳ শুরু হচ্ছে..."
@@ -16286,7 +17641,7 @@ async def _process_pdf_pages_inner(
                         # before the window had a chance to start) — route
                         # through the same window-aware worker so it also
                         # gets image-byte prefetching and window fill-in.
-                        _gen_task = _spawn_task(_rd_chain_gen(idx)) if _RD_MODE.get() else _spawn_task(_gen_with_retry(img, page_num))
+                        _gen_task = _spawn_task(_rd_chain_gen(idx))
                     ACTIVE_GEN_TASK[chat_id] = _gen_task
                     try:
                         mcqs, gen_error = await _gen_task
@@ -16296,7 +17651,7 @@ async def _process_pdf_pages_inner(
                         if ACTIVE_GEN_TASK.get(chat_id) is _gen_task:
                             ACTIVE_GEN_TASK.pop(chat_id, None)
 
-                    if _RD_MODE.get() and not is_cancelled(chat_id):
+                    if not is_cancelled(chat_id):
                         _rd_fill_window(idx + 1)
             if not mcqs:
                 page_status[idx]["current"] = False
@@ -16342,7 +17697,7 @@ async def _process_pdf_pages_inner(
                     caption = ""
                     if tag:
                         caption = f"{tag}\n\n"
-                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n🌟Page No: {fmt_page(page_num)}"
+                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name if _PDFS_MODE.get() else topic}\n▬▬▬▬▬▬▬▬▬▬\n🌟Page No: {fmt_page(page_num)}\n▬▬▬▬▬▬▬▬▬▬\n✅MCQ: {len(mcqs)}"
 
                     # HARD GUARANTEE: image MUST succeed before any poll for
                     # this page goes out. No fail, no skip, no giving up —
@@ -16417,6 +17772,16 @@ async def _process_pdf_pages_inner(
                   except Exception as _mcq_e:
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
+                if image_msg_id and first_poll_link:
+                    try:
+                        _img_caption_final = caption + f"\n▬▬▬▬▬▬▬▬▬▬\n🔗First Poll Link:\n{first_poll_link}"
+                        await tg_post("editMessageCaption", {
+                            "chat_id": channel_id, "message_id": image_msg_id,
+                            "caption": _img_caption_final
+                        })
+                    except Exception as e:
+                        logger.warning(f"[PDF] Page {page_num} image caption poll-link edit failed: {e}")
+
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
                 try:
@@ -16446,33 +17811,83 @@ async def _process_pdf_pages_inner(
                 new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{cache_id}"
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
-                end_data = {
-                    "chat_id": channel_id,
-                    "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
-                    "reply_markup": {"inline_keyboard": [
-                        [{"text": "📝 Quiz Solve", "url": quiz_url},
-                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
-                        [{"text": "🔄 Poll Again", "url": poll_url},
-                         {"text": "🆕 New Poll", "url": new_poll_url}],
-                        [{"text": "🌐 Website Exam", "url": exam_url},
-                         {"text": "📄 Solve PDF", "url": solve_pdf_url}]
-                    ]},
-                    "reply_to_message_id": image_msg_id
-                }
-                if thread_id:
-                    end_data["message_thread_id"] = thread_id
+                _end_sep = "▬▬▬▬▬▬▬▬▬▬"
+                end_caption = f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}"
+                end_kb = {"inline_keyboard": [
+                    [{"text": "🔄 Poll Again", "url": poll_url},
+                     {"text": "🔄 Quiz Again", "url": quiz_url}],
+                    [{"text": "🆕 New Poll", "url": new_poll_url},
+                     {"text": "🆕 New Quiz", "url": new_quiz_url}],
+                    [{"text": "🌐 Website Exam", "url": exam_url}]
+                ]}
+
+                # PDF-attached end message, built INLINE at send-time (NOT
+                # pre-built by background prefetch -- that path was reverted
+                # 2026-09-09 for causing Playwright crash/relaunch storms).
+                _end_pdf_bytes = None
+                if mcqs:
+                    try:
+                        _end_pdf_bytes = await _generate_style1_pdf_guaranteed(
+                            mcqs, f"{topic} — {fmt_page(page_num)}", chat_id=0
+                        )
+                    except Exception as _pdf_e:
+                        logger.warning(f"[EndMsg] Page {page_num} inline PDF build failed: {_pdf_e}")
+
                 end_r = {"ok": False}
-                for _end_attempt in range(3):
-                    end_r = await tg_post("sendMessage", end_data)
+                if _end_pdf_bytes:
+                    safe_ptitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                    for _end_attempt in range(3):
+                        end_r = await send_document(
+                            channel_id, _end_pdf_bytes, f"{safe_ptitle}_{fmt_page(page_num)}_style1.pdf",
+                            caption=end_caption,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=image_msg_id
+                        )
+                        if end_r.get("ok"):
+                            break
+                        _end_err = (end_r.get("description") or end_r.get("error") or "")
+                        if "message to be replied not found" in _end_err.lower():
+                            logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
+                            end_r = await send_document(
+                                channel_id, _end_pdf_bytes, f"{safe_ptitle}_{fmt_page(page_num)}_style1.pdf",
+                                caption=end_caption,
+                                message_thread_id=thread_id
+                            )
+                            if end_r.get("ok"):
+                                break
+                        logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
+                        await asyncio.sleep(2)
                     if end_r.get("ok"):
-                        break
-                    _end_err = (end_r.get("description") or end_r.get("error") or "")
-                    if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
-                        logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
-                        end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
-                        continue
-                    logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
-                    await asyncio.sleep(2)
+                        _end_msg_id = end_r.get("result", {}).get("message_id")
+                        if _end_msg_id:
+                            try:
+                                await tg_post("editMessageReplyMarkup", {
+                                    "chat_id": channel_id, "message_id": _end_msg_id,
+                                    "reply_markup": end_kb
+                                })
+                            except Exception as e:
+                                logger.warning(f"[EndMsg] Page {page_num} button attach failed: {e}")
+
+                if not end_r.get("ok"):
+                    end_data = {
+                        "chat_id": channel_id,
+                        "text": end_caption,
+                        "reply_markup": end_kb,
+                        "reply_to_message_id": image_msg_id
+                    }
+                    if thread_id:
+                        end_data["message_thread_id"] = thread_id
+                    for _end_attempt in range(3):
+                        end_r = await tg_post("sendMessage", end_data)
+                        if end_r.get("ok"):
+                            break
+                        _end_err = (end_r.get("description") or end_r.get("error") or "")
+                        if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
+                            logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
+                            end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
+                            continue
+                        logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
+                        await asyncio.sleep(2)
                 if end_r.get("ok"):
                     await db_update_cache(cache_id, {"end_msg_id": end_r["result"]["message_id"]})
                 else:
@@ -16492,7 +17907,12 @@ async def _process_pdf_pages_inner(
                 # Auto Style1+Style3 PDF এখন সব page শেষে একবারই পাঠানো হবে (নিচে)
                 # each mcq already carries its own correct _pdfs_topic/
                 # _pdfs_subtopic tag from STEP 2's per-segment generation.
-                all_mcqs_raw.extend(mcqs)
+                # NOTE (2026-09-08 bugfix): all_mcqs_raw.extend(mcqs) was ALSO
+                # called right after poll-sending above (before this end-
+                # message block) -- this second call duplicated every page's
+                # MCQs into all_mcqs_raw, doubling the combined Style1/Style2
+                # PDF's MCQ count (100 real MCQ -> 200 in the final PDF).
+                # Removed here; the earlier call is sufficient.
 
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
@@ -16556,18 +17976,22 @@ async def _process_pdf_pages_inner(
             for row in all_mcqs_csv:
                 writer.writerow(row)
         await send_document(chat_id, buf.getvalue().encode("utf-8"), f"{topic}_mcq.csv",
-            caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ", mime_type="text/csv")
+            caption=f"📄 {topic} — {len(all_mcqs_csv)} MCQ (Merged)", mime_type="text/csv")
 
-        # CSV file-এর নিচে একটা "📢 Channel List" বাটন — click করলে channel
-        # list দেখাবে, poll পাঠানোর জন্য (existing csvchannel_ callback
-        # reuse করা হচ্ছে)।
-        if all_mcqs_raw:
-            _csv_cache_id = gen_session_id()
-            await db_save_mcq_cache(_csv_cache_id, _csv_cache_id, 0, topic, all_mcqs_raw)
-            await send_msg(chat_id, "📢 Poll আকারে channel-এ পাঠাতে চাও?",
-                reply_markup={"inline_keyboard": [[
-                    {"text": "📢 Channel List", "callback_data": f"csvpdflist_{_csv_cache_id}_{uid}"}
-                ]]})
+        # /rd: additionally send a topic-wise CSV -- Gemini decided each MCQ's
+        # topic itself per-page (no fixed user rule), tagged via _rd_topic
+        # during generation. Fully independent of /pdfs's grouping/CSV code.
+        if _RD_MODE.get() and all_mcqs_raw and any(m.get("_rd_topic") for m in all_mcqs_raw):
+            from pdf_handler import _rd_merge_similar_topics, _rd_group_by_topic, _rd_build_topicwise_csv_rows
+            all_mcqs_raw = _rd_merge_similar_topics(all_mcqs_raw)
+            _rd_topics_order, _rd_topic_map = _rd_group_by_topic(all_mcqs_raw, topic)
+            _rd_buf = io.StringIO()
+            _rd_writer = csv_mod.writer(_rd_buf)
+            _rd_writer.writerow(["questions","option1","option2","option3","option4","answer","explanation","section"])
+            for row in _rd_build_topicwise_csv_rows(_rd_topics_order, _rd_topic_map):
+                _rd_writer.writerow(row)
+            await send_document(chat_id, _rd_buf.getvalue().encode("utf-8"), f"{topic}_topicwise.csv",
+                caption=f"📂 {topic} — {len(_rd_topics_order)} topic(s), topic-wise CSV", mime_type="text/csv")
 
     if not csv_only and not summary_pages and is_cancelled(chat_id):
         await send_msg(chat_id, "🛑 কাজ বাতিল করা হয়েছে — কোনো পেজ শেষ হওয়ার আগেই থামানো হয়েছে, তাই কোনো ফলাফল নেই।")
@@ -16764,8 +18188,9 @@ async def _process_pdfs_pages_inner(
     start_time = time.time()
     total_mcq = sum(len(p[2]) for p in pages) if skip_generate else 0
     total_polls = 0
-    _reset_ai_call_count(chat_id)
-    _current_job_chat_id_ctx.set(chat_id)
+    # NOTE: reset + context-set moved earlier (before prefetch can start) —
+    # removed duplicate here so it doesn't wipe out calls prefetch already
+    # made in the meantime.
 
     if not status_msg_id:
         r = await send_msg(chat_id, "⏳ Processing শুরু হচ্ছে...")
@@ -17043,7 +18468,7 @@ async def _process_pdfs_pages_inner(
                     caption = ""
                     if tag:
                         caption = f"{tag}\n\n"
-                    caption += f"🟥ATLAS Special MCQ System\n🎯Topic: {page_topic_name}\n🌟Page No: {fmt_page(page_num)}"
+                    caption += f"🟥ATLAS Special MCQ System\n▬▬▬▬▬▬▬▬▬▬\n🎯Topic: {page_topic_name}\n▬▬▬▬▬▬▬▬▬▬\n🌟Page No: {fmt_page(page_num)}\n▬▬▬▬▬▬▬▬▬▬\n✅MCQ: {len(mcqs)}"
 
                     photo_r = await send_photo(channel_id, img_bytes, caption, message_thread_id=thread_id)
                     if photo_r.get("ok"):
@@ -17101,6 +18526,16 @@ async def _process_pdfs_pages_inner(
                   except Exception as _mcq_e:
                     logger.error(f"[Poll] MCQ {i+1} unexpected error, skipping: {_mcq_e}")
                     continue
+                if image_msg_id and first_poll_link:
+                    try:
+                        _img_caption_final = caption + f"\n▬▬▬▬▬▬▬▬▬▬\n🔗First Poll Link:\n{first_poll_link}"
+                        await tg_post("editMessageCaption", {
+                            "chat_id": channel_id, "message_id": image_msg_id,
+                            "caption": _img_caption_final
+                        })
+                    except Exception as e:
+                        logger.warning(f"[PDF] Page {page_num} image caption poll-link edit failed: {e}")
+
 
                 await db_save_mcq_cache(cache_id, session_id, page_num, topic, mcqs, poll_links, image_file_id, image_msg_id, channel_id)
                 try:
@@ -17130,33 +18565,83 @@ async def _process_pdfs_pages_inner(
                 new_quiz_url = f"https://t.me/{bot_un}?start=pdfnew_{cache_id}"
                 new_poll_url = f"https://t.me/{bot_un}?start=pollnew_{cache_id}"
 
-                end_data = {
-                    "chat_id": channel_id,
-                    "text": f"🚀Topic: {topic}\n🌟Page No: {fmt_page(page_num)}\n✅MCQ: {len(mcqs)}\n🔗First Poll Link:\n{first_poll_link}",
-                    "reply_markup": {"inline_keyboard": [
-                        [{"text": "📝 Quiz Solve", "url": quiz_url},
-                         {"text": "🆕 New Quiz", "url": new_quiz_url}],
-                        [{"text": "🔄 Poll Again", "url": poll_url},
-                         {"text": "🆕 New Poll", "url": new_poll_url}],
-                        [{"text": "🌐 Website Exam", "url": exam_url},
-                         {"text": "📄 Solve PDF", "url": solve_pdf_url}]
-                    ]},
-                    "reply_to_message_id": image_msg_id
-                }
-                if thread_id:
-                    end_data["message_thread_id"] = thread_id
+                _end_sep = "▬▬▬▬▬▬▬▬▬▬"
+                end_caption = f"🚀Topic: {topic}\n{_end_sep}\n🌟Page No: {fmt_page(page_num)}\n{_end_sep}\n✅MCQ: {len(mcqs)}\n{_end_sep}\n🔗First Poll Link:\n{first_poll_link}"
+                end_kb = {"inline_keyboard": [
+                    [{"text": "🔄 Poll Again", "url": poll_url},
+                     {"text": "🔄 Quiz Again", "url": quiz_url}],
+                    [{"text": "🆕 New Poll", "url": new_poll_url},
+                     {"text": "🆕 New Quiz", "url": new_quiz_url}],
+                    [{"text": "🌐 Website Exam", "url": exam_url}]
+                ]}
+
+                # PDF-attached end message, built INLINE at send-time (NOT
+                # pre-built by background prefetch -- that path was reverted
+                # 2026-09-09 for causing Playwright crash/relaunch storms).
+                _end_pdf_bytes = None
+                if mcqs:
+                    try:
+                        _end_pdf_bytes = await _generate_style1_pdf_guaranteed(
+                            mcqs, f"{topic} — {fmt_page(page_num)}", chat_id=0
+                        )
+                    except Exception as _pdf_e:
+                        logger.warning(f"[EndMsg] Page {page_num} inline PDF build failed: {_pdf_e}")
+
                 end_r = {"ok": False}
-                for _end_attempt in range(3):
-                    end_r = await tg_post("sendMessage", end_data)
+                if _end_pdf_bytes:
+                    safe_ptitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                    for _end_attempt in range(3):
+                        end_r = await send_document(
+                            channel_id, _end_pdf_bytes, f"{safe_ptitle}_{fmt_page(page_num)}_style1.pdf",
+                            caption=end_caption,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=image_msg_id
+                        )
+                        if end_r.get("ok"):
+                            break
+                        _end_err = (end_r.get("description") or end_r.get("error") or "")
+                        if "message to be replied not found" in _end_err.lower():
+                            logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
+                            end_r = await send_document(
+                                channel_id, _end_pdf_bytes, f"{safe_ptitle}_{fmt_page(page_num)}_style1.pdf",
+                                caption=end_caption,
+                                message_thread_id=thread_id
+                            )
+                            if end_r.get("ok"):
+                                break
+                        logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
+                        await asyncio.sleep(2)
                     if end_r.get("ok"):
-                        break
-                    _end_err = (end_r.get("description") or end_r.get("error") or "")
-                    if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
-                        logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
-                        end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
-                        continue
-                    logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
-                    await asyncio.sleep(2)
+                        _end_msg_id = end_r.get("result", {}).get("message_id")
+                        if _end_msg_id:
+                            try:
+                                await tg_post("editMessageReplyMarkup", {
+                                    "chat_id": channel_id, "message_id": _end_msg_id,
+                                    "reply_markup": end_kb
+                                })
+                            except Exception as e:
+                                logger.warning(f"[EndMsg] Page {page_num} button attach failed: {e}")
+
+                if not end_r.get("ok"):
+                    end_data = {
+                        "chat_id": channel_id,
+                        "text": end_caption,
+                        "reply_markup": end_kb,
+                        "reply_to_message_id": image_msg_id
+                    }
+                    if thread_id:
+                        end_data["message_thread_id"] = thread_id
+                    for _end_attempt in range(3):
+                        end_r = await tg_post("sendMessage", end_data)
+                        if end_r.get("ok"):
+                            break
+                        _end_err = (end_r.get("description") or end_r.get("error") or "")
+                        if "message to be replied not found" in _end_err.lower() and "reply_to_message_id" in end_data:
+                            logger.warning(f"[EndMsg] Page {page_num}: reply target message gone, retrying WITHOUT reply_to_message_id")
+                            end_data = {k: v for k, v in end_data.items() if k != "reply_to_message_id"}
+                            continue
+                        logger.warning(f"[EndMsg] Page {page_num} attempt {_end_attempt+1} failed, retrying...")
+                        await asyncio.sleep(2)
                 if end_r.get("ok"):
                     await db_update_cache(cache_id, {"end_msg_id": end_r["result"]["message_id"]})
                 else:
@@ -17176,7 +18661,12 @@ async def _process_pdfs_pages_inner(
                 # Auto Style1+Style3 PDF এখন সব page শেষে একবারই পাঠানো হবে (নিচে)
                 # each mcq already carries its own correct _pdfs_topic/
                 # _pdfs_subtopic tag from STEP 2's per-segment generation.
-                all_mcqs_raw.extend(mcqs)
+                # NOTE (2026-09-08 bugfix): all_mcqs_raw.extend(mcqs) was ALSO
+                # called right after poll-sending above (before this end-
+                # message block) -- this second call duplicated every page's
+                # MCQs into all_mcqs_raw, doubling the combined Style1/Style2
+                # PDF's MCQ count (100 real MCQ -> 200 in the final PDF).
+                # Removed here; the earlier call is sufficient.
 
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
@@ -18029,8 +19519,8 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
-    '- "topic_hint": the text inside the widest, full-page-width BLACK/DARK BACKGROUND banner bar that this MCQ falls under (e.g. "বাংলাদেশ পরিচিতি", "বর্তমান ও পুরাতন নাম, ভৌগোলিক উপনাম", "বাংলাদেশের অবস্থান, আয়তন ও সীমানা") — this is the actual topic name and is CRITICAL, used to detect topic boundaries. Rules:\n'
-    '  a) Do NOT use smaller sub-headers like university/organization names (জাহাঙ্গীরনগর বিশ্ববিদ্যালয়, রাজশাহী বিশ্ববিদ্যালয়, জগন্নাথ বিশ্ববিদ্যালয়, চাকুরি, BUP) or unit labels (বি ইউনিট, এ ইউনিট, এফ ইউনিট, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself.\n'
+    '- "topic_hint": the text inside the widest, full-page-width BLACK/DARK BACKGROUND banner bar that this MCQ falls under (e.g. "বাংলাদেশ পরিচিতি", "বর্তমান ও পুরাতন নাম, ভৌগোলিক উপনাম", "বাংলাদেশের অবস্থান, আয়তন ও সীমানা") — this is the actual topic name and is CRITICAL, used to detect topic boundaries. STRICT SIZE/COLOR RULE: only a bar that (i) spans the FULL width of the page/column area (edge to edge, not a small box) AND (ii) has a SOLID FULL BLACK background qualifies as a topic banner. A small/short box, a lightly-shaded or colored (non-black) box, or any box that does not stretch the full width is NEVER a topic_hint, no matter what text it contains — treat it as ordinary content and keep the previously active topic_hint. Rules:\n'
+    '  a) Do NOT use smaller sub-headers like university/organization names (জাহাঙ্গীরনগর বিশ্ববিদ্যালয়, রাজশাহী বিশ্ববিদ্যালয়, জগন্নাথ বিশ্ববিদ্যালয়, চাকুরি, BUP) or unit labels (বি ইউনিট, এ ইউনিট, এফ ইউনিট, FASS, FSSS) — those are subsections INSIDE one topic, never the topic itself. ABSOLUTE RULE: ANY text containing the word "বিশ্ববিদ্যালয়" (university), regardless of full-page-width black-bg styling or any other visual marker, is NEVER a topic_hint under any circumstance — it is always a university/institution name tag and must be ignored as a topic candidate; if such a black-bg bar contains "বিশ্ববিদ্যালয়", treat it as if it were NOT a banner at all and keep the previously active topic_hint.\n'
     '  b) If a new black-bg banner appears anywhere on THIS page (even partway down, even if a different banner was active at the top of the page), every MCQ from that point onward gets the NEW banner text; MCQs above it on the same page keep the banner that was already active for them.\n'
     '  b2) TWO-COLUMN pages specifically: the left and right columns can each have their OWN active banner, independent of each other — e.g. left column may still be finishing an earlier topic (no new banner in the left column at all) while the right column already starts a completely new banner from its very first MCQ. Determine each MCQ\'s topic_hint by which banner is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current banner. Do not assume a banner that appears in one column also applies to the other column\'s MCQs above the same vertical height.\n'
     '  b3) STRICT RULE — within a single page, a topic must be treated as fully finished in BOTH columns before any MCQ can belong to the next topic. Concretely: if the left column still has MCQs of an OLD topic that haven\'t been read yet (because you are still scanning the right column, or the right column\'s items appear higher up visually), those left-column OLD-topic MCQs do NOT get replaced by a new banner just because the new banner happens to appear next to or between them and the right column. Read each column fully top-to-bottom on its own; a column keeps its topic exactly until ITS OWN text hits a new banner — never inherit a topic change from the other column\'s position on the page.\n'
@@ -18390,7 +19880,7 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
     nearest topic heading (topic_hint), used by /topic to detect topic
     boundaries and split into separate per-topic CSVs.
 
-    Call 1: Gemini->Groq->OpenRouter full extraction (as before). SKIPPED
+    Call 1: Gemini-only extraction (no fallback). SKIPPED
     on a cache hit (cache_key given and found in _topic_mcq_result_cache)
     -- same re-run-same-PDF speedup /qbm has, kept in its OWN cache
     namespace since topic_hint/qsn_no fields differ from /qbm's shape.
@@ -18407,23 +19897,11 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
             logger.info(f"[TOPIC MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
             return _qbm_dedup_list(cached)
         gem = await _qbm_gemini_extract(img, TOPIC_EXTRACT_PROMPT)
-        if gem:
-            result = _qbm_dedup_list(gem)
-            if result and cache_key:
-                _topic_mcq_result_cache[cache_key] = result
-                _cap_qbm_mcq_cache(_topic_mcq_result_cache)
-            return result
-        txt = await _qbm_groq_call(img, TOPIC_EXTRACT_PROMPT_GROQ_COMPACT)
-        result = _qbm_parse_json(txt) if txt else []
-        if result:
-            result = _qbm_dedup_list(result)
-            if result and cache_key:
-                _topic_mcq_result_cache[cache_key] = result
-                _cap_qbm_mcq_cache(_topic_mcq_result_cache)
-            return result
-        txt3 = await _qbm_openrouter_call(img, TOPIC_EXTRACT_PROMPT)
-        result3 = _qbm_parse_json(txt3) if txt3 else []
-        return _qbm_dedup_list(result3)
+        result = _qbm_dedup_list(gem) if gem else []
+        if result and cache_key:
+            _topic_mcq_result_cache[cache_key] = result
+            _cap_qbm_mcq_cache(_topic_mcq_result_cache)
+        return result
 
     mcqs = await _run_extract_call()
     if not mcqs:
@@ -20646,6 +22124,39 @@ _OPTION_LETTER_REF_RE = re.compile(
 )
 
 
+# /chem-specific CODE-LEVEL backstop (user request 2026-09-17): the prompt
+# rule tells the model to skip শিক্ষার্থীর কাজ / সমাধানকৃত সমস্যা / ব্যাবহারিক
+# sections, but a model can still slip a generated MCQ through under
+# pressure -- this regex catches any MCQ whose question or explanation text
+# still contains one of these three labels and drops it outright (unlike
+# the letter-ref check above, this one auto-removes rather than just logs,
+# since these labels are an unambiguous, safe string match with no risk of
+# false-positive damage to legitimate content).
+_CHEM_SKIP_SECTION_RE = re.compile(r'শিক্ষার্থীর\s*কাজ|সমাধানকৃত\s*সমস্যা|ব্যাবহারিক|উদ্দীপক')
+
+
+def _chem_drop_skip_section_mcqs(mcqs: list, page_num) -> list:
+    """CODE-LEVEL filter: removes any MCQ whose question/explanation text
+    references one of the skip-section labels, as a safety net on top of
+    the prompt-level SKIP THESE SECTION TYPES rule. Marked/highlighted
+    content is still generated normally by the model (the prompt rule's
+    override), so this filter only ever catches genuine slip-throughs of
+    plain unmarked skip-section content -- it does not re-check marking
+    status itself (that's a visual signal only the model call can see)."""
+    kept = []
+    for m in mcqs:
+        q = m.get("question") or ""
+        exp = m.get("explanation") or ""
+        if _CHEM_SKIP_SECTION_RE.search(q) or _CHEM_SKIP_SECTION_RE.search(exp):
+            logger.warning(
+                f"[CHEM SKIP-SECTION DROP] page {page_num}: MCQ referenced a "
+                f"skip-section label, dropped -- question: '{q[:60]}'"
+            )
+            continue
+        kept.append(m)
+    return kept
+
+
 def _chem_flag_letter_ref_explanations(mcqs: list, page_num) -> None:
     """CODE-LEVEL check (logging only, never auto-edits/drops -- unlike the
     source-grounding filter, rewriting explanation prose correctly is not
@@ -20914,6 +22425,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                     _qbm_key_offset_ctx.reset(_tok)
                 mcqs = _qbm_dedup_list(gem) if gem else []
                 mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
+                mcqs = _chem_drop_skip_section_mcqs(mcqs, page_num)
                 _chem_flag_letter_ref_explanations(mcqs, page_num)
                 if mcqs:
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini ({len(mcqs)} MCQ)")
@@ -20930,6 +22442,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                         _qbm_key_offset_ctx.reset(_tok2)
                     mcqs = _qbm_dedup_list(gem_retry) if gem_retry else []
                     mcqs = _chem_filter_verified_mcqs(mcqs, page_num)
+                    mcqs = _chem_drop_skip_section_mcqs(mcqs, page_num)
                     _chem_flag_letter_ref_explanations(mcqs, page_num)
                     if mcqs:
                         logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via Gemini retry ({len(mcqs)} MCQ)")
@@ -20959,6 +22472,7 @@ async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, 
                 finally:
                     _qbm_key_offset_ctx.reset(_tok3)
                 final_mcqs = _chem_filter_verified_mcqs(final_mcqs, page_num) if final_mcqs else []
+                final_mcqs = _chem_drop_skip_section_mcqs(final_mcqs, page_num) if final_mcqs else []
                 _chem_flag_letter_ref_explanations(final_mcqs, page_num)
                 if final_mcqs:
                     logger.warning(f"[CHEM-GEN v2] page {page_num}: SUCCESS via final fresh-eyes scan ({len(final_mcqs)} MCQ)")
@@ -21827,6 +23341,23 @@ async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = Fal
     try:
         prompt = await qbm_get_active_prompt()
         gem = await _qbm_gemini_extract(img, prompt, careful=careful, gemini_only=gemini_only)
+        # 2026-09-08 ROOT-CAUSE FIX: plain /qbm's prompt can still legally
+        # emit a {"trailing_topic_marker": "..."} sentinel for a page that
+        # starts/ends with a bare section heading and zero MCQs (e.g. a page
+        # that opens on "Adjective & Its Classification" with no questions
+        # above it, or ends on a new heading with none below it) -- the
+        # /unmesh topic-grouping path already strips these before treating
+        # the list as real MCQs, but this plain Call1 path did not, so
+        # `gem` came back non-empty (it "understood" the page and found a
+        # heading) while containing ZERO actual question/option data. That
+        # satisfied `if gem:` below and skipped the ZERO-SKIP-GUARANTEE
+        # retry+final-safety-net entirely -- the page was then silently
+        # confirmed "done" with 0 real MCQs, which is indistinguishable
+        # from the alert's "genuinely empty" verdict but is actually a
+        # false negative. Strip marker-only junk here so a heading-only
+        # page correctly reports as empty and goes through the full
+        # zero-skip retry ladder like any other empty result.
+        gem = [m for m in (gem or []) if not (isinstance(m, dict) and "trailing_topic_marker" in m and len(m) == 1)]
         if gem:
             logger.info(f"[QBM Call1] Gemini succeeded, {len(gem)} MCQ")
             out = _qbm_dedup_list(gem)
@@ -22823,7 +24354,10 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
                 ],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=12288,
+                    # 2026-09-08 FIX: same truncation issue as _qbm_gemini_raw --
+                    # 12288 cut off dense-page JSON mid-array, causing
+                    # deterministic 0-MCQ on the same page every retry.
+                    max_output_tokens=24576,
                     response_mime_type="application/json",
                     thinking_config=types.ThinkingConfig(thinking_budget=768 if careful else 0)
                 )
@@ -22958,7 +24492,16 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 ],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=12288,
+                    # 2026-09-08 FIX: 12288 was truncating output JSON mid-array
+                    # on dense pages (many MCQs + long verbatim "Explanation:"
+                    # text) -- output gets cut before the closing "]", the
+                    # array becomes invalid JSON, repair-parser can't recover
+                    # a coherent list, page comes back as 0 MCQ EVERY retry
+                    # (deterministic, not key/quota related -- same page always
+                    # produces the same length output and hits the same wall).
+                    # Raised to 24576 to give headroom for a full 20+ MCQ page
+                    # with long explanations.
+                    max_output_tokens=24576,
                     response_mime_type="application/json",
                     thinking_config=types.ThinkingConfig(thinking_budget=768 if careful else 0)
                 )
@@ -22995,7 +24538,32 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 _used_set = _qbm_page_used_accounts_ctx.get()
                 if _used_set is not None:
                     _used_set.add(_used_acct)
-                return response.text or ""
+                # 2026-09-08 ROOT-CAUSE DIAGNOSTIC: response.text can be
+                # empty/short for reasons that never surface as an exception
+                # -- SAFETY block, MAX_TOKENS cutoff, RECITATION block, or a
+                # genuinely empty candidate list. Without this, those pages
+                # look identical to "model legitimately found 0 MCQ" in every
+                # downstream log. Log candidate finish_reason + safety
+                # ratings whenever text comes back empty or suspiciously
+                # short, so a repeat failure is diagnosable instead of
+                # invisible.
+                _rtext = response.text or ""
+                if len(_rtext) < 50:
+                    try:
+                        _cands = getattr(response, "candidates", None) or []
+                        _diag = []
+                        for _c in _cands:
+                            _fr = getattr(_c, "finish_reason", None)
+                            _sr = getattr(_c, "safety_ratings", None)
+                            _diag.append(f"finish_reason={_fr} safety_ratings={_sr}")
+                        _pf = getattr(response, "prompt_feedback", None)
+                        logger.warning(
+                            f"[QBM-diag] EMPTY/short Gemini response ({len(_rtext)} chars) for key {key[:12]}... "
+                            f"| candidates={_diag} | prompt_feedback={_pf} | raw_text={_rtext[:200]!r}"
+                        )
+                    except Exception as _diag_err:
+                        logger.warning(f"[QBM-diag] failed to introspect empty response: {_diag_err}")
+                return _rtext
             except Exception as e:
                 msg = str(e)
                 # SDK's str(e) sometimes truncates the JSON body before the
@@ -23027,6 +24595,15 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                     _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
+                # 2026-09-08 ROOT-CAUSE DIAGNOSTIC: response.text raises
+                # (rather than returning "") when the SDK finds no valid
+                # text part -- classic signature of a SAFETY / RECITATION /
+                # PROHIBITED_CONTENT block, or MAX_TOKENS with zero completed
+                # parts. Indistinguishable from a normal transient error in
+                # the log below without this -- flag it so a content-block
+                # on a specific page is diagnosable, not silently retried.
+                if "response.text" in msg or "finish_reason" in msg.lower() or "Invalid operation" in msg or "quick accessor" in msg:
+                    logger.warning(f"[QBM-diag] Gemini key {key[:12]}... response.text accessor FAILED (likely SAFETY/RECITATION/MAX_TOKENS block, not quota): {full_msg[:800]}")
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         # All Gemini keys exhausted/rate-limited/errored — fall back to Groq vision
@@ -23125,7 +24702,15 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                 _used_set_multi = _qbm_page_used_accounts_ctx.get()
                 if _used_set_multi is not None:
                     _used_set_multi.add(key_rotator.account_of(key))
-                return response.text or ""
+                _rtext_multi = response.text or ""
+                if len(_rtext_multi) < 50:
+                    try:
+                        _cands = getattr(response, "candidates", None) or []
+                        _diag = [f"finish_reason={getattr(c,'finish_reason',None)} safety_ratings={getattr(c,'safety_ratings',None)}" for c in _cands]
+                        logger.warning(f"[QBM-diag] EMPTY/short multi-image Gemini response ({len(_rtext_multi)} chars) | candidates={_diag} | prompt_feedback={getattr(response,'prompt_feedback',None)}")
+                    except Exception as _diag_err:
+                        logger.warning(f"[QBM-diag] failed to introspect empty multi-image response: {_diag_err}")
+                return _rtext_multi
             except asyncio.TimeoutError:
                 logger.warning(f"[QBM] Gemini key {key[:12]}... multi-image call timed out (60s), trying next key")
                 continue
@@ -23157,6 +24742,8 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                     _dead_accounts.add(key_rotator.account_of(key))
                     logger.warning(f"[QBM] Gemini key {key[:12]}... permanently banned (suspended/invalid), trying next key")
                     continue
+                if "response.text" in msg or "finish_reason" in msg.lower() or "Invalid operation" in msg or "quick accessor" in msg:
+                    logger.warning(f"[QBM-diag] Gemini key {key[:12]}... (multi-image) response.text accessor FAILED (likely SAFETY/RECITATION/MAX_TOKENS block, not quota): {full_msg[:800]}")
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
         logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision (first image only)")
@@ -24564,13 +26151,6 @@ async def _handle_topic_impl(msg: dict):
 
         topic_groups = _topic_group_mcqs(extracted_pages)
 
-        _missing_exp = [m for _, mcqs in topic_groups for m in mcqs if len((m.get("explanation") or "").strip()) < 80]
-        if _missing_exp:
-            try:
-                await _ai_generate_all_explanations(_missing_exp)
-            except Exception as e:
-                logger.warning(f"[TOPIC] explanation fill failed: {e}")
-
         if status_msg_id:
             breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
             next_step = "channel-এ poll পাঠানো হচ্ছে..." if topic_channel_id else "CSV পাঠানো হচ্ছে..."
@@ -24588,20 +26168,28 @@ async def _handle_topic_impl(msg: dict):
         import io as _io_topic, csv as _csv_topic
         _running_count = 0
         _cmd_msg_id = msg.get("message_id")
+        _merged_buf = _io_topic.StringIO()
+        _merged_w = _csv_topic.writer(_merged_buf)
+        _merged_w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                             "answer", "explanation", "type", "section"])
         for name, mcqs in topic_groups:
             buf = _io_topic.StringIO()
             w = _csv_topic.writer(buf)
             w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                         "answer", "explanation", "type", "section"])
+            _num_mg, _bn_name_mg = _split_topic_number_and_bangla_name(name)
+            _merged_w.writerow([_bn_name_mg, "", "", "", "", "", "", "", "", ""])
             for m in mcqs:
                 opts = m.get("options", ["", "", "", ""])
-                w.writerow([
+                row = [
                     m.get("question", ""), opts[0] if len(opts) > 0 else "",
                     opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
                     opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
                     _ans_map.get(m.get("answer", "A"), "1"),
                     _strip_img_tag(m.get("explanation", "")), "1", "1"
-                ])
+                ]
+                w.writerow(row)
+                _merged_w.writerow(row)
             _num_fn, _bn_name_fn = _split_topic_number_and_bangla_name(name)
             safe_name = re.sub(r'[\\/:*?"<>|]', '_', _bn_name_fn).strip() or "Topic"
             range_start = _running_count + 1
@@ -24620,6 +26208,16 @@ async def _handle_topic_impl(msg: dict):
                          f"📄 PDF Page: {page_range_text}\n"
                          f"🔢 MCQ Range: {range_start}–{range_end}\n"
                          f"💎 Total: {len(mcqs)}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if len(topic_groups) > 1:
+            _merged_file_base = re.sub(r'[\\/:*?"<>|]', '_', file_name.rsplit(".", 1)[0]).strip() or "Topic"
+            await send_document(chat_id, _merged_buf.getvalue().encode("utf-8"),
+                f"{_merged_file_base}_Merged.csv",
+                caption=(f"📚 <b>All Topics Merged</b>\n"
+                         f"📂 Topics: {len(topic_groups)}\n"
+                         f"💎 Total MCQ: {total_mcq_found}"),
                 mime_type="text/csv",
                 reply_to_message_id=_cmd_msg_id)
 
@@ -27933,19 +29531,32 @@ async def qbm_extract_all_pages(
             # exhaustion) be told apart from a page that's genuinely blank.
             while not mcqs and not is_cancelled(chat_id):
                 _attempt_n += 1
-                _careful = _attempt_n >= 2  # 1st retry stays fast; 2nd+ uses careful mode (higher thinking budget + exhaustive-scan prompt)
-                logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry #{_attempt_n}{' (careful mode)' if _careful else ''} (cache bypassed), will not finalize until confirmed")
+                _careful = _attempt_n >= 4  # 2026-09-08: first 3 attempts fast/normal scan, last 2 (4th, 5th) careful/deep scan (was: only 1st fast, rest careful)
+                # 2026-09-08: careful-mode attempts also try a contrast/
+                # sharpness-enhanced version of the page -- a faint/blurry
+                # scan can genuinely be unreadable at normal contrast even
+                # though real content is there; re-asking with the SAME
+                # blurry image wastes retries. Never mutates the original
+                # (still needed for posting/other uses).
+                _img_to_use = img
+                if _careful:
+                    try:
+                        _img_to_use = _enhance_blurry_page(img)
+                    except Exception as _enh_e:
+                        logger.warning(f"[QBM Extract] Page {page_num} image enhance failed, using original: {_enh_e}")
+                        _img_to_use = img
+                logger.warning(f"[QBM Extract] Page {page_num} returned 0 MCQ with no error — retry #{_attempt_n}{' (careful mode + enhanced image)' if _careful else ''} (cache bypassed), will not finalize until confirmed")
                 if _attempt_n > 1:
                     await asyncio.sleep(min(3 * _attempt_n, 30))
                 try:
                     _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
-                    mcqs = await (_call_extract_fn(img=img, cache_key=_ck, bypass_cache=True, careful=_careful) if _ck else _call_extract_fn(img=img, careful=_careful))
+                    mcqs = await (_call_extract_fn(img=_img_to_use, cache_key=_ck, bypass_cache=True, careful=_careful) if _ck else _call_extract_fn(img=_img_to_use, careful=_careful))
                 except TypeError:
                     # extractor doesn't accept bypass_cache/careful kwargs —
                     # fall back to a plain re-call (still a fresh attempt).
                     try:
                         _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
-                        mcqs = await (_call_extract_fn(img=img, cache_key=_ck) if _ck else _call_extract_fn(img=img))
+                        mcqs = await (_call_extract_fn(img=_img_to_use, cache_key=_ck) if _ck else _call_extract_fn(img=_img_to_use))
                     except Exception as e3:
                         logger.error(f"[QBM Extract] Page {page_num} 0-MCQ retry #{_attempt_n} also failed: {e3}")
                         mcqs = []
@@ -28123,6 +29734,52 @@ async def qbm_extract_all_pages(
             rebuilt.append((page_num, img, kept))
         final_results = rebuilt
 
+    # FINAL SAFETY-NET PASS (2026-09-08, /unmesh + shared callers): 0 MCQ on
+    # a page is never actually acceptable -- if any page is STILL at 0 MCQ
+    # after all pages have finished their own per-page retry ladder above
+    # (5 attempts + independent empty-page scan each), don't accept it yet.
+    # Run up to 3 more whole-document rounds, each round retrying only the
+    # pages still at 0 -- each attempt already rotates through a different
+    # Gemini key/account via _qbm_gemini_raw_only's key_rotator (fresh call,
+    # never the same exhausted key twice), so a genuinely bad/rate-limited
+    # key on the first pass doesn't keep failing the same way on this pass.
+    # Only after 3 full rounds still come back empty does the page finally
+    # get accepted as 0 and the owner alerted -- never silently before that.
+    _zero_idx = [i for i, r in enumerate(final_results) if r is not None and not (r[2] or [])]
+    if _zero_idx and not is_cancelled(chat_id):
+        logger.warning(f"[QBM Final Safety-Net] {len(_zero_idx)} page(s) still 0 MCQ after per-page retry ladder — starting final whole-document passes (up to 3 rounds)")
+        for _round in range(1, 4):
+            if not _zero_idx or is_cancelled(chat_id):
+                break
+            logger.warning(f"[QBM Final Safety-Net] round {_round}/3 — retrying {len(_zero_idx)} page(s): {[final_results[i][0] for i in _zero_idx]}")
+            for _fi in _zero_idx:
+                if is_cancelled(chat_id):
+                    break
+                _pn, _img, _ = final_results[_fi]
+                try:
+                    _qbm_key_offset_ctx.set(random.randint(0, 50))  # force a different starting key/account than any prior attempt
+                    try:
+                        _enhanced_img = _enhance_blurry_page(_img)
+                    except Exception as _enh_e:
+                        logger.warning(f"[QBM Final Safety-Net] page {_pn} image enhance failed, using original: {_enh_e}")
+                        _enhanced_img = _img
+                    _recovered = await _extract_fn(img=_enhanced_img, careful=True)
+                except Exception as e:
+                    logger.error(f"[QBM Final Safety-Net] page {_pn} round {_round} errored: {e}")
+                    _recovered = []
+                if _recovered:
+                    logger.info(f"[QBM Final Safety-Net] page {_pn} recovered {len(_recovered)} MCQ on final-pass round {_round}")
+                    final_results[_fi] = (_pn, _img, _recovered)
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+            _zero_idx = [i for i, r in enumerate(final_results) if r is not None and not (r[2] or [])]
+        if _zero_idx:
+            _still_zero_pages = [final_results[i][0] for i in _zero_idx]
+            logger.warning(f"[QBM Final Safety-Net] pages {_still_zero_pages} still 0 MCQ after 3 final rounds — accepting as genuinely empty, alerting owner")
+            try:
+                await notify_owner(f"⚠️ [QBM/{file_name}] Page(s) {_still_zero_pages} returned 0 MCQ even after per-page retry ladder + 3 final safety-net rounds — accepted as genuinely empty (all Gemini keys/rounds exhausted for these pages).")
+            except Exception:
+                pass
+
     return final_results
 
 
@@ -28282,6 +29939,16 @@ async def process_qbm_pages(
             img_bytes = image_to_bytes(img) if not isinstance(img, (bytes, bytearray)) else img
 
             if csv_only:
+                if not mcqs:
+                    # 2026-09-08: a page that reaches here with 0 MCQ has
+                    # already survived the full retry ladder + 3-round final
+                    # safety-net pass -- it's being accepted as genuinely
+                    # empty. Still write a placeholder row (not silence) so
+                    # the page number stays visible/traceable in the merged
+                    # CSV instead of vanishing without a trace -- makes a
+                    # real miss immediately obvious on review instead of
+                    # looking identical to "this page just doesn't exist".
+                    all_mcqs_csv.append([f"⚠️ Page {page_num}: 0 MCQ (retry ladder + safety-net exhausted)", "", "", "", "", "", "", "1", "1"])
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
                     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
@@ -28363,6 +30030,13 @@ async def process_qbm_pages(
 
                 summary_pages.append({"page": page_num, "first_poll": first_poll_link, "mcq_count": len(mcqs)})
 
+                if not mcqs:
+                    # Same placeholder-row principle as the csv_only branch
+                    # above -- a 0-MCQ page here has already survived the
+                    # full retry ladder + 3-round final safety-net, and gets
+                    # a visible marker instead of silently vanishing from
+                    # the merged CSV.
+                    all_mcqs_csv.append([f"⚠️ Page {page_num}: 0 MCQ (retry ladder + safety-net exhausted)", "", "", "", "", "", "", "1", "1"])
                 for m in mcqs:
                     opts = m.get("options", ["", "", "", ""])
                     ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
@@ -30171,6 +31845,16 @@ async def _advance_quiz(uid: int):
     else:
         await _send_quiz_question(uid)
 
+# ============================================================
+# ⚠️ STABLE — DO NOT MODIFY WITHOUT EXPLICIT PERMISSION ⚠️
+# handle_poll_answer() auto-advance flow (Sep 2026) is CONFIRMED
+# WORKING as of this version. The routing order below
+# (LIVE_POLL_MAP -> LIVE_QUIZ_STATE legacy -> D1 QUIZ_SESSIONS ->
+# legacy qs_get/_seq_stall_recovery) is load-bearing. Do NOT
+# reorder these checks, remove the [PollAnswer][TRACE] logs, or
+# "simplify" this function. If auto-advance breaks again, add
+# logging and reproduce first — do not guess-edit this block.
+# ============================================================
 async def handle_poll_answer(pa: dict):
     try:
         logger.info(f"[PollAnswer][TRACE] ENTER poll_id={pa.get('poll_id')} uid={pa.get('user',{}).get('id')} option_ids={pa.get('option_ids')}")
@@ -31022,11 +32706,36 @@ async def handle_merge_command(msg: dict):
                 import io as _io
                 writer = PdfWriter()
                 total_pages = 0
+                # file_ids ধারাবাহিকভাবে user যে order এ পাঠিয়েছে সেই order-এই
+                # আসে (append হয় প্রতিটা /merge reply-তে) -- এই loop সেই order
+                # অক্ষুণ্ণ রেখে page যোগ করে, তাই merge করা PDF-এ serial ঠিক থাকে।
                 for fid in pdf_file_ids:
                     pdf_bytes = await download_tg_file(fid)
                     reader = PdfReader(_io.BytesIO(pdf_bytes))
                     for page in reader.pages:
-                        writer.add_page(page)
+                        # FIX (page size not preserved on merge): add_page()
+                        # alone can let a page's effective size get flattened
+                        # to whatever the writer's default/last page size is
+                        # in some pypdf/viewer combinations when source PDFs
+                        # have different page sizes. Re-assert this page's
+                        # OWN original mediabox (and crop/trim/bleed/art boxes
+                        # if present) right after adding it, so every page in
+                        # the merged output keeps its exact original size --
+                        # whatever size each source PDF/image page already
+                        # was -- instead of being resized to match others.
+                        added_page = writer.add_page(page)
+                        try:
+                            added_page.mediabox = page.mediabox
+                            if page.cropbox is not None:
+                                added_page.cropbox = page.cropbox
+                            if page.trimbox is not None:
+                                added_page.trimbox = page.trimbox
+                            if page.bleedbox is not None:
+                                added_page.bleedbox = page.bleedbox
+                            if page.artbox is not None:
+                                added_page.artbox = page.artbox
+                        except Exception:
+                            pass
                     total_pages += len(reader.pages)
                 out_buf = _io.BytesIO()
                 writer.write(out_buf)
@@ -31552,7 +33261,8 @@ async def process_update(update: dict):
         elif "callback_query" in update:
             await handle_callback(update["callback_query"])
         elif "poll_answer" in update:
-            await handle_poll_answer(update["poll_answer"])
+            logger.info(f"[Webhook][TRACE] poll_answer update_id={update.get('update_id')} raw={update['poll_answer']}")
+            _spawn_task(handle_poll_answer(update["poll_answer"]))
         elif "chat_member" in update:
             cm = update["chat_member"]
             old_status = cm.get("old_chat_member", {}).get("status")
@@ -31831,6 +33541,9 @@ async def handle_message(msg: dict):
         if collected:
             return
 
+    if text.startswith("/merge"):
+        await handle_merge_command(msg)
+        return
     if text == "/start":
         await handle_start(msg)
         return
@@ -31942,19 +33655,21 @@ async def handle_message(msg: dict):
         return
     if text.startswith("/rd"):
         # /rd = same generation/output as plain /pdf (single CSV, same
-        # question/explanation rules) but with a maximum-content-utilization
-        # prompt targeting an average 15+ MCQ/page instead of /pdf's
-        # default ~10-20.
+        # question/explanation rules, same 15+/no-ceiling count target as
+        # of 2026-09-08) but ALSO does topic detection + topic-wise CSV
+        # split, which plain /pdf does not.
         if not is_auth:
             if is_private:
                 await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         clear_cancel(chat_id)
         token = _RD_MODE.set(True)
+        _topics_token = _RD_KNOWN_TOPICS.set([])
         try:
             await handle_pdf(msg)
         finally:
             _RD_MODE.reset(token)
+            _RD_KNOWN_TOPICS.reset(_topics_token)
         return
     if text.startswith("/chok"):
         if not is_auth:
@@ -32227,6 +33942,16 @@ async def handle_message(msg: dict):
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_cut_command(msg))
+    elif text.startswith("/ytproxystatus"):
+        # 2026-09-13: quick way to check if an external YT_PROXY is
+        # configured and reachable for /cut <yt-link>. Cloudflare WARP
+        # was tried and removed -- HF Space containers don't grant the
+        # NET_ADMIN capability WARP's tunnel needs, confirmed via live
+        # testing, not just theory.
+        if not is_auth:
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
+            return
+        _spawn_command_task(uid, handle_ytproxystatus_command(msg))
     elif text.startswith("/csvS"):
         # /csvS অবশ্যই /csv এর আগে check করতে হবে
         if not is_auth:
@@ -32323,6 +34048,10 @@ async def handle_message(msg: dict):
         await handle_quiz_create(msg)
     elif text == "/qlist":
         await handle_qlist(msg)
+    elif text.lower() in ("/stopquiz", "stopquiz"):
+        stopped = await stop_quiz_for_user(uid)
+        if not stopped:
+            await send_msg(chat_id, "কোনো চলমান quiz নেই।")
     elif text.startswith("/qdel"):
         await handle_qdel(msg)
     elif text.startswith("/pre"):
@@ -32337,8 +34066,6 @@ async def handle_message(msg: dict):
             await handle_d1_send(msg)
         else:
             await send_msg(chat_id, "❌ Owner only!")
-    elif text.startswith("/merge"):
-        await handle_merge_command(msg)
     elif text == "/convert":
         await handle_convert_command(msg)
     elif text.startswith("/error") or text.startswith("/errors"):
@@ -32434,7 +34161,20 @@ async def handle_message(msg: dict):
             n_warmup = sum(1 for k in not_banned_not_cooling_not_exhausted if key_rotator.is_warming_up(k))
             n_overcap = sum(1 for k in not_banned_not_cooling_not_exhausted if key_rotator.account_over_daily_cap(k))
             n_active = len(not_banned_not_cooling_not_exhausted) - len({k for k in not_banned_not_cooling_not_exhausted if key_rotator.account_circuit_open(k) or key_rotator.is_stagger_locked(k)})
-            lines.append(f"  ↳ এর মধ্যে actively usable: {n_active} | 🔒 stagger-locked: {n_stagger} | ⛔ circuit-paused: {n_circuit} | 🐣 warming-up: {n_warmup} | 📈 over daily-cap: {n_overcap}")
+            # Low-healthy safety net (matches GeminiKeyRotator.ordered_keys):
+            # once healthy keys drop below 20, today-exhausted keys become
+            # usable too (not blocked) — reflect that here so /keys shows
+            # the real usable count instead of always excluding exhausted.
+            _low_healthy_note = ""
+            if gem_healthy < 20:
+                gem_exhausted_set = {k for k in gemini_keys if k not in gem_banned_set and _is_gemini_key_exhausted_today(k)}
+                n_exhausted_usable = len(gem_exhausted_set) - len({
+                    k for k in gem_exhausted_set
+                    if key_rotator.account_circuit_open(k) or key_rotator.is_stagger_locked(k)
+                })
+                n_active += n_exhausted_usable
+                _low_healthy_note = f" (🔓 low-healthy safety net active: +{n_exhausted_usable} exhausted key usable)"
+            lines.append(f"  ↳ এর মধ্যে actively usable: {n_active} | 🔒 stagger-locked: {n_stagger} | ⛔ circuit-paused: {n_circuit} | 🐣 warming-up: {n_warmup} | 📈 over daily-cap: {n_overcap}{_low_healthy_note}")
             if gem_banned_set:
                 reasons = key_rotator._ban_reasons
                 meta = getattr(key_rotator, "_ban_meta", {})
@@ -32781,9 +34521,27 @@ async def handle_callback(query: dict):
             cache_id = data.replace("pollagain_", "")
             _spawn_task(handle_poll_again(cache_id, user, chat_id))
 
+        elif data.startswith("quizresume_"):
+            resume_uid = int(data.split("_", 1)[1])
+            if resume_uid != uid:
+                await tg_post("answerCallbackQuery", {"callback_query_id": query["id"], "text": "এটা তোমার quiz না।", "show_alert": True})
+                return
+            ok = await resume_quiz_for_user(resume_uid, chat_id)
+            if not ok:
+                await send_msg(chat_id, "এই quiz আর resume করা যাবে না।")
         elif data.startswith("qsame_"):
             cache_id = data.replace("qsame_", "")
             _spawn_task(handle_quiz_same(cache_id, user, chat_id))
+
+        elif data.startswith("csvpollnew_"):
+            # /rd -c (topicwise → group forum topic) end-msg "New Poll" button.
+            # CSV-origin caches have no source image, so this is NOT an
+            # AI-regeneration (unlike image-based pollnew_) -- it replays
+            # the SAME already-cached MCQ set as a fresh poll round. Once a
+            # topic's MCQs exist in cache, every subsequent "New Poll" tap
+            # reuses that same cached data instead of calling AI again.
+            cache_id = data.replace("csvpollnew_", "")
+            _spawn_task(handle_poll_again(cache_id, user, chat_id))
 
         elif data.startswith("pollnew_"):
             cache_id = data.replace("pollnew_", "")
@@ -32795,6 +34553,17 @@ async def handle_callback(query: dict):
         elif data.startswith("polllb_"):
             cache_id = data.replace("polllb_", "")
             await handle_poll_leaderboard(cache_id, uid, chat_id)
+
+        elif data.startswith("csvquiznew_"):
+            # /rd -c end-msg "New Quiz" button — same rationale as
+            # csvpollnew_ above: no source image to regenerate from, so this
+            # replays the SAME cached MCQ set as a fresh quiz round instead
+            # of calling AI again.
+            cache_id = data.replace("csvquiznew_", "")
+            if uid in _QUIZ_START_LOCK:
+                return
+            _QUIZ_START_LOCK.add(uid)
+            _spawn_task(_run_quiz_start_debounced(handle_quiz_same(cache_id, user, chat_id), uid))
 
         elif data.startswith("qnew_"):
             cache_id = data.replace("qnew_", "")
@@ -32988,7 +34757,12 @@ async def handle_callback(query: dict):
                 if _csv3_row:
                     kb2["inline_keyboard"].append(_csv3_row)
                 kb2["inline_keyboard"].append([{"text": "❌ Cancel", "callback_data": f"csvcancel_{uid}"}])
-                await send_msg(chat_id, "📢 Channel select করো:", reply_markup=kb2)
+                # 2026-09-13 (user request): edit THIS SAME message into the
+                # channel list instead of sending a separate new message.
+                await tg_post("editMessageText", {
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "text": "📢 Channel select করো:", "reply_markup": kb2
+                })
 
         elif data.startswith("csvpdflist_"):
             # csvpdflist_{cache_id}_{uid} — /pdf বা /pdfs job শেষে CSV-এর নিচে
@@ -33028,6 +34802,16 @@ async def handle_callback(query: dict):
             channel = "_".join(parts[1:-2])
             if uid != orig_uid:
                 return
+            # 2026-09-13 (user request): once a channel is picked, the
+            # "📢 Channel select করো:" message's buttons should disappear
+            # instead of staying clickable/stale on screen.
+            try:
+                await tg_post("editMessageReplyMarkup", {
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "reply_markup": {"inline_keyboard": []}
+                })
+            except Exception as e:
+                logger.warning(f"[CSV] channel-select button removal failed: {e}")
             enqueue_csv_to_channel(cache_id_ch, channel, chat_id, uid)
 
         elif data.startswith("rapidch_"):
