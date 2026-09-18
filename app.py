@@ -971,7 +971,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     g_header = (
                         f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>\n"
                         f"{sep}\n"
-                        f"🌟Total Topic: {len(blocks)}\n"
+                        f"🌟মোট Part: {len(blocks)}\n"
                         f"📌Total MCQ: {sum(len(b.get('mcqs') or []) for b in g_batches)}"
                     )
                 else:
@@ -980,7 +980,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                         f"{sep}\n"
                         f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>\n"
                         f"{sep}\n"
-                        f"🌟Total Topic: {len(blocks)}\n"
+                        f"🌟মোট Part: {len(blocks)}\n"
                         f"📌Total MCQ: {sum(len(b.get('mcqs') or []) for b in g_batches)}"
                     )
                 section_texts.append(f"\n{sep}\n".join([g_header] + blocks))

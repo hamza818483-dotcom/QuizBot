@@ -86,6 +86,20 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
 .pill-btn.primary{background:var(--accent);color:#fff;}
 .pill-btn.outline{background:transparent;border:2px solid var(--accent);color:var(--accent);}
 .brand-footer{margin-top:6px;font-size:11px;color:var(--text-tertiary);}
+
+/* BALLOON CELEBRATION (correct answer) */
+.qcard-wrap{position:relative;}
+.balloon-layer{pointer-events:none;position:absolute;inset:0;overflow:visible;z-index:20;}
+@keyframes balloonPop{
+  0%{transform:translateY(0) scale(.4);opacity:0;}
+  15%{opacity:1;}
+  70%{transform:translateY(-120px) scale(1);opacity:1;}
+  100%{transform:translateY(-160px) scale(0);opacity:0;}
+}
+.balloon-pop{position:absolute;bottom:0;border-radius:999px;animation:balloonPop .85s ease-out forwards;}
+
+/* SOUND TOGGLE */
+.sound-btn{margin-left:auto;}
 </style>
 </head>
 <body>
@@ -106,10 +120,11 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
       <div class="prog-label" id="progLabel">প্রশ্ন 1/1</div>
       <div class="prog-bar"><div class="prog-fill" id="progFill" style="width:0%"></div></div>
     </div>
+    <button class="icon-btn sound-btn" id="soundBtn" onclick="toggleSound()">🔊</button>
     <button class="finish-btn" onclick="finishQuiz()">শেষ করো</button>
   </div>
 
-  <div class="qwrap">
+  <div class="qwrap qcard-wrap">
     <div class="qmeta" id="qMeta">📘 বিষয়</div>
     <div class="qtext" id="qText"></div>
     <div class="options" id="optionsBox"></div>
@@ -117,6 +132,7 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
       <div class="explain-lbl">ব্যাখ্যা</div>
       <div id="explainText"></div>
     </div>
+    <div class="balloon-layer" id="balloonLayer"></div>
   </div>
 
   <div class="bottombar">
@@ -126,6 +142,7 @@ body{font-family:'Noto Sans Bengali','Inter',sans-serif;background:var(--bg);col
     </div>
   </div>
 </div>
+
 
 <div id="finishScreen" class="screen">
   <div class="trophy">🏆</div>
@@ -219,6 +236,58 @@ async function fetchExamData(){
   return null;
 }
 
+// ── SOUND ENGINE (same tones as LMS Quick Practice, no external assets) ──
+let audioCtx = null;
+let soundOn = true;
+function getCtx(){ if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)(); return audioCtx; }
+function tone(ctx,freq,start,dur,type,peak){
+  const osc=ctx.createOscillator(),gain=ctx.createGain();
+  osc.type=type; osc.connect(gain); gain.connect(ctx.destination);
+  osc.frequency.setValueAtTime(freq, ctx.currentTime+start);
+  gain.gain.setValueAtTime(0.0001, ctx.currentTime+start);
+  gain.gain.exponentialRampToValueAtTime(peak, ctx.currentTime+start+0.02);
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime+start+dur);
+  osc.start(ctx.currentTime+start); osc.stop(ctx.currentTime+start+dur);
+}
+function playCorrectSound(){
+  if(!soundOn) return;
+  try{ const ctx=getCtx(), v=0.6;
+    tone(ctx,1046.5,0,0.12,'sine',v); tone(ctx,1318.5,0.08,0.12,'sine',v); tone(ctx,1568,0.16,0.22,'sine',v);
+  }catch(e){}
+}
+function playWrongSound(){
+  if(!soundOn) return;
+  try{ const ctx=getCtx(), v=0.6*0.8;
+    tone(ctx,330,0,0.16,'sawtooth',v); tone(ctx,220,0.12,0.16,'sawtooth',v); tone(ctx,150,0.24,0.22,'sawtooth',v);
+  }catch(e){}
+}
+function toggleSound(){
+  soundOn = !soundOn;
+  document.getElementById('soundBtn').textContent = soundOn ? '🔊' : '🔇';
+}
+
+// ── BALLOON CELEBRATION (correct answer) ──
+const BALLOON_COLORS = ['#f87171','#fb923c','#facc15','#4ade80','#38bdf8','#a78bfa','#f472b6'];
+function burstBalloons(){
+  const layer = document.getElementById('balloonLayer');
+  layer.innerHTML = '';
+  const n = 10;
+  for (let i = 0; i < n; i++) {
+    const b = document.createElement('span');
+    const left = 8 + Math.random()*84;
+    const delay = Math.random()*0.15;
+    const size = 20 + Math.random()*14;
+    b.className = 'balloon-pop';
+    b.style.left = left + '%';
+    b.style.width = size + 'px';
+    b.style.height = (size*1.15) + 'px';
+    b.style.background = BALLOON_COLORS[i % BALLOON_COLORS.length];
+    b.style.animationDelay = delay + 's';
+    layer.appendChild(b);
+  }
+  setTimeout(() => { layer.innerHTML = ''; }, 900);
+}
+
 // ── STATE ──
 let mcqs = [], topic = 'Quiz', current = 0, answered = [];
 
@@ -278,8 +347,11 @@ function selectOption(idx){
   if (answered[current]) return;
   const q = mcqs[current];
   const correctIdx = ansToIndex(q.answer);
-  answered[current] = { selectedIdx: idx, correct: idx === correctIdx };
+  const correct = idx === correctIdx;
+  answered[current] = { selectedIdx: idx, correct };
   renderQuestion();
+  if (correct) { playCorrectSound(); burstBalloons(); }
+  else { playWrongSound(); }
 }
 
 function goPrev(){
