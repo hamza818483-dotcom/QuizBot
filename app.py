@@ -33572,7 +33572,12 @@ async def handle_message(msg: dict):
         if collected:
             return
 
-    if msg["chat"].get("type") == "private" and text.lower() in ("/stop", "stop", "থামো", "থামাও"):
+    _stop_texts = ("/stop", "stop", "থামো", "থামাও", "/finish", "finish")
+    _is_cancel_cmd = text.lower() in ("/cancel", "cancel")
+    if msg["chat"].get("type") == "private" and (
+        text.lower() in _stop_texts
+        or (_is_cancel_cmd and (msg["from"]["id"] in DM_STOP_FLAGS or await qs_get(msg["from"]["id"])))
+    ):
         uid = msg["from"]["id"]
         chat_id = msg["chat"]["id"]
         DM_STOP_FLAGS[uid] = True
