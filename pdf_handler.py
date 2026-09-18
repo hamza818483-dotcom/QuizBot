@@ -785,7 +785,7 @@ class GeminiKeyRotator:
         self.current = (self.current + 1) % len(self.keys)
         return key
 
-    def ordered_keys(self, offset: int = 0):
+    def ordered_keys(self, offset: int = 0, healthiest_first: bool = False):
         """Only non-banned keys, healthy ones first: not exhausted-today AND
         not in short cooldown AND not over its rolling per-minute ceiling,
         then over-RPM keys, then short-cooldown keys, then today-exhausted
@@ -897,6 +897,12 @@ class GeminiKeyRotator:
                     group.sort(key=lambda k: self.key_daily_call_count(k))
                 rebuilt.extend(group)
             healthy = rebuilt
+            if healthiest_first:
+                # /unmesh: strict healthiest-first -- keys are already all
+                # under-rpm/not-cooling/not-exhausted/under-cap here; among
+                # them, pick the least-used key (rolling 24h) FIRST across
+                # the whole pool (stable sort keeps the random tie order).
+                healthy = sorted(healthy, key=lambda k: self.key_daily_call_count(k))
             self.current = (self.current + 1) % max(len(self.keys), 1)
         return healthy + over_cap + over_rpm + cooling + (exhausted if (not_exhausted or _low_healthy) else []) + stagger_locked + circuit_open
 
