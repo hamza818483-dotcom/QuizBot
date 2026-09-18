@@ -3082,7 +3082,6 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"\"question\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],"
         f"\"answer\":\"A|B|C|D\",\"explanation\":\"...\",\"source_verbatim\":\"...\","
         f"\"verified\":true,\"exp_bbox\":[100,200,900,350]"
-        f"{_RD_MODE.get() and ',\"topic_hint\":\"...\"' or ''}"
         f"}}]"
     )
 
