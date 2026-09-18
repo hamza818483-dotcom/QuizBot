@@ -30,6 +30,7 @@ export default {
     if (url.pathname === '/r2/put' && request.method === 'POST') return await r2Put(request, env);
     if (url.pathname === '/r2/image-put' && request.method === 'POST') return await r2ImagePut(request, env);
     if (url.pathname.startsWith('/img/') && request.method === 'GET') return await r2ImageGet(url, env);
+    if (url.pathname.startsWith('/api/premium-pdf-view/') && request.method === 'GET') return await handlePremiumPdfView(request, url, env);
 
     // D1 init tables
     if (url.pathname === '/init-db') return await initDB();
@@ -76,7 +77,7 @@ export default {
     }
 
     const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
-                     '/api/leaderboard', '/api/solve-pdf', '/api/premium-pdf-view',
+                     '/api/leaderboard', '/api/solve-pdf',
                      '/api/tg-image', '/api/new-exam/status'];
     if (HF_ONLY.some(p => url.pathname.startsWith(p))) {
       const hosts = [env.RENDER_URL || env.HF_SPACE_URL || 'https://hamza-02-quizbot.hf.space', env.RENDER_URL_2].filter(Boolean);
@@ -439,6 +440,62 @@ async function r2ImageGet(url, env) {
   } catch (e) {
     return new Response(e.message, { status: 500 });
   }
+}
+
+// Premium PDF (style1) — R2-first so this keeps working even if every bot
+// host (HF Space) is down. Chromium rendering can only happen on the bot
+// process, so the very first view of a given cache_id still needs HF up;
+// every view after that (including ones while HF is down) is served
+// straight from R2, since the PDF for a given cache_id never changes once
+// generated.
+async function handlePremiumPdfView(request, url, env) {
+  const id = url.pathname.replace('/api/premium-pdf-view/', '').split('?')[0].trim();
+  if (!id) return jsonResp({ ok: false, error: 'No id' }, 400);
+
+  if (env.PDF_BUCKET) {
+    try {
+      const obj = await env.PDF_BUCKET.get(`premium-pdfs/${id}.pdf`);
+      if (obj) {
+        return new Response(obj.body, {
+          headers: {
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': `inline; filename="premium_${id}.pdf"`,
+          },
+        });
+      }
+    } catch (e) {
+      console.warn('[premium-pdf] R2 read failed, falling back to HF:', e.message);
+    }
+  }
+
+  const hosts = [env.RENDER_URL || env.HF_SPACE_URL || 'https://hamza-02-quizbot.hf.space', env.RENDER_URL_2].filter(Boolean);
+  for (const RENDER of hosts) {
+    try {
+      const r = await fetch(`${RENDER}/api/premium-pdf-view/${id}`, { signal: AbortSignal.timeout(30000) });
+      if (r.ok) {
+        const pdfBuf = await r.arrayBuffer();
+        if (env.PDF_BUCKET) {
+          try {
+            await env.PDF_BUCKET.put(`premium-pdfs/${id}.pdf`, pdfBuf, {
+              httpMetadata: { contentType: 'application/pdf' },
+            });
+          } catch (e) {
+            console.warn('[premium-pdf] R2 write failed (non-fatal):', e.message);
+          }
+        }
+        return new Response(pdfBuf, {
+          headers: {
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': `inline; filename="premium_${id}.pdf"`,
+          },
+        });
+      }
+    } catch (e) {
+      console.warn(`[premium-pdf] backend (${RENDER}) unreachable, trying next:`, e.message);
+    }
+  }
+
+  return jsonResp({ ok: false, error: 'PDF not cached yet and bot backend is unreachable — open this link once while the bot is online to generate it.' }, 502);
 }
 
 async function r2Put(request, env) {
