@@ -20206,7 +20206,7 @@ def _build_unmesh_heading_scan_prompt() -> str:
         "topic heading, so give it even if zero headings were found. Use null only if the page has "
         "no MCQ at all.\n\n"
         "ALSO (independent, separate from topic headings): look for the exact Bengali text line "
-        "\"প্র্যাকটিস টেস্ট\" (\"Practice Test\") used as a section title anywhere on this page. If present, "
+        "\"প্র্যাকটিস টেস্ট\" / \"প্র্যাক্টিস টেস্ট\" (\"Practice Test\") used as a section title anywhere on this page. If present, "
         "report stop_marker_next_qsn_no = the printed qsn_no of the very first MCQ that appears AFTER "
         "that title (below it in its own column / following it), or 0 if NO MCQ follows it on this page. "
         "If the text is NOT on this page, use null. This is NOT a topic heading — never put it in headings.\n\n"
@@ -20354,8 +20354,7 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
             if isinstance(_m, dict) and "trailing_topic_marker" not in _m:
                 _q = _m.get("qsn_no")
                 _m["_unmesh_stop_after"] = _stop_next_qsn  # 0 => nothing on this page follows it
-        headings = [h for h in headings if "প্র্যাকটিস টেস্ট" not in (h.get("heading_text") or "")
-                    and "practice test" not in (h.get("heading_text") or "").lower()]
+        headings = [h for h in headings if not re.search(r"প্র্যাক্?টিস\s*টেস্ট|practice\s*test", h.get("heading_text") or "", re.I)]
 
     # CODE-LEVEL CROSS-CHECK using the heading-scan's own independent
     # last_qsn_no_on_page signal — this call already reads the whole page
@@ -20373,6 +20372,10 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
             _scan_flagged_missing = set(range(_extracted_max + 1, _scan_last_qsn + 1))
             logger.warning(f"[UNMESH heading-scan] independent last_qsn_no_on_page={_scan_last_qsn} > extracted max={_extracted_max} — flagging {sorted(_scan_flagged_missing)} for Call2 miss-check")
 
+    # Section labels (সম্ভাব্য আরও প্রশ্ন, বিগত প্রশ্নাবলি, Practice ... ) are NEVER topics
+    headings = [h for h in (headings or []) if not re.search(
+        r"আন্তর্জাতিক\s*বিষয়াবলি?|সম্ভাব্য\s*আরো?\s*প্রশ্ন|বিগত\s*প্রশ্নাবলি?|প্র্যাক্?টিস\s*টেস্ট|more\s+questions?|previous\s+questions?|practice\s+(questions?|test)|extra\s+questions?",
+        (h.get("heading_text") or ""), re.I)]
     forced_boundaries = set()
     if headings:
         by_qsn_early = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
@@ -20678,13 +20681,18 @@ def _unmesh_apply_stop_marker(extracted_pages: list) -> list:
     (0 => keep none... i.e. all MCQs on that page stay, since none follow
     the title); every later page is dropped entirely."""
     out, stopped = [], False
-    for page_num, img, mcqs in extracted_pages:
+    _last_idx = len(extracted_pages) - 1
+    for _pi, (page_num, img, mcqs) in enumerate(extracted_pages):
         if stopped:
             continue
         stop_at = None
         for m in mcqs:
             if isinstance(m, dict) and "_unmesh_stop_after" in m:
-                stop_at = m["_unmesh_stop_after"]
+                # প্র্যাকটিস টেস্ট lives at the END of the document — only honour it on the
+                # last page; a hit on an earlier page is a false positive, ignore it.
+                if _pi == _last_idx:
+                    stop_at = m["_unmesh_stop_after"]
+                m.pop("_unmesh_stop_after", None)
                 break
         if stop_at is None:
             out.append((page_num, img, mcqs))
@@ -20718,10 +20726,17 @@ def _unmesh_group_mcqs(extracted_pages: list) -> list:
         r'এফ ইউনিট|ই ইউনিট|চাকুরি|BUP|FASS|FSSS|[A-Za-z]{1,6}\s*ইউনিট)$',
         re.IGNORECASE
     )
+    _SECTION_LABEL_RE = re.compile(
+        r'(আন্তর্জাতিক\s*বিষয়াবলি?|সম্ভাব্য\s*আরও\s*প্রশ্ন|সম্ভাব্য\s*আরো\s*প্রশ্ন|বিগত\s*প্রশ্নাবলি?|প্র্যাক্?টিস\s*টেস্ট|প্র্যাকটিস\s*টেস্ট|'
+        r'more\s+questions?(\s+for\s+practice)?|previous\s+questions?|practice\s+(questions?|test)|extra\s+questions?)',
+        re.IGNORECASE
+    )
     def _is_fake_topic(hint: str) -> bool:
         h = hint.strip()
         if not h:
             return False
+        if _SECTION_LABEL_RE.search(h) and len(h) <= 60:
+            return True
         if _FAKE_TOPIC_RE.match(h):
             return True
         if len(h) <= 25 and (h.endswith("বিশ্ববিদ্যালয়") or h.endswith("ইউনিট")):
