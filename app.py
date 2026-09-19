@@ -1303,6 +1303,88 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 logger.warning(f"[LMS-Send] DM progress error-edit failed: {e2}")
 
 
+@app.post("/api/gemini-proxy")
+async def gemini_proxy(request: Request):
+    """Shared Gemini key pool for the LMS (Atlas AI, MCQ helper, AI Tag ...).
+    LMS worker holds NO Gemini keys any more -- it POSTs here and this uses
+    QuizBot's key_rotator (healthiest-first, ban tracking, circuit breaker).
+    Body: {secret, parts:[{text}|{inline_data:{mime_type,data}}], max_tokens?, temperature?}
+    Returns: {answer, model} or {error} (502)."""
+    data = await request.json()
+    if not LMS_API_SECRET:
+        return JSONResponse({"error": "LMS_API_SECRET not configured"}, status_code=503)
+    if data.get("secret") != LMS_API_SECRET:
+        return JSONResponse({"error": "unauthorized"}, status_code=403)
+    parts_in = data.get("parts") or []
+    if not parts_in:
+        return JSONResponse({"error": "parts required"}, status_code=400)
+    try:
+        from pdf_handler import key_rotator, _is_gemini_key_exhausted_today
+        from google import genai as gai
+        from google.genai import types
+    except Exception as e:
+        return JSONResponse({"error": f"import: {e}"}, status_code=500)
+    if not key_rotator.keys:
+        return JSONResponse({"error": "no gemini keys"}, status_code=503)
+
+    sdk_parts = []
+    for p_ in parts_in:
+        if p_.get("text"):
+            sdk_parts.append(types.Part.from_text(text=str(p_["text"])))
+        elif p_.get("inline_data"):
+            idata = p_["inline_data"]
+            sdk_parts.append(types.Part.from_bytes(
+                data=base64.b64decode(idata["data"]),
+                mime_type=idata.get("mime_type") or "image/jpeg"))
+    max_tokens = min(int(data.get("max_tokens") or 8192), 24576)
+    temperature = float(data.get("temperature", 0.7))
+    model_ctx = {"m": "gemini-3.5-flash"}
+
+    def _call(key):
+        client = gai.Client(api_key=key, http_options=types.HttpOptions(timeout=38000))
+        return client.models.generate_content(
+            model=model_ctx["m"], contents=sdk_parts,
+            config=types.GenerateContentConfig(
+                temperature=temperature, max_output_tokens=max_tokens,
+                thinking_config=types.ThinkingConfig(thinking_budget=0)))
+
+    keys = key_rotator.ordered_keys(healthiest_first=True) or key_rotator.keys
+    live = [k for k in keys if not _is_gemini_key_exhausted_today(k)]
+    keys = live or keys
+    ovl, fb_used, last_err = 0, False, "no key worked"
+    for i, key in enumerate(keys[:25]):
+        if i:
+            await asyncio.sleep(random.uniform(0.1, 0.4))
+        key_rotator.record_call(key)
+        try:
+            async with key_rotator.throttled_call(key=key):
+                resp = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
+            key_rotator.mark_healthy(key)
+            txt = resp.text or ""
+            if txt.strip():
+                return JSONResponse({"answer": txt, "model": model_ctx["m"]})
+            last_err = "empty response"
+        except Exception as e:
+            msg = str(e)
+            last_err = msg[:200]
+            up = msg.upper()
+            if any(t in up for t in ("503", "504", "UNAVAILABLE", "DEADLINE_EXCEEDED")) or isinstance(e, asyncio.TimeoutError):
+                ovl += 1
+                if ovl >= 3:
+                    if fb_used:
+                        break
+                    fb_used, model_ctx["m"], ovl = True, "gemini-2.5-flash", 0
+                    await asyncio.sleep(1.5)
+                continue
+            if "429" in msg or "RESOURCE_EXHAUSTED" in up:
+                key_rotator.mark_rate_limited(key, daily_exhausted=("PER_DAY" in up or "DAILY" in up or "QUOTA" in up))
+                continue
+            if any(t in msg for t in ("401", "403", "400")) and any(t in up for t in ("UNAUTHENTICATED", "PERMISSION_DENIED", "API KEY NOT VALID", "SUSPENDED")):
+                key_rotator.mark_banned(key, msg[:120])
+                continue
+    return JSONResponse({"error": last_err}, status_code=502)
+
+
 @app.post("/api/lms-send-channel")
 async def lms_send_channel(request: Request):
     """
