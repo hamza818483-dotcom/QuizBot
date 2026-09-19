@@ -20205,9 +20205,14 @@ def _build_unmesh_heading_scan_prompt() -> str:
         "both columns considered) — this is a separate lightweight completeness signal, not a "
         "topic heading, so give it even if zero headings were found. Use null only if the page has "
         "no MCQ at all.\n\n"
+        "ALSO (independent, separate from topic headings): look for the exact Bengali text line "
+        "\"প্র্যাকটিস টেস্ট\" (\"Practice Test\") used as a section title anywhere on this page. If present, "
+        "report stop_marker_next_qsn_no = the printed qsn_no of the very first MCQ that appears AFTER "
+        "that title (below it in its own column / following it), or 0 if NO MCQ follows it on this page. "
+        "If the text is NOT on this page, use null. This is NOT a topic heading — never put it in headings.\n\n"
         "Output ONLY this JSON object, nothing else:\n"
         '{"headings": [{"heading_text": "...", "next_qsn_no": <int or null>}], '
-        '"last_qsn_no_on_page": <int or null>}\n'
+        '"last_qsn_no_on_page": <int or null>, "stop_marker_next_qsn_no": <int or null>}\n'
         "If there are zero genuine topic headings on this page, output headings as exactly []."
     )
 
@@ -20218,6 +20223,7 @@ def _parse_unmesh_heading_scan(text: str) -> tuple:
     responses may still return just the array) — in that case
     last_qsn_no_on_page comes back as None and callers should skip that
     extra check rather than treat it as a real signal."""
+    _parse_unmesh_heading_scan.last_stop = None
     if not text:
         return [], None
     t = text.strip()
@@ -20236,6 +20242,8 @@ def _parse_unmesh_heading_scan(text: str) -> tuple:
             headings = data.get("headings") or []
             last_q = data.get("last_qsn_no_on_page")
             last_q = last_q if isinstance(last_q, int) else None
+            _sm = data.get("stop_marker_next_qsn_no")
+            _parse_unmesh_heading_scan.last_stop = _sm if isinstance(_sm, int) and not isinstance(_sm, bool) else None
             return (headings if isinstance(headings, list) else []), last_q
         if isinstance(data, list):
             return data, None
@@ -20332,10 +20340,22 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
     try:
         scan_txt = await _qbm_gemini_raw_only(img, _build_unmesh_heading_scan_prompt())
         headings, _scan_last_qsn = _parse_unmesh_heading_scan(scan_txt)
+        _stop_next_qsn = getattr(_parse_unmesh_heading_scan, "last_stop", None)
     except Exception as e:
         logger.warning(f"[UNMESH heading-scan] failed, skipping: {e}")
         headings = []
         _scan_last_qsn = None
+        _stop_next_qsn = None
+    # "প্র্যাকটিস টেস্ট" STOP marker: MCQs from that qsn_no onward on this page
+    # (and every later page) are excluded; MCQs above it stay in the last topic.
+    if _stop_next_qsn is not None:
+        logger.warning(f"[UNMESH stop-marker] 'প্র্যাকটিস টেস্ট' found, cut at qsn_no>={_stop_next_qsn}")
+        for _m in mcqs:
+            if isinstance(_m, dict) and "trailing_topic_marker" not in _m:
+                _q = _m.get("qsn_no")
+                _m["_unmesh_stop_after"] = _stop_next_qsn  # 0 => nothing on this page follows it
+        headings = [h for h in headings if "প্র্যাকটিস টেস্ট" not in (h.get("heading_text") or "")
+                    and "practice test" not in (h.get("heading_text") or "").lower()]
 
     # CODE-LEVEL CROSS-CHECK using the heading-scan's own independent
     # last_qsn_no_on_page signal — this call already reads the whole page
@@ -20652,6 +20672,36 @@ def _bcs_group_mcqs(extracted_pages: list) -> list:
     return [("BCS MCQ", flat)]
 
 
+def _unmesh_apply_stop_marker(extracted_pages: list) -> list:
+    """Cut everything at/after the first "প্র্যাকটিস টেস্ট" title: on the
+    marker's page keep only MCQs with qsn_no < first-after-marker qsn_no
+    (0 => keep none... i.e. all MCQs on that page stay, since none follow
+    the title); every later page is dropped entirely."""
+    out, stopped = [], False
+    for page_num, img, mcqs in extracted_pages:
+        if stopped:
+            continue
+        stop_at = None
+        for m in mcqs:
+            if isinstance(m, dict) and "_unmesh_stop_after" in m:
+                stop_at = m["_unmesh_stop_after"]
+                break
+        if stop_at is None:
+            out.append((page_num, img, mcqs))
+            continue
+        stopped = True
+        if stop_at == 0:
+            kept = [m for m in mcqs if isinstance(m, dict)]
+        else:
+            kept = [m for m in mcqs if isinstance(m, dict)
+                    and not (isinstance(m.get("qsn_no"), int) and m["qsn_no"] >= stop_at)]
+        for m in kept:
+            m.pop("_unmesh_stop_after", None)
+        out.append((page_num, img, kept))
+        logger.warning(f"[UNMESH stop-marker] page {page_num}: kept {len(kept)}/{len(mcqs)} MCQs, all later pages dropped")
+    return out
+
+
 def _unmesh_group_mcqs(extracted_pages: list) -> list:
     """DEDICATED grouping for /unmesh (fully independent of /topic's
     _topic_group_mcqs). Same two split signals — qsn_no==1 OR the effective
@@ -20662,6 +20712,7 @@ def _unmesh_group_mcqs(extracted_pages: list) -> list:
     right after it, but the next MCQ ২০২ only appears on the next page).
     That marker's text becomes the active hint for every MCQ from that point
     forward, even though nothing on the marker's own page carried it."""
+    extracted_pages = _unmesh_apply_stop_marker(extracted_pages)
     _FAKE_TOPIC_RE = re.compile(
         r'^(বিশ্ববিদ্যালয়|.{0,20}বিশ্ববিদ্যালয়|বি ইউনিট|এ ইউনিট|সি ইউনিট|ডি ইউনিট|'
         r'এফ ইউনিট|ই ইউনিট|চাকুরি|BUP|FASS|FSSS|[A-Za-z]{1,6}\s*ইউনিট)$',
@@ -26765,6 +26816,8 @@ async def _handle_unmesh_impl(msg: dict):
             extractor=_unmesh_extract_from_image, file_id=file_id,
             page_status_out=_unmesh_page_status, gemini_only=True
         )
+        # "প্র্যাকটিস টেস্ট" title => drop it and everything after it (count + export)
+        extracted_pages = _unmesh_apply_stop_marker(extracted_pages)
 
         total_mcq_found = sum(
             1 for _, _, mcqs in extracted_pages for m in mcqs if "trailing_topic_marker" not in m
