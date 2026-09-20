@@ -1055,15 +1055,17 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             else:
                 post_text = section_texts[0]
 
-            def _pack(text, limit=3800):
+            def _pack(text, limit=3800, first_limit=None):
                 # split ONLY at block boundaries (each piece is complete HTML) and only if too long
                 parts = text.split(f"\n{sep}\n")
                 out, cur = [], ""
+                lim = first_limit or limit
                 for p in parts:
                     cand = (cur + f"\n{sep}\n" + p) if cur else p
-                    if cur and len(cand) > limit:
+                    if cur and len(cand) > lim:
                         out.append(cur)
                         cur = p
+                        lim = limit
                     else:
                         cur = cand
                 if cur:
@@ -1073,9 +1075,21 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             if poll_quiz_pdf_only and _is_group:
                 _msgs = [m for m in _tw_msgs if m and m.strip()]   # topic-wise: header, then ONE message per topic
             else:
-                _msgs = _pack(post_text)                            # single post (split only if > Telegram limit)
+                _msgs = _pack(post_text, first_limit=1000)          # single post: 1st chunk fits a photo caption; rest only if too long
             _n = len(_msgs)
             sent_chat, sent_msg_id = {}, None
+            # 2026-09-20: first message = cover IMAGE with the summary as its caption
+            # (same look as the "all" mode). Falls back to plain text if the image
+            # can't be made/sent or the caption would exceed Telegram's 1024 limit.
+            _cover_bytes = None
+            if _msgs and len(_msgs[0]) <= 1024:
+                try:
+                    _cs = (groups[0].get("subject") or subject or "MCQ")
+                    _ct = (groups[0].get("exam_title") if len(groups) == 1 else None) or exam_title or _cs
+                    _cover_bytes = await _generate_lms_cover_image(_cs, _ct)
+                except Exception as e:
+                    logger.warning(f"[LMS-Send-Links] cover image failed: {e}")
+                    _cover_bytes = None
             for _i, _txt in enumerate(_msgs):
                 if job.get("cancel_requested"):
                     job["status"] = "cancelled"
@@ -1087,7 +1101,14 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 }
                 if thread_id:
                     send_data["message_thread_id"] = thread_id
-                r = await tg_post("sendMessage", send_data)
+                r = None
+                if _i == 0 and _cover_bytes:
+                    r = await send_photo(channel_id, _cover_bytes, caption=_txt, message_thread_id=thread_id or None)
+                    if not r.get("ok"):
+                        logger.warning(f"[LMS-Send-Links] cover photo send failed ({r.get('description') or r.get('error')}) -> text fallback")
+                        r = None
+                if r is None:
+                    r = await tg_post("sendMessage", send_data)
                 _tries = 0
                 while not r.get("ok") and _tries < 3 and "too many requests" in str(r.get("description", "")).lower():
                     _tries += 1
@@ -1196,7 +1217,19 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 master_msg_id = master_r["result"]["message_id"]
                 master_is_photo = master_is_photo_ok
                 try:
-                    await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": master_msg_id, "disable_notification": True})
+                    _pin = {"chat_id": channel_id, "message_id": master_msg_id, "disable_notification": True}
+                    _pr = await tg_post("pinChatMessage", _pin)
+                    if not _pr.get("ok"):
+                        await asyncio.sleep(1.5)
+                        _pr = await tg_post("pinChatMessage", _pin)
+                    if not _pr.get("ok"):
+                        _pdesc = _pr.get("description") or "unknown"
+                        logger.warning(f"[LMS-Send] master summary pin failed: {_pdesc}")
+                        job["warning"] = f"pin failed: {_pdesc}"
+                        try:
+                            await tg_post("sendMessage", {"chat_id": OWNER_ID, "text": f"⚠️ LMS Send: প্রথম summary pin করা যায়নি ({_pdesc}).\nবটকে ওই চ্যাটে 'Pin messages' permission দাও।"})
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.warning(f"[LMS-Send] master summary pin failed: {e}")
         except Exception as e:
