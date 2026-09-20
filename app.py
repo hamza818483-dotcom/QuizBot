@@ -36437,10 +36437,25 @@ async def _ram_guard_task() -> None:
         try:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
             hard_cap_mb = int(limit_mb * 0.88)
+            oom_mb = 15200  # ~95% of the 16GB container: the platform would OOM-kill us right after anyway
             if rss_mb >= hard_cap_mb:
-                logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= hard cap {hard_cap_mb}MB -> forced restart (job or not)")
-                await asyncio.sleep(1)
-                os._exit(0)
+                if _active_jobs.get("count", 0) > 0 and rss_mb < oom_mb:
+                    # 2026-09-20: never self-restart in the middle of a running job.
+                    # Free what we can and keep going; restart only if an OOM-kill is imminent.
+                    import gc
+                    for _attr in ("pdf_cache", "qbm_cache", "img_cache"):
+                        _c = getattr(app.state, _attr, None)
+                        if _c is not None:
+                            try:
+                                _cap_page_cache(_c)
+                            except Exception:
+                                pass
+                    gc.collect()
+                    logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= hard cap {hard_cap_mb}MB but {_active_jobs.get('count')} job(s) active -> freed caches, NOT restarting (restart only at >= {oom_mb}MB)")
+                else:
+                    logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= hard cap {hard_cap_mb}MB -> forced restart")
+                    await asyncio.sleep(1)
+                    os._exit(0)
             if rss_mb >= threshold_mb:
                 if _active_jobs["count"] > 0:
                     logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= threshold but {_active_jobs['count']} job(s) active -> deferring restart")
