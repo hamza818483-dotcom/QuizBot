@@ -27814,7 +27814,7 @@ async def _onu_extract_all_pages_streaming(
         if status_msg_id:
             await _safe_dash_edit()
 
-    WINDOW = 2  # max 2 pages in flight (per request 2026-09-20).
+    WINDOW = 1  # one page at a time: page N's Call1+Call2 both finish before page N+1 starts (per request 2026-09-20).
     # Lowered 4 -> 3 (2026-09-03 accuracy/safety/smoothness balance pass) --
     # fewer pages racing simultaneously means fewer keys/accounts hit at the
     # same instant, on top of the global concurrency cap in pdf_handler.py.
