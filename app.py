@@ -27493,7 +27493,9 @@ Also write a short explanation (Bangla if the MCQ is in Bangla) for why the corr
 """ + _MATH_UNICODE_RULE + """
 
 OUTPUT FORMAT — ONLY valid JSON array containing ONLY the highlighted MCQs, nothing else:
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"explanation":"...","yellow_highlight":true}]"""
+[{"qsn_no":24,"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"explanation":"...","yellow_highlight":true}]
+
+qsn_no = the MCQ's own printed serial number on the page as a plain integer (Bangla digits converted to normal digits, e.g. ২৪ -> 24). Use null only if no serial number is printed."""
 
 # Gemini-only variant of the same prompt — used ONLY when the call actually
 # goes to Gemini (no TPM ceiling to protect there, unlike Groq's 8000 TPM
@@ -27526,7 +27528,9 @@ STEP 4 — For each KEPT MCQ, write a short explanation (Bangla if the MCQ is in
 """ + _MATH_UNICODE_RULE + """
 
 OUTPUT FORMAT — ONLY valid JSON array of the KEPT (highlighted) MCQs only, exact order, exact wording (Bangla stays Bangla, English stays English), nothing else, no commentary, no markdown fences:
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"explanation":"...","yellow_highlight":true}]"""
+[{"qsn_no":24,"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"explanation":"...","yellow_highlight":true}]
+
+qsn_no = the MCQ's own printed serial number on the page as a plain integer (Bangla digits converted to normal digits, e.g. ২৪ -> 24). Use null only if no serial number is printed."""
 
 
 
@@ -27590,7 +27594,7 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
     if not mcqs:
         return mcqs
     try:
-        mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("question", "options", "answer")} for m in mcqs], ensure_ascii=False)
+        mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("qsn_no", "question", "options", "answer")} for m in mcqs], ensure_ascii=False)
         prompt = f"""Re-check this page image against an already-extracted MCQ list. Two jobs only. JOB 1 (completeness) is the MOST CRITICAL job here — a single missed MCQ is a serious failure, so follow every step below exactly, no shortcuts.
 
 JOB 1 — COMPLETENESS (exhaustive, mandatory multi-pass procedure):
@@ -27621,7 +27625,9 @@ EXISTING LIST (question text used for matching in Job 1, current answer used for
 {mcq_json}
 
 OUTPUT — a single JSON array containing ALL MCQs: every item from EXISTING LIST (answer corrected per Job 2 if needed) PLUS any new items found in Job 1. Same question/option wording as the source page. No commentary, no markdown fences:
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]"""
+[{{"qsn_no":24,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]
+
+qsn_no = that MCQ's printed serial number as a plain integer (Bangla digits converted, e.g. ২৪ -> 24) — REQUIRED on every item, especially newly-found missed ones, so they can be placed in correct serial order."""
         txt = await _qbm_gemini_raw(img, prompt)
         _call2_provider = "Gemini"
         if not txt:
@@ -27674,7 +27680,33 @@ OUTPUT — a single JSON array containing ALL MCQs: every item from EXISTING LIS
         for q_norm, orig in orig_by_q.items():
             if q_norm not in result_qs_norm:
                 final.append(orig)
-        return final if final else mcqs
+        if not final:
+            return mcqs
+        # Serial-order fix (per request): newly-recovered MCQs were appended
+        # at the end -- place every MCQ by its printed qsn_no so recovered
+        # ones land in their correct serial position. Items without a
+        # usable qsn_no keep their original relative order (stable sort,
+        # key falls back to their current index so they never jump around).
+        def _sn(m):
+            v = m.get("qsn_no")
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+        _idx_final = list(enumerate(final))
+        _known = [(i, m) for i, m in _idx_final if _sn(m) is not None]
+        if len(_known) == len(final):
+            final = [m for _, m in sorted(_known, key=lambda t: (_sn(t[1]), t[0]))]
+        elif _known:
+            # mixed: sort only the numbered ones among themselves, keep
+            # un-numbered ones at their existing slots.
+            _num_slots = [i for i, m in _idx_final if _sn(m) is not None]
+            _sorted_nums = sorted((m for _, m in _known), key=_sn)
+            _out = list(final)
+            for slot, m in zip(_num_slots, _sorted_nums):
+                _out[slot] = m
+            final = _out
+        return final
     except Exception as e:
         logger.warning(f"[ONU-verify] failed: {e} — keeping Call1 result unverified rather than dropping it")
         return mcqs
@@ -27788,7 +27820,7 @@ async def _onu_extract_all_pages_streaming(
         if status_msg_id:
             await _safe_dash_edit()
 
-    WINDOW = 3  # same concurrency window qbm_extract_all_pages uses.
+    WINDOW = 2  # max 2 pages in flight (per request 2026-09-20).
     # Lowered 4 -> 3 (2026-09-03 accuracy/safety/smoothness balance pass) --
     # fewer pages racing simultaneously means fewer keys/accounts hit at the
     # same instant, on top of the global concurrency cap in pdf_handler.py.
@@ -27809,7 +27841,28 @@ async def _onu_extract_all_pages_streaming(
             logger.error(f"[ONU streaming] Call1 page {page_num} error: {e}")
             mcqs = []
         call1_results[idx] = mcqs
-        await _maybe_start_pair_call2(idx // 2)
+        # Per-page flow (per request 2026-09-20): Call1 extract (above) ->
+        # this SAME page's own Call2 verify+miss-check right now (single
+        # image, no pair batching). Any missed MCQ is inserted by qsn_no.
+        if is_cancelled(chat_id):
+            final_mcqs[idx] = mcqs
+        else:
+            try:
+                final_mcqs[idx] = await _onu_verify_pass(img, mcqs) if mcqs else mcqs
+            except Exception as e:
+                logger.warning(f"[ONU per-page] Call2 page {page_num} failed: {e} — keeping Call1 result")
+                final_mcqs[idx] = mcqs
+        page_status[idx]["done"] = True
+        page_status[idx]["current"] = False
+        page_status[idx]["mcq"] = len(final_mcqs[idx] or [])
+        _mc = {}
+        for m in (final_mcqs[idx] or []):
+            p = m.get("_provider", "Gemini")
+            _mc[p] = _mc.get(p, 0) + 1
+        if _mc:
+            page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _mc.items())
+        if status_msg_id:
+            await _safe_dash_edit()
 
     sem = asyncio.Semaphore(WINDOW)
 
