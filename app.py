@@ -24710,7 +24710,37 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
-        for _ki, key in enumerate(keys_to_try):
+        # 2026-09-20 FIX: keys_to_try used to be built ONCE up-front, so a call
+        # that burned through that snapshot (503/429 across many keys) gave up
+        # with "All Gemini keys exhausted" even while other healthy keys
+        # (cooldown ended, stagger unlocked, other accounts) still existed.
+        # Now: when the snapshot is used up, re-ask the rotator for a FRESH
+        # healthy list, skip keys this call already tried, and keep going
+        # until the rotator has nothing untried left (max 4 refills).
+        _tried_keys = set()
+        _refills = 0
+        _queue = list(keys_to_try)
+        _ki = -1
+        while True:
+            if not _queue:
+                if _refills >= 4:
+                    break
+                _refills += 1
+                try:
+                    _fresh = key_rotator.ordered_keys_avoiding_accounts(_avoid_accts, offset=_qbm_key_offset_ctx.get()) or []
+                except Exception:
+                    _fresh = []
+                _fresh = [k for k in _fresh if k not in _tried_keys and not _is_gemini_key_exhausted_today(k)]
+                if not _fresh:
+                    break
+                logger.warning(f"[QBM] key list used up -- refilled with {len(_fresh)} fresh untried healthy key(s) (refill {_refills}/4)")
+                _queue = _fresh
+                await asyncio.sleep(random.uniform(0.3, 0.9))
+            key = _queue.pop(0)
+            if key in _tried_keys:
+                continue
+            _tried_keys.add(key)
+            _ki += 1
             if is_cancelled():
                 return ""
             if key_rotator.account_of(key) in _dead_accounts:
