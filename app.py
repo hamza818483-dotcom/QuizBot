@@ -23327,6 +23327,7 @@ def _qbm_parse_json(text: str) -> list:
                 **({"yellow_highlight": mc.get("yellow_highlight")} if "yellow_highlight" in mc else {}),
                 **({"qsn_no": mc.get("qsn_no")} if "qsn_no" in mc else {}),
                 **({"has_image": mc.get("has_image")} if "has_image" in mc else {}),
+                **({"remove": mc.get("remove")} if "remove" in mc else {}),
                 **({"topic_hint": mc.get("topic_hint")} if "topic_hint" in mc else {}),
                 **({"subtopic_hint": mc.get("subtopic_hint")} if "subtopic_hint" in mc else {}),
                 # SOURCE-GROUNDING fields (2026-08-20): /chem's generation
@@ -27571,20 +27572,21 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
         return mcqs
     try:
         mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("qsn_no", "question", "options", "answer")} for m in mcqs], ensure_ascii=False)
-        prompt = f"""VERIFY an already-extracted MCQ list against this page image. Inclusion rule: an MCQ belongs ONLY if its SERIAL NUMBER has a RED BOX (single box around one number, or one tall box around several consecutive numbers = all of them). Answer = the option with the RED CIRCLE (golla) on its letter, taken as-is.
+        prompt = f"""VERIFY one page. Look at the PAGE IMAGE itself as the only truth; the EXISTING LIST below is just what a first pass extracted and may be wrong.
 
-DO 3 CHECKS:
-1. MISSED: go through every serial number on the page in order (numbers are consecutive — a gap means you missed a block). For each red-boxed number NOT in the EXISTING LIST, add it as a new item (full question, options, answer, explanation, and its "qsn_no"). Never add an MCQ that has no red box.
-2. ANSWER: for each existing item, check the red-circled option is what "answer" says; if it was misread, correct "answer" to the circled option. Do NOT change an answer using your own knowledge when a red circle is visible.
-3. IMAGE/ROMAN: set "has_image":true on any MCQ that has a real printed picture/diagram/figure/graph in its question or options (the word চিত্র alone does not count). Do not add new items that are picture-based or roman-combination (i, ii, iii / ১, ২, ৩) type.
+RULE: an MCQ belongs ONLY if its SERIAL NUMBER has a RED BOX (single box around one number, or one tall box around several consecutive numbers = all of them). Its answer = the option with the RED CIRCLE (golla) on its letter, exactly as drawn on the page. Skip MCQs with a real printed picture/diagram/figure/graph (the word চিত্র alone is not a picture) and roman/serial-combination MCQs (i, ii, iii / ১, ২, ৩ options).
+
+CHECK 1 — LOGIC: for every item in the EXISTING LIST, confirm it follows the RULE (red-boxed number, not picture, not roman-combo). If an item does NOT, set "remove":true on it.
+CHECK 2 — MISSED: read every serial number down the page (they are consecutive; a gap = a missed block). Every red-boxed number that follows the RULE but is NOT in the EXISTING LIST is a MISS — write it out completely yourself from the page (its "qsn_no", full question, 4 options, answer, explanation) and add it. Never add an MCQ that has no red box.
+CHECK 3 — ANSWER: for EVERY item (existing and new), look at the page again and read which option has the red circle; set "answer" to exactly that option letter (1st=A ... 4th=D), ignoring what the EXISTING LIST said. If a box-included MCQ has no red circle at all, use your subject knowledge.
 
 EXISTING LIST:
 {mcq_json}
 
-OUTPUT — ONE JSON array with ALL MCQs (every existing item, answer corrected if needed, PLUS newly found ones), page wording unchanged, no commentary, no markdown fences. New items need an explanation: printed ব্যাখ্যা verbatim if present, else self-written per the rules below.
+OUTPUT — ONE JSON array of ALL MCQs that follow the RULE (existing kept + newly added; removed ones flagged "remove":true), page wording unchanged, no commentary, no markdown fences. New items need an explanation: printed ব্যাখ্যা verbatim if present, else self-written per the rules below.
 {_EXPLANATION_DEPTH_RULE}
 {_MATH_UNICODE_RULE}
-[{{"qsn_no":17,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","has_image":false,"explanation":"..."}}]"""
+[{{"qsn_no":17,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","has_image":false,"remove":false,"explanation":"..."}}]"""
         txt = await _qbm_gemini_raw(img, prompt, gemini_only=True)
         _call2_provider = "Gemini"
         if not txt:
@@ -27601,6 +27603,7 @@ OUTPUT — ONE JSON array with ALL MCQs (every existing item, answer corrected i
 
         orig_by_q = {_norm_q(m.get("question")): m for m in mcqs}
         result_qs_norm = set()
+        _removed_qs = set()
         final = []
         for r in result:
             q_norm = _norm_q(r.get("question"))
@@ -27609,14 +27612,22 @@ OUTPUT — ONE JSON array with ALL MCQs (every existing item, answer corrected i
             result_qs_norm.add(q_norm)
             orig = orig_by_q.get(q_norm)
             if orig is not None:
-                # Existing MCQ -- only let Job 2 touch the answer field.
+                # CHECK 1 (logic): Call2 says this item breaks the rule -> drop it.
+                if r.get("remove") is True:
+                    _removed_qs.add(q_norm)
+                    continue
+                # CHECK 3 (answer): Call2 re-read the red circle from the page.
                 if r.get("answer"):
                     orig["answer"] = r["answer"]
                 if r.get("has_image") is True:
                     orig["has_image"] = True
+                if r.get("qsn_no") is not None and orig.get("qsn_no") is None:
+                    orig["qsn_no"] = r["qsn_no"]
                 final.append(orig)
             else:
-                # Job 1 -- genuinely new, previously-missed highlighted MCQ.
+                # CHECK 2 (miss): Call2 wrote a missed red-boxed MCQ itself.
+                if r.get("remove") is True:
+                    continue
                 if r.get("options") and r.get("answer"):
                     r["yellow_highlight"] = True
                     # 2026-08-23 FIX: without this, the dashboard's
@@ -27631,10 +27642,10 @@ OUTPUT — ONE JSON array with ALL MCQs (every existing item, answer corrected i
         # from its output (didn't intend to remove it, just omitted while
         # focusing on Job 1/2), keep it rather than silently losing it.
         for q_norm, orig in orig_by_q.items():
-            if q_norm not in result_qs_norm:
+            if q_norm not in result_qs_norm and q_norm not in _removed_qs:
                 final.append(orig)
         if not final:
-            return mcqs
+            return []  # every item failed the logic check (or none valid) -> nothing qualifies on this page
         # Serial-order fix (per request): newly-recovered MCQs were appended
         # at the end -- place every MCQ by its printed qsn_no so recovered
         # ones land in their correct serial position. Items without a
