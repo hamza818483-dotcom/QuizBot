@@ -24845,7 +24845,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
         def _call(key):
             client = gai.Client(
                 api_key=key,
-                http_options=types.HttpOptions(timeout=38000)
+                http_options=types.HttpOptions(timeout=60000)
             )
             parts = [types.Part.from_text(text=prompt)]
             for ib in img_bytes_list:
@@ -24855,7 +24855,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                 contents=parts,
                 config=types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=12288
+                    max_output_tokens=32768
                 )
             )
 
@@ -29202,6 +29202,15 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
                 call1_by_index = await _onu2_call1_extract_batch(imgs)
                 for i in range(1, len(pair) + 1):
                     call1_by_index.setdefault(i, [])
+                    # Dense-page safety (20-30 MCQ/page): if the batched call
+                    # returned nothing for a page (truncated/invalid JSON),
+                    # retry THAT page alone via single-image Call1 (24576 cap)
+                    # so it is never silently dropped as 0 MCQ.
+                    if not call1_by_index[i]:
+                        try:
+                            call1_by_index[i] = await _onu2_call1_extract(pair[i - 1][1])
+                        except Exception as _e:
+                            logger.warning(f"[ONU2 pair] single-page Call1 retry failed page {pair[i - 1][0]}: {_e}")
                 missed_by_index = await _onu2_call2_misscheck_batch(imgs, call1_by_index)
                 for i, (page_num, img) in enumerate(pair, start=1):
                     call1 = call1_by_index.get(i, [])
