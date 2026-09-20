@@ -24870,9 +24870,18 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
             # them re-confirming the same suspicious state; try just the
             # first 2 for real. If either succeeds, the flag was wrong and
             # mark_healthy() below clears it; if both genuinely 429 with
-            # PerDay, the flags were correct after all and Groq is the
-            # right call.
+            # PerDay, the flags were correct after all.
             keys_to_try = keys_to_try[:2]
+        if gemini_only:
+            # Callers that opted out of any fallback (e.g. /onu2, which is
+            # Gemini-exclusive per explicit instruction) shouldn't have one
+            # call march through 80+ keys one at a time during a genuine
+            # transient Google-side outage (503/504) -- each attempt can
+            # take up to 40s, so a long run of failures can stall a single
+            # call for many minutes and block everything queued behind it.
+            # Cap attempts; still tries a healthy spread of different keys
+            # (not the same one repeatedly), just bounded.
+            keys_to_try = keys_to_try[:20]
         for _ki, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
@@ -24936,9 +24945,10 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                     logger.warning(f"[QBM-diag] Gemini key {key[:12]}... (multi-image) response.text accessor FAILED (likely SAFETY/RECITATION/MAX_TOKENS block, not quota): {full_msg[:800]}")
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
-        logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision (first image only)")
         if gemini_only:
+            logger.warning(f"[QBM] All {len(keys_to_try)} attempted Gemini keys failed (gemini_only=True, no fallback) — returning empty")
             return ""
+        logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision (first image only)")
         return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
     except Exception as e:
         logger.warning(f"[QBM] Gemini multi-image raw call failed: {e}")
@@ -28637,24 +28647,12 @@ async def _onu2_call1_extract_batch(imgs: list) -> dict:
         return {}
     prompt = ONU2_CALL1_PROMPT_BATCHED_TMPL.format(n=n)
     try:
-        gem_txt = await _qbm_gemini_raw_multi(imgs, prompt)
+        gem_txt = await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=True)
         provider = "Gemini"
-        if gem_txt:
-            # Gemini actually responded -- trust the parse even if it's
-            # an empty list (legit "no MCQs on this page" case). Only a
-            # TRUE Gemini failure (empty text = all keys exhausted/errored
-            # inside _qbm_gemini_raw_multi) should fall through to Groq.
-            gem = _onu2_parse_mcq_array(gem_txt)
-        else:
-            gem = []
-            txt = await _qbm_groq_call(imgs[0], prompt)
-            provider = "Groq"
-            if txt:
-                gem = _onu2_parse_mcq_array(txt)
-            else:
-                or_txt = await _qbm_openrouter_call(imgs[0], prompt)
-                gem = _onu2_parse_mcq_array(or_txt) if or_txt else []
-                provider = "OpenRouter"
+        # gemini_only=True: no Groq/OpenRouter fallback here — if Gemini
+        # returns nothing, this page-pair's Call1 result is simply empty
+        # (per explicit instruction: onu2 uses Gemini exclusively).
+        gem = _onu2_parse_mcq_array(gem_txt) if gem_txt else []
         by_index = {}
         for m in gem:
             idx = m.get("page_index")
