@@ -13,11 +13,6 @@ on:
         type: boolean
         default: false
 
-# Only the newest push deploys; an older run still waiting for the bot to go idle is cancelled.
-concurrency:
-  group: sync-to-hf
-  cancel-in-progress: true
-
 jobs:
   sync-to-hf:
     runs-on: ubuntu-latest
@@ -27,22 +22,6 @@ jobs:
         with:
           fetch-depth: 0
           lfs: true
-
-      # Deploying restarts the HF container and kills any running /onu job.
-      # So wait (max 40 min) until the bot reports no active job, then deploy.
-      - name: Wait until HF bot is idle (max 40 min)
-        env:
-          HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
-        run: |
-          URL="${HF_SPACE_URL:-https://hamza-02-quizbot.hf.space}"
-          for i in $(seq 1 80); do
-            BODY=$(curl -s --max-time 20 "${URL}/health" || echo "")
-            JOBS=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('active_jobs',0))" 2>/dev/null || echo 0)
-            echo "check $i: active_jobs=${JOBS}"
-            if [ "${JOBS:-0}" = "0" ]; then exit 0; fi
-            sleep 30
-          done
-          echo "::warning::HF bot still busy after 40 min - deploying anyway"
 
       - name: Push to Primary HF Space (hamza-02/QuizBot)
         env:
