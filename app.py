@@ -27568,21 +27568,61 @@ qsn_no = the MCQ's printed serial number as a plain integer (Bangla digits conve
 
 
 
-async def _onu_call1_extract(img) -> list:
-    """/onu Call1 -- GEMINI ONLY (per request 2026-09-20: Groq/OpenRouter
-    totally removed from /onu). Extracts every MCQ that is EITHER
-    highlighted (any color) OR has a marked option (red/orange
-    circle/box on an option) -- see ONU_EXTRACT_PROMPT_GEMINI."""
+def _onu_job_cancelled() -> bool:
     try:
-        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT_GEMINI, gemini_only=True, allow5=True)
-        out = _qbm_dedup_list(gem) if gem else []
-        for m in out:
-            m["_provider"] = "Gemini"
-        return out
-    except Exception as e:
-        logger.warning(f"[ONU Call1] failed: {e}")
-        return []
+        cid = _current_job_chat_id_ctx.get(None)
+        return bool(cid) and is_cancelled(cid)
+    except Exception:
+        return False
 
+
+def _onu_is_valid_empty_array(txt: str) -> bool:
+    """True only when the model really answered a well-formed empty array."""
+    t = (txt or "").strip()
+    if "```json" in t:
+        t = t.split("```json")[1].split("```")[0].strip()
+    elif "```" in t:
+        t = t.split("```")[1].split("```")[0].strip()
+    try:
+        return json.loads(t) == []
+    except Exception:
+        return False
+
+
+async def _onu_call1_extract(img, info: dict = None) -> list:
+    """/onu Call1 -- GEMINI ONLY. Extracts every red-boxed MCQ.
+    2026-09-20: a FAILED response (empty text = all keys errored, or
+    unparseable JSON) is retried up to 3 times with fresh healthy keys and a
+    short backoff; a well-formed empty array "[]" is a real answer ("no
+    red-boxed MCQ here") and is NOT retried. The failure reason is written
+    to info["err"] so the dashboard can show it instead of "কারণ অজানা"."""
+    last_err = ""
+    for attempt in range(1, 4):
+        if _onu_job_cancelled():
+            break
+        txt = ""
+        try:
+            txt = await _qbm_gemini_raw(img, ONU_EXTRACT_PROMPT_GEMINI, gemini_only=True)
+        except Exception as e:
+            last_err = f"Gemini error: {str(e)[:60]}"
+        if txt:
+            gem = _onu_parse_json5(txt)
+            if gem:
+                out = _qbm_dedup_list(gem)
+                for m in out:
+                    m["_provider"] = "Gemini"
+                return out
+            if _onu_is_valid_empty_array(txt):
+                return []
+            last_err = "Gemini JSON parse failed"
+            logger.warning(f"[ONU Call1] attempt {attempt}/3 unparseable response: {txt[:200]!r}")
+        elif not last_err:
+            last_err = "Gemini response empty (all keys failed)"
+        if attempt < 3:
+            await asyncio.sleep(random.uniform(3, 6) * attempt)
+    if info is not None:
+        info["err"] = f"Call1: {last_err or 'cancelled'} (3 attempts)"
+    return []
 
 def _onu_parse_json5(text):
     """/onu-only parse: keeps a printed 5th option (E)."""
@@ -27693,7 +27733,7 @@ OUTPUT — ONLY a valid JSON array, no commentary, no markdown fences:
         return []
 
 
-async def _onu_verify_pass(img, mcqs: list) -> list:
+async def _onu_verify_pass(img, mcqs: list, info: dict = None) -> list:
     """/onu-ONLY Call2 — two jobs only, per request:
     1) Did Call1 catch EVERY highlighted MCQ on the page? (MAXIMALLY STRICT
        miss-check — 2026-08-23: rebuilt as a mandatory 3-pass procedure
@@ -27718,8 +27758,7 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
     array (same shape _qbm_parse_json already parses). Newly-recovered
     MCQs get yellow_highlight:true automatically since job 1 only ever
     finds highlighted blocks by construction."""
-    if not mcqs:
-        return mcqs
+    mcqs = mcqs or []  # an EMPTY Call1 still gets a full Call2 -- its boxed-serial inventory is an independent second read
     try:
         mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("qsn_no", "question", "options", "answer")} for m in mcqs], ensure_ascii=False)
         prompt = f"""VERIFY one page. Look at the PAGE IMAGE itself as the only truth; the EXISTING LIST below is just what a first pass extracted and may be wrong.
@@ -27742,13 +27781,30 @@ OUTPUT — ONE JSON object, no commentary, no markdown fences. "mcqs" = ALL MCQs
 {_EXPLANATION_DEPTH_RULE}
 {_MATH_UNICODE_RULE}
 {{"boxed_serials":[5,6,7],"skipped_serials":[6],"mcqs":[{{"qsn_no":5,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D/E","has_image":false,"remove":false,"explanation":"..."}}]}}"""
-        txt = await _qbm_gemini_raw(img, prompt, gemini_only=True)
         _call2_provider = "Gemini"
-        if not txt:
-            return mcqs  # Call2 failed entirely -- keep Call1's result as-is (Gemini-only, no Groq/OpenRouter)
-        result, _boxed, _skipped = _onu_parse_call2_output(txt)
+        result = None
+        _boxed = _skipped = None
+        _c2_err = ""
+        for _att in range(1, 4):  # up to 3 tries; each rotates through healthy keys
+            txt = await _qbm_gemini_raw(img, prompt, gemini_only=True)
+            if txt:
+                result, _boxed, _skipped = _onu_parse_call2_output(txt)
+                if result or _boxed is not None:
+                    break  # parsed fine (an empty list is a valid "nothing qualifies" answer)
+                result = None
+                _c2_err = "Call2 JSON parse failed"
+            else:
+                _c2_err = "Call2 response empty (all keys failed)"
+            if _onu_job_cancelled():
+                break
+            if _att < 3:
+                await asyncio.sleep(random.uniform(3, 6) * _att)
+        if result is None:
+            if info is not None:
+                info["err"] = _c2_err + " (3 attempts)"
+            return mcqs  # keep Call1's result as-is (Gemini-only, no Groq/OpenRouter)
         if not result:
-            return mcqs  # parse failed / empty -- untrustworthy, keep Call1's result
+            return mcqs  # Call2 says nothing (more) qualifies -- keep Call1's result
 
         # Job 2: merge corrected answers back onto Call1's items by matching
         # normalized question text (order/count from the model isn't
@@ -28000,11 +28056,14 @@ async def _onu_extract_all_pages_streaming(
         page_status[idx]["current"] = True
         if status_msg_id:
             await _safe_dash_edit()
+        _c1 = {}
+        _c2 = {}
         try:
-            mcqs = await _onu_extract_from_image(img)
+            mcqs = await _onu_extract_from_image(img, _c1)
         except Exception as e:
             logger.error(f"[ONU streaming] Call1 page {page_num} error: {e}")
             mcqs = []
+            _c1["err"] = f"Call1 exception: {str(e)[:60]}"
         call1_results[idx] = mcqs
         # Per-page flow (per request 2026-09-20): Call1 extract (above) ->
         # this SAME page's own Call2 verify+miss-check right now (single
@@ -28013,13 +28072,25 @@ async def _onu_extract_all_pages_streaming(
             final_mcqs[idx] = mcqs
         else:
             try:
-                final_mcqs[idx] = await _onu_verify_pass(img, mcqs) if mcqs else mcqs
+                final_mcqs[idx] = await _onu_verify_pass(img, mcqs, _c2)
             except Exception as e:
                 logger.warning(f"[ONU per-page] Call2 page {page_num} failed: {e} — keeping Call1 result")
                 final_mcqs[idx] = mcqs
+                _c2["err"] = f"Call2 exception: {str(e)[:60]}"
         page_status[idx]["done"] = True
         page_status[idx]["current"] = False
         page_status[idx]["mcq"] = len(final_mcqs[idx] or [])
+        if page_status[idx]["mcq"] == 0:
+            _why = " | ".join(x for x in (_c1.get("err"), _c2.get("err")) if x)
+            if _why:   # Gemini FAILED -> shown as a failure with the real reason
+                page_status[idx]["failed"] = True
+                page_status[idx]["error"] = _why
+            else:      # both calls answered "nothing red-boxed" -> genuine empty page
+                page_status[idx]["failed"] = False
+                page_status[idx]["error"] = "এই page-এ red-boxed MCQ নেই (Call1+Call2 দুটোই খালি)"
+        else:
+            page_status[idx]["failed"] = False
+            page_status[idx]["error"] = ""
         _mc = {}
         for m in (final_mcqs[idx] or []):
             p = m.get("_provider", "Gemini")
@@ -28042,6 +28113,22 @@ async def _onu_extract_all_pages_streaming(
         except Exception as e:
             logger.error(f"[ONU streaming] task error: {e}")
 
+    # Final pass: any page that FAILED (Gemini error, not a genuine empty page)
+    # gets one more sequential try now that rate-limit windows/503 spikes passed.
+    if not is_cancelled(chat_id):
+        _failed_idx = [i for i in range(n) if page_status[i].get("failed") and not (final_mcqs[i] or [])]
+        for _i in _failed_idx:
+            if is_cancelled(chat_id):
+                break
+            await asyncio.sleep(5)
+            page_status[_i]["done"] = False
+            page_status[_i]["failed"] = False
+            page_status[_i]["error"] = ""
+            try:
+                await _run_call1_then_maybe_pair(_i, pages[_i][0], pages[_i][1])
+            except Exception as e:
+                logger.error(f"[ONU streaming] retry pass page {pages[_i][0]} error: {e}")
+
     _dash_stop.set()
     try:
         await _ticker_task
@@ -28059,7 +28146,7 @@ async def _onu_extract_all_pages_streaming(
     return [(pages[i][0], pages[i][1], final_mcqs[i]) for i in range(n)]
 
 
-async def _onu_extract_from_image(img) -> list:
+async def _onu_extract_from_image(img, info: dict = None) -> list:
     """/onu Call1 ONLY (per-page) — 2026-08-23: Call2 (verify/miss-check)
     was moved OUT of here into a separate batched pass
     (_onu_batch_verify_pages) that runs across ALL pages afterward, 2
@@ -28080,10 +28167,10 @@ async def _onu_extract_from_image(img) -> list:
     behavior risk."""
     await _qbm_ram_aware_acquire()
     try:
-        call1 = await _onu_call1_extract(img)
+        call1 = await _onu_call1_extract(img, info)
         if not call1:
             return []
-        return _cap_mcq_options(call1)
+        return _cap_mcq_options(call1, max_opts=5)  # 5 = keep a printed 5th option (was 4 -> cut E + swapped answer into D)
     finally:
         _QBM_EXTRACT_HARD_CAP.release()
 
@@ -34678,30 +34765,8 @@ async def handle_message(msg: dict):
                 n_active += n_exhausted_usable
                 _low_healthy_note = f" (🔓 low-healthy safety net active: +{n_exhausted_usable} exhausted key usable)"
             lines.append(f"  ↳ এর মধ্যে actively usable: {n_active} | 🔒 stagger-locked: {n_stagger} | ⛔ circuit-paused: {n_circuit} | 🐣 warming-up: {n_warmup} | 📈 over daily-cap: {n_overcap}{_low_healthy_note}")
-            if gem_banned_set:
-                reasons = key_rotator._ban_reasons
-                meta = getattr(key_rotator, "_ban_meta", {})
-                shown = list(gem_banned_set)[:25]
-                for bk in shown:
-                    why = reasons.get(bk, "reason not recorded")
-                    m = meta.get(bk)
-                    extra = ""
-                    if m:
-                        banned_at = m.get("banned_at")
-                        age = m.get("key_age_days_at_ban")
-                        acct = m.get("account")
-                        if banned_at:
-                            when_str = datetime.fromtimestamp(banned_at, BD_TZ).strftime('%Y-%m-%d %H:%M')
-                            extra = f" [banned {when_str}"
-                            if age is not None:
-                                extra += f", key was {age:.1f}d old"
-                            if acct:
-                                extra += f", account={acct}"
-                            extra += "]"
-                    lines.append(f"    🚫 <code>{bk[:12]}...</code> — {why}{extra}")
-                if len(gem_banned_set) > 25:
-                    lines.append(f"    ...আরও {len(gem_banned_set) - 25} টা banned key (মোট {len(gem_banned_set)})")
-                lines.append("    বিস্তারিত account/timeline breakdown এর জন্য /banreport দাও")
+            # (2026-09-20) per-key banned list removed from /keys on request -- only the
+            # 🚫 Banned count in the header above remains; /banreport still has details.
 
 
             # Generic rotators (NVIDIA, Nemotron, Gemma, OpenRouter-Qwen, HF)
