@@ -28407,7 +28407,11 @@ async def handle_onu(msg: dict):
             pass
     async with lock:
         _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
-        return await _handle_onu_impl(msg)
+        _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+        try:
+            return await _handle_onu_impl(msg)
+        finally:
+            _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
 
 
 async def _handle_onu_impl(msg: dict):
@@ -29631,7 +29635,11 @@ async def handle_onu2(msg: dict):
             pass
     async with lock:
         _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
-        return await _handle_onu2_impl(msg)
+        _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+        try:
+            return await _handle_onu2_impl(msg)
+        finally:
+            _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
 
 
 async def _handle_onu2_impl(msg: dict):
@@ -36377,6 +36385,13 @@ async def _scheduled_restart_task() -> None:
     """v-RAM-fix: clean self-exit every 12h so Render restarts the process
     fresh, fully resetting RAM regardless of any leak."""
     await asyncio.sleep(12 * 3600)
+    # 2026-09-20: never kill a running job -- wait (max 3h) until none is active.
+    _waited = 0
+    while _active_jobs.get("count", 0) > 0 and _waited < 3 * 3600:
+        if _waited % 900 == 0:
+            logger.info(f"[Restart] 12h restart due but {_active_jobs.get('count')} job(s) active -> waiting")
+        await asyncio.sleep(60)
+        _waited += 60
     logger.info("[Restart] Scheduled restart: exiting cleanly for fresh RAM")
     os._exit(0)
 
@@ -36672,7 +36687,7 @@ async def _cross_bot_watchdog_task() -> None:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "db": sb is not None, "gemini_keys": len(key_rotator.keys), "bot_token": bool(BOT_TOKEN)}
+    return {"status": "ok", "db": sb is not None, "gemini_keys": len(key_rotator.keys), "bot_token": bool(BOT_TOKEN), "active_jobs": _active_jobs.get("count", 0)}
 
 @app.on_event("startup")
 async def startup():
