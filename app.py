@@ -27788,7 +27788,7 @@ async def _onu_extract_all_pages_streaming(
         if status_msg_id:
             await _safe_dash_edit()
 
-    WINDOW = 2  # max 2 pages (per request 2026-09-20).
+    WINDOW = 3  # same concurrency window qbm_extract_all_pages uses.
     # Lowered 4 -> 3 (2026-09-03 accuracy/safety/smoothness balance pass) --
     # fewer pages racing simultaneously means fewer keys/accounts hit at the
     # same instant, on top of the global concurrency cap in pdf_handler.py.
@@ -28057,8 +28057,8 @@ async def _handle_onu_impl(msg: dict):
             "<b>Format:</b>\n"
             "<code>/onu -p 1-5 -c @channel -m \"Topic\" -t group_id</code>\n\n"
             "📌 /qbm-এর মতোই existing MCQ extract করে (নতুন বানায় না)\n"
-            "📌 শুধুমাত্র সেই MCQ নেবে যার serial number-এ red box (single/group) আঁকা আছে\n"
-            "📌 বাকি সব বাদ: red box নেই এমন MCQ, ছবিযুক্ত MCQ, roman/সংখ্যা combination (i,ii,iii) MCQ\n"
+            "📌 শুধুমাত্র সেই MCQ নেবে যার প্রশ্নে yellow highlight মার্ক করা আছে\n"
+            "📌 বাকি সব বাদ: highlight নেই এমন MCQ, ছবিযুক্ত MCQ, roman/সংখ্যা combination (i,ii,iii) MCQ\n"
             "📌 -p = page range, PDF-only (না দিলে সব page)\n"
             "📌 -c = channel id (না দিলে list দেখাবে)\n"
             "📌 -m = topic name\n"
@@ -28155,18 +28155,15 @@ async def _handle_onu_impl(msg: dict):
 
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
-                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (red-box detect, 2-page pair batched)...")
+                f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (Call1 per-page, Call2 প্রতি 2-page pair শেষেই)...")
 
         # 2026-08-24 (per request): Call1 runs per-page as pages finish;
         # Call2 for a pair (page 1&2, 3&4, ...) starts the MOMENT both
         # pages in that pair have finished Call1 -- interleaved with later
         # pages' still-running Call1, instead of waiting for every single
         # page's Call1 to finish first.
-        # 2026-09-20 (per request): /onu now uses /onu2's red-boxed
-        # serial-number detection + pair-batched Call1/Call2 pipeline
-        # (max 2 pages in flight) instead of yellow-highlight detection.
-        extracted_pages = await _onu2_extract_all_pages_paired(
-            chat_id, pages, status_msg_id, file_name, topic
+        extracted_pages = await _onu_extract_all_pages_streaming(
+            chat_id, pages, topic, file_name, status_msg_id
         )
         # Same explanation-fallback safety net -- runs once here across all
         # pages after streaming extraction+verification completes.
@@ -28186,12 +28183,7 @@ async def _handle_onu_impl(msg: dict):
         agg_reasons = {"no_highlight": 0, "has_image": 0, "roman_combo": 0}
         for page_num, img, mcqs in extracted_pages:
             total_before += len(mcqs)
-            # red-box inclusion already applied by /onu2 pipeline; only drop
-            # image-attached & roman-combo MCQs (no yellow-highlight check).
-            kept = [m for m in mcqs if not _onu_mcq_has_image(m) and not _onu_mcq_is_roman_combo(m)]
-            reasons = {"no_highlight": 0,
-                       "has_image": sum(1 for m in mcqs if _onu_mcq_has_image(m)),
-                       "roman_combo": sum(1 for m in mcqs if not _onu_mcq_has_image(m) and _onu_mcq_is_roman_combo(m))}
+            kept, reasons = _onu_filter_mcqs(mcqs)
             for k in agg_reasons:
                 agg_reasons[k] += reasons[k]
             total_after += len(kept)
@@ -28268,7 +28260,7 @@ async def _handle_onu_impl(msg: dict):
                 mime_type="text/csv",
                 reply_to_message_id=status_msg_id)
         else:
-            await send_msg(chat_id, "❌ কোনো red-boxed MCQ পাওয়া যায়নি।",
+            await send_msg(chat_id, "❌ কোনো yellow-highlighted MCQ পাওয়া যায়নি।",
                             reply_to_message_id=status_msg_id)
         return
 
@@ -29186,7 +29178,7 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
     # look random (later pairs could finish before earlier ones) and
     # hammered the API harder than needed. This keeps most of the speed
     # benefit while making progress look roughly sequential.
-    MAX_CONCURRENT_PAIRS = 1  # 1 pair = max 2 pages in flight (per request, /onu + /onu2)
+    MAX_CONCURRENT_PAIRS = 2
     _pair_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PAIRS)
 
     async def _process_pair(pair_idx, pair):
