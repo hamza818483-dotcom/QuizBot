@@ -29139,14 +29139,41 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
     async def _status():
         if not status_msg_id:
             return
+        await _safe_dash_edit()
+
+    # Periodic ticker (matches /qbm's smooth live-update pattern): without
+    # this, the dashboard only refreshed when a full page-pair finished
+    # (Call1+Call2+finish, which can take a long time per pair), so elapsed
+    # time/percentage looked frozen mid-pair even though work was ongoing.
+    _dash_stop = asyncio.Event()
+    _last_dash_text = [None]
+
+    async def _safe_dash_edit():
+        text = _dashboard()
+        if text == _last_dash_text[0]:
+            return
         try:
-            await edit_msg(chat_id, status_msg_id, _dashboard(), reply_markup=_cancel_kb(chat_id))
+            await edit_msg(chat_id, status_msg_id, text, reply_markup=_cancel_kb(chat_id))
+            _last_dash_text[0] = text
         except Exception:
             pass
+
+    async def _dashboard_ticker():
+        deadline = time.time() + 1800
+        while not _dash_stop.is_set() and time.time() < deadline:
+            try:
+                await asyncio.wait_for(_dash_stop.wait(), timeout=4)
+            except asyncio.TimeoutError:
+                pass
+            if _dash_stop.is_set():
+                break
+            if status_msg_id:
+                await _safe_dash_edit()
 
     for s in page_status[:PAIR_SIZE]:
         s["current"] = True
     await _status()
+    _ticker_task = _spawn_task(_dashboard_ticker()) if status_msg_id else None
 
     # Cap how many PAIRS run concurrently (2 pairs = up to 4 pages in
     # flight at once) -- unlimited concurrency made the dashboard order
@@ -29191,6 +29218,12 @@ async def _onu2_extract_all_pages_paired(chat_id: int, pages: list, status_msg_i
                 _QBM_EXTRACT_HARD_CAP.release()
 
     await asyncio.gather(*[_process_pair(pi, pair) for pi, pair in enumerate(pairs)], return_exceptions=True)
+    _dash_stop.set()
+    if _ticker_task:
+        try:
+            await asyncio.wait_for(_ticker_task, timeout=2)
+        except Exception:
+            pass
 
     # Any slot that failed outright (exception in _process_pair before its
     # per-page results were set) still needs a placeholder so downstream
