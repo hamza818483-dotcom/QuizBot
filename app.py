@@ -36370,6 +36370,18 @@ async def startup():
     except Exception as e:
         logger.warning(f"[App] Gemini key warm-up D1 rehydrate failed (non-fatal): {e}")
 
+    # Rehydrate permanently-banned keys (403 suspended / 401 invalid service
+    # account) from D1. The local /tmp ban file is wiped on every restart
+    # (routine on free-tier hosting) -- without this, every restart forgets
+    # all previously-banned keys and wastes the first attempt of many calls
+    # retrying keys already known dead, until each fails again and gets
+    # re-banned. This was defined but never actually called at startup.
+    try:
+        from pdf_handler import load_banned_keys_from_d1
+        await load_banned_keys_from_d1()
+    except Exception as e:
+        logger.warning(f"[App] Gemini banned-key D1 rehydrate failed (non-fatal, relies on local /tmp file only): {e}")
+
     try:
         if sb is not None:
             await sb_exec(lambda: sb.table("pdf_users").select("user_id").limit(1).execute(), timeout=10)
