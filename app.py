@@ -27556,7 +27556,7 @@ ANSWER: in each included MCQ, the option with a RED CIRCLE/DOT (golla) drawn on 
 
 SKIP even if red-boxed: any MCQ with a printed picture/diagram/figure/graph in its question or options (a real image, not just the word চিত্র), and any MCQ whose options are roman-numeral / serial combinations (i, ii, iii / ১, ২, ৩ style, needs a statement list above it).
 
-UDDIPOK (উদ্দীপক): if an included MCQ belongs to a printed উদ্দীপক / passage / stem (e.g. "নিচের উদ্দীপকটি পড়ে ১৭ ও ১৮ নং প্রশ্নের উত্তর দাও"), start that MCQ's "question" with the COMPLETE উদ্দীপক text exactly as printed, then a line break, then the MCQ's own question. When one উদ্দীপক has two (or more) questions under it, EVERY one of those MCQs carries the full উদ্দীপক text in its own "question" (repeat it in each — never only in the first). The উদ্দীপক itself has no red box; only red-boxed serials are included, but each included one gets its উদ্দীপক. If the উদ্দীপক contains a printed picture/diagram, those MCQs count as has_image (skipped).
+UDDIPOK (উদ্দীপক): if an included MCQ belongs to a printed উদ্দীপক / passage / stem (e.g. "নিচের উদ্দীপকটি পড়ে ১৭ ও ১৮ নং প্রশ্নের উত্তর দাও"), start that MCQ's "question" with the COMPLETE উদ্দীপক text exactly as printed, then a line break, then the MCQ's own question. When one উদ্দীপক has two (or more) questions under it, EVERY one of those MCQs carries the full উদ্দীপক text in its own "question" (repeat it in each — never only in the first). Copy ONLY the passage/stem text itself — NEVER the instruction line that says which questions it covers (e.g. "নিচের উদ্দীপকটি পড়ে ১৭ ও ১৮ নং প্রশ্নের উত্তর দাও"); leave that line out. The উদ্দীপক itself has no red box; only red-boxed serials are included, but each included one gets its উদ্দীপক. If the উদ্দীপক contains a printed picture/diagram, those MCQs count as has_image (skipped).
 
 Keep exact page order and exact wording (Bangla stays Bangla, English stays English). Options are A-D in printed order. If an MCQ prints a FIFTH option (ক খ গ ঘ ঙ / A B C D E / ১ ২ ৩ ৪ ৫) include it too as key "E" — never drop a printed option; an MCQ that prints only 4 options gets NO "E" key (never invent one). If the red circle is on the 5th option, answer = "E".
 
@@ -27631,9 +27631,32 @@ async def _onu_call1_extract(img, info: dict = None) -> list:
         info["err"] = f"{last_err or 'cancelled'} (3 attempts)"
     return []
 
+_UD_LEAD_RE = re.compile(r"^\s*(?:নিচের\s*)?(?:উদ্দীপক|অনুচ্ছেদ)[^।\n]{0,90}?উত্তর\s*দাও\s*[।:.\-–—]*\s*")
+
+
+def _onu_strip_uddipok_instruction(q):
+    """Drop the directive line ("নিচের উদ্দীপকটি পড়ে ১৭ ও ১৮ নং প্রশ্নের উত্তর দাও")
+    from a question; the উদ্দীপক passage text itself is kept. Never empties a question."""
+    if not q or "উত্তর" not in q:
+        return q
+    keep = []
+    for ln in q.split("\n"):
+        t = ln.strip()
+        if (t and len(t) <= 140 and re.search(r"উত্তর\s*দাও", t)
+                and re.search(r"প্রশ্ন|নং|নম্বর", t) and re.search(r"উদ্দীপক|অনুচ্ছেদ|পড়", t)):
+            continue
+        keep.append(ln)
+    new = "\n".join(keep).strip()
+    new2 = _UD_LEAD_RE.sub("", new, count=1).strip() if new else new
+    return new2 or new or q
+
+
 def _onu_parse_json5(text):
-    """/onu-only parse: keeps a printed 5th option (E)."""
-    return _qbm_parse_json(text, allow5=True)
+    """/onu-only parse: keeps a printed 5th option (E) and strips the উদ্দীপক directive line."""
+    out = _qbm_parse_json(text, allow5=True)
+    for m in out:
+        m["question"] = _onu_strip_uddipok_instruction(m.get("question"))
+    return out
 
 
 _BN_DIGITS_TBL = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
@@ -27712,7 +27735,7 @@ async def _onu_recover_missing_serials(img, serials: list) -> list:
     try:
         prompt = f"""On this page, the MCQs with these SERIAL NUMBERS have a RED BOX and must be extracted: {serials}.
 For each serial number, find that MCQ on the page and write it out exactly as printed (Bangla stays Bangla, English stays English). Answer = the option with the RED CIRCLE (golla) on its letter, taken as-is (1st=A ... 4th=D, 5th=E); an MCQ that prints FIVE options (ক খ গ ঘ ঙ / A-E) must include all five as A-E, a 4-option MCQ gets no \"E\"; if there is no red circle, use your subject knowledge. Do NOT output a serial whose MCQ has a real printed picture/diagram/figure/graph, or roman/serial-combination options (i, ii, iii / ১, ২, ৩).
-If the MCQ sits under a printed উদ্দীপক / passage, start its "question" with the full উদ্দীপক text, then a line break, then its own question.
+If the MCQ sits under a printed উদ্দীপক / passage, start its "question" with the full উদ্দীপক passage text (passage only — never the instruction line like "নিচের উদ্দীপকটি পড়ে ১৭ ও ১৮ নং প্রশ্নের উত্তর দাও"), then a line break, then its own question.
 Explanation: printed ব্যাখ্যা verbatim if present, else self-written per the rules below.
 {_EXPLANATION_DEPTH_RULE}
 {_MATH_UNICODE_RULE}
@@ -27781,7 +27804,7 @@ CHECK 2 — MISSED: every number in boxed_serials that is not in skipped_serials
 CHECK 3 — ANSWER: for EVERY item (existing and new), look at the page again and read which option has the red circle; set "answer" to exactly that option letter (1st=A ... 4th=D, 5th=E), ignoring what the EXISTING LIST said. If a box-included MCQ has no red circle at all, use your subject knowledge.
 CHECK 4 — SERIAL AUDIT: for EVERY item in "mcqs" (existing and new) set "qsn_no" to the serial number actually PRINTED next to THAT MCQ on the page — compare its question text with the page; do NOT copy the EXISTING LIST's qsn_no blindly (it may be wrong, swapped, duplicated or missing). Every qsn_no must be unique and "mcqs" must be in ascending serial order. Final self-check before answering: every number in boxed_serials (minus skipped_serials) appears exactly once in "mcqs".
 CHECK 5 — OPTIONS: an MCQ may print FIVE options (ক খ গ ঘ ঙ / A B C D E). For every item confirm its "options" holds EVERY option printed on the page; if the page prints a 5th option the EXISTING LIST lacks, include it as "E" (and if the red circle is on it, "answer":"E"). 4-option MCQs stay A-D only — never invent an "E".
-CHECK 6 — UDDIPOK: if an MCQ sits under a printed উদ্দীপক / passage / stem, its "question" must START with the COMPLETE উদ্দীপক text, then a line break, then its own question — and when one উদ্দীপক has two questions, BOTH MCQs carry the full উদ্দীপক text. If an EXISTING LIST item lacks it, output that item with the corrected "question" (same "qsn_no").
+CHECK 6 — UDDIPOK: if an MCQ sits under a printed উদ্দীপক / passage / stem, its "question" must START with the COMPLETE উদ্দীপক passage text (passage only — never the instruction line like "নিচের উদ্দীপকটি পড়ে ১৭ ও ১৮ নং প্রশ্নের উত্তর দাও"), then a line break, then its own question — and when one উদ্দীপক has two questions, BOTH MCQs carry the full উদ্দীপক text. If an EXISTING LIST item lacks it, output that item with the corrected "question" (same "qsn_no").
 
 EXISTING LIST:
 {mcq_json}
