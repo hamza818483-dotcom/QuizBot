@@ -23326,6 +23326,7 @@ def _qbm_parse_json(text: str) -> list:
                 "qsn_bbox": qsn_bbox,
                 **({"yellow_highlight": mc.get("yellow_highlight")} if "yellow_highlight" in mc else {}),
                 **({"qsn_no": mc.get("qsn_no")} if "qsn_no" in mc else {}),
+                **({"has_image": mc.get("has_image")} if "has_image" in mc else {}),
                 **({"topic_hint": mc.get("topic_hint")} if "topic_hint" in mc else {}),
                 **({"subtopic_hint": mc.get("subtopic_hint")} if "subtopic_hint" in mc else {}),
                 # SOURCE-GROUNDING fields (2026-08-20): /chem's generation
@@ -27396,6 +27397,8 @@ def _onu_mcq_has_image(m: dict) -> bool:
     or an <img> tag already embedded in question/explanation."""
     if m.get("qsn_bbox"):
         return True
+    if m.get("has_image") is True:  # model-detected ACTUAL printed image on this MCQ (Call1/Call2 flag)
+        return True
     q = m.get("question", "") or ""
     if "<img" in q.lower():
         return True
@@ -27511,6 +27514,8 @@ ONU_EXTRACT_PROMPT_GEMINI = """STRICT MCQ EXTRACTOR — INCLUDE an MCQ if EITHER
   (M) MARKED OPTION: one of that MCQ's 4 options has a RED or ORANGE CIRCLE / dot / golla, or a RED or ORANGE BOX / highlight drawn around or over its letter/text (A/B/C/D by position, 1st option=A ... 4th=D).
   An MCQ that has (H) only, (M) only, or both, is INCLUDED. An MCQ with neither is SKIPPED (plain white, no option mark). Judge each MCQ block completely independently — never copy the previous block's verdict. A large red-pen RECTANGLE drawn around a GROUP of several MCQs is only a grouping annotation: it is NOT (H), and it is NOT (M) (it is not on an option letter) — judge every MCQ inside it on its own pixels. Ignore margin scribbles/handwritten notes unrelated to an option letter.
 
+IMAGE RULE (applies BEFORE everything else, to every MCQ block): if a REAL picture / diagram / figure / graph / table-image / circuit / map / photo is actually PRINTED attached to that MCQ — inside its question area, next to its options, or inside one of its options — set "has_image":true for that MCQ (it will be discarded downstream). This is about an ACTUAL drawn/printed image on the page, NOT the word "চিত্র"/"figure" appearing in text: a question that merely mentions "চিত্র" in words with no picture printed for it has "has_image":false. Plain text, numbers, equations and ordinary tables typed as text are NOT images. When in doubt whether a graphic belongs to this MCQ, judge by position: only a picture sitting within this MCQ's own block counts.
+
 STEP 1 — First, list every MCQ block on the page in order (question + its 4 options), without judging yet.
 
 STEP 2 — Now go back through that list ONE MCQ AT A TIME and, for EACH one individually, check BOTH (H) the background behind its question line and 4 options, AND (M) whether any of its 4 options carries a red/orange circle/box mark (ignore the rest of the page while judging this one block). KEEP the block if (H) OR (M) is true; DROP it only if BOTH are false:
@@ -27538,7 +27543,7 @@ STEP 4 — For each KEPT MCQ, write a short explanation (Bangla if the MCQ is in
 """ + _MATH_UNICODE_RULE + """
 
 OUTPUT FORMAT — ONLY valid JSON array of the KEPT MCQs only (highlighted OR marked option), exact order, exact wording (Bangla stays Bangla, English stays English), nothing else, no commentary, no markdown fences:
-[{"qsn_no":24,"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"explanation":"...","yellow_highlight":true}]
+[{"qsn_no":24,"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"has_image":false,"explanation":"...","yellow_highlight":true}]
 
 qsn_no = the MCQ's own printed serial number on the page as a plain integer (Bangla digits converted to normal digits, e.g. ২৪ -> 24). Use null only if no serial number is printed."""
 
@@ -27590,7 +27595,7 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
         return mcqs
     try:
         mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("qsn_no", "question", "options", "answer")} for m in mcqs], ensure_ascii=False)
-        prompt = f"""Re-check this page image against an already-extracted MCQ list. NOTE — INCLUSION RULE for this whole task: an MCQ qualifies if it is EITHER highlighted (any highlighter color, even faint/partial) OR has a marked option (a red/orange circle/box on one of its 4 options); highlight is NOT mandatory — a marked-option-only MCQ is fully valid and must be in the list, and a highlighted MCQ with no mark is equally valid. Skip only MCQs with neither. Two jobs only. JOB 1 (completeness) is the MOST CRITICAL job here — a single missed MCQ is a serious failure, so follow every step below exactly, no shortcuts.
+        prompt = f"""Re-check this page image against an already-extracted MCQ list. NOTE — INCLUSION RULE for this whole task: an MCQ qualifies if it is EITHER highlighted (any highlighter color, even faint/partial) OR has a marked option (a red/orange circle/box on one of its 4 options); highlight is NOT mandatory — a marked-option-only MCQ is fully valid and must be in the list, and a highlighted MCQ with no mark is equally valid. Skip only MCQs with neither. IMAGE RULE: an MCQ with a REAL printed picture/diagram/figure/graph attached inside its own block (question area, beside options, or inside an option) is NOT wanted — set \"has_image\":true on it (it is discarded downstream); the mere WORD চিত্র/figure in text with no printed picture is NOT an image. Two jobs only. JOB 1 (completeness) is the MOST CRITICAL job here — a single missed MCQ is a serious failure, so follow every step below exactly, no shortcuts.
 
 JOB 1 — COMPLETENESS (exhaustive, mandatory multi-pass procedure):
 PASS A — Build a complete inventory first, before judging anything else:
@@ -27620,7 +27625,7 @@ EXISTING LIST (question text used for matching in Job 1, current answer used for
 {mcq_json}
 
 OUTPUT — a single JSON array containing ALL MCQs: every item from EXISTING LIST (answer corrected per Job 2 if needed) PLUS any new items found in Job 1. Same question/option wording as the source page. No commentary, no markdown fences:
-[{{"qsn_no":24,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]
+[{{"qsn_no":24,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","has_image":false,"explanation":"..."}}]
 
 qsn_no = that MCQ's printed serial number as a plain integer (Bangla digits converted, e.g. ২৪ -> 24) — REQUIRED on every item, especially newly-found missed ones, so they can be placed in correct serial order."""
         txt = await _qbm_gemini_raw(img, prompt, gemini_only=True)
@@ -27650,6 +27655,8 @@ qsn_no = that MCQ's printed serial number as a plain integer (Bangla digits conv
                 # Existing MCQ -- only let Job 2 touch the answer field.
                 if r.get("answer"):
                     orig["answer"] = r["answer"]
+                if r.get("has_image") is True:
+                    orig["has_image"] = True
                 final.append(orig)
             else:
                 # Job 1 -- genuinely new, previously-missed highlighted MCQ.
