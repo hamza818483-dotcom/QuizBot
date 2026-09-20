@@ -27635,20 +27635,28 @@ _UD_LEAD_RE = re.compile(r"^\s*(?:নিচের\s*)?(?:উদ্দীপক|�
 
 
 def _onu_strip_uddipok_instruction(q):
-    """Drop the directive line ("নিচের উদ্দীপকটি পড়ে ১৭ ও ১৮ নং প্রশ্নের উত্তর দাও")
-    from a question; the উদ্দীপক passage text itself is kept. Never empties a question."""
+    """Drop the directive ("নিচের উদ্দীপকটি পড়ে ১৭ ও ১৮ নং প্রশ্নের উত্তর দাও") from a
+    question; the উদ্দীপক passage text itself is kept -- also when directive and
+    passage share ONE line. Never empties a question."""
     if not q or "উত্তর" not in q:
         return q
     keep = []
     for ln in q.split("\n"):
         t = ln.strip()
-        if (t and len(t) <= 140 and re.search(r"উত্তর\s*দাও", t)
+        if not t:
+            keep.append(ln)
+            continue
+        m = _UD_LEAD_RE.match(t)
+        if m:                      # directive at line start
+            rest = t[m.end():].strip()
+            if rest:               # ...followed by passage text on the same line
+                keep.append(rest)
+            continue               # pure directive line -> dropped
+        if (len(t) <= 140 and re.search(r"উত্তর\s*দাও", t)
                 and re.search(r"প্রশ্ন|নং|নম্বর", t) and re.search(r"উদ্দীপক|অনুচ্ছেদ|পড়", t)):
             continue
         keep.append(ln)
-    new = "\n".join(keep).strip()
-    new2 = _UD_LEAD_RE.sub("", new, count=1).strip() if new else new
-    return new2 or new or q
+    return "\n".join(keep).strip() or q
 
 
 def _onu_parse_json5(text):
