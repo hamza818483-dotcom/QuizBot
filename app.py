@@ -27556,6 +27556,8 @@ ANSWER: in each included MCQ, the option with a RED CIRCLE/DOT (golla) drawn on 
 
 SKIP even if red-boxed: any MCQ with a printed picture/diagram/figure/graph in its question or options (a real image, not just the word চিত্র), and any MCQ whose options are roman-numeral / serial combinations (i, ii, iii / ১, ২, ৩ style, needs a statement list above it).
 
+UDDIPOK (উদ্দীপক): if an included MCQ belongs to a printed উদ্দীপক / passage / stem (e.g. "নিচের উদ্দীপকটি পড়ে ১৭ ও ১৮ নং প্রশ্নের উত্তর দাও"), start that MCQ's "question" with the COMPLETE উদ্দীপক text exactly as printed, then a line break, then the MCQ's own question. When one উদ্দীপক has two (or more) questions under it, EVERY one of those MCQs carries the full উদ্দীপক text in its own "question" (repeat it in each — never only in the first). The উদ্দীপক itself has no red box; only red-boxed serials are included, but each included one gets its উদ্দীপক. If the উদ্দীপক contains a printed picture/diagram, those MCQs count as has_image (skipped).
+
 Keep exact page order and exact wording (Bangla stays Bangla, English stays English). Options are A-D in printed order. If an MCQ prints a FIFTH option (ক খ গ ঘ ঙ / A B C D E / ১ ২ ৩ ৪ ৫) include it too as key "E" — never drop a printed option; an MCQ that prints only 4 options gets NO "E" key (never invent one). If the red circle is on the 5th option, answer = "E".
 
 For each MCQ write "explanation": copy any printed ব্যাখ্যা near it verbatim, otherwise write one following:
@@ -27589,20 +27591,23 @@ def _onu_is_valid_empty_array(txt: str) -> bool:
         return False
 
 
+_ONU_EMPTY_RETRY_NOTE = "\n\nIMPORTANT: this page DOES contain at least one red-boxed MCQ — a previous read wrongly returned none. Look again along the left margin and around EVERY printed serial number for red rectangles (thin, faint, partly cut or overlapping boxes all count) and extract them."
+
+
 async def _onu_call1_extract(img, info: dict = None) -> list:
-    """/onu Call1 -- GEMINI ONLY. Extracts every red-boxed MCQ.
-    2026-09-20: a FAILED response (empty text = all keys errored, or
-    unparseable JSON) is retried up to 3 times with fresh healthy keys and a
-    short backoff; a well-formed empty array "[]" is a real answer ("no
-    red-boxed MCQ here") and is NOT retried. The failure reason is written
-    to info["err"] so the dashboard can show it instead of "কারণ অজানা"."""
+    """/onu Call1 -- GEMINI ONLY. 2026-09-20: a page can NEVER have 0 MCQs, so an
+    empty answer (failed OR a well-formed "[]") is retried up to 3 times with
+    fresh healthy keys; retries after an empty answer use careful mode + an
+    explicit "there IS a red-boxed MCQ" note. Reason goes to info["err"]."""
     last_err = ""
+    _empty_seen = False
     for attempt in range(1, 4):
         if _onu_job_cancelled():
             break
         txt = ""
         try:
-            txt = await _qbm_gemini_raw(img, ONU_EXTRACT_PROMPT_GEMINI, gemini_only=True)
+            txt = await _qbm_gemini_raw(img, ONU_EXTRACT_PROMPT_GEMINI + (_ONU_EMPTY_RETRY_NOTE if _empty_seen else ""),
+                                        careful=_empty_seen, gemini_only=True)
         except Exception as e:
             last_err = f"Gemini error: {str(e)[:60]}"
         if txt:
@@ -27613,15 +27618,17 @@ async def _onu_call1_extract(img, info: dict = None) -> list:
                     m["_provider"] = "Gemini"
                 return out
             if _onu_is_valid_empty_array(txt):
-                return []
-            last_err = "Gemini JSON parse failed"
-            logger.warning(f"[ONU Call1] attempt {attempt}/3 unparseable response: {txt[:200]!r}")
+                _empty_seen = True
+                last_err = "Call1: 0 MCQ (red box detect hoy ni)"
+            else:
+                last_err = "Gemini JSON parse failed"
+            logger.warning(f"[ONU Call1] attempt {attempt}/3 no MCQ ({last_err}): {txt[:120]!r}")
         elif not last_err:
             last_err = "Gemini response empty (all keys failed)"
         if attempt < 3:
             await asyncio.sleep(random.uniform(3, 6) * attempt)
     if info is not None:
-        info["err"] = f"Call1: {last_err or 'cancelled'} (3 attempts)"
+        info["err"] = f"{last_err or 'cancelled'} (3 attempts)"
     return []
 
 def _onu_parse_json5(text):
@@ -27705,6 +27712,7 @@ async def _onu_recover_missing_serials(img, serials: list) -> list:
     try:
         prompt = f"""On this page, the MCQs with these SERIAL NUMBERS have a RED BOX and must be extracted: {serials}.
 For each serial number, find that MCQ on the page and write it out exactly as printed (Bangla stays Bangla, English stays English). Answer = the option with the RED CIRCLE (golla) on its letter, taken as-is (1st=A ... 4th=D, 5th=E); an MCQ that prints FIVE options (ক খ গ ঘ ঙ / A-E) must include all five as A-E, a 4-option MCQ gets no \"E\"; if there is no red circle, use your subject knowledge. Do NOT output a serial whose MCQ has a real printed picture/diagram/figure/graph, or roman/serial-combination options (i, ii, iii / ১, ২, ৩).
+If the MCQ sits under a printed উদ্দীপক / passage, start its "question" with the full উদ্দীপক text, then a line break, then its own question.
 Explanation: printed ব্যাখ্যা verbatim if present, else self-written per the rules below.
 {_EXPLANATION_DEPTH_RULE}
 {_MATH_UNICODE_RULE}
@@ -27773,6 +27781,7 @@ CHECK 2 — MISSED: every number in boxed_serials that is not in skipped_serials
 CHECK 3 — ANSWER: for EVERY item (existing and new), look at the page again and read which option has the red circle; set "answer" to exactly that option letter (1st=A ... 4th=D, 5th=E), ignoring what the EXISTING LIST said. If a box-included MCQ has no red circle at all, use your subject knowledge.
 CHECK 4 — SERIAL AUDIT: for EVERY item in "mcqs" (existing and new) set "qsn_no" to the serial number actually PRINTED next to THAT MCQ on the page — compare its question text with the page; do NOT copy the EXISTING LIST's qsn_no blindly (it may be wrong, swapped, duplicated or missing). Every qsn_no must be unique and "mcqs" must be in ascending serial order. Final self-check before answering: every number in boxed_serials (minus skipped_serials) appears exactly once in "mcqs".
 CHECK 5 — OPTIONS: an MCQ may print FIVE options (ক খ গ ঘ ঙ / A B C D E). For every item confirm its "options" holds EVERY option printed on the page; if the page prints a 5th option the EXISTING LIST lacks, include it as "E" (and if the red circle is on it, "answer":"E"). 4-option MCQs stay A-D only — never invent an "E".
+CHECK 6 — UDDIPOK: if an MCQ sits under a printed উদ্দীপক / passage / stem, its "question" must START with the COMPLETE উদ্দীপক text, then a line break, then its own question — and when one উদ্দীপক has two questions, BOTH MCQs carry the full উদ্দীপক text. If an EXISTING LIST item lacks it, output that item with the corrected "question" (same "qsn_no").
 
 EXISTING LIST:
 {mcq_json}
@@ -27785,14 +27794,28 @@ OUTPUT — ONE JSON object, no commentary, no markdown fences. "mcqs" = ALL MCQs
         result = None
         _boxed = _skipped = None
         _c2_err = ""
+        _need = not mcqs  # Call1 found nothing: a page can never have 0 MCQ -> an empty Call2 answer is NOT trusted
         for _att in range(1, 4):  # up to 3 tries; each rotates through healthy keys
-            txt = await _qbm_gemini_raw(img, prompt, gemini_only=True)
+            _retry = _att > 1 and _need
+            txt = await _qbm_gemini_raw(img, prompt + (_ONU_EMPTY_RETRY_NOTE if _retry else ""), careful=_retry, gemini_only=True)
             if txt:
                 result, _boxed, _skipped = _onu_parse_call2_output(txt)
-                if result or _boxed is not None:
-                    break  # parsed fine (an empty list is a valid "nothing qualifies" answer)
-                result = None
-                _c2_err = "Call2 JSON parse failed"
+                if result:
+                    break
+                if _boxed is not None:
+                    if not _need:
+                        break  # Call1 had MCQs; "nothing more" is a valid answer
+                    _exp = sorted(set(_boxed) - set(_skipped or []))
+                    if _exp:  # it listed boxed serials but wrote no MCQ -> targeted recovery
+                        rec = await _onu_recover_missing_serials(img, _exp)
+                        if rec:
+                            logger.warning(f"[ONU serial] Call2 listed boxed {_exp} but wrote none -- recovered {[m['qsn_no'] for m in rec]}")
+                            return sorted(rec, key=lambda m: m["qsn_no"])
+                    result = None
+                    _c2_err = "Call2: 0 MCQ (red box detect hoy ni)"
+                else:
+                    result = None
+                    _c2_err = "Call2 JSON parse failed"
             else:
                 _c2_err = "Call2 response empty (all keys failed)"
             if _onu_job_cancelled():
@@ -27804,7 +27827,7 @@ OUTPUT — ONE JSON object, no commentary, no markdown fences. "mcqs" = ALL MCQs
                 info["err"] = _c2_err + " (3 attempts)"
             return mcqs  # keep Call1's result as-is (Gemini-only, no Groq/OpenRouter)
         if not result:
-            return mcqs  # Call2 says nothing (more) qualifies -- keep Call1's result
+            return mcqs  # Call1 had MCQs and Call2 says nothing more qualifies -- keep Call1's result
 
         # Job 2: merge corrected answers back onto Call1's items by matching
         # normalized question text (order/count from the model isn't
@@ -27813,6 +27836,11 @@ OUTPUT — ONE JSON object, no commentary, no markdown fences. "mcqs" = ALL MCQs
             return re.sub(r"\s+", " ", (q or "")).strip().lower()
 
         orig_by_q = {_norm_q(m.get("question")): m for m in mcqs}
+        orig_by_no = {}
+        for _m in mcqs:
+            _n0 = _onu_serial_int(_m.get("qsn_no"))
+            if _n0 is not None:
+                orig_by_no.setdefault(_n0, []).append(_m)
         result_qs_norm = set()
         _removed_qs = set()
         _removed_serials = set()
@@ -27823,10 +27851,25 @@ OUTPUT — ONE JSON object, no commentary, no markdown fences. "mcqs" = ALL MCQs
                 continue
             result_qs_norm.add(q_norm)
             orig = orig_by_q.get(q_norm)
+            _orig_qn = q_norm
+            if orig is None:
+                # Call2 may have PREPENDED the উদ্দীপক to an existing MCQ's question ->
+                # text no longer matches; match by printed serial instead and adopt it.
+                _n_r = _onu_serial_int(r.get("qsn_no"))
+                _cand = orig_by_no.get(_n_r) if _n_r is not None else None
+                if _cand and len(_cand) == 1:
+                    _cq = _norm_q(_cand[0].get("question"))
+                    if _cq and _cq in q_norm and len(q_norm) > len(_cq):
+                        orig = _cand[0]
+                        _orig_qn = _cq
+                        result_qs_norm.add(_cq)
+                        if r.get("remove") is not True:
+                            orig["question"] = r.get("question")
+                            logger.warning(f"[ONU uddipok] Call2 added উদ্দীপক to Q{_n_r}")
             if orig is not None:
                 # CHECK 1 (logic): Call2 says this item breaks the rule -> drop it.
                 if r.get("remove") is True:
-                    _removed_qs.add(q_norm)
+                    _removed_qs.add(_orig_qn)
                     for _x in (r.get("qsn_no"), orig.get("qsn_no")):
                         _n = _onu_serial_int(_x)
                         if _n is not None:
@@ -28082,12 +28125,9 @@ async def _onu_extract_all_pages_streaming(
         page_status[idx]["mcq"] = len(final_mcqs[idx] or [])
         if page_status[idx]["mcq"] == 0:
             _why = " | ".join(x for x in (_c1.get("err"), _c2.get("err")) if x)
-            if _why:   # Gemini FAILED -> shown as a failure with the real reason
-                page_status[idx]["failed"] = True
-                page_status[idx]["error"] = _why
-            else:      # both calls answered "nothing red-boxed" -> genuine empty page
-                page_status[idx]["failed"] = False
-                page_status[idx]["error"] = "এই page-এ red-boxed MCQ নেই (Call1+Call2 দুটোই খালি)"
+            # a page can never have 0 MCQs -> always a failure (retried in the final pass)
+            page_status[idx]["failed"] = True
+            page_status[idx]["error"] = _why or "0 MCQ — page-এ MCQ থাকার কথা, আবার চেষ্টা হবে"
         else:
             page_status[idx]["failed"] = False
             page_status[idx]["error"] = ""
