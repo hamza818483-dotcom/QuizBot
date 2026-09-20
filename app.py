@@ -27508,45 +27508,21 @@ qsn_no = the MCQ's own printed serial number on the page as a plain integer (Ban
 # so nothing downstream (_qbm_parse_json, dedup, verify/repair pipeline)
 # needs to know or care which prompt variant produced the data — this is
 # purely a Gemini-side accuracy upgrade, not a pipeline change.
-ONU_EXTRACT_PROMPT_GEMINI = """STRICT MCQ EXTRACTOR — INCLUDE an MCQ if EITHER condition is true (highlight is NOT mandatory): (H) it has a HIGHLIGHTER tint, OR (M) it has a MARKED OPTION. Never invent new MCQs. If NEITHER condition is true for any MCQ on the page → return [].
+ONU_EXTRACT_PROMPT_GEMINI = """MCQ EXTRACTOR. Extract ONLY the MCQs whose SERIAL NUMBER has a RED BOX (red rectangle) drawn around/beside it. The box is either SINGLE (around one number = one MCQ) or GROUPED (one tall box around several consecutive numbers = ALL those MCQs). Trace each box edge to see exactly which serial numbers fall inside. A serial number with no red box = SKIP. Never invent MCQs. No red-boxed MCQ on the page -> return [].
 
-  (H) HIGHLIGHT: highlighter/marker-pen tint behind that MCQ's question line and/or its 4 options — yellow, green, orange, pink, blue or any other color, bright, pale or faint, even partial (only the question line or only one option) — all count.
-  (M) MARKED OPTION: one of that MCQ's 4 options has a RED or ORANGE CIRCLE / dot / golla, or a RED or ORANGE BOX / highlight drawn around or over its letter/text (A/B/C/D by position, 1st option=A ... 4th=D).
-  An MCQ that has (H) only, (M) only, or both, is INCLUDED. An MCQ with neither is SKIPPED (plain white, no option mark). Judge each MCQ block completely independently — never copy the previous block's verdict. A large red-pen RECTANGLE drawn around a GROUP of several MCQs is only a grouping annotation: it is NOT (H), and it is NOT (M) (it is not on an option letter) — judge every MCQ inside it on its own pixels. Ignore margin scribbles/handwritten notes unrelated to an option letter.
+ANSWER: in each included MCQ, the option with a RED CIRCLE/DOT (golla) drawn on its letter is the answer (1st option=A ... 4th=D). Take exactly that option as "answer" — do not change it with your own knowledge. If an included MCQ has no red circle at all, pick the answer from your own subject knowledge.
 
-IMAGE RULE (applies BEFORE everything else, to every MCQ block): if a REAL picture / diagram / figure / graph / table-image / circuit / map / photo is actually PRINTED attached to that MCQ — inside its question area, next to its options, or inside one of its options — set "has_image":true for that MCQ (it will be discarded downstream). This is about an ACTUAL drawn/printed image on the page, NOT the word "চিত্র"/"figure" appearing in text: a question that merely mentions "চিত্র" in words with no picture printed for it has "has_image":false. Plain text, numbers, equations and ordinary tables typed as text are NOT images. When in doubt whether a graphic belongs to this MCQ, judge by position: only a picture sitting within this MCQ's own block counts.
+SKIP even if red-boxed: any MCQ with a printed picture/diagram/figure/graph in its question or options (a real image, not just the word চিত্র), and any MCQ whose options are roman-numeral / serial combinations (i, ii, iii / ১, ২, ৩ style, needs a statement list above it).
 
-STEP 1 — First, list every MCQ block on the page in order (question + its 4 options), without judging yet.
+Keep exact page order and exact wording (Bangla stays Bangla, English stays English). Options are A-D in printed order.
 
-STEP 2 — Now go back through that list ONE MCQ AT A TIME and, for EACH one individually, check BOTH (H) the background behind its question line and 4 options, AND (M) whether any of its 4 options carries a red/orange circle/box mark (ignore the rest of the page while judging this one block). KEEP the block if (H) OR (M) is true; DROP it only if BOTH are false:
-   - Is there ANY highlighter/marker-pen tint behind this specific block — yellow, green, orange, pink, blue, or any other color? (bright, pale, or faded — all count, and ANY color counts, not just yellow/green/orange)
-   - If any highlighter color is present, even faintly, this block IS highlighted — KEEP it for the output. This is a MUST-TAKE rule — never skip a highlighted MCQ even by mistake, regardless of which color was used.
-   - If the background is genuinely plain white/uncolored paper behind THIS block, this block is NOT highlighted — DROP it, do not include it in the output at all.
-   - A page can legitimately mix highlighted and non-highlighted blocks — never copy the previous block's verdict for the next one; judge each block completely independently, as if it were the only MCQ on the page.
-   - Faint/light highlighter marks are the most commonly missed case — when in doubt about a pale tint, look again before deciding it's not highlighted.
-   - CRITICAL — do not confuse a large RED-PEN RECTANGLE drawn around a GROUP of several consecutive MCQs with highlighter color. That red rectangle is just a grouping/annotation box and says NOTHING about which MCQs inside it are actually highlighted — some MCQs inside that red box may have a colored (e.g. yellow) background and some may be plain white, mixed together. Judge each MCQ's own background tint independently even when it sits inside such a red-boxed group; being inside the red box is NEVER by itself a reason to include or exclude an MCQ.
-   - Similarly, ignore any handwritten annotation words/scribbles (e.g. margin notes, circled words unrelated to the 4 options) — they are not highlighter color and don't affect the highlight decision either way.
-
-
-STEP 2b — Marked-option rule (same as /onu2): a marked option is ONLY a visual pointer to what someone chose — it is NOT automatically correct. Independently verify with your own subject knowledge:
-   - Marked option IS factually correct → "answer" = that option, "marked_answer_wrong":false.
-   - Marked option is NOT factually correct → "answer" = the ACTUALLY correct option, "marked_answer_wrong":true, and say so in the explanation.
-   - No mark on this MCQ (it was kept for highlight only) → determine the correct answer from subject knowledge, "marked_answer_wrong":false.
-
-STEP 3 — For each KEPT (highlighted) MCQ, ALSO separately check whether it has a MARKED option: the option with a RED or ORANGE CIRCLE, or a RED or ORANGE BOX/HIGHLIGHT, drawn/painted around or over its letter/text (A/B/C/D by position, 1st option=A...4th=D). This mark is completely OPTIONAL — a highlighted MCQ is kept whether or not it also has a red/orange mark; do not drop or skip an otherwise-highlighted MCQ just because it lacks this mark. When a mark IS present, it only shows what someone marked — it can be WRONG. Independently verify with your own subject knowledge which option is actually, factually correct:
-   - Marked option IS factually correct → "answer" = that option, "marked_answer_wrong":false.
-   - Marked option is NOT factually correct → "answer" = the ACTUALLY correct option (ignore the wrong mark), "marked_answer_wrong":true.
-   - No red/orange mark visible at all (this is normal and expected — most highlighted MCQs may have no mark) → determine correct answer from subject knowledge, "marked_answer_wrong":false.
-
-STEP 4 — For each KEPT MCQ, write a short explanation (Bangla if the MCQ is in Bangla) for why the correct answer is correct — use any ব্যাখ্যা text physically printed on the page near this MCQ if present (copy verbatim, no rewrite), otherwise self-write following the structure below. If marked_answer_wrong is true, the explanation MUST also state the marked option was wrong and give the correct one.
+For each MCQ write "explanation": copy any printed ব্যাখ্যা near it verbatim, otherwise write one following:
 """ + _EXPLANATION_DEPTH_RULE + """
 """ + _MATH_UNICODE_RULE + """
 
-OUTPUT FORMAT — ONLY valid JSON array of the KEPT MCQs only (highlighted OR marked option), exact order, exact wording (Bangla stays Bangla, English stays English), nothing else, no commentary, no markdown fences:
-[{"qsn_no":24,"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"has_image":false,"explanation":"...","yellow_highlight":true}]
-
-qsn_no = the MCQ's own printed serial number on the page as a plain integer (Bangla digits converted to normal digits, e.g. ২৪ -> 24). Use null only if no serial number is printed."""
-
+OUTPUT — ONLY a valid JSON array, no commentary, no markdown fences:
+[{"qsn_no":17,"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"has_image":false,"explanation":"...","yellow_highlight":true}]
+qsn_no = the MCQ's printed serial number as a plain integer (Bangla digits converted, e.g. ১৭ -> 17); null if none printed. Always set "yellow_highlight":true and "marked_answer_wrong":false."""
 
 
 
@@ -27595,39 +27571,20 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
         return mcqs
     try:
         mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("qsn_no", "question", "options", "answer")} for m in mcqs], ensure_ascii=False)
-        prompt = f"""Re-check this page image against an already-extracted MCQ list. NOTE — INCLUSION RULE for this whole task: an MCQ qualifies if it is EITHER highlighted (any highlighter color, even faint/partial) OR has a marked option (a red/orange circle/box on one of its 4 options); highlight is NOT mandatory — a marked-option-only MCQ is fully valid and must be in the list, and a highlighted MCQ with no mark is equally valid. Skip only MCQs with neither. IMAGE RULE: an MCQ with a REAL printed picture/diagram/figure/graph attached inside its own block (question area, beside options, or inside an option) is NOT wanted — set \"has_image\":true on it (it is discarded downstream); the mere WORD চিত্র/figure in text with no printed picture is NOT an image. Two jobs only. JOB 1 (completeness) is the MOST CRITICAL job here — a single missed MCQ is a serious failure, so follow every step below exactly, no shortcuts.
+        prompt = f"""VERIFY an already-extracted MCQ list against this page image. Inclusion rule: an MCQ belongs ONLY if its SERIAL NUMBER has a RED BOX (single box around one number, or one tall box around several consecutive numbers = all of them). Answer = the option with the RED CIRCLE (golla) on its letter, taken as-is.
 
-JOB 1 — COMPLETENESS (exhaustive, mandatory multi-pass procedure):
-PASS A — Build a complete inventory first, before judging anything else:
-  - Find every MCQ's printed serial number on the page (Bangla digit or English digit, e.g. ২৪, ২৫, ২৬... or 24, 25, 26...). List them out in your own reasoning as a continuous sequence.
-  - If the serial numbers have a gap (e.g. you see ২৪, ২৫, ২৭ but no ২৬), that means you missed locating MCQ ২৬ on the page — go back and find it before continuing. A page's MCQ numbers are ALWAYS consecutive with no gaps; a gap in your list is proof of a missed block, not proof the number doesn't exist.
-  - This numbering check is your primary safety net — use it deliberately, don't skip it.
+DO 3 CHECKS:
+1. MISSED: go through every serial number on the page in order (numbers are consecutive — a gap means you missed a block). For each red-boxed number NOT in the EXISTING LIST, add it as a new item (full question, options, answer, explanation, and its "qsn_no"). Never add an MCQ that has no red box.
+2. ANSWER: for each existing item, check the red-circled option is what "answer" says; if it was misread, correct "answer" to the circled option. Do NOT change an answer using your own knowledge when a red circle is visible.
+3. IMAGE/ROMAN: set "has_image":true on any MCQ that has a real printed picture/diagram/figure/graph in its question or options (the word চিত্র alone does not count). Do not add new items that are picture-based or roman-combination (i, ii, iii / ১, ২, ৩) type.
 
-PASS B — For EVERY single serial number in that complete, gap-free sequence, one at a time, in order:
-  - Locate that exact MCQ block (question + its 4 options) on the page.
-  - Check its background for ANY highlighter tint — yellow, green, orange, pink, blue, or any other color, even a single faint/pale patch behind just the question line or just one option counts, not just a fully, evenly-colored block.
-  - A highlight can be PARTIAL — sometimes only the question line is tinted and the options look white, or vice versa — either case still counts as highlighted for that MCQ.
-  - Make this decision using ONLY that MCQ's own pixels — never infer it from neighboring MCQs, from being near/inside a red-pen box, or from any pattern you noticed on the page. Each MCQ is judged completely alone, as if it were the only one on the page.
-  - A large red-pen rectangle drawn around a GROUP of several MCQs is ONLY a grouping/annotation mark — it carries ZERO information about which MCQs inside it are highlighted. MCQs inside such a box are very often a mix of highlighted and plain-white; treat being inside/outside such a box as completely irrelevant to your highlight decision.
-  - Isolated single highlighted MCQs (one highlighted MCQ surrounded by non-highlighted neighbors, or sitting just beside a red-circled cluster of OTHER MCQs) are the single most common miss — deliberately slow down and re-examine any MCQ like this before deciding.
-  - If highlighted AND its question text is NOT already present in the EXISTING LIST below, it was MISSED — add it to the output as a new item (correct question/options/answer/explanation, Bangla stays Bangla).
-
-PASS C — FINAL VERIFICATION (mandatory, do not skip): after finishing Pass B, go through your gap-free serial-number sequence from PASS A one more time, purely as a checklist — for every number, confirm you made an explicit highlight decision for it (either "highlighted, in output" or "not highlighted, correctly excluded"). If you find any serial number you never actually judged, judge it now before producing the final output.
-
-STRICT NEGATIVE RULE (equally important as finding misses): only add a NEW item in Job 1 if that specific MCQ block is genuinely, visibly highlighted by your Pass B check. Never add a plain white/non-highlighted MCQ to the output just because it's near a highlighted one, near a red-pen box, or because you're trying to be thorough — being thorough means correctly INCLUDING every highlighted MCQ AND correctly EXCLUDING every non-highlighted one, not adding extra MCQs "just in case."
-
-JOB 2 — MARKED ANSWER ACCURACY: for every MCQ already in the EXISTING LIST, look again at its 4 options and find the one with a RED or ORANGE circle/box drawn around/over its letter or text (A/B/C/D by position). Independently verify with your own subject knowledge whether that marked option is factually correct:
-- If the mark IS on the factually correct option, keep "answer" as that option.
-- If the mark is on the WRONG option, correct "answer" to the actually correct option instead.
-- If no red/orange mark is visible for that MCQ, leave "answer" as-is (already extracted).
-
-EXISTING LIST (question text used for matching in Job 1, current answer used for re-checking in Job 2):
+EXISTING LIST:
 {mcq_json}
 
-OUTPUT — a single JSON array containing ALL MCQs: every item from EXISTING LIST (answer corrected per Job 2 if needed) PLUS any new items found in Job 1. Same question/option wording as the source page. No commentary, no markdown fences:
-[{{"qsn_no":24,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","has_image":false,"explanation":"..."}}]
-
-qsn_no = that MCQ's printed serial number as a plain integer (Bangla digits converted, e.g. ২৪ -> 24) — REQUIRED on every item, especially newly-found missed ones, so they can be placed in correct serial order."""
+OUTPUT — ONE JSON array with ALL MCQs (every existing item, answer corrected if needed, PLUS newly found ones), page wording unchanged, no commentary, no markdown fences. New items need an explanation: printed ব্যাখ্যা verbatim if present, else self-written per the rules below.
+{_EXPLANATION_DEPTH_RULE}
+{_MATH_UNICODE_RULE}
+[{{"qsn_no":17,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","has_image":false,"explanation":"..."}}]"""
         txt = await _qbm_gemini_raw(img, prompt, gemini_only=True)
         _call2_provider = "Gemini"
         if not txt:
@@ -28100,8 +28057,8 @@ async def _handle_onu_impl(msg: dict):
             "<b>Format:</b>\n"
             "<code>/onu -p 1-5 -c @channel -m \"Topic\" -t group_id</code>\n\n"
             "📌 /qbm-এর মতোই existing MCQ extract করে (নতুন বানায় না)\n"
-            "📌 নেবে: highlight আছে অথবা option-এ red/orange marked আছে (যেকোনো একটা থাকলেই হবে)\n"
-            "📌 বাকি সব বাদ: highlight ও mark দুটোই নেই এমন MCQ, ছবিযুক্ত MCQ, roman/সংখ্যা combination (i,ii,iii) MCQ\n"
+            "📌 নেবে: serial number-এ red box (single/group) আছে এমন MCQ; answer = option-এ red golla যেটায়\n"
+            "📌 বাকি সব বাদ: red box নেই এমন MCQ, ছবিযুক্ত MCQ, roman/সংখ্যা combination (i,ii,iii) MCQ\n"
             "📌 -p = page range, PDF-only (না দিলে সব page)\n"
             "📌 -c = channel id (না দিলে list দেখাবে)\n"
             "📌 -m = topic name\n"
@@ -28303,7 +28260,7 @@ async def _handle_onu_impl(msg: dict):
                 mime_type="text/csv",
                 reply_to_message_id=status_msg_id)
         else:
-            await send_msg(chat_id, "❌ কোনো highlighted/marked MCQ পাওয়া যায়নি।",
+            await send_msg(chat_id, "❌ কোনো red-boxed MCQ পাওয়া যায়নি।",
                             reply_to_message_id=status_msg_id)
         return
 
