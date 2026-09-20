@@ -949,6 +949,17 @@ class GeminiKeyRotator:
         if daily_exhausted:
             _mark_gemini_key_exhausted_today(key)
 
+    # Error signatures that mean the entire Google Cloud account/service-account
+    # is dead (not just this one key) -- Google suspends at the account level,
+    # so every sibling key on that account is equally dead and will fail the
+    # same way. Waiting for each to fail individually just burns time/quota
+    # retrying keys already known-dead by association.
+    ACCOUNT_DEAD_SIGNATURES = (
+        "SERVICE ACCOUNT IS DELETED OR DISABLED",
+        "CONSUMER" ,  # covers "Consumer '...' has been suspended"
+        "HAS BEEN SUSPENDED",
+    )
+
     def mark_banned(self, key: str, reason: str = ""):
         """Permanently skip this key (e.g. 403 CONSUMER_SUSPENDED / invalid key,
         401 UNAUTHENTICATED / ACCOUNT_STATE_INVALID) — removed from the active
@@ -958,7 +969,26 @@ class GeminiKeyRotator:
         stores WHEN it was banned and how old the key was at ban-time (days
         since first_seen), so a later timeline review (was this a fresh key
         hit right after heavy first use, or an old established one?) doesn't
-        require cross-referencing separate logs."""
+        require cross-referencing separate logs.
+
+        If `reason` matches an account-dead signature (whole GCP account/
+        service-account suspended or deleted, not a single-key issue), every
+        other still-live key on that same account is banned right alongside
+        it -- they're all certainly dead too, so there's no reason to let
+        the code discover that the slow way, one 401 at a time."""
+        self._ban_one(key, reason)
+        reason_upper = (reason or "").upper()
+        if any(sig in reason_upper for sig in self.ACCOUNT_DEAD_SIGNATURES):
+            acct = self.account_of(key)
+            siblings = [k for k in self.keys if self.account_of(k) == acct and k != key]
+            for sib in siblings:
+                self._ban_one(sib, reason=f"[auto-cascaded from sibling key] {reason}"[:200])
+            if siblings:
+                logger.error(f"[Gemini] Account-wide ban cascade: {acct} confirmed dead ({reason[:80]}) -- also banned {len(siblings)} sibling key(s) on the same account instead of waiting for each to fail individually")
+
+    def _ban_one(self, key: str, reason: str = ""):
+        """Actual single-key ban mechanics, used by mark_banned() directly
+        and by its account-wide cascade."""
         self._cooldown_until[key] = float("inf")
         self._banned.add(key)
         if reason:
