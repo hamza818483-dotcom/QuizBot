@@ -27573,6 +27573,106 @@ async def _onu_call1_extract(img) -> list:
         return []
 
 
+_BN_DIGITS_TBL = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+
+
+def _onu_serial_int(v):
+    """Printed serial -> plain int. Accepts int, "17", Bangla "১৭", "১৭।" ; else None."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+    m = re.search(r"\d+", str(v).translate(_BN_DIGITS_TBL))
+    return int(m.group()) if m else None
+
+
+def _onu_parse_call2_output(txt: str):
+    """Call2 output -> (mcq_items, boxed_serials|None, skipped_serials|None).
+    Expects {"boxed_serials":[..],"skipped_serials":[..],"mcqs":[..]}; also
+    accepts a bare array; salvages a truncated object (mcqs array repaired by
+    _qbm_parse_json, serial lists by regex)."""
+    t = (txt or "").strip()
+    if "```json" in t:
+        t = t.split("```json")[1].split("```")[0].strip()
+    elif "```" in t:
+        t = t.split("```")[1].split("```")[0].strip()
+
+    def _ints(x):
+        if not isinstance(x, list):
+            return None
+        out = set()
+        for e in x:
+            n = _onu_serial_int(e)
+            if n is not None:
+                out.add(n)
+        return sorted(out)
+
+    obj = None
+    try:
+        obj = json.loads(t)
+    except Exception:
+        m = re.search(r"\{.*\}", t, re.DOTALL)
+        if m:
+            try:
+                obj = json.loads(m.group())
+            except Exception:
+                obj = None
+    if isinstance(obj, dict):
+        lst = obj.get("mcqs")
+        if isinstance(lst, list):
+            return (_qbm_parse_json(json.dumps(lst, ensure_ascii=False)),
+                    _ints(obj.get("boxed_serials")), _ints(obj.get("skipped_serials")))
+    elif isinstance(obj, list):
+        return _qbm_parse_json(json.dumps(obj, ensure_ascii=False)), None, None
+
+    def _rx(key):
+        m = re.search(r'"%s"\s*:\s*\[([^\]]*)\]' % key, t)
+        return _ints(re.findall(r"\d+", m.group(1).translate(_BN_DIGITS_TBL))) if m else None
+    i = t.find('"mcqs"')
+    if i >= 0:
+        j = t.find("[", i)
+        if j >= 0:
+            return _qbm_parse_json(t[j:]), _rx("boxed_serials"), _rx("skipped_serials")
+    return _qbm_parse_json(t), None, None
+
+
+async def _onu_recover_missing_serials(img, serials: list) -> list:
+    """ONE targeted Gemini call, only when Call2's own boxed-serial list says
+    some red-boxed MCQs are missing from its output. Never raises."""
+    try:
+        prompt = f"""On this page, the MCQs with these SERIAL NUMBERS have a RED BOX and must be extracted: {serials}.
+For each serial number, find that MCQ on the page and write it out exactly as printed (Bangla stays Bangla, English stays English). Answer = the option with the RED CIRCLE (golla) on its letter, taken as-is (1st=A ... 4th=D); if there is no red circle, use your subject knowledge. Do NOT output a serial whose MCQ has a real printed picture/diagram/figure/graph, or roman/serial-combination options (i, ii, iii / ১, ২, ৩).
+Explanation: printed ব্যাখ্যা verbatim if present, else self-written per the rules below.
+{_EXPLANATION_DEPTH_RULE}
+{_MATH_UNICODE_RULE}
+OUTPUT — ONLY a valid JSON array, no commentary, no markdown fences:
+[{{"qsn_no":5,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","has_image":false,"explanation":"..."}}]"""
+        txt = await _qbm_gemini_raw(img, prompt, gemini_only=True)
+        if not txt:
+            return []
+        wanted = set(serials)
+        out = []
+        for m in _qbm_parse_json(txt):
+            n = _onu_serial_int(m.get("qsn_no"))
+            if n is None or n not in wanted:
+                continue
+            if m.get("has_image") is True or _onu_mcq_has_image(m) or _onu_mcq_is_roman_combo(m):
+                continue
+            if not (m.get("options") and m.get("answer")):
+                continue
+            m["qsn_no"] = n
+            m["_provider"] = "Gemini"
+            m["yellow_highlight"] = True
+            out.append(m)
+        return out
+    except Exception as e:
+        logger.warning(f"[ONU serial] recovery call failed: {e}")
+        return []
+
+
 async def _onu_verify_pass(img, mcqs: list) -> list:
     """/onu-ONLY Call2 — two jobs only, per request:
     1) Did Call1 catch EVERY highlighted MCQ on the page? (MAXIMALLY STRICT
@@ -27606,24 +27706,28 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
 
 RULE: an MCQ belongs ONLY if its SERIAL NUMBER has a RED BOX (single box around one number, or one tall box around several consecutive numbers = all of them). Its answer = the option with the RED CIRCLE (golla) on its letter, exactly as drawn on the page. Skip MCQs with a real printed picture/diagram/figure/graph (the word চিত্র alone is not a picture) and roman/serial-combination MCQs (i, ii, iii / ১, ২, ৩ options).
 
-CHECK 1 — LOGIC: for every item in the EXISTING LIST, confirm it follows the RULE (red-boxed number, not picture, not roman-combo). If an item does NOT, set "remove":true on it.
-CHECK 2 — MISSED: read every serial number down the page (they are consecutive; a gap = a missed block). Every red-boxed number that follows the RULE but is NOT in the EXISTING LIST is a MISS — write it out completely yourself from the page (its "qsn_no", full question, 4 options, answer, explanation) and add it. Never add an MCQ that has no red box.
+CHECK 0 — SERIAL INVENTORY (do this FIRST): read every printed serial number down the page, top to bottom, as plain integers (Bangla digits -> normal digits, e.g. ১৭ = 17). Then write two lists:
+  "boxed_serials": every serial number that has a red box, INCLUDING every number inside a tall group box (a box spanning 21 to 30 means 21,22,23,...,30 — list each one).
+  "skipped_serials": the subset of boxed_serials you will NOT output because that MCQ has a real printed picture/diagram, or is a roman/serial-combination MCQ.
+CHECK 1 — LOGIC: for every item in the EXISTING LIST, confirm it follows the RULE (red-boxed number, not picture, not roman-combo). If it does NOT, set "remove":true on it.
+CHECK 2 — MISSED: every number in boxed_serials that is not in skipped_serials MUST appear exactly once in "mcqs". If it is NOT in the EXISTING LIST it is a MISS — write it out completely yourself from the page (its "qsn_no", full question, 4 options, answer, explanation). Never add an MCQ whose number has no red box.
 CHECK 3 — ANSWER: for EVERY item (existing and new), look at the page again and read which option has the red circle; set "answer" to exactly that option letter (1st=A ... 4th=D), ignoring what the EXISTING LIST said. If a box-included MCQ has no red circle at all, use your subject knowledge.
+CHECK 4 — SERIAL AUDIT: for EVERY item in "mcqs" (existing and new) set "qsn_no" to the serial number actually PRINTED next to THAT MCQ on the page — compare its question text with the page; do NOT copy the EXISTING LIST's qsn_no blindly (it may be wrong, swapped, duplicated or missing). Every qsn_no must be unique and "mcqs" must be in ascending serial order. Final self-check before answering: every number in boxed_serials (minus skipped_serials) appears exactly once in "mcqs".
 
 EXISTING LIST:
 {mcq_json}
 
-OUTPUT — ONE JSON array of ALL MCQs that follow the RULE (existing kept + newly added; removed ones flagged "remove":true), page wording unchanged, no commentary, no markdown fences. New items need an explanation: printed ব্যাখ্যা verbatim if present, else self-written per the rules below.
+OUTPUT — ONE JSON object, no commentary, no markdown fences. "mcqs" = ALL MCQs that follow the RULE (existing kept + newly added; wrong ones flagged "remove":true), page wording unchanged. New items need an explanation: printed ব্যাখ্যা verbatim if present, else self-written per the rules below.
 {_EXPLANATION_DEPTH_RULE}
 {_MATH_UNICODE_RULE}
-[{{"qsn_no":17,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","has_image":false,"remove":false,"explanation":"..."}}]"""
+{{"boxed_serials":[5,6,7],"skipped_serials":[6],"mcqs":[{{"qsn_no":5,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","has_image":false,"remove":false,"explanation":"..."}}]}}"""
         txt = await _qbm_gemini_raw(img, prompt, gemini_only=True)
         _call2_provider = "Gemini"
         if not txt:
             return mcqs  # Call2 failed entirely -- keep Call1's result as-is (Gemini-only, no Groq/OpenRouter)
-        result = _qbm_parse_json(txt)
+        result, _boxed, _skipped = _onu_parse_call2_output(txt)
         if not result:
-            return mcqs  # parse failed -- untrustworthy, keep Call1's result
+            return mcqs  # parse failed / empty -- untrustworthy, keep Call1's result
 
         # Job 2: merge corrected answers back onto Call1's items by matching
         # normalized question text (order/count from the model isn't
@@ -27634,6 +27738,7 @@ OUTPUT — ONE JSON array of ALL MCQs that follow the RULE (existing kept + newl
         orig_by_q = {_norm_q(m.get("question")): m for m in mcqs}
         result_qs_norm = set()
         _removed_qs = set()
+        _removed_serials = set()
         final = []
         for r in result:
             q_norm = _norm_q(r.get("question"))
@@ -27645,18 +27750,31 @@ OUTPUT — ONE JSON array of ALL MCQs that follow the RULE (existing kept + newl
                 # CHECK 1 (logic): Call2 says this item breaks the rule -> drop it.
                 if r.get("remove") is True:
                     _removed_qs.add(q_norm)
+                    for _x in (r.get("qsn_no"), orig.get("qsn_no")):
+                        _n = _onu_serial_int(_x)
+                        if _n is not None:
+                            _removed_serials.add(_n)
                     continue
                 # CHECK 3 (answer): Call2 re-read the red circle from the page.
                 if r.get("answer"):
                     orig["answer"] = r["answer"]
                 if r.get("has_image") is True:
                     orig["has_image"] = True
-                if r.get("qsn_no") is not None and orig.get("qsn_no") is None:
-                    orig["qsn_no"] = r["qsn_no"]
+                # CHECK 4 (serial): Call2 re-read the printed serial from the page
+                # -> trust it over Call1's (Call1's may be wrong/swapped/missing).
+                _r_sn = _onu_serial_int(r.get("qsn_no"))
+                if _r_sn is not None:
+                    _o_sn = _onu_serial_int(orig.get("qsn_no"))
+                    if _o_sn != _r_sn:
+                        logger.warning(f"[ONU serial] Call2 corrected qsn_no {_o_sn} -> {_r_sn}: {q_norm[:40]}")
+                    orig["qsn_no"] = _r_sn
                 final.append(orig)
             else:
                 # CHECK 2 (miss): Call2 wrote a missed red-boxed MCQ itself.
                 if r.get("remove") is True:
+                    _n = _onu_serial_int(r.get("qsn_no"))
+                    if _n is not None:
+                        _removed_serials.add(_n)
                     continue
                 if r.get("options") and r.get("answer"):
                     r["yellow_highlight"] = True
@@ -27676,30 +27794,56 @@ OUTPUT — ONE JSON array of ALL MCQs that follow the RULE (existing kept + newl
                 final.append(orig)
         if not final:
             return []  # every item failed the logic check (or none valid) -> nothing qualifies on this page
-        # Serial-order fix (per request): newly-recovered MCQs were appended
-        # at the end -- place every MCQ by its printed qsn_no so recovered
-        # ones land in their correct serial position. Items without a
-        # usable qsn_no keep their original relative order (stable sort,
-        # key falls back to their current index so they never jump around).
-        def _sn(m):
-            v = m.get("qsn_no")
-            try:
-                return int(v)
-            except (TypeError, ValueError):
-                return None
-        _idx_final = list(enumerate(final))
-        _known = [(i, m) for i, m in _idx_final if _sn(m) is not None]
-        if len(_known) == len(final):
-            final = [m for _, m in sorted(_known, key=lambda t: (_sn(t[1]), t[0]))]
-        elif _known:
-            # mixed: sort only the numbered ones among themselves, keep
-            # un-numbered ones at their existing slots.
-            _num_slots = [i for i, m in _idx_final if _sn(m) is not None]
-            _sorted_nums = sorted((m for _, m in _known), key=_sn)
-            _out = list(final)
-            for slot, m in zip(_num_slots, _sorted_nums):
-                _out[slot] = m
-            final = _out
+        # ---------- SERIAL VERIFICATION (strong) ----------
+        # 1) every MCQ carries a clean integer serial (Bangla digits -> int)
+        for m in final:
+            m["qsn_no"] = _onu_serial_int(m.get("qsn_no"))
+
+        def _sort_by_serial(lst):
+            # numbered items sorted by printed serial; un-numbered keep their slot
+            known = [(i, m) for i, m in enumerate(lst) if m.get("qsn_no") is not None]
+            if len(known) == len(lst):
+                return [m for _, m in sorted(known, key=lambda t: (t[1]["qsn_no"], t[0]))]
+            if known:
+                srt = sorted((m for _, m in known), key=lambda m: m["qsn_no"])
+                out = list(lst)
+                for (slot, _), m in zip(known, srt):
+                    out[slot] = m
+                return out
+            return lst
+
+        final = _sort_by_serial(final)
+
+        # 2) duplicate / missing serial detection
+        _have_list = [m["qsn_no"] for m in final if m.get("qsn_no") is not None]
+        _dups = sorted({n for n in _have_list if _have_list.count(n) > 1})
+        if _dups:
+            logger.warning(f"[ONU serial] duplicate qsn_no {_dups} -- two MCQs claim one serial (possible mislabel)")
+        _nos = sum(1 for m in final if m.get("qsn_no") is None)
+        if _nos:
+            logger.warning(f"[ONU serial] {_nos} MCQ(s) without qsn_no -- kept in existing position")
+
+        # 3) cross-check vs Call2's own boxed-serial inventory
+        if _boxed:
+            _have = set(_have_list)
+            _expected = set(_boxed) - set(_skipped or []) - _removed_serials
+            _missing = sorted(_expected - _have)
+            _extra = sorted(_have - set(_boxed))
+            if _extra:
+                logger.warning(f"[ONU serial] serial(s) {_extra} in output but NOT in Call2 boxed_serials -- kept (ambiguous signal, never drop), please check")
+            if _missing:
+                logger.warning(f"[ONU serial] boxed serial(s) {_missing} missing from output -- one targeted recovery call")
+                _rec = await _onu_recover_missing_serials(img, _missing)
+                _got = set()
+                for m in _rec:
+                    if m["qsn_no"] not in _have:
+                        final.append(m)
+                        _got.add(m["qsn_no"])
+                if _got:
+                    final = _sort_by_serial(final)
+                _still = sorted(set(_missing) - _got)
+                logger.warning(f"[ONU serial] recovered {sorted(_got)}; still missing {_still} (picture/roman or unreadable)")
+        logger.info(f"[ONU serial] final serials: {[m.get('qsn_no') for m in final]}")
         return final
     except Exception as e:
         logger.warning(f"[ONU-verify] failed: {e} — keeping Call1 result unverified rather than dropping it")
