@@ -954,6 +954,24 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 "exam_title": exam_title, "subject": subject, "batches": batches,
             }]
 
+            # 2026-09-20 (poll_quiz_pdf mode): in a GROUP with no thread_id, auto-create
+            # ONE forum topic named after the exam and post inside it; the links are
+            # then sent topic-wise (one message per topic). Channels keep the single post.
+            _is_group = False
+            if poll_quiz_pdf_only:
+                try:
+                    _ctype = await _get_chat_type(channel_id)
+                except Exception:
+                    _ctype = ""
+                _is_group = _ctype in ("group", "supergroup")
+                if _is_group and not thread_id:
+                    _tname = (groups[0].get("exam_title") if len(groups) == 1 else groups[0].get("subject")) or exam_title or subject or "MCQ"
+                    _auto_tid = await _create_forum_topic(channel_id, str(_tname).strip() or "MCQ")
+                    if _auto_tid:
+                        thread_id = _auto_tid
+                        logger.info(f"[LMS-Send-Links] auto-created forum topic {_tname!r} -> thread_id={thread_id}")
+            _tw_msgs = []  # topic-wise messages (header, then one per topic)
+
             total_mcq = 0
             total_topics = 0
             section_texts = []
@@ -1018,6 +1036,8 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                         f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>"
                     )
                 section_texts.append(f"\n{sep}\n".join([g_header] + blocks))
+                _tw_msgs.append(g_header)
+                _tw_msgs.extend(blocks)
 
             if not section_texts:
                 job["status"] = "error"
@@ -1031,27 +1051,63 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     f"{sep}{sep}"
                 )
                 post_text = overall_header + f"\n{sep}{sep}\n".join(section_texts)
+                _tw_msgs.insert(0, overall_header)
             else:
                 post_text = section_texts[0]
 
-            send_data = {
-                "chat_id": channel_id, "text": post_text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            }
-            if thread_id:
-                send_data["message_thread_id"] = thread_id
-            r = await tg_post("sendMessage", send_data)
-            if not r.get("ok"):
-                job["status"] = "error"
-                job["error"] = r.get("description") or "Telegram send failed"
-                logger.error(f"[LMS-Send-Links] sendMessage failed: {job['error']}")
-                return
-            sent_chat = r.get("result", {}).get("chat", {})
-            sent_msg_id = r.get("result", {}).get("message_id")
+            def _pack(text, limit=3800):
+                # split ONLY at block boundaries (each piece is complete HTML) and only if too long
+                parts = text.split(f"\n{sep}\n")
+                out, cur = [], ""
+                for p in parts:
+                    cand = (cur + f"\n{sep}\n" + p) if cur else p
+                    if cur and len(cand) > limit:
+                        out.append(cur)
+                        cur = p
+                    else:
+                        cur = cand
+                if cur:
+                    out.append(cur)
+                return out
+
+            if poll_quiz_pdf_only and _is_group:
+                _msgs = [m for m in _tw_msgs if m and m.strip()]   # topic-wise: header, then ONE message per topic
+            else:
+                _msgs = _pack(post_text)                            # single post (split only if > Telegram limit)
+            _n = len(_msgs)
+            sent_chat, sent_msg_id = {}, None
+            for _i, _txt in enumerate(_msgs):
+                if job.get("cancel_requested"):
+                    job["status"] = "cancelled"
+                    return
+                send_data = {
+                    "chat_id": channel_id, "text": _txt,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                }
+                if thread_id:
+                    send_data["message_thread_id"] = thread_id
+                r = await tg_post("sendMessage", send_data)
+                _tries = 0
+                while not r.get("ok") and _tries < 3 and "too many requests" in str(r.get("description", "")).lower():
+                    _tries += 1
+                    _ra = int((r.get("parameters") or {}).get("retry_after") or 5)
+                    await asyncio.sleep(min(_ra, 30) + 1)
+                    r = await tg_post("sendMessage", send_data)
+                if not r.get("ok"):
+                    job["status"] = "error"
+                    job["error"] = r.get("description") or "Telegram send failed"
+                    logger.error(f"[LMS-Send-Links] sendMessage {_i + 1}/{_n} failed: {job['error']}")
+                    return
+                if _i == 0:
+                    sent_chat = r.get("result", {}).get("chat", {})
+                    sent_msg_id = r.get("result", {}).get("message_id")
+                job["pct"] = int((_i + 1) * 100 / _n)
+                if _i < _n - 1:
+                    await asyncio.sleep(1.2)  # groups allow ~20 msgs/min
             logger.info(
-                f"[LMS-Send-Links] posted OK -> chat_id={channel_id} resolved_chat={sent_chat.get('id')} "
-                f"type={sent_chat.get('type')} title={sent_chat.get('title')!r} message_id={sent_msg_id}"
+                f"[LMS-Send-Links] posted OK ({_n} msg) -> chat_id={channel_id} resolved_chat={sent_chat.get('id')} "
+                f"type={sent_chat.get('type')} title={sent_chat.get('title')!r} first_message_id={sent_msg_id} thread_id={thread_id}"
             )
             job["status"] = "done"
             job["pct"] = 100
