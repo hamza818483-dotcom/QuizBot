@@ -27428,9 +27428,9 @@ def _onu_filter_mcqs(mcqs: list):
     kept = []
     reasons = {"no_highlight": 0, "has_image": 0, "roman_combo": 0}
     for m in mcqs:
-        if not m.get("yellow_highlight"):
-            reasons["no_highlight"] += 1
-            continue
+        # 2026-09-20: highlight is NOT mandatory anymore -- an MCQ qualifies
+        # if highlighted OR has a marked option; that decision is made by the
+        # model (Call1/Call2) so anything it returned already qualifies.
         if _onu_mcq_has_image(m):
             reasons["has_image"] += 1
             continue
@@ -27505,11 +27505,15 @@ qsn_no = the MCQ's own printed serial number on the page as a plain integer (Ban
 # so nothing downstream (_qbm_parse_json, dedup, verify/repair pipeline)
 # needs to know or care which prompt variant produced the data — this is
 # purely a Gemini-side accuracy upgrade, not a pipeline change.
-ONU_EXTRACT_PROMPT_GEMINI = """STRICT MCQ EXTRACTOR — HIGHLIGHTED ONLY, with careful visual highlight detection. Never invent new MCQs. 0 highlighted MCQs → return [].
+ONU_EXTRACT_PROMPT_GEMINI = """STRICT MCQ EXTRACTOR — INCLUDE an MCQ if EITHER condition is true (highlight is NOT mandatory): (H) it has a HIGHLIGHTER tint, OR (M) it has a MARKED OPTION. Never invent new MCQs. If NEITHER condition is true for any MCQ on the page → return [].
 
-STEP 1 — First, list every MCQ block on the page in order (question + its 4 options), without judging highlight yet.
+  (H) HIGHLIGHT: highlighter/marker-pen tint behind that MCQ's question line and/or its 4 options — yellow, green, orange, pink, blue or any other color, bright, pale or faint, even partial (only the question line or only one option) — all count.
+  (M) MARKED OPTION: one of that MCQ's 4 options has a RED or ORANGE CIRCLE / dot / golla, or a RED or ORANGE BOX / highlight drawn around or over its letter/text (A/B/C/D by position, 1st option=A ... 4th=D).
+  An MCQ that has (H) only, (M) only, or both, is INCLUDED. An MCQ with neither is SKIPPED (plain white, no option mark). Judge each MCQ block completely independently — never copy the previous block's verdict. A large red-pen RECTANGLE drawn around a GROUP of several MCQs is only a grouping annotation: it is NOT (H), and it is NOT (M) (it is not on an option letter) — judge every MCQ inside it on its own pixels. Ignore margin scribbles/handwritten notes unrelated to an option letter.
 
-STEP 2 — Now go back through that list ONE MCQ AT A TIME and, for EACH one individually, zoom your attention onto ONLY the background area directly behind that MCQ's question line and its 4 options (ignore the rest of the page while judging this one block):
+STEP 1 — First, list every MCQ block on the page in order (question + its 4 options), without judging yet.
+
+STEP 2 — Now go back through that list ONE MCQ AT A TIME and, for EACH one individually, check BOTH (H) the background behind its question line and 4 options, AND (M) whether any of its 4 options carries a red/orange circle/box mark (ignore the rest of the page while judging this one block). KEEP the block if (H) OR (M) is true; DROP it only if BOTH are false:
    - Is there ANY highlighter/marker-pen tint behind this specific block — yellow, green, orange, pink, blue, or any other color? (bright, pale, or faded — all count, and ANY color counts, not just yellow/green/orange)
    - If any highlighter color is present, even faintly, this block IS highlighted — KEEP it for the output. This is a MUST-TAKE rule — never skip a highlighted MCQ even by mistake, regardless of which color was used.
    - If the background is genuinely plain white/uncolored paper behind THIS block, this block is NOT highlighted — DROP it, do not include it in the output at all.
@@ -27517,6 +27521,12 @@ STEP 2 — Now go back through that list ONE MCQ AT A TIME and, for EACH one ind
    - Faint/light highlighter marks are the most commonly missed case — when in doubt about a pale tint, look again before deciding it's not highlighted.
    - CRITICAL — do not confuse a large RED-PEN RECTANGLE drawn around a GROUP of several consecutive MCQs with highlighter color. That red rectangle is just a grouping/annotation box and says NOTHING about which MCQs inside it are actually highlighted — some MCQs inside that red box may have a colored (e.g. yellow) background and some may be plain white, mixed together. Judge each MCQ's own background tint independently even when it sits inside such a red-boxed group; being inside the red box is NEVER by itself a reason to include or exclude an MCQ.
    - Similarly, ignore any handwritten annotation words/scribbles (e.g. margin notes, circled words unrelated to the 4 options) — they are not highlighter color and don't affect the highlight decision either way.
+
+
+STEP 2b — Marked-option rule (same as /onu2): a marked option is ONLY a visual pointer to what someone chose — it is NOT automatically correct. Independently verify with your own subject knowledge:
+   - Marked option IS factually correct → "answer" = that option, "marked_answer_wrong":false.
+   - Marked option is NOT factually correct → "answer" = the ACTUALLY correct option, "marked_answer_wrong":true, and say so in the explanation.
+   - No mark on this MCQ (it was kept for highlight only) → determine the correct answer from subject knowledge, "marked_answer_wrong":false.
 
 STEP 3 — For each KEPT (highlighted) MCQ, ALSO separately check whether it has a MARKED option: the option with a RED or ORANGE CIRCLE, or a RED or ORANGE BOX/HIGHLIGHT, drawn/painted around or over its letter/text (A/B/C/D by position, 1st option=A...4th=D). This mark is completely OPTIONAL — a highlighted MCQ is kept whether or not it also has a red/orange mark; do not drop or skip an otherwise-highlighted MCQ just because it lacks this mark. When a mark IS present, it only shows what someone marked — it can be WRONG. Independently verify with your own subject knowledge which option is actually, factually correct:
    - Marked option IS factually correct → "answer" = that option, "marked_answer_wrong":false.
@@ -27527,7 +27537,7 @@ STEP 4 — For each KEPT MCQ, write a short explanation (Bangla if the MCQ is in
 """ + _EXPLANATION_DEPTH_RULE + """
 """ + _MATH_UNICODE_RULE + """
 
-OUTPUT FORMAT — ONLY valid JSON array of the KEPT (highlighted) MCQs only, exact order, exact wording (Bangla stays Bangla, English stays English), nothing else, no commentary, no markdown fences:
+OUTPUT FORMAT — ONLY valid JSON array of the KEPT MCQs only (highlighted OR marked option), exact order, exact wording (Bangla stays Bangla, English stays English), nothing else, no commentary, no markdown fences:
 [{"qsn_no":24,"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"explanation":"...","yellow_highlight":true}]
 
 qsn_no = the MCQ's own printed serial number on the page as a plain integer (Bangla digits converted to normal digits, e.g. ২৪ -> 24). Use null only if no serial number is printed."""
@@ -27536,30 +27546,15 @@ qsn_no = the MCQ's own printed serial number on the page as a plain integer (Ban
 
 
 async def _onu_call1_extract(img) -> list:
-    """Same as _qbm_call1_extract but uses ONU_EXTRACT_PROMPT (adds yellow_highlight field, which covers ANY highlighter color — yellow, green, orange, pink, blue, etc).
-    Gemini primary / Groq fallback (matches /qbm's provider order) -- Gemini
-    generally reads highlight color/marks more reliably than Groq's vision
-    model, so it's tried first; Groq only kicks in if Gemini fails/is
-    exhausted, same fallback order as the rest of the pipeline."""
+    """/onu Call1 -- GEMINI ONLY (per request 2026-09-20: Groq/OpenRouter
+    totally removed from /onu). Extracts every MCQ that is EITHER
+    highlighted (any color) OR has a marked option (red/orange
+    circle/box on an option) -- see ONU_EXTRACT_PROMPT_GEMINI."""
     try:
-        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT_GEMINI)
+        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT_GEMINI, gemini_only=True)
         out = _qbm_dedup_list(gem) if gem else []
         for m in out:
             m["_provider"] = "Gemini"
-        if out:
-            return out
-        txt = await _qbm_groq_call(img, ONU_EXTRACT_PROMPT)
-        result = _qbm_parse_json(txt) if txt else []
-        if result:
-            out = _qbm_dedup_list(result)
-            for m in out:
-                m["_provider"] = "Groq"
-            return out
-        or_txt = await _qbm_openrouter_call(img, ONU_EXTRACT_PROMPT)
-        result3 = _qbm_parse_json(or_txt) if or_txt else []
-        out = _qbm_dedup_list(result3)
-        for m in out:
-            m["_provider"] = "OpenRouter"
         return out
     except Exception as e:
         logger.warning(f"[ONU Call1] failed: {e}")
@@ -27595,7 +27590,7 @@ async def _onu_verify_pass(img, mcqs: list) -> list:
         return mcqs
     try:
         mcq_json = json.dumps([{k: v for k, v in m.items() if k in ("qsn_no", "question", "options", "answer")} for m in mcqs], ensure_ascii=False)
-        prompt = f"""Re-check this page image against an already-extracted MCQ list. Two jobs only. JOB 1 (completeness) is the MOST CRITICAL job here — a single missed MCQ is a serious failure, so follow every step below exactly, no shortcuts.
+        prompt = f"""Re-check this page image against an already-extracted MCQ list. NOTE — INCLUSION RULE for this whole task: an MCQ qualifies if it is EITHER highlighted (any highlighter color, even faint/partial) OR has a marked option (a red/orange circle/box on one of its 4 options); highlight is NOT mandatory — a marked-option-only MCQ is fully valid and must be in the list, and a highlighted MCQ with no mark is equally valid. Skip only MCQs with neither. Two jobs only. JOB 1 (completeness) is the MOST CRITICAL job here — a single missed MCQ is a serious failure, so follow every step below exactly, no shortcuts.
 
 JOB 1 — COMPLETENESS (exhaustive, mandatory multi-pass procedure):
 PASS A — Build a complete inventory first, before judging anything else:
@@ -27628,16 +27623,10 @@ OUTPUT — a single JSON array containing ALL MCQs: every item from EXISTING LIS
 [{{"qsn_no":24,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]
 
 qsn_no = that MCQ's printed serial number as a plain integer (Bangla digits converted, e.g. ২৪ -> 24) — REQUIRED on every item, especially newly-found missed ones, so they can be placed in correct serial order."""
-        txt = await _qbm_gemini_raw(img, prompt)
+        txt = await _qbm_gemini_raw(img, prompt, gemini_only=True)
         _call2_provider = "Gemini"
         if not txt:
-            txt = await _qbm_groq_call(img, prompt)
-            _call2_provider = "Groq"
-        if not txt:
-            txt = await _qbm_openrouter_call(img, prompt)
-            _call2_provider = "OpenRouter"
-        if not txt:
-            return mcqs  # Call2 failed entirely -- keep Call1's result as-is rather than losing highlighted MCQs
+            return mcqs  # Call2 failed entirely -- keep Call1's result as-is (Gemini-only, no Groq/OpenRouter)
         result = _qbm_parse_json(txt)
         if not result:
             return mcqs  # parse failed -- untrustworthy, keep Call1's result
@@ -28011,14 +28000,8 @@ EXISTING LISTS, keyed by page_index (question text used for matching in Job 1, c
 
 OUTPUT — a single JSON object with keys "1" and "2" (one per page_index), each value a JSON array containing ALL MCQs for that page: every item from that page's EXISTING LIST (answer corrected per Job 2 if needed) PLUS any new items found in Job 1 for that page. Same question/option wording as the source page. No commentary, no markdown fences:
 {{"1":[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}],"2":[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"..."}}]}}"""
-        txt = await _qbm_gemini_raw_multi(imgs, prompt)
+        txt = await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=True)
         _call2_provider = "Gemini"
-        if not txt:
-            txt = await _qbm_groq_call(imgs[0], prompt)
-            _call2_provider = "Groq"
-        if not txt:
-            txt = await _qbm_openrouter_call(imgs[0], prompt)
-            _call2_provider = "OpenRouter"
         if not txt:
             return mcqs_list  # both pages' Call2 failed -- keep Call1 results
 
@@ -28110,8 +28093,8 @@ async def _handle_onu_impl(msg: dict):
             "<b>Format:</b>\n"
             "<code>/onu -p 1-5 -c @channel -m \"Topic\" -t group_id</code>\n\n"
             "📌 /qbm-এর মতোই existing MCQ extract করে (নতুন বানায় না)\n"
-            "📌 শুধুমাত্র সেই MCQ নেবে যার প্রশ্নে yellow highlight মার্ক করা আছে\n"
-            "📌 বাকি সব বাদ: highlight নেই এমন MCQ, ছবিযুক্ত MCQ, roman/সংখ্যা combination (i,ii,iii) MCQ\n"
+            "📌 নেবে: highlight আছে অথবা option-এ red/orange marked আছে (যেকোনো একটা থাকলেই হবে)\n"
+            "📌 বাকি সব বাদ: highlight ও mark দুটোই নেই এমন MCQ, ছবিযুক্ত MCQ, roman/সংখ্যা combination (i,ii,iii) MCQ\n"
             "📌 -p = page range, PDF-only (না দিলে সব page)\n"
             "📌 -c = channel id (না দিলে list দেখাবে)\n"
             "📌 -m = topic name\n"
@@ -28313,7 +28296,7 @@ async def _handle_onu_impl(msg: dict):
                 mime_type="text/csv",
                 reply_to_message_id=status_msg_id)
         else:
-            await send_msg(chat_id, "❌ কোনো yellow-highlighted MCQ পাওয়া যায়নি।",
+            await send_msg(chat_id, "❌ কোনো highlighted/marked MCQ পাওয়া যায়নি।",
                             reply_to_message_id=status_msg_id)
         return
 
