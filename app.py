@@ -27585,8 +27585,12 @@ def _onu_serial_int(v):
             return int(v)
         except (TypeError, ValueError):
             return None
-    m = re.search(r"\d+", str(v).translate(_BN_DIGITS_TBL))
-    return int(m.group()) if m else None
+    groups = re.findall(r"\d+", str(v).translate(_BN_DIGITS_TBL))
+    # exactly ONE digit group ("17", "১৭।") -> usable serial. Mixed labels like
+    # "১ক৬" / "৪জ ৯" have several groups; a single int would collapse them all
+    # to the same number and scramble the order -> None (item keeps its
+    # top-to-bottom page position instead).
+    return int(groups[0]) if len(groups) == 1 else None
 
 
 def _onu_parse_call2_output(txt: str):
