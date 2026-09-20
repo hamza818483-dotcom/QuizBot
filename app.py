@@ -23249,7 +23249,7 @@ def _looks_ai_generated(expl: str) -> bool:
     return any(p.lower() in low for p in _AI_GENERATED_PATTERNS)
 
 
-def _qbm_parse_json(text: str) -> list:
+def _qbm_parse_json(text: str, allow5: bool = False) -> list:
     """Parse extractor JSON output -> list of {question, options[A-D], answer(A-D), explanation}"""
     if not text:
         return []
@@ -23306,6 +23306,17 @@ def _qbm_parse_json(text: str) -> list:
                 opts_list = [_clean_mcq_text(o) for o in padded]
             else:
                 continue
+            # allow5 (opt-in, /onu only): keep a printed FIFTH option (ক-ঙ / A-E).
+            # Default False -> always exactly 4 options as before.
+            if allow5:
+                if isinstance(opts, dict):
+                    _e5 = _clean_mcq_text(opts.get("E", ""))
+                elif isinstance(opts, list) and len(opts) >= 5:
+                    _e5 = _clean_mcq_text(opts[4])
+                else:
+                    _e5 = ""
+                if _e5:
+                    opts_list = opts_list + [_e5]
             expl = _clean_mcq_text(mc.get("explanation", ""))
             expl_source = mc.get("explanation_source", "")
             raw_qbbox = mc.get("qsn_bbox")
@@ -23321,7 +23332,7 @@ def _qbm_parse_json(text: str) -> list:
             valid.append({
                 "question": q.strip(),
                 "options": opts_list,
-                "answer": mc.get("answer", "A") if mc.get("answer") in ("A", "B", "C", "D") else "A",
+                "answer": mc.get("answer", "A") if mc.get("answer") in (("A", "B", "C", "D", "E") if len(opts_list) >= 5 else ("A", "B", "C", "D")) else "A",
                 "explanation": expl,
                 "qsn_bbox": qsn_bbox,
                 **({"yellow_highlight": mc.get("yellow_highlight")} if "yellow_highlight" in mc else {}),
@@ -25361,7 +25372,7 @@ async def handle_ai(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
-async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False, careful: bool = False, gemini_only: bool = False):
+async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False, careful: bool = False, gemini_only: bool = False, allow5: bool = False):
     """Direct Gemini call with the strict extraction prompt (fallback path).
 
     2026-08-20: added optional _return_marker_info flag (default False, so
@@ -25385,9 +25396,9 @@ async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool
     # which only captures WARNING+.
     if not txt:
         logger.warning("[QBM-debug] _qbm_gemini_extract: EMPTY raw response text from Gemini")
-    elif not _qbm_parse_json(txt):
+    elif not _qbm_parse_json(txt, allow5=allow5):
         logger.warning(f"[QBM-debug] _qbm_gemini_extract: Gemini responded but 0 MCQs parsed. Raw (first 300 chars): {txt[:300]!r}")
-    parsed = _qbm_parse_json(txt) if txt else []
+    parsed = _qbm_parse_json(txt, allow5=allow5) if txt else []
     if not _return_marker_info:
         return parsed
     is_marker_only = bool(parsed) and all(isinstance(m, dict) and "trailing_topic_marker" in m for m in parsed)
@@ -25530,7 +25541,7 @@ async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str, 
     try:
         q = mc.get("question", "")
         opts = mc.get("options", [])
-        opts_txt = "\n".join(f"{L}) {o}" for L, o in zip("ABCD", opts))
+        opts_txt = "\n".join(f"{L}) {o}" for L, o in zip("ABCDE", opts))
         prompt = f"""প্রশ্ন: {q}
 {opts_txt}
 সঠিক উত্তর: {answer_letter}
@@ -27541,18 +27552,18 @@ qsn_no = the MCQ's own printed serial number on the page as a plain integer (Ban
 # purely a Gemini-side accuracy upgrade, not a pipeline change.
 ONU_EXTRACT_PROMPT_GEMINI = """MCQ EXTRACTOR. Extract ONLY the MCQs whose SERIAL NUMBER has a RED BOX (red rectangle) drawn around/beside it. The box is either SINGLE (around one number = one MCQ) or GROUPED (one tall box around several consecutive numbers = ALL those MCQs). Trace each box edge to see exactly which serial numbers fall inside. A serial number with no red box = SKIP. Never invent MCQs. No red-boxed MCQ on the page -> return [].
 
-ANSWER: in each included MCQ, the option with a RED CIRCLE/DOT (golla) drawn on its letter is the answer (1st option=A ... 4th=D). Take exactly that option as "answer" — do not change it with your own knowledge. If an included MCQ has no red circle at all, pick the answer from your own subject knowledge.
+ANSWER: in each included MCQ, the option with a RED CIRCLE/DOT (golla) drawn on its letter is the answer (1st option=A ... 4th=D, 5th=E). Take exactly that option as "answer" — do not change it with your own knowledge. If an included MCQ has no red circle at all, pick the answer from your own subject knowledge.
 
 SKIP even if red-boxed: any MCQ with a printed picture/diagram/figure/graph in its question or options (a real image, not just the word চিত্র), and any MCQ whose options are roman-numeral / serial combinations (i, ii, iii / ১, ২, ৩ style, needs a statement list above it).
 
-Keep exact page order and exact wording (Bangla stays Bangla, English stays English). Options are A-D in printed order.
+Keep exact page order and exact wording (Bangla stays Bangla, English stays English). Options are A-D in printed order. If an MCQ prints a FIFTH option (ক খ গ ঘ ঙ / A B C D E / ১ ২ ৩ ৪ ৫) include it too as key "E" — never drop a printed option; an MCQ that prints only 4 options gets NO "E" key (never invent one). If the red circle is on the 5th option, answer = "E".
 
 For each MCQ write "explanation": copy any printed ব্যাখ্যা near it verbatim, otherwise write one following:
 """ + _EXPLANATION_DEPTH_RULE + """
 """ + _MATH_UNICODE_RULE + """
 
 OUTPUT — ONLY a valid JSON array, no commentary, no markdown fences:
-[{"qsn_no":17,"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"has_image":false,"explanation":"...","yellow_highlight":true}]
+[{"qsn_no":17,"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D/E","marked_answer_wrong":false,"has_image":false,"explanation":"...","yellow_highlight":true}]
 qsn_no = the MCQ's printed serial number as a plain integer (Bangla digits converted, e.g. ১৭ -> 17); null if none printed. Always set "yellow_highlight":true and "marked_answer_wrong":false."""
 
 
@@ -27563,7 +27574,7 @@ async def _onu_call1_extract(img) -> list:
     highlighted (any color) OR has a marked option (red/orange
     circle/box on an option) -- see ONU_EXTRACT_PROMPT_GEMINI."""
     try:
-        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT_GEMINI, gemini_only=True)
+        gem = await _qbm_gemini_extract(img, ONU_EXTRACT_PROMPT_GEMINI, gemini_only=True, allow5=True)
         out = _qbm_dedup_list(gem) if gem else []
         for m in out:
             m["_provider"] = "Gemini"
@@ -27571,6 +27582,11 @@ async def _onu_call1_extract(img) -> list:
     except Exception as e:
         logger.warning(f"[ONU Call1] failed: {e}")
         return []
+
+
+def _onu_parse_json5(text):
+    """/onu-only parse: keeps a printed 5th option (E)."""
+    return _qbm_parse_json(text, allow5=True)
 
 
 _BN_DIGITS_TBL = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
@@ -27627,10 +27643,10 @@ def _onu_parse_call2_output(txt: str):
     if isinstance(obj, dict):
         lst = obj.get("mcqs")
         if isinstance(lst, list):
-            return (_qbm_parse_json(json.dumps(lst, ensure_ascii=False)),
+            return (_onu_parse_json5(json.dumps(lst, ensure_ascii=False)),
                     _ints(obj.get("boxed_serials")), _ints(obj.get("skipped_serials")))
     elif isinstance(obj, list):
-        return _qbm_parse_json(json.dumps(obj, ensure_ascii=False)), None, None
+        return _onu_parse_json5(json.dumps(obj, ensure_ascii=False)), None, None
 
     def _rx(key):
         m = re.search(r'"%s"\s*:\s*\[([^\]]*)\]' % key, t)
@@ -27639,8 +27655,8 @@ def _onu_parse_call2_output(txt: str):
     if i >= 0:
         j = t.find("[", i)
         if j >= 0:
-            return _qbm_parse_json(t[j:]), _rx("boxed_serials"), _rx("skipped_serials")
-    return _qbm_parse_json(t), None, None
+            return _onu_parse_json5(t[j:]), _rx("boxed_serials"), _rx("skipped_serials")
+    return _onu_parse_json5(t), None, None
 
 
 async def _onu_recover_missing_serials(img, serials: list) -> list:
@@ -27648,18 +27664,18 @@ async def _onu_recover_missing_serials(img, serials: list) -> list:
     some red-boxed MCQs are missing from its output. Never raises."""
     try:
         prompt = f"""On this page, the MCQs with these SERIAL NUMBERS have a RED BOX and must be extracted: {serials}.
-For each serial number, find that MCQ on the page and write it out exactly as printed (Bangla stays Bangla, English stays English). Answer = the option with the RED CIRCLE (golla) on its letter, taken as-is (1st=A ... 4th=D); if there is no red circle, use your subject knowledge. Do NOT output a serial whose MCQ has a real printed picture/diagram/figure/graph, or roman/serial-combination options (i, ii, iii / ১, ২, ৩).
+For each serial number, find that MCQ on the page and write it out exactly as printed (Bangla stays Bangla, English stays English). Answer = the option with the RED CIRCLE (golla) on its letter, taken as-is (1st=A ... 4th=D, 5th=E); an MCQ that prints FIVE options (ক খ গ ঘ ঙ / A-E) must include all five as A-E, a 4-option MCQ gets no \"E\"; if there is no red circle, use your subject knowledge. Do NOT output a serial whose MCQ has a real printed picture/diagram/figure/graph, or roman/serial-combination options (i, ii, iii / ১, ২, ৩).
 Explanation: printed ব্যাখ্যা verbatim if present, else self-written per the rules below.
 {_EXPLANATION_DEPTH_RULE}
 {_MATH_UNICODE_RULE}
 OUTPUT — ONLY a valid JSON array, no commentary, no markdown fences:
-[{{"qsn_no":5,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","has_image":false,"explanation":"..."}}]"""
+[{{"qsn_no":5,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D/E","has_image":false,"explanation":"..."}}]"""
         txt = await _qbm_gemini_raw(img, prompt, gemini_only=True)
         if not txt:
             return []
         wanted = set(serials)
         out = []
-        for m in _qbm_parse_json(txt):
+        for m in _onu_parse_json5(txt):
             n = _onu_serial_int(m.get("qsn_no"))
             if n is None or n not in wanted:
                 continue
@@ -27715,8 +27731,9 @@ CHECK 0 — SERIAL INVENTORY (do this FIRST): read every printed serial number d
   "skipped_serials": the subset of boxed_serials you will NOT output because that MCQ has a real printed picture/diagram, or is a roman/serial-combination MCQ.
 CHECK 1 — LOGIC: for every item in the EXISTING LIST, confirm it follows the RULE (red-boxed number, not picture, not roman-combo). If it does NOT, set "remove":true on it.
 CHECK 2 — MISSED: every number in boxed_serials that is not in skipped_serials MUST appear exactly once in "mcqs". If it is NOT in the EXISTING LIST it is a MISS — write it out completely yourself from the page (its "qsn_no", full question, 4 options, answer, explanation). Never add an MCQ whose number has no red box.
-CHECK 3 — ANSWER: for EVERY item (existing and new), look at the page again and read which option has the red circle; set "answer" to exactly that option letter (1st=A ... 4th=D), ignoring what the EXISTING LIST said. If a box-included MCQ has no red circle at all, use your subject knowledge.
+CHECK 3 — ANSWER: for EVERY item (existing and new), look at the page again and read which option has the red circle; set "answer" to exactly that option letter (1st=A ... 4th=D, 5th=E), ignoring what the EXISTING LIST said. If a box-included MCQ has no red circle at all, use your subject knowledge.
 CHECK 4 — SERIAL AUDIT: for EVERY item in "mcqs" (existing and new) set "qsn_no" to the serial number actually PRINTED next to THAT MCQ on the page — compare its question text with the page; do NOT copy the EXISTING LIST's qsn_no blindly (it may be wrong, swapped, duplicated or missing). Every qsn_no must be unique and "mcqs" must be in ascending serial order. Final self-check before answering: every number in boxed_serials (minus skipped_serials) appears exactly once in "mcqs".
+CHECK 5 — OPTIONS: an MCQ may print FIVE options (ক খ গ ঘ ঙ / A B C D E). For every item confirm its "options" holds EVERY option printed on the page; if the page prints a 5th option the EXISTING LIST lacks, include it as "E" (and if the red circle is on it, "answer":"E"). 4-option MCQs stay A-D only — never invent an "E".
 
 EXISTING LIST:
 {mcq_json}
@@ -27724,7 +27741,7 @@ EXISTING LIST:
 OUTPUT — ONE JSON object, no commentary, no markdown fences. "mcqs" = ALL MCQs that follow the RULE (existing kept + newly added; wrong ones flagged "remove":true), page wording unchanged. New items need an explanation: printed ব্যাখ্যা verbatim if present, else self-written per the rules below.
 {_EXPLANATION_DEPTH_RULE}
 {_MATH_UNICODE_RULE}
-{{"boxed_serials":[5,6,7],"skipped_serials":[6],"mcqs":[{{"qsn_no":5,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","has_image":false,"remove":false,"explanation":"..."}}]}}"""
+{{"boxed_serials":[5,6,7],"skipped_serials":[6],"mcqs":[{{"qsn_no":5,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D/E","has_image":false,"remove":false,"explanation":"..."}}]}}"""
         txt = await _qbm_gemini_raw(img, prompt, gemini_only=True)
         _call2_provider = "Gemini"
         if not txt:
@@ -27762,6 +27779,12 @@ OUTPUT — ONE JSON object, no commentary, no markdown fences. "mcqs" = ALL MCQs
                 # CHECK 3 (answer): Call2 re-read the red circle from the page.
                 if r.get("answer"):
                     orig["answer"] = r["answer"]
+                # CHECK 5 (options): Call1 may have dropped a printed 5th option.
+                _r_o = r.get("options") or []
+                _o_o = orig.get("options") or []
+                if len(_r_o) >= 5 and _r_o[4] and (len(_o_o) < 5 or not _o_o[4]):
+                    orig["options"] = list(_o_o[:4]) + [_r_o[4]]
+                    logger.warning(f"[ONU options] Call2 restored missing 5th option: {q_norm[:40]}")
                 if r.get("has_image") is True:
                     orig["has_image"] = True
                 # CHECK 4 (serial): Call2 re-read the printed serial from the page
@@ -28360,7 +28383,7 @@ async def _handle_onu_impl(msg: dict):
             for m in _mcqs:
                 if not (m.get("explanation") or "").strip():
                     try:
-                        m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m.get("answer", "A"))
+                        m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m.get("answer", "A"), gemini_only=True)
                     except Exception as e:
                         logger.warning(f"[ONU] explanation fallback failed: {e}")
 
@@ -28421,7 +28444,7 @@ async def _handle_onu_impl(msg: dict):
             _w_onu = _csv_mod_onu.writer(_buf_onu)
             _w_onu.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                               "answer", "explanation", "type", "section"])
-            _ans_map_onu = {"A": "1", "B": "2", "C": "3", "D": "4"}
+            _ans_map_onu = {"A": "1", "B": "2", "C": "3", "D": "4", "E": "5"}
             for _, _, mcqs in extracted_pages:
                 for m in mcqs:
                     _raw_opts = m.get("options", {})
@@ -28431,7 +28454,7 @@ async def _handle_onu_impl(msg: dict):
                     # indexing below on a dict raised KeyError: 0. Convert
                     # to an ordered A/B/C/D list here for the writerow call.
                     if isinstance(_raw_opts, dict):
-                        opts = [_raw_opts.get(k, "") for k in ("A", "B", "C", "D")]
+                        opts = [_raw_opts.get(k, "") for k in ("A", "B", "C", "D", "E")]
                     elif isinstance(_raw_opts, list):
                         opts = _raw_opts
                     else:
