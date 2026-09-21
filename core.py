@@ -2014,16 +2014,22 @@ async def db_save_mcq_cache(cache_id: str, session_id: str, page: int,
                              image_file_id: str = None, image_msg_id: int = None,
                              channel_id: str = None, is_new_gen: bool = False,
                              end_msg_id: int = None):
-    try:
-        await sb_exec(lambda: sb.table("pdf_mcq_cache").upsert({
-            "id": cache_id, "session_id": session_id, "page_number": page,
-            "topic": topic, "mcq_data": mcqs, "poll_links": poll_links or [],
-            "image_file_id": image_file_id, "image_msg_id": image_msg_id,
-            "channel_id": channel_id or "", "is_new_gen": is_new_gen,
-            "end_msg_id": end_msg_id, "new_gen_count": 0
-        }).execute())
-    except Exception as e:
-        logger.error(f"[DB] save_mcq_cache error: {e}")
+    # 2026-09-21: a Supabase timeout used to be swallowed after ONE try -> the topic's
+    # Quiz/Poll deep links were dead. The upsert is idempotent, so retry twice more.
+    for _att in range(1, 4):
+        try:
+            await sb_exec(lambda: sb.table("pdf_mcq_cache").upsert({
+                "id": cache_id, "session_id": session_id, "page_number": page,
+                "topic": topic, "mcq_data": mcqs, "poll_links": poll_links or [],
+                "image_file_id": image_file_id, "image_msg_id": image_msg_id,
+                "channel_id": channel_id or "", "is_new_gen": is_new_gen,
+                "end_msg_id": end_msg_id, "new_gen_count": 0
+            }).execute())
+            break
+        except Exception as e:
+            logger.error(f"[DB] save_mcq_cache error (attempt {_att}/3): {type(e).__name__}: {e}")
+            if _att < 3:
+                await asyncio.sleep(2 * _att)
 
     async def _d1_write():
         # DURABILITY: mirror into D1 `quizzes` table too (same table/schema the

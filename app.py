@@ -12396,7 +12396,10 @@ async def _get_pw_browser():
             _PW_BROWSER["browser"] = await asyncio.wait_for(
                 _PW_BROWSER["playwright"].chromium.launch(
                     headless=True,
-                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
+                    # 2026-09-21: "--single-process" removed. In that mode any page close/crash takes the WHOLE
+                    # browser down: the next new_page() then hangs (15s TimeoutError, empty message in the log)
+                    # and every PDF paid a 15s stall + full relaunch. Multi-process is stable and HF has RAM.
+                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-extensions", "--mute-audio"]
                 ), timeout=30
             )
         return _PW_BROWSER["browser"]
