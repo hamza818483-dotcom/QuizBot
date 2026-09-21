@@ -1230,6 +1230,78 @@ def post_process(results: list) -> list:
 # MAIN PARSE FUNCTION (sync, run via asyncio.to_thread)
 # Returns dict: {"source": "Chorcha.net"|"Testmoz"|None, "results": [...]}
 # ============================================================
+# ============================================================
+# AAPATHSHALA (aapathshala.com/exams) — "q-card" layout
+#   question : div.q-card > div.question-body (+ p.serial-number)
+#   options  : ol > li.option > label
+#   answer   : li.option contains span.mark_answer  (unmark_answer = wrong)
+#   explan.  : blockquote (text + images/MathML)
+#   tags     : div.tag-container span.tag  (board/exam/year/topic) -> not used in CSV
+# ============================================================
+def _parse_aapathshala(soup, img_map, progress_cb=None):
+    cards = soup.select('div.q-card')
+    if not cards:
+        return None
+    results, skipped = [], []
+    total = len(cards)
+    for ci, card in enumerate(cards, 1):
+        try:
+            qb = card.select_one('div.question-body')
+            q_text = format_content(qb, img_map) if qb else ""
+            q_text = re.sub(r'^\s*[0-9০-৯]+\s*[\.\)\-ঃ:]\s*', '', q_text).strip()
+
+            # question-body-র বাইরের ছবি (question-header-এর ভেতরে কিন্তু body-র বাইরে)
+            hdr = card.select_one('div.question-header')
+            if hdr:
+                for img in hdr.find_all('img'):
+                    if qb and img in qb.descendants:
+                        continue
+                    q_text += " " + format_content(BeautifulSoup(str(img), 'html.parser'), img_map)
+            q_text = q_text.strip()
+            if not q_text:
+                skipped.append((ci, "question text empty"))
+                continue
+
+            opts = card.select('form.answer-wrapper li.option') or card.select('li.option')
+            options, ans_idx = [], ""
+            for i, li in enumerate(opts, 1):
+                lab = li.find('label')
+                # answer-mark (✓ icon) টেক্সটে না ঢোকে: শুধু label-এর কন্টেন্ট
+                otext = format_content(lab, img_map) if lab else ""
+                options.append(otext.strip())
+                if li.select_one('span.mark_answer'):
+                    ans_idx = str(i)
+            if len(options) < 2:
+                skipped.append((ci, "fewer than 2 options"))
+                continue
+            options = options[:5]
+            while len(options) < 5:
+                options.append("")
+            if not ans_idx:
+                ans_idx = "1"
+                skipped.append((ci, "no correct-answer mark found — defaulted to option 1"))
+            if options[4].strip() and ans_idx == "5":
+                options[3], ans_idx = options[4], "4"
+
+            bq = card.find('blockquote')
+            exp_text = format_content(bq, img_map).strip() if bq else ""
+
+            results.append({"questions": q_text, "option1": options[0], "option2": options[1],
+                            "option3": options[2], "option4": options[3], "option5": "",
+                            "answer": ans_idx, "explanation": exp_text, "type": 1, "section": 1})
+        except Exception as e:
+            skipped.append((ci, f"parse error: {str(e)[:80]}"))
+        if progress_cb:
+            try:
+                progress_cb(ci, total)
+            except Exception:
+                pass
+    results = post_process(results)
+    gc.collect()
+    return {"source": "Aapathshala", "results": results,
+            "total_cards_seen": total, "skipped": skipped}
+
+
 def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> dict:
     """
     progress_cb(done:int, total:int) — optional callback, called after each
@@ -1256,6 +1328,41 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
         html_body = file_bytes.decode('utf-8', errors='ignore')
 
     soup = BeautifulSoup(html_body, 'lxml')
+
+    # MathJax (rendered) -> real MathML: rendered span-এ শুধু ছড়ানো mjx-char থাকে (ভাঙা সূত্র),
+    # কিন্তু `data-mathml` attribute-এ নির্ভুল <math> আছে। সেটা দিয়ে বদলে দিলে নিচের msup/mfrac
+    # হ্যান্ডলার ঠিকঠাক কাজ করে। কোনো সাইটে এই attribute না থাকলে কিছুই বদলায় না।
+    try:
+        import html as _html
+        for _mj in soup.select('[data-mathml]'):
+            _m = _mj.get('data-mathml') or ''
+            if '<math' not in _m:
+                continue
+            _frag = BeautifulSoup(_html.unescape(_m), 'lxml').find('math')
+            if _frag is not None:
+                # নেস্টেড msup/msub (যেমন (3×10⁸)²): বাইরেরটা প্রসেস হওয়ার সময় ভেতরের
+                # msup get_text() হয়ে "108" হয়ে যায়। তাই ভেতর থেকে বাইরে, আগেই ছোট
+                # টেক্সটে (10⁸) নামিয়ে আনি — শুধু যেগুলোর script সরল অঙ্ক/চিহ্ন।
+                _SUP = str.maketrans("0123456789+-−=()n", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁻⁼⁽⁾ⁿ")
+                _SUB = str.maketrans("0123456789+-−=()", "₀₁₂₃₄₅₆₇₈₉₊₋₋₌₍₎")
+                for _tag, _tbl in (('msup', _SUP), ('msub', _SUB)):
+                    for _n in sorted(_frag.find_all(_tag), key=lambda t: len(list(t.parents)), reverse=True):
+                        _k = _n.find_all(recursive=False)
+                        if len(_k) != 2:
+                            continue
+                        _b, _s = _k[0].get_text("", strip=True), _k[1].get_text("", strip=True)
+                        if _s and all(ch in "0123456789+-−=()n" for ch in _s):
+                            _n.replace_with(_b + _s.translate(_tbl))
+                _mj.replace_with(_frag)
+        for _junk in soup.select('.MathJax_Preview, script[type^="math/"], .MJX_Assistive_MathML'):
+            _junk.decompose()
+    except Exception as _e:
+        logger.warning(f"[MHTML] MathJax->MathML pre-pass failed: {_e}")
+
+    # AAPATHSHALA (q-card layout) — চেনা গেলে এখানেই শেষ; না চিনলে নিচের Chorcha/Testmoz যেমন ছিল তেমন
+    _aap = _parse_aapathshala(soup, img_map, progress_cb)
+    if _aap is not None and _aap["results"]:
+        return _aap
 
     # ============================================================
     # CHORCHA.NET
