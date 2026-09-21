@@ -7671,6 +7671,60 @@ def _parse_tg_link(link: str):
 # the bot (only there Telegram exposes a quiz poll's correct_option_id) and
 # deleted again right away.
 # ============================================================
+_COLLECT_CHAT_KEY = "poll_collect_chat"
+
+
+async def _get_collect_chat():
+    """Private chat (user id) the poll-range collector forwards into, or None."""
+    try:
+        v = await d1_get(_COLLECT_CHAT_KEY)
+        cid = v.get("chat_id") if isinstance(v, dict) else None
+        return int(cid) if cid else None
+    except Exception:
+        return None
+
+
+async def handle_collectchat(msg: dict):
+    """/collectchat <user_id> | me | off  -- pick the private chat that absorbs the
+    forward-and-delete flicker while polls are collected (see handle_poll_range_practice).
+    Must be a PRIVATE chat with this bot: Telegram only reveals a quiz poll's correct
+    answer in a private chat with the bot, so a group/channel would not work."""
+    chat_id = msg["chat"]["id"]
+    parts = (msg.get("text") or "").split(maxsplit=1)
+    arg = parts[1].strip().lower() if len(parts) > 1 else ""
+    cur = await _get_collect_chat()
+    if arg in ("off", "clear", "reset"):
+        await d1_del(_COLLECT_CHAT_KEY)
+        await send_msg(chat_id, "✅ Collector chat বন্ধ। এখন poll collect নিজের chat-এই হবে (ঝাপসা দেখা যাবে)।")
+        return
+    if arg == "me":
+        if msg["chat"].get("type") != "private":
+            await send_msg(chat_id, "❌ 'me' শুধু বটের private chat-এ কাজ করে।")
+            return
+        target = chat_id
+    elif arg.lstrip("-").isdigit():
+        target = int(arg)
+    else:
+        await send_msg(chat_id,
+            f"📥 <b>Collector chat:</b> {('<code>' + str(cur) + '</code>') if cur else 'সেট নেই (নিজের chat-এ collect হয়)'}\n\n"
+            "poll collect করার সময় forward হওয়া message গুলো যেন তোমার chat-এ ঝলকে না ওঠে, তাই আলাদা একটা "
+            "<b>private chat</b> (যেমন তোমার দ্বিতীয় Telegram account, mute/archive করা) ঠিক করো।\n\n"
+            "১) ওই account থেকে বটে <code>/start</code> দাও\n"
+            "২) এখানে: <code>/collectchat &lt;ওই account-এর user id&gt;</code>\n"
+            "   (বা ওই account থেকেই <code>/collectchat me</code> — account টা admin হতে হবে)\n"
+            "বন্ধ করতে: <code>/collectchat off</code>")
+        return
+    if target <= 0:
+        await send_msg(chat_id, "❌ Collector অবশ্যই একজন user-এর private chat হতে হবে (user id, ধনাত্মক সংখ্যা) — group/channel-এ quiz-এর সঠিক উত্তর পাওয়া যায় না।")
+        return
+    t = await tg_post("sendMessage", {"chat_id": target, "text": "✅ এই chat এখন poll collector। এটা mute/archive করে রাখতে পারো।", "disable_notification": True})
+    if not t.get("ok"):
+        await send_msg(chat_id, f"❌ ওই chat-এ message পাঠানো যায়নি ({t.get('description') or 'unknown'})।\nওই account থেকে আগে বটে <code>/start</code> দাও।")
+        return
+    await d1_set(_COLLECT_CHAT_KEY, {"chat_id": target}, ttl=10 * 365 * 86400)
+    await send_msg(chat_id, f"✅ Collector chat সেট: <code>{target}</code>\nএখন থেকে poll range collect ওই chat-এ হবে, তোমার chat-এ ঝলক দেখা যাবে না।")
+
+
 _POLL_RANGE_RUNNING: set = set()
 _POLL_RANGE_MAX = 300
 _TME_MSG_LINK_RE = re.compile(r"(?:https?://)?t\.me/(?:c/\d+(?:/\d+)?/\d+|[A-Za-z0-9_]{4,}(?:/\d+)?/\d+)")
@@ -7730,13 +7784,29 @@ async def handle_poll_range_practice(msg: dict, src_chat, id_a: int, id_b: int):
 
         mcqs, title = [], ""
         n_nonpoll = n_noans = n_badopts = n_missing = fail_streak = 0
+        # Forward into the hidden collector chat (if set) so the forward-and-delete
+        # flicker never shows in the admin's own chat; preflight it, else fall back.
+        target = chat_id
+        collector_note = ""
+        _cc = await _get_collect_chat()
+        if _cc and _cc != chat_id:
+            _pr = await tg_post("sendMessage", {"chat_id": _cc, "text": "⏳ collecting…", "disable_notification": True})
+            if _pr.get("ok"):
+                target = _cc
+                try:
+                    await tg_post("deleteMessage", {"chat_id": _cc, "message_id": _pr["result"]["message_id"]})
+                except Exception:
+                    pass
+            else:
+                logger.warning(f"[PollRange] collector chat {_cc} unusable: {_pr.get('description')}")
+                collector_note = "\n\n⚠️ Collector chat কাজ করছে না (ওই account থেকে /start দাও) — নিজের chat-এ collect করা হয়েছে।"
         last_edit = 0.0
         stopped = False
         for n, mid in enumerate(range(start_id, end_id + 1), 1):
             if DM_STOP_FLAGS.pop(uid, False):
                 stopped = True
                 break
-            r = await tg_post("forwardMessage", {"chat_id": chat_id, "from_chat_id": src_chat,
+            r = await tg_post("forwardMessage", {"chat_id": target, "from_chat_id": src_chat,
                                                  "message_id": mid, "disable_notification": True})
             if r.get("ok"):
                 fail_streak = 0
@@ -7747,7 +7817,7 @@ async def handle_poll_range_practice(msg: dict, src_chat, id_a: int, id_b: int):
                 poll = m.get("poll")
                 if fwd_id:
                     try:
-                        await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": fwd_id})
+                        await tg_post("deleteMessage", {"chat_id": target, "message_id": fwd_id})
                     except Exception:
                         pass
                 if not poll:
@@ -7790,7 +7860,7 @@ async def handle_poll_range_practice(msg: dict, src_chat, id_a: int, id_b: int):
             notes.append(f"• {n_badopts} টি poll-এ ৪টি option নেই — বাদ")
         if n_nonpoll:
             notes.append(f"• {n_nonpoll} টি message poll না — বাদ")
-        note_txt = ("\n\n" + "\n".join(notes)) if notes else ""
+        note_txt = (("\n\n" + "\n".join(notes)) if notes else "") + collector_note
         if not mcqs:
             await _edit("❌ এই range-এ ব্যবহারযোগ্য কোনো quiz poll পাওয়া যায়নি।" + note_txt)
             return
@@ -34708,6 +34778,8 @@ async def handle_message(msg: dict):
         await handle_channel(msg)
     elif text.startswith("/forward"):
         _spawn_command_task(uid, handle_forward(msg))
+    elif text.startswith("/collectchat"):
+        await handle_collectchat(msg)
     elif text.startswith("/getid"):
         await handle_getid(msg)
     elif text.strip() == "/special":
