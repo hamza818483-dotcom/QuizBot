@@ -7727,6 +7727,16 @@ async def handle_collectchat(msg: dict):
 
 _POLL_RANGE_RUNNING: set = set()
 _POLL_RANGE_MAX = 300
+_POLL_RANGE_GLOBAL_MAX = 6      # collections running at the same time (all users)
+_COLLECT_LOCK = asyncio.Lock()  # the hidden collector chat is shared: forwards from every user queue here (FIFO = fair)
+
+
+class _NoLock:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
 _TME_MSG_LINK_RE = re.compile(r"(?:https?://)?t\.me/(?:c/\d+(?:/\d+)?/\d+|[A-Za-z0-9_]{4,}(?:/\d+)?/\d+)")
 
 
@@ -7766,6 +7776,9 @@ async def handle_poll_range_practice(msg: dict, src_chat, id_a: int, id_b: int):
     if uid in _POLL_RANGE_RUNNING:
         await send_msg(chat_id, "⏳ আগের একটা range এখনও চলছে — শেষ হওয়া পর্যন্ত অপেক্ষা করো।")
         return
+    if len(_POLL_RANGE_RUNNING) >= _POLL_RANGE_GLOBAL_MAX:
+        await send_msg(chat_id, "⏳ এখন অনেকে poll collect করছে — ১-২ মিনিট পর আবার link দুইটা পাঠাও।")
+        return
     _POLL_RANGE_RUNNING.add(uid)
     DM_STOP_FLAGS.pop(uid, None)
     status_id = None
@@ -7802,24 +7815,29 @@ async def handle_poll_range_practice(msg: dict, src_chat, id_a: int, id_b: int):
                 collector_note = "\n\n⚠️ Collector chat কাজ করছে না (ওই account থেকে /start দাও) — নিজের chat-এ collect করা হয়েছে।"
         last_edit = 0.0
         stopped = False
+        _gate = _COLLECT_LOCK if target != chat_id else _NoLock()
         for n, mid in enumerate(range(start_id, end_id + 1), 1):
             if DM_STOP_FLAGS.pop(uid, False):
                 stopped = True
                 break
-            r = await tg_post("forwardMessage", {"chat_id": target, "from_chat_id": src_chat,
-                                                 "message_id": mid, "disable_notification": True})
+            # shared collector chat: every user's forward->delete goes through ONE fair queue
+            # (Telegram allows ~1 msg/sec into a single private chat); own chat: no queue.
+            async with _gate:
+                r = await tg_post("forwardMessage", {"chat_id": target, "from_chat_id": src_chat,
+                                                     "message_id": mid, "disable_notification": True})
+                _fid = (r.get("result") or {}).get("message_id") if r.get("ok") else None
+                if _fid:
+                    try:
+                        await tg_post("deleteMessage", {"chat_id": target, "message_id": _fid})
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.35)
             if r.get("ok"):
                 fail_streak = 0
                 m = r.get("result") or {}
-                fwd_id = m.get("message_id")
                 if not title:
                     title = ((m.get("forward_from_chat") or {}).get("title") or "").strip()
                 poll = m.get("poll")
-                if fwd_id:
-                    try:
-                        await tg_post("deleteMessage", {"chat_id": target, "message_id": fwd_id})
-                    except Exception:
-                        pass
                 if not poll:
                     n_nonpoll += 1
                 else:
@@ -7848,7 +7866,6 @@ async def handle_poll_range_practice(msg: dict, src_chat, id_a: int, id_b: int):
             if now - last_edit >= 2.0 or n == total:
                 last_edit = now
                 await _edit(_poll_range_progress_text(n, total, len(mcqs), title))
-            await asyncio.sleep(0.35)
 
         if stopped:
             await _edit(f"🛑 থামানো হয়েছে। {len(mcqs)} টি poll পাওয়া গিয়েছিল — সেট save করা হয়নি।")
@@ -34487,9 +34504,7 @@ async def handle_message(msg: dict):
     if is_private and text and not text.startswith("/"):
         _rng = _parse_two_msg_links(text)
         if _rng:
-            if not is_auth:
-                await send_msg(chat_id, "❌ এই ফিচার শুধু admin-দের জন্য।")
-                return
+            # free for every user (not admin-only)
             _spawn_command_task(uid, handle_poll_range_practice(msg, *_rng))
             return
 
