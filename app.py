@@ -737,6 +737,20 @@ async def _create_forum_topic(channel_id: str, name: str) -> int | None:
     return None
 
 
+async def _lms_pin_main_post(chat_id, message_id) -> tuple:
+    """Pin the main (first, gathered) post. Retries once; returns (ok, description).
+    Never raises. Pinning inside a forum topic pins it within that topic."""
+    try:
+        d = {"chat_id": chat_id, "message_id": message_id, "disable_notification": True}
+        r = await tg_post("pinChatMessage", d)
+        if not r.get("ok"):
+            await asyncio.sleep(1.5)
+            r = await tg_post("pinChatMessage", d)
+        return bool(r.get("ok")), (r.get("description") or "")
+    except Exception as e:
+        return False, str(e)
+
+
 def lms_get_pre_message(subject: str, exam_title: str, topic: str, count: int, first_link: str = "") -> str:
     """LMS Readymade-send format:
     🟥(Sub Name)
@@ -955,8 +969,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             }]
 
             # 2026-09-20 (poll_quiz_pdf mode): in a GROUP with no thread_id, auto-create
-            # ONE forum topic named after the exam and post inside it; the links are
-            # then sent topic-wise (one message per topic). Channels keep the single post.
+            # ONE forum topic named after the exam and post inside it.
             _is_group = False
             if poll_quiz_pdf_only:
                 try:
@@ -970,7 +983,6 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     if _auto_tid:
                         thread_id = _auto_tid
                         logger.info(f"[LMS-Send-Links] auto-created forum topic {_tname!r} -> thread_id={thread_id}")
-            _tw_msgs = []  # topic-wise messages (header, then one per topic)
 
             total_mcq = 0
             total_topics = 0
@@ -1036,8 +1048,6 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                         f"◼️<b>{_html_escape(g_title or 'MCQ')}</b>"
                     )
                 section_texts.append(f"\n{sep}\n".join([g_header] + blocks))
-                _tw_msgs.append(g_header)
-                _tw_msgs.extend(blocks)
 
             if not section_texts:
                 job["status"] = "error"
@@ -1051,7 +1061,6 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     f"{sep}{sep}"
                 )
                 post_text = overall_header + f"\n{sep}{sep}\n".join(section_texts)
-                _tw_msgs.insert(0, overall_header)
             else:
                 post_text = section_texts[0]
 
@@ -1072,10 +1081,9 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     out.append(cur)
                 return out
 
-            if poll_quiz_pdf_only and _is_group:
-                _msgs = [m for m in _tw_msgs if m and m.strip()]   # topic-wise: header, then ONE message per topic
-            else:
-                _msgs = _pack(post_text, first_limit=1000)          # single post: 1st chunk fits a photo caption; rest only if too long
+            # ONE gathered main post: 1st chunk fits the photo caption (<=1024), the rest
+            # (only if the summary is longer) follows as text. Same in channel and group.
+            _msgs = _pack(post_text, first_limit=1000)
             _n = len(_msgs)
             sent_chat, sent_msg_id = {}, None
             # 2026-09-20: first message = cover IMAGE with the summary as its caption
@@ -1123,6 +1131,16 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 if _i == 0:
                     sent_chat = r.get("result", {}).get("chat", {})
                     sent_msg_id = r.get("result", {}).get("message_id")
+                    # the main post (image + gathered summary) gets PINNED, same as the "all" mode
+                    if sent_msg_id:
+                        _pok, _pdesc = await _lms_pin_main_post(channel_id, sent_msg_id)
+                        if not _pok:
+                            logger.warning(f"[LMS-Send-Links] main post pin failed: {_pdesc}")
+                            job["warning"] = f"pin failed: {_pdesc}"
+                            try:
+                                await tg_post("sendMessage", {"chat_id": OWNER_ID, "text": f"⚠️ LMS Send: main post pin করা যায়নি ({_pdesc or 'unknown'}).\nবটকে ওই চ্যাটে 'Pin messages' permission দাও।"})
+                            except Exception:
+                                pass
                 job["pct"] = int((_i + 1) * 100 / _n)
                 if _i < _n - 1:
                     await asyncio.sleep(1.2)  # groups allow ~20 msgs/min
