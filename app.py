@@ -7662,6 +7662,158 @@ def _parse_tg_link(link: str):
         return f"@{username}", msg_id
     return None, None
 
+# ============================================================
+# 2026-09-21: send TWO t.me message links (no command) -> every quiz poll between
+# them is collected, shown with a live % progress, saved as an MCQ set and
+# replied with two buttons: "Poll Practice" + "Quiz Solve" (same deep links the
+# LMS posts use, so the set can be practised again in any way).
+# Each message in the range is forwarded to the sender's own private chat with
+# the bot (only there Telegram exposes a quiz poll's correct_option_id) and
+# deleted again right away.
+# ============================================================
+_POLL_RANGE_RUNNING: set = set()
+_POLL_RANGE_MAX = 300
+_TME_MSG_LINK_RE = re.compile(r"(?:https?://)?t\.me/(?:c/\d+(?:/\d+)?/\d+|[A-Za-z0-9_]{4,}(?:/\d+)?/\d+)")
+
+
+def _parse_two_msg_links(text: str):
+    """(src_chat, id_a, id_b) when `text` is exactly two t.me message links of the
+    same chat (nothing else in the message), else None."""
+    links = _TME_MSG_LINK_RE.findall(text or "")
+    if len(links) != 2:
+        return None
+    if re.sub(r"[\s,;|>→\-–—]+", "", _TME_MSG_LINK_RE.sub("", text)):
+        return None
+    c1, i1 = _parse_tg_link(links[0])
+    c2, i2 = _parse_tg_link(links[1])
+    if c1 is None or c2 is None or i1 is None or i2 is None:
+        return None
+    if str(c1).lower() != str(c2).lower() or i1 == i2:
+        return None
+    return c1, i1, i2
+
+
+def _poll_range_progress_text(done: int, total: int, polls: int, title: str = "") -> str:
+    pct = int(done * 100 / total) if total else 100
+    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+    head = f"📢 <b>{_html_escape(title)}</b>\n" if title else ""
+    return (f"⏳ <b>Poll সংগ্রহ হচ্ছে…</b>\n{head}\n[{bar}] <b>{pct}%</b>\n"
+            f"📥 {done}/{total} message পড়া হয়েছে\n✅ {polls} টি quiz poll পাওয়া গেছে\n\n<i>থামাতে stop লিখো</i>")
+
+
+async def handle_poll_range_practice(msg: dict, src_chat, id_a: int, id_b: int):
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    start_id, end_id = (id_a, id_b) if id_a < id_b else (id_b, id_a)
+    total = end_id - start_id + 1
+    if total > _POLL_RANGE_MAX:
+        await send_msg(chat_id, f"❌ Range খুব বড় ({total} message) — max {_POLL_RANGE_MAX} এ limit করো।")
+        return
+    if uid in _POLL_RANGE_RUNNING:
+        await send_msg(chat_id, "⏳ আগের একটা range এখনও চলছে — শেষ হওয়া পর্যন্ত অপেক্ষা করো।")
+        return
+    _POLL_RANGE_RUNNING.add(uid)
+    DM_STOP_FLAGS.pop(uid, None)
+    status_id = None
+    try:
+        st = await send_msg(chat_id, _poll_range_progress_text(0, total, 0))
+        status_id = (st or {}).get("result", {}).get("message_id")
+
+        async def _edit(text, markup=None):
+            try:
+                if status_id:
+                    await edit_msg(chat_id, status_id, text, reply_markup=markup)
+                else:
+                    await send_msg(chat_id, text, reply_markup=markup)
+            except Exception:
+                pass
+
+        mcqs, title = [], ""
+        n_nonpoll = n_noans = n_badopts = n_missing = fail_streak = 0
+        last_edit = 0.0
+        stopped = False
+        for n, mid in enumerate(range(start_id, end_id + 1), 1):
+            if DM_STOP_FLAGS.pop(uid, False):
+                stopped = True
+                break
+            r = await tg_post("forwardMessage", {"chat_id": chat_id, "from_chat_id": src_chat,
+                                                 "message_id": mid, "disable_notification": True})
+            if r.get("ok"):
+                fail_streak = 0
+                m = r.get("result") or {}
+                fwd_id = m.get("message_id")
+                if not title:
+                    title = ((m.get("forward_from_chat") or {}).get("title") or "").strip()
+                poll = m.get("poll")
+                if fwd_id:
+                    try:
+                        await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": fwd_id})
+                    except Exception:
+                        pass
+                if not poll:
+                    n_nonpoll += 1
+                else:
+                    opts = [(o or {}).get("text", "") for o in (poll.get("options") or [])]
+                    cid = poll.get("correct_option_id")
+                    if cid is None:
+                        n_noans += 1          # regular (non-quiz) poll: no correct answer to practise with
+                    elif len(opts) != 4:
+                        n_badopts += 1        # the whole practice/quiz pipeline is A-D (4 options)
+                    else:
+                        mcqs.append({"question": poll.get("question", ""), "options": opts,
+                                     "answer": "ABCD"[cid] if 0 <= cid < 4 else "A",
+                                     "explanation": poll.get("explanation", "") or ""})
+            else:
+                desc = str(r.get("description") or "").lower()
+                fail_streak += 1
+                if any(k in desc for k in ("chat not found", "not a member", "channel_private", "kicked", "forbidden", "not enough rights")):
+                    await _edit("❌ ওই channel/group থেকে পড়া যাচ্ছে না।\n\nবটকে সেখানে add করো (বা public channel-এর link দাও)।")
+                    return
+                if "not found" in desc or "message_id_invalid" in desc:
+                    n_missing += 1
+                if fail_streak >= 8 and not mcqs:
+                    await _edit("❌ Message গুলো forward করা যাচ্ছে না।\n\nChannel-এ <b>Restrict saving content</b> চালু থাকতে পারে, বা ID ভুল।")
+                    return
+            now = time.time()
+            if now - last_edit >= 2.0 or n == total:
+                last_edit = now
+                await _edit(_poll_range_progress_text(n, total, len(mcqs), title))
+            await asyncio.sleep(0.35)
+
+        if stopped:
+            await _edit(f"🛑 থামানো হয়েছে। {len(mcqs)} টি poll পাওয়া গিয়েছিল — সেট save করা হয়নি।")
+            return
+        notes = []
+        if n_noans:
+            notes.append(f"• {n_noans} টি poll-এ সঠিক উত্তর নেই (quiz mode না) — বাদ")
+        if n_badopts:
+            notes.append(f"• {n_badopts} টি poll-এ ৪টি option নেই — বাদ")
+        if n_nonpoll:
+            notes.append(f"• {n_nonpoll} টি message poll না — বাদ")
+        note_txt = ("\n\n" + "\n".join(notes)) if notes else ""
+        if not mcqs:
+            await _edit("❌ এই range-এ ব্যবহারযোগ্য কোনো quiz poll পাওয়া যায়নি।" + note_txt)
+            return
+        cache_id = gen_session_id()
+        topic = f"{title or str(src_chat)} ({start_id}-{end_id})"
+        await db_save_mcq_cache(cache_id, cache_id, 0, topic, mcqs)
+        bot_un = await get_bot_username()
+        markup = {"inline_keyboard": [[
+            {"text": "📝 Poll Practice", "url": f"https://t.me/{bot_un}?start=poll_{cache_id}"},
+            {"text": "🧩 Quiz Solve", "url": f"https://t.me/{bot_un}?start=pdf_{cache_id}"},
+        ]]}
+        await _edit(f"✅ <b>{len(mcqs)} টি poll</b> পাওয়া গেছে\n📢 {_html_escape(title or str(src_chat))}\n"
+                    f"🔗 message {start_id} – {end_id}{note_txt}\n\nযেভাবে খুশি আবার practice করো 👇", markup)
+    except Exception as e:
+        logger.error(f"[PollRange] failed: {e}", exc_info=True)
+        try:
+            await send_msg(chat_id, f"❌ কিছু একটা ভুল হয়েছে: {str(e)[:120]}")
+        except Exception:
+            pass
+    finally:
+        _POLL_RANGE_RUNNING.discard(uid)
+
+
 async def handle_forward(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg.get("from", {}).get("id")
@@ -34259,6 +34411,17 @@ async def handle_message(msg: dict):
     # DB cleanup (every ~100 requests, random)
     if random.random() < 0.01:
         _spawn_task(db_auto_cleanup_if_needed())
+
+    # দুইটা t.me message link পাঠালেই (কোনো command ছাড়া): মাঝের quiz poll গুলো collect করে
+    # % progress দেখায়, তারপর "Poll Practice" + "Quiz Solve" button দেয়।
+    if is_private and text and not text.startswith("/"):
+        _rng = _parse_two_msg_links(text)
+        if _rng:
+            if not is_auth:
+                await send_msg(chat_id, "❌ এই ফিচার শুধু admin-দের জন্য।")
+                return
+            _spawn_command_task(uid, handle_poll_range_practice(msg, *_rng))
+            return
 
     # Plain t.me link পাঠালেই (কোনো command ছাড়া) auto-resolve করে ID দিয়ে দেওয়া
     if (is_private and text and not text.startswith("/")
