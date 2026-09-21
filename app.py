@@ -903,7 +903,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
             logger.warning(f"[LMS-Send] score-ask ending message failed: {e}")
 
     return sent, first_link, batch_cache_id
-async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = "", links_only: bool = False, exam_groups: list = None, links_variant: str = "full"):
+async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int, batches: list, exam_title: str = "", subject: str = "", links_only: bool = False, exam_groups: list = None, links_variant: str = "full", chapter: str = ""):
     """batches: [{"topic": str, "mcqs": [...]}, ...] — one entry per topic
     (or a single entry when the exam has no topic split / no batch-size
     split requested). Sent sequentially, same as /csvS's batch loop.
@@ -965,7 +965,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             poll_quiz_pdf_only = (links_variant == "poll_quiz_pdf")
 
             groups = exam_groups if exam_groups else [{
-                "exam_title": exam_title, "subject": subject, "batches": batches,
+                "exam_title": exam_title, "subject": subject, "chapter": chapter, "batches": batches,
             }]
 
             # 2026-09-20 (poll_quiz_pdf mode): in a GROUP with no thread_id, auto-create
@@ -1094,7 +1094,8 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 try:
                     _cs = (groups[0].get("subject") or subject or "MCQ")
                     _ct = (groups[0].get("exam_title") if len(groups) == 1 else None) or exam_title or _cs
-                    _cover_bytes = await _generate_lms_cover_image(_cs, _ct)
+                    _cch = (groups[0].get("chapter") if len(groups) == 1 else "") or (chapter if not exam_groups else "") or ""
+                    _cover_bytes = await _generate_lms_cover_image(_cs, _ct, str(_cch).strip())
                 except Exception as e:
                     logger.warning(f"[LMS-Send-Links] cover image failed: {e}")
                     _cover_bytes = None
@@ -1211,7 +1212,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links, subject=subject or "MCQ")
 
         try:
-            cover_bytes = await _generate_lms_cover_image(subject or "MCQ", exam_title or "MCQ")
+            cover_bytes = await _generate_lms_cover_image(subject or "MCQ", exam_title or "MCQ", chapter or "")
             caption_txt = _live_master_summary_text()
             if cover_bytes and len(caption_txt) <= 1024:
                 master_r = await send_photo(
@@ -1521,6 +1522,7 @@ async def lms_send_channel(request: Request):
     exam_id = str(data.get("exam_id") or "").strip()
     exam_title = str(data.get("exam_title") or "").strip()
     subject = str(data.get("subject") or "").strip()
+    chapter = str(data.get("chapter") or "").strip()   # exam's own chapter (cover image)
     links_only = bool(data.get("links_only"))
     # "full" (default) = Poll/Quiz/Website/Rapid/PDF links; "poll_quiz_pdf" =
     # only Poll Practice, Quiz Solve, Premium PDF (no Website Exam anywhere,
@@ -1550,7 +1552,7 @@ async def lms_send_channel(request: Request):
         "batches_done": 0, "batches_total": batches_total, "error": None,
         "exam_id": exam_id, "cancel_requested": False,
     }
-    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject, links_only=links_only, exam_groups=exam_groups, links_variant=links_variant))
+    _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject, links_only=links_only, exam_groups=exam_groups, links_variant=links_variant, chapter=chapter))
     return JSONResponse({"ok": True, "job_id": job_id})
 
 
