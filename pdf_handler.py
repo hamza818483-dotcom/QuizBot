@@ -1015,6 +1015,19 @@ class GeminiKeyRotator:
 
 key_rotator = GeminiKeyRotator()
 
+# 2026-09-23: shared backend-outage cooldown -- when generate_mcq_from_image's
+# retry loop detects 3 consecutive timeout/503/504 failures across different
+# keys (a real Gemini backend-wide outage, not a per-key problem), it stamps
+# this timestamp. The outer [MCQGen] retry loop in app.py calls back into
+# generate_mcq_from_image() again almost immediately on 0 MCQs, which used to
+# re-burn 3 more keys just to re-detect the SAME still-ongoing outage every
+# round (visible in logs as repeated "3 consecutive ... stopping early"
+# blocks a few seconds apart, wasting minutes on a single page). A short
+# shared cooldown lets the next call skip straight to a brief wait instead
+# of re-proving what's already known to be down.
+_gemini_backend_outage_until = 0.0
+_GEMINI_OUTAGE_COOLDOWN_SECONDS = 12
+
 # Shared with app.py's qbm_extract_all_pages: each concurrent page-window
 # slot sets this to a distinct offset before calling into any Gemini
 # extraction path here, so ordered_keys(offset=...) below spreads
@@ -2207,6 +2220,7 @@ async def generate_mcq_from_image(
     max_keys: int = None,
     custom_prompt: str = None,
 ) -> list:
+    global _gemini_backend_outage_until
     if custom_prompt:
         # /tf (and any other caller with its own fully-formed prompt) skips
         # the default MCQ_PROMPT_WITH_COUNT/MCQ_PROMPT_MAX templating below
@@ -2236,6 +2250,17 @@ async def generate_mcq_from_image(
     # with 5-6 keys that's 4-5 minutes of stalling per image before ever
     # reaching the OpenRouter fallback. Cap attempts at 3 keys max, and use a
     # shorter timeout on the 2nd/3rd attempt so a bad/slow key fails fast.
+    # 2026-09-23: if a backend-wide outage was just confirmed (see the
+    # cooldown stamp below), skip straight to a brief wait before touching
+    # any key -- burning another 3 keys to re-detect an outage still inside
+    # its own cooldown window was purely wasted latency (this is what turned
+    # a single page's generation into a multi-minute stall in production
+    # logs: [MCQGen] attempt 1/2/3/4 each independently re-discovering the
+    # exact same ongoing Google-side 503 spike from scratch).
+    _outage_remaining = _gemini_backend_outage_until - time.time()
+    if _outage_remaining > 0:
+        logger.info(f"[Gemini] backend outage cooldown active ({_outage_remaining:.1f}s left) — waiting before retrying instead of re-burning keys")
+        await asyncio.sleep(min(_outage_remaining, _GEMINI_OUTAGE_COOLDOWN_SECONDS))
     _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
     # 2026-08-28 (user request): multi-round Gemini/Gemma interleaving --
     # caller can cap this round to max_keys, so the outer loop in app.py can
@@ -2472,6 +2497,7 @@ async def generate_mcq_from_image(
             # the caller falls to Groq/other providers immediately.
             if _consecutive_infra_fails >= 3:
                 logger.error(f"[Gemini] {_consecutive_infra_fails} consecutive timeout/503/504 failures across different keys — treating as backend-wide outage, stopping early (tried {attempt+1}/{max_retries} keys) to fall back to Groq")
+                _gemini_backend_outage_until = time.time() + _GEMINI_OUTAGE_COOLDOWN_SECONDS
                 break
         if attempt < max_retries - 1:
             # 2026-08-28 (user request): exponential backoff on transient
