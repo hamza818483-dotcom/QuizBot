@@ -2236,7 +2236,7 @@ async def generate_mcq_from_image(
     # with 5-6 keys that's 4-5 minutes of stalling per image before ever
     # reaching the OpenRouter fallback. Cap attempts at 3 keys max, and use a
     # shorter timeout on the 2nd/3rd attempt so a bad/slow key fails fast.
-    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
     # 2026-08-28 (user request): multi-round Gemini/Gemma interleaving --
     # caller can cap this round to max_keys, so the outer loop in app.py can
     # do "10 Gemini keys -> Gemma -> 5 more Gemini keys -> Gemma -> remaining
@@ -2290,7 +2290,10 @@ async def generate_mcq_from_image(
     # 2026-08-07: switched back to gemini-3.5-flash — gemini-3.5-flash was
     # 404ing ("no longer available to new users") for new API keys, on top
     # of its own daily-quota exhaustion, so it's no longer a safe primary.
-    _GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-2.5-flash"]
+    # 2026-09-23: dropped gemini-2.5-flash — Google returns hard 404
+    # ("no longer available to new users") on every call now, so it was
+    # just burning one guaranteed-failing attempt per key for no benefit.
+    _GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.6-flash"]
 
     _tried_keys = set()
     for attempt in range(max_retries):
@@ -2306,7 +2309,7 @@ async def generate_mcq_from_image(
         # same call used to build the original _ordered) always reflects
         # the current healthy-first order and skips keys already tried
         # this round before falling back to a repeat if truly none remain.
-        _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+        _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
         _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
         _untried = [k for k in _fresh if k not in _tried_keys]
         if _untried:
