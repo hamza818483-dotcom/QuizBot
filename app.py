@@ -16253,7 +16253,11 @@ async def dagano_generate_all_pages(
     for p in pages:
         queue.put_nowait(p)
 
-    MAX_WORKERS = 2
+    # Sequential (1 worker x 2-page batch) instead of 2 parallel workers --
+    # 2 workers meant up to 4 pages hitting the API at once, which is what
+    # caused large PDFs to fail. One worker keeps at most one 2-page batch
+    # in flight at a time, same as /dagano and /extra now both use.
+    MAX_WORKERS = 1
     lock = asyncio.Lock()
     total_mcq_box = {"n": 0}
     flagged_by_page = {}  # real page_num -> [dropped_question_text, ...] from conditional 2nd-pass rejections
@@ -16702,7 +16706,11 @@ async def extra_generate_all_pages(
     for p in pages:
         queue.put_nowait(p)
 
-    MAX_WORKERS = 2
+    # Sequential (1 worker x 2-page batch) instead of 2 parallel workers --
+    # 2 workers meant up to 4 pages hitting the API at once, which is what
+    # caused large PDFs to fail. One worker keeps at most one 2-page batch
+    # in flight at a time, same as /dagano and /extra now both use.
+    MAX_WORKERS = 1
     lock = asyncio.Lock()
     total_mcq_box = {"n": 0}
 
