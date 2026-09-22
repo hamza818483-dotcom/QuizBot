@@ -1214,16 +1214,41 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         try:
             cover_bytes = await _generate_lms_cover_image(subject or "MCQ", exam_title or "MCQ", chapter or "")
             caption_txt = _live_master_summary_text()
-            if cover_bytes and len(caption_txt) <= 1024:
-                master_r = await send_photo(
-                    channel_id, cover_bytes,
-                    caption=caption_txt,
-                    message_thread_id=thread_id or None,
-                )
-                master_is_photo_ok = True
-            else:
-                if cover_bytes and len(caption_txt) > 1024:
-                    logger.warning("[LMS-Send] master summary too long for photo caption (>1024) — falling back to text message")
+            master_is_photo_ok = False
+            if cover_bytes:
+                if len(caption_txt) <= 1024:
+                    master_r = await send_photo(
+                        channel_id, cover_bytes,
+                        caption=caption_txt,
+                        message_thread_id=thread_id or None,
+                    )
+                    master_is_photo_ok = master_r.get("ok", False)
+                else:
+                    # Caption too long for a photo caption — still send the
+                    # image (short caption), then the full summary as a
+                    # separate text message right after, so the cover image
+                    # is never dropped just because the topic list grew.
+                    master_r = await send_photo(
+                        channel_id, cover_bytes,
+                        caption=(subject or exam_title or "MCQ"),
+                        message_thread_id=thread_id or None,
+                    )
+                    master_is_photo_ok = master_r.get("ok", False)
+                    if master_is_photo_ok:
+                        try:
+                            await tg_post("sendMessage", {
+                                "chat_id": channel_id,
+                                "text": caption_txt,
+                                "parse_mode": "HTML",
+                                "disable_web_page_preview": True,
+                                "reply_to_message_id": master_r["result"]["message_id"],
+                                **({"message_thread_id": thread_id} if thread_id else {}),
+                            })
+                        except Exception as e:
+                            logger.warning(f"[LMS-Send] full summary follow-up text failed: {e}")
+            if not cover_bytes or not master_is_photo_ok:
+                if not cover_bytes:
+                    logger.warning("[LMS-Send] cover image generation failed — falling back to text message")
                 master_r = await tg_post("sendMessage", {
                     "chat_id": channel_id,
                     "text": caption_txt,
@@ -1235,22 +1260,23 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             if master_r.get("ok"):
                 master_msg_id = master_r["result"]["message_id"]
                 master_is_photo = master_is_photo_ok
-                try:
-                    _pin = {"chat_id": channel_id, "message_id": master_msg_id, "disable_notification": True}
-                    _pr = await tg_post("pinChatMessage", _pin)
-                    if not _pr.get("ok"):
-                        await asyncio.sleep(1.5)
+                if chat_type in ("group", "supergroup"):
+                    try:
+                        _pin = {"chat_id": channel_id, "message_id": master_msg_id, "disable_notification": True}
                         _pr = await tg_post("pinChatMessage", _pin)
-                    if not _pr.get("ok"):
-                        _pdesc = _pr.get("description") or "unknown"
-                        logger.warning(f"[LMS-Send] master summary pin failed: {_pdesc}")
-                        job["warning"] = f"pin failed: {_pdesc}"
-                        try:
-                            await tg_post("sendMessage", {"chat_id": OWNER_ID, "text": f"⚠️ LMS Send: প্রথম summary pin করা যায়নি ({_pdesc}).\nবটকে ওই চ্যাটে 'Pin messages' permission দাও।"})
-                        except Exception:
-                            pass
-                except Exception as e:
-                    logger.warning(f"[LMS-Send] master summary pin failed: {e}")
+                        if not _pr.get("ok"):
+                            await asyncio.sleep(1.5)
+                            _pr = await tg_post("pinChatMessage", _pin)
+                        if not _pr.get("ok"):
+                            _pdesc = _pr.get("description") or "unknown"
+                            logger.warning(f"[LMS-Send] master summary pin failed: {_pdesc}")
+                            job["warning"] = f"pin failed: {_pdesc}"
+                            try:
+                                await tg_post("sendMessage", {"chat_id": OWNER_ID, "text": f"⚠️ LMS Send: প্রথম summary pin করা যায়নি ({_pdesc}).\nবটকে ওই চ্যাটে 'Pin messages' permission দাও।"})
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send] master summary pin failed: {e}")
         except Exception as e:
             logger.warning(f"[LMS-Send] initial master summary send failed: {e}")
 
