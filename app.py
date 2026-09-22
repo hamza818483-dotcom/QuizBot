@@ -7821,77 +7821,49 @@ async def handle_poll_range_practice(msg: dict, src_chat, id_a: int, id_b: int):
             except Exception:
                 pass
 
-        mcqs, title = [], ""
-        n_nonpoll = n_noans = n_badopts = n_missing = fail_streak = 0
-        # Forward into the hidden collector chat (if set) so the forward-and-delete
-        # flicker never shows in the admin's own chat; preflight it, else fall back.
-        target = chat_id
-        collector_note = ""
-        _cc = await _get_collect_chat()
-        if _cc and _cc != chat_id:
-            _pr = await tg_post("sendMessage", {"chat_id": _cc, "text": "⏳ collecting…", "disable_notification": True})
-            if _pr.get("ok"):
-                target = _cc
-                try:
-                    await tg_post("deleteMessage", {"chat_id": _cc, "message_id": _pr["result"]["message_id"]})
-                except Exception:
-                    pass
-            else:
-                logger.warning(f"[PollRange] collector chat {_cc} unusable: {_pr.get('description')}")
-                collector_note = "\n\n⚠️ Collector chat কাজ করছে না (ওই account থেকে /start দাও) — নিজের chat-এ collect করা হয়েছে।"
+        # Read directly via the Telethon userbot session (same path as /ok) —
+        # no forward+delete into any chat, so there is no visible flicker at all.
         last_edit = 0.0
         stopped = False
-        _gate = _COLLECT_LOCK if target != chat_id else _NoLock()
-        for n, mid in enumerate(range(start_id, end_id + 1), 1):
-            if DM_STOP_FLAGS.pop(uid, False):
-                stopped = True
-                break
-            # shared collector chat: every user's forward->delete goes through ONE fair queue
-            # (Telegram allows ~1 msg/sec into a single private chat); own chat: no queue.
-            async with _gate:
-                r = await tg_post("forwardMessage", {"chat_id": target, "from_chat_id": src_chat,
-                                                     "message_id": mid, "disable_notification": True})
-                _fid = (r.get("result") or {}).get("message_id") if r.get("ok") else None
-                if _fid:
-                    try:
-                        await tg_post("deleteMessage", {"chat_id": target, "message_id": _fid})
-                    except Exception:
-                        pass
-                await asyncio.sleep(0.35)
-            if r.get("ok"):
-                fail_streak = 0
-                m = r.get("result") or {}
-                if not title:
-                    title = ((m.get("forward_from_chat") or {}).get("title") or "").strip()
-                poll = m.get("poll")
-                if not poll:
-                    n_nonpoll += 1
-                else:
-                    opts = [(o or {}).get("text", "") for o in (poll.get("options") or [])]
-                    cid = poll.get("correct_option_id")
-                    if cid is None:
-                        n_noans += 1          # regular (non-quiz) poll: no correct answer to practise with
-                    elif len(opts) != 4:
-                        n_badopts += 1        # the whole practice/quiz pipeline is A-D (4 options)
-                    else:
-                        mcqs.append({"question": poll.get("question", ""), "options": opts,
-                                     "answer": "ABCD"[cid] if 0 <= cid < 4 else "A",
-                                     "explanation": poll.get("explanation", "") or ""})
-            else:
-                desc = str(r.get("description") or "").lower()
-                fail_streak += 1
-                if any(k in desc for k in ("chat not found", "not a member", "channel_private", "kicked", "forbidden", "not enough rights")):
-                    await _edit("❌ ওই channel/group থেকে পড়া যাচ্ছে না।\n\nবটকে সেখানে add করো (বা public channel-এর link দাও)।")
-                    return
-                if "not found" in desc or "message_id_invalid" in desc:
-                    n_missing += 1
-                if fail_streak >= 8 and not mcqs:
-                    await _edit("❌ Message গুলো forward করা যাচ্ছে না।\n\nChannel-এ <b>Restrict saving content</b> চালু থাকতে পারে, বা ID ভুল।")
-                    return
+
+        async def _progress(checked, found, elapsed=None):
+            nonlocal last_edit
             now = time.time()
-            if now - last_edit >= 2.0 or n == total:
+            if now - last_edit >= 2.0 or checked == total:
                 last_edit = now
-                await _edit(_poll_range_progress_text(n, total, len(mcqs), title))
+                await _edit(_poll_range_progress_text(checked, total, found))
+
+        try:
+            polls_result = await extract_polls_telethon(src_chat, start_id, end_id, progress_cb=_progress)
+        except Exception as e:
+            desc = str(e).lower()
+            if any(k in desc for k in ("chat not found", "not a member", "channel_private", "kicked", "forbidden", "not enough rights", "resolve")):
+                await _edit("❌ ওই channel/group থেকে পড়া যাচ্ছে না।\n\nUserbot account-টাকে সেখানে join/add করো (বা public channel-এর link দাও)।")
+            else:
+                await _edit(f"❌ কিছু একটা ভুল হয়েছে: {str(e)[:150]}")
+            return
+
+        if DM_STOP_FLAGS.pop(uid, False):
+            stopped = True
+
+        title = ""
+        mcqs = []
+        n_noans = n_badopts = 0
+        for p in polls_result:
+            opts = p.get("options") or []
+            correct_idx = p.get("correct_idx")
+            if correct_idx is None:
+                n_noans += 1
+                continue
+            if len(opts) != 4:
+                n_badopts += 1
+                continue
+            mcqs.append({
+                "question": p.get("question", ""),
+                "options": opts,
+                "answer": "ABCD"[correct_idx] if 0 <= correct_idx < 4 else "A",
+                "explanation": p.get("explanation", "") or "",
+            })
 
         if stopped:
             await _edit(f"🛑 থামানো হয়েছে। {len(mcqs)} টি poll পাওয়া গিয়েছিল — সেট save করা হয়নি।")
@@ -7901,9 +7873,10 @@ async def handle_poll_range_practice(msg: dict, src_chat, id_a: int, id_b: int):
             notes.append(f"• {n_noans} টি poll-এ সঠিক উত্তর নেই (quiz mode না) — বাদ")
         if n_badopts:
             notes.append(f"• {n_badopts} টি poll-এ ৪টি option নেই — বাদ")
-        if n_nonpoll:
-            notes.append(f"• {n_nonpoll} টি message poll না — বাদ")
-        note_txt = (("\n\n" + "\n".join(notes)) if notes else "") + collector_note
+        skipped_ids = getattr(polls_result, "skipped_ids", None)
+        if skipped_ids:
+            notes.append(f"• {len(skipped_ids)} টি poll manual review প্রয়োজন")
+        note_txt = ("\n\n" + "\n".join(notes)) if notes else ""
         if not mcqs:
             await _edit("❌ এই range-এ ব্যবহারযোগ্য কোনো quiz poll পাওয়া যায়নি।" + note_txt)
             return
@@ -8416,7 +8389,7 @@ async def handle_livetime(msg: dict):
 # ============================================================
 # FEATURE: /poll — Poll Extract (see poll_extract.py)
 # ============================================================
-from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range, handle_ok_single_topic, handle_ok_all_topics
+from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range, handle_ok_single_topic, handle_ok_all_topics, extract_polls_telethon
 
 
 # ============================================================
