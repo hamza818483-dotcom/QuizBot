@@ -1399,7 +1399,7 @@ async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: s
     key-rotation, daily-exhaustion skip, and timeout/retry behavior
     without duplicating it. Returns raw response text, or "" if every key
     failed (caller decides what empty means for its own step)."""
-    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
     _all_marked_exhausted = bool(key_rotator.keys) and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
     _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
     if _live:
@@ -1420,7 +1420,7 @@ async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: s
         # Re-derive fresh healthy order each attempt instead of indexing a
         # stale pre-loop snapshot, so a key cooled/banned earlier in THIS
         # loop is never revisited while an untried healthy key exists.
-        _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+        _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
         _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
         _untried = [k for k in _fresh if k not in _tried_keys]
         if _untried:
@@ -1566,7 +1566,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
     )
     prompt = PDFS_CALL2_MCQ_ONLY_PROMPT.format(
         topics_list=topics_list, page=str(page).zfill(2), per_topic_count=mcq_count_hint)
-    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
     _all_marked_exhausted = bool(key_rotator.keys) and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
     _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
     if _live:
@@ -1583,7 +1583,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
     _consecutive_infra_fails = 0
     _tried_keys = set()
     for attempt in range(max_retries):
-        _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+        _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
         _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
         _untried = [k for k in _fresh if k not in _tried_keys]
         if _untried:
@@ -2567,11 +2567,11 @@ Return ONLY valid JSON array, no markdown, no extra text:
 
     # ── PRIMARY: Gemini (new google.genai SDK, multi-key rotation) ──
     max_retries = len(key_rotator.keys) if key_rotator.keys else 3
-    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+    _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
     _tried_keys = set()
     for attempt in range(max_retries):
         try:
-            _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+            _fresh = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
             _fresh = [k for k in _fresh if not _is_gemini_key_exhausted_today(k)] or _fresh
             _untried = [k for k in _fresh if k not in _tried_keys]
             if _untried:

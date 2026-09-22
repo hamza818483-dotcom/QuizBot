@@ -5295,7 +5295,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
         from google.genai import types
         from pdf_handler import image_to_base64, _is_gemini_key_exhausted_today
         img_b64 = image_to_base64(img)
-        _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True) or key_rotator.keys
         _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
         if not _live:
             logger.warning(f"[GeminiVerify] all {len(_ordered)} Gemini keys already known daily-exhausted — retrying them anyway (Google resets may have happened) but this is likely why /extra fell to Groq")
@@ -15438,7 +15438,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                 config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=8192)
             )
 
-        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True) or key_rotator.keys
         _dead_accounts = set()
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
@@ -25436,7 +25436,7 @@ async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False) -> str:
                 config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=16384)
             )
 
-        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True) or key_rotator.keys
         _dead_accounts = set()
         _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
         if _live:
@@ -30274,7 +30274,7 @@ Return ONLY the JSON array, nothing else."""
         if not result_json:
             try:
                 from pdf_handler import key_rotator, image_to_base64
-                _gkeys = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get())
+                _gkeys = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
                 if _gkeys:
                     gkey = _gkeys[0]
                     from google import genai as gai
