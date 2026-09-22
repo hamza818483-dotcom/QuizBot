@@ -6297,6 +6297,45 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
                 # before accepting zero, just with a tighter ceiling.
                 break
 
+    if _RD_MODE.get() and len(out) < _rng_min and len(out) > 0:
+        # /rd: page genuinely doesn't have 15 MCQs worth of distinct
+        # content -- rather than keep re-rolling toward an unreachable
+        # floor (each retry re-running the full multi-key provider
+        # chain), take ONE final Gemini-only "maximize whatever this
+        # page actually has" pass and accept its result as final. This
+        # replaces what used to be more gap-fill attempts chasing 15;
+        # a page with e.g. 9 real MCQs worth of content now settles at
+        # ~9 after this one pass instead of burning 3 more full retry
+        # chains trying to invent a 15th.
+        logger.info(f"[RD] page {page_num}: {len(out)}/{_rng_min} after normal retries -- one Gemini-only max-extraction pass, then accepting whatever it finds")
+        _max_prompt = _rd_build_gapfill_prompt(topic, out) + (
+            "\n\nThis page has been checked multiple times already. Extract every "
+            "remaining distinct fact/detail still on the page as a new MCQ, however "
+            "few or many that turns out to be -- do not pad with repeats or "
+            "near-duplicates of existing questions just to hit a target count."
+        )
+        try:
+            max_out, _ = await _generate_mcq_from_image_raw(
+                img, topic, page_num, mcq_count, exclude_groq_keys=None,
+                custom_prompt=_max_prompt, gemini_only=True
+            )
+            max_out = _cap_mcq_options(max_out, 4)
+            max_out = _validate_mcq_structure(max_out)
+            if _RD_MODE.get() and max_out:
+                from pdf_handler import _rd_reconcile_mcq_topic
+                max_out = _rd_reconcile_mcq_topic(max_out, topic)
+                _kt_list3 = _RD_KNOWN_TOPICS.get()
+                if _kt_list3 is not None:
+                    for _t in {m.get("_rd_topic") for m in max_out if m.get("_rd_topic")}:
+                        if _t not in _kt_list3:
+                            _kt_list3.append(_t)
+            if max_out:
+                out = _rd_dedupe_gapfill_merge(out, max_out)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"[RD] page {page_num}: max-extraction pass failed: {e} -- keeping {len(out)} MCQs as final")
+
     if _rng_max and len(out) > _rng_max:
         out = out[:_rng_max]
 
@@ -6715,7 +6754,7 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
     return mcqs
 
 
-async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None):
+async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False):
     # 2026-08-19: Gemini is now PRIMARY for ALL modes (explicit user
     # preference), Groq is fallback only when Gemini fails/empty. Previously
     # (2026-08-07) Groq was made primary because Gemini's free-tier daily
@@ -6727,7 +6766,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
     _LAST_GEMINI_ERROR["reason"] = ""
     _LAST_FALLBACK_ERROR["reason"] = ""
 
-    _plain_pdf = _is_plain_pdf_mode()
+    _plain_pdf = _is_plain_pdf_mode() or gemini_only
     _gemini_primary_mode = True
     if _gemini_primary_mode:
         _gp_tag = "/extra" if _EXTRA_MODE.get() else ("/bio" if _BIO_MODE.get() else ("/chem" if _CHEM_MODE.get() else "default"))
