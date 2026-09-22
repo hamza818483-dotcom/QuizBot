@@ -928,6 +928,9 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
       "poll_quiz_pdf" — only Poll Practice, Quiz Solve, Premium PDF; no
                         Website Exam / Rapid Practice Game link anywhere,
                         including the footer's "Website:" line.
+      "website_only"  — only a single Website Exam link per topic; no
+                        Poll Practice / Quiz Solve / Rapid Practice Game /
+                        Premium PDF link anywhere.
     """
     job = LMS_SEND_JOBS[job_id]
     dm_msg_id = None
@@ -963,6 +966,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             bot_un = await get_bot_username()
             sep = "▬▬▬▬▬▬▬▬▬▬"
             poll_quiz_pdf_only = (links_variant == "poll_quiz_pdf")
+            website_only = (links_variant == "website_only")
 
             groups = exam_groups if exam_groups else [{
                 "exam_title": exam_title, "subject": subject, "chapter": chapter, "batches": batches,
@@ -971,7 +975,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             # 2026-09-20 (poll_quiz_pdf mode): in a GROUP with no thread_id, auto-create
             # ONE forum topic named after the exam and post inside it.
             _is_group = False
-            if poll_quiz_pdf_only:
+            if poll_quiz_pdf_only or website_only:
                 try:
                     _ctype = await _get_chat_type(channel_id)
                 except Exception:
@@ -1003,8 +1007,17 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     poll_link = f"https://t.me/{bot_un}?start=poll_{cache_id}"
                     quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
                     pdf_link = f"{CF_WORKER_URL_2}/api/premium-pdf-view/{cache_id}"
-                    asyncio.create_task(_prewarm_premium_pdf(f"{pdf_link}?raw=1"))
-                    if poll_quiz_pdf_only:
+                    if not website_only:
+                        asyncio.create_task(_prewarm_premium_pdf(f"{pdf_link}?raw=1"))
+                    if website_only:
+                        exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+                        quote_body = (
+                            f"<b>{_serial}. {_html_escape(topic)}</b>\n"
+                            f"📌 মোট MCQ: {len(mcqs)}\n"
+                            f"───────────\n"
+                            f"<a href=\"{exam_link}\"><b>🌐 Website Exam</b></a>"
+                        )
+                    elif poll_quiz_pdf_only:
                         quote_body = (
                             f"<b>{_serial}. {_html_escape(topic)}</b>\n"
                             f"📌 মোট MCQ: {len(mcqs)}\n"
