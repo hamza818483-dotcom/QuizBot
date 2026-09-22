@@ -16742,6 +16742,28 @@ async def extra_generate_all_pages(
             logger.error(f"[Extra Generate] fallback single-page {page_num} failed: {e}")
             return []
 
+    async def _finalize_page(pg, im, mcqs):
+        """Before accepting a 0-MCQ result: if the page visibly has
+        highlighter-color pixels (so it clearly has a mark), that's a
+        real miss, not a legitimately empty page -- retry it ONCE with
+        an enhanced (upscaled/sharpened/contrast-boosted) image and a
+        single-page call, which reads faint/small marks much more
+        reliably than the batched multi-page call. Only replaces the
+        result if the retry actually finds something."""
+        if not mcqs:
+            try:
+                if _extra_page_has_highlight_marks(im):
+                    logger.info(f"[Extra Retry] page {pg}: 0 MCQs but highlighter pixels detected -- retrying with enhanced image")
+                    enhanced = _enhance_blurry_page(im)
+                    retry_mcqs, _, _ = await _extra_gen_from_image(enhanced, topic, pg)
+                    if retry_mcqs:
+                        mcqs = retry_mcqs
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"[Extra Retry] page {pg} enhanced retry failed: {e}")
+        await _mark_done(pg, im, mcqs)
+
     async def _worker():
         while True:
             if is_cancelled(chat_id):
@@ -16790,11 +16812,11 @@ async def extra_generate_all_pages(
                     break
 
                 # First page in this attempt: finalize it either way --
-                # 0 MCQs here is a fully legit "figure-only/no-content
-                # page" result, not a failure.
+                # 0 MCQs here is only accepted after a highlight-aware
+                # enhanced-image retry (see _finalize_page).
                 first_pg, first_im = pending[0]
                 first_mcqs = await _audited(by_index.get(1, []), first_im, first_pg)
-                await _mark_done(first_pg, first_im, first_mcqs)
+                await _finalize_page(first_pg, first_im, first_mcqs)
 
                 if n == 1:
                     pending = []
@@ -16806,7 +16828,7 @@ async def extra_generate_all_pages(
                     # first page genuinely had content -- finalize the
                     # second page's result from this same call too.
                     second_mcqs = await _audited(by_index.get(2, []), second_im, second_pg)
-                    await _mark_done(second_pg, second_im, second_mcqs)
+                    await _finalize_page(second_pg, second_im, second_mcqs)
                     pending = []
                 else:
                     # First page came back empty (no marks / figure-only)
@@ -16826,7 +16848,7 @@ async def extra_generate_all_pages(
                         # page alone (its own extraction from this call
                         # is still valid, whatever it found).
                         second_mcqs = await _audited(by_index.get(2, []), second_im, second_pg)
-                        await _mark_done(second_pg, second_im, second_mcqs)
+                        await _finalize_page(second_pg, second_im, second_mcqs)
                         pending = []
 
     tasks = [_spawn_task(_worker()) for _ in range(MAX_WORKERS)]
