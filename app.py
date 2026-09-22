@@ -15330,13 +15330,8 @@ def _build_extra_prompt_batched(topic: str, n: int) -> str:
 
 async def _extra_gen_from_images_batch(imgs: list, topic: str) -> dict:
     """/extra's BATCHED generation call -- scans multiple consecutive page
-    images in ONE Gemini call (Groq/OpenRouter fallback only ever sees the
-    first image, same acceptable-degradation pattern onu2 uses). Gemini
-    first (primary), Groq fallback ONLY on a true technical failure (empty
-    response), never on a genuine empty/[] result -- most /extra pages are
-    legitimately sparse or empty, so an empty parse is trusted as-is and
-    does NOT burn through more keys/providers. Returns
-    {page_index (1-based int): [mcq dicts]}."""
+    images in ONE Gemini call. Gemini ONLY -- no Groq/OpenRouter fallback.
+    Returns {page_index (1-based int): [mcq dicts]}."""
     n = len(imgs)
     if n == 0:
         return {}
@@ -15344,18 +15339,7 @@ async def _extra_gen_from_images_batch(imgs: list, topic: str) -> dict:
     try:
         gem_txt = await _qbm_gemini_raw_multi(imgs, prompt)
         provider = "Gemini"
-        if gem_txt:
-            gem = _onu2_parse_mcq_array(gem_txt)
-        else:
-            gem = []
-            txt = await _qbm_groq_call(imgs[0], prompt)
-            provider = "Groq"
-            if txt:
-                gem = _onu2_parse_mcq_array(txt)
-            else:
-                or_txt = await _qbm_openrouter_call(imgs[0], prompt)
-                gem = _onu2_parse_mcq_array(or_txt) if or_txt else []
-                provider = "OpenRouter"
+        gem = _onu2_parse_mcq_array(gem_txt) if gem_txt else []
         by_index = {}
         for m in gem:
             idx = m.get("page_index")
@@ -15384,18 +15368,16 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
     _qbm_gemini_raw_multi (no shared call), so /dagano's token-limit and
     behavior can't be changed by edits elsewhere. Sets an EXPLICIT
     max_output_tokens (8192) -- enough for a page-sized response while
-    keeping generation inside Google's request deadline. Same
-    key-rotation/quota-exhaustion/Groq-fallback pattern as the shared
-    QBM caller, reimplemented standalone."""
+    keeping generation inside Google's request deadline. Gemini ONLY --
+    no Groq/OpenRouter fallback."""
     try:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
-            _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
-            return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+            logger.warning("[Dagano] no Gemini keys configured")
+            return ""
         if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
-            logger.warning("[Dagano] all Gemini keys already known daily-exhausted — skipping straight to Groq")
-            _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
-            return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+            logger.warning("[Dagano] all Gemini keys already known daily-exhausted")
+            return ""
         from google import genai as gai
         from google.genai import types
         img_bytes_list = []
@@ -15479,13 +15461,11 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                     continue
                 logger.warning(f"[Dagano] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
-        logger.warning("[Dagano] All Gemini keys exhausted — falling back to Groq vision (first image only)")
-        _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
-        return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+        logger.warning("[Dagano] All Gemini keys exhausted — no Groq fallback (Gemini-only mode)")
+        return ""
     except Exception as e:
         logger.warning(f"[Dagano] Gemini multi-image raw call failed: {e}")
-        _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Groq")
-        return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
+        return ""
 
 
 def _dagano_page_has_marks(img) -> bool:
