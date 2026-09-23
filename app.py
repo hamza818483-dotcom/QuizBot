@@ -21288,7 +21288,11 @@ async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
         # Scan the segment's OWN pages first (table can land on any page
         # within the topic, most often the last), then walk forward through
         # every later page in the whole document — a topic's table can
-        # also appear several pages after the topic's own last page.
+        # also appear several pages after the topic's own last page, with
+        # OTHER topics' MCQs sitting in between (table position follows
+        # topic sequence, never page adjacency). NEVER stop scanning just
+        # because one page returns no match — keep walking forward through
+        # every remaining page until a match is found or pages run out.
         scan_order = seg_page_indices + [p for p in range(last_seg_page_idx + 1, len(extracted_pages))
                                           if p not in seg_page_indices]
         for j in scan_order:
@@ -21304,12 +21308,12 @@ async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
                     logger.warning(f"[BCS Call2] segment scan against page idx {j} (attempt {_attempt+1}) failed: {e}")
                     page_map = {}
                 if not page_map:
-                    break  # this page genuinely has nothing more for the remaining items
+                    break  # no match on THIS page/attempt — try next attempt or move to next page (do NOT abandon the whole forward scan)
                 found_map.update(page_map)
                 _before = len(_unresolved)
                 _unresolved = [m for m in _unresolved if (m.get("question") or "").strip()[:80] not in found_map]
                 if len(_unresolved) == _before:
-                    break  # no progress this attempt, stop retrying this page
+                    break  # no progress this attempt, stop retrying this page, move to next page
 
         for m in _real_mcqs:
             key = (m.get("question") or "").strip()[:80]
@@ -21317,6 +21321,8 @@ async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
                 m["answer"] = found_map[key]
                 m["no_mark"] = False
                 m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=True)
+
+
 
 
 
