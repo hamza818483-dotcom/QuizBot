@@ -30763,29 +30763,41 @@ Return ONLY the JSON array, nothing else."""
 
         if not result_json:
             try:
-                from pdf_handler import key_rotator, image_to_base64
-                _gkeys = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
-                if _gkeys:
-                    gkey = _gkeys[0]
-                    from google import genai as gai
-                    from google.genai import types
-                    client = gai.Client(
-                        api_key=gkey,
-                        http_options=types.HttpOptions(timeout=38000)
-                    )
-                    img_b64 = image_to_base64(img)
+                from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
+                _gkeys = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True) or key_rotator.keys
+                _gkeys = [k for k in _gkeys if not _is_gemini_key_exhausted_today(k)] or _gkeys
+                from google import genai as gai
+                from google.genai import types
+                img_b64 = image_to_base64(img)
+                img_bytes_local = base64.b64decode(img_b64)
 
-                    def _call():
-                        return client.models.generate_content(
-                            model="gemini-3.5-flash",
-                            contents=[
-                                types.Part.from_text(text=prompt),
-                                types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
-                            ],
-                            config=types.GenerateContentConfig(max_output_tokens=8192)
-                        )
-                    response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=40)
-                    result_json = _qbm_parse_bare_json_array(response.text)
+                def _call(k):
+                    client = gai.Client(api_key=k, http_options=types.HttpOptions(timeout=38000))
+                    return client.models.generate_content(
+                        model="gemini-3.5-flash",
+                        contents=[
+                            types.Part.from_text(text=prompt),
+                            types.Part.from_bytes(data=img_bytes_local, mime_type="image/jpeg")
+                        ],
+                        config=types.GenerateContentConfig(max_output_tokens=8192)
+                    )
+                # Retries across up to 8 keys instead of exactly 1 with zero
+                # retry -- a single transient error (rate limit, 503
+                # overload, timeout) on one key was silently returning {}
+                # for the whole page, leaving every MCQ unresolved even
+                # when a real answer-key table was on the page.
+                for _gk in _gkeys[:8]:
+                    try:
+                        response = await asyncio.wait_for(asyncio.to_thread(_call, _gk), timeout=40)
+                        result_json = _qbm_parse_bare_json_array(response.text)
+                        if result_json is not None:
+                            break
+                    except Exception as _e_inner:
+                        _msg_inner = str(_e_inner).upper()
+                        if any(t in _msg_inner for t in ("429", "RESOURCE_EXHAUSTED", "503", "504", "UNAVAILABLE", "DEADLINE_EXCEEDED")):
+                            continue
+                        logger.warning(f"[QBM] answer-key scan gemini key {_gk[:12]}... failed: {_e_inner}")
+                        continue
             except Exception as e:
                 logger.warning(f"[QBM] answer-key scan gemini fallback failed: {e}")
 
