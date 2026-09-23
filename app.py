@@ -23935,6 +23935,40 @@ def _looks_ai_generated(expl: str) -> bool:
     return any(p.lower() in low for p in _AI_GENERATED_PATTERNS)
 
 
+def _qbm_parse_bare_json_array(text: str) -> list:
+    """Lightweight JSON-array parser for non-MCQ-schema responses (e.g.
+    answer-key match results like [{"item_index":2,"answer":"A"}] or
+    [{"question_index":1,"answer":"A"}]) -- unlike _qbm_parse_json, this
+    does NOT require a "question"/"options" field on each object, so it
+    doesn't silently discard every entry of a differently-shaped schema.
+    2026-09-23 fix: _qbm_scan_answer_key was calling _qbm_parse_json on its
+    own {"serial"/"item_index": N, "answer": "X"} output, which has neither
+    field -- every single match was being dropped, making serial_strict
+    answer resolution return empty 100% of the time regardless of what the
+    model actually found. Returns [] on any parse failure, never raises."""
+    if not text:
+        return []
+    t = text.strip()
+    if "```json" in t:
+        t = t.split("```json")[1].split("```")[0].strip()
+    elif "```" in t:
+        t = t.split("```")[1].split("```")[0].strip()
+    try:
+        m = re.search(r'\[.*\]', t, re.DOTALL)
+        raw = json.loads(m.group()) if m else json.loads(t)
+    except Exception as e:
+        try:
+            search_end = getattr(e, "pos", len(t))
+            last_obj_end = _find_last_complete_top_level_json_object_end(t, search_end)
+            if last_obj_end != -1:
+                raw = json.loads(t[:last_obj_end + 1] + "]")
+            else:
+                return []
+        except Exception:
+            return []
+    return raw if isinstance(raw, list) else []
+
+
 def _qbm_parse_json(text: str, allow5: bool = False) -> list:
     """Parse extractor JSON output -> list of {question, options[A-D], answer(A-D), explanation}"""
     if not text:
@@ -30607,7 +30641,7 @@ Return ONLY the JSON array, nothing else."""
                     )
                     if txt:
                         groq_key_rotator.mark_healthy(key)
-                        result_json = _qbm_parse_json(txt)
+                        result_json = _qbm_parse_bare_json_array(txt)
                         break
                     if status == 429:
                         groq_key_rotator.mark_rate_limited(key, daily_exhausted=(_key_429_is_tpm.get(key) is not True))
@@ -30639,7 +30673,7 @@ Return ONLY the JSON array, nothing else."""
                             config=types.GenerateContentConfig(max_output_tokens=8192)
                         )
                     response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=40)
-                    result_json = _qbm_parse_json(response.text)
+                    result_json = _qbm_parse_bare_json_array(response.text)
             except Exception as e:
                 logger.warning(f"[QBM] answer-key scan gemini fallback failed: {e}")
 
