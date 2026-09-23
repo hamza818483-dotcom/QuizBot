@@ -30306,7 +30306,7 @@ async def _handle_onu2_impl(msg: dict):
                 pass
 
 
-async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = False) -> dict:
+async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = False, serial_strict: bool = False) -> dict:
     """
     Given a page image and a list of MCQs whose answer wasn't found on their
     own page, check if THIS page contains an answer key (table, boxed list,
@@ -30317,15 +30317,54 @@ async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = F
     gemini_only (default False): when True (/unmesh, per user request
     2026-09-04), skips the Groq attempt entirely and goes straight to
     Gemini — no non-Gemini model anywhere in /unmesh's pipeline.
+
+    serial_strict (opt-in, default False — /bcs passes True per user
+    request 2026-09-23): match ONLY by each MCQ's own printed serial number
+    ("qsn_no", the number printed next to the question itself) against the
+    table's row number — position-for-position, e.g. row "১." in the table
+    always maps to the question printed as ১./1./প্রশ্ন-১ on the MCQ page,
+    strictly serially. Content/topic-based "looks like a match" guessing is
+    explicitly disallowed in this mode.
     """
     if not unresolved_mcqs:
         return {}
     try:
-        q_list = "\n".join(
-            f"{i+1}. {(m.get('question') or '').strip()[:150]}"
-            for i, m in enumerate(unresolved_mcqs)
-        )
-        prompt = f"""This image may contain an ANSWER KEY (a table, boxed list, or a line
+        if serial_strict:
+            q_list = "\n".join(
+                f"serial {m.get('qsn_no')}: {(m.get('question') or '').strip()[:150]}"
+                for m in unresolved_mcqs if m.get("qsn_no") is not None
+            )
+            if not q_list:
+                return {}
+            prompt = f"""This image may contain an ANSWER KEY (a table, boxed list, or a line
+like "1-A, 2-C, 3-B..." mapping question serial NUMBERS to correct options),
+positioned serially/numerically (row order = question serial order).
+
+Here are MCQs still missing an answer, each with its own PRINTED serial number:
+{q_list}
+
+Task: STRICT SERIAL MATCHING ONLY. For each MCQ above, look at the answer
+key/table on this page and find the row/entry whose serial NUMBER exactly
+equals that MCQ's serial number (e.g. serial 21 must match the table's row
+literally numbered/labelled 21 — not "row 21 counting from the top" if the
+table's own printed numbers don't say 21, and never by matching question
+content, topic, or wording similarity). If the table's printed numbering
+does not include a given serial, that MCQ has no match here — do not force one.
+
+Return a JSON array like:
+[{{"serial": 21, "answer": "A"}}, {{"serial": 23, "answer": "C"}}]
+
+Only include entries where the table's own printed serial number genuinely
+equals the MCQ's serial number on this page.
+If this page has no answer key at all, or no serial-number match for these
+specific MCQs, return exactly: []
+Return ONLY the JSON array, nothing else."""
+        else:
+            q_list = "\n".join(
+                f"{i+1}. {(m.get('question') or '').strip()[:150]}"
+                for i, m in enumerate(unresolved_mcqs)
+            )
+            prompt = f"""This image may contain an ANSWER KEY (a table, boxed list, or a line
 like "1-A, 2-C, 3-B..." mapping question numbers to correct options).
 
 Here are questions whose answers are still missing, in order:
@@ -30394,6 +30433,18 @@ Return ONLY the JSON array, nothing else."""
             return {}
 
         found = {}
+        if serial_strict:
+            by_serial = {m.get("qsn_no"): m for m in unresolved_mcqs if m.get("qsn_no") is not None}
+            for entry in result_json:
+                try:
+                    serial = int(entry.get("serial"))
+                    ans = str(entry.get("answer", "")).strip().upper()[:1]
+                    if serial in by_serial and ans in ("A", "B", "C", "D"):
+                        key_text = (by_serial[serial].get("question") or "").strip()[:80]
+                        found[key_text] = ans
+                except (ValueError, TypeError, AttributeError):
+                    continue
+            return found
         for entry in result_json:
             try:
                 q_idx = int(entry.get("question_index", 0)) - 1
@@ -30584,7 +30635,7 @@ async def qbm_extract_all_pages(
                     if not unresolved or is_cancelled(chat_id):
                         break
                     _, lookahead_img = pages[idx + lookahead_offset]
-                    found_map = await _qbm_scan_answer_key(lookahead_img, unresolved, gemini_only=gemini_only)
+                    found_map = await _qbm_scan_answer_key(lookahead_img, unresolved, gemini_only=gemini_only, serial_strict=no_knowledge_fallback)
                     if found_map:
                         for m in mcqs:
                             key = (m.get("question") or "").strip()[:80]
