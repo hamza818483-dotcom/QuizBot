@@ -1520,7 +1520,7 @@ async def gemini_proxy(request: Request):
                 if ovl >= 3:
                     if fb_used:
                         break
-                    fb_used, model_ctx["m"], ovl = True, "gemini-2.5-flash", 0
+                    fb_used, model_ctx["m"], ovl = True, "gemini-3.6-flash", 0
                     await asyncio.sleep(1.5)
                 continue
             if "429" in msg or "RESOURCE_EXHAUSTED" in up:
@@ -25440,9 +25440,9 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
                         # Model-wide overload: hopping through 100+ keys is pointless.
                         if not _fallback_used:
                             _fallback_used = True
-                            _model_ctx["m"] = "gemini-2.5-flash"
+                            _model_ctx["m"] = "gemini-3.6-flash"
                             _ovl_streak = 0
-                            logger.warning("[UNMESH] switching to gemini-2.5-flash fallback")
+                            logger.warning("[UNMESH] switching to gemini-3.6-flash fallback")
                             await asyncio.sleep(2)
                         else:
                             logger.warning("[UNMESH] both models overloaded -- backing off, returning empty")
