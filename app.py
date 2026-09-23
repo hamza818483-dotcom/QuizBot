@@ -27530,7 +27530,8 @@ async def _handle_bcs_impl(msg: dict):
         extracted_pages = await qbm_extract_all_pages(
             chat_id, pages, "BCS Extract", file_name, status_msg_id,
             extractor=_bcs_extract_from_image, file_id=file_id,
-            page_status_out=_bcs_page_status, gemini_only=True
+            page_status_out=_bcs_page_status, gemini_only=True,
+            no_knowledge_fallback=True
         )
 
         total_mcq_found = sum(
@@ -30414,7 +30415,8 @@ async def qbm_extract_all_pages(
     extractor=None, file_id: str = None,
     page_status_out: list = None,
     gemini_only: bool = False,
-    job_id: str = None
+    job_id: str = None,
+    no_knowledge_fallback: bool = False
 ) -> list:
     """
     Phase 1 -- runs the full 3-call connected extraction pipeline for every
@@ -30448,6 +30450,15 @@ async def qbm_extract_all_pages(
     hole jotuk complete oituk sathe sathe output diye dibe'. Best-effort,
     never blocks/fails the extraction itself. Every existing caller
     without a job_id is completely unaffected.
+
+    no_knowledge_fallback (opt-in, default False): when True, skips the
+    last-resort _qbm_web_resolve_answer() step entirely for any MCQ still
+    unresolved after the full cross-page answer-key lookahead -- per user
+    request 2026-09-23: '/bcs Ans nije theke nibe na kokhono' (never let
+    /bcs pick an answer from the model's own knowledge, source-table match
+    only). Such MCQs stay flagged (no_mark/"Answer not found in source")
+    instead of getting a knowledge-guessed answer. /bcs passes True; every
+    other existing caller defaults to False and is unaffected.
     """
     _extract_fn = extractor or _qbm_extract_from_image
     page_status = [{"page": p, "done": False, "current": False, "mcq": 0} for p, _ in pages]
@@ -30587,8 +30598,9 @@ async def qbm_extract_all_pages(
                         unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
 
             # Still unresolved after scanning nearby pages -> last-resort Groq
-            # knowledge-based resolution, never a blind guess.
-            if unresolved and not is_cancelled(chat_id):
+            # knowledge-based resolution, never a blind guess. Skipped for
+            # /bcs (no_knowledge_fallback=True) -- those stay flagged instead.
+            if unresolved and not is_cancelled(chat_id) and not no_knowledge_fallback:
                 for m in unresolved:
                     if is_cancelled(chat_id):
                         break
