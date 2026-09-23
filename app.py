@@ -21211,6 +21211,25 @@ Return ONLY the JSON object or null, nothing else."""
     return None
 
 
+def _bcs_norm_hint(s: str) -> str:
+    """Normalize a topic_hint string for comparison so trivial OCR/reading
+    variance between two Call1 calls (extra/missing space, half-width vs
+    full-width parenthesis, stray punctuation) doesn't get treated as a
+    real topic change. 2026-09-23 fix: the same recurring page-header
+    badge (e.g. "৫০ তম বিসিএস প্রশ্ন ও সমাধান বাংলাদেশ") is re-read fresh
+    on every page it appears on since it's genuinely visible each time —
+    tiny character-level differences between two separate Gemini calls on
+    two different page images were being read as strict inequality,
+    wrongly splitting one continuing topic into "(1)"/"(2)" fake pieces
+    at the page boundary. Strip all whitespace and non-alphanumeric
+    punctuation before comparing, keep only the Bangla/English letters
+    and digits so the comparison is robust to formatting drift.
+    """
+    if not s:
+        return ""
+    return re.sub(r'[^\w]', '', s, flags=re.UNICODE).strip().lower()
+
+
 async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
     """/bcs Call2 (2026-09-23, rewritten to resolve per-TOPIC not per-PAGE):
     a topic's MCQs can span multiple pages (e.g. 24 on page 1 continuing
@@ -21266,7 +21285,7 @@ async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
     prev_hint = None
     for page_idx, img, m, eff in flat:
         qno = m.get("qsn_no")
-        hint_changed = bool(eff) and (prev_hint is not None) and (eff != prev_hint)
+        hint_changed = bool(eff) and (prev_hint is not None) and (_bcs_norm_hint(eff) != _bcs_norm_hint(prev_hint))
         starts_new = (not segments) or (qno == 1) or hint_changed
         if starts_new:
             segments.append([])
@@ -21383,7 +21402,7 @@ def _bcs_group_mcqs(extracted_pages: list) -> list:
     for m in flat:
         hint = m.get("_effective_hint", "")
         qno = m.get("qsn_no")
-        hint_changed = bool(hint) and (prev_hint is not None) and (hint != prev_hint)
+        hint_changed = bool(hint) and (prev_hint is not None) and (_bcs_norm_hint(hint) != _bcs_norm_hint(prev_hint))
         # Second independent boundary signal (2026-09-23 correction): an
         # উত্তরমালা answer-table by itself does NOT prove a topic ended —
         # a table can legitimately sit in the middle of ONE continuing
