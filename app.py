@@ -27928,12 +27928,20 @@ async def _handle_bcs_impl(msg: dict):
             _merged_w.writerow([name, "", "", "", "", "", "", "", "", ""])
             for m in mcqs:
                 opts = m.get("options", ["", "", "", ""])
+                # /bcs 2026-09-23 fix: an MCQ whose answer table was never
+                # actually found (no_mark=True, still carrying Call1's
+                # placeholder answer="A") must NOT be written out as "1" --
+                # that looked like a real resolved answer in the CSV when
+                # it was really just the unresolved placeholder. Leave
+                # answer/explanation blank instead so it's visibly
+                # unresolved rather than silently wrong.
+                _unresolved = bool(m.get("no_mark")) or "Answer not found in source" in (m.get("explanation") or "")
                 row = [
                     m.get("question", ""), opts[0] if len(opts) > 0 else "",
                     opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
                     opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
-                    _ans_map.get(m.get("answer", "A"), "1"),
-                    _strip_img_tag(m.get("explanation", "")), "1", "1"
+                    "" if _unresolved else _ans_map.get(m.get("answer", "A"), "1"),
+                    "" if _unresolved else _strip_img_tag(m.get("explanation", "")), "1", "1"
                 ]
                 w.writerow(row)
                 _merged_w.writerow(row)
