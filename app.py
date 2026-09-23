@@ -21082,27 +21082,12 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
 
 
 async def _bcs_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False) -> list:
-    """/bcs extractor — STRICT TWO-CALL pipeline per user spec (2026-09-23:
-    'Call1 ei ans+explanation banabe na... Call2 e 2nd page/table theke ans
-    nibe+explanation banabe ans wise'):
-
-    Call1 (BCS_EXTRACT_PROMPT_CALL1): pure exact-extraction only — question,
+    """/bcs Call1 — PURE extraction only (2026-09-23 redesign): question,
     options, qsn_no, topic_hint. NEVER decides an answer or writes an
-    explanation here, so it can never accidentally invent one from its own
-    knowledge before the real answer-table has even been read.
-
-    Call2 (_qbm_scan_answer_key, serial_strict=True): looks at THIS SAME
-    page image for a serially-numbered উত্তরমালা/answer-table/key and
-    matches ONLY by each MCQ's own printed qsn_no against the table's own
-    printed serial number — never by content/topic guessing. Matched MCQs
-    get "answer" set first, THEN "explanation" is built from that known
-    answer (ans-wise, never the reverse). Unmatched MCQs are marked
-    unresolved (explanation="Answer not found in source", no_mark=True) so
-    qbm_extract_all_pages's existing cross-page lookahead can still find
-    the real table on a LATER page exactly as before — this function only
-    adds the SAME-page table check that was previously missing (per the
-    2026-09-23 bug report: page 2 has both the tail of topic 1's MCQs AND
-    its উত্তরমালা table together, which the old one-call design missed).
+    explanation here. Answers are resolved afterwards by
+    _bcs_resolve_answers_two_page (Call2 = page N+1's table, Call3 = full
+    cross-check), which needs every page's Call1 result available at once
+    — so this function does ONLY Call1 and leaves every MCQ unresolved.
     """
     cached = _bcs_mcq_result_cache.get(cache_key) if (cache_key and not bypass_cache) else None
     if cached:
@@ -21114,32 +21099,110 @@ async def _bcs_extract_from_image(img, cache_key: tuple = None, bypass_cache: bo
     gem = _qbm_parse_json(gem_txt) if gem_txt else []
     result = _qbm_dedup_list(gem) if gem else []
 
-    # Call2 — same-page উত্তরমালা/answer-table check, strict serial match.
-    _real_mcqs = [m for m in result if "trailing_topic_marker" not in m]
-    if _real_mcqs:
-        try:
-            found_map = await _qbm_scan_answer_key(img, _real_mcqs, gemini_only=True, serial_strict=True)
-        except Exception as e:
-            logger.warning(f"[BCS Call2] same-page answer-table scan failed: {e}")
-            found_map = {}
-        for m in _real_mcqs:
-            key = (m.get("question") or "").strip()[:80]
-            if key in found_map:
-                m["answer"] = found_map[key]
-                m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=True)
-            else:
-                # Not on this page's own table — leave unresolved so the
-                # generic cross-page lookahead in qbm_extract_all_pages
-                # (which greps for this exact phrase) can still find it on
-                # a later page, per existing /bcs no_knowledge_fallback wiring.
-                m["answer"] = "A"
-                m["no_mark"] = True
-                m["explanation"] = "Answer not found in source"
+    for m in result:
+        if "trailing_topic_marker" in m:
+            continue
+        m["answer"] = "A"
+        m["no_mark"] = True
+        m["explanation"] = "Answer not found in source"
 
     if result and cache_key:
         _bcs_mcq_result_cache[cache_key] = result
         _cap_qbm_mcq_cache(_bcs_mcq_result_cache)
     return result
+
+
+async def _qbm_verify_serial_answer_match(img_n, img_n1, mcqs_n: list, found_map: dict) -> dict:
+    """/bcs Call3 — full cross-check pass over page N + page N+1 together:
+    verify each Call2 match's serial number genuinely lines up serially
+    (row order == question order, nothing skipped/misaligned). Drops any
+    entry that doesn't hold up. found_map is {question_key: answer} from
+    Call2. Returns a filtered/corrected found_map. Never invents new
+    matches — only confirms or drops existing ones.
+    """
+    if not found_map:
+        return {}
+    by_key = {(m.get("question") or "").strip()[:80]: m for m in mcqs_n}
+    check_list = "\n".join(
+        f"serial {by_key[k].get('qsn_no')}: answer={v}"
+        for k, v in found_map.items() if k in by_key
+    )
+    if not check_list:
+        return {}
+    prompt = f"""You are given TWO page images: PAGE N (questions) and PAGE N+1 (its answer
+table). A previous pass matched these question-serial -> answer pairs by
+reading the table's own printed serial numbers:
+{check_list}
+
+Task: STRICT VERIFICATION ONLY. For each pair, check BOTH images together:
+1. Does PAGE N actually contain a question printed with that exact serial number?
+2. Does PAGE N+1's answer table actually contain a row printed with that exact
+   serial number, in correct serial order relative to neighboring rows (not
+   skipped, not misaligned, not duplicated)?
+3. Does the table's printed answer for that row equal the given answer?
+
+Return a JSON array of ONLY the serials that pass ALL three checks:
+[{{"serial": 21, "answer": "A"}}, ...]
+Drop any serial that fails any check — do not guess or fix, only confirm or drop.
+If everything drops, return exactly: []
+Return ONLY the JSON array, nothing else."""
+    try:
+        gem_txt = await _qbm_gemini_raw_multi([img_n, img_n1], prompt)
+        result_json = _qbm_parse_json(gem_txt) if gem_txt else None
+    except Exception as e:
+        logger.warning(f"[BCS Call3] verify pass failed, keeping Call2 result unverified: {e}")
+        return found_map
+    if not result_json or not isinstance(result_json, list):
+        return {}
+    verified_serials = {}
+    for entry in result_json:
+        try:
+            serial = int(entry.get("serial"))
+            ans = str(entry.get("answer", "")).strip().upper()[:1]
+            if ans in ("A", "B", "C", "D"):
+                verified_serials[serial] = ans
+        except (ValueError, TypeError, AttributeError):
+            continue
+    out = {}
+    for k, m in by_key.items():
+        s = m.get("qsn_no")
+        if s in verified_serials:
+            out[k] = verified_serials[s]
+    return out
+
+
+async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
+    """/bcs Call2+Call3 — per user spec (2026-09-23): for page N's MCQs,
+    Call2 looks DIRECTLY at page N+1's image for the answer table (never
+    checks page N's own image — /bcs answer tables are never same-page).
+    Call3 then cross-checks both pages together: serials line up, table
+    row order matches question order, nothing missed/misaligned. Mutates
+    extracted_pages' mcq dicts in place (answer/explanation/no_mark).
+    Pages with no N+1 (last page) stay unresolved — nothing later to check.
+    """
+    for i in range(len(extracted_pages) - 1):
+        page_num, img_n, mcqs_n = extracted_pages[i]
+        _, img_n1, _ = extracted_pages[i + 1]
+        _real_mcqs = [m for m in mcqs_n if "trailing_topic_marker" not in m
+                      and "Answer not found in source" in (m.get("explanation") or "")]
+        if not _real_mcqs:
+            continue
+        try:
+            found_map = await _qbm_scan_answer_key(img_n1, _real_mcqs, gemini_only=True, serial_strict=True)
+        except Exception as e:
+            logger.warning(f"[BCS Call2] page {page_num}->N+1 answer-table scan failed: {e}")
+            found_map = {}
+        if found_map:
+            try:
+                found_map = await _qbm_verify_serial_answer_match(img_n, img_n1, _real_mcqs, found_map)
+            except Exception as e:
+                logger.warning(f"[BCS Call3] page {page_num} verify failed, using unverified Call2: {e}")
+        for m in _real_mcqs:
+            key = (m.get("question") or "").strip()[:80]
+            if key in found_map:
+                m["answer"] = found_map[key]
+                m["no_mark"] = False
+                m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=True)
 
 
 def _bcs_group_mcqs(extracted_pages: list) -> list:
@@ -27593,8 +27656,12 @@ async def _handle_bcs_impl(msg: dict):
             chat_id, pages, "BCS Extract", file_name, status_msg_id,
             extractor=_bcs_extract_from_image, file_id=file_id,
             page_status_out=_bcs_page_status, gemini_only=True,
-            no_knowledge_fallback=True
+            no_knowledge_fallback=True, skip_lookahead=True
         )
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ Answer table মেলানো হচ্ছে (Call2+Call3)...")
+        await _bcs_resolve_answers_two_page(extracted_pages)
 
         total_mcq_found = sum(
             1 for _, _, mcqs in extracted_pages for m in mcqs if "trailing_topic_marker" not in m
@@ -30529,7 +30596,8 @@ async def qbm_extract_all_pages(
     page_status_out: list = None,
     gemini_only: bool = False,
     job_id: str = None,
-    no_knowledge_fallback: bool = False
+    no_knowledge_fallback: bool = False,
+    skip_lookahead: bool = False
 ) -> list:
     """
     Phase 1 -- runs the full 3-call connected extraction pipeline for every
@@ -30688,7 +30756,7 @@ async def qbm_extract_all_pages(
                 return idx, page_num, img, mcqs
 
             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
-            if unresolved and idx + 1 < len(pages) and not is_cancelled(chat_id):
+            if unresolved and idx + 1 < len(pages) and not is_cancelled(chat_id) and not skip_lookahead:
                 # Scan ALL remaining pages (not just the next 2) — an answer
                 # key/table can legitimately sit many pages later, and giving
                 # up early would mean falling back to an AI-guessed answer
