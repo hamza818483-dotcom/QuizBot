@@ -21312,6 +21312,7 @@ def _bcs_group_mcqs(extracted_pages: list) -> list:
     groups = []
     group_seq = 0
     prev_hint = None
+    prev_qno_in_group = None
     for m in flat:
         hint = m.get("_effective_hint", "")
         qno = m.get("qsn_no")
@@ -21321,14 +21322,31 @@ def _bcs_group_mcqs(extracted_pages: list) -> list:
         # after_answer_table always starts a new group, even if the badge
         # detection missed the new topic's banner on this same page.
         after_table = bool(m.get("after_answer_table"))
-        starts_new = (not groups) or (qno == 1) or hint_changed or after_table
+        # Third, code-level safety net (2026-09-23): badge/after_answer_table
+        # detection has proven inconsistent run-to-run (same page, same
+        # prompt, sometimes correctly split, sometimes not) -- if this MCQ's
+        # own printed serial DROPS relative to the previous MCQ *within the
+        # same still-open group* (e.g. serial 24 followed by serial 1, or
+        # any qno <= prev_qno_in_group), that is never legitimate within one
+        # real topic (serials only ever increase or gap-fill forward within
+        # a topic) and is itself sufficient proof a topic boundary was
+        # missed by every other signal -- force a split here even with no
+        # badge/table flag at all.
+        qno_regressed = (
+            isinstance(qno, int) and isinstance(prev_qno_in_group, int)
+            and qno <= prev_qno_in_group
+        )
+        starts_new = (not groups) or (qno == 1) or hint_changed or after_table or qno_regressed
         if starts_new:
             group_seq += 1
             name = hint if hint else f"Topic {group_seq}"
             groups.append([name, []])
+            prev_qno_in_group = None
         groups[-1][1].append(m)
         if hint:
             prev_hint = hint
+        if isinstance(qno, int):
+            prev_qno_in_group = qno
 
     name_counts = {}
     for g in groups:
