@@ -21212,38 +21212,86 @@ Return ONLY the JSON object or null, nothing else."""
 
 
 async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
-    """/bcs Call2 (2026-09-23, Call3 removed per user request — Call1+Call2
-    alone must be fully accurate): every MCQ before an উত্তরমালা/answer
-    table gets its answer from THAT SAME table, serial-wise — no matter
-    how many pages separate the question from the table. Scans page N's
-    own image first (topic tail + table land together), then walks
-    FORWARD through N+1, N+2, N+3... until every MCQ is matched or pages
-    run out (a topic can span 3+ pages before its table appears).
-    _qbm_scan_answer_key(serial_strict=True) is itself already the strict
-    check — it matches ONLY by the table's own printed serial number
-    against each MCQ's own printed serial number, never by content/topic
-    guessing, and returns nothing if no genuine match exists — so this is
-    the single authoritative resolution step, no separate verify pass.
+    """/bcs Call2 (2026-09-23, rewritten to resolve per-TOPIC not per-PAGE):
+    a topic's MCQs can span multiple pages (e.g. 24 on page 1 continuing
+    into 7 more on page 2), and its answer table (usually on the LAST page
+    of that topic) always covers the topic's FULL serial range (1..N) in
+    ONE table — not just the MCQs that happen to physically sit on that
+    same page. Resolving page-by-page (old approach) split one topic's
+    MCQs into separate per-page batches, each firing its own scan call
+    against the table page with only a PARTIAL item list — causing
+    stragglers whose serial fell in the "wrong call" to be missed even
+    though the table genuinely had every answer. Fix: group MCQs into the
+    same topic segments _bcs_group_mcqs will use (qsn_no==1 / hint-change
+    boundaries), then resolve each full topic segment in one pass, scanning
+    forward from the segment's own last page onward.
     Mutates extracted_pages' mcq dicts in place (answer/explanation/no_mark).
     """
-    for i in range(len(extracted_pages)):
-        page_num, img_n, mcqs_n = extracted_pages[i]
-        _real_mcqs = [m for m in mcqs_n if "trailing_topic_marker" not in m
-                      and "Answer not found in source" in (m.get("explanation") or "")]
+    # Build the same flat list + effective-hint pass _bcs_group_mcqs uses,
+    # so segment boundaries here exactly match final grouping.
+    flat = []
+    last_hint = None
+    for _page_idx, (page_num, img, mcqs) in enumerate(extracted_pages):
+        marker_positions = [i for i, m in enumerate(mcqs) if "trailing_topic_marker" in m]
+        for mp in marker_positions:
+            marker_text = (mcqs[mp].get("trailing_topic_marker") or "").strip()
+            if not marker_text:
+                continue
+            for j in range(mp + 1, len(mcqs)):
+                if "trailing_topic_marker" in mcqs[j]:
+                    continue
+                if not (mcqs[j].get("topic_hint") or "").strip():
+                    mcqs[j]["topic_hint"] = marker_text
+        for m in mcqs:
+            if "trailing_topic_marker" in m:
+                th = (m.get("trailing_topic_marker") or "").strip()
+                if th:
+                    last_hint = th
+                continue
+            hint = (m.get("topic_hint") or "").strip()
+            if hint:
+                last_hint = hint
+                eff = hint
+            else:
+                eff = last_hint or ""
+            flat.append((_page_idx, img, m, eff))
+
+    if not flat:
+        return
+
+    # Split into topic segments: new segment on qsn_no==1 or effective-hint
+    # change — same signals as _bcs_group_mcqs (minus the serial-regression
+    # safety net, which is a grouping-time-only concern here).
+    segments = []
+    prev_hint = None
+    for page_idx, img, m, eff in flat:
+        qno = m.get("qsn_no")
+        hint_changed = bool(eff) and (prev_hint is not None) and (eff != prev_hint)
+        starts_new = (not segments) or (qno == 1) or hint_changed
+        if starts_new:
+            segments.append([])
+        segments[-1].append((page_idx, img, m))
+        if eff:
+            prev_hint = eff
+
+    for seg in segments:
+        _real_mcqs = [m for (_, _, m) in seg
+                      if "Answer not found in source" in (m.get("explanation") or "")]
         if not _real_mcqs:
             continue
 
+        seg_page_indices = sorted(set(p for (p, _, _) in seg))
+        last_seg_page_idx = seg_page_indices[-1]
+
         found_map = {}
         _unresolved = _real_mcqs
-        # Scan same page first, then forward through every later page —
-        # a topic's answer table can be many pages after its questions,
-        # not just the very next one. RETRY each page up to 2x if the
-        # first call only returns a PARTIAL match (2026-09-23 fix: a
-        # single call with 25-31+ unresolved items in one prompt can miss
-        # some even when the table genuinely has all of them on that same
-        # page — previously any straggler was permanently lost since the
-        # loop only ever scanned a given page once before moving on).
-        for j in range(i, len(extracted_pages)):
+        # Scan the segment's OWN pages first (table can land on any page
+        # within the topic, most often the last), then walk forward through
+        # every later page in the whole document — a topic's table can
+        # also appear several pages after the topic's own last page.
+        scan_order = seg_page_indices + [p for p in range(last_seg_page_idx + 1, len(extracted_pages))
+                                          if p not in seg_page_indices]
+        for j in scan_order:
             if not _unresolved:
                 break
             _, img_j, _ = extracted_pages[j]
@@ -21253,7 +21301,7 @@ async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
                 try:
                     page_map = await _qbm_scan_answer_key(img_j, _unresolved, gemini_only=True, serial_strict=True)
                 except Exception as e:
-                    logger.warning(f"[BCS Call2] page {page_num} scan against page idx {j} (attempt {_attempt+1}) failed: {e}")
+                    logger.warning(f"[BCS Call2] segment scan against page idx {j} (attempt {_attempt+1}) failed: {e}")
                     page_map = {}
                 if not page_map:
                     break  # this page genuinely has nothing more for the remaining items
@@ -21269,6 +21317,7 @@ async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
                 m["answer"] = found_map[key]
                 m["no_mark"] = False
                 m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=True)
+
 
 
 def _bcs_group_mcqs(extracted_pages: list) -> list:
