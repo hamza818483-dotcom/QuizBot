@@ -30590,30 +30590,42 @@ list, or a line like "1-A, 2-C, 3-B..." mapping question serial NUMBERS to
 correct options), each positioned serially/numerically (row order = question
 serial order) under its OWN topic/category heading.
 
-⚠️ CRITICAL — MULTIPLE TABLES CAN SHARE THE SAME NUMBERING: a page can have
-TWO OR MORE separate answer-key tables stacked on it (e.g. one table for
-topic "বাংলাদেশ" with rows 1-31, and right below/beside it a SEPARATE table
-for topic "আন্তর্জাতিক" that ALSO starts again at row 1). These are NOT the
-same table continuing — each topic's table has its own independent
-serial-1-to-N numbering. You MUST first identify which table belongs to
-which topic heading (read the heading printed directly above/on each table),
-and match an MCQ's serial number ONLY within the table for ITS OWN topic —
-never against a same-numbered row in a different topic's table.
+⚠️ MULTIPLE TABLES CAN SHARE THE SAME NUMBERING: a page can have TWO OR MORE
+separate answer-key tables stacked on it (e.g. one table with rows 1-31,
+and right below/beside it a SEPARATE table that ALSO starts again at row 1
+for a different topic). These are NOT the same table continuing — each is
+its own independent serial-1-to-N numbering.
+
+HOW TO TELL TABLES APART (in this priority order — a table almost never has
+the exact topic name written directly on it, so do NOT require an exact
+heading-text match):
+1. If this page has only ONE answer-key table, it applies to whichever
+   topic's questions physically precede it on the page/column — match by
+   serial number directly, no heading text needed at all.
+2. If there are multiple tables, tell them apart by POSITION relative to
+   each topic's questions (a table almost always sits immediately after
+   the block of questions it answers, in reading order) and by the fact
+   each restarts numbering at 1 — NOT by requiring a printed topic label
+   on the table itself. A short caption like "উত্তরমালা" or "Answer Key"
+   with no topic name is still a valid, matchable table — treat it as
+   belonging to the nearest preceding question block on the page.
+3. Only skip a serial number as unmatched if NO table on this page reaches
+   that serial number at all, or if two+ candidate tables both plausibly
+   reach it and truly cannot be told apart by position.
 
 Here are MCQs still missing an answer, each with its own item_index
 (a unique reference number for THIS list only — NOT printed on any page),
 its own PRINTED serial number, AND the topic it belongs to:
 {q_list}
 
-Task: STRICT SERIAL MATCHING WITHIN THE CORRECT TOPIC'S TABLE ONLY. For each
-MCQ above: (1) find the answer-key table on this page whose heading/label
-matches that MCQ's topic, (2) within THAT table only, find the row/entry
-whose serial NUMBER exactly equals that MCQ's serial number. Never match
-across tables — a serial-1 MCQ in topic "বাংলাদেশ" must NEVER be answered
-from a serial-1 row that belongs to topic "আন্তর্জাতিক"'s table, even though
-both are numbered 1. If the table's printed numbering does not include a
-given serial, or you cannot confidently identify which table belongs to that
-MCQ's topic, that MCQ has no match here — do not force one.
+Task: SERIAL MATCHING WITHIN THE CORRECT TABLE. For each MCQ above: (1)
+identify which table on this page corresponds to its topic using the rules
+above (position/order, not exact heading text), (2) within THAT table only,
+find the row/entry whose serial NUMBER exactly equals that MCQ's serial
+number. Never match a serial number against a different topic's table when
+more than one genuinely-distinguishable table exists. If no table on this
+page reaches that serial at all, that MCQ has no match here — do not force
+one.
 
 Return a JSON array using the item_index from the list above (NOT the
 printed serial number) to identify each match, like:
