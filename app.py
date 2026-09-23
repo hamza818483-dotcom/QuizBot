@@ -20137,6 +20137,9 @@ CHEM_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 
 
 BCS_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
+    'Absolute priority A>B>C>D>E, match by question number. None found → "A" + note "Answer not found in source". Convert source format to A/B/C/D. Re-verify twice.',
+    'Absolute priority A>B>C>D>E, match by question number. HARD RULE FOR /bcs: the answer MUST be traced to an actual visual mark/answer table/answer key found in the source images — NEVER pick an answer using your own subject knowledge of what seems factually correct, not even as a tie-breaker; your own knowledge may ONLY be used to build the "explanation" text, never to decide "answer". None of A-E found anywhere in source → output "answer":"A" but ALWAYS also set "no_mark": true and put the literal note "Answer not found in source" as the "explanation" (do not guess a knowledge-based explanation either in this specific case). Convert source format to A/B/C/D. Re-verify twice.'
+).replace(
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
