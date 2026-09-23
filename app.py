@@ -27776,8 +27776,12 @@ async def _handle_bcs_impl(msg: dict):
             w = _csv_bcs.writer(buf)
             w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                         "answer", "explanation", "type", "section"])
-            _num_mg, _bn_name_mg = _split_topic_number_and_bangla_name(name)
-            _merged_w.writerow([_bn_name_mg, "", "", "", "", "", "", "", "", ""])
+            # /bcs: keep the FULL topic string (number+তম included) in the
+            # CSV's own topic-marker row -- unlike /chem/topic captions,
+            # here the number is part of the topic identity itself
+            # (৫০ তম বিসিএস(বাংলাদেশ) vs ৪৯ তম বিসিএস(বাংলাদেশ) are
+            # different topics), so it must not be stripped for the CSV.
+            _merged_w.writerow([name, "", "", "", "", "", "", "", "", ""])
             for m in mcqs:
                 opts = m.get("options", ["", "", "", ""])
                 row = [
