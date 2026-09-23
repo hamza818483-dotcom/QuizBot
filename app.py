@@ -21171,6 +21171,103 @@ Return ONLY the JSON array, nothing else."""
     return out
 
 
+async def _bcs_recover_missing_serials(extracted_pages: list) -> None:
+    """/bcs miss-recovery (2026-09-23): Call1 can silently drop an MCQ
+    (e.g. serial 4 missing from a 1,2,3,5,6... run). Runs AFTER Call1,
+    BEFORE Call2/Call3 (so any recovered MCQ still gets its answer
+    resolved normally). Walks every topic segment (qsn_no==1 up to the
+    next qsn_no==1, spanning pages via topic_hint continuity) looking for
+    gaps in the serial sequence. For each gap, re-scans the SPECIFIC
+    page(s) that segment touches with a targeted "find only serial X"
+    prompt (cheap, narrow -- not a full re-extraction) and inserts any
+    recovered MCQ back into that page's list in correct serial position.
+    Never invents an MCQ that genuinely isn't on the page -- if the
+    targeted scan finds nothing, the gap is logged and left as-is.
+    """
+    # Build a flat view: (page_idx, mcq_dict) for every real MCQ, in order.
+    flat = []
+    for page_idx, (page_num, img, mcqs) in enumerate(extracted_pages):
+        for m in mcqs:
+            if "trailing_topic_marker" not in m:
+                flat.append((page_idx, m))
+    if not flat:
+        return
+
+    # Split into segments the same way _bcs_group_mcqs does: qsn_no==1
+    # starts a new segment.
+    segments = []
+    cur = []
+    for page_idx, m in flat:
+        if m.get("qsn_no") == 1 and cur:
+            segments.append(cur)
+            cur = []
+        cur.append((page_idx, m))
+    if cur:
+        segments.append(cur)
+
+    for seg in segments:
+        nums = [m.get("qsn_no") for _, m in seg if isinstance(m.get("qsn_no"), int)]
+        if len(nums) < 2:
+            continue
+        gaps = sorted(set(range(nums[0], nums[-1] + 1)) - set(nums))
+        if not gaps:
+            continue
+        seg_page_indices = sorted(set(page_idx for page_idx, _ in seg))
+        logger.warning(f"[BCS miss-recovery] segment qsn {nums[0]}-{nums[-1]} missing serial(s) {gaps}, re-scanning pages {[extracted_pages[p][0] for p in seg_page_indices]}")
+        for gap_serial in gaps:
+            recovered = None
+            recovered_page_idx = None
+            for page_idx in seg_page_indices:
+                _, img, _ = extracted_pages[page_idx]
+                try:
+                    recovered = await _bcs_scan_for_missing_serial(img, gap_serial)
+                except Exception as e:
+                    logger.warning(f"[BCS miss-recovery] targeted scan for serial {gap_serial} failed: {e}")
+                    recovered = None
+                if recovered:
+                    recovered_page_idx = page_idx
+                    break
+            if recovered:
+                recovered["qsn_no"] = gap_serial
+                recovered["answer"] = "A"
+                recovered["no_mark"] = True
+                recovered["explanation"] = "Answer not found in source"
+                target_mcqs = extracted_pages[recovered_page_idx][2]
+                insert_at = len(target_mcqs)
+                for idx2, m2 in enumerate(target_mcqs):
+                    if isinstance(m2.get("qsn_no"), int) and m2.get("qsn_no") > gap_serial:
+                        insert_at = idx2
+                        break
+                target_mcqs.insert(insert_at, recovered)
+                logger.info(f"[BCS miss-recovery] recovered serial {gap_serial} on page {extracted_pages[recovered_page_idx][0]}")
+            else:
+                logger.warning(f"[BCS miss-recovery] serial {gap_serial} not found on any scanned page — leaving gap")
+
+
+async def _bcs_scan_for_missing_serial(img, serial: int) -> dict:
+    """Targeted single-serial re-scan -- narrow prompt asking only for one
+    specific missing question number, so it's cheap and doesn't re-extract
+    the whole page. Returns an MCQ dict (question/options/qsn_no/
+    topic_hint) or None if that serial genuinely isn't on this page.
+    """
+    prompt = f"""Look ONLY for the MCQ printed with serial/question number {serial} on this page
+(the number printed right next to the question itself, e.g. "{serial}." or "প্রশ্ন-{serial}").
+
+If a question with EXACTLY that printed serial number exists on this page, extract it
+EXACTLY as printed (question text + all 4 options), and return:
+{{"question": "...", "options": ["...", "...", "...", "..."], "qsn_no": {serial}, "topic_hint": "..."}}
+
+If no question with that exact serial number is on this page, return exactly: null
+Return ONLY the JSON object or null, nothing else."""
+    gem_txt = await _qbm_gemini_raw_only(img, prompt)
+    if not gem_txt:
+        return None
+    parsed = _qbm_parse_json(gem_txt)
+    if isinstance(parsed, dict) and parsed.get("question") and parsed.get("options"):
+        return parsed
+    return None
+
+
 async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
     """/bcs Call2+Call3 (2026-09-23, final revision — page-count doesn't
     matter): every MCQ before an উত্তরমালা/answer table gets its answer
@@ -27688,6 +27785,10 @@ async def _handle_bcs_impl(msg: dict):
             page_status_out=_bcs_page_status, gemini_only=True,
             no_knowledge_fallback=True, skip_lookahead=True
         )
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ Missing MCQ check হচ্ছে...")
+        await _bcs_recover_missing_serials(extracted_pages)
 
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ Answer table মেলানো হচ্ছে (Call2+Call3)...")
