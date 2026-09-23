@@ -30703,19 +30703,30 @@ its own independent serial-1-to-N numbering.
 HOW TO TELL TABLES APART (in this priority order — a table almost never has
 the exact topic name written directly on it, so do NOT require an exact
 heading-text match):
-1. If this page has only ONE answer-key table, it applies to whichever
-   topic's questions physically precede it on the page/column — match by
-   serial number directly, no heading text needed at all.
-2. If there are multiple tables, tell them apart by POSITION relative to
-   each topic's questions (a table almost always sits immediately after
-   the block of questions it answers, in reading order) and by the fact
-   each restarts numbering at 1 — NOT by requiring a printed topic label
-   on the table itself. A short caption like "উত্তরমালা" or "Answer Key"
-   with no topic name is still a valid, matchable table — treat it as
-   belonging to the nearest preceding question block on the page.
-3. Only skip a serial number as unmatched if NO table on this page reaches
-   that serial number at all, or if two+ candidate tables both plausibly
-   reach it and truly cannot be told apart by position.
+1. A table belongs ONLY to the single topic block that sits IMMEDIATELY
+   BEFORE it in reading order (the questions right above it, ending right
+   where the table starts) — never to a topic block that starts AFTER the
+   table on the page, even if that later topic's own questions have no
+   table anywhere and even if its serial numbers (1, 2, 3...) happen to
+   also exist as rows in this earlier table. A table can only answer
+   questions that were already printed above it; it is never a forward
+   answer key for questions printed below it.
+2. If this page has only ONE answer-key table, it applies ONLY to the one
+   topic block immediately preceding it — match by serial number directly,
+   no heading text needed. Do NOT also apply it to any topic block that
+   follows the table on this same page.
+3. If there are multiple tables, tell them apart by POSITION (each table
+   answers only the question block immediately above itself, and each
+   restarts numbering at 1) — NOT by requiring a printed topic label on
+   the table itself. A short caption like "উত্তরমালা" or "Answer Key"
+   with no topic name is still valid — treat it as belonging ONLY to the
+   nearest PRECEDING question block, never a following one.
+4. Only skip a serial number as unmatched if NO table that precedes that
+   topic's own questions reaches that serial number, or if two+ candidate
+   preceding tables both plausibly reach it and cannot be told apart by
+   position. A topic with no table anywhere above/after its own questions
+   (through the forward document scan) stays genuinely unresolved — never
+   borrow a different topic's table just because the serial numbers match.
 
 Here are MCQs still missing an answer, each with its own item_index
 (a unique reference number for THIS list only — NOT printed on any page),
@@ -30724,12 +30735,15 @@ its own PRINTED serial number, AND the topic it belongs to:
 
 Task: SERIAL MATCHING WITHIN THE CORRECT TABLE. For each MCQ above: (1)
 identify which table on this page corresponds to its topic using the rules
-above (position/order, not exact heading text), (2) within THAT table only,
-find the row/entry whose serial NUMBER exactly equals that MCQ's serial
-number. Never match a serial number against a different topic's table when
-more than one genuinely-distinguishable table exists. If no table on this
-page reaches that serial at all, that MCQ has no match here — do not force
-one.
+above (the table must sit AFTER that MCQ's own question block, never
+before it — a table above/before a topic's questions can NEVER answer that
+topic), (2) within THAT table only, find the row/entry whose serial NUMBER
+exactly equals that MCQ's serial number. Never match a serial number
+against a different topic's table, and never match against a table that
+is positioned BEFORE the MCQ's own question block on the page even if the
+serial numbers line up — that is always a different, earlier topic's
+table. If no table that genuinely belongs to that MCQ's own topic reaches
+its serial at all, that MCQ has no match here — do not force one.
 
 Return a JSON array using the item_index from the list above (NOT the
 printed serial number) to identify each match, like:
