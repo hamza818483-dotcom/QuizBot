@@ -20169,6 +20169,29 @@ BCS_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 )
 
 
+BCS_EXTRACT_PROMPT_CALL1 = BCS_EXTRACT_PROMPT.replace(
+    'ANSWER DETECTION (triple-check): trace to actual source, never guess. Priority:\n'
+    'A) Any visual mark on an option (circle/tick✓/cross✗/underline/bold/highlight/star) — overrides all, 100%\n'
+    'B) Answer right after the MCQ block  C) Answer table at page bottom (e.g. "1-A, 2-C...") — if no mark\n'
+    'D) Combined answer key on later pages (scan forward, often after 2-3 pages/doc end) — if no mark\n'
+    'E) Answer key on adjacent page(s) — if no mark\n'
+    'Absolute priority A>B>C>D>E, match by question number. HARD RULE FOR /bcs: the answer MUST be traced to an actual visual mark/answer table/answer key found in the source images — NEVER pick an answer using your own subject knowledge of what seems factually correct, not even as a tie-breaker; your own knowledge may ONLY be used to build the "explanation" text, never to decide "answer". None of A-E found anywhere in source → output "answer":"A" but ALWAYS also set "no_mark": true and put the literal note "Answer not found in source" as the "explanation" (do not guess a knowledge-based explanation either in this specific case). Convert source format to A/B/C/D. Re-verify twice.\n\n',
+    'DO NOT determine or output any "answer" or "explanation" field at all in this call — that is done in a separate later step by a different process, using the answer-table on this page/a later page. Your ONLY job here is to extract the question, all 4 options, qsn_no and topic_hint, with total fidelity — never skip an MCQ just because you cannot yet tell which option is correct.\n\n'
+).replace(
+    'EXPLANATION RULES (strict priority, max 190 chars Bengali unless case 1):\n'
+    '1) TOP PRIORITY: page has explanation/reasoning text for this MCQ → copy 100% VERBATIM, byte-for-byte, no summarizing/paraphrasing/translating/"improving" (overrides 190-char limit; never edited even if it doesn\'t cover all 4 options). Skip to case 2 only if truly none exists.\n'
+    '2) No direct explanation but other relevant info exists (paragraph/note/box/table/fact) → build from it as direct fact (see forbidden phrases below). Structure: correct option\'s own relevant info FIRST (why it\'s right), then the 3 wrong options\' actual identity/relevant facts and why each doesn\'t fit — never a bare "ভুল"/"incorrect" with no reason. Correct-option info must land first since that\'s what survives if length forces a cut.\n'
+    '3) Nothing relevant exists → generate best accurate explanation from own knowledge, same structure (correct-option info first, then real detail on why each wrong option doesn\'t fit).\n'
+    'Case 1 always checked first; never mix (verbatim text never edited, self-written always covers all 4, correct-answer-first ordering).',
+    'EXPLANATION: not produced in this call — skip entirely, do not output an "explanation" field.'
+).replace(
+    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]',
+    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly []. NEVER include "answer" or "explanation" keys.\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
+)
+
+
 UNMESH_CODE_VERSION_MARKER = "306adaf-groq-fallback-v1"  # bump this any time recovery logic changes; log it once per /unmesh run to confirm deployed code version from Telegram output alone, no server log access needed
 
 UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
@@ -21059,21 +21082,60 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
 
 
 async def _bcs_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False) -> list:
-    """/bcs extractor — exact-extraction only (never invents new MCQs),
-    single Gemini call, no Call2 verify/miss-check pass (kept lightweight
-    per spec: 'page-e ja mcq ache segulai nibe, 100%, newly banabe na').
-    Cross-page answer lookahead (answer commonly printed 1 page later) is
-    handled generically by qbm_extract_all_pages's existing cross-page
-    answer-key scan — no extra code needed here for that.
-    Topic detection is a placeholder for now (grouping method pending)."""
+    """/bcs extractor — STRICT TWO-CALL pipeline per user spec (2026-09-23:
+    'Call1 ei ans+explanation banabe na... Call2 e 2nd page/table theke ans
+    nibe+explanation banabe ans wise'):
+
+    Call1 (BCS_EXTRACT_PROMPT_CALL1): pure exact-extraction only — question,
+    options, qsn_no, topic_hint. NEVER decides an answer or writes an
+    explanation here, so it can never accidentally invent one from its own
+    knowledge before the real answer-table has even been read.
+
+    Call2 (_qbm_scan_answer_key, serial_strict=True): looks at THIS SAME
+    page image for a serially-numbered উত্তরমালা/answer-table/key and
+    matches ONLY by each MCQ's own printed qsn_no against the table's own
+    printed serial number — never by content/topic guessing. Matched MCQs
+    get "answer" set first, THEN "explanation" is built from that known
+    answer (ans-wise, never the reverse). Unmatched MCQs are marked
+    unresolved (explanation="Answer not found in source", no_mark=True) so
+    qbm_extract_all_pages's existing cross-page lookahead can still find
+    the real table on a LATER page exactly as before — this function only
+    adds the SAME-page table check that was previously missing (per the
+    2026-09-23 bug report: page 2 has both the tail of topic 1's MCQs AND
+    its উত্তরমালা table together, which the old one-call design missed).
+    """
     cached = _bcs_mcq_result_cache.get(cache_key) if (cache_key and not bypass_cache) else None
     if cached:
         logger.info(f"[BCS MCQ Cache] hit for {cache_key} — skipping extraction call")
         return _qbm_dedup_list(cached)
-    _prompt = BCS_EXTRACT_PROMPT + _QBM_CAREFUL_SCAN_ADDENDUM if careful else BCS_EXTRACT_PROMPT
-    gem_txt = await _qbm_gemini_raw_only(img, _prompt, careful=careful)
+
+    _prompt1 = BCS_EXTRACT_PROMPT_CALL1 + _QBM_CAREFUL_SCAN_ADDENDUM if careful else BCS_EXTRACT_PROMPT_CALL1
+    gem_txt = await _qbm_gemini_raw_only(img, _prompt1, careful=careful)
     gem = _qbm_parse_json(gem_txt) if gem_txt else []
     result = _qbm_dedup_list(gem) if gem else []
+
+    # Call2 — same-page উত্তরমালা/answer-table check, strict serial match.
+    _real_mcqs = [m for m in result if "trailing_topic_marker" not in m]
+    if _real_mcqs:
+        try:
+            found_map = await _qbm_scan_answer_key(img, _real_mcqs, gemini_only=True, serial_strict=True)
+        except Exception as e:
+            logger.warning(f"[BCS Call2] same-page answer-table scan failed: {e}")
+            found_map = {}
+        for m in _real_mcqs:
+            key = (m.get("question") or "").strip()[:80]
+            if key in found_map:
+                m["answer"] = found_map[key]
+                m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=True)
+            else:
+                # Not on this page's own table — leave unresolved so the
+                # generic cross-page lookahead in qbm_extract_all_pages
+                # (which greps for this exact phrase) can still find it on
+                # a later page, per existing /bcs no_knowledge_fallback wiring.
+                m["answer"] = "A"
+                m["no_mark"] = True
+                m["explanation"] = "Answer not found in source"
+
     if result and cache_key:
         _bcs_mcq_result_cache[cache_key] = result
         _cap_qbm_mcq_cache(_bcs_mcq_result_cache)
