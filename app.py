@@ -21237,19 +21237,31 @@ async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
         _unresolved = _real_mcqs
         # Scan same page first, then forward through every later page —
         # a topic's answer table can be many pages after its questions,
-        # not just the very next one.
+        # not just the very next one. RETRY each page up to 2x if the
+        # first call only returns a PARTIAL match (2026-09-23 fix: a
+        # single call with 25-31+ unresolved items in one prompt can miss
+        # some even when the table genuinely has all of them on that same
+        # page — previously any straggler was permanently lost since the
+        # loop only ever scanned a given page once before moving on).
         for j in range(i, len(extracted_pages)):
             if not _unresolved:
                 break
             _, img_j, _ = extracted_pages[j]
-            try:
-                page_map = await _qbm_scan_answer_key(img_j, _unresolved, gemini_only=True, serial_strict=True)
-            except Exception as e:
-                logger.warning(f"[BCS Call2] page {page_num} scan against page idx {j} failed: {e}")
-                page_map = {}
-            if page_map:
+            for _attempt in range(2):
+                if not _unresolved:
+                    break
+                try:
+                    page_map = await _qbm_scan_answer_key(img_j, _unresolved, gemini_only=True, serial_strict=True)
+                except Exception as e:
+                    logger.warning(f"[BCS Call2] page {page_num} scan against page idx {j} (attempt {_attempt+1}) failed: {e}")
+                    page_map = {}
+                if not page_map:
+                    break  # this page genuinely has nothing more for the remaining items
                 found_map.update(page_map)
+                _before = len(_unresolved)
                 _unresolved = [m for m in _unresolved if (m.get("question") or "").strip()[:80] not in found_map]
+                if len(_unresolved) == _before:
+                    break  # no progress this attempt, stop retrying this page
 
         for m in _real_mcqs:
             key = (m.get("question") or "").strip()[:80]
