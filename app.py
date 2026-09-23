@@ -21172,16 +21172,15 @@ Return ONLY the JSON array, nothing else."""
 
 
 async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
-    """/bcs Call2+Call3 — per user spec (2026-09-23, revised): a topic's
-    tail questions can spill onto page N itself alongside that SAME
-    topic's answer table (e.g. Q1-24 on page1, Q25-31 + the FULL 1-31
-    answer table together on page2). So Call2 checks BOTH page N's own
-    image (topic finishes + table lands on the same page) AND page N+1's
-    image (table on the next page — the common case), and merges whatever
-    each finds. Call3 then cross-checks both pages together: serials line
-    up, table row order matches question order, nothing missed/
-    misaligned. Mutates extracted_pages' mcq dicts in place (answer/
-    explanation/no_mark). Last page has no N+1 -- only same-page checked.
+    """/bcs Call2+Call3 (2026-09-23, final revision — page-count doesn't
+    matter): every MCQ before an উত্তরমালা/answer table gets its answer
+    from THAT SAME table, serial-wise — no matter how many pages separate
+    the question from the table. Call2 scans page N's own image first
+    (topic tail + table land together), then walks FORWARD through N+1,
+    N+2, N+3... until every MCQ is matched or pages run out (a topic can
+    span 3+ pages before its table appears). Call3 cross-checks the
+    question page + the page the table was actually found on. Mutates
+    extracted_pages' mcq dicts in place (answer/explanation/no_mark).
     """
     for i in range(len(extracted_pages)):
         page_num, img_n, mcqs_n = extracted_pages[i]
@@ -21191,30 +21190,43 @@ async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
             continue
 
         found_map = {}
-        try:
-            same_page_map = await _qbm_scan_answer_key(img_n, _real_mcqs, gemini_only=True, serial_strict=True)
-        except Exception as e:
-            logger.warning(f"[BCS Call2] page {page_num} same-page answer-table scan failed: {e}")
-            same_page_map = {}
-        found_map.update(same_page_map)
+        table_img_for_key = {}  # question_key -> image the table was found on (for Call3)
 
-        img_n1 = extracted_pages[i + 1][1] if i + 1 < len(extracted_pages) else None
-        _still_unresolved = [m for m in _real_mcqs if (m.get("question") or "").strip()[:80] not in found_map]
-        if img_n1 is not None and _still_unresolved:
+        _unresolved = _real_mcqs
+        # Scan same page first, then forward through every later page —
+        # a topic's answer table can be many pages after its questions,
+        # not just the very next one.
+        for j in range(i, len(extracted_pages)):
+            if not _unresolved:
+                break
+            _, img_j, _ = extracted_pages[j]
             try:
-                next_page_map = await _qbm_scan_answer_key(img_n1, _still_unresolved, gemini_only=True, serial_strict=True)
+                page_map = await _qbm_scan_answer_key(img_j, _unresolved, gemini_only=True, serial_strict=True)
             except Exception as e:
-                logger.warning(f"[BCS Call2] page {page_num}->N+1 answer-table scan failed: {e}")
-                next_page_map = {}
-            found_map.update(next_page_map)
+                logger.warning(f"[BCS Call2] page {page_num} scan against page idx {j} failed: {e}")
+                page_map = {}
+            if page_map:
+                for k, v in page_map.items():
+                    found_map[k] = v
+                    table_img_for_key[k] = img_j
+                _unresolved = [m for m in _unresolved if (m.get("question") or "").strip()[:80] not in found_map]
 
         if found_map:
-            try:
-                found_map = await _qbm_verify_serial_answer_match(
-                    img_n, img_n1 if img_n1 is not None else img_n, _real_mcqs, found_map
-                )
-            except Exception as e:
-                logger.warning(f"[BCS Call3] page {page_num} verify failed, using unverified Call2: {e}")
+            # Group by which page the table was actually found on, so
+            # Call3 verifies each (question page, table page) pair together.
+            by_table_img = {}
+            for k, v in found_map.items():
+                by_table_img.setdefault(id(table_img_for_key[k]), (table_img_for_key[k], {}))[1][k] = v
+            verified = {}
+            for _, (t_img, sub_map) in by_table_img.items():
+                sub_mcqs = [m for m in _real_mcqs if (m.get("question") or "").strip()[:80] in sub_map]
+                try:
+                    verified.update(await _qbm_verify_serial_answer_match(img_n, t_img, sub_mcqs, sub_map))
+                except Exception as e:
+                    logger.warning(f"[BCS Call3] page {page_num} verify failed, using unverified Call2: {e}")
+                    verified.update(sub_map)
+            found_map = verified
+
         for m in _real_mcqs:
             key = (m.get("question") or "").strip()[:80]
             if key in found_map:
