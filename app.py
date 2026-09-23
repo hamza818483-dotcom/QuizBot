@@ -30521,34 +30521,52 @@ async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = F
         return {}
     try:
         if serial_strict:
+            _strict_items = [(i, m) for i, m in enumerate(unresolved_mcqs) if m.get("qsn_no") is not None]
             q_list = "\n".join(
-                f"serial {m.get('qsn_no')}: {(m.get('question') or '').strip()[:150]}"
-                for m in unresolved_mcqs if m.get("qsn_no") is not None
+                f"item_index {i}, serial {m.get('qsn_no')} (topic: {(m.get('topic_hint') or 'unknown').strip()[:60]}): {(m.get('question') or '').strip()[:150]}"
+                for i, m in _strict_items
             )
             if not q_list:
                 return {}
-            prompt = f"""This image may contain an ANSWER KEY (a table, boxed list, or a line
-like "1-A, 2-C, 3-B..." mapping question serial NUMBERS to correct options),
-positioned serially/numerically (row order = question serial order).
+            prompt = f"""This image may contain one or more ANSWER KEY tables (a table, boxed
+list, or a line like "1-A, 2-C, 3-B..." mapping question serial NUMBERS to
+correct options), each positioned serially/numerically (row order = question
+serial order) under its OWN topic/category heading.
 
-Here are MCQs still missing an answer, each with its own PRINTED serial number:
+⚠️ CRITICAL — MULTIPLE TABLES CAN SHARE THE SAME NUMBERING: a page can have
+TWO OR MORE separate answer-key tables stacked on it (e.g. one table for
+topic "বাংলাদেশ" with rows 1-31, and right below/beside it a SEPARATE table
+for topic "আন্তর্জাতিক" that ALSO starts again at row 1). These are NOT the
+same table continuing — each topic's table has its own independent
+serial-1-to-N numbering. You MUST first identify which table belongs to
+which topic heading (read the heading printed directly above/on each table),
+and match an MCQ's serial number ONLY within the table for ITS OWN topic —
+never against a same-numbered row in a different topic's table.
+
+Here are MCQs still missing an answer, each with its own item_index
+(a unique reference number for THIS list only — NOT printed on any page),
+its own PRINTED serial number, AND the topic it belongs to:
 {q_list}
 
-Task: STRICT SERIAL MATCHING ONLY. For each MCQ above, look at the answer
-key/table on this page and find the row/entry whose serial NUMBER exactly
-equals that MCQ's serial number (e.g. serial 21 must match the table's row
-literally numbered/labelled 21 — not "row 21 counting from the top" if the
-table's own printed numbers don't say 21, and never by matching question
-content, topic, or wording similarity). If the table's printed numbering
-does not include a given serial, that MCQ has no match here — do not force one.
+Task: STRICT SERIAL MATCHING WITHIN THE CORRECT TOPIC'S TABLE ONLY. For each
+MCQ above: (1) find the answer-key table on this page whose heading/label
+matches that MCQ's topic, (2) within THAT table only, find the row/entry
+whose serial NUMBER exactly equals that MCQ's serial number. Never match
+across tables — a serial-1 MCQ in topic "বাংলাদেশ" must NEVER be answered
+from a serial-1 row that belongs to topic "আন্তর্জাতিক"'s table, even though
+both are numbered 1. If the table's printed numbering does not include a
+given serial, or you cannot confidently identify which table belongs to that
+MCQ's topic, that MCQ has no match here — do not force one.
 
-Return a JSON array like:
-[{{"serial": 21, "answer": "A"}}, {{"serial": 23, "answer": "C"}}]
+Return a JSON array using the item_index from the list above (NOT the
+printed serial number) to identify each match, like:
+[{{"item_index": 2, "answer": "A"}}, {{"item_index": 5, "answer": "C"}}]
 
 Only include entries where the table's own printed serial number genuinely
-equals the MCQ's serial number on this page.
-If this page has no answer key at all, or no serial-number match for these
-specific MCQs, return exactly: []
+equals that item's serial number, AND that table's topic genuinely matches
+the item's stated topic.
+If this page has no answer key at all, or no correct-topic serial-number
+match for these specific MCQs, return exactly: []
 Return ONLY the JSON array, nothing else."""
         else:
             q_list = "\n".join(
@@ -30625,13 +30643,13 @@ Return ONLY the JSON array, nothing else."""
 
         found = {}
         if serial_strict:
-            by_serial = {m.get("qsn_no"): m for m in unresolved_mcqs if m.get("qsn_no") is not None}
+            by_index = {i: m for i, m in _strict_items}
             for entry in result_json:
                 try:
-                    serial = int(entry.get("serial"))
+                    item_idx = int(entry.get("item_index"))
                     ans = str(entry.get("answer", "")).strip().upper()[:1]
-                    if serial in by_serial and ans in ("A", "B", "C", "D"):
-                        key_text = (by_serial[serial].get("question") or "").strip()[:80]
+                    if item_idx in by_index and ans in ("A", "B", "C", "D"):
+                        key_text = (by_index[item_idx].get("question") or "").strip()[:80]
                         found[key_text] = ans
                 except (ValueError, TypeError, AttributeError):
                     continue
