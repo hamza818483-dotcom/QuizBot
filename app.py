@@ -20160,11 +20160,13 @@ BCS_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     'SECOND, INDEPENDENT TOPIC-BOUNDARY SIGNAL — উত্তরমালা TABLE: a blue-background box labelled "উত্তরমালা" (or a similar answer-table heading) containing a serial-numbered answer grid marks the END of the topic whose questions came before it. ANY MCQ that appears AFTER such a table on the page (even if no new number+তম badge is visible yet for it) MUST be treated as belonging to a NEW topic, never lumped into the topic that the table just closed out — set "after_answer_table": true on every such MCQ (omit or set false otherwise). This is a MANDATORY backup signal, always applied regardless of whether badge detection succeeds — even when a new badge (rule b4) IS clearly found after the table, still ALSO set "after_answer_table": true on the MCQs immediately following that table, since a missed/misread badge is common and this flag is what protects against that MCQ being silently merged into the wrong topic group upstream. Never skip setting this flag just because you already assigned a topic_hint.\n\n'
     'OUTPUT ORDER (CRITICAL — this is a SEGMENT-major order, not a plain column-major order):\n'
     '  A "segment" = the vertical span of the page still under ONE topic badge, before the next badge starts (in either column). A single page can contain multiple segments stacked vertically.\n'
-    '  For EACH segment, in top-to-bottom page order:\n'
+    '  MOST PAGES have only ONE segment (the same topic continues through both columns, no new badge and no উত্তরমালা table appears mid-page) — for these, this rule is IDENTICAL to plain column-major: output the ENTIRE left column top-to-bottom, THEN the entire right column top-to-bottom. Do NOT invent a segment break just because the page has two columns — a column boundary alone is NEVER a segment boundary. Only a genuine NEW topic badge or an উত্তরমালা table actually appearing partway down the page creates a real second segment.\n'
+    '  For EACH real segment (only when one genuinely exists), in top-to-bottom page order:\n'
     '    - output every MCQ from THAT segment\'s left column (top to bottom),\n'
     '    - THEN every MCQ from THAT segment\'s right column (top to bottom, same segment only),\n'
     '    - THEN move to the next segment down the page and repeat (its left column, then its right column).\n'
-    '  Do NOT do a single whole-page "entire left column, then entire right column" pass. Never zigzag within one segment\'s column, but DO switch back to a new segment\'s left column immediately after finishing that same segment\'s right column.\n'
+    '  Do NOT do a single whole-page "entire left column, then entire right column" pass ONLY when the page genuinely has 2+ real segments. Never zigzag within one segment\'s column, but DO switch back to a new segment\'s left column immediately after finishing that same segment\'s right column.\n'
+    '  SERIAL CONTINUITY CHECK: within one continuing topic (no real segment break), qsn_no must increase monotonically across the whole page in the order you output — left column\'s last qsn_no must be immediately followed by right column\'s first qsn_no (e.g. left ends at 9, right starts at 10 — never right restarting at 1 unless a genuine new topic badge/table introduced a real new segment there).\n'
     '  Before finalizing output, recount: every MCQ visible on the page (both columns, top to bottom) MUST appear exactly once in the JSON array — zero skipped, zero duplicated. IMPORTANT PRIORITY: getting every MCQ extracted (none skipped) is more important than getting the segment/topic ordering perfect — if unsure exactly where a segment boundary falls, still include every MCQ you can see; a slightly-off topic_hint is fixable, but a completely MISSING MCQ is not.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
@@ -21278,15 +21280,17 @@ async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
     if not flat:
         return
 
-    # Split into topic segments: new segment on qsn_no==1 or effective-hint
-    # change — same signals as _bcs_group_mcqs (minus the serial-regression
-    # safety net, which is a grouping-time-only concern here).
+    # Split into topic segments: new segment on genuine hint change only —
+    # qsn_no==1 alone does NOT split (matches _bcs_group_mcqs fix: a
+    # continuing topic's serial numbering can be misread/reset by Call1
+    # without a real topic boundary, e.g. left column ending / right
+    # column starting on the same topic).
     segments = []
     prev_hint = None
     for page_idx, img, m, eff in flat:
         qno = m.get("qsn_no")
         hint_changed = bool(eff) and (prev_hint is not None) and (_bcs_norm_hint(eff) != _bcs_norm_hint(prev_hint))
-        starts_new = (not segments) or (qno == 1) or hint_changed
+        starts_new = (not segments) or hint_changed or (prev_hint is None and eff)
         if starts_new:
             segments.append([])
         segments[-1].append((page_idx, img, m))
@@ -21424,9 +21428,17 @@ def _bcs_group_mcqs(extracted_pages: list) -> list:
         # visibly "Topic N" rather than silently wrong.
         qno_regressed = (
             isinstance(qno, int) and isinstance(prev_qno_in_group, int)
-            and qno <= prev_qno_in_group
+            and qno <= prev_qno_in_group and hint_changed
         )
-        starts_new = (not groups) or (qno == 1) or hint_changed or qno_regressed
+        # qno==1 alone must NOT force a new group when the topic_hint has
+        # NOT changed — a continuing topic (e.g. left column ending,
+        # right column starting) can have Call1 misread/reset its visible
+        # serial numbering without any real topic boundary existing. Only
+        # treat qno==1 as a boundary signal when paired with an actual
+        # hint change (hint_changed) or when there's no established
+        # hint yet to compare against (very first MCQ overall).
+        qno_is_one = (qno == 1) and (hint_changed or prev_hint is None)
+        starts_new = (not groups) or qno_is_one or hint_changed
         if starts_new:
             group_seq += 1
             if hint and (own_fresh_hint or not after_table):
