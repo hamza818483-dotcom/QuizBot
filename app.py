@@ -30686,74 +30686,28 @@ async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = F
             )
             if not q_list:
                 return {}
-            prompt = f"""This image may contain one or more ANSWER KEY groups mapping question
-serial NUMBERS to correct options. This can appear in ANY of these visual
-forms — treat all of them as equally valid answer keys, do not require a
-box/border/table-grid or a heading to accept one as real:
-- a bordered/boxed table
-- a plain inline list with NO box or border at all, e.g. "1. C   2. C,D
-  3. B   4. B   5. B   6. A   7. D   8. B ..." running across the page in
-  rows/columns with no table lines
-- a dash-style line like "1-A, 2-C, 3-B..."
-- a caption-less grid (no "উত্তরমালা"/"Answer Key" label at all — the
-  serial+letter pairs alone are enough to recognize it as an answer key)
-A serial can map to MORE THAN ONE letter (e.g. "2. C,D" means Q2's answer
-is both C and D) — capture every letter listed for that serial, comma-
-joined, e.g. "answer": "C,D".
-Each such group is positioned serially/numerically (row order = question
-serial order), generally under (or associated with) its OWN topic/category
-of questions.
+            prompt = f"""This image may contain an ANSWER KEY — a table, a plain
+inline list ("1. C  2. C,D  3. B ..."), or a dash-style line ("1-A, 2-C,
+3-B..."). A serial can map to more than one letter (e.g. "2. C,D") —
+capture every letter, comma-joined.
 
-⚠️ MULTIPLE TABLES CAN SHARE THE SAME NUMBERING: a page can have TWO OR MORE
-separate answer-key tables stacked on it (e.g. one table with rows 1-31,
-and right below/beside it a SEPARATE table that ALSO starts again at row 1
-for a different topic). These are NOT the same table continuing — each is
-its own independent serial-1-to-N numbering.
-
-HOW TO TELL TABLES APART (in this priority order — a table almost never has
-the exact topic name written directly on it, so do NOT require an exact
-heading-text match):
-1. A table answers the topic block whose questions come IMMEDIATELY BEFORE
-   it (directly above it, ending right where the table starts) — that is
-   its normal, common position, and if this page has only ONE table, match
-   it to that immediately-preceding topic's questions by serial number,
-   no heading text needed.
-2. A DIFFERENT, LATER topic block that starts AFTER this table on the SAME
-   page does NOT reuse it, even if that later topic's own serials (1, 2,
-   3...) happen to also exist as rows in this table — that table already
-   belongs to the earlier topic above it. Only use a table for a topic
-   whose OWN questions are the ones the table is positioned after.
-3. If there are multiple tables on the page, each answers only the
-   question block immediately above itself (each restarts numbering at 1).
-   A short caption like "উত্তরমালা" or "Answer Key" with no topic name is
-   still a valid table — match it to the nearest preceding block.
-4. Only skip a serial as unmatched if no table belonging to that topic
-   reaches that serial anywhere. A topic with no table of its own at all
-   stays genuinely unresolved — never borrow a different topic's table.
+SIMPLE RULE: an answer-key table belongs to the block of questions
+PRINTED IMMEDIATELY ABOVE IT on the page — never to a topic that starts
+AFTER the table, even if that later topic's serials also start at 1.
 
 Here are MCQs still missing an answer, each with its own item_index
-(a unique reference number for THIS list only — NOT printed on any page),
-its own PRINTED serial number, AND the topic it belongs to:
+(reference number for this list only), its own PRINTED serial number,
+and its topic:
 {q_list}
 
-Task: SERIAL MATCHING WITHIN THE CORRECT TABLE. For each MCQ above: (1)
-identify which table on this page is the one whose own topic matches this
-MCQ's topic (using the position rules above), (2) within THAT table only,
-find the row/entry whose serial NUMBER exactly equals that MCQ's serial
-number. Never match against a table that belongs to a DIFFERENT topic just
-because the serial numbers happen to line up. If no table belonging to
-that MCQ's own topic reaches its serial at all, that MCQ has no match
-here — do not force one.
+Task: for each MCQ above, find the answer-key table that sits directly
+after ITS OWN topic's questions (not a table that belongs to some other
+topic), then read off the row whose serial number matches this MCQ's
+serial. If no such table is on this page, skip that MCQ.
 
-Return a JSON array using the item_index from the list above (NOT the
-printed serial number) to identify each match, like:
+Return a JSON array using item_index (not the printed serial):
 [{{"item_index": 2, "answer": "A"}}, {{"item_index": 5, "answer": "C"}}]
-
-Only include entries where the table's own printed serial number genuinely
-equals that item's serial number, AND that table's topic genuinely matches
-the item's stated topic.
-If this page has no answer key at all, or no correct-topic serial-number
-match for these specific MCQs, return exactly: []
+No match on this page → return exactly: []
 Return ONLY the JSON array, nothing else."""
         else:
             q_list = "\n".join(
