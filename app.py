@@ -30696,22 +30696,28 @@ async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = F
             )
             if not q_list:
                 return {}
-            prompt = f"""Find the ANSWER KEY on this image — a table, a plain
+            prompt = f"""This image may contain an ANSWER KEY — a table, a plain
 inline list ("1. C  2. C,D  3. B ..."), or a dash-style line ("1-A, 2-C,
 3-B..."). A serial can map to more than one letter (e.g. "2. C,D") —
 capture every letter, comma-joined.
 
+SIMPLE RULE: an answer-key table belongs to the block of questions
+PRINTED IMMEDIATELY ABOVE IT on the page — never to a topic that starts
+AFTER the table, even if that later topic's serials also start at 1.
+
 Here are MCQs still missing an answer, each with its own item_index
-(reference number for this list only) and its own PRINTED serial number:
+(reference number for this list only), its own PRINTED serial number,
+and its topic:
 {q_list}
 
-For each MCQ, look at the answer-key table belonging to its OWN topic
-(the table right after that topic's own questions — not a table for a
-different topic) and read off the row matching its serial number.
+Task: for each MCQ above, find the answer-key table that sits directly
+after ITS OWN topic's questions (not a table that belongs to some other
+topic), then read off the row whose serial number matches this MCQ's
+serial. If no such table is on this page, skip that MCQ.
 
 Return a JSON array using item_index (not the printed serial):
 [{{"item_index": 2, "answer": "A"}}, {{"item_index": 5, "answer": "C"}}]
-No answer key found on this page → return exactly: []
+No match on this page → return exactly: []
 Return ONLY the JSON array, nothing else."""
         else:
             q_list = "\n".join(
@@ -30757,44 +30763,29 @@ Return ONLY the JSON array, nothing else."""
 
         if not result_json:
             try:
-                from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
-                _gkeys = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True) or key_rotator.keys
-                _gkeys = [k for k in _gkeys if not _is_gemini_key_exhausted_today(k)] or _gkeys
-                from google import genai as gai
-                from google.genai import types
-                img_b64 = image_to_base64(img)
-                img_bytes_local = base64.b64decode(img_b64)
-
-                def _call(k):
-                    client = gai.Client(api_key=k, http_options=types.HttpOptions(timeout=38000))
-                    return client.models.generate_content(
-                        model="gemini-3.5-flash",
-                        contents=[
-                            types.Part.from_text(text=prompt),
-                            types.Part.from_bytes(data=img_bytes_local, mime_type="image/jpeg")
-                        ],
-                        config=types.GenerateContentConfig(max_output_tokens=8192)
+                from pdf_handler import key_rotator, image_to_base64
+                _gkeys = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True)
+                if _gkeys:
+                    gkey = _gkeys[0]
+                    from google import genai as gai
+                    from google.genai import types
+                    client = gai.Client(
+                        api_key=gkey,
+                        http_options=types.HttpOptions(timeout=38000)
                     )
-                # 2026-09-23 fix: this used to try exactly ONE key with no
-                # retry at all -- any transient error (rate limit, 503
-                # overload, timeout) on that single key silently returned
-                # {} for the whole page, making every MCQ on it look
-                # unresolved even when a real উত্তরমালা table was sitting
-                # right there. Now retries across up to 8 keys before
-                # giving up, same overload/rate-limit handling pattern as
-                # the rest of the BCS pipeline.
-                for _gk in _gkeys[:8]:
-                    try:
-                        response = await asyncio.wait_for(asyncio.to_thread(_call, _gk), timeout=40)
-                        result_json = _qbm_parse_bare_json_array(response.text)
-                        if result_json is not None:
-                            break
-                    except Exception as _e_inner:
-                        _msg_inner = str(_e_inner).upper()
-                        if any(t in _msg_inner for t in ("429", "RESOURCE_EXHAUSTED", "503", "504", "UNAVAILABLE", "DEADLINE_EXCEEDED")):
-                            continue
-                        logger.warning(f"[QBM] answer-key scan gemini key {_gk[:12]}... failed: {_e_inner}")
-                        continue
+                    img_b64 = image_to_base64(img)
+
+                    def _call():
+                        return client.models.generate_content(
+                            model="gemini-3.5-flash",
+                            contents=[
+                                types.Part.from_text(text=prompt),
+                                types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
+                            ],
+                            config=types.GenerateContentConfig(max_output_tokens=8192)
+                        )
+                    response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=40)
+                    result_json = _qbm_parse_bare_json_array(response.text)
             except Exception as e:
                 logger.warning(f"[QBM] answer-key scan gemini fallback failed: {e}")
 
