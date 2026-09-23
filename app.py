@@ -30585,10 +30585,23 @@ async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = F
             )
             if not q_list:
                 return {}
-            prompt = f"""This image may contain one or more ANSWER KEY tables (a table, boxed
-list, or a line like "1-A, 2-C, 3-B..." mapping question serial NUMBERS to
-correct options), each positioned serially/numerically (row order = question
-serial order) under its OWN topic/category heading.
+            prompt = f"""This image may contain one or more ANSWER KEY groups mapping question
+serial NUMBERS to correct options. This can appear in ANY of these visual
+forms — treat all of them as equally valid answer keys, do not require a
+box/border/table-grid or a heading to accept one as real:
+- a bordered/boxed table
+- a plain inline list with NO box or border at all, e.g. "1. C   2. C,D
+  3. B   4. B   5. B   6. A   7. D   8. B ..." running across the page in
+  rows/columns with no table lines
+- a dash-style line like "1-A, 2-C, 3-B..."
+- a caption-less grid (no "উত্তরমালা"/"Answer Key" label at all — the
+  serial+letter pairs alone are enough to recognize it as an answer key)
+A serial can map to MORE THAN ONE letter (e.g. "2. C,D" means Q2's answer
+is both C and D) — capture every letter listed for that serial, comma-
+joined, e.g. "answer": "C,D".
+Each such group is positioned serially/numerically (row order = question
+serial order), generally under (or associated with) its OWN topic/category
+of questions.
 
 ⚠️ MULTIPLE TABLES CAN SHARE THE SAME NUMBERING: a page can have TWO OR MORE
 separate answer-key tables stacked on it (e.g. one table with rows 1-31,
@@ -30716,8 +30729,10 @@ Return ONLY the JSON array, nothing else."""
             for entry in result_json:
                 try:
                     item_idx = int(entry.get("item_index"))
-                    ans = str(entry.get("answer", "")).strip().upper()[:1]
-                    if item_idx in by_index and ans in ("A", "B", "C", "D"):
+                    raw_ans = str(entry.get("answer", "")).strip().upper()
+                    letters = [c for c in raw_ans if c in ("A", "B", "C", "D")]
+                    ans = ",".join(dict.fromkeys(letters))
+                    if item_idx in by_index and ans:
                         key_text = (by_index[item_idx].get("question") or "").strip()[:80]
                         found[key_text] = ans
                 except (ValueError, TypeError, AttributeError):
