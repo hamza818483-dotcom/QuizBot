@@ -20156,6 +20156,7 @@ BCS_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '  b3) A NEW badge ALWAYS immediately changes topic_hint for every MCQ after it in ITS OWN column, the instant it appears — even if that badge is the very last thing on the page (right at the bottom, no MCQ follows it on this page at all) and even if the other column still has old-topic MCQs left. Never wait for "both columns to finish". If a badge appears with zero MCQs following it on this page, still report it: emit one extra object at the very end of the JSON array in the form {"trailing_topic_marker":"<topic_hint text>"} (no other fields) so the next page knows this new topic already started.\n'
     '  c) If this specific page has genuinely no such badge visible anywhere on it (pure continuation page, no new badge printed), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
     '  d) Every MCQ under the same visible badge on this page must get the EXACT SAME topic_hint string, character-for-character.\n\n'
+    'SECOND, INDEPENDENT TOPIC-BOUNDARY SIGNAL — উত্তরমালা TABLE: a blue-background box labelled "উত্তরমালা" (or a similar answer-table heading) containing a serial-numbered answer grid marks the END of the topic whose questions came before it. ANY MCQ that appears AFTER such a table on the page (even if no new number+তম badge is visible yet for it) MUST be treated as belonging to a NEW topic, never lumped into the topic that the table just closed out — set "after_answer_table": true on every such MCQ (omit or set false otherwise). This is a backup signal alongside the badge — use it even when badge detection is uncertain, since a table always closes out the topic above it.\n\n'
     'OUTPUT ORDER (CRITICAL — this is a SEGMENT-major order, not a plain column-major order):\n'
     '  A "segment" = the vertical span of the page still under ONE topic badge, before the next badge starts (in either column). A single page can contain multiple segments stacked vertically.\n'
     '  For EACH segment, in top-to-bottom page order:\n'
@@ -20188,7 +20189,7 @@ BCS_EXTRACT_PROMPT_CALL1 = BCS_EXTRACT_PROMPT.replace(
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
     '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]',
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly []. NEVER include "answer" or "explanation" keys.\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"...","after_answer_table":false}]'
 )
 
 
@@ -21314,7 +21315,12 @@ def _bcs_group_mcqs(extracted_pages: list) -> list:
         hint = m.get("_effective_hint", "")
         qno = m.get("qsn_no")
         hint_changed = bool(hint) and (prev_hint is not None) and (hint != prev_hint)
-        starts_new = (not groups) or (qno == 1) or hint_changed
+        # Second independent boundary signal: an উত্তরমালা answer-table
+        # always closes out the topic above it — any MCQ flagged
+        # after_answer_table always starts a new group, even if the badge
+        # detection missed the new topic's banner on this same page.
+        after_table = bool(m.get("after_answer_table"))
+        starts_new = (not groups) or (qno == 1) or hint_changed or after_table
         if starts_new:
             group_seq += 1
             name = hint if hint else f"Topic {group_seq}"
