@@ -21172,29 +21172,47 @@ Return ONLY the JSON array, nothing else."""
 
 
 async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
-    """/bcs Call2+Call3 — per user spec (2026-09-23): for page N's MCQs,
-    Call2 looks DIRECTLY at page N+1's image for the answer table (never
-    checks page N's own image — /bcs answer tables are never same-page).
-    Call3 then cross-checks both pages together: serials line up, table
-    row order matches question order, nothing missed/misaligned. Mutates
-    extracted_pages' mcq dicts in place (answer/explanation/no_mark).
-    Pages with no N+1 (last page) stay unresolved — nothing later to check.
+    """/bcs Call2+Call3 — per user spec (2026-09-23, revised): a topic's
+    tail questions can spill onto page N itself alongside that SAME
+    topic's answer table (e.g. Q1-24 on page1, Q25-31 + the FULL 1-31
+    answer table together on page2). So Call2 checks BOTH page N's own
+    image (topic finishes + table lands on the same page) AND page N+1's
+    image (table on the next page — the common case), and merges whatever
+    each finds. Call3 then cross-checks both pages together: serials line
+    up, table row order matches question order, nothing missed/
+    misaligned. Mutates extracted_pages' mcq dicts in place (answer/
+    explanation/no_mark). Last page has no N+1 -- only same-page checked.
     """
-    for i in range(len(extracted_pages) - 1):
+    for i in range(len(extracted_pages)):
         page_num, img_n, mcqs_n = extracted_pages[i]
-        _, img_n1, _ = extracted_pages[i + 1]
         _real_mcqs = [m for m in mcqs_n if "trailing_topic_marker" not in m
                       and "Answer not found in source" in (m.get("explanation") or "")]
         if not _real_mcqs:
             continue
+
+        found_map = {}
         try:
-            found_map = await _qbm_scan_answer_key(img_n1, _real_mcqs, gemini_only=True, serial_strict=True)
+            same_page_map = await _qbm_scan_answer_key(img_n, _real_mcqs, gemini_only=True, serial_strict=True)
         except Exception as e:
-            logger.warning(f"[BCS Call2] page {page_num}->N+1 answer-table scan failed: {e}")
-            found_map = {}
+            logger.warning(f"[BCS Call2] page {page_num} same-page answer-table scan failed: {e}")
+            same_page_map = {}
+        found_map.update(same_page_map)
+
+        img_n1 = extracted_pages[i + 1][1] if i + 1 < len(extracted_pages) else None
+        _still_unresolved = [m for m in _real_mcqs if (m.get("question") or "").strip()[:80] not in found_map]
+        if img_n1 is not None and _still_unresolved:
+            try:
+                next_page_map = await _qbm_scan_answer_key(img_n1, _still_unresolved, gemini_only=True, serial_strict=True)
+            except Exception as e:
+                logger.warning(f"[BCS Call2] page {page_num}->N+1 answer-table scan failed: {e}")
+                next_page_map = {}
+            found_map.update(next_page_map)
+
         if found_map:
             try:
-                found_map = await _qbm_verify_serial_answer_match(img_n, img_n1, _real_mcqs, found_map)
+                found_map = await _qbm_verify_serial_answer_match(
+                    img_n, img_n1 if img_n1 is not None else img_n, _real_mcqs, found_map
+                )
             except Exception as e:
                 logger.warning(f"[BCS Call3] page {page_num} verify failed, using unverified Call2: {e}")
         for m in _real_mcqs:
