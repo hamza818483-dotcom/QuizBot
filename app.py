@@ -21112,65 +21112,6 @@ async def _bcs_extract_from_image(img, cache_key: tuple = None, bypass_cache: bo
     return result
 
 
-async def _qbm_verify_serial_answer_match(img_n, img_n1, mcqs_n: list, found_map: dict) -> dict:
-    """/bcs Call3 — full cross-check pass over page N + page N+1 together:
-    verify each Call2 match's serial number genuinely lines up serially
-    (row order == question order, nothing skipped/misaligned). Drops any
-    entry that doesn't hold up. found_map is {question_key: answer} from
-    Call2. Returns a filtered/corrected found_map. Never invents new
-    matches — only confirms or drops existing ones.
-    """
-    if not found_map:
-        return {}
-    by_key = {(m.get("question") or "").strip()[:80]: m for m in mcqs_n}
-    check_list = "\n".join(
-        f"serial {by_key[k].get('qsn_no')}: answer={v}"
-        for k, v in found_map.items() if k in by_key
-    )
-    if not check_list:
-        return {}
-    prompt = f"""You are given TWO page images: PAGE N (questions) and PAGE N+1 (its answer
-table). A previous pass matched these question-serial -> answer pairs by
-reading the table's own printed serial numbers:
-{check_list}
-
-Task: STRICT VERIFICATION ONLY. For each pair, check BOTH images together:
-1. Does PAGE N actually contain a question printed with that exact serial number?
-2. Does PAGE N+1's answer table actually contain a row printed with that exact
-   serial number, in correct serial order relative to neighboring rows (not
-   skipped, not misaligned, not duplicated)?
-3. Does the table's printed answer for that row equal the given answer?
-
-Return a JSON array of ONLY the serials that pass ALL three checks:
-[{{"serial": 21, "answer": "A"}}, ...]
-Drop any serial that fails any check — do not guess or fix, only confirm or drop.
-If everything drops, return exactly: []
-Return ONLY the JSON array, nothing else."""
-    try:
-        gem_txt = await _qbm_gemini_raw_multi([img_n, img_n1], prompt)
-        result_json = _qbm_parse_json(gem_txt) if gem_txt else None
-    except Exception as e:
-        logger.warning(f"[BCS Call3] verify pass failed, keeping Call2 result unverified: {e}")
-        return found_map
-    if not result_json or not isinstance(result_json, list):
-        return {}
-    verified_serials = {}
-    for entry in result_json:
-        try:
-            serial = int(entry.get("serial"))
-            ans = str(entry.get("answer", "")).strip().upper()[:1]
-            if ans in ("A", "B", "C", "D"):
-                verified_serials[serial] = ans
-        except (ValueError, TypeError, AttributeError):
-            continue
-    out = {}
-    for k, m in by_key.items():
-        s = m.get("qsn_no")
-        if s in verified_serials:
-            out[k] = verified_serials[s]
-    return out
-
-
 async def _bcs_recover_missing_serials(extracted_pages: list) -> None:
     """/bcs miss-recovery (2026-09-23): Call1 can silently drop an MCQ
     (e.g. serial 4 missing from a 1,2,3,5,6... run). Runs AFTER Call1,
@@ -21269,15 +21210,19 @@ Return ONLY the JSON object or null, nothing else."""
 
 
 async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
-    """/bcs Call2+Call3 (2026-09-23, final revision — page-count doesn't
-    matter): every MCQ before an উত্তরমালা/answer table gets its answer
-    from THAT SAME table, serial-wise — no matter how many pages separate
-    the question from the table. Call2 scans page N's own image first
-    (topic tail + table land together), then walks FORWARD through N+1,
-    N+2, N+3... until every MCQ is matched or pages run out (a topic can
-    span 3+ pages before its table appears). Call3 cross-checks the
-    question page + the page the table was actually found on. Mutates
-    extracted_pages' mcq dicts in place (answer/explanation/no_mark).
+    """/bcs Call2 (2026-09-23, Call3 removed per user request — Call1+Call2
+    alone must be fully accurate): every MCQ before an উত্তরমালা/answer
+    table gets its answer from THAT SAME table, serial-wise — no matter
+    how many pages separate the question from the table. Scans page N's
+    own image first (topic tail + table land together), then walks
+    FORWARD through N+1, N+2, N+3... until every MCQ is matched or pages
+    run out (a topic can span 3+ pages before its table appears).
+    _qbm_scan_answer_key(serial_strict=True) is itself already the strict
+    check — it matches ONLY by the table's own printed serial number
+    against each MCQ's own printed serial number, never by content/topic
+    guessing, and returns nothing if no genuine match exists — so this is
+    the single authoritative resolution step, no separate verify pass.
+    Mutates extracted_pages' mcq dicts in place (answer/explanation/no_mark).
     """
     for i in range(len(extracted_pages)):
         page_num, img_n, mcqs_n = extracted_pages[i]
@@ -21287,8 +21232,6 @@ async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
             continue
 
         found_map = {}
-        table_img_for_key = {}  # question_key -> image the table was found on (for Call3)
-
         _unresolved = _real_mcqs
         # Scan same page first, then forward through every later page —
         # a topic's answer table can be many pages after its questions,
@@ -21303,26 +21246,8 @@ async def _bcs_resolve_answers_two_page(extracted_pages: list) -> None:
                 logger.warning(f"[BCS Call2] page {page_num} scan against page idx {j} failed: {e}")
                 page_map = {}
             if page_map:
-                for k, v in page_map.items():
-                    found_map[k] = v
-                    table_img_for_key[k] = img_j
+                found_map.update(page_map)
                 _unresolved = [m for m in _unresolved if (m.get("question") or "").strip()[:80] not in found_map]
-
-        if found_map:
-            # Group by which page the table was actually found on, so
-            # Call3 verifies each (question page, table page) pair together.
-            by_table_img = {}
-            for k, v in found_map.items():
-                by_table_img.setdefault(id(table_img_for_key[k]), (table_img_for_key[k], {}))[1][k] = v
-            verified = {}
-            for _, (t_img, sub_map) in by_table_img.items():
-                sub_mcqs = [m for m in _real_mcqs if (m.get("question") or "").strip()[:80] in sub_map]
-                try:
-                    verified.update(await _qbm_verify_serial_answer_match(img_n, t_img, sub_mcqs, sub_map))
-                except Exception as e:
-                    logger.warning(f"[BCS Call3] page {page_num} verify failed, using unverified Call2: {e}")
-                    verified.update(sub_map)
-            found_map = verified
 
         for m in _real_mcqs:
             key = (m.get("question") or "").strip()[:80]
@@ -27791,7 +27716,7 @@ async def _handle_bcs_impl(msg: dict):
         await _bcs_recover_missing_serials(extracted_pages)
 
         if status_msg_id:
-            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ Answer table মেলানো হচ্ছে (Call2+Call3)...")
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ Answer table মেলানো হচ্ছে (Call2)...")
         await _bcs_resolve_answers_two_page(extracted_pages)
 
         total_mcq_found = sum(
