@@ -21401,28 +21401,27 @@ def _bcs_group_mcqs(extracted_pages: list) -> list:
     prev_qno_in_group = None
     for m in flat:
         hint = m.get("_effective_hint", "")
+        own_fresh_hint = bool((m.get("topic_hint") or "").strip())
+        after_table = bool(m.get("after_answer_table"))
         qno = m.get("qsn_no")
         hint_changed = bool(hint) and (prev_hint is not None) and (_bcs_norm_hint(hint) != _bcs_norm_hint(prev_hint))
-        # Second independent boundary signal (2026-09-23 correction): an
-        # উত্তরমালা answer-table by itself does NOT prove a topic ended —
-        # a table can legitimately sit in the middle of ONE continuing
-        # topic (same topic_hint before and after it). Splitting on the
-        # table flag alone caused one real topic spanning 2 pages to be
-        # wrongly cut into two fake pieces. The table is only a genuine
-        # boundary when it coincides with an actual hint change (handled
-        # by hint_changed above) or a serial regression (handled by
-        # qno_regressed below) — after_answer_table is no longer used as
-        # an independent trigger.
-        # Third, code-level safety net (2026-09-23): badge/after_answer_table
-        # detection has proven inconsistent run-to-run (same page, same
-        # prompt, sometimes correctly split, sometimes not) -- if this MCQ's
-        # own printed serial DROPS relative to the previous MCQ *within the
-        # same still-open group* (e.g. serial 24 followed by serial 1, or
-        # any qno <= prev_qno_in_group), that is never legitimate within one
-        # real topic (serials only ever increase or gap-fill forward within
-        # a topic) and is itself sufficient proof a topic boundary was
-        # missed by every other signal -- force a split here even with no
-        # badge/table flag at all.
+        # Second independent boundary signal (2026-09-23 correction, then
+        # RESTORED 2026-09-23 later same day): an উত্তরমালা table alone
+        # doesn't prove a topic ended if the SAME topic continues right
+        # after it (rare, but happens on wide two-page topics). However
+        # completely IGNORING after_answer_table caused a worse bug: when
+        # the badge for the NEW topic after the table is misread/missed by
+        # Call1 (topic_hint comes back empty for that MCQ), qno==1 still
+        # correctly starts a new group, but that group then silently
+        # INHERITS the OLD topic's carried-forward hint as its name —
+        # e.g. an "আন্তর্জাতিক" block starting right after a "বাংলাদেশ"
+        # table gets mis-labeled "বাংলাদেশ (2)" instead of "আন্তর্জাতিক".
+        # Fix: after_answer_table IS used again, but only for this narrower
+        # purpose — it does not by itself force a split (qno==1/regression
+        # already do that reliably), it forces the new group to NOT borrow
+        # a stale hint for its NAME when Call1 didn't freshly re-detect a
+        # badge on this exact MCQ, so a misnamed-but-real topic is at least
+        # visibly "Topic N" rather than silently wrong.
         qno_regressed = (
             isinstance(qno, int) and isinstance(prev_qno_in_group, int)
             and qno <= prev_qno_in_group
@@ -21430,7 +21429,10 @@ def _bcs_group_mcqs(extracted_pages: list) -> list:
         starts_new = (not groups) or (qno == 1) or hint_changed or qno_regressed
         if starts_new:
             group_seq += 1
-            name = hint if hint else f"Topic {group_seq}"
+            if hint and (own_fresh_hint or not after_table):
+                name = hint
+            else:
+                name = f"Topic {group_seq} (badge unclear — please verify)"
             groups.append([name, []])
             prev_qno_in_group = None
         groups[-1][1].append(m)
@@ -30711,30 +30713,23 @@ its own independent serial-1-to-N numbering.
 HOW TO TELL TABLES APART (in this priority order — a table almost never has
 the exact topic name written directly on it, so do NOT require an exact
 heading-text match):
-1. A table belongs ONLY to the single topic block that sits IMMEDIATELY
-   BEFORE it in reading order (the questions right above it, ending right
-   where the table starts) — never to a topic block that starts AFTER the
-   table on the page, even if that later topic's own questions have no
-   table anywhere and even if its serial numbers (1, 2, 3...) happen to
-   also exist as rows in this earlier table. A table can only answer
-   questions that were already printed above it; it is never a forward
-   answer key for questions printed below it.
-2. If this page has only ONE answer-key table, it applies ONLY to the one
-   topic block immediately preceding it — match by serial number directly,
-   no heading text needed. Do NOT also apply it to any topic block that
-   follows the table on this same page.
-3. If there are multiple tables, tell them apart by POSITION (each table
-   answers only the question block immediately above itself, and each
-   restarts numbering at 1) — NOT by requiring a printed topic label on
-   the table itself. A short caption like "উত্তরমালা" or "Answer Key"
-   with no topic name is still valid — treat it as belonging ONLY to the
-   nearest PRECEDING question block, never a following one.
-4. Only skip a serial number as unmatched if NO table that precedes that
-   topic's own questions reaches that serial number, or if two+ candidate
-   preceding tables both plausibly reach it and cannot be told apart by
-   position. A topic with no table anywhere above/after its own questions
-   (through the forward document scan) stays genuinely unresolved — never
-   borrow a different topic's table just because the serial numbers match.
+1. A table answers the topic block whose questions come IMMEDIATELY BEFORE
+   it (directly above it, ending right where the table starts) — that is
+   its normal, common position, and if this page has only ONE table, match
+   it to that immediately-preceding topic's questions by serial number,
+   no heading text needed.
+2. A DIFFERENT, LATER topic block that starts AFTER this table on the SAME
+   page does NOT reuse it, even if that later topic's own serials (1, 2,
+   3...) happen to also exist as rows in this table — that table already
+   belongs to the earlier topic above it. Only use a table for a topic
+   whose OWN questions are the ones the table is positioned after.
+3. If there are multiple tables on the page, each answers only the
+   question block immediately above itself (each restarts numbering at 1).
+   A short caption like "উত্তরমালা" or "Answer Key" with no topic name is
+   still a valid table — match it to the nearest preceding block.
+4. Only skip a serial as unmatched if no table belonging to that topic
+   reaches that serial anywhere. A topic with no table of its own at all
+   stays genuinely unresolved — never borrow a different topic's table.
 
 Here are MCQs still missing an answer, each with its own item_index
 (a unique reference number for THIS list only — NOT printed on any page),
@@ -30742,16 +30737,13 @@ its own PRINTED serial number, AND the topic it belongs to:
 {q_list}
 
 Task: SERIAL MATCHING WITHIN THE CORRECT TABLE. For each MCQ above: (1)
-identify which table on this page corresponds to its topic using the rules
-above (the table must sit AFTER that MCQ's own question block, never
-before it — a table above/before a topic's questions can NEVER answer that
-topic), (2) within THAT table only, find the row/entry whose serial NUMBER
-exactly equals that MCQ's serial number. Never match a serial number
-against a different topic's table, and never match against a table that
-is positioned BEFORE the MCQ's own question block on the page even if the
-serial numbers line up — that is always a different, earlier topic's
-table. If no table that genuinely belongs to that MCQ's own topic reaches
-its serial at all, that MCQ has no match here — do not force one.
+identify which table on this page is the one whose own topic matches this
+MCQ's topic (using the position rules above), (2) within THAT table only,
+find the row/entry whose serial NUMBER exactly equals that MCQ's serial
+number. Never match against a table that belongs to a DIFFERENT topic just
+because the serial numbers happen to line up. If no table belonging to
+that MCQ's own topic reaches its serial at all, that MCQ has no match
+here — do not force one.
 
 Return a JSON array using the item_index from the list above (NOT the
 printed serial number) to identify each match, like:
