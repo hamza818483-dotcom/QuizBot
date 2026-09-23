@@ -21317,11 +21317,16 @@ def _bcs_group_mcqs(extracted_pages: list) -> list:
         hint = m.get("_effective_hint", "")
         qno = m.get("qsn_no")
         hint_changed = bool(hint) and (prev_hint is not None) and (hint != prev_hint)
-        # Second independent boundary signal: an উত্তরমালা answer-table
-        # always closes out the topic above it — any MCQ flagged
-        # after_answer_table always starts a new group, even if the badge
-        # detection missed the new topic's banner on this same page.
-        after_table = bool(m.get("after_answer_table"))
+        # Second independent boundary signal (2026-09-23 correction): an
+        # উত্তরমালা answer-table by itself does NOT prove a topic ended —
+        # a table can legitimately sit in the middle of ONE continuing
+        # topic (same topic_hint before and after it). Splitting on the
+        # table flag alone caused one real topic spanning 2 pages to be
+        # wrongly cut into two fake pieces. The table is only a genuine
+        # boundary when it coincides with an actual hint change (handled
+        # by hint_changed above) or a serial regression (handled by
+        # qno_regressed below) — after_answer_table is no longer used as
+        # an independent trigger.
         # Third, code-level safety net (2026-09-23): badge/after_answer_table
         # detection has proven inconsistent run-to-run (same page, same
         # prompt, sometimes correctly split, sometimes not) -- if this MCQ's
@@ -21336,7 +21341,7 @@ def _bcs_group_mcqs(extracted_pages: list) -> list:
             isinstance(qno, int) and isinstance(prev_qno_in_group, int)
             and qno <= prev_qno_in_group
         )
-        starts_new = (not groups) or (qno == 1) or hint_changed or after_table or qno_regressed
+        starts_new = (not groups) or (qno == 1) or hint_changed or qno_regressed
         if starts_new:
             group_seq += 1
             name = hint if hint else f"Topic {group_seq}"
