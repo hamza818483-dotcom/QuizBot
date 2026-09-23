@@ -30705,17 +30705,9 @@ Here are MCQs still missing an answer, each with its own item_index
 (reference number for this list only) and its own PRINTED serial number:
 {q_list}
 
-A table always belongs to the topic printed IMMEDIATELY ABOVE it on the
-page — the topic whose questions just finished. It NEVER belongs to a
-new topic that starts below/after it (even if that new topic's own
-question 1, 2, 3... happens to look like it could match the table's
-rows). If a new topic starts right after this table, that new topic's
-MCQs are NOT answered by this table — skip them entirely (do not
-include their item_index in your output) rather than guessing.
-
-For each MCQ in the list above, only use a table if it is the table for
-THAT MCQ's own topic (matched by topic name), then read off the row
-matching its serial number.
+For each MCQ, look at the answer-key table belonging to its OWN topic
+(the table right after that topic's own questions — not a table for a
+different topic) and read off the row matching its serial number.
 
 Return a JSON array using item_index (not the printed serial):
 [{{"item_index": 2, "answer": "A"}}, {{"item_index": 5, "answer": "C"}}]
