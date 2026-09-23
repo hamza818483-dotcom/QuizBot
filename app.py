@@ -20136,6 +20136,36 @@ CHEM_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 )
 
 
+BCS_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
+    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
+    '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
+    '- "topic_hint": THIS PAGE STYLE (BCS প্রশ্ন ও সমাধান compilation) marks a new topic with a small banner badge identified by ALL of these signals TOGETHER:\n'
+    '  i) WHITE / PLAIN background (NOT a black or dark-filled box) — a small badge/box, not a full-width bar.\n'
+    '  ii) A Bangla number (e.g. ৫০, ৪৪, ৪১) printed in bold, with the word "তম" printed directly beneath (or right next to) that number, together forming an ordinal like "৫০\\nতম".\n'
+    '  iii) The recurring common title text "বিসিএস প্রশ্ন ও সমাধান" printed beside/near the number+তম badge — this exact phrase is COMMON to every such banner and is NEVER itself part of the topic name, it only helps you recognize this is a real topic banner (as opposed to random bold text elsewhere).\n'
+    '  iv) Directly below that title text is the actual CATEGORY name for this section — e.g. "বাংলাদেশ", "আন্তর্জাতিক", "বাংলা", "সাধারণ বিজ্ঞান", "গাণিতিক যুক্তি", etc. — this category word/phrase is the part that actually changes from banner to banner and is CRITICAL for topic-splitting.\n'
+    '  A banner is a real topic_hint ONLY when i, ii, iii are all present together (white bg + number-তম badge + the common "বিসিএস প্রশ্ন ও সমাধান" phrase); iv (the category line) is what supplies the distinguishing name. Build the topic_hint STRING exactly as: "<number> তম বিসিএস(<category>)" — e.g. number ৫০ + category বাংলাদেশ → "৫০ তম বিসিএস(বাংলাদেশ)"; number ৫০ + category আন্তর্জাতিক → "৫০ তম বিসিএস(আন্তর্জাতিক)". Read the Bangla number and the category text exactly as printed; do not translate or alter them.\n'
+    '  a) Do NOT treat plain bold sub-headers, page headers/footers, বিষয়/exam-source tags, or ব্যাখ্যা/explanation labels as a topic banner — only the specific number+তম+"বিসিএস প্রশ্ন ও সমাধান"+category badge combination counts.\n'
+    '  b) If a new such badge appears anywhere on THIS page (even partway down), every MCQ from that point onward gets the NEW topic_hint string; MCQs above it on the same page keep whichever topic_hint was already active for them.\n'
+    '  b2) TWO-COLUMN pages: left and right columns can each have their OWN active badge, independent of each other. Determine each MCQ\'s topic_hint by which badge is ACTUALLY above it in ITS OWN column, never by copying the other column\'s current badge.\n'
+    '  b3) A NEW badge ALWAYS immediately changes topic_hint for every MCQ after it in ITS OWN column, the instant it appears — even if that badge is the very last thing on the page (right at the bottom, no MCQ follows it on this page at all) and even if the other column still has old-topic MCQs left. Never wait for "both columns to finish". If a badge appears with zero MCQs following it on this page, still report it: emit one extra object at the very end of the JSON array in the form {"trailing_topic_marker":"<topic_hint text>"} (no other fields) so the next page knows this new topic already started.\n'
+    '  c) If this specific page has genuinely no such badge visible anywhere on it (pure continuation page, no new badge printed), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
+    '  d) Every MCQ under the same visible badge on this page must get the EXACT SAME topic_hint string, character-for-character.\n\n'
+    'OUTPUT ORDER (CRITICAL — this is a SEGMENT-major order, not a plain column-major order):\n'
+    '  A "segment" = the vertical span of the page still under ONE topic badge, before the next badge starts (in either column). A single page can contain multiple segments stacked vertically.\n'
+    '  For EACH segment, in top-to-bottom page order:\n'
+    '    - output every MCQ from THAT segment\'s left column (top to bottom),\n'
+    '    - THEN every MCQ from THAT segment\'s right column (top to bottom, same segment only),\n'
+    '    - THEN move to the next segment down the page and repeat (its left column, then its right column).\n'
+    '  Do NOT do a single whole-page "entire left column, then entire right column" pass. Never zigzag within one segment\'s column, but DO switch back to a new segment\'s left column immediately after finishing that same segment\'s right column.\n'
+    '  Before finalizing output, recount: every MCQ visible on the page (both columns, top to bottom) MUST appear exactly once in the JSON array — zero skipped, zero duplicated. IMPORTANT PRIORITY: getting every MCQ extracted (none skipped) is more important than getting the segment/topic ordering perfect — if unsure exactly where a segment boundary falls, still include every MCQ you can see; a slightly-off topic_hint is fixable, but a completely MISSING MCQ is not.\n\n'
+    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
+)
+
+
 UNMESH_CODE_VERSION_MARKER = "306adaf-groq-fallback-v1"  # bump this any time recovery logic changes; log it once per /unmesh run to confirm deployed code version from Telegram output alone, no server log access needed
 
 UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
@@ -21037,7 +21067,7 @@ async def _bcs_extract_from_image(img, cache_key: tuple = None, bypass_cache: bo
     if cached:
         logger.info(f"[BCS MCQ Cache] hit for {cache_key} — skipping extraction call")
         return _qbm_dedup_list(cached)
-    _prompt = QBM_EXTRACT_PROMPT_DEFAULT + _QBM_CAREFUL_SCAN_ADDENDUM if careful else QBM_EXTRACT_PROMPT_DEFAULT
+    _prompt = BCS_EXTRACT_PROMPT + _QBM_CAREFUL_SCAN_ADDENDUM if careful else BCS_EXTRACT_PROMPT
     gem_txt = await _qbm_gemini_raw_only(img, _prompt, careful=careful)
     gem = _qbm_parse_json(gem_txt) if gem_txt else []
     result = _qbm_dedup_list(gem) if gem else []
@@ -21048,25 +21078,82 @@ async def _bcs_extract_from_image(img, cache_key: tuple = None, bypass_cache: bo
 
 
 def _bcs_group_mcqs(extracted_pages: list) -> list:
-    """/bcs topic grouping — PLACEHOLDER (topic-detection method pending
-    from user, 2026-09-04). For now, puts every MCQ from every page into a
-    single "BCS MCQ" group so the topic-wise + merged CSV export mechanics
-    (identical structure to /unmesh's) work end-to-end immediately. Swap
-    the grouping logic here once the real topic-detection method is given
-    — everything downstream (CSV export, dashboard) already consumes the
-    same [(topic_name, mcqs), ...] shape /unmesh_group_mcqs returns, so no
-    other code needs to change.
-    """
+    """/bcs topic grouping — badge signal: white-bg "<num> তম" + common
+    "বিসিএস প্রশ্ন ও সমাধান" title + category line, normalized by
+    BCS_EXTRACT_PROMPT into topic_hint strings like "৫০ তম বিসিএস(বাংলাদেশ)".
+    Boundary logic mirrors /unmesh's: qsn_no==1 OR effective topic_hint
+    changing starts a new group; trailing_topic_marker sentinels carry a
+    badge seen at the bottom of a page (zero MCQs following it there)
+    forward onto the next page's MCQs."""
     flat = []
+    last_hint = None
     for _page_idx, (page_num, _, mcqs) in enumerate(extracted_pages):
+        marker_positions = [i for i, m in enumerate(mcqs) if "trailing_topic_marker" in m]
+        for mp in marker_positions:
+            marker_text = (mcqs[mp].get("trailing_topic_marker") or "").strip()
+            if not marker_text:
+                continue
+            for j in range(mp + 1, len(mcqs)):
+                if "trailing_topic_marker" in mcqs[j]:
+                    continue
+                if not (mcqs[j].get("topic_hint") or "").strip():
+                    mcqs[j]["topic_hint"] = marker_text
         for m in mcqs:
             if "trailing_topic_marker" in m:
+                th = (m.get("trailing_topic_marker") or "").strip()
+                if th:
+                    last_hint = th
                 continue
+            m["_page_key"] = _page_idx
             m["_page_num"] = page_num
+            hint = (m.get("topic_hint") or "").strip()
+            if hint:
+                last_hint = hint
+                m["_effective_hint"] = hint
+            else:
+                m["_effective_hint"] = last_hint or ""
             flat.append(m)
+
+    if extracted_pages:
+        last_page_idx = len(extracted_pages) - 1
+        for m in reversed(flat):
+            if m.get("_page_key") != last_page_idx:
+                break
+            if not (m.get("topic_hint") or "").strip() and m.get("_effective_hint"):
+                m["topic_hint"] = m["_effective_hint"]
+
     if not flat:
         return []
-    return [("BCS MCQ", flat)]
+
+    flat = _check_segment_topic_consistency(flat, context="bcs-grouping-stage")
+
+    groups = []
+    group_seq = 0
+    prev_hint = None
+    for m in flat:
+        hint = m.get("_effective_hint", "")
+        qno = m.get("qsn_no")
+        hint_changed = bool(hint) and (prev_hint is not None) and (hint != prev_hint)
+        starts_new = (not groups) or (qno == 1) or hint_changed
+        if starts_new:
+            group_seq += 1
+            name = hint if hint else f"Topic {group_seq}"
+            groups.append([name, []])
+        groups[-1][1].append(m)
+        if hint:
+            prev_hint = hint
+
+    name_counts = {}
+    for g in groups:
+        name_counts[g[0]] = name_counts.get(g[0], 0) + 1
+    seen = {}
+    for g in groups:
+        base = g[0]
+        if name_counts[base] > 1:
+            seen[base] = seen.get(base, 0) + 1
+            g[0] = f"{base} ({seen[base]})"
+
+    return [(g[0], g[1]) for g in groups]
 
 
 def _unmesh_group_mcqs(extracted_pages: list) -> list:
