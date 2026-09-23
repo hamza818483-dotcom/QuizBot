@@ -25383,7 +25383,17 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
             keys_to_try = _live
         _ovl_streak = 0  # consecutive 503/504 (model-wide overload, NOT a key problem)
         _fallback_used = False
-        for _ki, key in enumerate(keys_to_try):
+        # 2026-09-23 fix: with 171 keys and no cap here, a genuine model-wide
+        # outage (every key hitting 503/504) could loop through the ENTIRE
+        # key pool -- 170+ keys x ~40s timeout each -- turning one page's
+        # extraction into 20+ minutes before finally giving up. Cap the
+        # number of keys actually attempted per call; if this many keys in a
+        # row all fail, the problem is the model/network, not the next key,
+        # so keep trying further is just wasted wall-clock time. Caller
+        # (_bcs_extract_from_image etc.) already handles an empty "" result
+        # gracefully.
+        _MAX_KEYS_PER_CALL = 30
+        for _ki, key in enumerate(keys_to_try[:_MAX_KEYS_PER_CALL]):
             if is_cancelled():
                 return ""
             if key_rotator.account_of(key) in _dead_accounts:
