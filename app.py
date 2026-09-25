@@ -4167,7 +4167,7 @@ def _parse_mcq_json(text: str) -> list:
     if not text:
         return []
     s = text.strip()
-    # Reasoning models (e.g. Groq's qwen/qwen3.6-27b) sometimes prefix output
+    # Reasoning models (e.g. Groq's qwen/qwen3.8-27b) sometimes prefix output
     # with a <think>...</think> block despite prompt instructions not to.
     # Strip it explicitly rather than relying solely on find('[')/rfind(']'),
     # since a closed think-block's content itself is fine to discard, and an
@@ -4330,7 +4330,7 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
         "temperature": 0.3,
         "max_tokens": dynamic_max_tokens,
     }
-    # qwen/qwen3.6-27b is a reasoning model — by default it prefixes output
+    # qwen/qwen3.8-27b is a reasoning model — by default it prefixes output
     # with a <think>...</think> block before the actual JSON, which burns
     # into dynamic_max_tokens (often truncating before JSON even starts) and
     # breaks _parse_mcq_json which expects the response to start with '['.
@@ -4694,7 +4694,7 @@ async def _gen_groq_single(img, topic, count, exclude_keys: set = None, key_offs
         return [], set()
     # meta-llama/llama-4-scout-17b-16e-instruct was deprecated by Groq on
     # 2026-06-17 (see console.groq.com/docs/deprecations) — every call to it
-    # now fails, which silently fell through to Gemini. qwen/qwen3.6-27b is
+    # now fails, which silently fell through to Gemini. qwen/qwen3.8-27b is
     # Groq's current vision-capable replacement (openai/gpt-oss-120b, their
     # other suggested replacement, is text-only and can't process images).
     # Image is downscaled (see _img_to_data_url_groq) to stay under Groq's
@@ -4711,7 +4711,7 @@ async def _gen_groq_single(img, topic, count, exclude_keys: set = None, key_offs
         tried_keys.add(key)
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
-            key, "qwen/qwen3.6-27b",
+            key, "qwen/qwen3.8-27b",
             data_url, prompt, mcq_count_hint=count
         )
         if txt:
@@ -4754,7 +4754,7 @@ async def _gen_groq_single(img, topic, count, exclude_keys: set = None, key_offs
             if shrunk_url:
                 txt2, status2 = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
-                    key, "qwen/qwen3.6-27b",
+                    key, "qwen/qwen3.8-27b",
                     shrunk_url, prompt, mcq_count_hint=shrunk_count
                 )
                 if txt2:
@@ -4774,7 +4774,7 @@ async def _gen_groq_single(img, topic, count, exclude_keys: set = None, key_offs
                     if hard_url:
                         txt3, status3 = await _post_openai_compat(
                             "https://api.groq.com/openai/v1/chat/completions",
-                            key, "qwen/qwen3.6-27b",
+                            key, "qwen/qwen3.8-27b",
                             hard_url, prompt, mcq_count_hint=hard_count
                         )
                         if txt3:
@@ -5364,7 +5364,7 @@ async def _gen_groq_raw_text(img, prompt: str, mcq_count_hint=None) -> str:
         for key in keys:
             txt, status = await _post_openai_compat(
                 "https://api.groq.com/openai/v1/chat/completions",
-                key, "qwen/qwen3.6-27b",
+                key, "qwen/qwen3.8-27b",
                 data_url, prompt, mcq_count_hint=mcq_count_hint
             )
             if txt:
@@ -5416,7 +5416,7 @@ async def _gen_groq_raw_text(img, prompt: str, mcq_count_hint=None) -> str:
             for key in keys:
                 txt, status = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
-                    key, "qwen/qwen3.6-27b",
+                    key, "qwen/qwen3.8-27b",
                     data_url, prompt, mcq_count_hint=mcq_count_hint
                 )
                 if txt:
@@ -16226,7 +16226,7 @@ async def _dagano_gen_from_image(img, topic, page_num):
                     data_url = _img_to_data_url_groq(img, prompt_len_hint=prompt)
                 txt, status = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
-                    key, "qwen/qwen3.6-27b", data_url, prompt
+                    key, "qwen/qwen3.8-27b", data_url, prompt
                 )
                 if txt:
                     out = _qbm_parse_json(txt)
@@ -16655,7 +16655,7 @@ async def _extra_gen_from_image(img, topic, page_num, key_offset: int = 0, exclu
                     data_url = _img_to_data_url_groq(img, prompt_len_hint=prompt)
                 txt, status = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
-                    key, "qwen/qwen3.6-27b", data_url, prompt
+                    key, "qwen/qwen3.8-27b", data_url, prompt
                 )
                 if txt:
                     # Any real response (even parses to []) is trusted --
@@ -17802,7 +17802,7 @@ Output ONLY a valid JSON array, no extra text:
     for i, key in enumerate(keys):
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
-            key, "qwen/qwen3.6-27b",
+            key, "qwen/qwen3.8-27b",
             data_url, relaxed_prompt
         )
         if txt:
@@ -20041,7 +20041,7 @@ OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exact
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]"""
 
 
-# 2026-08-27 (per request): Groq (qwen/qwen3.6-27b) has an 8000 TPM hard
+# 2026-08-27 (per request): Groq (qwen/qwen3.8-27b) has an 8000 TPM hard
 # limit shared across prompt+image+output. QBM_EXTRACT_PROMPT_DEFAULT is
 # ~2400 tokens by itself, which forced the image to be downscaled as low
 # as 192x192px on pages needing many MCQs (large output budget) -- at
@@ -24244,7 +24244,7 @@ async def _qbm_groq_call(img, prompt: str) -> str:
             return ""
         txt, status = await _post_openai_compat(
             "https://api.groq.com/openai/v1/chat/completions",
-            key, "qwen/qwen3.6-27b",
+            key, "qwen/qwen3.8-27b",
             data_url, prompt, mcq_count_hint=10
         )
         if txt:
@@ -24260,7 +24260,7 @@ async def _qbm_groq_call(img, prompt: str) -> str:
             if shrunk_url:
                 txt2, status2 = await _post_openai_compat(
                     "https://api.groq.com/openai/v1/chat/completions",
-                    key, "qwen/qwen3.6-27b",
+                    key, "qwen/qwen3.8-27b",
                     shrunk_url, shrunk_prompt, mcq_count_hint=3
                 )
                 if txt2:
@@ -30760,7 +30760,7 @@ Return ONLY the JSON array, nothing else."""
                 for key in keys:
                     txt, status = await _post_openai_compat(
                         "https://api.groq.com/openai/v1/chat/completions",
-                        key, "qwen/qwen3.6-27b",
+                        key, "qwen/qwen3.8-27b",
                         data_url, prompt
                     )
                     if txt:
@@ -35763,7 +35763,7 @@ async def handle_message(msg: dict):
             g_cooling = sum(1 for k in gkeys if groq_key_rotator._cooldown_until.get(k, 0) > now and not _is_groq_key_exhausted_today(k))
             g_healthy = len(gkeys) - g_exhausted - g_cooling
             known_orgs = len(set(_key_org_map.values())) if _key_org_map else 0
-            lines.append(f"🟢 <b>Groq</b> (qwen/qwen3.6-27b): {len(gkeys)} key\n"
+            lines.append(f"🟢 <b>Groq</b> (qwen/qwen3.8-27b): {len(gkeys)} key\n"
                          f"  ✅ Healthy: {g_healthy} | ⏳ Cooldown: {g_cooling} | 🔴 আজকে exhausted: {g_exhausted}"
                          + (f"\n  🏢 Known orgs: {known_orgs}" if known_orgs else ""))
 
