@@ -779,7 +779,24 @@ async def edit_msg(chat_id, message_id: int, text: str, parse_mode: str = "HTML"
         payload["reply_markup"] = reply_markup
     return await tg_post("editMessageText", payload)
 
+_TG_CAPTION_LIMIT = 1024
+
+def _truncate_for_caption(text: str, limit: int = _TG_CAPTION_LIMIT) -> str:
+    if len(text) <= limit:
+        return text
+    marker = "\n...(truncated)"
+    cut = limit - len(marker)
+    nl = text.rfind("\n", 0, cut)
+    if nl != -1 and nl > cut // 2:
+        cut = nl
+    return text[:cut] + marker
+
 async def edit_msg_caption(chat_id, message_id: int, caption: str, parse_mode: str = "HTML") -> dict:
+    # Truncate to Telegram's 1024-char caption limit -- without this,
+    # long captions caused a repeating fail loop: both CF proxy attempts
+    # return 400 MEDIA_CAPTION_TOO_LONG, retried once more, still fails,
+    # and the caption update is silently dropped every time.
+    caption = _truncate_for_caption(caption)
     return await tg_post("editMessageCaption", {
         "chat_id": chat_id,
         "message_id": message_id,

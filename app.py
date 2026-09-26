@@ -18342,10 +18342,7 @@ async def _process_pdf_pages_inner(
                 if image_msg_id and first_poll_link:
                     try:
                         _img_caption_final = caption + f"\n▬▬▬▬▬▬▬▬▬▬\n🔗First Poll Link:\n{first_poll_link}"
-                        await tg_post("editMessageCaption", {
-                            "chat_id": channel_id, "message_id": image_msg_id,
-                            "caption": _img_caption_final
-                        })
+                        await edit_msg_caption(channel_id, image_msg_id, _img_caption_final)
                     except Exception as e:
                         logger.warning(f"[PDF] Page {page_num} image caption poll-link edit failed: {e}")
 
@@ -19096,10 +19093,7 @@ async def _process_pdfs_pages_inner(
                 if image_msg_id and first_poll_link:
                     try:
                         _img_caption_final = caption + f"\n▬▬▬▬▬▬▬▬▬▬\n🔗First Poll Link:\n{first_poll_link}"
-                        await tg_post("editMessageCaption", {
-                            "chat_id": channel_id, "message_id": image_msg_id,
-                            "caption": _img_caption_final
-                        })
+                        await edit_msg_caption(channel_id, image_msg_id, _img_caption_final)
                     except Exception as e:
                         logger.warning(f"[PDF] Page {page_num} image caption poll-link edit failed: {e}")
 
