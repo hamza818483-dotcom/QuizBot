@@ -1728,7 +1728,7 @@ async def _ensure_gemini_banned_table():
                     cols = await d1_select("PRAGMA table_info(gemini_banned_keys)")
                     col_names = {c.get("name") for c in (cols or [])}
                     if "account" not in col_names:
-                        await d1_run("ALTER TABLE gemini_banned_keys ADD COLUMN account TEXT", [])
+                        await d1_run("ALTER TABLE gemini_banned_keys ADD COLUMN account TEXT", [], suppress_log=True)
                 except Exception:
                     pass
                 globals()["_gemini_banned_account_col_checked"] = True
