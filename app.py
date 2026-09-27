@@ -31174,7 +31174,7 @@ async def qbm_extract_all_pages(
     # window before moving to the next), so ordering guarantees and the
     # cross-page answer-lookahead (which needs earlier pages already
     # resolved) are unaffected.
-    WINDOW = 3
+    WINDOW = 2
 
     async def _extract_one_slotted(slot, idx, page_num, img):
         _qbm_key_offset_ctx.set(slot)
