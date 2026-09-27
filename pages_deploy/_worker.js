@@ -76,6 +76,23 @@ export default {
       }
     }
 
+    // LMS "Live Quiz" (instant or scheduled) — same plain proxy-to-Render
+    // pattern as /api/lms-send-channel above, since the schedule/cancel
+    // logic (and the cron that fires due rows) all lives in app.py.
+    if (url.pathname.startsWith('/api/lms-live-quiz')) {
+      const RENDER = env.RENDER_URL || env.HF_SPACE_URL || 'https://hamza-02-quizbot.hf.space';
+      const renderReq = new Request(RENDER + url.pathname + url.search, {
+        method: request.method,
+        headers: request.headers,
+        body: request.method !== 'GET' ? request.body : undefined,
+      });
+      try {
+        return await fetch(renderReq, { signal: AbortSignal.timeout(30000) });
+      } catch (e) {
+        return jsonResp({ ok: false, error: 'Bot server (HF Space) unreachable: ' + e.message }, 502);
+      }
+    }
+
     const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
                      '/api/leaderboard', '/api/solve-pdf',
                      '/api/tg-image', '/api/new-exam/status'];
