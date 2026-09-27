@@ -25564,8 +25564,13 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         _ki = -1
         _consec_outage_fails = 0  # consecutive 503/504/timeout across DIFFERENT
         # keys -- 3 in a row means Google's backend itself is overloaded, not
-        # individual keys, so stop burning through the whole 97-key pool
-        # (which wastes 2-3 min per call) and fall back to Groq immediately.
+        # individual keys. Per user request (2026-09-27): NEVER fall back to
+        # Groq -- instead wait a bit and retry with a fresh key batch,
+        # notifying the user once per wait why it's stuck. Capped at 5 waits
+        # (~then keeps trying with whatever keys remain / eventually returns
+        # empty rather than looping forever).
+        _outage_wait_rounds = 0
+        _outage_notified_chat = None
         while True:
             if not _queue:
                 if _refills >= 4:
@@ -25690,19 +25695,39 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                     _consec_outage_fails = 0
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 if _consec_outage_fails >= 3:
-                    logger.error(f"[QBM] 3 consecutive backend-outage failures across different keys — stopping early (tried {_ki+1} key(s)) to fall back to Groq instead of burning the rest of the pool")
-                    break
+                    _outage_wait_rounds += 1
+                    if _outage_wait_rounds > 5:
+                        logger.error("[QBM] backend outage persisted through 5 wait+retry rounds — giving up for this page (Groq disabled per user request)")
+                        break
+                    _wait_s = min(10 * _outage_wait_rounds, 30)
+                    logger.error(f"[QBM] 3 consecutive backend-outage failures across different keys — Google Gemini seems overloaded. Waiting {_wait_s}s then retrying with fresh keys (round {_outage_wait_rounds}/5, Groq disabled per user request)")
+                    try:
+                        _chat_id_for_notice = _current_job_chat_id_ctx.get()
+                        if _chat_id_for_notice and _outage_wait_rounds != _outage_notified_chat:
+                            await send_msg(_chat_id_for_notice,
+                                f"⚠️ Google Gemini server এখন overload/busy (৩+ key পরপর 503 দিচ্ছে)। "
+                                f"তাই {_wait_s}s wait করে fresh key দিয়ে আবার try করছি (round {_outage_wait_rounds}/5)... "
+                                f"একটু ধৈর্য ধরো, Groq ব্যবহার করা হবে না।")
+                            _outage_notified_chat = _outage_wait_rounds
+                    except Exception:
+                        pass
+                    await asyncio.sleep(_wait_s)
+                    _consec_outage_fails = 0
+                    try:
+                        _fresh_after_outage = key_rotator.ordered_keys_avoiding_accounts(_avoid_accts, offset=_qbm_key_offset_ctx.get()) or []
+                    except Exception:
+                        _fresh_after_outage = []
+                    _queue = [k for k in _fresh_after_outage if not _is_gemini_key_exhausted_today(k)] or _fresh_after_outage
+                    _ki = -1
+                    continue
                 continue
-        # All Gemini keys exhausted/rate-limited/errored (or backend-outage
-        # circuit breaker tripped above) — fall back to Groq vision
-        if gemini_only:
-            logger.warning("[QBM] All Gemini keys exhausted — gemini_only set, returning empty (no Groq fallback)")
-            return ""
-        logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision")
-        return await _gen_groq_raw_text(img, prompt)
+        # All Gemini keys exhausted/rate-limited/errored, or outage retries
+        # exhausted -- Groq disabled per user request, return empty.
+        logger.warning("[QBM] All Gemini keys exhausted — returning empty (Groq fallback disabled per user request)")
+        return ""
     except Exception as e:
         logger.warning(f"[QBM] Gemini raw call failed: {e}")
-        return "" if gemini_only else await _gen_groq_raw_text(img, prompt)
+        return ""
 
 
 async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = False) -> str:
