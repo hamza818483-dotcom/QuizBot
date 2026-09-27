@@ -32359,14 +32359,28 @@ async def start_live_quiz(group_id, session_id: str, topic: str,
         f"⚡Per Quiz Time: {per_q_time} sec\n\n"
         f"Are Your Ready?"
     )
-    await tg_post("sendMessage", {"chat_id": group_id, "text": pre_text})
+    pre_r = await tg_post("sendMessage", {"chat_id": group_id, "text": pre_text})
+    pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
+
+    # Countdown edits the same "Are Your Ready?" message in place (3️⃣→2️⃣→1️⃣→শুরু!)
+    # instead of sending 3 new messages, so the channel only sees one line change.
+    async def _countdown_edit(text: str):
+        if pre_msg_id:
+            edit_r = await tg_post("editMessageText", {
+                "chat_id": group_id, "message_id": pre_msg_id, "text": text,
+            })
+            if edit_r.get("ok"):
+                return
+        # No message id (send failed) or edit failed (e.g. rate limit) —
+        # fall back to a fresh message so the countdown still shows.
+        await tg_post("sendMessage", {"chat_id": group_id, "text": text})
 
     await asyncio.sleep(2)
-    await tg_post("sendMessage", {"chat_id": group_id, "text": "3️⃣"})
+    await _countdown_edit(f"{pre_text}\n\n3️⃣")
     await asyncio.sleep(2)
-    await tg_post("sendMessage", {"chat_id": group_id, "text": "2️⃣"})
+    await _countdown_edit(f"{pre_text}\n\n2️⃣")
     await asyncio.sleep(2)
-    await tg_post("sendMessage", {"chat_id": group_id, "text": "1️⃣ 🚀 শুরু!"})
+    await _countdown_edit(f"{pre_text}\n\n1️⃣ 🚀 শুরু!")
     await asyncio.sleep(1)
 
     quiz_start = time.time()
