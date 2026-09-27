@@ -32401,8 +32401,39 @@ async def start_live_quiz(group_id, session_id: str, topic: str,
         "current_correct_idx": 0,
         # নতুন: কে কোন option দাগিয়েছে track করার জন্য
         "option_voters":       {},  # poll_id -> {option_idx: [user_name, ...]}
+        "status_msg_id":       None,   # admin_chat-এর single live-update msg
     }
     LIVE_QUIZ_STATE[group_id] = live_state
+
+    # ── admin_chat-এ একটাই "live update" status message — প্রতি প্রশ্নে
+    # এডিট হবে (নতুন msg না), সাথে ❌ Cancel বাটন — চাপলে quiz মাঝপথে থেমে যাবে ──
+    def _status_text(idx_done: int) -> str:
+        return (
+            f"🔴 <b>Live Quiz চলছে</b>\n\n"
+            f"🚀 Topic: {topic}\n"
+            f"📊 প্রশ্ন: {idx_done}/{total}\n"
+            f"👥 অংশগ্রহণকারী: {len(live_state.get('scores', {}))}"
+        )
+
+    status_kb = {"inline_keyboard": [[{"text": "❌ Cancel", "callback_data": f"livequizstop_{group_id}"}]]}
+    status_r = await tg_post("sendMessage", {
+        "chat_id": admin_chat, "text": _status_text(0),
+        "parse_mode": "HTML", "reply_markup": status_kb,
+    })
+    if status_r.get("ok"):
+        live_state["status_msg_id"] = status_r["result"]["message_id"]
+
+    async def _update_status(idx_done: int):
+        smid = live_state.get("status_msg_id")
+        if not smid:
+            return
+        try:
+            await tg_post("editMessageText", {
+                "chat_id": admin_chat, "message_id": smid, "text": _status_text(idx_done),
+                "parse_mode": "HTML", "reply_markup": status_kb,
+            })
+        except Exception:
+            pass
 
     settings   = await db_get_settings()
     tag        = settings.get("tag", "")
@@ -32502,12 +32533,27 @@ async def start_live_quiz(group_id, session_id: str, topic: str,
             if poll_id:
                 LIVE_POLL_MAP.pop(poll_id, None)
 
+        await _update_status(idx + 1)
+
         # ✅ Instant next — 0s delay
         await asyncio.sleep(0)
 
+    was_cancelled = not live_state.get("active", True)
     live_state["active"] = False
     LIVE_QUIZ_STATE.pop(group_id, None)
-    await _send_live_grand_result(group_id, live_state)
+
+    smid = live_state.get("status_msg_id")
+    if smid:
+        try:
+            final_text = "❌ <b>Live Quiz cancelled!</b>" if was_cancelled else "✅ <b>Live Quiz শেষ হয়েছে!</b>"
+            await tg_post("editMessageText", {
+                "chat_id": admin_chat, "message_id": smid, "text": final_text, "parse_mode": "HTML",
+            })
+        except Exception:
+            pass
+
+    if not was_cancelled:
+        await _send_live_grand_result(group_id, live_state)
 
 
 async def handle_live_poll_answer(pa: dict):
@@ -36827,6 +36873,16 @@ async def handle_callback(query: dict):
                 live_data.get("admin_chat", chat_id),
                 per_q_time
             ))
+
+        elif data.startswith("livequizstop_"):
+            target_group = data.replace("livequizstop_", "")
+            try:
+                target_group = int(target_group)
+            except ValueError:
+                pass
+            st = LIVE_QUIZ_STATE.get(target_group)
+            if st:
+                st["active"] = False  # loop এর পরের check-এ থেমে যাবে, status msg নিজেই cancelled-এ edit হবে
 
         elif data.startswith("livecancel_"):
             orig_uid = int(data.replace("livecancel_", ""))
