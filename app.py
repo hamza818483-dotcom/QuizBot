@@ -1645,7 +1645,10 @@ async def lms_live_quiz_schedule(request: Request):
     from lms_live_quiz import create_scheduled_live_quiz, LmsLiveQuizError
 
     name = str(data.get("name") or "").strip()
-    exam_id = str(data.get("exam_id") or "").strip()
+    exam_id = str(data.get("exam_id") or "").strip() or None
+    question_ids = data.get("question_ids") or None
+    if question_ids:
+        question_ids = [str(q).strip() for q in question_ids if str(q).strip()]
     chat_id = str(data.get("chat_id") or "").strip()
     thread_id = data.get("thread_id")
     thread_id = int(thread_id) if thread_id else None
@@ -1653,12 +1656,13 @@ async def lms_live_quiz_schedule(request: Request):
     scheduled_at = str(data.get("scheduled_at") or "").strip() or time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
     channel_row_id = data.get("channel_row_id") or None
 
-    if not exam_id or not chat_id:
-        return JSONResponse({"error": "exam_id and chat_id are required"}, status_code=400)
+    if (not exam_id and not question_ids) or not chat_id:
+        return JSONResponse({"error": "chat_id and (exam_id or question_ids) are required"}, status_code=400)
 
     try:
         row = await create_scheduled_live_quiz(
-            name=name, exam_id=exam_id, chat_id=chat_id, thread_id=thread_id,
+            name=name, exam_id=exam_id, question_ids=question_ids,
+            chat_id=chat_id, thread_id=thread_id,
             per_q_time_sec=per_q_time_sec, scheduled_at_iso=scheduled_at,
             channel_row_id=channel_row_id,
         )
@@ -1684,7 +1688,7 @@ async def _run_one_lms_live_quiz(row: dict):
     start_live_quiz() the /live command uses. Skips (leaves pending, no
     error) if that group already has a live quiz running — the next cron
     tick will retry it."""
-    from lms_live_quiz import fetch_exam_mcqs, claim_live_quiz, mark_live_quiz, LmsLiveQuizError
+    from lms_live_quiz import fetch_exam_mcqs, fetch_mcqs_by_ids, claim_live_quiz, mark_live_quiz, LmsLiveQuizError
 
     row_id = row["id"]
     chat_id_raw = row.get("chat_id")
@@ -1698,7 +1702,15 @@ async def _run_one_lms_live_quiz(row: dict):
         return
 
     try:
-        mcqs, exam_title = await fetch_exam_mcqs(row["exam_id"])
+        # Manually-picked MCQs (question_ids) take priority over exam_id —
+        # a row only has question_ids when the admin hand-selected specific
+        # questions in the LMS Question Bank rather than a whole exam.
+        question_ids = row.get("question_ids")
+        if question_ids:
+            mcqs = await fetch_mcqs_by_ids(question_ids)
+            exam_title = "ATLAS Live Quiz"
+        else:
+            mcqs, exam_title = await fetch_exam_mcqs(row["exam_id"])
     except LmsLiveQuizError as e:
         await mark_live_quiz(row_id, "error", error=str(e))
         return
@@ -1708,7 +1720,7 @@ async def _run_one_lms_live_quiz(row: dict):
         return
 
     if not mcqs:
-        await mark_live_quiz(row_id, "error", error="এই exam-এ কোনো প্রশ্ন নেই।")
+        await mark_live_quiz(row_id, "error", error="কোনো প্রশ্ন পাওয়া যায়নি।")
         return
 
     session_id = gen_session_id()

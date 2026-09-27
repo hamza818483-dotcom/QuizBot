@@ -37,6 +37,23 @@ class LmsLiveQuizError(Exception):
     pass
 
 
+def _rows_to_mcqs(rows: list) -> list:
+    mcqs = []
+    for row in rows:
+        opts = [row.get("option_a") or "", row.get("option_b") or "", row.get("option_c") or "", row.get("option_d") or ""]
+        opts = [o for o in opts if o.strip()]
+        if len(opts) < 2:
+            continue
+        ans = ANS_MAP.get(str(row.get("correct_option") or "A").strip().upper(), "A")
+        mcqs.append({
+            "question": row.get("question_text") or "",
+            "options": opts,
+            "answer": ans,
+            "explanation": row.get("explanation") or "",
+        })
+    return mcqs
+
+
 async def fetch_exam_mcqs(exam_id: str) -> tuple[list, str]:
     """Returns (mcqs, exam_title). mcqs shape matches start_live_quiz's
     expected format: {"question","options"[4],"answer","explanation"}."""
@@ -66,36 +83,56 @@ async def fetch_exam_mcqs(exam_id: str) -> tuple[list, str]:
         q_r.raise_for_status()
         rows = q_r.json()
 
-    mcqs = []
-    for row in rows:
-        opts = [row.get("option_a") or "", row.get("option_b") or "", row.get("option_c") or "", row.get("option_d") or ""]
-        opts = [o for o in opts if o.strip()]
-        if len(opts) < 2:
-            continue
-        ans = ANS_MAP.get(str(row.get("correct_option") or "A").strip().upper(), "A")
-        mcqs.append({
-            "question": row.get("question_text") or "",
-            "options": opts,
-            "answer": ans,
-            "explanation": row.get("explanation") or "",
-        })
-    return mcqs, exam_title
+    return _rows_to_mcqs(rows), exam_title
+
+
+async def fetch_mcqs_by_ids(question_ids: list[str]) -> list:
+    """Fetches only the specifically-picked exam_questions rows (manual
+    checkbox selection from the LMS Question Bank), preserving the order
+    the admin selected them in — not the exam's own question_index order."""
+    if not LMS_SUPABASE_URL or not LMS_SUPABASE_SERVICE_KEY:
+        raise LmsLiveQuizError("LMS_SUPABASE_URL / LMS_SUPABASE_SERVICE_KEY env var সেট করা নেই।")
+    if not question_ids:
+        return []
+    async with httpx.AsyncClient(timeout=30) as client:
+        q_r = await client.get(
+            f"{LMS_SUPABASE_URL}/rest/v1/exam_questions",
+            headers=_headers(),
+            params={
+                "id": f"in.({','.join(question_ids)})",
+                "select": "id,question_text,option_a,option_b,option_c,option_d,correct_option,explanation",
+            },
+        )
+        q_r.raise_for_status()
+        rows = q_r.json()
+
+    by_id = {str(r["id"]): r for r in rows}
+    ordered_rows = [by_id[qid] for qid in question_ids if qid in by_id]
+    return _rows_to_mcqs(ordered_rows)
 
 
 async def create_scheduled_live_quiz(
-    name: str, exam_id: str, chat_id: str, thread_id: Optional[int],
+    name: str, chat_id: str, thread_id: Optional[int],
     per_q_time_sec: int, scheduled_at_iso: str, channel_row_id: Optional[str] = None,
+    exam_id: Optional[str] = None, question_ids: Optional[list[str]] = None,
 ) -> dict:
-    """Insert a row into LMS's scheduled_live_quizzes table. Validates the
-    exam has questions up front so a typo'd exam_id fails fast instead of
-    silently sitting pending forever."""
-    mcqs, _ = await fetch_exam_mcqs(exam_id)
+    """Insert a row into LMS's scheduled_live_quizzes table. Exactly one of
+    exam_id (whole exam) or question_ids (manually-picked MCQs) must be
+    given. Validates questions exist up front so bad input fails fast
+    instead of silently sitting pending forever."""
+    if question_ids:
+        mcqs = await fetch_mcqs_by_ids(question_ids)
+    elif exam_id:
+        mcqs, _ = await fetch_exam_mcqs(exam_id)
+    else:
+        raise LmsLiveQuizError("exam_id অথবা question_ids — কোনো একটা দিতে হবে।")
     if not mcqs:
-        raise LmsLiveQuizError("এই exam-এ কোনো প্রশ্ন নেই।")
+        raise LmsLiveQuizError("কোনো প্রশ্ন পাওয়া যায়নি।")
 
     payload = {
         "name": name.strip() or "ATLAS Live Quiz",
         "exam_id": exam_id,
+        "question_ids": question_ids or None,
         "channel_id": channel_row_id,
         "chat_id": str(chat_id).strip(),
         "thread_id": thread_id,
