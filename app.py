@@ -31418,7 +31418,7 @@ async def process_qbm_pages(
         try:
             _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
             mcqs = precomputed_mcqs if skip_extract else (
-                await _qbm_extract_from_image(img, cache_key=_ck) if _ck else await _qbm_extract_from_image(img)
+                await _qbm_extract_from_image(img, cache_key=_ck, gemini_only=True) if _ck else await _qbm_extract_from_image(img, gemini_only=True)
             )
             if not mcqs:
                 page_status[idx]["current"] = False
