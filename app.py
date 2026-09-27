@@ -25562,6 +25562,10 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         _refills = 0
         _queue = list(keys_to_try)
         _ki = -1
+        _consec_outage_fails = 0  # consecutive 503/504/timeout across DIFFERENT
+        # keys -- 3 in a row means Google's backend itself is overloaded, not
+        # individual keys, so stop burning through the whole 97-key pool
+        # (which wastes 2-3 min per call) and fall back to Groq immediately.
         while True:
             if not _queue:
                 if _refills >= 4:
@@ -25597,6 +25601,8 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 async with key_rotator.throttled_call(key=key):
                     response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
                 key_rotator.mark_healthy(key)
+                _consec_outage_fails = 0  # reset -- a live key answered, so the
+                # backend isn't globally down anymore
                 _used_acct = key_rotator.account_of(key)
                 _used_set = _qbm_page_used_accounts_ctx.get()
                 if _used_set is not None:
@@ -25667,9 +25673,28 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 # on a specific page is diagnosable, not silently retried.
                 if "response.text" in msg or "finish_reason" in msg.lower() or "Invalid operation" in msg or "quick accessor" in msg:
                     logger.warning(f"[QBM-diag] Gemini key {key[:12]}... response.text accessor FAILED (likely SAFETY/RECITATION/MAX_TOKENS block, not quota): {full_msg[:800]}")
+                # 2026-09-27 BACKEND-OUTAGE CIRCUIT BREAKER: 503/504/overload/
+                # timeout on a key is NOT that key's fault (it's Google's whole
+                # backend struggling) -- unlike 429/401 above, retrying a
+                # DIFFERENT key doesn't help when this keeps happening back to
+                # back. Without this, a full outage burns through the entire
+                # 97-key pool (2-3 min wasted) before finally falling back to
+                # Groq. 3 in a row (across different keys, so it's not just
+                # one flaky key) = treat as backend-wide outage, stop early.
+                _is_outage_err = ("UNAVAILABLE" in msg or "503" in msg or "504" in msg
+                                  or "DEADLINE_EXCEEDED" in msg or "overloaded" in msg.lower()
+                                  or isinstance(e, asyncio.TimeoutError))
+                if _is_outage_err:
+                    _consec_outage_fails += 1
+                else:
+                    _consec_outage_fails = 0
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
+                if _consec_outage_fails >= 3:
+                    logger.error(f"[QBM] 3 consecutive backend-outage failures across different keys — stopping early (tried {_ki+1} key(s)) to fall back to Groq instead of burning the rest of the pool")
+                    break
                 continue
-        # All Gemini keys exhausted/rate-limited/errored — fall back to Groq vision
+        # All Gemini keys exhausted/rate-limited/errored (or backend-outage
+        # circuit breaker tripped above) — fall back to Groq vision
         if gemini_only:
             logger.warning("[QBM] All Gemini keys exhausted — gemini_only set, returning empty (no Groq fallback)")
             return ""
