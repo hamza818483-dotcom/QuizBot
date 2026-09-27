@@ -25570,7 +25570,8 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         # (~then keeps trying with whatever keys remain / eventually returns
         # empty rather than looping forever).
         _outage_wait_rounds = 0
-        _outage_notified_chat = None
+        _outage_notify_msg_id = None  # single message, edited each round
+        _outage_notify_chat_id = None
         while True:
             if not _queue:
                 if _refills >= 4:
@@ -25703,12 +25704,18 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                     logger.error(f"[QBM] 3 consecutive backend-outage failures across different keys — Google Gemini seems overloaded. Waiting {_wait_s}s then retrying with fresh keys (round {_outage_wait_rounds}/5, Groq disabled per user request)")
                     try:
                         _chat_id_for_notice = _current_job_chat_id_ctx.get()
-                        if _chat_id_for_notice and _outage_wait_rounds != _outage_notified_chat:
-                            await send_msg(_chat_id_for_notice,
-                                f"⚠️ Google Gemini server এখন overload/busy (৩+ key পরপর 503 দিচ্ছে)। "
-                                f"তাই {_wait_s}s wait করে fresh key দিয়ে আবার try করছি (round {_outage_wait_rounds}/5)... "
-                                f"একটু ধৈর্য ধরো, Groq ব্যবহার করা হবে না।")
-                            _outage_notified_chat = _outage_wait_rounds
+                        _notice_text = (
+                            f"⚠️ Google Gemini server এখন overload/busy (৩+ key পরপর 503 দিচ্ছে)। "
+                            f"তাই {_wait_s}s wait করে fresh key দিয়ে আবার try করছি (round {_outage_wait_rounds}/5)... "
+                            f"একটু ধৈর্য ধরো, Groq ব্যবহার করা হবে না।"
+                        )
+                        if _chat_id_for_notice:
+                            if _outage_notify_msg_id is None:
+                                _sent = await send_msg(_chat_id_for_notice, _notice_text)
+                                _outage_notify_msg_id = _sent.get("result", {}).get("message_id")
+                                _outage_notify_chat_id = _chat_id_for_notice
+                            else:
+                                await edit_msg(_outage_notify_chat_id, _outage_notify_msg_id, _notice_text)
                     except Exception:
                         pass
                     await asyncio.sleep(_wait_s)
