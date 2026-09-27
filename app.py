@@ -1623,6 +1623,130 @@ async def lms_send_channel_active_by_exam(exam_id: str):
     return JSONResponse({"ok": True, "job_id": None})
 
 
+# ── LMS "Live Quiz" send mode ──────────────────────────────────────────
+# Exam-bank-sourced Telegram live quiz (poll → stopPoll → reveal → next,
+# same as /live), fired instantly or scheduled for later. See
+# lms_live_quiz.py for the exam-fetch/DB-row helpers; the actual on-channel
+# runner is the same start_live_quiz() the /live command already uses.
+
+@app.post("/api/lms-live-quiz/schedule")
+async def lms_live_quiz_schedule(request: Request):
+    """Body: {secret, name, exam_id, chat_id, thread_id?, per_q_time_sec,
+    scheduled_at? (ISO string; omitted/past = instant), channel_row_id?}
+    Always just writes a 'pending' row — instant sends are simply rows
+    whose scheduled_at is now/past, picked up by the same cron loop within
+    ~10s, so there's exactly one code path for both instant and scheduled."""
+    if not LMS_API_SECRET:
+        logger.warning("[LMS-LiveQuiz] SECURITY: LMS_API_SECRET not set -- endpoint accepting unauthenticated requests!")
+    data = await request.json()
+    if LMS_API_SECRET and data.get("secret") != LMS_API_SECRET:
+        return JSONResponse({"error": "unauthorized"}, status_code=403)
+
+    from lms_live_quiz import create_scheduled_live_quiz, LmsLiveQuizError
+
+    name = str(data.get("name") or "").strip()
+    exam_id = str(data.get("exam_id") or "").strip()
+    chat_id = str(data.get("chat_id") or "").strip()
+    thread_id = data.get("thread_id")
+    thread_id = int(thread_id) if thread_id else None
+    per_q_time_sec = int(data.get("per_q_time_sec") or 20)
+    scheduled_at = str(data.get("scheduled_at") or "").strip() or time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    channel_row_id = data.get("channel_row_id") or None
+
+    if not exam_id or not chat_id:
+        return JSONResponse({"error": "exam_id and chat_id are required"}, status_code=400)
+
+    try:
+        row = await create_scheduled_live_quiz(
+            name=name, exam_id=exam_id, chat_id=chat_id, thread_id=thread_id,
+            per_q_time_sec=per_q_time_sec, scheduled_at_iso=scheduled_at,
+            channel_row_id=channel_row_id,
+        )
+    except LmsLiveQuizError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"[LMS-LiveQuiz] schedule error: {e}")
+        return JSONResponse({"error": "internal error"}, status_code=500)
+
+    return JSONResponse({"ok": True, "row": row})
+
+
+@app.post("/api/lms-live-quiz/cancel/{row_id}")
+async def lms_live_quiz_cancel(row_id: str):
+    """Cancels a still-pending (not yet started) scheduled live quiz."""
+    from lms_live_quiz import mark_live_quiz
+    await mark_live_quiz(row_id, "cancelled")
+    return JSONResponse({"ok": True})
+
+
+async def _run_one_lms_live_quiz(row: dict):
+    """Claims + runs a single scheduled_live_quizzes row via the same
+    start_live_quiz() the /live command uses. Skips (leaves pending, no
+    error) if that group already has a live quiz running — the next cron
+    tick will retry it."""
+    from lms_live_quiz import fetch_exam_mcqs, claim_live_quiz, mark_live_quiz, LmsLiveQuizError
+
+    row_id = row["id"]
+    chat_id_raw = row.get("chat_id")
+    try:
+        chat_id = int(chat_id_raw)
+    except (TypeError, ValueError):
+        chat_id = chat_id_raw
+
+    if chat_id in LIVE_QUIZ_STATE:
+        logger.info(f"[LMS-LiveQuiz] {row_id}: group {chat_id} busy with another live quiz, retrying next tick")
+        return
+
+    try:
+        mcqs, exam_title = await fetch_exam_mcqs(row["exam_id"])
+    except LmsLiveQuizError as e:
+        await mark_live_quiz(row_id, "error", error=str(e))
+        return
+    except Exception as e:
+        logger.error(f"[LMS-LiveQuiz] {row_id}: exam fetch failed: {e}")
+        await mark_live_quiz(row_id, "error", error=f"exam fetch failed: {e}")
+        return
+
+    if not mcqs:
+        await mark_live_quiz(row_id, "error", error="এই exam-এ কোনো প্রশ্ন নেই।")
+        return
+
+    session_id = gen_session_id()
+    quiz_name = (row.get("name") or "").strip() or exam_title
+
+    won = await claim_live_quiz(row_id, session_id)
+    if not won:
+        # another scheduler tick already picked this row up first
+        return
+
+    try:
+        await start_live_quiz(
+            chat_id, session_id, quiz_name, mcqs,
+            OWNER_ID, int(row.get("per_q_time_sec") or 20),
+        )
+        await mark_live_quiz(row_id, "done")
+    except Exception as e:
+        logger.error(f"[LMS-LiveQuiz] {row_id}: run failed: {e}")
+        await mark_live_quiz(row_id, "error", error=str(e))
+
+
+async def _lms_live_quiz_scheduler_task():
+    """Polls LMS's scheduled_live_quizzes for due rows every 10s and fires
+    them. Each due row is spawned as its own task so multiple different
+    groups' quizzes can run concurrently — start_live_quiz already keys
+    LIVE_QUIZ_STATE per-group_id, and _run_one_lms_live_quiz's own busy
+    check prevents double-firing the SAME group."""
+    from lms_live_quiz import list_due_live_quizzes
+    while True:
+        try:
+            due = await list_due_live_quizzes()
+            for row in due:
+                _spawn_task(_run_one_lms_live_quiz(row))
+        except Exception as e:
+            logger.warning(f"[LMS-LiveQuiz] scheduler tick failed: {e}")
+        await asyncio.sleep(10)
+
+
 # v-mhtml-live: MHTML/HTML → CSV job state for live dashboard + live TG progress msg
 # job_id -> {"status": "running"|"done"|"error", "done": int, "total": int,
 #            "pct": int, "eta_sec": int, "started_at": float, "source": str,
@@ -37866,6 +37990,7 @@ async def startup():
     _spawn_task(_supervised(_memory_cleanup_task, "_memory_cleanup_task"))
     _spawn_task(_supervised(_ram_guard_task, "_ram_guard_task"))
     _spawn_task(_supervised(_scheduled_restart_task, "_scheduled_restart_task"))
+    _spawn_task(_supervised(_lms_live_quiz_scheduler_task, "_lms_live_quiz_scheduler_task"))
     # _spawn_task(_supervised(_watchdog_task, "_watchdog_task"))  # DISABLED — AtlasBot monitors instead
     # _spawn_task(_supervised(_watchdog2_task, "_watchdog2_task"))  # DISABLED — AtlasBot monitors instead
     # _spawn_task(_supervised(_cross_bot_watchdog_task, "_cross_bot_watchdog_task"))  # DISABLED
