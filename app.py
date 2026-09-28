@@ -1669,8 +1669,15 @@ async def lms_live_quiz_schedule(request: Request):
     except LmsLiveQuizError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
-        logger.error(f"[LMS-LiveQuiz] schedule error: {e}")
-        return JSONResponse({"error": "internal error"}, status_code=500)
+        detail = str(e)
+        try:
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                detail = f"{e} | {resp.text[:300]}"
+        except Exception:
+            pass
+        logger.error(f"[LMS-LiveQuiz] schedule error: {detail}")
+        return JSONResponse({"error": f"internal error: {detail[:400]}"}, status_code=500)
 
     return JSONResponse({"ok": True, "row": row})
 

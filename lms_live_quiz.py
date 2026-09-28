@@ -94,17 +94,21 @@ async def fetch_mcqs_by_ids(question_ids: list[str]) -> list:
         raise LmsLiveQuizError("LMS_SUPABASE_URL / LMS_SUPABASE_SERVICE_KEY env var সেট করা নেই।")
     if not question_ids:
         return []
+    rows = []
     async with httpx.AsyncClient(timeout=30) as client:
-        q_r = await client.get(
-            f"{LMS_SUPABASE_URL}/rest/v1/exam_questions",
-            headers=_headers(),
-            params={
-                "id": f"in.({','.join(question_ids)})",
-                "select": "id,question_text,option_a,option_b,option_c,option_d,correct_option,explanation",
-            },
-        )
-        q_r.raise_for_status()
-        rows = q_r.json()
+        # chunk to keep the URL length safe when many MCQs are picked
+        for i in range(0, len(question_ids), 40):
+            chunk = question_ids[i:i + 40]
+            q_r = await client.get(
+                f"{LMS_SUPABASE_URL}/rest/v1/exam_questions",
+                headers=_headers(),
+                params={
+                    "id": f"in.({','.join(chunk)})",
+                    "select": "id,question_text,option_a,option_b,option_c,option_d,correct_option,explanation",
+                },
+            )
+            q_r.raise_for_status()
+            rows.extend(q_r.json())
 
     by_id = {str(r["id"]): r for r in rows}
     ordered_rows = [by_id[qid] for qid in question_ids if qid in by_id]
