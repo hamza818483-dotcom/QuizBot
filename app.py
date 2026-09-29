@@ -8833,14 +8833,17 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     # channel list, so the person picks a channel already knowing the count. ──
     est_secs = 30 if source == "new" else 38
     label = "MCQ তৈরি হচ্ছে" if source == "new" else "Existing MCQ বের করা হচ্ছে"
-    loading = await send_msg(chat_id, f"⏳ Image থেকে {label}... 0%")
-    loading_id = loading.get("result", {}).get("message_id")
 
     # Same per-job Cancel button infra used by /pdf, /qbm, /onu — gives /img
     # a working 🛑 Cancel button too (user request: /img e cancel button nai).
+    # Must run BEFORE the first send_msg so the button is on the very first
+    # message the user sees, not just later ticker edits.
     clear_cancel(chat_id)
     new_job_id(chat_id)
     set_active_job(chat_id, f"/img ({topic})")
+
+    loading = await send_msg(chat_id, f"⏳ Image থেকে {label}... 0%", reply_markup=_cancel_kb(chat_id))
+    loading_id = loading.get("result", {}).get("message_id")
 
     _progress_stop = asyncio.Event()
     _img_progress = {"done": 0, "total": max(mcq_count or 10, 1)}
