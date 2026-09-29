@@ -3135,6 +3135,31 @@ def _rd_build_gapfill_prompt(topic: str, existing_mcqs: list) -> str:
     )
 
 
+def _build_img_compact_prompt(topic: str, count) -> str:
+    """Compact MCQ prompt for /img (New MCQ mode) — a single ad-hoc image,
+    not a textbook page pipeline, so the full ~370-line _build_mcq_prompt's
+    multi-page/topic-tagging/exp_bbox/RD-mode machinery is unneeded overhead.
+    Keeps only what materially affects quality: language lock, source-
+    grounding, 4-option/1-answer structure, and a full 4-option explanation.
+    """
+    n = count if isinstance(count, int) and count else None
+    count_rule = (f"Generate exactly {n} MCQs if the image content supports it; fewer only if it genuinely doesn't."
+                  if n else
+                  "Generate as many genuine MCQs as the image's content supports (typically 5-20) — cover the whole image, not just the first part.")
+    return (
+        f"Expert MCQ-extraction engine for Bengali/English academic images. Topic: {topic}\n\n"
+        f"LANGUAGE: Write question/options/explanation in the SAME script as the source (Bengali or English) — never translate/mix.\n"
+        f"SOURCE-GROUNDING (absolute): every MCQ must come only from facts visible in this image. Never invent outside facts, even to hit a count.\n"
+        f"{count_rule}\n"
+        f"RULES: exactly 4 options, exactly one correct answer; distractors should be plausible/confusable, never yes/no/filler; "
+        f"never make MCQs from titles/headings/page numbers; copy proper nouns/terms exactly as printed.\n"
+        f"EXPLANATION: must justify the correct option AND briefly state why each of the other 3 is wrong, all grounded in the image content only — "
+        f"identify options by their content, never by letter (A/B/C/D), since letters may get shuffled later.\n\n"
+        f"Return STRICT JSON array only, no prose/markdown/reasoning — start immediately with '['. Schema:\n"
+        f'[{{"question":"...","options":["A","B","C","D"],"answer":"A|B|C|D","explanation":"..."}}]'
+    )
+
+
 def _build_mcq_prompt(topic: str, count) -> str:
     if _CHOK_MODE.get():
         return _build_chok_prompt(topic)
@@ -8880,7 +8905,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             # new questions, only extracts what's already in the image, per /qbm rules.
             _gen_task = _spawn_task(_qbm_extract_from_image(img))
         else:
-            _gen_task = _spawn_task(generate_mcq_from_image(img, topic, 1, mcq_count))
+            _gen_task = _spawn_task(generate_mcq_from_image(img, topic, 1, mcq_count, custom_prompt=_build_img_compact_prompt(topic, mcq_count)))
         ACTIVE_GEN_TASK[chat_id] = _gen_task
         try:
             mcqs = await _gen_task
