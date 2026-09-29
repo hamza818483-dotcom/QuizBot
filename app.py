@@ -8809,8 +8809,8 @@ async def handle_img_source(source: str, uid: int, chat_id: int, user: dict):
     await handle_img_process(uid, chat_id, user)
 
 async def handle_img_process(uid: int, chat_id: int, user: dict):
-    """Runs MCQ generation/extraction, auto-sends CSV, then shows channel list.
-    Mode (Image/Topic) is asked AFTER channel is chosen, not here."""
+    """Runs MCQ generation/extraction and auto-sends the CSV. No channel-post
+    step — /img now just extracts/generates and delivers the CSV file."""
     session_key = f"img_cmd_{uid}"
     row = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", session_key).execute())
     if not row.data:
@@ -8822,11 +8822,6 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     topic = img_data.get("topic", "ATLAS Special MCQ")
     source = img_data.get("source", "new")
     mcq_count = img_data.get("mcq_count")
-
-    channels = await db_get_channels()
-    if not channels:
-        await send_msg(chat_id, "❌ কোনো channel save করা নেই! /channel দিয়ে add করো।")
-        return
 
     # ── MCQ processing ALWAYS runs here now (before channel select), same
     # pattern as /qbm: generate/extract first -> CSV auto-sent -> THEN show
@@ -8966,33 +8961,8 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     except Exception as csv_err:
         logger.warning(f"[IMG] CSV auto-send failed: {csv_err}")
 
-    # Cache the already-processed mcqs + raw image bytes so channel-select
-    # posts directly without re-running generation/extraction. In-memory cache
-    # is the fast path; mcqs are ALSO persisted in the DB session below so a
-    # server restart between steps never forces a redo of the AI call —
-    # only img_bytes would need a cheap re-download from Telegram (no AI cost).
-    app.state.img_cache = getattr(app.state, "img_cache", {})
-    app.state.img_cache[f"img_mcq_{uid}"] = {"mcqs": mcqs, "img_bytes": img_bytes}
-
-    await sb_exec(lambda: sb.table("quiz_sessions").upsert({
-        "key": f"img_mode_{uid}",
-        "data": json.dumps({"file_id": file_id, "topic": topic, "source": source, "mcq_count": mcq_count, "mcqs": mcqs}),
-        "updated_at": int(time.time())
-    }).execute())
-
-    await edit_msg(chat_id, loading_id, f"✅ Processing Complete! {len(mcqs)} MCQ পাওয়া গেছে")
-
-    kb = {"inline_keyboard": []}
-    for ch in channels:
-        ch_id = ch.get("channel_id", "")
-        ch_name = ch.get("channel_name", ch_id)
-        kb["inline_keyboard"].append([{
-            "text": f"📢 {ch_name}",
-            "callback_data": f"imgchannel_{ch_id}_{uid}"
-        }])
-    await send_msg(chat_id,
-        f"📌 Topic: <b>{topic}</b>\n\nকোন channel-এ পাঠাবে?",
-        reply_markup=kb, parse_mode="HTML")
+    await edit_msg(chat_id, loading_id, f"✅ Processing Complete! {len(mcqs)} MCQ পাওয়া গেছে (CSV উপরে পাঠানো হয়েছে)")
+    return
 
 def _imgqbm_options_to_list(mcqs: list) -> list:
     """/qbm extraction returns options as a dict {A,B,C,D}; /img's poll-sender
