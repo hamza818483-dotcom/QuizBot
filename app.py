@@ -3145,7 +3145,9 @@ def _build_img_compact_prompt(topic: str, count) -> str:
     n = count if isinstance(count, int) and count else None
     count_rule = (f"Generate exactly {n} MCQs if the image content supports it; fewer only if it genuinely doesn't."
                   if n else
-                  "Generate as many genuine MCQs as the image's content supports (typically 5-20) — cover the whole image, not just the first part.")
+                  "MAXIMUM CONTENT UTILIZATION: go through the ENTIRE image (every heading, paragraph, box, table, footnote, small print) "
+                  "and generate MCQs covering every distinct fact/name/number/term — do not stop after just the first or most obvious part. "
+                  "A content-rich image should naturally produce many MCQs; a sparse one naturally produces few. No fixed target count.")
     return (
         f"Expert MCQ-extraction engine for Bengali/English academic images. Topic: {topic}\n\n"
         f"LANGUAGE: Write question/options/explanation in the SAME script as the source (Bengali or English) — never translate/mix.\n"
@@ -8905,7 +8907,13 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             # new questions, only extracts what's already in the image, per /qbm rules.
             _gen_task = _spawn_task(_qbm_extract_from_image(img, gemini_only=True))
         else:
-            _gen_task = _spawn_task(generate_mcq_from_image(img, topic, 1, mcq_count, custom_prompt=_build_img_compact_prompt(topic, mcq_count), gemini_only=True))
+            # mcq_count deliberately NOT passed to generate_mcq_from_image's
+            # own count-target/retry logic — /img always uses the no-retry
+            # custom_prompt path (max-content-utilization prompt already
+            # encodes the target/count), so a single Gemini call is final:
+            # no 3x retry loop re-running the whole provider chain trying
+            # to hit an exact count (that loop was the main /img slowness).
+            _gen_task = _spawn_task(generate_mcq_from_image(img, topic, 1, None, custom_prompt=_build_img_compact_prompt(topic, mcq_count), gemini_only=True))
         ACTIVE_GEN_TASK[chat_id] = _gen_task
         try:
             mcqs = await _gen_task
