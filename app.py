@@ -8836,6 +8836,12 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     loading = await send_msg(chat_id, f"⏳ Image থেকে {label}... 0%")
     loading_id = loading.get("result", {}).get("message_id")
 
+    # Same per-job Cancel button infra used by /pdf, /qbm, /onu — gives /img
+    # a working 🛑 Cancel button too (user request: /img e cancel button nai).
+    clear_cancel(chat_id)
+    new_job_id(chat_id)
+    set_active_job(chat_id, f"/img ({topic})")
+
     _progress_stop = asyncio.Event()
     _img_progress = {"done": 0, "total": max(mcq_count or 10, 1)}
 
@@ -8856,7 +8862,8 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
                 try:
                     await edit_msg(chat_id, loading_id,
                         f"⏳ Image থেকে {label}...\n"
-                        f"📊 Progress: {bars[bar_idx]} {pct}%")
+                        f"📊 Progress: {bars[bar_idx]} {pct}%",
+                        reply_markup=_cancel_kb(chat_id))
                 except Exception:
                     pass
         except asyncio.CancelledError:
@@ -8873,19 +8880,35 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             # Existing MCQ mode: /qbm prompt logic, full 2-call connected pipeline
             # (Call 1 extract + Call 2 miss-check+verify) — never fabricates
             # new questions, only extracts what's already in the image, per /qbm rules.
-            mcqs = await _qbm_extract_from_image(img)
-            mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
+            _gen_task = _spawn_task(_qbm_extract_from_image(img))
         else:
-            mcqs = await generate_mcq_from_image(img, topic, 1, mcq_count)
+            _gen_task = _spawn_task(generate_mcq_from_image(img, topic, 1, mcq_count))
+        ACTIVE_GEN_TASK[chat_id] = _gen_task
+        try:
+            mcqs = await _gen_task
+        except asyncio.CancelledError:
+            mcqs = []
+        finally:
+            if ACTIVE_GEN_TASK.get(chat_id) is _gen_task:
+                ACTIVE_GEN_TASK.pop(chat_id, None)
+
+        if source == "existing" and mcqs:
+            mcqs = _cap_mcq_options(_imgqbm_options_to_list(mcqs))
     except Exception as e:
         _progress_stop.set()
         ticker_task.cancel()
+        clear_active_job(chat_id)
         logger.error(f"[IMG] Processing error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
         return
 
     _progress_stop.set()
     ticker_task.cancel()
+    clear_active_job(chat_id)
+
+    if is_cancelled(chat_id):
+        await edit_msg(chat_id, loading_id, "🛑 বন্ধ করা হয়েছে।")
+        return
 
     if not mcqs:
         msg = "❌ MCQ generate হয়নি!" if source == "new" else "❌ ছবিতে কোনো existing MCQ পাওয়া যায়নি!"
