@@ -6295,7 +6295,7 @@ def _dedupe_mcqs(mcqs: list) -> list:
     """DISABLED: dedup inactivated to stop false-positive MCQ drops. No-op passthrough."""
     return list(mcqs or [])
 
-async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None):
+async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False):
     """
     Smart wrapper: Gemini first (primary), then Groq fallback (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
@@ -6318,7 +6318,7 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
     # each call already uses its own independent API key + Gemini/Groq request
     # and has nothing that actually needs global serialization. Multiple users'
     # jobs now run concurrently instead of queuing behind one another.
-    out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=exclude_groq_keys, key_offset=key_offset, custom_prompt=custom_prompt)
+    out, tried_groq_keys = await _generate_mcq_from_image_raw(img, topic, page_num, mcq_count, exclude_groq_keys=exclude_groq_keys, key_offset=key_offset, custom_prompt=custom_prompt, gemini_only=gemini_only)
     # 2026-08-27: code-level SOURCE-GROUNDING enforcement for the default
     # /pdf path (was only wired to /chem before -- see _filter_verified_mcqs
     # docstring). The default prompt already asks Gemini/Groq for
@@ -8903,9 +8903,9 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             # Existing MCQ mode: /qbm prompt logic, full 2-call connected pipeline
             # (Call 1 extract + Call 2 miss-check+verify) — never fabricates
             # new questions, only extracts what's already in the image, per /qbm rules.
-            _gen_task = _spawn_task(_qbm_extract_from_image(img))
+            _gen_task = _spawn_task(_qbm_extract_from_image(img, gemini_only=True))
         else:
-            _gen_task = _spawn_task(generate_mcq_from_image(img, topic, 1, mcq_count, custom_prompt=_build_img_compact_prompt(topic, mcq_count)))
+            _gen_task = _spawn_task(generate_mcq_from_image(img, topic, 1, mcq_count, custom_prompt=_build_img_compact_prompt(topic, mcq_count), gemini_only=True))
         ACTIVE_GEN_TASK[chat_id] = _gen_task
         try:
             mcqs = await _gen_task
