@@ -8853,42 +8853,53 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     # ── MCQ processing ALWAYS runs here now (before channel select), same
     # pattern as /qbm: generate/extract first -> CSV auto-sent -> THEN show
     # channel list, so the person picks a channel already knowing the count. ──
-    est_secs = 30 if source == "new" else 38
-    label = "MCQ তৈরি হচ্ছে" if source == "new" else "Existing MCQ বের করা হচ্ছে"
+    est_secs = 15 if source == "new" else 20
+    mode_tag = "🆕 New MCQ" if source == "new" else "📋 Existing MCQ"
 
     # Same per-job Cancel button infra used by /pdf, /qbm, /onu — gives /img
     # a working 🛑 Cancel button too (user request: /img e cancel button nai).
-    # Must run BEFORE the first send_msg so the button is on the very first
-    # message the user sees, not just later ticker edits.
     clear_cancel(chat_id)
     new_job_id(chat_id)
     set_active_job(chat_id, f"/img ({topic})")
+    _start_time = time.time()
+    _reset_ai_call_count(chat_id)
 
-    loading = await send_msg(chat_id, f"⏳ Image থেকে {label}... 0%", reply_markup=_cancel_kb(chat_id))
+    def _render_dashboard(pct: int, stage: str) -> str:
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        elapsed = int(time.time() - _start_time)
+        mins, secs = divmod(elapsed, 60)
+        calls = _get_ai_call_count(chat_id)
+        return (
+            "⏳ <b>ATLAS Image Processing...</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 Topic: {topic}\n"
+            f"{mode_tag}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Progress: {pct}% [{bar}]\n"
+            f"🔄 Stage: {stage}\n"
+            f"⏱️ Elapsed: {mins}:{secs:02d}\n"
+            f"🤖 AI calls: {calls}"
+        )
+
+    loading = await send_msg(chat_id, _render_dashboard(0, "শুরু হচ্ছে..."), parse_mode="HTML", reply_markup=_cancel_kb(chat_id))
     loading_id = loading.get("result", {}).get("message_id")
 
     _progress_stop = asyncio.Event()
-    _img_progress = {"done": 0, "total": max(mcq_count or 10, 1)}
+    _stage_box = {"stage": f"🖼️ Image পড়া হচ্ছে..."}
 
     async def _progress_ticker():
-        bars = ["▱▱▱▱▱▱▱▱▱▱","▰▱▱▱▱▱▱▱▱▱","▰▰▱▱▱▱▱▱▱▱","▰▰▰▱▱▱▱▱▱▱","▰▰▰▰▱▱▱▱▱▱",
-                "▰▰▰▰▰▱▱▱▱▱","▰▰▰▰▰▰▱▱▱▱","▰▰▰▰▰▰▰▱▱▱","▰▰▰▰▰▰▰▰▱▱","▰▰▰▰▰▰▰▰▰▱"]
         smooth_pct = 0.0
         try:
             while not _progress_stop.is_set():
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
                 if _progress_stop.is_set():
                     break
-                real_pct = (_img_progress["done"] / _img_progress["total"]) * 100
-                target = min(max(real_pct, smooth_pct + 1.5), 95)
-                smooth_pct = min(smooth_pct + max((target - smooth_pct) * 0.25, 0.8), 95)
+                target = min(smooth_pct + (100 / max(est_secs, 5)), 95)
+                smooth_pct = min(target, 95)
                 pct = int(smooth_pct)
-                bar_idx = min(int(pct / 10), len(bars) - 1)
                 try:
-                    await edit_msg(chat_id, loading_id,
-                        f"⏳ Image থেকে {label}...\n"
-                        f"📊 Progress: {bars[bar_idx]} {pct}%",
-                        reply_markup=_cancel_kb(chat_id))
+                    await edit_msg(chat_id, loading_id, _render_dashboard(pct, _stage_box["stage"]),
+                        parse_mode="HTML", reply_markup=_cancel_kb(chat_id))
                 except Exception:
                     pass
         except asyncio.CancelledError:
@@ -8900,6 +8911,8 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
         img_bytes = await download_tg_file(file_id)
         from PIL import Image as PILImage
         img = PILImage.open(BytesIO(img_bytes))
+
+        _stage_box["stage"] = "🤖 Gemini AI প্রসেস করছে..." if source == "new" else "🤖 Gemini AI বের করছে..."
 
         if source == "existing":
             # Existing MCQ mode: /qbm prompt logic, full 2-call connected pipeline
@@ -8929,6 +8942,7 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
         _progress_stop.set()
         ticker_task.cancel()
         clear_active_job(chat_id)
+        _elapsed = int(time.time() - _start_time)
         logger.error(f"[IMG] Processing error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
         return
@@ -8936,14 +8950,16 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     _progress_stop.set()
     ticker_task.cancel()
     clear_active_job(chat_id)
+    _elapsed = int(time.time() - _start_time)
+    _emins, _esecs = divmod(_elapsed, 60)
 
     if is_cancelled(chat_id):
-        await edit_msg(chat_id, loading_id, "🛑 বন্ধ করা হয়েছে।")
+        await edit_msg(chat_id, loading_id, f"🛑 বন্ধ করা হয়েছে। (⏱️ {_emins}:{_esecs:02d})")
         return
 
     if not mcqs:
         msg = "❌ MCQ generate হয়নি!" if source == "new" else "❌ ছবিতে কোনো existing MCQ পাওয়া যায়নি!"
-        await send_msg(chat_id, msg)
+        await send_msg(chat_id, f"{msg} (⏱️ {_emins}:{_esecs:02d})")
         return
 
     # ✅ CSV auto-send — processing শেষ হওয়া মাত্রই, channel select করার আগেই
@@ -8974,7 +8990,15 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     except Exception as csv_err:
         logger.warning(f"[IMG] CSV auto-send failed: {csv_err}")
 
-    await edit_msg(chat_id, loading_id, f"✅ Processing Complete! {len(mcqs)} MCQ পাওয়া গেছে (CSV উপরে পাঠানো হয়েছে)")
+    _calls_final = _get_ai_call_count(chat_id)
+    await edit_msg(chat_id, loading_id,
+        "✅ <b>Processing Complete!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 MCQ পাওয়া গেছে: {len(mcqs)}\n"
+        f"⏱️ Elapsed: {_emins}:{_esecs:02d}\n"
+        f"🤖 AI calls: {_calls_final}\n"
+        f"📄 CSV উপরে পাঠানো হয়েছে",
+        parse_mode="HTML")
     return
 
 def _imgqbm_options_to_list(mcqs: list) -> list:
