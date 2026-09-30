@@ -93,6 +93,22 @@ export default {
       }
     }
 
+    // ATLAS SMS Relay Android app posts parsed bKash/Nagad SMS here —
+    // same plain proxy-to-backend pattern as the route above.
+    if (url.pathname.startsWith('/api/sms-payment')) {
+      const RENDER = env.RENDER_URL || env.HF_SPACE_URL || 'https://hamza-02-quizbot.hf.space';
+      const renderReq = new Request(RENDER + url.pathname + url.search, {
+        method: request.method,
+        headers: request.headers,
+        body: request.method !== 'GET' ? request.body : undefined,
+      });
+      try {
+        return await fetch(renderReq, { signal: AbortSignal.timeout(30000) });
+      } catch (e) {
+        return jsonResp({ ok: false, error: 'Bot server (HF Space) unreachable: ' + e.message }, 502);
+      }
+    }
+
     const HF_ONLY = ['/api/exam/result', '/api/new-exam', '/api/bookmark',
                      '/api/leaderboard', '/api/solve-pdf',
                      '/api/tg-image', '/api/new-exam/status'];

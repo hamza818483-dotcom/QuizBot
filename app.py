@@ -702,6 +702,7 @@ NEW_EXAM_JOBS = {}
 # instead of a Telegram command.
 # ============================================================
 LMS_API_SECRET = os.environ.get("LMS_API_SECRET", "")
+SMS_RELAY_SECRET = os.environ.get("SMS_RELAY_SECRET", "")
 LMS_SEND_JOBS = {}  # job_id -> {"status", "pct", "sent_total", "total", "batches_done", "batches_total", "error"}
 DM_STOP_FLAGS = {}   # uid -> True while user has requested /stop (checked inside Poll Practice loop)
 DM_LAST_SESSION = {}  # uid -> in-memory mirror, kept in sync with D1 (see dm_session_set/get below)
@@ -1688,6 +1689,40 @@ async def lms_live_quiz_cancel(row_id: str):
     from lms_live_quiz import mark_live_quiz
     await mark_live_quiz(row_id, "cancelled")
     return JSONResponse({"ok": True})
+
+
+# ── ATLAS SMS Relay (self-hosted PipraPay alternative) ─────────────────
+# Receives parsed bKash/Nagad "payment received" SMS from the Android app
+# in android-app/atlas-sms-relay (LMS repo), matches to a pending
+# payment_requests row, and auto-approves via the existing
+# approve_payment_request() RPC. See sms_payment_relay.py for the logic.
+
+@app.post("/api/sms-payment/ingest")
+async def sms_payment_ingest(request: Request):
+    """Body (from the Android app): {secret, trx_id, amount, sender_phone,
+    raw_sms, received_at}"""
+    if not SMS_RELAY_SECRET:
+        logger.warning("[SMS-Relay] SECURITY: SMS_RELAY_SECRET not set -- endpoint accepting unauthenticated requests!")
+    data = await request.json()
+    if SMS_RELAY_SECRET and data.get("secret") != SMS_RELAY_SECRET:
+        return JSONResponse({"error": "unauthorized"}, status_code=403)
+
+    trx_id = str(data.get("trx_id") or "").strip()
+    if not trx_id:
+        return JSONResponse({"error": "trx_id is required"}, status_code=400)
+    amount = data.get("amount")
+    sender_phone = data.get("sender_phone")
+    raw_sms = data.get("raw_sms")
+    received_at = data.get("received_at")
+
+    from sms_payment_relay import process_incoming_sms
+
+    try:
+        result = await process_incoming_sms(trx_id, amount, sender_phone, raw_sms, received_at)
+        return JSONResponse({"ok": True, **result})
+    except Exception as e:
+        logger.error(f"[SMS-Relay] ingest error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 async def _run_one_lms_live_quiz(row: dict):
