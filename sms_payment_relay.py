@@ -80,7 +80,20 @@ async def _log_row(client: httpx.AsyncClient, trx_id: str, amount, sender_phone,
 async def process_incoming_sms(trx_id: str, amount: Optional[str], sender_phone: Optional[str],
                                 raw_sms: Optional[str], received_at_ms: Optional[int]) -> dict:
     """Core logic: find a matching pending payment_requests row and approve
-    it. Returns a dict describing what happened (for the API response)."""
+    it. Returns a dict describing what happened (for the API response).
+
+    Matching strategy (trx_id is NOT required from students — most don't
+    understand what it is, so we never ask for it; it's only used here if
+    a payment_requests row happens to have one saved from an earlier,
+    unrelated flow):
+      1) amount + sender_last5 (last 5 digits of the paying number, which
+         students DO enter on the payment form) — strong, unambiguous match
+      2) amount + trx_id, if a row already has trx_id set for some reason
+      3) amount alone, ONLY if exactly one pending request has that amount
+         in the last 48h — ambiguous cases (two students paying the same
+         amount around the same time) are deliberately left unmatched for
+         manual admin review rather than risk approving the wrong student.
+    """
     if not LMS_SUPABASE_URL or not LMS_SUPABASE_SERVICE_KEY:
         raise RuntimeError("LMS_SUPABASE_URL / LMS_SUPABASE_SERVICE_KEY env var সেট করা নেই।")
 
@@ -91,29 +104,51 @@ async def process_incoming_sms(trx_id: str, amount: Optional[str], sender_phone:
         except Exception:
             pass
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        # 1) Exact trx_id match against any pending request (trx_id is
-        #    unique per real transaction, so this is the strong match).
-        r = await client.get(
-            f"{LMS_SUPABASE_URL}/rest/v1/payment_requests",
-            headers=_headers(),
-            params={
-                "trx_id": f"eq.{trx_id}",
-                "status": "eq.pending",
-                "select": "id,trx_id,amount_sent,status",
-                "limit": "1",
-            },
-        )
-        r.raise_for_status()
-        rows = r.json()
+    sender_last5 = (sender_phone or "")[-5:] if sender_phone else None
+    cutoff = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - 48 * 3600))
 
-        # 2) Fallback: some students type the trx_id with different
-        #    casing/spacing than the SMS itself, or the request was logged
-        #    with just amount+sender_last5. Try amount match on recent
-        #    (last 48h) pending requests with no trx_id set yet.
-        if not rows and amount:
-            cutoff = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - 48 * 3600))
+    async with httpx.AsyncClient(timeout=20) as client:
+        rows = []
+
+        # 1) Strongest match: amount + sender_last5 (what students actually
+        #    enter on the payment form).
+        if amount and sender_last5:
+            r1 = await client.get(
+                f"{LMS_SUPABASE_URL}/rest/v1/payment_requests",
+                headers=_headers(),
+                params={
+                    "status": "eq.pending",
+                    "amount_sent": f"eq.{amount}",
+                    "sender_last5": f"eq.{sender_last5}",
+                    "created_at": f"gte.{cutoff}",
+                    "select": "id,trx_id,amount_sent,status,sender_last5",
+                    "order": "created_at.desc",
+                    "limit": "1",
+                },
+            )
+            r1.raise_for_status()
+            rows = r1.json()
+
+        # 2) If this payment_requests row happens to already have a trx_id
+        #    saved (e.g. from a different submission flow), match on that.
+        if not rows and trx_id:
             r2 = await client.get(
+                f"{LMS_SUPABASE_URL}/rest/v1/payment_requests",
+                headers=_headers(),
+                params={
+                    "trx_id": f"eq.{trx_id}",
+                    "status": "eq.pending",
+                    "select": "id,trx_id,amount_sent,status",
+                    "limit": "1",
+                },
+            )
+            r2.raise_for_status()
+            rows = r2.json()
+
+        # 3) Last resort: amount alone, only if unambiguous (exactly one
+        #    pending candidate) — see docstring above for why.
+        if not rows and amount:
+            r3 = await client.get(
                 f"{LMS_SUPABASE_URL}/rest/v1/payment_requests",
                 headers=_headers(),
                 params={
@@ -125,11 +160,8 @@ async def process_incoming_sms(trx_id: str, amount: Optional[str], sender_phone:
                     "limit": "5",
                 },
             )
-            r2.raise_for_status()
-            candidates = r2.json()
-            # Only auto-approve on amount-fallback if there's exactly ONE
-            # candidate — multiple students paying the identical amount in
-            # the same window is ambiguous, leave those for manual review.
+            r3.raise_for_status()
+            candidates = r3.json()
             if len(candidates) == 1:
                 rows = candidates
 
