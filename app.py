@@ -1725,6 +1725,37 @@ async def sms_payment_ingest(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/api/sms-payment/ingest-raw")
+async def sms_payment_ingest_raw(secret: str = "", sms: str = "", sender: str = ""):
+    """Macrodroid-friendly variant — a plain GET with the raw SMS text as a
+    query param (Macrodroid's HTTP GET action can template this straight
+    from its {sms} trigger variable, no JSON body needed). Parses the SMS
+    text itself server-side (same rules as the Android app) then runs the
+    same match+approve logic as the JSON /ingest endpoint above.
+    Example URL template in Macrodroid:
+      https://quizbot.pages.dev/api/sms-payment/ingest-raw?secret=YOUR_SECRET&sms=[sms_body]&sender=[sms_sender]
+    """
+    if not SMS_RELAY_SECRET:
+        logger.warning("[SMS-Relay] SECURITY: SMS_RELAY_SECRET not set -- endpoint accepting unauthenticated requests!")
+    if SMS_RELAY_SECRET and secret != SMS_RELAY_SECRET:
+        return JSONResponse({"error": "unauthorized"}, status_code=403)
+
+    from sms_payment_relay import parse_sms_text, process_incoming_sms
+
+    trx_id, amount, parsed_sender = parse_sms_text(sms)
+    if not trx_id:
+        # Not a recognized payment SMS (OTP, promo, etc) — quietly ignore,
+        # this is expected and not an error from Macrodroid's side.
+        return JSONResponse({"ok": True, "matched": False, "reason": "not a payment SMS"})
+
+    try:
+        result = await process_incoming_sms(trx_id, amount, parsed_sender or sender, sms, int(time.time() * 1000))
+        return JSONResponse({"ok": True, **result})
+    except Exception as e:
+        logger.error(f"[SMS-Relay] ingest-raw error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 async def _run_one_lms_live_quiz(row: dict):
     """Claims + runs a single scheduled_live_quizzes row via the same
     start_live_quiz() the /live command uses. Skips (leaves pending, no

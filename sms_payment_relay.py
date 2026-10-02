@@ -11,6 +11,7 @@
 # LMS_SUPABASE_URL / LMS_SUPABASE_SERVICE_KEY.
 # ============================================================
 import logging
+import re
 import time
 from typing import Optional
 
@@ -19,6 +20,31 @@ import httpx
 from core import LMS_SUPABASE_URL, LMS_SUPABASE_SERVICE_KEY
 
 logger = logging.getLogger("atlas.sms_payment_relay")
+
+# Same parsing rules as the Android app's SmsParser.java (kept here too so
+# Macrodroid — which just forwards the raw SMS text, no parsing of its
+# own — can be used instead of the custom Android app).
+_TRX_ID_RE = re.compile(r"TrxID\s*[:\-]?\s*([A-Za-z0-9]{6,})", re.IGNORECASE)
+_AMOUNT_RE = re.compile(r"Tk\.?\s*([0-9][0-9,]*\.?[0-9]*)", re.IGNORECASE)
+_SENDER_RE = re.compile(r"from\s+(01[0-9]{9})", re.IGNORECASE)
+
+
+def parse_sms_text(body: str):
+    """Returns (trx_id, amount, sender_phone) or (None, None, None) if this
+    doesn't look like a bKash/Nagad payment-received SMS."""
+    if not body:
+        return None, None, None
+    trx_match = _TRX_ID_RE.search(body)
+    if not trx_match:
+        return None, None, None
+    amount_match = _AMOUNT_RE.search(body)
+    if not amount_match:
+        return None, None, None
+    trx_id = trx_match.group(1)
+    amount = amount_match.group(1).replace(",", "")
+    sender_match = _SENDER_RE.search(body)
+    sender_phone = sender_match.group(1) if sender_match else None
+    return trx_id, amount, sender_phone
 
 
 def _headers():
