@@ -35338,6 +35338,13 @@ async def handle_message(msg: dict):
         if collected:
             return
 
+    # Standalone image → MCQ type select (non-owner, no command, no reply)
+    if (msg.get("photo") or (msg.get("document") and (msg.get("document", {}).get("mime_type", "")).startswith("image/"))) \
+            and not text and not msg.get("reply_to_message") and not is_auth:
+        handled = await handle_standalone_image(msg)
+        if handled:
+            return
+
     # Auto mhtml/html → smart detect (MCQ→CSV queue, Q&A/CQ→tell user to use /qpdf)
     if msg.get("document") and not msg.get("reply_to_message"):
         _doc = msg["document"]
@@ -36194,6 +36201,278 @@ async def handle_message(msg: dict):
 
 
 # ============================================================
+# IMAGE → MCQ FEATURE (ported from AtlasBot)
+# ============================================================
+
+# Pending image store: uid -> {file_id, bytes (optional)}
+_IMG_MCQ_PENDING: dict = {}
+
+PROGRESS_BAR_LEN = 7
+_OPT_PREFIX_RE = re.compile(r'^\s*[\(\[]?\s*([A-Da-d]|[কখগঘ])\s*[\)\.\:\]।]\s*')
+
+_IMG_MCQ_PROMPT_MAP = {
+    'prompt_1': {
+        'name': '🩺 Medical Standard',
+        'text': (
+            "MCQ TYPE: Standard Easy\n\n"
+            "-সোর্সে (ছবি/টেক্সট) MCQ বা তথ্য যাই থাকুক, সব জায়গা থেকে প্রশ্ন; ছক/table-এ অগ্রাধিকার; সব তথ্য কাজে লাগিয়ে যতগুলো সম্ভব MCQ (সংখ্যার সীমা নেই)।\n"
+            "-MUST: হাইলাইট/রঙ-দাগ, বক্স, আন্ডারলাইন, হাতে দেওয়া এক্সট্রা মার্ক — এসব লাইন থেকে অবশ্যই MCQ।\n"
+            "-টপিক/অধ্যায়ের নাম, হেডলাইন, পেইজ নম্বর থেকে MCQ নয়।\n"
+            "-প্রশ্ন: ১-২ লাইন, সহজ। অপশন: ৪টি, সব তথ্যপূর্ণ (হ্যাঁ/না নয়)। উত্তর: ঠিক একটি।\n"
+            "-ব্যাখ্যা: বাংলা, ছোট (max 90 char)।\n"
+            "-JSON only: [{\"question\":\"...\",\"options\":[\"A) ...\",\"B) ...\",\"C) ...\",\"D) ...\"],\"answer\":0,\"explanation\":\"...\"}]"
+        ),
+    },
+    'prompt_2': {
+        'name': '✅ সত্য-মিথ্যার প্রশ্ন',
+        'text': (
+            "MCQ TYPE: True/False Style\n\n"
+            "-সোর্সের সব তথ্য ব্যবহার করে যতগুলো সম্ভব MCQ।\n"
+            "🚫 MANDATORY: প্রতিটি প্রশ্নে হুবহু \"বললে ভুল হবে\" (বা \"বললে ভুল হবে না\") + একই বাক্যে \"সত্য\"/\"মিথ্যা\"।\n"
+            "৪ কাঠামো: \"নিচের কোনটিকে সত্য বললে ভুল হবে না?\" / \"সত্য বললে ভুল হবে?\" / \"মিথ্যা বললে ভুল হবে?\" / \"মিথ্যা বললে ভুল হবে না?\"\n"
+            "-অপশন: real তথ্য থেকে; ৪টিই তথ্যপূর্ণ।\n"
+            "-ব্যাখ্যা: বাংলা, ছোট (max 90 char)।\n"
+            "-JSON only: [{\"question\":\"...\",\"options\":[\"A) ...\",\"B) ...\",\"C) ...\",\"D) ...\"],\"answer\":0,\"explanation\":\"...\"}]"
+        ),
+    },
+    'prompt_3': {
+        'name': '🔥 কঠিন প্রশ্ন',
+        'text': (
+            "MCQ TYPE: Short Question, Long Options\n\n"
+            "-প্রশ্ন: ছোট, এক লাইন। অপশন: ৪টি বড় (বাক্য/phrase), সবই তথ্যপূর্ণ।\n"
+            "-ঠিক একটি সঠিক; A/B/C/D-তে ছড়ানো।\n"
+            "-ব্যাখ্যা: বাংলা, খুব ছোট (max 90 char)।\n"
+            "-সংখ্যার সীমা নেই।\n"
+            "-JSON only: [{\"question\":\"...\",\"options\":[\"A) ...\",\"B) ...\",\"C) ...\",\"D) ...\"],\"answer\":0,\"explanation\":\"...\"}]"
+        ),
+    },
+    'prompt_mixed': {
+        'name': '🎲 Mixed (সবগুলো)',
+        'text': (
+            "MCQ TYPE: Mixed (Standard Easy + True/False + Short Q Long Options)\n\n"
+            "-সোর্সের সব তথ্য ব্যবহার করে যতগুলো সম্ভব MCQ। ৩ ধরন প্রায় সমান ভাগে।\n"
+            "-৪টি অপশনই তথ্যপূর্ণ; ঠিক একটি সঠিক।\n"
+            "-ব্যাখ্যা: বাংলা, খুব ছোট (max 90 char)।\n"
+            "-JSON only: [{\"question\":\"...\",\"options\":[\"A) ...\",\"B) ...\",\"C) ...\",\"D) ...\"],\"answer\":0,\"explanation\":\"...\"}]"
+        ),
+    },
+    'qbm_extract': {
+        'name': '📌 শুধুমাত্র পেইজের MCQ',
+        'text': (
+            "YOU ARE A STRICT MCQ EXTRACTOR. ONLY EXTRACT MCQs THAT ALREADY EXIST ON THIS PAGE. NEVER INVENT NEW QUESTIONS.\n\n"
+            "EXTRACT ALL MCQs — missing even one is a failure. Remove only numbering prefixes. Keep original wording.\n"
+            "ANSWER DETECTION: scan for marks on options, answer boxes, answer keys. Default index 0 only as last resort.\n"
+            "SHUFFLE options randomly after detecting correct answer; update answer index to match new position.\n"
+            "EXPLANATION: cover all 4 options. Max 200 chars, Bengali.\n"
+            "OUTPUT: ONLY valid JSON array.\n"
+            "[{\"question\":\"...\",\"options\":[\"...\",\"...\",\"...\",\"...\"],\"answer\":0,\"explanation\":\"...\"}]"
+        ),
+    },
+}
+
+def _img_mcq_progress_bar(pct: int) -> str:
+    filled = int(round(PROGRESS_BAR_LEN * pct / 100))
+    return "▰" * filled + "▱" * (PROGRESS_BAR_LEN - filled)
+
+def _img_mcq_clean_option(opt: str) -> str:
+    if not isinstance(opt, str):
+        return opt
+    cleaned = _OPT_PREFIX_RE.sub('', opt, count=1).strip()
+    return cleaned if cleaned else opt
+
+def _img_mcq_clean_options(mcqs: list) -> list:
+    out = []
+    for m in mcqs:
+        m2 = dict(m)
+        m2['options'] = [_img_mcq_clean_option(o) for o in m2.get('options', [])]
+        out.append(m2)
+    return out
+
+async def _img_mcq_progress_loop(chat_id: int, msg_id: int, type_label: str, total_eta: int = 12):
+    start = time.time()
+    try:
+        while True:
+            elapsed = time.time() - start
+            if elapsed < total_eta:
+                pct = int(elapsed / total_eta * 100)
+            else:
+                overtime = elapsed - total_eta
+                pct = min(99, 90 + int(9 * (1 - pow(2.71828, -overtime / 15))))
+            type_line = f"🏷️ টাইপ: {type_label}\n" if type_label else ""
+            text = (
+                f"🔄 Image থেকে MCQ তৈরি হচ্ছে...\n"
+                f"{type_line}"
+                f"⌛ এখন পর্যন্ত: {elapsed:.0f} সেকেন্ড\n"
+                f"📊 Progress: {_img_mcq_progress_bar(pct)} {pct}%"
+            )
+            try:
+                await tg_post("editMessageCaption", {
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "caption": text, "parse_mode": "HTML"
+                })
+            except Exception:
+                pass
+            await asyncio.sleep(1.5)
+    except asyncio.CancelledError:
+        pass
+
+def _img_mcq_keyboard(cache_id: str, uid: int) -> dict:
+    return {"inline_keyboard": [
+        [{"text": "📊 Poll Solve", "callback_data": f"poll_{cache_id}"},
+         {"text": "📝 Quiz Solve", "callback_data": f"quiz_{cache_id}"}],
+        [{"text": "🌐 Website Exam", "url": f"{GH_PAGES_EXAM_URL}?id={cache_id}&uid={uid}"}],
+    ]}
+
+async def handle_standalone_image(msg: dict):
+    """AtlasBot-style: image পাঠালে MCQ type keyboard দেখায় (owner ছাড়া সবার জন্য)."""
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    uname = msg["from"].get("first_name", "User")
+
+    # Get file_id
+    if msg.get("photo"):
+        photo = msg["photo"][-1]
+        file_size = photo.get("file_size", 0)
+        if file_size and file_size > 20 * 1024 * 1024:
+            await send_msg(chat_id, "❌ Image সাইজ 20MB-এর বেশি। compress করে আবার পাঠান।")
+            return True
+        file_id = photo["file_id"]
+    elif msg.get("document"):
+        doc = msg["document"]
+        mime = doc.get("mime_type", "")
+        if not mime.startswith("image/"):
+            return False  # not an image doc, let other handlers deal
+        file_size = doc.get("file_size", 0)
+        if file_size and file_size > 20 * 1024 * 1024:
+            await send_msg(chat_id, "❌ Image সাইজ 20MB-এর বেশি। compress করে আবার পাঠান।")
+            return True
+        file_id = doc["file_id"]
+    else:
+        return False
+
+    # Store pending
+    _IMG_MCQ_PENDING[uid] = {"file_id": file_id}
+
+    # Build type keyboard
+    keyboard = {"inline_keyboard": []}
+    row = []
+    for key, val in _IMG_MCQ_PROMPT_MAP.items():
+        if key == 'qbm_extract':
+            continue
+        row.append({"text": val['name'], "callback_data": f"imgmcq_{key}"})
+        if len(row) == 2:
+            keyboard["inline_keyboard"].append(row)
+            row = []
+    if row:
+        keyboard["inline_keyboard"].append(row)
+    keyboard["inline_keyboard"].append(
+        [{"text": _IMG_MCQ_PROMPT_MAP['qbm_extract']['name'], "callback_data": "imgmcq_qbm_extract"}]
+    )
+
+    # Download image bytes for sending back as photo
+    try:
+        img_bytes = await download_tg_file(file_id)
+    except Exception as e:
+        logger.error(f"[ImgMCQ] download failed: {e}")
+        await send_msg(chat_id, "❌ Image ডাউনলোড করা যায়নি। আবার পাঠান।")
+        return True
+
+    await send_photo(chat_id, img_bytes,
+        caption=f"🌟 স্বাগতম {uname}!\n\nকোন ধরণের MCQ চান সিলেক্ট করুন 👇",
+        reply_markup=keyboard)
+    return True
+
+async def handle_imgmcq_callback(query: dict):
+    """User type select করলে image থেকে MCQ generate করে।"""
+    data = query["data"]
+    chat_id = query["message"]["chat"]["id"]
+    msg_id = query["message"]["message_id"]
+    uid = query["from"]["id"]
+    uname = query["from"].get("first_name", "User")
+    prompt_type = data[len("imgmcq_"):]
+
+    pending = _IMG_MCQ_PENDING.get(uid)
+    if not pending:
+        await tg_post("answerCallbackQuery", {
+            "callback_query_id": query["id"],
+            "text": "⏳ সেশন শেষ — ছবিটি আবার পাঠান", "show_alert": True
+        })
+        return
+
+    file_id = pending.get("file_id")
+    type_label = _IMG_MCQ_PROMPT_MAP.get(prompt_type, {}).get('name', prompt_type)
+    prompt_text = _IMG_MCQ_PROMPT_MAP.get(prompt_type, _IMG_MCQ_PROMPT_MAP['prompt_1'])['text']
+
+    # Start progress loop
+    prog_task = asyncio.create_task(_img_mcq_progress_loop(chat_id, msg_id, type_label))
+
+    gen_start = time.time()
+    try:
+        # Download image
+        img_bytes = await download_tg_file(file_id)
+
+        # Generate MCQs
+        mcqs = await generate_mcq_from_image(img_bytes, prompt_type, 1, None, custom_prompt=prompt_text)
+        gen_elapsed = time.time() - gen_start
+        prog_task.cancel()
+
+        if not mcqs:
+            await tg_post("editMessageCaption", {
+                "chat_id": chat_id, "message_id": msg_id,
+                "caption": "❌ কোনো MCQ তৈরি হয়নি। আরো তথ্য আছে এমন ছবি পাঠান।",
+                "reply_markup": {"inline_keyboard": [[
+                    {"text": "🔄 আবার চেষ্টা করুন", "callback_data": data}
+                ]]}
+            })
+            return
+
+        # Clean options
+        mcqs = _img_mcq_clean_options(mcqs)
+
+        # Save to D1
+        from poll_extract import save_quiz_to_d1
+        polls = [{
+            "question": m["question"],
+            "options": m.get("options", ["", "", "", ""]),
+            "correct_idx": m.get("answer", 0),
+            "explanation": m.get("explanation", ""),
+        } for m in mcqs]
+        cache_id = await save_quiz_to_d1(polls, f"Image MCQ — {type_label}", uid)
+
+        # Clear pending
+        _IMG_MCQ_PENDING.pop(uid, None)
+
+        caption = (
+            f"✅ {len(mcqs)}টি MCQ তৈরি হয়েছে!\n"
+            f"📋 Type: {type_label}\n"
+            f"⏱️ সময়: {gen_elapsed:.1f}s\n\n"
+            f"নিচের বাটন থেকে Practice শুরু করুন 👇"
+        )
+        await tg_post("editMessageCaption", {
+            "chat_id": chat_id, "message_id": msg_id,
+            "caption": caption,
+            "reply_markup": _img_mcq_keyboard(cache_id, uid),
+            "parse_mode": "HTML",
+        })
+
+    except asyncio.CancelledError:
+        prog_task.cancel()
+    except Exception as e:
+        prog_task.cancel()
+        logger.error(f"[ImgMCQ] generation error: {e}")
+        try:
+            await tg_post("editMessageCaption", {
+                "chat_id": chat_id, "message_id": msg_id,
+                "caption": "❌ MCQ তৈরিতে সমস্যা হয়েছে। আবার চেষ্টা করুন।",
+                "reply_markup": {"inline_keyboard": [[
+                    {"text": "🔄 আবার চেষ্টা করুন", "callback_data": data}
+                ]]}
+            })
+        except Exception:
+            pass
+
+
+# ============================================================
 # CALLBACK HANDLER
 # ============================================================
 async def handle_callback(query: dict):
@@ -36205,6 +36484,9 @@ async def handle_callback(query: dict):
     uname = user.get("username") or user.get("first_name", "User")
     await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
+        if data.startswith("imgmcq_"):
+            _spawn_task(handle_imgmcq_callback(query))
+            return
         if data.startswith("pdfpg_"):
             rest = data[len("pdfpg_"):]
             sess_part, _, page_part = rest.rpartition("_")
