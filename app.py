@@ -1692,33 +1692,32 @@ async def lms_live_quiz_cancel(row_id: str):
 
 
 # ── ATLAS SMS Relay (self-hosted PipraPay alternative) ─────────────────
-# Receives parsed bKash/Nagad "payment received" SMS from the Android app
-# in android-app/atlas-sms-relay (LMS repo), matches to a pending
-# payment_requests row, and auto-approves via the existing
-# approve_payment_request() RPC. See sms_payment_relay.py for the logic.
+# Receives bKash/Nagad "payment received" SMS (via Macrodroid on the
+# admin's phone), matches to a pending payment_requests row by amount +
+# sender phone number, and auto-approves via the existing
+# approve_payment_request() RPC. No trx_id anywhere in this flow —
+# students are never asked for it. See sms_payment_relay.py for the logic.
 
 @app.post("/api/sms-payment/ingest")
 async def sms_payment_ingest(request: Request):
-    """Body (from the Android app): {secret, trx_id, amount, sender_phone,
-    raw_sms, received_at}"""
+    """Body: {secret, amount, sender_phone, raw_sms, received_at}"""
     if not SMS_RELAY_SECRET:
         logger.warning("[SMS-Relay] SECURITY: SMS_RELAY_SECRET not set -- endpoint accepting unauthenticated requests!")
     data = await request.json()
     if SMS_RELAY_SECRET and data.get("secret") != SMS_RELAY_SECRET:
         return JSONResponse({"error": "unauthorized"}, status_code=403)
 
-    trx_id = str(data.get("trx_id") or "").strip()
-    if not trx_id:
-        return JSONResponse({"error": "trx_id is required"}, status_code=400)
     amount = data.get("amount")
     sender_phone = data.get("sender_phone")
+    if not amount or not sender_phone:
+        return JSONResponse({"error": "amount and sender_phone are required"}, status_code=400)
     raw_sms = data.get("raw_sms")
     received_at = data.get("received_at")
 
     from sms_payment_relay import process_incoming_sms
 
     try:
-        result = await process_incoming_sms(trx_id, amount, sender_phone, raw_sms, received_at)
+        result = await process_incoming_sms(amount, sender_phone, raw_sms, received_at)
         return JSONResponse({"ok": True, **result})
     except Exception as e:
         logger.error(f"[SMS-Relay] ingest error: {e}")
@@ -1728,12 +1727,12 @@ async def sms_payment_ingest(request: Request):
 @app.get("/api/sms-payment/ingest-raw")
 async def sms_payment_ingest_raw(secret: str = "", sms: str = "", sender: str = ""):
     """Macrodroid-friendly variant — a plain GET with the raw SMS text as a
-    query param (Macrodroid's HTTP GET action can template this straight
-    from its {sms} trigger variable, no JSON body needed). Parses the SMS
-    text itself server-side (same rules as the Android app) then runs the
-    same match+approve logic as the JSON /ingest endpoint above.
-    Example URL template in Macrodroid:
-      https://quizbot.pages.dev/api/sms-payment/ingest-raw?secret=YOUR_SECRET&sms=[sms_body]&sender=[sms_sender]
+    query param (Macrodroid's HTTP GET action templates this straight from
+    its SMS-trigger variables, no JSON body needed). Parses amount +
+    sender from the SMS text server-side, then runs the same match+approve
+    logic as the JSON /ingest endpoint above.
+    Macrodroid URL template:
+      https://quizbot.pages.dev/api/sms-payment/ingest-raw?secret=YOUR_SECRET&sms={sms_message}&sender={sms_number}
     """
     if not SMS_RELAY_SECRET:
         logger.warning("[SMS-Relay] SECURITY: SMS_RELAY_SECRET not set -- endpoint accepting unauthenticated requests!")
@@ -1742,14 +1741,14 @@ async def sms_payment_ingest_raw(secret: str = "", sms: str = "", sender: str = 
 
     from sms_payment_relay import parse_sms_text, process_incoming_sms
 
-    trx_id, amount, parsed_sender = parse_sms_text(sms)
-    if not trx_id:
+    amount, parsed_sender = parse_sms_text(sms)
+    if not amount:
         # Not a recognized payment SMS (OTP, promo, etc) — quietly ignore,
         # this is expected and not an error from Macrodroid's side.
         return JSONResponse({"ok": True, "matched": False, "reason": "not a payment SMS"})
 
     try:
-        result = await process_incoming_sms(trx_id, amount, parsed_sender or sender, sms, int(time.time() * 1000))
+        result = await process_incoming_sms(amount, parsed_sender or sender, sms, int(time.time() * 1000))
         return JSONResponse({"ok": True, **result})
     except Exception as e:
         logger.error(f"[SMS-Relay] ingest-raw error: {e}")
