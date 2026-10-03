@@ -36462,8 +36462,13 @@ async def handle_imgmcq_callback(query: dict):
         # Download image
         img_bytes = await download_tg_file(file_id)
 
+        # Convert bytes → PIL Image (required by generate_mcq_from_image)
+        from PIL import Image as _PILImg
+        from io import BytesIO as _BytesIO
+        img = _PILImg.open(_BytesIO(img_bytes)).convert("RGB")
+
         # Generate MCQs — Gemini only, never Groq
-        mcqs = await generate_mcq_from_image(img_bytes, prompt_type, 1, None, custom_prompt=prompt_text, gemini_only=True)
+        mcqs = await generate_mcq_from_image(img, prompt_type, 1, None, custom_prompt=prompt_text, gemini_only=True)
         gen_elapsed = time.time() - gen_start
         prog_task.cancel()
 
