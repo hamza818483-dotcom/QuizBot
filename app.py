@@ -7020,7 +7020,12 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
         # that tries every available Gemini key (max_keys=None) instead of
         # the 6/5/remaining interleave, since there's no other provider to
         # interleave with in this mode.
-        _gemini_rounds = [None] if _plain_pdf else [6, 5, None]  # None = all remaining keys
+        # 2026-10-03: capped plain-mode single round from None (ALL live
+        # keys, could be 80+) to 6 -- unbounded retry was causing /img to
+        # take 1-2+ minutes when early keys were slow/503. Still
+        # Gemini-only (no Groq/Gemma fallback), per the 2026-09-04 decision
+        # above -- just bounded instead of unbounded.
+        _gemini_rounds = [6] if _plain_pdf else [6, 5, None]  # None = all remaining keys
         gemini_out = []
         for _round_idx, _round_size in enumerate(_gemini_rounds):
             try:
@@ -8928,6 +8933,11 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
     set_active_job(chat_id, f"/img ({topic})")
     _start_time = time.time()
     _reset_ai_call_count(chat_id)
+    # FIX: without this, _generate_mcq_from_image_raw's _bump_ai_call_count
+    # reads _current_job_chat_id_ctx.get() == None (never set for /img),
+    # so every call got attributed to chat_id=None instead of this chat —
+    # the final "AI calls" always showed 0 regardless of actual calls made.
+    _current_job_chat_id_ctx.set(chat_id)
 
     def _render_dashboard(pct: int, stage: str) -> str:
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
