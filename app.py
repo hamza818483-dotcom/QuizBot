@@ -36469,8 +36469,13 @@ async def handle_imgmcq_callback(query: dict):
 
         # Generate MCQs — Gemini only, never Groq
         # Use app.py's own wrapper (supports gemini_only), not pdf_handler's
-        mcqs = await _generate_mcq_from_image_raw(img, prompt_type, 1, None, custom_prompt=prompt_text, gemini_only=True)
-        mcqs = mcqs[0] if isinstance(mcqs, tuple) else mcqs
+        raw = await _generate_mcq_from_image_raw(img, prompt_type, 1, None, custom_prompt=prompt_text, gemini_only=True)
+        mcqs = raw[0] if isinstance(raw, tuple) else raw
+        # Retry once on empty (transient Gemini 503/parse fail)
+        if not mcqs:
+            logger.warning("[ImgMCQ] first attempt returned 0 MCQs — retrying once")
+            raw2 = await _generate_mcq_from_image_raw(img, prompt_type, 1, None, custom_prompt=prompt_text, gemini_only=True)
+            mcqs = raw2[0] if isinstance(raw2, tuple) else raw2
         gen_elapsed = time.time() - gen_start
         prog_task.cancel()
 
