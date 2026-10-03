@@ -36468,7 +36468,9 @@ async def handle_imgmcq_callback(query: dict):
         img = _PILImg.open(_BytesIO(img_bytes)).convert("RGB")
 
         # Generate MCQs — Gemini only, never Groq
-        mcqs = await generate_mcq_from_image(img, prompt_type, 1, None, custom_prompt=prompt_text, gemini_only=True)
+        # Use app.py's own wrapper (supports gemini_only), not pdf_handler's
+        mcqs = await _generate_mcq_from_image_raw(img, prompt_type, 1, None, custom_prompt=prompt_text, gemini_only=True)
+        mcqs = mcqs[0] if isinstance(mcqs, tuple) else mcqs
         gen_elapsed = time.time() - gen_start
         prog_task.cancel()
 
