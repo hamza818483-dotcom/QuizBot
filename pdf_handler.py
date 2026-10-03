@@ -1026,6 +1026,13 @@ key_rotator = GeminiKeyRotator()
 # shared cooldown lets the next call skip straight to a brief wait instead
 # of re-proving what's already known to be down.
 _gemini_backend_outage_until = 0.0
+
+# Set by app.py (_bump_ai_call_count) so this module can report EVERY
+# individual Gemini key attempt (not just once per generate_mcq_from_image()
+# call) -- without this, "AI calls" in the UI undercounted badly: a single
+# call here can internally try up to 6 keys x 2 models, all invisible to the
+# caller-side counter in app.py. None by default = no-op (app.py sets it).
+_gemini_key_attempt_hook = None
 _GEMINI_OUTAGE_COOLDOWN_SECONDS = 12
 
 # Shared with app.py's qbm_extract_all_pages: each concurrent page-window
@@ -2345,6 +2352,11 @@ async def generate_mcq_from_image(
             key = _ordered[attempt % len(_ordered)] if _ordered else key_rotator.get_key()
         _tried_keys.add(key)
         key_rotator.record_call(key)
+        if _gemini_key_attempt_hook:
+            try:
+                _gemini_key_attempt_hook()
+            except Exception:
+                pass
         last_exc = None
         for model_name in _GEMINI_MODELS:
             try:

@@ -1852,6 +1852,16 @@ DEFAULT_LIVE_TIME = 10
 # ============================================================
 import base64 as _b64_ai
 from pdf_handler import generate_mcq_from_image as _gemini_gen_mcq
+import pdf_handler as _pdf_handler_mod
+
+def _on_gemini_key_attempt():
+    # Fires once per individual key attempt inside pdf_handler's retry loop
+    # (up to 6 keys x 2 models per call here) -- gives an accurate per-key
+    # "AI calls" count instead of counting once per generate_mcq_from_image()
+    # call regardless of how many keys it tried internally.
+    _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini-key")
+
+_pdf_handler_mod._gemini_key_attempt_hook = _on_gemini_key_attempt
 
 def _img_to_data_url(img) -> str:
     try:
