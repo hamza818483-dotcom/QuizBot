@@ -36386,7 +36386,7 @@ async def _img_mcq_gemini_generate(img, prompt_text: str, max_attempts: int = 2)
 
             def _call():
                 return client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model="gemini-3.5-flash",
                     contents=[
                         types.Part.from_text(text=prompt_text),
                         types.Part.from_bytes(
