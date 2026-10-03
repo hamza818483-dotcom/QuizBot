@@ -703,6 +703,11 @@ NEW_EXAM_JOBS = {}
 # ============================================================
 LMS_API_SECRET = os.environ.get("LMS_API_SECRET", "")
 SMS_RELAY_SECRET = os.environ.get("SMS_RELAY_SECRET", "")
+# Serializes SMS-payment matching: if several enrollment SMS arrive close
+# together (e.g. many students join around the same time), each one's
+# match+approve runs one at a time rather than concurrently, so two SMS
+# can never race to read/approve the same pending payment_requests row.
+SMS_RELAY_LOCK = asyncio.Lock()
 LMS_SEND_JOBS = {}  # job_id -> {"status", "pct", "sent_total", "total", "batches_done", "batches_total", "error"}
 DM_STOP_FLAGS = {}   # uid -> True while user has requested /stop (checked inside Poll Practice loop)
 DM_LAST_SESSION = {}  # uid -> in-memory mirror, kept in sync with D1 (see dm_session_set/get below)
@@ -1717,7 +1722,8 @@ async def sms_payment_ingest(request: Request):
     from sms_payment_relay import process_incoming_sms
 
     try:
-        result = await process_incoming_sms(amount, sender_phone, raw_sms, received_at)
+        async with SMS_RELAY_LOCK:
+            result = await process_incoming_sms(amount, sender_phone, raw_sms, received_at)
         return JSONResponse({"ok": True, **result})
     except Exception as e:
         logger.error(f"[SMS-Relay] ingest error: {e}")
@@ -1748,7 +1754,8 @@ async def sms_payment_ingest_raw(secret: str = "", sms: str = "", sender: str = 
         return JSONResponse({"ok": True, "matched": False, "reason": "not a payment SMS"})
 
     try:
-        result = await process_incoming_sms(amount, parsed_sender or sender, sms, int(time.time() * 1000))
+        async with SMS_RELAY_LOCK:
+            result = await process_incoming_sms(amount, parsed_sender or sender, sms, int(time.time() * 1000))
         return JSONResponse({"ok": True, **result})
     except Exception as e:
         logger.error(f"[SMS-Relay] ingest-raw error: {e}")
