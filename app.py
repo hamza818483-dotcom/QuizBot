@@ -36362,10 +36362,14 @@ def _img_mcq_clean_options(mcqs: list) -> list:
         out.append(m2)
     return out
 
+_IMG_MCQ_MODEL_FALLBACK = ["gemini-3.5-flash", "gemini-3.8-flash"]
+
 async def _img_mcq_gemini_generate(img, prompt_text: str, max_attempts: int = 2) -> list:
     """Dedicated Gemini caller for image MCQ. Uses our own parser (integer answer 0-3).
-    Single key per attempt (sequential retry on failure). Output capped to keep
-    generation time bounded — MCQ count per image is capped via the prompt (<=20)."""
+    Single key per attempt (sequential retry on failure). Attempt 2 switches to a
+    different model (3.8-flash) so a 503/overload on 3.5-flash's pool doesn't retry
+    into the same congested pool. Output capped to keep generation time bounded —
+    MCQ count per image is naturally ~10-20."""
     from pdf_handler import image_to_base64, _is_gemini_key_exhausted_today
     import base64
     img_b64 = image_to_base64(img)
@@ -36385,12 +36389,13 @@ async def _img_mcq_gemini_generate(img, prompt_text: str, max_attempts: int = 2)
         key = _untried[0]
         _tried.add(key)
         key_rotator.record_call(key)
+        _model = _IMG_MCQ_MODEL_FALLBACK[min(attempt, len(_IMG_MCQ_MODEL_FALLBACK) - 1)]
         try:
-            client = gai.Client(api_key=key, http_options=types.HttpOptions(timeout=28000))
+            client = gai.Client(api_key=key, http_options=types.HttpOptions(timeout=18000))
 
             def _call():
                 return client.models.generate_content(
-                    model="gemini-3.5-flash",
+                    model=_model,
                     contents=[
                         types.Part.from_text(text=prompt_text),
                         types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
@@ -36398,18 +36403,18 @@ async def _img_mcq_gemini_generate(img, prompt_text: str, max_attempts: int = 2)
                     config=types.GenerateContentConfig(max_output_tokens=6144)
                 )
 
-            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=30)
+            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=20)
             mcqs = _img_mcq_parse_json(response.text)
             if mcqs:
                 key_rotator.mark_healthy(key)
-                logger.info(f"[ImgMCQ] {len(mcqs)} MCQs generated (attempt {attempt+1})")
+                logger.info(f"[ImgMCQ] {len(mcqs)} MCQs generated (attempt {attempt+1}, model={_model})")
                 return mcqs
-            logger.warning(f"[ImgMCQ] 0 MCQs parsed on attempt {attempt+1} — retrying")
+            logger.warning(f"[ImgMCQ] 0 MCQs parsed on attempt {attempt+1} (model={_model}) — retrying")
         except Exception as e:
             err = str(e)
             if "429" in err or "RESOURCE_EXHAUSTED" in err:
                 key_rotator.mark_rate_limited(key)
-            logger.warning(f"[ImgMCQ] Gemini attempt {attempt+1} failed: {e}")
+            logger.warning(f"[ImgMCQ] Gemini attempt {attempt+1} (model={_model}) failed: {e}")
     return []
 
 async def _img_mcq_progress_loop(chat_id: int, msg_id: int, type_label: str, uid: int, total_eta: int = 12):
