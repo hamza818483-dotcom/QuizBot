@@ -36234,8 +36234,10 @@ async def handle_message(msg: dict):
 # IMAGE → MCQ FEATURE (ported from AtlasBot)
 # ============================================================
 
-# Pending image store: uid -> {file_id, bytes (optional)}
+# Pending image store: uid -> {file_id}
 _IMG_MCQ_PENDING: dict = {}
+# Running generation tasks: uid -> asyncio.Task
+_IMG_MCQ_TASKS: dict = {}
 
 PROGRESS_BAR_LEN = 7
 _OPT_PREFIX_RE = re.compile(r'^\s*[\(\[]?\s*([A-Da-d]|[কখগঘ])\s*[\)\.\:\]।]\s*')
@@ -36318,8 +36320,9 @@ def _img_mcq_clean_options(mcqs: list) -> list:
         out.append(m2)
     return out
 
-async def _img_mcq_progress_loop(chat_id: int, msg_id: int, type_label: str, total_eta: int = 12):
+async def _img_mcq_progress_loop(chat_id: int, msg_id: int, type_label: str, uid: int, total_eta: int = 12):
     start = time.time()
+    cancel_kb = {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": f"imgmcq_cancel_{uid}"}]]}
     try:
         while True:
             elapsed = time.time() - start
@@ -36338,7 +36341,8 @@ async def _img_mcq_progress_loop(chat_id: int, msg_id: int, type_label: str, tot
             try:
                 await tg_post("editMessageCaption", {
                     "chat_id": chat_id, "message_id": msg_id,
-                    "caption": text, "parse_mode": "HTML"
+                    "caption": text, "parse_mode": "HTML",
+                    "reply_markup": cancel_kb,
                 })
             except Exception:
                 pass
@@ -36429,20 +36433,37 @@ async def handle_imgmcq_callback(query: dict):
         })
         return
 
+    # Cancel request
+    if prompt_type.startswith("cancel_"):
+        task = _IMG_MCQ_TASKS.pop(uid, None)
+        if task and not task.done():
+            task.cancel()
+        _IMG_MCQ_PENDING.pop(uid, None)
+        try:
+            await tg_post("editMessageCaption", {
+                "chat_id": chat_id, "message_id": msg_id,
+                "caption": "🛑 বন্ধ করা হয়েছে।"
+            })
+        except Exception:
+            pass
+        return
+
     file_id = pending.get("file_id")
     type_label = _IMG_MCQ_PROMPT_MAP.get(prompt_type, {}).get('name', prompt_type)
     prompt_text = _IMG_MCQ_PROMPT_MAP.get(prompt_type, _IMG_MCQ_PROMPT_MAP['prompt_1'])['text']
 
     # Start progress loop
-    prog_task = asyncio.create_task(_img_mcq_progress_loop(chat_id, msg_id, type_label))
+    prog_task = asyncio.create_task(_img_mcq_progress_loop(chat_id, msg_id, type_label, uid))
 
     gen_start = time.time()
+    # Register current task so cancel button can kill it
+    _IMG_MCQ_TASKS[uid] = asyncio.current_task()
     try:
         # Download image
         img_bytes = await download_tg_file(file_id)
 
-        # Generate MCQs
-        mcqs = await generate_mcq_from_image(img_bytes, prompt_type, 1, None, custom_prompt=prompt_text)
+        # Generate MCQs — Gemini only, never Groq
+        mcqs = await generate_mcq_from_image(img_bytes, prompt_type, 1, None, custom_prompt=prompt_text, gemini_only=True)
         gen_elapsed = time.time() - gen_start
         prog_task.cancel()
 
@@ -36487,8 +36508,11 @@ async def handle_imgmcq_callback(query: dict):
 
     except asyncio.CancelledError:
         prog_task.cancel()
+        _IMG_MCQ_TASKS.pop(uid, None)
+        _IMG_MCQ_PENDING.pop(uid, None)
     except Exception as e:
         prog_task.cancel()
+        _IMG_MCQ_TASKS.pop(uid, None)
         logger.error(f"[ImgMCQ] generation error: {e}")
         try:
             await tg_post("editMessageCaption", {
