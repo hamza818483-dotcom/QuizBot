@@ -36363,14 +36363,20 @@ def _img_mcq_clean_options(mcqs: list) -> list:
     return out
 
 async def _img_mcq_gemini_generate(img, prompt_text: str, max_attempts: int = 2) -> list:
-    """Dedicated Gemini caller for image MCQ. Uses our own parser (integer answer 0-3)."""
+    """Dedicated Gemini caller for image MCQ. Uses our own parser (integer answer 0-3).
+    Single key per attempt (sequential retry on failure). Output capped to keep
+    generation time bounded — MCQ count per image is capped via the prompt (<=20)."""
     from pdf_handler import image_to_base64, _is_gemini_key_exhausted_today
     import base64
     img_b64 = image_to_base64(img)
+    img_bytes = base64.b64decode(img_b64)
 
     _ordered = key_rotator.ordered_keys(healthiest_first=True)
     _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
     _tried = set()
+
+    from google import genai as gai
+    from google.genai import types
 
     for attempt in range(min(max_attempts, len(_live))):
         _untried = [k for k in _live if k not in _tried]
@@ -36380,24 +36386,19 @@ async def _img_mcq_gemini_generate(img, prompt_text: str, max_attempts: int = 2)
         _tried.add(key)
         key_rotator.record_call(key)
         try:
-            from google import genai as gai
-            from google.genai import types
-            client = gai.Client(api_key=key, http_options=types.HttpOptions(timeout=45000))
+            client = gai.Client(api_key=key, http_options=types.HttpOptions(timeout=28000))
 
             def _call():
                 return client.models.generate_content(
                     model="gemini-3.5-flash",
                     contents=[
                         types.Part.from_text(text=prompt_text),
-                        types.Part.from_bytes(
-                            data=base64.b64decode(img_b64),
-                            mime_type="image/jpeg"
-                        )
+                        types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
                     ],
-                    config=types.GenerateContentConfig(max_output_tokens=16384)
+                    config=types.GenerateContentConfig(max_output_tokens=6144)
                 )
 
-            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=50)
+            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=30)
             mcqs = _img_mcq_parse_json(response.text)
             if mcqs:
                 key_rotator.mark_healthy(key)
