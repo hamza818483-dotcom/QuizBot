@@ -7004,7 +7004,12 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
     _plain_pdf = _is_plain_pdf_mode() or gemini_only
     _gemini_primary_mode = True
     if _gemini_primary_mode:
-        _gp_tag = "/extra" if _EXTRA_MODE.get() else ("/bio" if _BIO_MODE.get() else ("/chem" if _CHEM_MODE.get() else "default"))
+        # FIX: gemini_only=True is passed by BOTH plain /pdf and /img, but
+        # the log tag below only ever said "/pdf" (hardcoded), making /img's
+        # outage logs misleadingly read "[AI-ROT] /pdf gemini-only..." even
+        # though no /pdf job was running. Distinguish the two explicitly.
+        _gp_tag = ("/extra" if _EXTRA_MODE.get() else ("/bio" if _BIO_MODE.get() else
+                   ("/chem" if _CHEM_MODE.get() else ("/img" if gemini_only else "/pdf"))))
         _ai_call_chat_id = _current_job_chat_id_ctx.get()
 
         # 2026-08-28 (user request): multi-round Gemini/Gemma interleave --
@@ -7073,7 +7078,7 @@ async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exc
         if _plain_pdf:
             # /pdf Gemini-only: every Gemini key already exhausted above,
             # no Gemma/Groq/other-fallback rotation -- genuinely give up.
-            logger.warning(f"[AI-ROT] /pdf gemini-only: all Gemini keys exhausted for page {page_num}, no fallback (per user request)")
+            logger.warning(f"[AI-ROT] {_gp_tag} gemini-only: all Gemini keys exhausted for page {page_num}, no fallback (per user request)")
             return [], set()
 
         # all Gemini rounds exhausted -- one final Gemma try before Groq
