@@ -36302,6 +36302,48 @@ _IMG_MCQ_PROMPT_MAP = {
     },
 }
 
+def _img_mcq_parse_json(text: str) -> list:
+    """Dedicated parser for image MCQ feature. Accepts answer as integer (0-3) or letter (A-D)."""
+    if not text:
+        return []
+    text = text.strip()
+    if "<think>" in text:
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    try:
+        data = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    valid = []
+    letter_map = {"A": 0, "B": 1, "C": 2, "D": 3}
+    for m in data:
+        if not all(k in m for k in ["question", "options", "answer"]):
+            continue
+        opts = m.get("options", [])
+        if len(opts) != 4:
+            continue
+        ans = m.get("answer")
+        # Accept integer 0-3
+        if isinstance(ans, int) and 0 <= ans <= 3:
+            ans_idx = ans
+        # Accept letter A-D
+        elif isinstance(ans, str) and ans.upper() in letter_map:
+            ans_idx = letter_map[ans.upper()]
+        else:
+            continue
+        valid.append({
+            "question": str(m.get("question", "")).strip(),
+            "options": [str(o).strip() for o in opts],
+            "answer": ans_idx,
+            "explanation": str(m.get("explanation", "")).strip(),
+        })
+    return valid
+
 def _img_mcq_progress_bar(pct: int) -> str:
     filled = int(round(PROGRESS_BAR_LEN * pct / 100))
     return "▰" * filled + "▱" * (PROGRESS_BAR_LEN - filled)
@@ -36319,6 +36361,55 @@ def _img_mcq_clean_options(mcqs: list) -> list:
         m2['options'] = [_img_mcq_clean_option(o) for o in m2.get('options', [])]
         out.append(m2)
     return out
+
+async def _img_mcq_gemini_generate(img, prompt_text: str, max_attempts: int = 2) -> list:
+    """Dedicated Gemini caller for image MCQ. Uses our own parser (integer answer 0-3)."""
+    from pdf_handler import image_to_base64, _is_gemini_key_exhausted_today
+    import base64
+    img_b64 = image_to_base64(img)
+
+    _ordered = key_rotator.ordered_keys(healthiest_first=True)
+    _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)] or _ordered
+    _tried = set()
+
+    for attempt in range(min(max_attempts, len(_live))):
+        _untried = [k for k in _live if k not in _tried]
+        if not _untried:
+            break
+        key = _untried[0]
+        _tried.add(key)
+        key_rotator.record_call(key)
+        try:
+            from google import genai as gai
+            from google.genai import types
+            client = gai.Client(api_key=key, http_options=types.HttpOptions(timeout=45000))
+
+            def _call():
+                return client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=[
+                        types.Part.from_text(text=prompt_text),
+                        types.Part.from_bytes(
+                            data=base64.b64decode(img_b64),
+                            mime_type="image/jpeg"
+                        )
+                    ],
+                    config=types.GenerateContentConfig(max_output_tokens=16384)
+                )
+
+            response = await asyncio.wait_for(asyncio.to_thread(_call), timeout=50)
+            mcqs = _img_mcq_parse_json(response.text)
+            if mcqs:
+                key_rotator.mark_healthy(key)
+                logger.info(f"[ImgMCQ] {len(mcqs)} MCQs generated (attempt {attempt+1})")
+                return mcqs
+            logger.warning(f"[ImgMCQ] 0 MCQs parsed on attempt {attempt+1} — retrying")
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                key_rotator.mark_rate_limited(key)
+            logger.warning(f"[ImgMCQ] Gemini attempt {attempt+1} failed: {e}")
+    return []
 
 async def _img_mcq_progress_loop(chat_id: int, msg_id: int, type_label: str, uid: int, total_eta: int = 12):
     start = time.time()
@@ -36467,15 +36558,8 @@ async def handle_imgmcq_callback(query: dict):
         from io import BytesIO as _BytesIO
         img = _PILImg.open(_BytesIO(img_bytes)).convert("RGB")
 
-        # Generate MCQs — Gemini only, never Groq
-        # Use app.py's own wrapper (supports gemini_only), not pdf_handler's
-        raw = await _generate_mcq_from_image_raw(img, prompt_type, 1, None, custom_prompt=prompt_text, gemini_only=True)
-        mcqs = raw[0] if isinstance(raw, tuple) else raw
-        # Retry once on empty (transient Gemini 503/parse fail)
-        if not mcqs:
-            logger.warning("[ImgMCQ] first attempt returned 0 MCQs — retrying once")
-            raw2 = await _generate_mcq_from_image_raw(img, prompt_type, 1, None, custom_prompt=prompt_text, gemini_only=True)
-            mcqs = raw2[0] if isinstance(raw2, tuple) else raw2
+        # Generate MCQs — dedicated Gemini caller with our own parser
+        mcqs = await _img_mcq_gemini_generate(img, prompt_text)
         gen_elapsed = time.time() - gen_start
         prog_task.cancel()
 
