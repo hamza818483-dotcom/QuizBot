@@ -29,7 +29,7 @@ logger = logging.getLogger("atlas.sms_payment_relay")
 
 # Only amount + sender number are extracted from the SMS text — no trx_id.
 _AMOUNT_RE = re.compile(r"Tk\.?\s*([0-9][0-9,]*\.?[0-9]*)", re.IGNORECASE)
-_SENDER_RE = re.compile(r"from\s+(01[0-9]{9})", re.IGNORECASE)
+_SENDER_RE = re.compile(r"(?:from|Sender:?)\s*(01[0-9]{9})", re.IGNORECASE)
 # A payment-received SMS always has one of these verbs near the amount;
 # this keeps OTPs/promos/balance-check SMS from being treated as payments.
 _PAYMENT_HINT_RE = re.compile(r"received|cash in", re.IGNORECASE)
