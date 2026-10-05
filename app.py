@@ -3629,6 +3629,23 @@ def _build_mcq_prompt(topic: str, count) -> str:
         f"page background.\n\n"
         if _RD_MODE.get() else ""
         )
+        + (
+        f"🚫🚫 /rd STRICT EXCLUSION RULES (absolute, no exceptions): "
+        f"(1) NEVER create an MCQ from any FIGURE / চিত্র / diagram / photo / "
+        f"ছবি / graph / chart-picture / illustration / labelled drawing / "
+        f"microscope or anatomy image — treat every image region as if it were "
+        f"blank. (2) NEVER create an MCQ from any QUESTION already printed on "
+        f"the page — existing প্রশ্ন / MCQ / অনুশীলনী / exercise / সৃজনশীল / "
+        f"উদ্দীপক / past-paper / board-question / practice-question blocks are "
+        f"to be IGNORED completely (do not copy, rephrase, solve or convert them). "
+        f"Use ONLY the running explanatory TEXT (paragraphs, definitions, lists, "
+        f"fact tables) as the source. (3) The words চিত্র / চিত্রে / ছবি / "
+        f"figure / diagram / উদ্দীপক must NOT appear in any question, option or "
+        f"explanation. (4) exp_bbox must NEVER point at a figure or a question "
+        f"block — only at explanatory text. (5) If a page (or part) has only "
+        f"figures/questions and no explanatory text, output [] for it.\n\n"
+        if _RD_MODE.get() else ""
+        )
         + f"Return STRICT JSON array only, no prose, no markdown fences. "
         f"🚨 DO NOT include any <think>, reasoning, chain-of-thought, or "
         f"explanation text before the JSON — output must start IMMEDIATELY "
@@ -4343,6 +4360,34 @@ async def _math_postprocess_mcqs(mcqs: list) -> list:
     return out
 
 
+
+_RD_BAD_REF_RE = None
+
+def _rd_drop_figure_question_mcqs(mcqs: list, page_num=None) -> list:
+    """/rd ONLY: hard code-level backstop for the prompt rule -- drop any MCQ that
+    leans on a figure/image or on a printed exam question (stimulus), judged from
+    its question, options and explanation text."""
+    global _RD_BAD_REF_RE
+    import re as _re
+    if _RD_BAD_REF_RE is None:
+        _RD_BAD_REF_RE = _re.compile(
+            r"(চিত্র|ছবি|ডায়াগ্রাম|লেখচিত্র|গ্রাফ|উদ্দীপক|"
+            r"\bfig(?:ure)?s?\b\.?|\bdiagram\b|\bimage\b|\bpicture\b|\bphoto(?:graph)?\b|"
+            r"\bgraph\b|\billustrat\w*|\bas shown\b|\bshown (?:in|above|below)\b|\bstimulus\b)",
+            _re.I)
+    kept, dropped = [], 0
+    for m in (mcqs or []):
+        if not isinstance(m, dict):
+            kept.append(m); continue
+        opts = m.get("options") or []
+        blob = " ".join([str(m.get("question", "")), " ".join(str(o) for o in opts), str(m.get("explanation", ""))])
+        if _RD_BAD_REF_RE.search(blob):
+            dropped += 1
+            continue
+        kept.append(m)
+    if dropped:
+        logger.info(f"[/rd] page {page_num}: dropped {dropped} figure/question-based MCQ(s) (strict rule)")
+    return kept
 
 def _validate_mcq_structure(mcqs: list) -> list:
     """
@@ -6442,6 +6487,8 @@ async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_
         out = _filter_verified_mcqs(out, page_num, tag="/pdf")
     out = _cap_mcq_options(out, 4)
     out = _validate_mcq_structure(out)
+    if _RD_MODE.get() and out:
+        out = _rd_drop_figure_question_mcqs(out, page_num)
     if _RD_MODE.get() and out:
         from pdf_handler import _rd_reconcile_mcq_topic
         out = _rd_reconcile_mcq_topic(out, topic)
