@@ -61,8 +61,11 @@ async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = "ben+eng"):
         dst = os.path.join(tmp, "out.pdf")
         with open(src, "wb") as f:
             f.write(pdf_bytes)
+        # --pdf-renderer sandwich: Tesseract's own text layer. The default (fpdf2/hocr)
+        # renderer corrupts Bengali (conjuncts like উদ্ভিদ): full-word search fails,
+        # copy gives garbage/control chars. Verified: sandwich -> exact Unicode.
         cmd = ["ocrmypdf", "--redo-ocr", "--optimize", "0",
-               "--output-type", "pdf", "-l", langs,
+               "--output-type", "pdf", "--pdf-renderer", "sandwich", "-l", langs,
                "--jobs", str(min(4, os.cpu_count() or 2)),
                "--tesseract-timeout", "120"]
         if norm:
