@@ -25587,6 +25587,143 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
     return fixed
 
 
+# ============================================================
+# /v — 2-CALL GEMINI-ONLY EXTRACTOR (per page: max 2 logical calls)
+#   Call 1: strict serial extraction (left column top->bottom, then next
+#           column) + 4-line explanation (one line per option).
+#   Call 2: full audit of Call 1 (missed MCQ, spelling, missing words,
+#           option order, answer, 4-line explanation) -> final list.
+# No Groq/OpenRouter, no safety-net AI calls, no lookahead, no web resolve.
+# Retries (max 2) happen ONLY inside a call when Gemini fails / returns
+# unparseable output; a valid "[]" means a genuinely empty page.
+# ============================================================
+_V_RULES = """RULES:
+- READ ORDER (strict, fully serial): finish the LEFT column top-to-bottom first, then the next column to its right top-to-bottom. Never zigzag across columns. Single-column page: top-to-bottom.
+- Extract ONLY MCQs already printed on this page. Never invent, never skip, never merge. 0 MCQs -> [].
+- Never reword question/options (strip only numbering like ১./1./Q1./ক./A.). Never translate.
+- Never truncate: a question/option ends only at its real end. Never leave a word blank or missing; fix obvious OCR/spelling slips without changing meaning, check char-by-char.
+- OPTION ORDER: map by VISUAL POSITION only: 1st->A, 2nd->B, 3rd->C, 4th->D (never sort by label/text).
+- ANSWER: visual mark on option (circle/tick/underline/bold/highlight) > answer right after the MCQ > answer table on page > answer key elsewhere. Not found -> "A" and put "Answer not found in source" at the very end of the explanation. Answer letter = position of the correct text in OUTPUT.
+- UNDERLINE: individually underlined word/phrase in question/options -> wrap as **word**. No underline -> no ** markers.
+- উদ্দীপক/passage: prepend the full passage to each linked MCQ (self-contained); strip only navigation sentences like "উদ্দীপকের আলোকে ২১-২২ নং প্রশ্নের উত্তর দাও".
+- Numbers/years: keep the source numeral system exactly (no Bengali<->English conversion).
+- Math/Chem: never raw LaTeX; use Unicode (H₂O, x², √x, ½, °C, ×, π, α).
+- Synonym/antonym MCQs: question+options stay 100% English, no Bangla gloss.
+- Forbidden phrases in question/explanation: never say WHERE info lives (চিত্রে/বক্সে/ছকে/উদ্দীপকে/সারণিতে/পৃষ্ঠায়/প্যাসেজে/"as shown in figure/table/passage"). State the fact directly.
+- DIAGRAM: if the question needs a diagram/figure, add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) covering the whole diagram + labels edge-to-edge. Omit if none. Options never get bbox.
+- EXPLANATION = EXACTLY 4 lines separated by \\n, one line per option in order A, B, C, D. Line format: "A) <why this option is correct / why it is wrong>". Each line <=45 chars (whole explanation <=190 chars), real relevant fact (never bare "ভুল"/"incorrect"). If the page itself has an explanation, use its facts. Bengali unless the MCQ is English.
+"""
+
+_V_SCHEMA = """OUTPUT: valid JSON array only, no markdown, no extra text.
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"A) ...\\nB) ...\\nC) ...\\nD) ...","qsn_bbox":[100,200,400,450]}]
+"""
+
+V_CALL1_PROMPT = "STRICT MCQ EXTRACTOR (CALL 1). Extract every MCQ on this page image, in strict serial order.\n\n" + _V_RULES + "\n" + _V_SCHEMA
+
+
+def _v_build_call2_prompt(call1: list) -> str:
+    try:
+        existing = json.dumps(
+            [{"question": m.get("question", ""), "options": m.get("options", []),
+              "answer": m.get("answer", "A"), "explanation": m.get("explanation", ""),
+              **({"qsn_bbox": m["qsn_bbox"]} if m.get("qsn_bbox") else {})} for m in call1],
+            ensure_ascii=False)
+    except Exception:
+        existing = "[]"
+    return (
+        "STRICT MCQ AUDITOR (CALL 2). Below is the list extracted from this exact page image by Call 1:\n"
+        + existing + "\n\n"
+        "TASK: re-read the whole page image (left column top-to-bottom, then next column) and AUDIT that list against the image:\n"
+        "1) MISSED MCQ: any MCQ on the page not in the list (check the LAST MCQ of every column and the page bottom) -> add it at its correct serial position.\n"
+        "2) SPELLING/WORDS: wrong spelling, missing/dropped words, truncated question or option, OCR confusion -> fix to match the image exactly.\n"
+        "3) OPTION ORDER (visual position -> A,B,C,D), ANSWER correctness vs page marks/keys, underline **markers**, উদ্দীপক prepended, qsn_bbox present only if a diagram exists.\n"
+        "4) EXPLANATION must be exactly 4 lines (A/B/C/D, one relevant line per option, <=45 chars each); rewrite any that is not.\n"
+        "5) Never invent MCQs that are not on the page; never drop a correct one; keep serial order.\n"
+        "Return the FULL corrected final list (not just changes).\n\n"
+        + _V_RULES + "\n" + _V_SCHEMA
+    )
+
+
+_V_EMPTY_RE = re.compile(r'^\s*(```(?:json)?)?\s*\[\s*\]\s*(```)?\s*$')
+
+
+async def _v_gemini_call(img, prompt: str, tag: str):
+    """One logical Gemini call with up to 2 internal retries (only when the
+    response is empty/failed or JSON is unparseable). Returns (list, valid_empty)."""
+    for attempt in range(3):
+        try:
+            txt = await _qbm_gemini_raw(img, prompt, careful=(attempt > 0), gemini_only=True)
+        except Exception as e:
+            logger.warning(f"[/v {tag}] attempt {attempt+1}/3 error: {e}")
+            txt = ""
+        if txt and _V_EMPTY_RE.match(txt):
+            return [], True
+        res = _qbm_parse_json(txt) if txt else []
+        res = [m for m in (res or []) if not (isinstance(m, dict) and "trailing_topic_marker" in m and len(m) == 1)]
+        if res:
+            return res, False
+        logger.warning(f"[/v {tag}] attempt {attempt+1}/3 gave no usable output")
+    return [], False
+
+
+def _v_normalize_explanation(mc: dict) -> None:
+    ex = (mc.get("explanation") or "").replace("\r", "")
+    lines = [ln.strip() for ln in ex.split("\n") if ln.strip()]
+    lines = [ln[:60] for ln in lines[:4]]
+    mc["explanation"] = "\n".join(lines)
+
+
+async def _v_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False,
+                                careful: bool = False, gemini_only: bool = True) -> list:
+    await _qbm_ram_aware_acquire()
+    try:
+        # CALL 1
+        call1, valid_empty = await _v_gemini_call(img, V_CALL1_PROMPT, "Call1")
+        if not call1:
+            return []  # valid empty page (or Gemini unusable after retries)
+        call1 = _qbm_dedup_list(call1)
+        for m in call1:
+            m["_provider"] = "Gemini"
+            m["_call1_provider"] = "Gemini"
+        # CALL 2
+        call2, _ = await _v_gemini_call(img, _v_build_call2_prompt(call1), "Call2")
+        final = call1
+        if call2 and len(call2) >= len(call1) * 0.8:
+            deduped = _qbm_dedup_list(call2)
+            if deduped and len(deduped) >= len(call1) * 0.8:
+                final = list(deduped)
+                # never lose a Call1 MCQ the audit silently dropped
+                seen = [_qbm_dedup_key(m) for m in final]
+                for c in call1:
+                    k = _qbm_dedup_key(c)
+                    if k and not _qbm_is_duplicate(k, seen):
+                        final.append(c)
+                        seen.append(k)
+                for m in final:
+                    m["_provider"] = "Gemini"
+                    m["_call1_provider"] = "Gemini"
+                    m["_call2_provider"] = "Gemini"
+                try:
+                    final = _qbm_repair_order(call1, final)
+                except Exception:
+                    pass
+                try:
+                    final = _qbm_restore_opt_bboxes(call1, final)
+                except Exception:
+                    pass
+        # deterministic (zero-AI) cleanup only
+        for mc in final:
+            _v_normalize_explanation(mc)
+            try:
+                _qbm_balance_answer_with_options(mc)
+            except Exception:
+                pass
+        final = _cap_mcq_options(final)
+        return await _attach_option_images_if_missing(final, img)
+    finally:
+        _QBM_EXTRACT_HARD_CAP.release()
+
+
 async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
     """/unmesh-ONLY variant of _qbm_gemini_raw: tries every Gemini key
     (healthiest-first, skipping already-known-daily-exhausted ones) but
@@ -27119,7 +27256,7 @@ async def handle_auto_command(msg: dict):
         await send_msg(chat_id, "❌ কোনো run থেকেই MCQ পাওয়া যায়নি।")
 
 
-async def handle_qbm(msg: dict):
+async def handle_qbm(msg: dict, mode_v: bool = False):
     """
     /qbm -p (pages) -c (channel) -m (topic) -t (thread_id)
     PDF-এ থাকা EXISTING MCQ extract করে (নতুন MCQ বানায় না)।
@@ -27136,10 +27273,10 @@ async def handle_qbm(msg: dict):
             pass
     async with lock:
         _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
-        return await _handle_qbm_impl(msg)
+        return await _handle_qbm_impl(msg, mode_v=mode_v)
 
 
-async def _handle_qbm_impl(msg: dict):
+async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     uname = msg["from"].get("first_name", "User")
@@ -27281,10 +27418,18 @@ async def _handle_qbm_impl(msg: dict):
         # Channel selection + CSV file generation happen only AFTER extraction
         # is fully complete, so the person picks a channel already knowing
         # exactly how many MCQs were found.
-        extracted_pages = await qbm_extract_all_pages(
-            chat_id, pages, topic, file_name, status_msg_id, file_id=file_id, gemini_only=True,
-            job_id=_qbm_extract_job_id
-        )
+        if mode_v:
+            # /v: 2-call Gemini-only pipeline, no lookahead/web-resolve/extra retries
+            extracted_pages = await qbm_extract_all_pages(
+                chat_id, pages, topic, file_name, status_msg_id, extractor=_v_extract_from_image,
+                file_id=file_id, gemini_only=True, job_id=_qbm_extract_job_id,
+                no_knowledge_fallback=True, skip_lookahead=True, strict_calls=True
+            )
+        else:
+            extracted_pages = await qbm_extract_all_pages(
+                chat_id, pages, topic, file_name, status_msg_id, file_id=file_id, gemini_only=True,
+                job_id=_qbm_extract_job_id
+            )
 
         if _qbm_extract_job_id:
             # Extraction finished cleanly (no crash) -- this job no longer
@@ -31161,7 +31306,8 @@ async def qbm_extract_all_pages(
     gemini_only: bool = False,
     job_id: str = None,
     no_knowledge_fallback: bool = False,
-    skip_lookahead: bool = False
+    skip_lookahead: bool = False,
+    strict_calls: bool = False
 ) -> list:
     """
     Phase 1 -- runs the full 3-call connected extraction pipeline for every
@@ -31357,7 +31503,7 @@ async def qbm_extract_all_pages(
                         ).strip()
         except Exception as e:
             logger.error(f"[QBM Extract] Page {page_num} error: {e} — retrying once before giving up (page must never be silently skipped)")
-            if not is_cancelled(chat_id):
+            if not is_cancelled(chat_id) and not strict_calls:
                 try:
                     _ck = (_qbm_page_content_hash(img), page_num) if file_id else None
                     mcqs = await (_call_extract_fn(img=img, cache_key=_ck) if _ck else _call_extract_fn(img=img))
@@ -31372,7 +31518,7 @@ async def qbm_extract_all_pages(
         # report "0 MCQ" forever. Retry once here too, bypassing the
         # page-level cache so it's a genuinely fresh attempt, not a cached
         # empty replay.
-        if not mcqs and not is_cancelled(chat_id):
+        if not mcqs and not is_cancelled(chat_id) and not strict_calls:
             # 0-MCQ page: retry with rising effort (careful mode from 2nd
             # attempt) up to 5 tries — most speed-related misses recover in
             # 1-2. After 5 straight misses, run ONE independent fresh-eyes
@@ -35836,6 +35982,9 @@ async def handle_message(msg: dict):
         # with an English name line underneath — typical of chemistry/
         # science textbook chapter layouts.
         _spawn_command_task(uid, handle_chem(msg))
+    elif text == "/v" or text.startswith("/v ") or text.startswith("/v\n"):
+        # /v = /qbm-style args, Gemini-only, exactly 2 calls per page
+        _spawn_command_task(uid, handle_qbm(msg, mode_v=True))
     elif text.startswith("/qbm"):
         # /qbm = Question Bank Maker — EXTRACTS existing MCQ from PDF (never generates new)
         # 100% ported from AtlasMasterBot's qbm_handler
