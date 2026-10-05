@@ -25603,7 +25603,8 @@ _V_RULES = """RULES:
 - Never reword question/options (strip only numbering like ১./1./Q1./ক./A.). Never translate.
 - Never truncate: a question/option ends only at its real end. Never leave a word blank or missing; fix obvious OCR/spelling slips without changing meaning, check char-by-char.
 - OPTION ORDER: map by VISUAL POSITION only: 1st->A, 2nd->B, 3rd->C, 4th->D (never sort by label/text).
-- ANSWER (page-first, never guess): the answer is printed ON THE PAGE. Check in this order: (1) a circled/boxed letter (ⓐⓑⓒⓓ / (a)(b)(c)(d) in a circle / ✓) at the RIGHT END of the MCQ block, on the last option row, in the right margin of that MCQ's column; (2) visual mark on an option (tick/underline/bold/highlight); (3) answer printed right after the MCQ; (4) answer table/key on the page. Match each answer to its MCQ by vertical position (the circle sits on the same rows as that MCQ's options). Convert a/b/c/d (also ক/খ/গ/ঘ, 1-4) -> A/B/C/D BY POSITION. Only if truly nothing is printed -> "A" and end the explanation with "Answer not found in source".
+- ANSWER (page-first, never guess): the answer is printed ON THE PAGE. Check in this order: (1) a circled/boxed letter (ⓐⓑⓒⓓ / (a)(b)(c)(d) in a circle / ✓) at the RIGHT END of the MCQ block, on the last option row, in the right margin of that MCQ's column; (2) visual mark on an option (tick/underline/bold/highlight); (3) answer printed right after the MCQ; (4) answer table/key on the page. Match each answer to its MCQ by vertical position (the circle sits on the same rows as that MCQ's options). Convert a/b/c/d (also ক/খ/গ/ঘ, 1-4) -> A/B/C/D BY POSITION. Only if truly nothing is printed on the page -> set answer "A" as a placeholder and set the explanation to EXACTLY "Answer not found in source" (nothing else, no 4 lines, no reasoning). NEVER decide or work out an answer from your own knowledge, logic or the explanation text.
+- NO NEW MCQs: output only MCQs physically printed on this page (question + its own options). Never create, rewrite or complete an MCQ from a passage, explanation, heading or your knowledge. A stray line (heading, "ব্যাখ্যা:", tag) is not an MCQ.
 - PAGE FORMAT GUIDE (typical printed MCQ banks):
   * Ignore page furniture: headers/titles/banners (e.g. "ভার্সিটি 'ক' মাস্টার প্রশ্নব্যাংক", chapter tag), watermarks/URLs (e.g. Educationblog24.com), page numbers, side tabs, decorations.
   * Question line = "<number>. <question text>  [EXAM'YY-YY]". Drop the number and drop the trailing exam-source tag in square brackets like [JU'19-20], [DU'14-15], [Agri'19-20]. A question may wrap to 2 lines (tag on the last line).
@@ -25646,7 +25647,7 @@ def _v_build_call2_prompt(call1: list) -> str:
         "2) SPELLING/WORDS: wrong spelling, missing/dropped words, truncated question or option, OCR confusion -> fix to match the image exactly.\n"
         "3) ANSWER CHECK (mandatory, for EVERY MCQ): find the answer printed on the page itself (circled letter at the right end of that MCQ block, else tick/underline/after-MCQ answer/page key) and make \"answer\" equal it, converted to A/B/C/D by option position. Never trust Call 1's answer over the page; never guess when the page shows one. Also check OPTION ORDER (visual position), underline **markers**, exam-source tags like [JU'19-20] removed, উদ্দীপক prepended, qsn_bbox only if a diagram exists.\n"
         "4) EXPLANATION must be exactly 4 lines (A/B/C/D, one relevant line per option, <=45 chars each); rewrite any that is not.\n"
-        "5) Never invent MCQs that are not on the page; never drop a correct one; keep serial order.\n"
+        "5) Never invent MCQs that are not physically printed on the page; never create an answer yourself (if the page shows none, keep answer \"A\" with explanation exactly \"Answer not found in source\"); never drop a correct MCQ; keep serial order.\n"
         "Return the FULL corrected final list (not just changes).\n\n"
         + _V_RULES + "\n" + _V_SCHEMA
     )
@@ -25676,6 +25677,9 @@ async def _v_gemini_call(img, prompt: str, tag: str):
 
 def _v_normalize_explanation(mc: dict) -> None:
     ex = (mc.get("explanation") or "").replace("\r", "")
+    if "Answer not found in source" in ex:
+        mc["explanation"] = "Answer not found in source"  # no answer on page -> no invented reasoning
+        return
     lines = [ln.strip() for ln in ex.split("\n") if ln.strip()]
     lines = [ln[:60] for ln in lines[:4]]
     mc["explanation"] = "\n".join(lines)
