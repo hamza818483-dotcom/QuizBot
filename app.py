@@ -25607,6 +25607,7 @@ _V_RULES = """RULES:
 - PAGE FORMAT GUIDE (typical printed MCQ banks):
   * Ignore page furniture: headers/titles/banners (e.g. "ভার্সিটি 'ক' মাস্টার প্রশ্নব্যাংক", chapter tag), watermarks/URLs (e.g. Educationblog24.com), page numbers, side tabs, decorations.
   * Question line = "<number>. <question text>  [EXAM'YY-YY]". Drop the number and drop the trailing exam-source tag in square brackets like [JU'19-20], [DU'14-15], [Agri'19-20]. A question may wrap to 2 lines (tag on the last line).
+  * Option labels are lowercase letters in brackets: (a) (b) (c) (d). Split options at each label even when there is no space between them (e.g. "(b) এনজাইম(c) হরমোন"). Strip the "(a)" label itself from the option text.
   * Options labelled (a)(b)(c)(d) may sit on ONE line, in a 2x2 grid (read a,b then c,d), or one per line. Map by position: 1st->A, 2nd->B, 3rd->C, 4th->D. Options like "A = T, C = G" or "A ≡ T, C = G" keep exact symbols (=, ≡).
   * Page = 2 columns: finish the whole left column (e.g. 20,21,22,23) before the right column (e.g. 24,25,26).
   * A line starting "ব্যাখ্যা:" under an MCQ is that MCQ's page explanation: use its facts in the 4 lines, never put the "ব্যাখ্যা:" line as an option or in the question.
