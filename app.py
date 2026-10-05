@@ -25627,7 +25627,7 @@ _V_SCHEMA = """OUTPUT: valid JSON array only, no markdown, no extra text.
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"A) ...\\nB) ...\\nC) ...\\nD) ...","qsn_bbox":[100,200,400,450]}]
 """
 
-V_CALL1_PROMPT = "STRICT MCQ EXTRACTOR (CALL 1). Extract every MCQ on this page image, in strict serial order.\n\n" + _V_RULES + "\n" + _V_SCHEMA
+V_CALL1_PROMPT = "STRICT MCQ EXTRACTOR (CALL 1). Extract every MCQ on this page image, in strict serial order. This page ALWAYS contains MCQs and EVERY MCQ has its answer printed on the page (circled letter at the right end of the MCQ block) — scan the whole page carefully, never return an empty list, never skip an MCQ or its answer.\n\n" + _V_RULES + "\n" + _V_SCHEMA
 
 
 def _v_build_call2_prompt(call1: list) -> str:
@@ -25642,7 +25642,7 @@ def _v_build_call2_prompt(call1: list) -> str:
     return (
         "STRICT MCQ AUDITOR (CALL 2). Below is the list extracted from this exact page image by Call 1:\n"
         + existing + "\n\n"
-        "TASK: re-read the whole page image (left column top-to-bottom, then next column) and AUDIT that list against the image:\n"
+        "TASK: this page ALWAYS contains MCQs and every MCQ has its answer printed on the page (circled letter at the right of the MCQ block). Re-read the whole page image (left column top-to-bottom, then next column) and AUDIT that list against the image:\n"
         "1) MISSED MCQ: any MCQ on the page not in the list (check the LAST MCQ of every column and the page bottom) -> add it at its correct serial position.\n"
         "2) SPELLING/WORDS: wrong spelling, missing/dropped words, truncated question or option, OCR confusion -> fix to match the image exactly.\n"
         "3) ANSWER CHECK (mandatory, for EVERY MCQ): find the answer printed on the page itself (circled letter at the right end of that MCQ block, else tick/underline/after-MCQ answer/page key) and make \"answer\" equal it, converted to A/B/C/D by option position. Never trust Call 1's answer over the page; never guess when the page shows one. Also check OPTION ORDER (visual position), underline **markers**, exam-source tags like [JU'19-20] removed, উদ্দীপক prepended, qsn_bbox only if a diagram exists.\n"
@@ -25656,7 +25656,7 @@ def _v_build_call2_prompt(call1: list) -> str:
 _V_EMPTY_RE = re.compile(r'^\s*(```(?:json)?)?\s*\[\s*\]\s*(```)?\s*$')
 
 
-async def _v_gemini_call(img, prompt: str, tag: str):
+async def _v_gemini_call(img, prompt: str, tag: str, allow_empty: bool = True):
     """One logical Gemini call with up to 2 internal retries (only when the
     response is empty/failed or JSON is unparseable). Returns (list, valid_empty)."""
     for attempt in range(3):
@@ -25666,7 +25666,10 @@ async def _v_gemini_call(img, prompt: str, tag: str):
             logger.warning(f"[/v {tag}] attempt {attempt+1}/3 error: {e}")
             txt = ""
         if txt and _V_EMPTY_RE.match(txt):
-            return [], True
+            if allow_empty:
+                return [], True
+            logger.warning(f"[/v {tag}] attempt {attempt+1}/3 returned [] but page must contain MCQs — retrying")
+            continue
         res = _qbm_parse_json(txt) if txt else []
         res = [m for m in (res or []) if not (isinstance(m, dict) and "trailing_topic_marker" in m and len(m) == 1)]
         if res:
@@ -25690,7 +25693,7 @@ async def _v_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool
     await _qbm_ram_aware_acquire()
     try:
         # CALL 1
-        call1, valid_empty = await _v_gemini_call(img, V_CALL1_PROMPT, "Call1")
+        call1, valid_empty = await _v_gemini_call(img, V_CALL1_PROMPT, "Call1", allow_empty=False)
         if not call1:
             return []  # valid empty page (or Gemini unusable after retries)
         call1 = _qbm_dedup_list(call1)
