@@ -31455,7 +31455,7 @@ async def qbm_extract_all_pages(
         _ticker_deadline = time.time() + 1800
         while not _qbm_dash_stop.is_set() and time.time() < _ticker_deadline:
             try:
-                await asyncio.wait_for(_qbm_dash_stop.wait(), timeout=4)
+                await asyncio.wait_for(_qbm_dash_stop.wait(), timeout=(1 if strict_calls else 4))  # /v: elapsed ticks every second
             except asyncio.TimeoutError:
                 pass
             if _qbm_dash_stop.is_set():
