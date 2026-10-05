@@ -7,6 +7,9 @@ RUN apt-get update && apt-get install -y \
     poppler-utils \
     tesseract-ocr \
     tesseract-ocr-ben \
+    tesseract-ocr-eng \
+    ghostscript \
+    qpdf \
     fonts-noto \
     curl \
     unzip \

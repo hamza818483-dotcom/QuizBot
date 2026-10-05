@@ -17388,6 +17388,52 @@ async def handle_math_image(msg: dict):
         _MATH_MODE.reset(token)
 
 
+async def handle_ocr(msg: dict):
+    """/ocr [pages] -- reply to a PDF: returns the SAME pdf made searchable
+    (invisible OCR text layer). Existing text/pages are never modified."""
+    from ocr_module import parse_ocr_args, ocr_pdf
+    chat_id = msg["chat"]["id"]
+    reply = msg.get("reply_to_message")
+    doc = (reply or {}).get("document") or {}
+    fname = doc.get("file_name") or "document.pdf"
+    is_pdf = "pdf" in (doc.get("mime_type") or "").lower() or fname.lower().endswith(".pdf")
+    spec, err = parse_ocr_args(msg.get("text", ""))
+    if not doc or not is_pdf or err:
+        await send_msg(chat_id,
+            ("❌ " + err + "\n\n" if err else "❌ PDF ফাইলে reply করে <code>/ocr</code> দাও!\n\n") +
+            "<b>Example:</b>\n"
+            "<code>/ocr</code> → পুরো PDF\n"
+            "<code>/ocr 5</code> → শুধু ৫ নম্বর পেজ\n"
+            "<code>/ocr 1-10</code> → ১ থেকে ১০\n"
+            "<code>/ocr 1-3,7,9-12</code> → মিশ্র\n\n"
+            "PDF-এর আগের text যেমন আছে তেমনই থাকবে, শুধু searchable হবে।")
+        return
+    st = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {fname}")
+    st_id = (st or {}).get("result", {}).get("message_id")
+    try:
+        pdf_bytes = await _download_pdf_cached(
+            doc["file_id"], chat_id=chat_id, message_id=reply.get("message_id"),
+            file_unique_id=doc.get("file_unique_id"))
+        if st_id:
+            await edit_msg(chat_id, st_id, f"🔎 OCR চলছে...\n📄 {fname}\n(পেজ বেশি হলে সময় লাগবে)")
+        out, info = await ocr_pdf(pdf_bytes, spec)
+    except Exception as e:
+        logger.warning(f"[ocr] failed: {type(e).__name__}: {e}")
+        if st_id:
+            await edit_msg(chat_id, st_id, f"❌ OCR ব্যর্থ: {str(e)[:200]}")
+        return
+    base = fname[:-4] if fname.lower().endswith(".pdf") else fname
+    pg = f"পেজ {info['spec']}" if info["spec"] else f"সব {info['total']} পেজ"
+    r = await send_document(chat_id, out, f"{base}_searchable.pdf",
+        caption=f"✅ Searchable PDF\n🔎 OCR: {pg}\n(আগের text অক্ষত)",
+        mime_type="application/pdf", reply_to_message_id=msg.get("message_id"))
+    if st_id:
+        try:
+            await edit_msg(chat_id, st_id, "✅ OCR শেষ" if (r or {}).get("ok", True) else f"❌ পাঠানো যায়নি: {(r or {}).get('error','')[:150]}")
+        except Exception:
+            pass
+
+
 async def handle_pdf(msg: dict):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
@@ -35876,6 +35922,13 @@ async def handle_message(msg: dict):
     if text.startswith("/start qz_"):
         quiz_id = text.split()[1] if len(text.split()) > 1 else text.replace("/start ", "")
         _spawn_command_task(uid, start_d1_quiz(chat_id, quiz_id, msg["from"]))
+        return
+    if text.startswith("/ocr") and (len(text) == 4 or text[4] in " @\n"):
+        if not is_auth:
+            if is_private:
+                await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
+            return
+        _spawn_command_task(uid, handle_ocr(msg))
         return
     _math_reply = msg.get("reply_to_message")
     _math_is_image_reply = bool(_math_reply and (_math_reply.get("photo") or (_math_reply.get("document") and _math_reply.get("document", {}).get("mime_type", "").startswith("image/"))))
