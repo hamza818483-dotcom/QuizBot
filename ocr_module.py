@@ -6,6 +6,14 @@ Free, no API keys. Existing text is NEVER touched:
   --optimize 0  no image recompression
   --output-type pdf  no PDF/A conversion (keeps the file as close to original)
 Only the requested pages (--pages) are OCR'd; other pages pass through untouched.
+
+Default language is "ben" only (not "ben+eng"). Running Tesseract with both
+dictionaries loaded causes the English language model to compete with Bengali
+on ambiguous glyphs inside pure-Bengali words, producing garbage English-looking
+fragments mid-sentence (e.g. "নগ্নবীজী" -> "AIRE", "প্রজাতির সন্ধান" -> "ROR ARTA").
+"ben"-only removes that competition; the LSTM model still reads embedded Latin
+script (species names etc.) reasonably via context, just without the
+dictionary-level misclassification bug.
 """
 import asyncio
 import os
@@ -49,12 +57,11 @@ async def _ocr_one_page(src_pdf: str, dst_pdf: str, page_no: int, langs: str):
     cmd = ["ocrmypdf", "--redo-ocr", "--optimize", "0",
            "--output-type", "pdf", "--pdf-renderer", "sandwich", "-l", langs,
            "--tesseract-timeout", "110",
-           # oem 1 = LSTM engine only; psm 3 = fully-automatic page segmentation
-           # (no OSD). Default OCRmyPDF leaves these at Tesseract's own defaults,
-           # which on dense Bengali paragraphs can merge 2-4 adjacent words into
-           # a single text run -> that whole run becomes one selectable/copyable
-           # blob instead of each word being separately searchable/selectable.
-           # Forcing oem 1 + psm 3 makes Tesseract emit proper per-word boxes.
+           # oem 1 = LSTM engine only; psm 3 = fully-automatic page segmentation.
+           # Default OCRmyPDF leaves oem/psm at Tesseract's own defaults, which
+           # on dense Bengali paragraphs can merge 2-4 adjacent words into a
+           # single text run -> that run becomes one selectable/copyable blob
+           # instead of each word being separately searchable.
            "--tesseract-oem", "1", "--tesseract-pagesegmode", "3",
            src_pdf, dst_pdf]
     proc = await asyncio.create_subprocess_exec(
@@ -69,7 +76,7 @@ async def _ocr_one_page(src_pdf: str, dst_pdf: str, page_no: int, langs: str):
         raise RuntimeError(f"পেজ {page_no}: " + ((msg[-1] if msg else f"exit {proc.returncode}")[:150]))
 
 
-async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = "ben+eng",
+async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = "ben",
                    progress_cb=None):
     """Returns (out_bytes, info_dict) or raises RuntimeError(reason).
 
