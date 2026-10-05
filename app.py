@@ -35958,6 +35958,12 @@ async def handle_message(msg: dict):
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
         _spawn_command_task(uid, handle_ytproxystatus_command(msg))
+    elif text == "/crop" or text.startswith("/crop "):
+        if not is_auth:
+            await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
+            return
+        from crop_module import handle_crop_command
+        _spawn_command_task(uid, handle_crop_command(msg))
     elif text.startswith("/csvS"):
         # /csvS অবশ্যই /csv এর আগে check করতে হবে
         if not is_auth:
