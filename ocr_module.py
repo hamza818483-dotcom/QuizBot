@@ -1,7 +1,8 @@
 """/ocr -- make a PDF searchable (invisible text layer) via OCRmyPDF + Tesseract.
 
 Free, no API keys. Existing text is NEVER touched:
-  --skip-text   pages that already have a text layer are copied as-is
+  --redo-ocr    keeps all existing real text; additionally OCRs text that lives in
+                images/scans on ANY page (mixed pages included)
   --optimize 0  no image recompression
   --output-type pdf  no PDF/A conversion (keeps the file as close to original)
 Only the requested pages (--pages) are OCR'd; other pages pass through untouched.
@@ -60,7 +61,7 @@ async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = "ben+eng"):
         dst = os.path.join(tmp, "out.pdf")
         with open(src, "wb") as f:
             f.write(pdf_bytes)
-        cmd = ["ocrmypdf", "--skip-text", "--optimize", "0",
+        cmd = ["ocrmypdf", "--redo-ocr", "--optimize", "0",
                "--output-type", "pdf", "-l", langs,
                "--jobs", str(min(4, os.cpu_count() or 2)),
                "--tesseract-timeout", "120"]

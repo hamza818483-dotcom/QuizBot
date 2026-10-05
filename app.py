@@ -17425,7 +17425,7 @@ async def handle_ocr(msg: dict):
     base = fname[:-4] if fname.lower().endswith(".pdf") else fname
     pg = f"পেজ {info['spec']}" if info["spec"] else f"সব {info['total']} পেজ"
     r = await send_document(chat_id, out, f"{base}_searchable.pdf",
-        caption=f"✅ Searchable PDF\n🔎 OCR: {pg}\n(আগের text অক্ষত)",
+        caption=f"✅ Searchable PDF\n🔎 OCR: {pg}\n(আগের text অক্ষত, ছবির ভেতরের text-ও searchable)",
         mime_type="application/pdf", reply_to_message_id=msg.get("message_id"))
     if st_id:
         try:
