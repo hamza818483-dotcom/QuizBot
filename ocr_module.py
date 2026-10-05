@@ -44,8 +44,39 @@ def _normalize_spec(spec: str, total: int):
     return ",".join(str(n) for n in sorted(pages)), len(pages)
 
 
-async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = "ben+eng"):
-    """Returns (out_bytes, info_dict) or raises RuntimeError(reason)."""
+async def _ocr_one_page(src_pdf: str, dst_pdf: str, page_no: int, langs: str):
+    """OCR a single-page PDF in place. Raises RuntimeError(reason) on failure."""
+    cmd = ["ocrmypdf", "--redo-ocr", "--optimize", "0",
+           "--output-type", "pdf", "--pdf-renderer", "sandwich", "-l", langs,
+           "--tesseract-timeout", "110",
+           # oem 1 = LSTM engine only; psm 3 = fully-automatic page segmentation
+           # (no OSD). Default OCRmyPDF leaves these at Tesseract's own defaults,
+           # which on dense Bengali paragraphs can merge 2-4 adjacent words into
+           # a single text run -> that whole run becomes one selectable/copyable
+           # blob instead of each word being separately searchable/selectable.
+           # Forcing oem 1 + psm 3 makes Tesseract emit proper per-word boxes.
+           "--tesseract-oem", "1", "--tesseract-pagesegmode", "3",
+           src_pdf, dst_pdf]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        _, err = await asyncio.wait_for(proc.communicate(), timeout=180)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"পেজ {page_no}: OCR টাইমআউট")
+    if proc.returncode != 0 or not os.path.exists(dst_pdf):
+        msg = (err or b"").decode("utf-8", "ignore").strip().splitlines()
+        raise RuntimeError(f"পেজ {page_no}: " + ((msg[-1] if msg else f"exit {proc.returncode}")[:150]))
+
+
+async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = "ben+eng",
+                   progress_cb=None):
+    """Returns (out_bytes, info_dict) or raises RuntimeError(reason).
+
+    OCRs one page at a time (deterministic progress) and reassembles the
+    output PDF via PyMuPDF. progress_cb(done, total) is awaited after each
+    page so callers can render a %/elapsed-time dashboard.
+    """
     import fitz  # PyMuPDF
     with fitz.open(stream=pdf_bytes, filetype="pdf") as d:
         total = d.page_count
@@ -53,34 +84,43 @@ async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = "ben+eng"):
         norm, n_sel = _normalize_spec(spec, total)
         if not norm:
             raise RuntimeError(f"Page range PDF-এর বাইরে (মোট {total} পেজ)")
+        pages = []
+        for part in norm.split(","):
+            if "-" in part:
+                a, b = (int(x) for x in part.split("-"))
+            else:
+                a = b = int(part)
+            pages.extend(range(a, b + 1))
     else:
         norm, n_sel = None, total
+        pages = list(range(1, total + 1))
 
     with tempfile.TemporaryDirectory() as tmp:
-        src = os.path.join(tmp, "in.pdf")
-        dst = os.path.join(tmp, "out.pdf")
-        with open(src, "wb") as f:
+        src_whole = os.path.join(tmp, "in.pdf")
+        with open(src_whole, "wb") as f:
             f.write(pdf_bytes)
-        # --pdf-renderer sandwich: Tesseract's own text layer. The default (fpdf2/hocr)
-        # renderer corrupts Bengali (conjuncts like উদ্ভিদ): full-word search fails,
-        # copy gives garbage/control chars. Verified: sandwich -> exact Unicode.
-        cmd = ["ocrmypdf", "--redo-ocr", "--optimize", "0",
-               "--output-type", "pdf", "--pdf-renderer", "sandwich", "-l", langs,
-               "--jobs", str(min(4, os.cpu_count() or 2)),
-               "--tesseract-timeout", "120"]
-        if norm:
-            cmd += ["--pages", norm]
-        cmd += [src, dst]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        try:
-            _, err = await asyncio.wait_for(proc.communicate(), timeout=1800)
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise RuntimeError("OCR সময়সীমা (৩০ মিনিট) পার হয়েছে")
-        if proc.returncode != 0 or not os.path.exists(dst):
-            msg = (err or b"").decode("utf-8", "ignore").strip().splitlines()
-            raise RuntimeError((msg[-1] if msg else f"ocrmypdf exit {proc.returncode}")[:200])
+
+        out_doc = fitz.open(stream=pdf_bytes, filetype="pdf")  # start as full original
+        if progress_cb:
+            await progress_cb(0, len(pages))
+        for i, pno in enumerate(pages, 1):
+            page_src = os.path.join(tmp, f"p{pno}.pdf")
+            page_dst = os.path.join(tmp, f"p{pno}_out.pdf")
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as d1:
+                single = fitz.open()
+                single.insert_pdf(d1, from_page=pno - 1, to_page=pno - 1)
+                single.save(page_src)
+                single.close()
+            await _ocr_one_page(page_src, page_dst, pno, langs)
+            with fitz.open(page_dst) as ocred:
+                out_doc.delete_page(pno - 1)
+                out_doc.insert_pdf(ocred, from_page=0, to_page=0, start_at=pno - 1)
+            if progress_cb:
+                await progress_cb(i, len(pages))
+
+        dst = os.path.join(tmp, "final.pdf")
+        out_doc.save(dst)
+        out_doc.close()
         with open(dst, "rb") as f:
             out = f.read()
     return out, {"total": total, "selected": n_sel, "spec": norm}

@@ -17458,15 +17458,58 @@ async def handle_ocr(msg: dict):
             "<code>/ocr 1-3,7,9-12</code> → মিশ্র\n\n"
             "PDF-এর আগের text যেমন আছে তেমনই থাকবে, শুধু searchable হবে।")
         return
-    st = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {fname}")
+    import time as _time
+
+    def _bar(pct):
+        filled = int(pct / 10)
+        return "█" * filled + "░" * (10 - filled)
+
+    def _fmt_elapsed(sec):
+        sec = int(sec)
+        return f"{sec//60}মি {sec%60}সে" if sec >= 60 else f"{sec}সে"
+
+    t0 = _time.monotonic()
+    st = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {fname}\n[{_bar(0)} 0%]")
     st_id = (st or {}).get("result", {}).get("message_id")
+
+    _last_dl_pct = {"v": -1}
+
+    async def _dl_progress(current, total):
+        if not total or not st_id:
+            return
+        pct = int(current * 100 / total)
+        if pct != _last_dl_pct["v"] and (pct % 5 == 0 or pct == 100):
+            _last_dl_pct["v"] = pct
+            try:
+                await edit_msg(chat_id, st_id,
+                    f"⏳ PDF download হচ্ছে...\n📄 {fname}\n"
+                    f"[{_bar(pct)} {pct}%]\n⏱ {_fmt_elapsed(_time.monotonic() - t0)}")
+            except Exception:
+                pass
+
+    _last_ocr_pct = {"v": -1}
+
+    async def _ocr_progress(done, total):
+        if not total or not st_id:
+            return
+        pct = int(done * 100 / total)
+        if pct != _last_ocr_pct["v"]:
+            _last_ocr_pct["v"] = pct
+            try:
+                await edit_msg(chat_id, st_id,
+                    f"🔎 OCR চলছে...\n📄 {fname}\n"
+                    f"[{_bar(pct)} {pct}%] ({done}/{total} পেজ)\n"
+                    f"⏱ {_fmt_elapsed(_time.monotonic() - t0)}")
+            except Exception:
+                pass
+
     try:
         pdf_bytes = await _download_pdf_cached(
-            doc["file_id"], chat_id=chat_id, message_id=reply.get("message_id"),
-            file_unique_id=doc.get("file_unique_id"))
+            doc["file_id"], progress_cb=_dl_progress, chat_id=chat_id,
+            message_id=reply.get("message_id"), file_unique_id=doc.get("file_unique_id"))
         if st_id:
-            await edit_msg(chat_id, st_id, f"🔎 OCR চলছে...\n📄 {fname}\n(পেজ বেশি হলে সময় লাগবে)")
-        out, info = await ocr_pdf(pdf_bytes, spec)
+            await edit_msg(chat_id, st_id, f"🔎 OCR চলছে...\n📄 {fname}\n[{_bar(0)} 0%]\n(পেজ বেশি হলে সময় লাগবে)")
+        out, info = await ocr_pdf(pdf_bytes, spec, progress_cb=_ocr_progress)
     except Exception as e:
         logger.warning(f"[ocr] failed: {type(e).__name__}: {e}")
         if st_id:
@@ -17474,12 +17517,13 @@ async def handle_ocr(msg: dict):
         return
     base = fname[:-4] if fname.lower().endswith(".pdf") else fname
     pg = f"পেজ {info['spec']}" if info["spec"] else f"সব {info['total']} পেজ"
+    elapsed = _fmt_elapsed(_time.monotonic() - t0)
     r = await send_document(chat_id, out, f"{base}_searchable.pdf",
-        caption=f"✅ Searchable PDF\n🔎 OCR: {pg}\n(আগের text অক্ষত, ছবির ভেতরের text-ও searchable)",
+        caption=f"✅ Searchable PDF\n🔎 OCR: {pg}\n⏱ মোট সময়: {elapsed}\n(আগের text অক্ষত, ছবির ভেতরের text-ও searchable)",
         mime_type="application/pdf", reply_to_message_id=msg.get("message_id"))
     if st_id:
         try:
-            await edit_msg(chat_id, st_id, "✅ OCR শেষ" if (r or {}).get("ok", True) else f"❌ পাঠানো যায়নি: {(r or {}).get('error','')[:150]}")
+            await edit_msg(chat_id, st_id, f"✅ OCR শেষ ({elapsed})" if (r or {}).get("ok", True) else f"❌ পাঠানো যায়নি: {(r or {}).get('error','')[:150]}")
         except Exception:
             pass
 
