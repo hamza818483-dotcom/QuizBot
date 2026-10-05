@@ -759,6 +759,11 @@ class GeminiKeyRotator:
         """Call this right before/when actually using a key, so the rolling
         window reflects real usage (independent of mark_healthy/rate_limited)."""
         self._call_times.setdefault(key, []).append(time.time())
+        try:
+            if _gemini_request_hook:
+                _gemini_request_hook(key)
+        except Exception:
+            pass
         self.record_account_call(key)
         self.note_key_seen(key)
         now = time.time()
@@ -1033,6 +1038,9 @@ _gemini_backend_outage_until = 0.0
 # call here can internally try up to 6 keys x 2 models, all invisible to the
 # caller-side counter in app.py. None by default = no-op (app.py sets it).
 _gemini_key_attempt_hook = None
+# EXACT request hook: fires from GeminiKeyRotator.record_call, i.e. once for
+# EVERY real Gemini key request (all call paths), set by app.py.
+_gemini_request_hook = None
 _GEMINI_OUTAGE_COOLDOWN_SECONDS = 12
 
 # Shared with app.py's qbm_extract_all_pages: each concurrent page-window

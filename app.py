@@ -1869,6 +1869,7 @@ def _on_gemini_key_attempt():
     _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini-key")
 
 _pdf_handler_mod._gemini_key_attempt_hook = _on_gemini_key_attempt
+_pdf_handler_mod._gemini_request_hook = _on_gemini_request
 
 def _img_to_data_url(img) -> str:
     try:
@@ -2146,9 +2147,29 @@ def _is_plain_pdf_mode() -> bool:
 _PDF_AI_CALL_COUNTS = {}
 _PDF_AI_CALL_BY_MODEL = {}
 
+# EXACT Gemini request counter (1 per real key request, success OR fail).
+# _PAGE_REQ_CTX holds the page_status entry of the page currently running in
+# this asyncio task, so parallel pages never mix their counts.
+_PDF_GEMINI_REQ = {}
+_PAGE_REQ_CTX = contextvars.ContextVar("page_req_ctx", default=None)
+
+def _on_gemini_request(key):
+    _e = _PAGE_REQ_CTX.get()
+    if _e is not None:
+        _e["req_calls"] = _e.get("req_calls", 0) + 1
+    _cid = _current_job_chat_id_ctx.get()
+    if _cid is not None:
+        _PDF_GEMINI_REQ[_cid] = _PDF_GEMINI_REQ.get(_cid, 0) + 1
+
+def _set_page_req_ctx(entry):
+    _PAGE_REQ_CTX.set(entry)
+    if entry is not None:
+        entry.setdefault("req_calls", 0)
+
 def _reset_ai_call_count(chat_id):
     _PDF_AI_CALL_COUNTS[chat_id] = 0
     _PDF_AI_CALL_BY_MODEL[chat_id] = {}
+    _PDF_GEMINI_REQ[chat_id] = 0
 
 def _bump_ai_call_count(chat_id, n: int = 1, model: str = None):
     _PDF_AI_CALL_COUNTS[chat_id] = _PDF_AI_CALL_COUNTS.get(chat_id, 0) + n
@@ -2157,13 +2178,19 @@ def _bump_ai_call_count(chat_id, n: int = 1, model: str = None):
         by_model[model] = by_model.get(model, 0) + n
 
 def _get_ai_call_count(chat_id) -> int:
-    return _PDF_AI_CALL_COUNTS.get(chat_id, 0)
+    # EXACT requests burned: every real Gemini key request + other providers.
+    _other = sum(v for k, v in _PDF_AI_CALL_BY_MODEL.get(chat_id, {}).items() if k not in ("Gemini", "Gemini-key"))
+    return _PDF_GEMINI_REQ.get(chat_id, 0) + _other
 
 def _get_ai_call_breakdown_str(chat_id) -> str:
-    by_model = _PDF_AI_CALL_BY_MODEL.get(chat_id, {})
-    if not by_model:
-        return ""
-    return ", ".join(f"{k}:{v}" for k, v in by_model.items())
+    parts = []
+    _g = _PDF_GEMINI_REQ.get(chat_id, 0)
+    if _g:
+        parts.append(f"Gemini:{_g}")
+    for k, v in _PDF_AI_CALL_BY_MODEL.get(chat_id, {}).items():
+        if k not in ("Gemini", "Gemini-key"):
+            parts.append(f"{k}:{v}")
+    return ", ".join(parts)
 # When set (non-None), _build_bio_prompt injects the already-detected topic
 # segment boundaries into the SAME single generation call, hard-locking each
 # segment's MCQs to only that segment's own content -- so the whole page
@@ -17711,14 +17738,14 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 topic_str = f" 📂{page_topic}" if page_topic else ""
                 secs_gen = s.get("gen_seconds")
                 secs_str = f" ⏱{secs_gen}s" if secs_gen is not None else ""
-                calls_n = s.get("ai_calls")
+                calls_n = s.get("req_calls", 0)
                 calls_str = f" 🤖{calls_n}" if calls_n is not None else ""
                 lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str} ✓")
         elif s["current"]:
             _stage = s.get("stage") or "Processing..."
             _pg_start = s.get("page_start_time")
             _live_secs = int(time.time() - _pg_start) if _pg_start else 0
-            _calls_now = s.get("live_ai_calls")
+            _calls_now = s.get("req_calls", 0)
             _calls_now_str = f" 🤖{_calls_now}" if _calls_now is not None else ""
             lines.append(f"⏳ Page {fmt_page(s['page'])}: {_stage} ⏱{_live_secs}s{_calls_now_str}")
         else:
@@ -17737,7 +17764,7 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
             lines.append(f"  • {t_name}: {t_count} MCQ")
     if ai_calls is not None:
         _breakdown_str = f" ({ai_calls_breakdown})" if ai_calls_breakdown else ""
-        lines.append(f"🤖 AI calls: {ai_calls}{_breakdown_str}")
+        lines.append(f"🔥 মোট request (exact): {ai_calls}{_breakdown_str}")
     return "\n".join(lines)
 
 def _build_dashboard_md(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=None, ai_calls_breakdown=None, topic_breakdown=None, live_topic=None):
@@ -17770,7 +17797,7 @@ def _build_dashboard_md(file_name, topic, pages, page_status, start_time, total_
                 model_tag = s.get("model", "")
                 page_topic = s.get("detected_topic", "")
                 secs_gen = s.get("gen_seconds")
-                calls_n = s.get("ai_calls")
+                calls_n = s.get("req_calls", 0)
                 parts = [f"{s['mcq']} MCQ"]
                 if model_tag: parts.append(model_tag)
                 if page_topic: parts.append(f"📂{page_topic}")
@@ -17782,7 +17809,7 @@ def _build_dashboard_md(file_name, topic, pages, page_status, start_time, total_
             _stage = s.get("stage") or "Processing..."
             _pg_start = s.get("page_start_time")
             _live_secs = int(time.time() - _pg_start) if _pg_start else 0
-            _calls_now = s.get("live_ai_calls")
+            _calls_now = s.get("req_calls", 0)
             detail = f"{_stage} · ⏱{_live_secs}s" + (f" · 🤖{_calls_now}" if _calls_now is not None else "")
             rows.append(f"| {pg} | ⏳ Running | {detail} |")
         else:
@@ -17796,7 +17823,7 @@ def _build_dashboard_md(file_name, topic, pages, page_status, start_time, total_
         footer.append("**Topic-wise:** " + ", ".join(f"{t}:{c}" for t, c in topic_breakdown.items()))
     if ai_calls is not None:
         _breakdown_str = f" ({ai_calls_breakdown})" if ai_calls_breakdown else ""
-        footer.append(f"**AI calls:** {ai_calls}{_breakdown_str}")
+        footer.append(f"**মোট request (exact):** {ai_calls}{_breakdown_str}")
 
     return "\n".join(header) + "\n\n" + "\n".join(rows) + "\n\n" + "\n".join(footer)
 
@@ -17812,7 +17839,7 @@ def _build_dashboard_v(file_name, topic, pages, page_status, start_time, total_m
     for s_ in running:
         t0 = s_.get("page_start_time")
         live = int(time.time() - t0) if t0 else 0
-        calls = s_.get("live_ai_calls")
+        calls = s_.get("req_calls", 0)
         calls_str = f" 🤖{calls}" if calls is not None else ""
         now.append(f"▶️ Page {fmt_page(s_['page'])} — {s_.get('v_now') or 'শুরু হচ্ছে...'} ⏱{live}s{calls_str}")
     if not running:
@@ -17966,6 +17993,7 @@ async def pdf_generate_all_pages(
         async with sem:
             if is_cancelled(chat_id):
                 return
+            _set_page_req_ctx(page_status[idx])
             async with lock:
                 slot = _slot_counter["n"] % _PDF_PARALLEL_PAGES
                 _slot_counter["n"] += 1
@@ -18301,6 +18329,7 @@ async def _process_pdf_pages_inner(
         it yet."""
         page_status[page_idx]["current"] = True
         page_status[page_idx]["stage"] = "🤖 AI call করা হচ্ছে (prefetch, সমান্তরালে)..."
+        _set_page_req_ctx(page_status[page_idx])
         page_status[page_idx]["page_start_time"] = time.time()
         page_status[page_idx]["_ai_calls_before"] = _get_ai_call_count(chat_id)
         _pg_tuple = pages[page_idx]
@@ -18427,6 +18456,7 @@ async def _process_pdf_pages_inner(
             page_status[idx]["_ai_calls_before"] = _get_ai_call_count(chat_id)
         await _update_pdf_dashboard(chat_id, status_msg_id,
             file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), reply_markup=_cancel_kb(chat_id))
+        _set_page_req_ctx(page_status[idx])
         _page_ai_calls_before = _get_ai_call_count(chat_id)
 
         try:
@@ -19208,6 +19238,7 @@ async def _process_pdfs_pages_inner(
         page_status[idx]["current"] = True
         await edit_msg(chat_id, status_msg_id,
             _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), topic_breakdown=_pdfs_topic_breakdown), reply_markup=_cancel_kb(chat_id))
+        _set_page_req_ctx(page_status[idx])
         _page_ai_calls_before = _get_ai_call_count(chat_id)
 
         try:
@@ -31485,6 +31516,7 @@ async def qbm_extract_all_pages(
         _page_ai_calls_before = _get_ai_call_count(chat_id)
         if strict_calls:
             # /v: live per-page stage line (which call is running right now)
+            _set_page_req_ctx(page_status[idx])
             page_status[idx]["page_start_time"] = time.time()
             page_status[idx]["v_now"] = "শুরু হচ্ছে..."
 
