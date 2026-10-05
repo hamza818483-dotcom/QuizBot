@@ -1869,7 +1869,6 @@ def _on_gemini_key_attempt():
     _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini-key")
 
 _pdf_handler_mod._gemini_key_attempt_hook = _on_gemini_key_attempt
-_pdf_handler_mod._gemini_request_hook = _on_gemini_request
 
 def _img_to_data_url(img) -> str:
     try:
@@ -2165,6 +2164,10 @@ def _set_page_req_ctx(entry):
     _PAGE_REQ_CTX.set(entry)
     if entry is not None:
         entry.setdefault("req_calls", 0)
+
+# register AFTER _on_gemini_request is defined (pdf_handler is imported earlier)
+import pdf_handler as _pdf_handler_mod_req
+_pdf_handler_mod_req._gemini_request_hook = _on_gemini_request
 
 def _reset_ai_call_count(chat_id):
     _PDF_AI_CALL_COUNTS[chat_id] = 0
