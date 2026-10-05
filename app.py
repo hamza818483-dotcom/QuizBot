@@ -8827,7 +8827,7 @@ async def handle_gallery_download_callback(query: dict):
         # dpi=200: noticeably sharper than the 150 used for MCQ-extraction
         # elsewhere in the bot — here the image *is* the deliverable the user
         # will keep, so quality matters more than render speed.
-        pages = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=200, thread_count=4)
+        pages = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=200, thread_count=4, use_cropbox=True)
     except Exception as e:
         logger.error(f"[Gallery] PDF render failed: {e}")
         if status_id:
@@ -11083,7 +11083,7 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                     await edit_msg(chat_id, status_msg_id, f"❌ PDF এ মোট {num_pages} পাতা আছে, {single_page} পাতা নেই!")
                 return
             from pdf2image import convert_from_bytes
-            images = convert_from_bytes(pdf_bytes, first_page=single_page, last_page=single_page, dpi=200)
+            images = convert_from_bytes(pdf_bytes, first_page=single_page, last_page=single_page, dpi=200, use_cropbox=True)
             if not images:
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id, "❌ Page render করা যায়নি!")
@@ -27514,11 +27514,11 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
                         first = int(parts[0])
                         last = int(parts[1]) if len(parts) > 1 else first
                         ocr_images = await asyncio.to_thread(
-                            convert_from_bytes, pdf_bytes, dpi=150, first_page=first, last_page=last
+                            convert_from_bytes, pdf_bytes, dpi=150, first_page=first, last_page=last, use_cropbox=True
                         )
                         pages = list(zip(range(first, last + 1), ocr_images))
                     else:
-                        ocr_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+                        ocr_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150, use_cropbox=True)
                         pages = list(enumerate(ocr_images, 1))
                 except Exception as e:
                     logger.warning(f"[QBM] OCR fallback failed: {e}")
@@ -29974,11 +29974,11 @@ async def _handle_onu_impl(msg: dict):
                         first = int(parts[0])
                         last = int(parts[1]) if len(parts) > 1 else first
                         ocr_images = await asyncio.to_thread(
-                            convert_from_bytes, pdf_bytes, dpi=150, first_page=first, last_page=last
+                            convert_from_bytes, pdf_bytes, dpi=150, first_page=first, last_page=last, use_cropbox=True
                         )
                         pages = list(zip(range(first, last + 1), ocr_images))
                     else:
-                        ocr_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+                        ocr_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150, use_cropbox=True)
                         pages = list(enumerate(ocr_images, 1))
                 except Exception as e:
                     logger.warning(f"[ONU] OCR fallback failed: {e}")
@@ -31197,11 +31197,11 @@ async def _handle_onu2_impl(msg: dict):
                         first = int(parts[0])
                         last = int(parts[1]) if len(parts) > 1 else first
                         ocr_images = await asyncio.to_thread(
-                            convert_from_bytes, pdf_bytes, dpi=150, first_page=first, last_page=last
+                            convert_from_bytes, pdf_bytes, dpi=150, first_page=first, last_page=last, use_cropbox=True
                         )
                         pages = list(zip(range(first, last + 1), ocr_images))
                     else:
-                        ocr_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150)
+                        ocr_images = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=150, use_cropbox=True)
                         pages = list(enumerate(ocr_images, 1))
                 except Exception as e:
                     logger.warning(f"[ONU2] OCR fallback failed: {e}")

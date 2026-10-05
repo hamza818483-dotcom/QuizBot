@@ -1712,7 +1712,7 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
             hit 100% (19 pages = 19 separate subprocess spins). Falls back
             to per-page conversion only if the batch call itself fails."""
             try:
-                imgs = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150, thread_count=4)
+                imgs = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150, thread_count=4, use_cropbox=True)
                 if imgs and len(imgs) == (last - first + 1):
                     return imgs
             except Exception as _conv_e:
@@ -1730,7 +1730,7 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
             backoffs = [1, 2, 3, 4]
             for _attempt in range(5):
                 try:
-                    imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4)
+                    imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4, use_cropbox=True)
                     if imgs:
                         return imgs[0]
                 except Exception as _conv_e:
@@ -1738,7 +1738,7 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                 if _attempt < len(backoffs):
                     time.sleep(backoffs[_attempt])
             try:
-                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=100, thread_count=4)
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=100, thread_count=4, use_cropbox=True)
                 if imgs:
                     logger.warning(f"[PDF] Page {p} recovered via dpi=100 fallback after 5 failed dpi=150 attempts")
                     return imgs[0]
