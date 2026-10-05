@@ -31427,6 +31427,7 @@ async def qbm_extract_all_pages(
     _qbm_dash_stop = asyncio.Event()
     _qbm_dash_lock = asyncio.Lock()
     _qbm_last_dash_text = [None]
+    _qbm_last_edit_ts = [0.0]
     _live_active_topic = [""]
 
     async def _qbm_safe_dash_edit():
@@ -31440,12 +31441,17 @@ async def qbm_extract_all_pages(
         # "message is not modified" error burning a request for nothing).
         async with _qbm_dash_lock:
             if strict_calls:
+                # never edit faster than Telegram allows (burst from stage changes + ticker)
+                if time.time() - _qbm_last_edit_ts[0] < (0.9 if chat_id > 0 else 2.9):
+                    return
+            if strict_calls:
                 text = _build_dashboard_v(file_name, topic, pages, page_status, start_time, total_mcq, _get_ai_call_count(chat_id), _get_ai_call_breakdown_str(chat_id), _live_active_topic[0])
             else:
                 text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), live_topic=_live_active_topic[0])
             if text == _qbm_last_dash_text[0]:
                 return
             try:
+                _qbm_last_edit_ts[0] = time.time()
                 await edit_msg(chat_id, status_msg_id, text, reply_markup=_cancel_kb(chat_id))
                 _qbm_last_dash_text[0] = text
             except Exception:
@@ -31455,7 +31461,7 @@ async def qbm_extract_all_pages(
         _ticker_deadline = time.time() + 1800
         while not _qbm_dash_stop.is_set() and time.time() < _ticker_deadline:
             try:
-                await asyncio.wait_for(_qbm_dash_stop.wait(), timeout=(1 if strict_calls else 4))  # /v: elapsed ticks every second
+                await asyncio.wait_for(_qbm_dash_stop.wait(), timeout=((1 if chat_id > 0 else 3) if strict_calls else 4))  # /v: DM 1s, group/channel 3s (Telegram edit limits)
             except asyncio.TimeoutError:
                 pass
             if _qbm_dash_stop.is_set():
