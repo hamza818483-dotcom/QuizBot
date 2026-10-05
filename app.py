@@ -17800,6 +17800,50 @@ def _build_dashboard_md(file_name, topic, pages, page_status, start_time, total_
 
     return "\n".join(header) + "\n\n" + "\n".join(rows) + "\n\n" + "\n".join(footer)
 
+def _build_dashboard_v(file_name, topic, page_status, start_time, total_mcq, ai_calls, events):
+    """/v-ONLY live dashboard: no per-page list. One NOW block (whatever page(s)
+    are running right now + what each is doing), totals, and a short event log."""
+    elapsed = int(time.time() - start_time)
+    mins, secs = divmod(elapsed, 60)
+    total = len(page_status)
+    done = sum(1 for s_ in page_status if s_["done"])
+    pct = int(done / total * 100) if total else 0
+    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+    lines = [
+        "⚙️ <b>/v চলছে...</b>",
+        f"📄 {file_name}",
+        f"🎯 {topic}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "🔴 <b>NOW</b>",
+    ]
+    running = [s_ for s_ in page_status if s_.get("current") and not s_["done"]]
+    if running:
+        for s_ in running:
+            t0 = s_.get("page_start_time")
+            live = int(time.time() - t0) if t0 else 0
+            calls = s_.get("live_ai_calls")
+            calls_str = f" · 🤖{calls}" if calls is not None else ""
+            lines.append(f"▶️ Page {fmt_page(s_['page'])}: {s_.get('stage') or 'Processing...'}")
+            lines.append(f"    ⏱{live}s{calls_str}")
+    elif done < total:
+        lines.append("⏳ পরের page শুরু হচ্ছে...")
+    else:
+        lines.append("✅ সব page শেষ")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📊 {pct}% [{bar}]  ✅ {done}/{total} page")
+    lines.append(f"📝 MCQ: {total_mcq}  ·  ⏱ {mins}:{secs:02d}")
+    if ai_calls is not None:
+        lines.append(f"🤖 AI calls: {ai_calls}")
+    zero = [fmt_page(s_["page"]) for s_ in page_status if s_["done"] and (s_.get("failed") or s_["mcq"] == 0)]
+    if zero:
+        lines.append("⚠️ 0 MCQ page: " + ", ".join(str(z) for z in zero))
+    if events:
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("📜 শেষ ঘটনা:")
+        lines.extend(f"• {e}" for e in events[-5:])
+    return "\n".join(lines)
+
+
 async def _update_pdf_dashboard(chat_id, message_id, *dash_args, reply_markup=None, **dash_kwargs):
     """Shared dashboard-update helper: DM (chat_id > 0) -> rich table via
     edit_rich_msg (auto-falls back to plain HTML edit_msg on any error).
@@ -31397,6 +31441,7 @@ async def qbm_extract_all_pages(
     # page start/finish -- elapsed time looked frozen the whole time. This
     # refreshes the same message every few seconds purely for the live clock,
     # independent of page completion events (same pattern as /pdf's ticker).
+    _v_events = []  # /v: rolling event log shown in the NOW dashboard
     _qbm_dash_stop = asyncio.Event()
     _qbm_dash_lock = asyncio.Lock()
     _qbm_last_dash_text = [None]
@@ -31412,7 +31457,10 @@ async def qbm_extract_all_pages(
         # call entirely when the text is unchanged (avoids Telegram's
         # "message is not modified" error burning a request for nothing).
         async with _qbm_dash_lock:
-            text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), live_topic=_live_active_topic[0])
+            if strict_calls:
+                text = _build_dashboard_v(file_name, topic, page_status, start_time, total_mcq, _get_ai_call_count(chat_id), _v_events)
+            else:
+                text = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), live_topic=_live_active_topic[0])
             if text == _qbm_last_dash_text[0]:
                 return
             try:
@@ -31452,7 +31500,10 @@ async def qbm_extract_all_pages(
             page_status[idx]["page_start_time"] = time.time()
             page_status[idx]["stage"] = "⏳ শুরু হচ্ছে..."
 
-            def _v_cb(txt, _i=idx, _b=_page_ai_calls_before):
+            def _v_cb(txt, _i=idx, _b=_page_ai_calls_before, _pn=page_num):
+                if page_status[_i].get("stage") != txt:
+                    _v_events.append(f"P{fmt_page(_pn)} {txt}")
+                    del _v_events[:-30]
                 page_status[_i]["stage"] = txt
                 page_status[_i]["live_ai_calls"] = _get_ai_call_count(chat_id) - _b
                 if status_msg_id:
@@ -31644,6 +31695,9 @@ async def qbm_extract_all_pages(
         page_status[idx]["mcq"] = len(mcqs)
         page_status[idx]["gen_seconds"] = round(time.time() - _page_start_ts, 1)
         page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
+        if strict_calls:
+            _v_events.append(f"P{fmt_page(page_num)} ✅ শেষ: {len(mcqs)} MCQ ⏱{page_status[idx]['gen_seconds']}s")
+            del _v_events[:-30]
         if job_id and mcqs:
             # Best-effort crash-recovery checkpoint -- never blocks/fails
             # the actual extraction if D1 is slow/down.
