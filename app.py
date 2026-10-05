@@ -25597,6 +25597,19 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
 # Retries (max 2) happen ONLY inside a call when Gemini fails / returns
 # unparseable output; a valid "[]" means a genuinely empty page.
 # ============================================================
+_v_stage_cb_ctx = contextvars.ContextVar("v_stage_cb", default=None)
+
+
+def _v_stage(text: str) -> None:
+    """Push a live per-page stage line to the /v dashboard (no-op outside /v)."""
+    try:
+        cb = _v_stage_cb_ctx.get()
+        if cb:
+            cb(text)
+    except Exception:
+        pass
+
+
 _V_RULES = """RULES:
 - READ ORDER (strict, fully serial): finish the LEFT column top-to-bottom first, then the next column to its right top-to-bottom. Never zigzag across columns. Single-column page: top-to-bottom.
 - Extract ONLY MCQs already printed on this page. Never invent, never skip, never merge. 0 MCQs -> [].
@@ -25660,6 +25673,7 @@ async def _v_gemini_call(img, prompt: str, tag: str, allow_empty: bool = True):
     """One logical Gemini call with up to 2 internal retries (only when the
     response is empty/failed or JSON is unparseable). Returns (list, valid_empty)."""
     for attempt in range(3):
+        _v_stage(f"🤖 {tag}: Gemini call চলছে (চেষ্টা {attempt+1}/3)" + (" — careful mode" if attempt > 0 else ""))
         try:
             txt = await _qbm_gemini_raw(img, prompt, careful=(attempt > 0), gemini_only=True)
         except Exception as e:
@@ -25693,15 +25707,16 @@ async def _v_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool
     await _qbm_ram_aware_acquire()
     try:
         # CALL 1
-        call1, valid_empty = await _v_gemini_call(img, V_CALL1_PROMPT, "Call1", allow_empty=False)
+        call1, valid_empty = await _v_gemini_call(img, V_CALL1_PROMPT, "Call-1 extract", allow_empty=False)
         if not call1:
             return []  # valid empty page (or Gemini unusable after retries)
         call1 = _qbm_dedup_list(call1)
         for m in call1:
             m["_provider"] = "Gemini"
             m["_call1_provider"] = "Gemini"
+        _v_stage(f"✅ Call-1 শেষ ({len(call1)} MCQ) → 🔍 Call-2 audit শুরু")
         # CALL 2
-        call2, _ = await _v_gemini_call(img, _v_build_call2_prompt(call1), "Call2")
+        call2, _ = await _v_gemini_call(img, _v_build_call2_prompt(call1), "Call-2 audit")
         final = call1
         if call2 and len(call2) >= len(call1) * 0.8:
             deduped = _qbm_dedup_list(call2)
@@ -25726,6 +25741,7 @@ async def _v_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool
                     final = _qbm_restore_opt_bboxes(call1, final)
                 except Exception:
                     pass
+        _v_stage(f"🧹 Final cleanup ({len(final)} MCQ) + diagram crop...")
         # deterministic (zero-AI) cleanup only
         for mc in final:
             _v_normalize_explanation(mc)
@@ -31431,6 +31447,17 @@ async def qbm_extract_all_pages(
         mcqs = []
         _page_start_ts = time.time()
         _page_ai_calls_before = _get_ai_call_count(chat_id)
+        if strict_calls:
+            # /v: live per-page stage line (which call is running right now)
+            page_status[idx]["page_start_time"] = time.time()
+            page_status[idx]["stage"] = "⏳ শুরু হচ্ছে..."
+
+            def _v_cb(txt, _i=idx, _b=_page_ai_calls_before):
+                page_status[_i]["stage"] = txt
+                page_status[_i]["live_ai_calls"] = _get_ai_call_count(chat_id) - _b
+                if status_msg_id:
+                    _spawn_task(_qbm_safe_dash_edit())
+            _v_stage_cb_ctx.set(_v_cb)
 
         async def _call_extract_fn(**kwargs):
             # gemini_only is only accepted by extractors that opted in
