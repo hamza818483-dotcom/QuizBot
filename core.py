@@ -527,6 +527,11 @@ async def tg_post(method: str, data: dict) -> dict:
         # "message can't be copied/forwarded" (service messages, poll-vote-only
         # notices, deleted-since messages) is equally permanent for
         # copyMessage/forwardMessage -- no amount of retrying changes it.
+        # "message can't be deleted" (older than 48h, or bot lacks delete
+        # rights there) and "message to delete not found" (already gone, or
+        # never existed -- common in a /delete range with gaps) are equally
+        # permanent for deleteMessage/deleteMessages -- retrying just burns
+        # 2.5s+ per message across a whole bulk-delete range for nothing.
         desc = (result.get("description") or "").lower()
         return (
             "bot was blocked by the user" in desc
@@ -536,6 +541,8 @@ async def tg_post(method: str, data: dict) -> dict:
             or "message can't be forwarded" in desc
             or "message to copy not found" in desc
             or "message to forward not found" in desc
+            or "message can't be deleted" in desc
+            or "message to delete not found" in desc
         )
 
     async def _try_primary():
