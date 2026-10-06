@@ -8610,10 +8610,61 @@ async def _run_delete_job(chat_id, uid):
     r = await send_msg(chat_id, f"⏳ Delete শুরু হচ্ছে... 0/{total}", reply_markup=_cancel_kb(chat_id, job_id))
     status_msg_id = r.get("result", {}).get("message_id")
 
+    # ── Preflight: বট ওই chat-এ admin + "Delete messages" right আছে কিনা আগে দেখো ──
+    # (না থাকলে প্রতিটা message-ই "can't be deleted" দিয়ে fail করবে — শুধু সময় নষ্ট)
+    try:
+        chat_info = (await tg_post("getChat", {"chat_id": src_chat})).get("result", {}) or {}
+        ctype = chat_info.get("type", "")
+        if ctype in ("channel", "supergroup", "group"):
+            me = (await tg_post("getMe", {})).get("result", {}) or {}
+            cm = (await tg_post("getChatMember", {"chat_id": src_chat, "user_id": me.get("id")})).get("result", {}) or {}
+            status = cm.get("status")
+            can_del = cm.get("can_delete_messages")
+            if status == "creator":
+                pass
+            elif status != "administrator":
+                await edit_msg(chat_id, status_msg_id,
+                    "❌ বট ওই chat-এ <b>admin না</b> — তাই message delete করতে পারবে না।\n"
+                    "বটকে admin বানাও + <b>Delete messages</b> permission দাও, তারপর আবার /delete দাও।")
+                _DELETE_PENDING.pop(uid, None)
+                return
+            elif ctype == "channel" and not can_del:
+                await edit_msg(chat_id, status_msg_id,
+                    "❌ বটের <b>Delete messages</b> permission নেই (channel)।\n"
+                    "Admin settings থেকে permission অন করো, তারপর আবার /delete দাও।")
+                _DELETE_PENDING.pop(uid, None)
+                return
+            elif ctype != "channel" and can_del is False:
+                await edit_msg(chat_id, status_msg_id,
+                    "❌ বটের <b>Delete messages</b> permission নেই।\n"
+                    "Admin settings থেকে permission অন করো, তারপর আবার /delete দাও।")
+                _DELETE_PENDING.pop(uid, None)
+                return
+    except Exception as e:
+        logger.warning(f"[/delete] preflight skipped: {e}")
+
     done = 0
     failed = 0
-    all_ids = list(range(start_id, end_id + 1))
+    skipped = 0   # "not found" — range-এর gap / আগেই delete হয়ে গেছে
     BATCH = 100  # deleteMessages hard cap per call
+    all_ids = list(range(start_id, end_id + 1))
+    consec_bad_chunks = 0
+
+    async def _del_ids(ids, depth=0):
+        """deleteMessages দিয়ে চেষ্টা; fail করলে অর্ধেক-অর্ধেক করে ভেঙে খারাপ id আলাদা করে।
+        returns (done, failed, skipped, last_err)"""
+        res = await tg_post("deleteMessages", {"chat_id": src_chat, "message_ids": ids})
+        if res.get("ok"):
+            return len(ids), 0, 0, ""
+        desc = (res.get("description") or "").lower()
+        if len(ids) == 1:
+            if "not found" in desc:
+                return 0, 0, 1, desc
+            return 0, 1, 0, desc
+        mid = len(ids) // 2
+        a = await _del_ids(ids[:mid], depth + 1)
+        b = await _del_ids(ids[mid:], depth + 1)
+        return a[0] + b[0], a[1] + b[1], a[2] + b[2], (b[3] or a[3] or desc)
 
     for i in range(0, len(all_ids), BATCH):
         if is_cancelled(chat_id) or CURRENT_JOB_ID.get(chat_id) != job_id:
@@ -8623,35 +8674,34 @@ async def _run_delete_job(chat_id, uid):
             return
         chunk_ids = all_ids[i:i + BATCH]
         try:
-            res = await tg_post("deleteMessages", {"chat_id": src_chat, "message_ids": chunk_ids})
-            if res.get("ok"):
-                done += len(chunk_ids)
+            d, f, sk, err = await _del_ids(chunk_ids)
+            done += d; failed += f; skipped += sk
+            # পুরো chunk-ই "can't be deleted" হলে (permission/48h limit) বারবার চেষ্টা না করে থামো
+            if d == 0 and f >= len(chunk_ids) * 0.9:
+                consec_bad_chunks += 1
             else:
-                # Whole-batch failure (e.g. one already-deleted/too-old id in
-                # it) -- fall back to per-message deleteMessage for just this
-                # chunk so one bad ID doesn't sink the rest of it.
-                for mid in chunk_ids:
-                    try:
-                        r2 = await tg_post("deleteMessage", {"chat_id": src_chat, "message_id": mid})
-                        if r2.get("ok"):
-                            done += 1
-                        else:
-                            failed += 1
-                    except Exception:
-                        failed += 1
-                    await asyncio.sleep(0.2)
+                consec_bad_chunks = 0
+            if consec_bad_chunks >= 2:
+                failed += len(all_ids) - (i + len(chunk_ids))
+                await edit_msg(chat_id, status_msg_id,
+                    f"❌ Delete থামানো হয়েছে — পরপর দুই batch-এর কোনো message-ই delete হয়নি।\n"
+                    f"সম্ভাব্য কারণ: (১) বটের Delete permission নেই, "
+                    f"(২) group/private chat-এ message ৪৮ ঘণ্টার পুরনো।\n"
+                    f"🗑 সফল: {done} | ❌ Fail: {failed} | ⏭ Skip: {skipped}")
+                _DELETE_PENDING.pop(uid, None)
+                return
         except Exception as e:
             failed += len(chunk_ids)
             logger.warning(f"[/delete] chunk starting {chunk_ids[0]} exception: {e}")
         await asyncio.sleep(max(0.5, len(chunk_ids) * 0.05))
         try:
             await edit_msg(chat_id, status_msg_id,
-                f"⏳ Delete হচ্ছে... {done + failed}/{total} ({done} সফল, {failed} fail)",
+                f"⏳ Delete হচ্ছে... {done + failed + skipped}/{total} ({done} সফল, {failed} fail, {skipped} skip)",
                 reply_markup=_cancel_kb(chat_id, job_id))
         except Exception:
             pass
 
-    summary = f"✅ Delete শেষ!\n🗑 সফল: {done}/{total}\n❌ Fail: {failed}"
+    summary = f"✅ Delete শেষ!\n🗑 সফল: {done}/{total}\n⏭ Skip (আগেই নেই): {skipped}\n❌ Fail: {failed}"
     await edit_msg(chat_id, status_msg_id, summary)
     _DELETE_PENDING.pop(uid, None)
 
