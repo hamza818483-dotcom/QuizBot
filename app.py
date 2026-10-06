@@ -8548,6 +8548,114 @@ async def _run_forward_job(chat_id, uid, target_channel):
     _FORWARD_PENDING.pop(uid, None)
 
 
+# ============================================================
+# FEATURE: /delete — bulk-deletes every message between two t.me links
+# (inclusive), same chat. Uses deleteMessages (batch, up to 100 ids/call) --
+# far fewer API calls than looping deleteMessage. Bot must be admin with
+# delete rights in that chat (same requirement as any bot-side delete).
+# Destructive + irreversible, so it always asks for a Yes/No confirm first.
+# ============================================================
+_DELETE_PENDING: Dict[int, dict] = {}  # uid -> {"src_chat": ..., "start_id": int, "end_id": int}
+
+
+async def handle_delete(msg: dict):
+    chat_id = msg["chat"]["id"]
+    uid = msg.get("from", {}).get("id")
+    text = msg.get("text", "")
+    args = text.replace("/delete", "", 1).strip().split()
+    if len(args) != 2:
+        await send_msg(chat_id,
+            "❌ Usage:\n<code>/delete (first link)\n(2nd link)</code>\n\n"
+            "প্রথম link = শুরুর message, দ্বিতীয় link = শেষের message — "
+            "মাঝের সব message (poll সহ) একসাথে delete হবে।")
+        return
+    src1, start_id = _parse_tg_link(args[0])
+    src2, end_id = _parse_tg_link(args[1])
+    if src1 is None or src2 is None:
+        await send_msg(chat_id, "❌ Link পড়তে পারলাম না — শুধু t.me message link দাও।")
+        return
+    if str(src1) != str(src2):
+        await send_msg(chat_id, "❌ দুইটা link একই group/channel থেকে হতে হবে।")
+        return
+    if start_id > end_id:
+        start_id, end_id = end_id, start_id
+    total = end_id - start_id + 1
+    if total > 5000:
+        await send_msg(chat_id, f"❌ Range খুব বড় ({total} messages) — max 5000 এ limit করো।")
+        return
+    _DELETE_PENDING[uid] = {"src_chat": src1, "start_id": start_id, "end_id": end_id}
+    await send_msg(chat_id,
+        f"⚠️ <b>Confirm করো</b>\n📥 Chat: <code>{src1}</code>\n"
+        f"🔢 Messages: {start_id} → {end_id} ({total}টা)\n\n"
+        f"এই range-এর <b>সব message স্থায়ীভাবে delete</b> হয়ে যাবে — ফেরত আসবে না।",
+        reply_markup={"inline_keyboard": [[
+            {"text": "✅ হ্যাঁ, Delete করো", "callback_data": "delconfirm_yes"},
+            {"text": "❌ বাতিল", "callback_data": "delconfirm_no"},
+        ]]})
+
+
+async def _run_delete_job(chat_id, uid):
+    pending = _DELETE_PENDING.get(uid)
+    if not pending:
+        await send_msg(chat_id, "❌ Delete request expired, আবার /delete দাও।")
+        return
+    src_chat = pending["src_chat"]
+    start_id = pending["start_id"]
+    end_id = pending["end_id"]
+    total = end_id - start_id + 1
+    job_id = new_job_id(chat_id)
+    clear_cancel(chat_id)
+    set_active_job(chat_id, "delete")
+
+    r = await send_msg(chat_id, f"⏳ Delete শুরু হচ্ছে... 0/{total}", reply_markup=_cancel_kb(chat_id, job_id))
+    status_msg_id = r.get("result", {}).get("message_id")
+
+    done = 0
+    failed = 0
+    all_ids = list(range(start_id, end_id + 1))
+    BATCH = 100  # deleteMessages hard cap per call
+
+    for i in range(0, len(all_ids), BATCH):
+        if is_cancelled(chat_id) or CURRENT_JOB_ID.get(chat_id) != job_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"🛑 Delete বন্ধ করা হয়েছে — {done}/{total} সফল, {failed} skip.")
+            _DELETE_PENDING.pop(uid, None)
+            return
+        chunk_ids = all_ids[i:i + BATCH]
+        try:
+            res = await tg_post("deleteMessages", {"chat_id": src_chat, "message_ids": chunk_ids})
+            if res.get("ok"):
+                done += len(chunk_ids)
+            else:
+                # Whole-batch failure (e.g. one already-deleted/too-old id in
+                # it) -- fall back to per-message deleteMessage for just this
+                # chunk so one bad ID doesn't sink the rest of it.
+                for mid in chunk_ids:
+                    try:
+                        r2 = await tg_post("deleteMessage", {"chat_id": src_chat, "message_id": mid})
+                        if r2.get("ok"):
+                            done += 1
+                        else:
+                            failed += 1
+                    except Exception:
+                        failed += 1
+                    await asyncio.sleep(0.2)
+        except Exception as e:
+            failed += len(chunk_ids)
+            logger.warning(f"[/delete] chunk starting {chunk_ids[0]} exception: {e}")
+        await asyncio.sleep(max(0.5, len(chunk_ids) * 0.05))
+        try:
+            await edit_msg(chat_id, status_msg_id,
+                f"⏳ Delete হচ্ছে... {done + failed}/{total} ({done} সফল, {failed} fail)",
+                reply_markup=_cancel_kb(chat_id, job_id))
+        except Exception:
+            pass
+
+    summary = f"✅ Delete শেষ!\n🗑 সফল: {done}/{total}\n❌ Fail: {failed}"
+    await edit_msg(chat_id, status_msg_id, summary)
+    _DELETE_PENDING.pop(uid, None)
+
+
 async def handle_getid(msg: dict):
     chat_id = msg["chat"]["id"]
     text = msg.get("text", "").strip()
@@ -36171,6 +36279,8 @@ async def handle_message(msg: dict):
         await handle_channel(msg)
     elif text.startswith("/forward"):
         _spawn_command_task(uid, handle_forward(msg))
+    elif text.startswith("/delete"):
+        _spawn_command_task(uid, handle_delete(msg))
     elif text.startswith("/collectchat"):
         await handle_collectchat(msg)
     elif text.startswith("/getid"):
@@ -37210,6 +37320,15 @@ async def handle_callback(query: dict):
             await tg_post("editMessageText", {"chat_id": chat_id, "message_id": msg_id,
                                                 "text": f"✅ Target: <code>{target_channel}</code>", "parse_mode": "HTML"})
             _spawn_command_task(uid, _run_forward_job(chat_id, uid, target_channel))
+            return
+        if data == "delconfirm_yes":
+            await tg_post("editMessageText", {"chat_id": chat_id, "message_id": msg_id,
+                                                "text": "✅ Confirmed — delete শুরু হচ্ছে..."})
+            _spawn_command_task(uid, _run_delete_job(chat_id, uid))
+            return
+        if data == "delconfirm_no":
+            _DELETE_PENDING.pop(uid, None)
+            await tg_post("editMessageText", {"chat_id": chat_id, "message_id": msg_id, "text": "❌ বাতিল করা হয়েছে।"})
             return
         if data == "chback":
             await _show_channel_list(chat_id, edit_message_id=msg_id)
