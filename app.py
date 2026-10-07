@@ -8612,14 +8612,19 @@ async def _run_delete_job(chat_id, uid):
 
     # ── Preflight: বট ওই chat-এ admin + "Delete messages" right আছে কিনা আগে দেখো ──
     # (না থাকলে প্রতিটা message-ই "can't be deleted" দিয়ে fail করবে — শুধু সময় নষ্ট)
+    pf_info = "preflight: n/a"
     try:
-        chat_info = (await tg_post("getChat", {"chat_id": src_chat})).get("result", {}) or {}
-        ctype = chat_info.get("type", "")
+        _gc = await tg_post("getChat", {"chat_id": src_chat})
+        chat_info = _gc.get("result", {}) or {}
+        ctype = chat_info.get("type", "") or f"?({_gc.get('description','')})"
+        pf_info = f"chat={ctype}"
         if ctype in ("channel", "supergroup", "group"):
             me = (await tg_post("getMe", {})).get("result", {}) or {}
             cm = (await tg_post("getChatMember", {"chat_id": src_chat, "user_id": me.get("id")})).get("result", {}) or {}
             status = cm.get("status")
             can_del = cm.get("can_delete_messages")
+            pf_info = f"chat={ctype}, bot={status}, can_delete={can_del}, forum={chat_info.get('is_forum')}"
+            logger.warning(f"[/delete] {pf_info} range={start_id}-{end_id}")
             if status == "creator":
                 pass
             elif status != "administrator":
@@ -8687,7 +8692,8 @@ async def _run_delete_job(chat_id, uid):
                     f"❌ Delete থামানো হয়েছে — পরপর দুই batch-এর কোনো message-ই delete হয়নি।\n"
                     f"সম্ভাব্য কারণ: (১) বটের Delete permission নেই, "
                     f"(২) group/private chat-এ message ৪৮ ঘণ্টার পুরনো।\n"
-                    f"🗑 সফল: {done} | ❌ Fail: {failed} | ⏭ Skip: {skipped}")
+                    f"🗑 সফল: {done} | ❌ Fail: {failed} | ⏭ Skip: {skipped}\n"
+                    f"🔎 {pf_info}\n📝 TG error: {err[:120]}")
                 _DELETE_PENDING.pop(uid, None)
                 return
         except Exception as e:
