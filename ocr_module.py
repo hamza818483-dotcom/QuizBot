@@ -246,6 +246,19 @@ async def _ocr_one_page(src_pdf: str, dst_pdf: str, page_no: int, langs: str):
     cmd = ["ocrmypdf", "--redo-ocr", "--optimize", "0",
            "--output-type", "pdf", "--pdf-renderer", "sandwich", "-l", langs,
            "--tesseract-timeout", "110",
+           # Many source PDFs here don't carry a reliable embedded DPI tag,
+           # so ocrmypdf/tesseract falls back to a low guessed DPI. At low
+           # DPI the vertical gap between two consecutive paragraphs and
+           # the gap between two lines inside one paragraph round to
+           # nearly the same few pixels, so Tesseract's line/paragraph
+           # bounding boxes come out imprecise -- the sandwich text layer
+           # then has no real gap there, and PDF-viewer click-drag
+           # selection (which follows those boxes, not any paragraph
+           # marker -- the text layer has none) drags straight from one
+           # paragraph into the next line of the following paragraph.
+           # Forcing a higher processing DPI gives Tesseract enough
+           # vertical pixel resolution to place that gap correctly.
+           "--image-dpi", "400",
            # oem 1 = LSTM engine only.
            # psm 4 = "single column of variable-sized text" — recognizes
            # column/line breaks (so English headings, boxed diagram labels,
