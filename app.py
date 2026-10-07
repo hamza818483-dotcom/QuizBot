@@ -8717,7 +8717,31 @@ async def _run_delete_job(chat_id, uid):
         except Exception:
             pass
 
-    summary = f"✅ Delete শেষ!\n🗑 সফল: {done}/{total}\n⏭ Skip (আগেই নেই): {skipped}\n❌ Fail: {failed}" + (f"\n🔢 Delete হয়নি (message id): {_ranges(bad_ids)}\n(এই id গুলো Telegram-এ খুলে দেখো — service message/অন্য কিছু কিনা)" if bad_ids else "")
+    # ── Root-cause probe: fail হওয়া id আসলে আছে কিনা (copyMessage দিয়ে যাচাই) ──
+    probe_txt = ""
+    if bad_ids:
+        bs = sorted(bad_ids)
+        samples = sorted({bs[0], bs[len(bs) // 2], bs[-1]})
+        lines = []
+        for mid in samples:
+            try:
+                dres = await tg_post("deleteMessage", {"chat_id": src_chat, "message_id": mid})
+                ddesc = dres.get("description", "ok") if not dres.get("ok") else "deleted"
+                cres = await tg_post("copyMessage", {"chat_id": chat_id, "from_chat_id": src_chat,
+                                                      "message_id": mid, "disable_notification": True})
+                if cres.get("ok"):
+                    cmid = (cres.get("result") or {}).get("message_id")
+                    state = "✅ আছে (copy হয়েছে)"
+                    if cmid:
+                        await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": cmid})
+                else:
+                    state = "🚫 নেই/copy হয়নি: " + (cres.get("description") or "?")[:60]
+                lines.append(f"• {mid}: delete→{ddesc[:50]} | {state}")
+            except Exception as e:
+                lines.append(f"• {mid}: probe error {e}")
+        probe_txt = "\n🔬 Probe:\n" + "\n".join(lines)
+
+    summary = f"✅ Delete শেষ!\n🗑 সফল: {done}/{total}\n⏭ Skip (আগেই নেই): {skipped}\n❌ Fail: {failed}" + (f"\n🔢 Delete হয়নি (message id): {_ranges(bad_ids)}\n(এই id গুলো Telegram-এ খুলে দেখো — service message/অন্য কিছু কিনা)" if bad_ids else "") + probe_txt
     await edit_msg(chat_id, status_msg_id, summary)
     _DELETE_PENDING.pop(uid, None)
 
