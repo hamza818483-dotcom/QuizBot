@@ -8627,6 +8627,81 @@ async def _run_delete_job(chat_id, uid):
     r = await send_msg(chat_id, f"⏳ Delete শুরু হচ্ছে... 0/{total}", reply_markup=_cancel_kb(chat_id, job_id))
     status_msg_id = r.get("result", {}).get("message_id")
 
+    # ── Userbot (Telethon user session) route: bot API-র ৪৮ ঘণ্টা delete-limit
+    # userbot-এ প্রযোজ্য না (এটা নিজের account, bot token না) — তাই এটাই আগে চেষ্টা করো।
+    try:
+        from poll_extract import SESSION_STR as _USR_SESSION, API_ID as _USR_API_ID, API_HASH as _USR_API_HASH
+    except Exception:
+        _USR_SESSION = ""
+    if _USR_SESSION:
+        try:
+            from telethon import TelegramClient
+            from telethon.sessions import StringSession
+            uclient = TelegramClient(StringSession(_USR_SESSION), _USR_API_ID, _USR_API_HASH)
+            await uclient.connect()
+            if await uclient.is_user_authorized():
+                all_ids = list(range(start_id, end_id + 1))
+                u_done = 0
+                UBATCH = 100
+                for i in range(0, len(all_ids), UBATCH):
+                    if is_cancelled(chat_id):
+                        break
+                    chunk = all_ids[i:i + UBATCH]
+                    try:
+                        await uclient.delete_messages(src_chat, chunk)
+                        u_done += len(chunk)
+                    except Exception as e:
+                        logger.warning(f"[/delete-userbot] chunk {chunk[0]}.. failed: {e}")
+                    if i % (UBATCH * 3) == 0:
+                        try:
+                            await edit_msg(chat_id, status_msg_id,
+                                f"⏳ Delete হচ্ছে (userbot)... {min(i + UBATCH, len(all_ids))}/{total}",
+                                reply_markup=_cancel_kb(chat_id, job_id))
+                        except Exception:
+                            pass
+                    await asyncio.sleep(0.3)
+                await uclient.disconnect()
+                cancelled = is_cancelled(chat_id)
+                await edit_msg(chat_id, status_msg_id,
+                    (f"⏹ বাতিল করা হয়েছে। (userbot দিয়ে {u_done}/{total} পর্যন্ত delete হয়েছে)" if cancelled else
+                     f"✅ Delete শেষ! (userbot)\n🗑 Delete command পাঠানো হয়েছে: {u_done}/{total}\n"
+                     f"(Telegram নিজে confirm না দিলেও সাধারণত সফল হয় — chat-এ check করো)"))
+                _DELETE_PENDING.pop(uid, None)
+                clear_active_job(chat_id)
+                return
+            else:
+                await uclient.disconnect()
+                logger.warning("[/delete-userbot] session not authorized, falling back to Bot API")
+        except Exception as e:
+            logger.warning(f"[/delete-userbot] unavailable, falling back to Bot API: {e}")
+
+    # ── ৪৮-ঘণ্টা early-warning: Bot API দিয়ে bot-এর নিজের পাঠানো পুরনো message
+    # (>48h) কখনোই delete করা যায় না — এটা Telegram-এর hard limit, আগেই জানিয়ে দাও ──
+    try:
+        _sample_mid = (start_id + end_id) // 2
+        _fwd = await tg_post("forwardMessage", {"chat_id": chat_id, "from_chat_id": src_chat,
+                                                 "message_id": _sample_mid, "disable_notification": True})
+        if _fwd.get("ok"):
+            _fo = (_fwd.get("result") or {}).get("forward_origin") or {}
+            _odate = _fo.get("date")
+            _fmid = (_fwd.get("result") or {}).get("message_id")
+            if _fmid:
+                await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": _fmid})
+            if _odate:
+                import time as _t
+                _age_h = (_t.time() - _odate) / 3600
+                if _age_h > 47:
+                    await edit_msg(chat_id, status_msg_id,
+                        f"⚠️ এই range-এর message প্রায় {_age_h:.0f} ঘণ্টা পুরনো।\n"
+                        f"Telegram Bot API দিয়ে বটের নিজের পাঠানো ৪৮ ঘণ্টার বেশি পুরনো message delete করা যায় না "
+                        f"(এটা Telegram-এর নিজস্ব সীমা, bot permission-এর সমস্যা না)।\n"
+                        f"Userbot session কনফিগার নেই/কাজ করছে না, তাই এই range bot দিয়ে মোছা সম্ভব না — manual delete করতে হবে।")
+                    _DELETE_PENDING.pop(uid, None)
+                    clear_active_job(chat_id)
+                    return
+    except Exception as e:
+        logger.warning(f"[/delete] 48h pre-check skipped: {e}")
+
     # ── Preflight: বট ওই chat-এ admin + "Delete messages" right আছে কিনা আগে দেখো ──
     # (না থাকলে প্রতিটা message-ই "can't be deleted" দিয়ে fail করবে — শুধু সময় নষ্ট)
     pf_info = "preflight: n/a"
@@ -9021,7 +9096,7 @@ async def handle_livetime(msg: dict):
 # ============================================================
 # FEATURE: /poll — Poll Extract (see poll_extract.py)
 # ============================================================
-from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range, handle_ok_single_topic, handle_ok_all_topics, extract_polls_telethon
+from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range, handle_ok_single_topic, handle_ok_all_topics, extract_polls_telethon, delete_messages_telethon
 
 
 # ============================================================
