@@ -8654,6 +8654,16 @@ async def _run_delete_job(chat_id, uid):
     BATCH = 100  # deleteMessages hard cap per call
     all_ids = list(range(start_id, end_id + 1))
     consec_bad_chunks = 0
+    bad_ids = []
+
+    def _ranges(ns):
+        ns = sorted(ns); out = []; a = b = None
+        for n in ns:
+            if a is None: a = b = n
+            elif n == b + 1: b = n
+            else: out.append(f"{a}" if a == b else f"{a}-{b}"); a = b = n
+        if a is not None: out.append(f"{a}" if a == b else f"{a}-{b}")
+        return ", ".join(out[:25]) + (" …" if len(out) > 25 else "")
 
     async def _del_ids(ids, depth=0):
         """deleteMessages দিয়ে চেষ্টা; fail করলে অর্ধেক-অর্ধেক করে ভেঙে খারাপ id আলাদা করে।
@@ -8665,6 +8675,7 @@ async def _run_delete_job(chat_id, uid):
         if len(ids) == 1:
             if "not found" in desc:
                 return 0, 0, 1, desc
+            bad_ids.append(ids[0])
             return 0, 1, 0, desc
         if len(ids) <= 8:
             # ছোট group: একসাথে concurrent single delete (দ্রুত + ঠিক কারণ জানা যায়)
@@ -8712,7 +8723,7 @@ async def _run_delete_job(chat_id, uid):
         except Exception:
             pass
 
-    summary = f"✅ Delete শেষ!\n🗑 সফল: {done}/{total}\n⏭ Skip (আগেই নেই): {skipped}\n❌ Fail: {failed}"
+    summary = f"✅ Delete শেষ!\n🗑 সফল: {done}/{total}\n⏭ Skip (আগেই নেই): {skipped}\n❌ Fail: {failed}" + (f"\n🔢 Delete হয়নি (message id): {_ranges(bad_ids)}\n(এই id গুলো Telegram-এ খুলে দেখো — service message/অন্য কিছু কিনা)" if bad_ids else "")
     await edit_msg(chat_id, status_msg_id, summary)
     _DELETE_PENDING.pop(uid, None)
 
