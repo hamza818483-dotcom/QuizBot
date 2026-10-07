@@ -104,12 +104,20 @@ def _detect_page_langs(page_src: str) -> str:
 def _mask_orange_annotations(page_src: str) -> bool:
     """Paint over orange/red-orange handwritten annotation ink (e.g. 'JU-2023',
     'RU-21' marginal codes) with white, directly in the page's embedded images,
-    so OCR never sees those glyphs. User-requested: these codes don't need to
-    be searchable/OCR'd, and leaving them in corrupts/merges with nearby real
-    Bangla text during OCR. Mutates page_src in place. Returns True if any
-    image was modified (so the caller knows the single-page pdf changed),
-    False on any failure or if no orange ink was found (fail-open --
-    never blocks the OCR pass itself).
+    so OCR never sees those glyphs.
+
+    IMPORTANT: this is applied to a throwaway COPY of the page used only to
+    produce the invisible text layer (see ocr_pdf's masked_src/clean_src
+    split) -- the visible page the user sees keeps its original,
+    unmasked image untouched. User-requested: these annotation codes
+    should stay visible exactly as-is, they just shouldn't be
+    OCR-searchable, since leaving them in the OCR pass corrupts/merges
+    with the real Bangla word next to them.
+
+    Mutates page_src in place. Returns True if any image was modified
+    (so the caller knows the single-page pdf changed), False on any
+    failure or if no orange ink was found (fail-open -- never blocks
+    the OCR pass itself).
     """
     try:
         import fitz
@@ -193,6 +201,46 @@ def _mask_orange_annotations(page_src: str) -> bool:
         return False
 
 
+def _graft_text_layer(ocred_pdf: str, clean_pdf: str, out_pdf: str):
+    """Take the invisible OCR text layer from ocred_pdf (produced from a
+    masked/throwaway copy of the page) and graft it onto clean_pdf (the
+    original, unmasked page -- visible image untouched, including any
+    orange annotation ink). Result written to out_pdf.
+
+    ocrmypdf's sandwich renderer puts OCR text as invisible-render-mode
+    text spans UNDER/OVER the original page content; we copy the whole
+    page's content stream + resources from ocred_pdf onto a fresh copy
+    of clean_pdf's page, then re-insert clean_pdf's own image XObject
+    so the visible picture is clean_pdf's original (unmasked) one, not
+    the masked one baked into ocred_pdf.
+    """
+    import fitz
+    with fitz.open(clean_pdf) as clean_doc, fitz.open(ocred_pdf) as ocred_doc:
+        # Simplest robust approach: start from the OCR'd page (has the
+        # correct invisible text layer + sandwich structure), then swap
+        # its image xref's stream back to the clean/original image bytes
+        # -- so the visible picture reverts to unmasked, while the text
+        # layer (which doesn't depend on the image bytes, only on the
+        # OCR pass that already ran) stays intact.
+        clean_page = clean_doc[0]
+        ocred_page = ocred_doc[0]
+        clean_imgs = clean_page.get_images(full=True)
+        ocred_imgs = ocred_page.get_images(full=True)
+        if clean_imgs and ocred_imgs:
+            clean_xref = clean_imgs[0][0]
+            orig_bytes = clean_doc.extract_image(clean_xref)["image"]
+            ocred_xref = ocred_imgs[0][0]
+            try:
+                # replace_image(stream=...) rewrites the xref's stream AND
+                # its Filter/ColorSpace/size metadata together in sync --
+                # plain update_stream left stale metadata mismatched to
+                # the new bytes and produced a corrupt (all-black) page.
+                ocred_page.replace_image(ocred_xref, stream=orig_bytes)
+            except Exception:
+                pass
+        ocred_doc.save(out_pdf)
+
+
 async def _ocr_one_page(src_pdf: str, dst_pdf: str, page_no: int, langs: str):
     """OCR a single-page PDF in place. Raises RuntimeError(reason) on failure."""
     cmd = ["ocrmypdf", "--redo-ocr", "--optimize", "0",
@@ -258,17 +306,25 @@ async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = None,
         if progress_cb:
             await progress_cb(0, len(pages))
         for i, pno in enumerate(pages, 1):
-            page_src = os.path.join(tmp, f"p{pno}.pdf")
-            page_dst = os.path.join(tmp, f"p{pno}_out.pdf")
+            page_clean = os.path.join(tmp, f"p{pno}_clean.pdf")   # kept unmasked -- this is what gets OCR'd for text, then its image is restored
+            page_masked = os.path.join(tmp, f"p{pno}_masked.pdf") # throwaway, orange ink painted white before OCR
+            page_dst = os.path.join(tmp, f"p{pno}_out.pdf")       # ocrmypdf output on the masked copy
+            page_final = os.path.join(tmp, f"p{pno}_final.pdf")   # OCR'd text layer + original unmasked image
             with fitz.open(stream=pdf_bytes, filetype="pdf") as d1:
                 single = fitz.open()
                 single.insert_pdf(d1, from_page=pno - 1, to_page=pno - 1)
-                single.save(page_src)
+                single.save(page_clean)
                 single.close()
-            page_langs = langs or _detect_page_langs(page_src)
-            _mask_orange_annotations(page_src)
-            await _ocr_one_page(page_src, page_dst, pno, page_langs)
-            with fitz.open(page_dst) as ocred:
+            page_langs = langs or _detect_page_langs(page_clean)
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as d2:
+                single2 = fitz.open()
+                single2.insert_pdf(d2, from_page=pno - 1, to_page=pno - 1)
+                single2.save(page_masked)
+                single2.close()
+            _mask_orange_annotations(page_masked)  # mutates page_masked only; page_clean stays untouched
+            await _ocr_one_page(page_masked, page_dst, pno, page_langs)
+            _graft_text_layer(page_dst, page_clean, page_final)
+            with fitz.open(page_final) as ocred:
                 out_doc.delete_page(pno - 1)
                 out_doc.insert_pdf(ocred, from_page=0, to_page=0, start_at=pno - 1)
             if progress_cb:
