@@ -8642,6 +8642,14 @@ async def _run_delete_job(chat_id, uid):
             can_del = cm.get("can_delete_messages")
             pf_info = f"chat={ctype}, bot={status}, can_delete={can_del}, forum={chat_info.get('is_forum')}"
             logger.warning(f"[/delete] {pf_info} range={start_id}-{end_id}")
+            if chat_info.get("is_forum"):
+                # topic bot nijei close korena—shudhu reopen deye bujha jay closed naki na
+                try:
+                    tid = 9034
+                    r1 = await tg_post("reopenForumTopic", {"chat_id": src_chat, "message_thread_id": tid})
+                    logger.warning(f"[/delete] topic {tid} reopen-probe: {r1}")
+                except Exception as _e:
+                    logger.warning(f"[/delete] topic reopen-probe error: {_e}")
             if status == "creator":
                 pass
             elif status != "administrator":
@@ -8764,6 +8772,8 @@ async def _run_delete_job(chat_id, uid):
                     thr = fm.get("message_thread_id", "")
                     state = (f"✅ আছে | type={kind} | sender_id={su.get('id','?')} (==bot? {same_bot}) "
                              f"| via_bot={via or '-'} | thread={thr or '-'} | origin={fo.get('type','?')} | {age}")
+                    rmid = fm.get("reply_to_message", {}).get("message_id")
+                    state += f" | reply_to={rmid or '-'}"
                     if fm.get("message_id"):
                         await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": fm["message_id"]})
                 else:
