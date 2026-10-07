@@ -8744,15 +8744,25 @@ async def _run_delete_job(chat_id, uid):
             try:
                 dres = await tg_post("deleteMessage", {"chat_id": src_chat, "message_id": mid})
                 ddesc = dres.get("description", "ok") if not dres.get("ok") else "deleted"
-                cres = await tg_post("copyMessage", {"chat_id": chat_id, "from_chat_id": src_chat,
-                                                      "message_id": mid, "disable_notification": True})
+                cres = await tg_post("forwardMessage", {"chat_id": chat_id, "from_chat_id": src_chat,
+                                                         "message_id": mid, "disable_notification": True})
                 if cres.get("ok"):
-                    cmid = (cres.get("result") or {}).get("message_id")
-                    state = "✅ আছে (copy হয়েছে)"
-                    if cmid:
-                        await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": cmid})
+                    fm = cres.get("result") or {}
+                    fo = fm.get("forward_origin") or {}
+                    su = fo.get("sender_user") or {}
+                    sc = fo.get("sender_chat") or {}
+                    who = (("@" + su["username"]) if su.get("username") else su.get("first_name")) if su else \
+                          (sc.get("title") or fo.get("sender_user_name") or "?")
+                    kind = next((k for k in ("poll", "photo", "video", "document", "audio", "voice", "sticker",
+                                             "animation", "text", "dice", "location", "contact") if k in fm), "other")
+                    import datetime as _dt
+                    od = fo.get("date")
+                    age = f"{(_dt.datetime.now(_dt.timezone.utc).timestamp() - od) / 3600:.1f}h আগে" if od else "?"
+                    state = f"✅ আছে | type={kind} | from={who}{' (bot)' if su.get('is_bot') else ''} | origin={fo.get('type','?')} | {age}"
+                    if fm.get("message_id"):
+                        await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": fm["message_id"]})
                 else:
-                    state = "🚫 নেই/copy হয়নি: " + (cres.get("description") or "?")[:60]
+                    state = "🚫 forward হয়নি: " + (cres.get("description") or "?")[:60]
                 lines.append(f"• {mid}: delete→{ddesc[:50]} | {state}")
             except Exception as e:
                 lines.append(f"• {mid}: probe error {e}")
