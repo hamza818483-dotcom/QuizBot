@@ -9096,7 +9096,7 @@ async def handle_livetime(msg: dict):
 # ============================================================
 # FEATURE: /poll — Poll Extract (see poll_extract.py)
 # ============================================================
-from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range, handle_ok_single_topic, handle_ok_all_topics, extract_polls_telethon, delete_messages_telethon
+from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range, handle_ok_single_topic, handle_ok_all_topics, extract_polls_telethon
 
 
 # ============================================================
