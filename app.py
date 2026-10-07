@@ -8702,16 +8702,6 @@ async def _run_delete_job(chat_id, uid):
                 consec_bad_chunks += 1
             else:
                 consec_bad_chunks = 0
-            if consec_bad_chunks >= 2:
-                failed += len(all_ids) - (i + len(chunk_ids))
-                await edit_msg(chat_id, status_msg_id,
-                    f"❌ Delete থামানো হয়েছে — পরপর দুই batch-এর কোনো message-ই delete হয়নি।\n"
-                    f"সম্ভাব্য কারণ: (১) বটের Delete permission নেই, "
-                    f"(২) group/private chat-এ message ৪৮ ঘণ্টার পুরনো।\n"
-                    f"🗑 সফল: {done} | ❌ Fail: {failed} | ⏭ Skip: {skipped}\n"
-                    f"🔎 {pf_info}\n📝 TG error: {err[:120]}")
-                _DELETE_PENDING.pop(uid, None)
-                return
         except Exception as e:
             failed += len(chunk_ids)
             logger.warning(f"[/delete] chunk starting {chunk_ids[0]} exception: {e}")
