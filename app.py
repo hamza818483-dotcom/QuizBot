@@ -8640,7 +8640,9 @@ async def _run_delete_job(chat_id, uid):
             cm = (await tg_post("getChatMember", {"chat_id": src_chat, "user_id": me.get("id")})).get("result", {}) or {}
             status = cm.get("status")
             can_del = cm.get("can_delete_messages")
-            pf_info = f"chat={ctype}, bot={status}, can_delete={can_del}, forum={chat_info.get('is_forum')}"
+            pf_info = (f"chat={ctype}, bot={status}, can_delete={can_del}, forum={chat_info.get('is_forum')}, "
+                       f"permissions={chat_info.get('permissions')}, protect_content={chat_info.get('has_protected_content')}, "
+                       f"slow_mode={chat_info.get('slow_mode_delay')}")
             logger.warning(f"[/delete] {pf_info} range={start_id}-{end_id}")
             if chat_info.get("is_forum"):
                 # topic bot nijei close korena—shudhu reopen deye bujha jay closed naki na
@@ -8752,6 +8754,8 @@ async def _run_delete_job(chat_id, uid):
             try:
                 dres = await tg_post("deleteMessage", {"chat_id": src_chat, "message_id": mid})
                 ddesc = dres.get("description", "ok") if not dres.get("ok") else "deleted"
+                ddesc_full = str(dres)[:300]
+                logger.warning(f"[/delete-probe] {mid} raw deleteMessage response: {ddesc_full}")
                 cres = await tg_post("forwardMessage", {"chat_id": chat_id, "from_chat_id": src_chat,
                                                          "message_id": mid, "disable_notification": True})
                 if cres.get("ok"):
