@@ -95,12 +95,15 @@ async def _ocr_one_page(src_pdf: str, dst_pdf: str, page_no: int, langs: str):
     cmd = ["ocrmypdf", "--redo-ocr", "--optimize", "0",
            "--output-type", "pdf", "--pdf-renderer", "sandwich", "-l", langs,
            "--tesseract-timeout", "110",
-           # oem 1 = LSTM engine only; psm 3 = fully-automatic page segmentation.
-           # Default OCRmyPDF leaves oem/psm at Tesseract's own defaults, which
-           # on dense Bengali paragraphs can merge 2-4 adjacent words into a
-           # single text run -> that run becomes one selectable/copyable blob
-           # instead of each word being separately searchable.
-           "--tesseract-oem", "1", "--tesseract-pagesegmode", "3",
+           # oem 1 = LSTM engine only.
+           # psm 6 = "uniform block of text" (single-column, reads line by line).
+           # psm 3 (old default, fully-automatic layout analysis) mis-detects
+           # word/line boundaries on dense Bengali paragraphs — it merges or
+           # splits glyph runs mid-word, so searching "ডেভোনিয়ান" only matches
+           # "ডেভো" (the run got cut) while copy-paste comes out broken.
+           # psm 6 keeps each line's glyphs in correct left-to-right order
+           # inside one text block, so full words stay intact and searchable.
+           "--tesseract-oem", "1", "--tesseract-pagesegmode", "6",
            src_pdf, dst_pdf]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
