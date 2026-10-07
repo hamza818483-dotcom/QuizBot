@@ -8668,7 +8668,11 @@ async def _run_delete_job(chat_id, uid):
     async def _del_ids(ids, depth=0):
         """deleteMessages দিয়ে চেষ্টা; fail করলে অর্ধেক-অর্ধেক করে ভেঙে খারাপ id আলাদা করে।
         returns (done, failed, skipped, last_err)"""
-        res = await tg_post("deleteMessages", {"chat_id": src_chat, "message_ids": ids})
+        if len(ids) == 1:
+            # single id: singular API দাও — অস্তিত্বহীন হলে সঠিক "not found" ফেরত দেয়
+            res = await tg_post("deleteMessage", {"chat_id": src_chat, "message_id": ids[0]})
+        else:
+            res = await tg_post("deleteMessages", {"chat_id": src_chat, "message_ids": ids})
         if res.get("ok"):
             return len(ids), 0, 0, ""
         desc = (res.get("description") or "").lower()
