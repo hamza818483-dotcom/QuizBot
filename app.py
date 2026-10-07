@@ -8666,6 +8666,11 @@ async def _run_delete_job(chat_id, uid):
             if "not found" in desc:
                 return 0, 0, 1, desc
             return 0, 1, 0, desc
+        if len(ids) <= 8:
+            # ছোট group: একসাথে concurrent single delete (দ্রুত + ঠিক কারণ জানা যায়)
+            rs = await asyncio.gather(*[_del_ids([m]) for m in ids])
+            return (sum(r[0] for r in rs), sum(r[1] for r in rs), sum(r[2] for r in rs),
+                    next((r[3] for r in rs if r[3]), desc))
         mid = len(ids) // 2
         a = await _del_ids(ids[:mid], depth + 1)
         b = await _del_ids(ids[mid:], depth + 1)

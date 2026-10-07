@@ -611,7 +611,7 @@ async def tg_post(method: str, data: dict) -> dict:
     for name, fn in order:
         result, ok = await fn()
         if ok == "permanent":
-            logger.warning(f"[TG] {method} permanent failure ({result.get('description')}) — not retrying")
+            (logger.debug if method in ("deleteMessage", "deleteMessages") else logger.warning)(f"[TG] {method} permanent failure ({result.get('description')}) — not retrying")
             return result
         if ok:
             if _last_good_api != name:
