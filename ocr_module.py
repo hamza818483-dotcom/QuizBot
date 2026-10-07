@@ -13,8 +13,19 @@ pages use "ben" only, pure-English pages use "eng" only, mixed pages use
 side — "ben"-only mangled English, "ben+eng" mangled Bangla (dictionaries
 compete on ambiguous glyphs, e.g. "নগ্নবীজী" -> "AIRE"). Per-page detection
 avoids the trade-off entirely.
+
+Orange/red marginal annotations (hand-written codes like "JU-2023",
+"RU-21" -- admission-test source tags, not body text) are masked out
+(painted white) before OCR, see _mask_orange_annotations: left as-is,
+their handwriting-like glyphs get fed into the same OCR pass as the
+printed paragraph text and corrupt/merge with nearby real words,
+breaking search on the real word next to them (e.g. "দ্বিনিষেক").
+Skipping them trades "these codes aren't searchable" for "the real
+text next to them stays correct and searchable" -- acceptable per
+user request.
 """
 import asyncio
+import io
 import os
 import re
 import tempfile
@@ -90,20 +101,115 @@ def _detect_page_langs(page_src: str) -> str:
     return "ben+eng"          # mixed page — dutai lagbe
 
 
+def _mask_orange_annotations(page_src: str) -> bool:
+    """Paint over orange/red-orange handwritten annotation ink (e.g. 'JU-2023',
+    'RU-21' marginal codes) with white, directly in the page's embedded images,
+    so OCR never sees those glyphs. User-requested: these codes don't need to
+    be searchable/OCR'd, and leaving them in corrupts/merges with nearby real
+    Bangla text during OCR. Mutates page_src in place. Returns True if any
+    image was modified (so the caller knows the single-page pdf changed),
+    False on any failure or if no orange ink was found (fail-open --
+    never blocks the OCR pass itself).
+    """
+    try:
+        import fitz
+        import numpy as np
+        import cv2
+    except Exception:
+        return False
+    try:
+        changed = False
+        d = fitz.open(page_src)
+        try:
+            page = d[0]
+            replacements = []  # (xref, new_png_bytes) collected first, applied after
+            for img_info in page.get_images(full=True):
+                xref = img_info[0]
+                try:
+                    base = d.extract_image(xref)
+                    img_bytes = base["image"]
+                    arr = np.frombuffer(img_bytes, dtype=np.uint8)
+                    cv_img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if cv_img is None:
+                        continue
+                    hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
+                    # Orange/red-orange handwriting ink: narrower + more
+                    # saturated range than the general highlighter gate
+                    # elsewhere in this codebase -- deliberately avoids
+                    # catching pale-yellow highlighter background tint,
+                    # only strong orange/red-orange pen/marker strokes.
+                    lo = np.array((5, 110, 110))
+                    hi = np.array((22, 255, 255))
+                    mask = cv2.inRange(hsv, lo, hi)
+                    if not mask.any():
+                        continue
+                    # Dilate slightly so anti-aliased stroke edges are
+                    # fully covered, not just the solid-color core.
+                    kernel = np.ones((5, 5), np.uint8)
+                    mask = cv2.dilate(mask, kernel, iterations=1)
+                    cv_img[mask > 0] = (255, 255, 255)
+                    # cv_img is BGR; Pixmap wants RGB raw samples, and the
+                    # stream must be re-flagged with no filter since it's
+                    # now raw pixel data, not the original JPEG/other
+                    # encoding -- getting filter/colorspace/size in sync
+                    # (via Pixmap+rect replace below) is what update_stream
+                    # alone got wrong (left stale DCTDecode tag on new
+                    # bytes -> corrupt page).
+                    rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+                    replacements.append((xref, rgb, cv_img.shape[1], cv_img.shape[0]))
+                except Exception:
+                    continue
+            # Rebuild each flagged image as a fresh Pixmap and hand it to
+            # replace_image, which rewrites the xref's stream together
+            # with its Filter/ColorSpace/size metadata in sync -- unlike
+            # raw update_stream, which left the old JPEG filter tag on the
+            # new raw bytes and produced a corrupt page.
+            for xref, rgb, w, h in replacements:
+                try:
+                    pix = fitz.Pixmap(fitz.csRGB, w, h, rgb.tobytes(), False)
+                    # Re-encode as JPEG and pass as `stream=` (raw
+                    # compressed bytes), not `pixmap=` -- replace_image's
+                    # pixmap= path re-decompresses to raw samples before
+                    # storing, which defeats the JPEG encoding and bloats
+                    # file size ~40x (the original image was JPEG-encoded).
+                    jpeg_bytes = pix.tobytes("jpeg", jpg_quality=90)
+                    page.replace_image(xref, stream=jpeg_bytes)
+                    changed = True
+                except Exception:
+                    continue
+            if changed:
+                out = io.BytesIO()
+                d.save(out)
+                d.close()
+                with open(page_src, "wb") as f:
+                    f.write(out.getvalue())
+            else:
+                d.close()
+        except Exception:
+            d.close()
+            return False
+        return changed
+    except Exception:
+        return False
+
+
 async def _ocr_one_page(src_pdf: str, dst_pdf: str, page_no: int, langs: str):
     """OCR a single-page PDF in place. Raises RuntimeError(reason) on failure."""
     cmd = ["ocrmypdf", "--redo-ocr", "--optimize", "0",
            "--output-type", "pdf", "--pdf-renderer", "sandwich", "-l", langs,
            "--tesseract-timeout", "110",
            # oem 1 = LSTM engine only.
-           # psm 6 = "uniform block of text" (single-column, reads line by line).
-           # psm 3 (old default, fully-automatic layout analysis) mis-detects
-           # word/line boundaries on dense Bengali paragraphs — it merges or
-           # splits glyph runs mid-word, so searching "ডেভোনিয়ান" only matches
-           # "ডেভো" (the run got cut) while copy-paste comes out broken.
-           # psm 6 keeps each line's glyphs in correct left-to-right order
-           # inside one text block, so full words stay intact and searchable.
-           "--tesseract-oem", "1", "--tesseract-pagesegmode", "6",
+           # psm 4 = "single column of variable-sized text" — recognizes
+           # column/line breaks (so English headings, boxed diagram labels,
+           # and marginal annotations don't get merged into neighboring
+           # Bangla paragraphs mid-word, which previously corrupted English
+           # words like "ANGIOSPERMS" into garbage when psm 6 forced the
+           # whole mixed-layout page into one block) while still reading
+           # each line left-to-right in order (so full words stay intact/
+           # searchable, unlike psm 3 which mis-detects word/line boundaries
+           # on dense Bengali paragraphs and cuts words like "ডেভোনিয়ান" ->
+           # "ডেভো").
+           "--tesseract-oem", "1", "--tesseract-pagesegmode", "4",
            src_pdf, dst_pdf]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -160,6 +266,7 @@ async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = None,
                 single.save(page_src)
                 single.close()
             page_langs = langs or _detect_page_langs(page_src)
+            _mask_orange_annotations(page_src)
             await _ocr_one_page(page_src, page_dst, pno, page_langs)
             with fitz.open(page_dst) as ocred:
                 out_doc.delete_page(pno - 1)
