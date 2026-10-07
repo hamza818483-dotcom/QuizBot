@@ -7,13 +7,12 @@ Free, no API keys. Existing text is NEVER touched:
   --output-type pdf  no PDF/A conversion (keeps the file as close to original)
 Only the requested pages (--pages) are OCR'd; other pages pass through untouched.
 
-Default language is "ben" only (not "ben+eng"). Running Tesseract with both
-dictionaries loaded causes the English language model to compete with Bengali
-on ambiguous glyphs inside pure-Bengali words, producing garbage English-looking
-fragments mid-sentence (e.g. "নগ্নবীজী" -> "AIRE", "প্রজাতির সন্ধান" -> "ROR ARTA").
-"ben"-only removes that competition; the LSTM model still reads embedded Latin
-script (species names etc.) reasonably via context, just without the
-dictionary-level misclassification bug.
+Language is auto-detected PER PAGE (see _detect_page_langs): pure-Bangla
+pages use "ben" only, pure-English pages use "eng" only, mixed pages use
+"ben+eng". A single global language was tried before and always broke one
+side — "ben"-only mangled English, "ben+eng" mangled Bangla (dictionaries
+compete on ambiguous glyphs, e.g. "নগ্নবীজী" -> "AIRE"). Per-page detection
+avoids the trade-off entirely.
 """
 import asyncio
 import os
@@ -52,6 +51,45 @@ def _normalize_spec(spec: str, total: int):
     return ",".join(str(n) for n in sorted(pages)), len(pages)
 
 
+def _detect_page_langs(page_src: str) -> str:
+    """Page-ta mostly Bangla naki mostly English/Latin, seta dekhe shothik
+    Tesseract language set bebohar kori. Ekta-i language shobshomoy use korle
+    hoy Bangla bhange (ben+eng), noyto English bhange (ben-only) — tai
+    page-wise detect kora shothik fix, kono ekta-ke permanently chere deya na.
+    """
+    try:
+        import fitz  # PyMuPDF
+        with fitz.open(page_src) as d:
+            page = d[0]
+            text = page.get_text() or ""
+    except Exception:
+        return "ben+eng"
+    bangla_chars = sum(1 for c in text if "\u0980" <= c <= "\u09FF")
+    latin_chars = sum(1 for c in text if c.isalpha() and c.isascii())
+    # existing text layer thakle (mixed page) seta diye bujhi; na thakle
+    # (pure scan) image render kore quick OCR sample niye bujhi.
+    if bangla_chars == 0 and latin_chars == 0:
+        try:
+            import fitz
+            import pytesseract
+            with fitz.open(page_src) as d:
+                pix = d[0].get_pixmap(dpi=150)
+                img_bytes = pix.tobytes("png")
+            from PIL import Image
+            import io
+            img = Image.open(io.BytesIO(img_bytes))
+            sample = pytesseract.image_to_string(img, lang="ben+eng")[:2000]
+            bangla_chars = sum(1 for c in sample if "\u0980" <= c <= "\u09FF")
+            latin_chars = sum(1 for c in sample if c.isalpha() and c.isascii())
+        except Exception:
+            return "ben+eng"
+    if bangla_chars == 0 and latin_chars > 0:
+        return "eng"          # purely English page — Bangla dictionary thakle English bhangbe
+    if latin_chars == 0 and bangla_chars > 0:
+        return "ben"          # purely Bangla page — English dictionary thakle Bangla bhangbe
+    return "ben+eng"          # mixed page — dutai lagbe
+
+
 async def _ocr_one_page(src_pdf: str, dst_pdf: str, page_no: int, langs: str):
     """OCR a single-page PDF in place. Raises RuntimeError(reason) on failure."""
     cmd = ["ocrmypdf", "--redo-ocr", "--optimize", "0",
@@ -76,7 +114,7 @@ async def _ocr_one_page(src_pdf: str, dst_pdf: str, page_no: int, langs: str):
         raise RuntimeError(f"পেজ {page_no}: " + ((msg[-1] if msg else f"exit {proc.returncode}")[:150]))
 
 
-async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = "ben",
+async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = None,
                    progress_cb=None):
     """Returns (out_bytes, info_dict) or raises RuntimeError(reason).
 
@@ -118,7 +156,8 @@ async def ocr_pdf(pdf_bytes: bytes, spec: str = None, langs: str = "ben",
                 single.insert_pdf(d1, from_page=pno - 1, to_page=pno - 1)
                 single.save(page_src)
                 single.close()
-            await _ocr_one_page(page_src, page_dst, pno, langs)
+            page_langs = langs or _detect_page_langs(page_src)
+            await _ocr_one_page(page_src, page_dst, pno, page_langs)
             with fitz.open(page_dst) as ocred:
                 out_doc.delete_page(pno - 1)
                 out_doc.insert_pdf(ocred, from_page=0, to_page=0, start_at=pno - 1)
