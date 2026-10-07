@@ -8563,9 +8563,26 @@ async def handle_delete(msg: dict):
     uid = msg.get("from", {}).get("id")
     text = msg.get("text", "")
     args = text.replace("/delete", "", 1).strip().split()
+    # ── সহজ mode: message-এ reply করে /delete  অথবা  শুধু ১টা link দিয়ে /delete ──
+    reply = msg.get("reply_to_message")
+    one_target = None
+    if reply and not args:
+        one_target = (chat_id, reply.get("message_id"))
+    elif len(args) == 1:
+        c1, m1 = _parse_tg_link(args[0])
+        if c1 is not None:
+            one_target = (c1, m1)
+    if one_target:
+        r = await tg_post("deleteMessage", {"chat_id": one_target[0], "message_id": one_target[1]})
+        if r.get("ok"):
+            if reply and not args:  # command message-ও মুছে দাও, chat পরিষ্কার থাকবে
+                await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": msg.get("message_id")})
+        else:
+            await send_msg(chat_id, f"❌ Delete হয়নি: {r.get('description', 'unknown error')}")
+        return
     if len(args) != 2:
         await send_msg(chat_id,
-            "❌ Usage:\n<code>/delete (first link)\n(2nd link)</code>\n\n"
+            "❌ Usage:\n• Message-এ <b>reply</b> করে <code>/delete</code>\n• অথবা <code>/delete (link)</code>\n• Range: <code>/delete (first link)\n(2nd link)</code>\n\n"
             "প্রথম link = শুরুর message, দ্বিতীয় link = শেষের message — "
             "মাঝের সব message (poll সহ) একসাথে delete হবে।")
         return
