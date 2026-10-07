@@ -8758,7 +8758,12 @@ async def _run_delete_job(chat_id, uid):
                     import datetime as _dt
                     od = fo.get("date")
                     age = f"{(_dt.datetime.now(_dt.timezone.utc).timestamp() - od) / 3600:.1f}h আগে" if od else "?"
-                    state = f"✅ আছে | type={kind} | from={who}{' (bot)' if su.get('is_bot') else ''} | origin={fo.get('type','?')} | {age}"
+                    me_id = (await tg_post("getMe", {})).get("result", {}).get("id")
+                    same_bot = "হ্যাঁ" if su.get("id") == me_id else ("না" if su.get("id") else "n/a")
+                    via = fm.get("via_bot", {}).get("username", "") or ""
+                    thr = fm.get("message_thread_id", "")
+                    state = (f"✅ আছে | type={kind} | sender_id={su.get('id','?')} (==bot? {same_bot}) "
+                             f"| via_bot={via or '-'} | thread={thr or '-'} | origin={fo.get('type','?')} | {age}")
                     if fm.get("message_id"):
                         await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": fm["message_id"]})
                 else:
