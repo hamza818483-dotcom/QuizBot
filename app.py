@@ -35860,10 +35860,11 @@ async def process_update(update: dict):
             # heavy extraction commands, and users expect them to respond
             # immediately even while a long /qbm or /auto job is running.
             _QUEUE_EXEMPT_EXACT = {"/ping", "/error", "/status", "/getid", "/id",
-                                     "/keys", "/channelist", "/qlist", "/info", "/info2"}
+                                     "/keys", "/channelist", "/qlist", "/info", "/info2",
+                                     "/stop", "stop", "থামো", "থামাও", "/finish", "finish"}
             _QUEUE_EXEMPT_PREFIX = ("/csv", "/csvS", "/cancel", "/errors", "/merge",
                                      "/menu", "/pin", "/channel", "/labels")
-            if (_txt_check in _QUEUE_EXEMPT_EXACT
+            if (_txt_check in _QUEUE_EXEMPT_EXACT or _txt_check.lower() in _QUEUE_EXEMPT_EXACT
                     or _txt_check.startswith(_QUEUE_EXEMPT_PREFIX)):
                 _spawn_task(handle_message(_msg))
                 return
