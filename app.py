@@ -1100,9 +1100,15 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     out.append(cur)
                 return out
 
-            # ONE gathered main post: 1st chunk fits the photo caption (<=1024), the rest
-            # (only if the summary is longer) follows as text. Same in channel and group.
-            _msgs = _pack(post_text, first_limit=1000)
+            # ONE gathered main post, sent as a SINGLE message:
+            # - if the whole content fits Telegram's photo-caption limit (<=1024) -> image + caption
+            # - else (content too long for a caption) -> plain text message, no image, no splitting,
+            #   as long as it fits Telegram's text limit (4096). Only in the rare case the content
+            #   itself exceeds 4096 do we fall back to _pack() to split into multiple messages.
+            if len(post_text) <= 4096:
+                _msgs = [post_text]
+            else:
+                _msgs = _pack(post_text, first_limit=3800)
             _n = len(_msgs)
             sent_chat, sent_msg_id = {}, None
             # 2026-09-20: first message = cover IMAGE with the summary as its caption
