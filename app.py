@@ -971,7 +971,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job["status"] = "running"
             bot_un = await get_bot_username()
             sep = "▬▬▬▬▬▬▬▬▬▬"
-            poll_quiz_pdf_only = (links_variant == "poll_quiz_pdf")
+            poll_quiz_pdf_only = (links_variant in ("poll_quiz_pdf", "pqp_v2"))
             website_only = (links_variant == "website_only")
 
             groups = exam_groups if exam_groups else [{
