@@ -1691,6 +1691,11 @@ async def lms_live_quiz_schedule(request: Request):
         logger.error(f"[LMS-LiveQuiz] schedule error: {detail}")
         return JSONResponse({"error": f"internal error: {detail[:400]}"}, status_code=500)
 
+    # Event-driven fire: no background poller needed, this schedules an
+    # in-process timer for exactly row["scheduled_at"] (or immediately, for
+    # instant sends where that's already "now").
+    _schedule_lms_live_quiz_fire(row)
+
     return JSONResponse({"ok": True, "row": row})
 
 
@@ -1698,6 +1703,7 @@ async def lms_live_quiz_schedule(request: Request):
 async def lms_live_quiz_cancel(row_id: str):
     """Cancels a still-pending (not yet started) scheduled live quiz."""
     from lms_live_quiz import mark_live_quiz
+    _cancel_lms_live_quiz_timer(row_id)
     await mark_live_quiz(row_id, "cancelled")
     return JSONResponse({"ok": True})
 
@@ -1827,25 +1833,70 @@ async def _run_one_lms_live_quiz(row: dict):
         await mark_live_quiz(row_id, "error", error=str(e))
 
 
-async def _lms_live_quiz_scheduler_task():
-    """Polls LMS's scheduled_live_quizzes for due rows every 10s and fires
-    them. Each due row is spawned as its own task so multiple different
-    groups' quizzes can run concurrently — start_live_quiz already keys
-    LIVE_QUIZ_STATE per-group_id, and _run_one_lms_live_quiz's own busy
-    check prevents double-firing the SAME group."""
+# row_id -> asyncio.Task, for pending timers created by
+# _schedule_lms_live_quiz_fire() below. Lets /cancel actually cancel the
+# in-memory timer instead of relying on a poller to notice the status flip.
+_LMS_LIVE_QUIZ_TIMERS: Dict[str, asyncio.Task] = {}
+
+
+async def _fire_lms_live_quiz_after_delay(row: dict, delay_sec: float):
+    try:
+        if delay_sec > 0:
+            await asyncio.sleep(delay_sec)
+        await _run_one_lms_live_quiz(row)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.error(f"[LMS-LiveQuiz] {row.get('id')}: timer fire failed: {e}")
+    finally:
+        _LMS_LIVE_QUIZ_TIMERS.pop(row.get("id"), None)
+
+
+def _schedule_lms_live_quiz_fire(row: dict):
+    """Event-driven replacement for the old 10s/30s DB-polling cron: the
+    /schedule endpoint calls this once, right after inserting the row, with
+    the exact wait computed from scheduled_at. No more background polling
+    of scheduled_live_quizzes at all — this was the single largest source
+    of Supabase edge_logs (~6,500 req/day), pushing the free-tier Log
+    Ingestion quota over its limit. A quiz now fires at exactly its
+    scheduled time (or immediately for instant sends), not "within ~10-30s
+    of" it."""
+    row_id = row["id"]
+    try:
+        scheduled_at = row.get("scheduled_at")
+        target = datetime.fromisoformat(str(scheduled_at).replace("Z", "+00:00"))
+        delay = (target - datetime.now(timezone.utc)).total_seconds()
+    except Exception:
+        delay = 0
+    delay = max(0.0, delay)
+    old = _LMS_LIVE_QUIZ_TIMERS.pop(row_id, None)
+    if old and not old.done():
+        old.cancel()
+    _LMS_LIVE_QUIZ_TIMERS[row_id] = _spawn_task(_fire_lms_live_quiz_after_delay(row, delay))
+
+
+def _cancel_lms_live_quiz_timer(row_id: str):
+    t = _LMS_LIVE_QUIZ_TIMERS.pop(row_id, None)
+    if t and not t.done():
+        t.cancel()
+
+
+async def _lms_live_quiz_startup_recovery():
+    """Runs ONCE at process startup (not a loop/poller): picks up any rows
+    that were already due, or scheduled for later, before this instance
+    started (e.g. previous process restarted/deployed mid-wait). After this
+    single pass, everything is event-driven via
+    _schedule_lms_live_quiz_fire() — called directly from the /schedule
+    endpoint — so there is no recurring background polling at all."""
     from lms_live_quiz import list_due_live_quizzes
-    while True:
-        try:
-            due = await list_due_live_quizzes()
-            for row in due:
-                _spawn_task(_run_one_lms_live_quiz(row))
-        except Exception as e:
-            logger.warning(f"[LMS-LiveQuiz] scheduler tick failed: {e}")
-        # Was 10s — that alone was ~6,500 Supabase log-ingestion rows/day
-        # (the single biggest edge_logs source, pushing the project over its
-        # free-tier Log Ingestion quota). 30s cuts this 3x with no real UX
-        # cost: a scheduled live quiz starting up to 30s "late" is unnoticed.
-        await asyncio.sleep(30)
+    try:
+        due = await list_due_live_quizzes()
+        for row in due:
+            _schedule_lms_live_quiz_fire(row)
+        if due:
+            logger.info(f"[LMS-LiveQuiz] startup recovery: resumed {len(due)} pending row(s)")
+    except Exception as e:
+        logger.warning(f"[LMS-LiveQuiz] startup recovery failed: {e}")
 
 
 # v-mhtml-live: MHTML/HTML → CSV job state for live dashboard + live TG progress msg
@@ -39367,7 +39418,7 @@ async def startup():
     _spawn_task(_supervised(_memory_cleanup_task, "_memory_cleanup_task"))
     _spawn_task(_supervised(_ram_guard_task, "_ram_guard_task"))
     _spawn_task(_supervised(_scheduled_restart_task, "_scheduled_restart_task"))
-    _spawn_task(_supervised(_lms_live_quiz_scheduler_task, "_lms_live_quiz_scheduler_task"))
+    _spawn_task(_lms_live_quiz_startup_recovery())  # one-shot, not a recurring poller
     # _spawn_task(_supervised(_watchdog_task, "_watchdog_task"))  # DISABLED — AtlasBot monitors instead
     # _spawn_task(_supervised(_watchdog2_task, "_watchdog2_task"))  # DISABLED — AtlasBot monitors instead
     # _spawn_task(_supervised(_cross_bot_watchdog_task, "_cross_bot_watchdog_task"))  # DISABLED
