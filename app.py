@@ -1841,7 +1841,11 @@ async def _lms_live_quiz_scheduler_task():
                 _spawn_task(_run_one_lms_live_quiz(row))
         except Exception as e:
             logger.warning(f"[LMS-LiveQuiz] scheduler tick failed: {e}")
-        await asyncio.sleep(10)
+        # Was 10s — that alone was ~6,500 Supabase log-ingestion rows/day
+        # (the single biggest edge_logs source, pushing the project over its
+        # free-tier Log Ingestion quota). 30s cuts this 3x with no real UX
+        # cost: a scheduled live quiz starting up to 30s "late" is unnoticed.
+        await asyncio.sleep(30)
 
 
 # v-mhtml-live: MHTML/HTML → CSV job state for live dashboard + live TG progress msg
