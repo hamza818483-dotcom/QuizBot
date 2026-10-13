@@ -1470,7 +1470,7 @@ async def _pdfs_gemini_call_with_retry(prompt: str, img: Image.Image, log_tag: s
 
             def _call():
                 return client.models.generate_content(
-                    model="gemini-3.5-flash",
+                    model="gemini-3.6-flash",
                     contents=[
                         types.Part.from_text(text=prompt),
                         types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
@@ -1633,7 +1633,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
 
             def _call():
                 return client.models.generate_content(
-                    model="gemini-3.5-flash",
+                    model="gemini-3.6-flash",
                     contents=[
                         types.Part.from_text(text=prompt),
                         types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
@@ -1659,7 +1659,7 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
                     _app_mod._bump_ai_call_count(_cid, model="Gemini")
             except Exception as _bump_e:
                 logger.warning(f"[PDFS-C2] AI-call bump failed (page {page}): {type(_bump_e).__name__}: {_bump_e}")
-            logger.info(f"[PDFS-C2] Page {page}: {len(valid)} MCQs in {elapsed}s (attempt {attempt+1}, gemini-3.5-flash)")
+            logger.info(f"[PDFS-C2] Page {page}: {len(valid)} MCQs in {elapsed}s (attempt {attempt+1}, gemini-3.6-flash)")
             return valid, elapsed, "Gemini" if valid else None
         except Exception as e:
             err_str = _gemini_full_error_text(e)
@@ -2327,13 +2327,13 @@ async def generate_mcq_from_image(
     # key the same way), drop to the older stable model on the same key
     # before moving to the next key. New models get more 503s in their
     # first weeks of traffic ramp-up.
-    # 2026-08-07: switched back to gemini-3.5-flash — gemini-3.5-flash was
+    # 2026-08-07: switched back to gemini-3.6-flash — gemini-3.6-flash was
     # 404ing ("no longer available to new users") for new API keys, on top
     # of its own daily-quota exhaustion, so it's no longer a safe primary.
     # 2026-09-23: dropped gemini-2.5-flash — Google returns hard 404
     # ("no longer available to new users") on every call now, so it was
     # just burning one guaranteed-failing attempt per key for no benefit.
-    _GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.6-flash"]
+    _GEMINI_MODELS = ["gemini-3.6-flash", "gemini-3.6-flash"]
 
     _tried_keys = set()
     for attempt in range(max_retries):
@@ -2643,7 +2643,7 @@ Return ONLY valid JSON array, no markdown, no extra text:
 
             def _call_gemini():
                 return client.models.generate_content(
-                    model="gemini-3.5-flash",
+                    model="gemini-3.6-flash",
                     contents=[types.Part.from_text(text=prompt)],
                     config=types.GenerateContentConfig(max_output_tokens=8192)
                 )

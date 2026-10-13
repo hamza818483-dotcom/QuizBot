@@ -1497,7 +1497,7 @@ async def gemini_proxy(request: Request):
                 mime_type=idata.get("mime_type") or "image/jpeg"))
     max_tokens = min(int(data.get("max_tokens") or 8192), 24576)
     temperature = float(data.get("temperature", 0.7))
-    model_ctx = {"m": "gemini-3.5-flash"}
+    model_ctx = {"m": "gemini-3.6-flash"}
 
     def _call(key):
         client = gai.Client(api_key=key, http_options=types.HttpOptions(timeout=38000))
@@ -2891,10 +2891,10 @@ async def _generate_tf_mcq_atlas(img, page_num: int, count_min: int = None, coun
     unmodified, exactly like AtlasBot's own generate_mcq_from_image(img, 'prompt_2').
 
     Returns (mcqs, provider_name) so the caller can report which model
-    (Gemini/Groq) actually produced each page — 2026-08-07: gemini-3.5-flash
+    (Gemini/Groq) actually produced each page — 2026-08-07: gemini-3.6-flash
     started 404ing ("no longer available to new users") on top of daily-quota
     429s, silently killing every /tf page since this function had no fallback.
-    Switched primary model to gemini-3.5-flash and added a Groq vision
+    Switched primary model to gemini-3.6-flash and added a Groq vision
     fallback so a Gemini-side outage doesn't zero out the whole run.
 
     count_min/count_max come from the user's [N-M] bracket (e.g. /tf [8-20]);
@@ -5695,7 +5695,7 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
                 http_options=types.HttpOptions(timeout=38000)
             )
             return client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-3.6-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
@@ -16160,7 +16160,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
             for ib in img_bytes_list:
                 parts.append(types.Part.from_bytes(data=ib, mime_type="image/jpeg"))
             return client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-3.6-flash",
                 contents=parts,
                 config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=8192)
             )
@@ -26357,7 +26357,7 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
         img_b64 = image_to_base64(img)
         img_bytes = base64.b64decode(img_b64)
 
-        _model_ctx = {"m": "gemini-3.5-flash"}
+        _model_ctx = {"m": "gemini-3.6-flash"}
 
         def _call(key):
             client = gai.Client(
@@ -26534,7 +26534,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 http_options=types.HttpOptions(timeout=38000)
             )
             return client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-3.6-flash",
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
@@ -26797,7 +26797,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
             for ib in img_bytes_list:
                 parts.append(types.Part.from_bytes(data=ib, mime_type="image/jpeg"))
             return client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-3.6-flash",
                 contents=parts,
                 config=types.GenerateContentConfig(
                     temperature=0.1,
@@ -26922,7 +26922,7 @@ async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False) -> str:
                 http_options=types.HttpOptions(timeout=38000)
             )
             return client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-3.6-flash",
                 contents=[types.Part.from_text(text=prompt)],
                 config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=16384)
             )
@@ -31844,7 +31844,7 @@ Return ONLY the JSON array, nothing else."""
                 def _call(k):
                     client = gai.Client(api_key=k, http_options=types.HttpOptions(timeout=38000))
                     return client.models.generate_content(
-                        model="gemini-3.5-flash",
+                        model="gemini-3.6-flash",
                         contents=[
                             types.Part.from_text(text=prompt),
                             types.Part.from_bytes(data=img_bytes_local, mime_type="image/jpeg")
@@ -36941,7 +36941,7 @@ async def handle_message(msg: dict):
             gem_exhausted = sum(1 for k in gemini_keys if _is_gemini_key_exhausted_today(k))
             gem_cooling = sum(1 for k in gemini_keys if 0 < key_rotator._cooldown_until.get(k, 0) < float("inf") and key_rotator._cooldown_until.get(k, 0) > now and not _is_gemini_key_exhausted_today(k))
             gem_healthy = len(gemini_keys) - gem_cooling - gem_exhausted
-            lines.append(f"\n🔵 <b>Gemini</b> (gemini-3.5-flash, free tier ~20 req/day/key): {len(gemini_keys) + gem_banned} key\n"
+            lines.append(f"\n🔵 <b>Gemini</b> (gemini-3.6-flash, free tier ~20 req/day/key): {len(gemini_keys) + gem_banned} key\n"
                          f"  ✅ Healthy: {gem_healthy} | ⏳ Cooldown: {gem_cooling} | 🔴 আজকে exhausted: {gem_exhausted} | 🚫 Banned: {gem_banned}")
             # Compact breakdown of the "healthy" bucket: not-banned/cooling/
             # exhausted doesn't mean immediately usable -- stagger-lock,
@@ -37186,7 +37186,7 @@ def _img_mcq_clean_options(mcqs: list) -> list:
         out.append(m2)
     return out
 
-_IMG_MCQ_MODEL_FALLBACK = ["gemini-3.5-flash", "gemini-3.8-flash"]
+_IMG_MCQ_MODEL_FALLBACK = ["gemini-3.6-flash", "gemini-3.8-flash"]
 
 async def _img_mcq_gemini_generate(img, prompt_text: str, max_attempts: int = 2) -> list:
     """Dedicated Gemini caller for image MCQ. Uses our own parser (integer answer 0-3).
