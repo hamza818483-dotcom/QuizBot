@@ -19409,17 +19409,17 @@ async def _process_pdf_pages_inner(
 
     if not csv_only and summary_pages:
         total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
-        summary = f"🟥ATLAS Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq_sum}\n\n"
-        for p in summary_pages:
-            summary += f"🌟Page-{fmt_page(p['page'])} ({p['mcq_count']} MCQ):\n{p['first_poll']}\n"
+        summary = f"🟥ATLAS Special Practice System\n━━━━━━━━━━\n🎯Topic: {topic}\n━━━━━━━━━━\n🚀Total MCQ: {total_mcq_sum}\n\n<blockquote>"
+        _page_lines = [f"🌟Page-{fmt_page(p['page'])} ({p['mcq_count']} MCQ):\n{p['first_poll']}" for p in summary_pages]
+        summary += "\n\n".join(_page_lines)
+        summary += "</blockquote>"
         if is_cancelled(chat_id):
             summary = f"🛑 কাজ বাতিল করা হয়েছে — যতটুকু হয়েছে তার ফলাফল:\n\n" + summary
         summary += (
-            f"\n💥শুভকামনা প্রিয় শিক্ষার্থী {uname}...\n"
-            '"যেকোনো প্রশ্ন থাকলে মেসেজ দাও "Ask Your Mentor" গ্রুপে।\n'
-            "🚀Whatsapp Helpline: wa.me/8801999681290\n🔗Website: Atlascourses.com"
+            '\n\n<blockquote>যেকোনো প্রশ্ন থাকলে মেসেজ দাও "Ask Your Mentor" গ্রুপে।\n'
+            "━━━━━━━━━━\n🚀Whatsapp Helpline: wa.me/8801999681290\n━━━━━━━━━━\n🔗Website: Atlascourses.com</blockquote>"
         )
-        summary_data = {"chat_id": channel_id, "text": summary, "disable_web_page_preview": True}
+        summary_data = {"chat_id": channel_id, "text": summary, "parse_mode": "HTML", "disable_web_page_preview": True}
         if first_image_msg_id:
             summary_data["reply_to_message_id"] = first_image_msg_id
         sum_r = await tg_post("sendMessage", summary_data)
@@ -20151,17 +20151,17 @@ async def _process_pdfs_pages_inner(
 
     if not csv_only and summary_pages:
         total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
-        summary = f"🟥ATLAS Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq_sum}\n\n"
-        for p in summary_pages:
-            summary += f"🌟Page-{fmt_page(p['page'])} ({p['mcq_count']} MCQ):\n{p['first_poll']}\n"
+        summary = f"🟥ATLAS Special Practice System\n━━━━━━━━━━\n🎯Topic: {topic}\n━━━━━━━━━━\n🚀Total MCQ: {total_mcq_sum}\n\n<blockquote>"
+        _page_lines = [f"🌟Page-{fmt_page(p['page'])} ({p['mcq_count']} MCQ):\n{p['first_poll']}" for p in summary_pages]
+        summary += "\n\n".join(_page_lines)
+        summary += "</blockquote>"
         if is_cancelled(chat_id):
             summary = f"🛑 কাজ বাতিল করা হয়েছে — যতটুকু হয়েছে তার ফলাফল:\n\n" + summary
         summary += (
-            f"\n💥শুভকামনা প্রিয় শিক্ষার্থী {uname}...\n"
-            '"যেকোনো প্রশ্ন থাকলে মেসেজ দাও "Ask Your Mentor" গ্রুপে।\n'
-            "🚀Whatsapp Helpline: wa.me/8801999681290\n🔗Website: Atlascourses.com"
+            '\n\n<blockquote>যেকোনো প্রশ্ন থাকলে মেসেজ দাও "Ask Your Mentor" গ্রুপে।\n'
+            "━━━━━━━━━━\n🚀Whatsapp Helpline: wa.me/8801999681290\n━━━━━━━━━━\n🔗Website: Atlascourses.com</blockquote>"
         )
-        summary_data = {"chat_id": channel_id, "text": summary, "disable_web_page_preview": True}
+        summary_data = {"chat_id": channel_id, "text": summary, "parse_mode": "HTML", "disable_web_page_preview": True}
         if first_image_msg_id:
             summary_data["reply_to_message_id"] = first_image_msg_id
         sum_r = await tg_post("sendMessage", summary_data)
@@ -34141,13 +34141,18 @@ async def handle_pdf_page_regen(session_id: str, page_num: int, dm_chat_id: int,
 
     if summary_msg_id and channel_id:
         total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
-        new_summary = f"🟥ATLAS Special Practice System\n🎯Topic: {topic}\n🚀Total MCQ: {total_mcq_sum}\n\n"
-        for p in summary_pages:
-            new_summary += f"🌟Page-{fmt_page(p['page'])} ({p['mcq_count']} MCQ):\n{p['first_poll']}\n"
+        new_summary = f"🟥ATLAS Special Practice System\n━━━━━━━━━━\n🎯Topic: {topic}\n━━━━━━━━━━\n🚀Total MCQ: {total_mcq_sum}\n\n<blockquote>"
+        _page_lines = [f"🌟Page-{fmt_page(p['page'])} ({p['mcq_count']} MCQ):\n{p['first_poll']}" for p in summary_pages]
+        new_summary += "\n\n".join(_page_lines)
+        new_summary += "</blockquote>"
+        new_summary += (
+            '\n\n<blockquote>যেকোনো প্রশ্ন থাকলে মেসেজ দাও "Ask Your Mentor" গ্রুপে।\n'
+            "━━━━━━━━━━\n🚀Whatsapp Helpline: wa.me/8801999681290\n━━━━━━━━━━\n🔗Website: Atlascourses.com</blockquote>"
+        )
         try:
             await tg_post("editMessageText", {
                 "chat_id": channel_id, "message_id": summary_msg_id,
-                "text": new_summary, "disable_web_page_preview": True
+                "text": new_summary, "parse_mode": "HTML", "disable_web_page_preview": True
             })
         except Exception as e:
             logger.warning(f"[PdfPageRegen] summary msg update failed: {e}")
