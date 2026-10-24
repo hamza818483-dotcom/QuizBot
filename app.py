@@ -26486,7 +26486,7 @@ _QBM_CAREFUL_SCAN_ADDENDUM = (
 )
 
 
-async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: bool = False) -> str:
+async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: bool = False, _fallback_model: str = None) -> str:
     """Direct Gemini call with any given prompt -> raw text (caller parses).
     Tries keys in healthiest-first order, one after another, until one
     succeeds -- a single key's 429 RESOURCE_EXHAUSTED (daily quota, only 20
@@ -26517,10 +26517,16 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         # use -- if every key was already confirmed daily-exhausted by an
         # earlier call in this process, skip straight to Groq instead of
         # burning a fresh 429 per key on every single /qbm page.
-        if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
+        # 2026-10-24: this tracker is keyed by raw API key only, not
+        # (key, model) -- it does NOT distinguish gemini-3.6-flash from
+        # gemini-3.5-flash-lite quota. So on the fallback pass
+        # (_fallback_model set) we must NOT trust it, or every fallback
+        # call would short-circuit here even though 3.5-flash-lite's
+        # quota is a completely separate, still-fresh bucket.
+        if _fallback_model is None and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
             if gemini_only:
-                logger.warning("[QBM] all Gemini keys already known daily-exhausted — gemini_only set, returning empty")
-                return ""
+                logger.warning("[QBM] all gemini-3.6-flash keys already known daily-exhausted — retrying with gemini-3.5-flash-lite (separate quota)")
+                return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash-lite")
             logger.warning("[QBM] all Gemini keys already known daily-exhausted — skipping straight to Groq")
             return await _gen_groq_raw_text(img, prompt)
         from google import genai as gai
@@ -26528,13 +26534,13 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         img_b64 = image_to_base64(img)
         img_bytes = base64.b64decode(img_b64)
 
-        def _call(key):
+        def _call(key, model_name="gemini-3.6-flash"):
             client = gai.Client(
                 api_key=key,
                 http_options=types.HttpOptions(timeout=38000)
             )
             return client.models.generate_content(
-                model="gemini-3.6-flash",
+                model=model_name,
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
@@ -26557,16 +26563,25 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
             )
 
         _avoid_accts = _qbm_page_used_accounts_ctx.get() or set()
-        keys_to_try = key_rotator.ordered_keys_avoiding_accounts(_avoid_accts, offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
-        _dead_accounts = set()
-        # Skip keys already confirmed daily-exhausted (by an earlier call this
-        # process) when at least one non-exhausted key remains -- ordered_keys()
-        # sorts exhausted keys last but doesn't remove them, so without this
-        # filter every call still re-tries and re-429s each known-dead key
-        # before reaching a live one, wasting calls on a predictable outcome.
-        _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
-        if _live:
-            keys_to_try = _live
+        if _fallback_model is not None:
+            # 2026-10-24: the fallback pass (gemini-3.5-flash-lite, a
+            # SEPARATE free-tier quota bucket from gemini-3.6-flash) must
+            # NOT be filtered by key_rotator's cooldown/daily-exhausted
+            # state -- that state was set by 3.6-flash's 429s and says
+            # nothing about whether 3.5-flash-lite is exhausted for the
+            # same key. Use the raw, unfiltered key list instead.
+            keys_to_try = list(key_rotator.keys)
+        else:
+            keys_to_try = key_rotator.ordered_keys_avoiding_accounts(_avoid_accts, offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+            # Skip keys already confirmed daily-exhausted (by an earlier call
+            # this process) when at least one non-exhausted key remains --
+            # ordered_keys() sorts exhausted keys last but doesn't remove
+            # them, so without this filter every call still re-tries and
+            # re-429s each known-dead key before reaching a live one,
+            # wasting calls on a predictable outcome.
+            _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
+            if _live:
+                keys_to_try = _live
         # 2026-09-20 FIX: keys_to_try used to be built ONCE up-front, so a call
         # that burned through that snapshot (503/429 across many keys) gave up
         # with "All Gemini keys exhausted" even while other healthy keys
@@ -26594,10 +26609,14 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                     break
                 _refills += 1
                 try:
-                    _fresh = key_rotator.ordered_keys_avoiding_accounts(_avoid_accts, offset=_qbm_key_offset_ctx.get()) or []
+                    _fresh = (list(key_rotator.keys) if _fallback_model is not None
+                              else (key_rotator.ordered_keys_avoiding_accounts(_avoid_accts, offset=_qbm_key_offset_ctx.get()) or []))
                 except Exception:
                     _fresh = []
-                _fresh = [k for k in _fresh if k not in _tried_keys and not _is_gemini_key_exhausted_today(k)]
+                if _fallback_model is not None:
+                    _fresh = [k for k in _fresh if k not in _tried_keys]
+                else:
+                    _fresh = [k for k in _fresh if k not in _tried_keys and not _is_gemini_key_exhausted_today(k)]
                 if not _fresh:
                     break
                 logger.warning(f"[QBM] key list used up -- refilled with {len(_fresh)} fresh untried healthy key(s) (refill {_refills}/4)")
@@ -26621,7 +26640,10 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
             key_rotator.record_call(key)
             try:
                 async with key_rotator.throttled_call(key=key):
-                    response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(_call, key, _fallback_model or "gemini-3.6-flash"),
+                        timeout=40
+                    )
                 key_rotator.mark_healthy(key)
                 _consec_outage_fails = 0  # reset -- a live key answered, so the
                 # backend isn't globally down anymore
@@ -26677,7 +26699,14 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                             retry_s = int(rd_match.group(1))
                     except Exception:
                         pass
-                    key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
+                    # 2026-10-24: on the fallback-model pass, do NOT write
+                    # into key_rotator's shared cooldown/daily-exhausted
+                    # state -- that state is keyed by raw key only (no
+                    # model), so marking it here would wrongly poison the
+                    # key for gemini-3.6-flash calls (a different, still-
+                    # possibly-fresh quota) made later by other callers.
+                    if _fallback_model is None:
+                        key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
                 if _is_auth_ban_error(full_msg):
@@ -26737,16 +26766,32 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                     await asyncio.sleep(_wait_s)
                     _consec_outage_fails = 0
                     try:
-                        _fresh_after_outage = key_rotator.ordered_keys_avoiding_accounts(_avoid_accts, offset=_qbm_key_offset_ctx.get()) or []
+                        if _fallback_model is not None:
+                            _fresh_after_outage = list(key_rotator.keys)
+                        else:
+                            _fresh_after_outage = key_rotator.ordered_keys_avoiding_accounts(_avoid_accts, offset=_qbm_key_offset_ctx.get()) or []
                     except Exception:
                         _fresh_after_outage = []
-                    _queue = [k for k in _fresh_after_outage if not _is_gemini_key_exhausted_today(k)] or _fresh_after_outage
+                    if _fallback_model is not None:
+                        _queue = _fresh_after_outage
+                    else:
+                        _queue = [k for k in _fresh_after_outage if not _is_gemini_key_exhausted_today(k)] or _fresh_after_outage
                     _ki = -1
                     continue
                 continue
-        # All Gemini keys exhausted/rate-limited/errored, or outage retries
-        # exhausted -- Groq disabled per user request, return empty.
-        logger.warning("[QBM] All Gemini keys exhausted — returning empty (Groq fallback disabled per user request)")
+        # All gemini-3.6-flash keys exhausted/rate-limited/errored.
+        # 2026-10-24: before giving up, retry the SAME key pool once more
+        # against gemini-3.5-flash-lite -- a different model = a separate
+        # per-model free-tier quota bucket (~500 RPD vs ~20 RPD for
+        # 3.6-flash), still Gemini (no Groq), still vision-capable. Only
+        # done once (guarded by _fallback_model is None) so this can't
+        # recurse into itself.
+        if _fallback_model is None:
+            logger.warning("[QBM] All gemini-3.6-flash keys exhausted — retrying with gemini-3.5-flash-lite (separate quota)")
+            return await _qbm_gemini_raw(img, prompt, careful=careful, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash-lite")
+        # Already on the fallback model and still exhausted -- Groq
+        # disabled per user request, return empty.
+        logger.warning("[QBM] All Gemini keys exhausted (incl. fallback model) — returning empty (Groq fallback disabled per user request)")
         return ""
     except Exception as e:
         logger.warning(f"[QBM] Gemini raw call failed: {e}")
