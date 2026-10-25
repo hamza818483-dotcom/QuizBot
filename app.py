@@ -5666,7 +5666,7 @@ def _parse_explanation_only_json(text: str) -> list:
         return []
     return [str(it.get("explanation", "")).strip()[:500] if isinstance(it, dict) else "" for it in data]
 
-async def _gemini_verify_raw_text(img, prompt: str) -> str:
+async def _gemini_verify_raw_text(img, prompt: str, _fallback_model: str = None) -> str:
     """Same job as _gen_groq_raw_text but via Gemini — used to get a second,
     provider-diverse opinion on missed-content verification. Tries EVERY
     live Gemini key before giving up (2026-08-26 fix: previously only
@@ -5675,7 +5675,11 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
     available — /extra must never touch another model while Gemini is
     alive). Best-effort: empty string only after all keys fail, never
     raises (caller treats empty as 'nothing extra found' / triggers Groq
-    fallback)."""
+    fallback).
+
+    2026-10-24: before giving up entirely, retries once more against
+    gemini-3.5-flash-lite -- a separate free-tier quota bucket from
+    gemini-3.6-flash (same provider, no Groq touched)."""
     try:
         if not key_rotator.keys:
             return ""
@@ -5683,19 +5687,25 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
         from google.genai import types
         from pdf_handler import image_to_base64, _is_gemini_key_exhausted_today
         img_b64 = image_to_base64(img)
-        _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True) or key_rotator.keys
-        _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
-        if not _live:
-            logger.warning(f"[GeminiVerify] all {len(_ordered)} Gemini keys already known daily-exhausted — retrying them anyway (Google resets may have happened) but this is likely why /extra fell to Groq")
-        keys_to_try = _live if _live else _ordered
+        if _fallback_model is not None:
+            # Separate quota bucket from gemini-3.6-flash -- the shared
+            # daily-exhausted flag (keyed by raw key only, no model) does
+            # not apply here, so use the full unfiltered key list.
+            keys_to_try = list(key_rotator.keys)
+        else:
+            _ordered = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True) or key_rotator.keys
+            _live = [k for k in _ordered if not _is_gemini_key_exhausted_today(k)]
+            if not _live:
+                logger.warning(f"[GeminiVerify] all {len(_ordered)} Gemini keys already known daily-exhausted — retrying them anyway (Google resets may have happened) but this is likely why /extra fell to Groq")
+            keys_to_try = _live if _live else _ordered
 
-        def _call(key):
+        def _call(key, model_name="gemini-3.6-flash"):
             client = gai.Client(
                 api_key=key,
                 http_options=types.HttpOptions(timeout=38000)
             )
             return client.models.generate_content(
-                model="gemini-3.6-flash",
+                model=model_name,
                 contents=[
                     types.Part.from_text(text=prompt),
                     types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg")
@@ -5711,7 +5721,10 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
             try:
                 _timeout = 40 if idx == 0 else 20
                 async with key_rotator.throttled_call(key=key):
-                    response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=_timeout)
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(_call, key, _fallback_model or "gemini-3.6-flash"),
+                        timeout=_timeout
+                    )
                 key_rotator.mark_healthy(key)
                 return response.text or ""
             except asyncio.TimeoutError:
@@ -5722,7 +5735,11 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
                 err_str = _gemini_full_error_text(e)
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                     daily = "PerDay" in err_str
-                    key_rotator.mark_rate_limited(key, daily_exhausted=daily)
+                    # Don't poison the shared per-key flag with the
+                    # fallback model's own exhaustion -- it's a separate
+                    # quota bucket from gemini-3.6-flash.
+                    if _fallback_model is None:
+                        key_rotator.mark_rate_limited(key, daily_exhausted=daily)
                 elif ("SUSPENDED" in err_str.upper() or "API_KEY_INVALID" in err_str.upper()
                       or "UNAUTHENTICATED" in err_str.upper() or "ACCOUNT_STATE_INVALID" in err_str.upper()
                       or "401" in err_str):
@@ -5731,7 +5748,10 @@ async def _gemini_verify_raw_text(img, prompt: str) -> str:
                     _dead_accounts.add(key_rotator.account_of(key))
                 logger.warning(f"[GeminiVerify] key {key[:12]}... failed, trying next key: {e}")
                 continue
-        logger.warning(f"[GeminiVerify] all {len(keys_to_try)} Gemini key(s) failed — returning empty")
+        if _fallback_model is None:
+            logger.warning(f"[GeminiVerify] all {len(keys_to_try)} gemini-3.6-flash key(s) failed — retrying with gemini-3.5-flash-lite (separate quota)")
+            return await _gemini_verify_raw_text(img, prompt, _fallback_model="gemini-3.5-flash-lite")
+        logger.warning(f"[GeminiVerify] all {len(keys_to_try)} Gemini key(s) failed (incl. fallback model) — returning empty")
         return ""
     except Exception as e:
         logger.warning(f"[GeminiVerify] failed: {e}")
@@ -16129,21 +16149,25 @@ async def _extra_gen_from_images_batch(imgs: list, topic: str) -> dict:
         return {}
 
 
-async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
+async def _dagano_gemini_raw_multi(imgs: list, prompt: str, _fallback_model: str = None) -> str:
     """/dagano's OWN multi-image Gemini caller -- fully independent of
     _qbm_gemini_raw_multi (no shared call), so /dagano's token-limit and
     behavior can't be changed by edits elsewhere. Sets an EXPLICIT
     max_output_tokens (8192) -- enough for a page-sized response while
     keeping generation inside Google's request deadline. Gemini ONLY --
-    no Groq/OpenRouter fallback."""
+    no Groq/OpenRouter fallback.
+
+    2026-10-24: before giving up entirely, retries once more against
+    gemini-3.5-flash-lite -- a separate free-tier quota bucket from
+    gemini-3.6-flash (still Gemini-only, no other provider touched)."""
     try:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
             logger.warning("[Dagano] no Gemini keys configured")
             return ""
-        if all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
-            logger.warning("[Dagano] all Gemini keys already known daily-exhausted")
-            return ""
+        if _fallback_model is None and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys):
+            logger.warning("[Dagano] all gemini-3.6-flash keys already known daily-exhausted — retrying with gemini-3.5-flash-lite (separate quota)")
+            return await _dagano_gemini_raw_multi(imgs, prompt, _fallback_model="gemini-3.5-flash-lite")
         from google import genai as gai
         from google.genai import types
         img_bytes_list = []
@@ -16151,7 +16175,7 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
             b64 = image_to_base64(img)
             img_bytes_list.append(base64.b64decode(b64))
 
-        def _call(key):
+        def _call(key, model_name="gemini-3.6-flash"):
             client = gai.Client(
                 api_key=key,
                 http_options=types.HttpOptions(timeout=38000)
@@ -16160,16 +16184,22 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
             for ib in img_bytes_list:
                 parts.append(types.Part.from_bytes(data=ib, mime_type="image/jpeg"))
             return client.models.generate_content(
-                model="gemini-3.6-flash",
+                model=model_name,
                 contents=parts,
                 config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=8192)
             )
 
-        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True) or key_rotator.keys
+        if _fallback_model is not None:
+            # Separate quota bucket from gemini-3.6-flash -- the shared
+            # daily-exhausted flag (keyed by raw key only, no model) does
+            # not apply, so use the full unfiltered key list.
+            keys_to_try = list(key_rotator.keys)
+        else:
+            keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True) or key_rotator.keys
+            _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
+            if _live:
+                keys_to_try = _live
         _dead_accounts = set()
-        _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
-        if _live:
-            keys_to_try = _live
         # 2026-08-22: try ALL live keys -- any single key's own
         # quota could be the one that succeeds. Timeout 25-40s range so
         # each key gets a fair shot while still failing fast on dead keys.
@@ -16182,7 +16212,10 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
             try:
                 _dagano_timeout = 40 if idx == 0 else 25
                 async with key_rotator.throttled_call(key=key):
-                    response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=_dagano_timeout)
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(_call, key, _fallback_model or "gemini-3.6-flash"),
+                        timeout=_dagano_timeout
+                    )
                 key_rotator.mark_healthy(key)
                 finish_reason = None
                 try:
@@ -16216,7 +16249,10 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                             retry_s = int(rd_match.group(1))
                     except Exception:
                         pass
-                    key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
+                    # Don't poison the shared per-key flag with the
+                    # fallback model's own exhaustion -- separate bucket.
+                    if _fallback_model is None:
+                        key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[Dagano] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
                 if _is_auth_ban_error(full_msg):
@@ -16227,7 +16263,10 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str) -> str:
                     continue
                 logger.warning(f"[Dagano] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
-        logger.warning("[Dagano] All Gemini keys exhausted — no Groq fallback (Gemini-only mode)")
+        if _fallback_model is None:
+            logger.warning("[Dagano] All gemini-3.6-flash keys exhausted — retrying with gemini-3.5-flash-lite (separate quota)")
+            return await _dagano_gemini_raw_multi(imgs, prompt, _fallback_model="gemini-3.5-flash-lite")
+        logger.warning("[Dagano] All Gemini keys exhausted (incl. fallback model) — no Groq fallback (Gemini-only mode)")
         return ""
     except Exception as e:
         logger.warning(f"[Dagano] Gemini multi-image raw call failed: {e}")
@@ -26798,7 +26837,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         return ""
 
 
-async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = False) -> str:
+async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = False, _fallback_model: str = None) -> str:
     """Multi-image variant of _qbm_gemini_raw -- sends several page images
     in ONE Gemini call instead of one call per image, used by /bio's
     batched heading-scan (_bio_apply_heading_scan) to cut per-page API
@@ -26809,13 +26848,18 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
 
     gemini_only (default False): when True, skips the Groq fallback
     entirely and returns "" instead -- used by /chem's gemini_only
-    callers (per user request 2026-09-04)."""
+    callers (per user request 2026-09-04).
+
+    2026-10-24: in both branches, before truly giving up, retries once
+    more against gemini-3.5-flash-lite -- a separate free-tier quota
+    bucket from gemini-3.6-flash (still Gemini, Groq behavior unchanged
+    either way)."""
     _bump_ai_call_count(_current_job_chat_id_ctx.get(), model="Gemini")
     try:
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today, _qbm_page_used_accounts_ctx
         if not key_rotator.keys:
             return "" if gemini_only else (await _gen_groq_raw_text(imgs[0], prompt) if imgs else "")
-        _all_marked_exhausted = all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
+        _all_marked_exhausted = _fallback_model is None and all(_is_gemini_key_exhausted_today(k) for k in key_rotator.keys)
         if _all_marked_exhausted:
             # Don't blind-trust the in-memory/D1 exhaustion flag -- if it was
             # ever set wrongly (bad D1 rehydrate, a non-quota error
@@ -26833,7 +26877,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
             b64 = image_to_base64(img)
             img_bytes_list.append(base64.b64decode(b64))
 
-        def _call(key):
+        def _call(key, model_name="gemini-3.6-flash"):
             client = gai.Client(
                 api_key=key,
                 http_options=types.HttpOptions(timeout=38000)
@@ -26842,7 +26886,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
             for ib in img_bytes_list:
                 parts.append(types.Part.from_bytes(data=ib, mime_type="image/jpeg"))
             return client.models.generate_content(
-                model="gemini-3.6-flash",
+                model=model_name,
                 contents=parts,
                 config=types.GenerateContentConfig(
                     temperature=0.1,
@@ -26851,9 +26895,15 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
             )
 
         _avoid_accts_multi = _qbm_page_used_accounts_ctx.get() or set()
-        keys_to_try = key_rotator.ordered_keys_avoiding_accounts(_avoid_accts_multi, offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
+        if _fallback_model is not None:
+            # Separate quota bucket from gemini-3.6-flash -- the shared
+            # daily-exhausted flag (keyed by raw key only, no model) does
+            # not apply, so use the full unfiltered key list.
+            keys_to_try = list(key_rotator.keys)
+        else:
+            keys_to_try = key_rotator.ordered_keys_avoiding_accounts(_avoid_accts_multi, offset=_qbm_key_offset_ctx.get()) or key_rotator.keys
         _dead_accounts = set()
-        _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
+        _live = [k for k in keys_to_try if _fallback_model is not None or not _is_gemini_key_exhausted_today(k)]
         if _live:
             keys_to_try = _live
         elif _all_marked_exhausted:
@@ -26887,7 +26937,10 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
             key_rotator.record_call(key)
             try:
                 async with key_rotator.throttled_call(key=key):
-                    response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=40)
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(_call, key, _fallback_model or "gemini-3.6-flash"),
+                        timeout=40
+                    )
                 key_rotator.mark_healthy(key)
                 _used_set_multi = _qbm_page_used_accounts_ctx.get()
                 if _used_set_multi is not None:
@@ -26923,7 +26976,10 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                             retry_s = int(rd_match.group(1))
                     except Exception:
                         pass
-                    key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
+                    # Don't poison the shared per-key flag with the
+                    # fallback model's own exhaustion -- separate bucket.
+                    if _fallback_model is None:
+                        key_rotator.mark_rate_limited(key, daily_exhausted=daily, retry_after_seconds=retry_s)
                     logger.warning(f"[QBM] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key | raw_error={full_msg[:1500]}")
                     continue
                 if _is_auth_ban_error(full_msg):
@@ -26936,24 +26992,31 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                     logger.warning(f"[QBM-diag] Gemini key {key[:12]}... (multi-image) response.text accessor FAILED (likely SAFETY/RECITATION/MAX_TOKENS block, not quota): {full_msg[:800]}")
                 logger.warning(f"[QBM] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
+        if _fallback_model is None:
+            logger.warning("[QBM] All gemini-3.6-flash keys exhausted (multi-image) — retrying with gemini-3.5-flash-lite (separate quota)")
+            return await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash-lite")
         if gemini_only:
-            logger.warning(f"[QBM] All {len(keys_to_try)} attempted Gemini keys failed (gemini_only=True, no fallback) — returning empty")
+            logger.warning(f"[QBM] All {len(keys_to_try)} attempted Gemini keys failed (incl. fallback model, gemini_only=True, no Groq) — returning empty")
             return ""
-        logger.warning("[QBM] All Gemini keys exhausted — falling back to Groq vision (first image only)")
+        logger.warning("[QBM] All Gemini keys exhausted (incl. fallback model) — falling back to Groq vision (first image only)")
         return await _gen_groq_raw_text(imgs[0], prompt) if imgs else ""
     except Exception as e:
         logger.warning(f"[QBM] Gemini multi-image raw call failed: {e}")
         return "" if gemini_only else (await _gen_groq_raw_text(imgs[0], prompt) if imgs else "")
 
 
-async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False) -> str:
+async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False, _fallback_model: str = None) -> str:
     """Text-only Gemini call (no image) for /ai's explanation generation.
     Same key-rotation/exhaustion handling as _qbm_gemini_raw, minus the
     image part -- tries every non-exhausted key in order before giving up.
 
     gemini_only (default False): when True, skips the Groq fallback at the
     end entirely and returns "" instead -- used by /qbm's gemini_only
-    callers so this shared utility doesn't silently reintroduce Groq."""
+    callers so this shared utility doesn't silently reintroduce Groq.
+
+    2026-10-24: before giving up (either branch), retries once more
+    against gemini-3.5-flash-lite -- a separate free-tier quota bucket
+    from gemini-3.6-flash (still Gemini, Groq behavior unchanged)."""
     try:
         from pdf_handler import key_rotator, _is_gemini_key_exhausted_today
         if not key_rotator.keys:
@@ -26961,22 +27024,28 @@ async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False) -> str:
         from google import genai as gai
         from google.genai import types
 
-        def _call(key):
+        def _call(key, model_name="gemini-3.6-flash"):
             client = gai.Client(
                 api_key=key,
                 http_options=types.HttpOptions(timeout=38000)
             )
             return client.models.generate_content(
-                model="gemini-3.6-flash",
+                model=model_name,
                 contents=[types.Part.from_text(text=prompt)],
                 config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=16384)
             )
 
-        keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True) or key_rotator.keys
+        if _fallback_model is not None:
+            # Separate quota bucket from gemini-3.6-flash -- the shared
+            # daily-exhausted flag (keyed by raw key only, no model) does
+            # not apply, so use the full unfiltered key list.
+            keys_to_try = list(key_rotator.keys)
+        else:
+            keys_to_try = key_rotator.ordered_keys(offset=_qbm_key_offset_ctx.get(), healthiest_first=True) or key_rotator.keys
+            _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
+            if _live:
+                keys_to_try = _live
         _dead_accounts = set()
-        _live = [k for k in keys_to_try if not _is_gemini_key_exhausted_today(k)]
-        if _live:
-            keys_to_try = _live
         for _ki, key in enumerate(keys_to_try):
             if is_cancelled():
                 return ""
@@ -26991,14 +27060,20 @@ async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False) -> str:
             key_rotator.record_call(key)
             try:
                 async with key_rotator.throttled_call(key=key):
-                    response = await asyncio.wait_for(asyncio.to_thread(_call, key), timeout=150)
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(_call, key, _fallback_model or "gemini-3.6-flash"),
+                        timeout=150
+                    )
                 key_rotator.mark_healthy(key)
                 return response.text or ""
             except Exception as e:
                 msg = str(e)
                 if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
                     daily = "PerDay" in msg
-                    key_rotator.mark_rate_limited(key, daily_exhausted=daily)
+                    # Don't poison the shared per-key flag with the
+                    # fallback model's own exhaustion -- separate bucket.
+                    if _fallback_model is None:
+                        key_rotator.mark_rate_limited(key, daily_exhausted=daily)
                     logger.warning(f"[AI] Gemini key {key[:12]}... {'daily-exhausted' if daily else 'rate-limited'}, trying next key")
                     continue
                 if _is_auth_ban_error(msg):
@@ -27009,7 +27084,10 @@ async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False) -> str:
                     continue
                 logger.warning(f"[AI] Gemini key {key[:12]}... non-quota error, trying next key: {e}")
                 continue
-        logger.warning("[AI] all Gemini keys exhausted/failed -- falling back to Groq text")
+        if _fallback_model is None:
+            logger.warning("[AI] all gemini-3.6-flash keys exhausted/failed -- retrying with gemini-3.5-flash-lite (separate quota)")
+            return await _ai_gemini_text_call(prompt, gemini_only=gemini_only, _fallback_model="gemini-3.5-flash-lite")
+        logger.warning("[AI] all Gemini keys exhausted/failed (incl. fallback model) -- falling back to Groq text")
         if gemini_only:
             return ""
         return await _qbm_groq_text_call(prompt)
@@ -31886,10 +31964,10 @@ Return ONLY the JSON array, nothing else."""
                 img_b64 = image_to_base64(img)
                 img_bytes_local = base64.b64decode(img_b64)
 
-                def _call(k):
+                def _call(k, model_name="gemini-3.6-flash"):
                     client = gai.Client(api_key=k, http_options=types.HttpOptions(timeout=38000))
                     return client.models.generate_content(
-                        model="gemini-3.6-flash",
+                        model=model_name,
                         contents=[
                             types.Part.from_text(text=prompt),
                             types.Part.from_bytes(data=img_bytes_local, mime_type="image/jpeg")
@@ -31901,18 +31979,23 @@ Return ONLY the JSON array, nothing else."""
                 # overload, timeout) on one key was silently returning {}
                 # for the whole page, leaving every MCQ unresolved even
                 # when a real answer-key table was on the page.
-                for _gk in _gkeys[:8]:
-                    try:
-                        response = await asyncio.wait_for(asyncio.to_thread(_call, _gk), timeout=40)
-                        result_json = _qbm_parse_bare_json_array(response.text)
-                        if result_json is not None:
-                            break
-                    except Exception as _e_inner:
-                        _msg_inner = str(_e_inner).upper()
-                        if any(t in _msg_inner for t in ("429", "RESOURCE_EXHAUSTED", "503", "504", "UNAVAILABLE", "DEADLINE_EXCEEDED")):
+                # 2026-10-24: also retry gemini-3.5-flash-lite (separate
+                # free-tier quota bucket) if gemini-3.6-flash exhausts.
+                for _model_pass in ("gemini-3.6-flash", "gemini-3.5-flash-lite"):
+                    if result_json is not None:
+                        break
+                    for _gk in _gkeys[:8]:
+                        try:
+                            response = await asyncio.wait_for(asyncio.to_thread(_call, _gk, _model_pass), timeout=40)
+                            result_json = _qbm_parse_bare_json_array(response.text)
+                            if result_json is not None:
+                                break
+                        except Exception as _e_inner:
+                            _msg_inner = str(_e_inner).upper()
+                            if any(t in _msg_inner for t in ("429", "RESOURCE_EXHAUSTED", "503", "504", "UNAVAILABLE", "DEADLINE_EXCEEDED")):
+                                continue
+                            logger.warning(f"[QBM] answer-key scan gemini key {_gk[:12]}... failed ({_model_pass}): {_e_inner}")
                             continue
-                        logger.warning(f"[QBM] answer-key scan gemini key {_gk[:12]}... failed: {_e_inner}")
-                        continue
             except Exception as e:
                 logger.warning(f"[QBM] answer-key scan gemini fallback failed: {e}")
 
