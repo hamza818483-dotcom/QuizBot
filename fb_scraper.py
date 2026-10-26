@@ -15,6 +15,8 @@ import os
 import re
 import io
 import json
+import time
+import random
 import asyncio
 import logging
 import httpx
@@ -27,11 +29,48 @@ FB_EMAIL = os.environ.get("FB_EMAIL", "")
 FB_PASSWORD = os.environ.get("FB_PASSWORD", "")
 FB_COOKIE_PATH = os.environ.get("FB_COOKIE_PATH", "/tmp/fb_session.json")
 
+# --- Safety limits (tunable via env) ---
+FB_MIN_COOLDOWN_SEC = int(os.environ.get("FB_MIN_COOLDOWN_SEC", "45"))   # min gap between any two scrapes
+FB_DAILY_CAP = int(os.environ.get("FB_DAILY_CAP", "25"))                 # max scrapes per rolling 24h
+
 _LOGIN_LOCK = asyncio.Lock()
+_RATE_LOCK = asyncio.Lock()
+_last_scrape_ts = 0.0
+_daily_timestamps = []  # epoch seconds of past scrapes, pruned to last 24h
 
 
 class FBScrapeError(Exception):
     pass
+
+
+async def _enforce_rate_limit():
+    """Global cooldown + rolling 24h cap, shared across all users of the bot."""
+    global _last_scrape_ts
+    async with _RATE_LOCK:
+        now = time.time()
+        # prune timestamps older than 24h
+        _daily_timestamps[:] = [t for t in _daily_timestamps if now - t < 86400]
+
+        if len(_daily_timestamps) >= FB_DAILY_CAP:
+            raise FBScrapeError(
+                f"⚠️ আজকের জন্য সর্বোচ্চ {FB_DAILY_CAP} বার scrape limit শেষ — অ্যাকাউন্ট সুরক্ষার জন্য। "
+                f"কিছুক্ষণ পর আবার চেষ্টা করুন।"
+            )
+
+        elapsed = now - _last_scrape_ts
+        if elapsed < FB_MIN_COOLDOWN_SEC:
+            wait_left = round(FB_MIN_COOLDOWN_SEC - elapsed)
+            raise FBScrapeError(
+                f"⏳ একটু ধীরে — পরবর্তী request-এর জন্য আরও {wait_left}s অপেক্ষা করুন (অ্যাকাউন্ট সুরক্ষার জন্য cooldown)।"
+            )
+
+        _last_scrape_ts = now
+        _daily_timestamps.append(now)
+
+
+async def _human_delay(min_ms: int, max_ms: int):
+    """Randomized jitter instead of fixed waits, to avoid predictable bot timing."""
+    await asyncio.sleep(random.uniform(min_ms, max_ms) / 1000)
 
 
 async def _ensure_logged_in(context, page):
@@ -52,7 +91,7 @@ async def _ensure_logged_in(context, page):
         await page.fill("input[name='email']", FB_EMAIL)
         await page.fill("input[name='pass']", FB_PASSWORD)
         await page.click("button[name='login']")
-        await page.wait_for_timeout(5000)
+        await _human_delay(4000, 6500)
 
         if "checkpoint" in page.url or "login" in page.url:
             raise FBScrapeError(
@@ -98,7 +137,16 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
             await _ensure_logged_in(context, page)
 
             await page.goto(post_url, wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(3000)
+            await _human_delay(2500, 4500)
+
+            # Reject anything that isn't a plain public post/photo view (checkpoint,
+            # login wall, or a restricted/private post all redirect or show a wall).
+            current_url = page.url
+            if "checkpoint" in current_url or "login" in current_url:
+                raise FBScrapeError(
+                    "❌ Facebook login/checkpoint wall এসেছে — সম্ভবত অ্যাকাউন্ট flagged, বা post টি private/restricted। "
+                    "শুধু public post ব্যবহার করুন।"
+                )
 
             # Try opening the first photo to enter the photo-viewer (carousel) —
             # this exposes high-res "scontent" URLs, more reliable than feed thumbnails.
@@ -106,7 +154,7 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
                 photo_link = page.locator("a[href*='/photo/'], a[href*='/photos/']").first
                 if await photo_link.count() > 0:
                     await photo_link.click(timeout=5000)
-                    await page.wait_for_timeout(2000)
+                    await _human_delay(1800, 3000)
 
                     seen = set()
                     for _ in range(max_images):
@@ -122,7 +170,7 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
                             break
                         try:
                             await next_btn.click(timeout=3000)
-                            await page.wait_for_timeout(1200)
+                            await _human_delay(900, 1800)
                         except Exception:
                             break
                     if urls:
@@ -141,7 +189,7 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
                         seen.add(src)
                         urls.append(src)
                 await page.mouse.wheel(0, 1500)
-                await page.wait_for_timeout(1000)
+                await _human_delay(800, 1600)
                 if len(urls) >= max_images:
                     break
 
@@ -195,6 +243,7 @@ async def fb_post_to_pdf(post_url: str, max_images: int = 60) -> tuple:
     Full pipeline: post URL -> PDF bytes.
     Returns (pdf_bytes, image_count).
     """
+    await _enforce_rate_limit()
     urls = await extract_image_urls(post_url, max_images=max_images)
     if not urls:
         raise FBScrapeError("কোনো ছবি পাওয়া যায়নি — post টা public কিনা বা link সঠিক কিনা চেক করুন।")
