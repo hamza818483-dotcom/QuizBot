@@ -3,7 +3,17 @@ fb_export_session.py — run this LOCALLY (not on the server) to manually log
 into Facebook in a real visible browser, solve any 2FA/checkpoint yourself,
 then export the logged-in session as JSON.
 
-Usage:
+No PC? Use Kiwi Browser (Android) instead of this script:
+    1. Install a cookie-export extension in Kiwi (Menu > Extensions >
+       from Chrome Web Store): "Cookie-Editor" or "EditThisCookie".
+    2. In Kiwi, go to facebook.com and log in manually (solve any
+       2FA/checkpoint).
+    3. Tap the extension icon > Export (copies cookie JSON, a list like
+       [{"name":...,"value":...,"domain":...}, ...]).
+    4. Paste that whole JSON as the FB_SESSION_COOKIE env var on the
+       server — the bot auto-converts this format, no extra steps needed.
+
+Usage (PC path):
     pip install playwright
     playwright install chromium
     python fb_export_session.py

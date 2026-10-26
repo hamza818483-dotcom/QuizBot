@@ -76,14 +76,50 @@ async def _human_delay(min_ms: int, max_ms: int):
     await asyncio.sleep(random.uniform(min_ms, max_ms) / 1000)
 
 
+def _cookie_samesite_fix(v):
+    v = (v or "Lax").capitalize()
+    return v if v in ("Strict", "Lax", "None") else "Lax"
+
+
+def _normalize_session_json(raw: str) -> str:
+    """Accepts either a Playwright storage_state JSON (passed through as-is)
+    or a raw browser-extension cookie export (EditThisCookie / Cookie-Editor
+    style: a plain list of {name, value, domain, path, expirationDate,
+    httpOnly, secure, sameSite, ...}) and converts the latter into a minimal
+    valid storage_state object Playwright can load."""
+    data = json.loads(raw)
+    if isinstance(data, dict) and "cookies" in data:
+        return raw  # already storage_state format
+    if isinstance(data, list):
+        cookies = []
+        for c in data:
+            if not isinstance(c, dict) or "name" not in c or "value" not in c:
+                continue
+            expires = c.get("expirationDate")
+            cookies.append({
+                "name": c["name"],
+                "value": c["value"],
+                "domain": c.get("domain") or ".facebook.com",
+                "path": c.get("path") or "/",
+                "expires": expires if isinstance(expires, (int, float)) else -1,
+                "httpOnly": bool(c.get("httpOnly", False)),
+                "secure": bool(c.get("secure", True)),
+                "sameSite": _cookie_samesite_fix(c.get("sameSite")),
+            })
+        return json.dumps({"cookies": cookies, "origins": []})
+    raise ValueError("Unrecognized FB_SESSION_COOKIE format")
+
+
 async def _ensure_logged_in(context, page):
     """Load cached session if valid; otherwise log in fresh and cache it."""
     # Seed cookie file from env on first use (survives restarts without
-    # needing a writable persistent disk).
+    # needing a writable persistent disk). Accepts either a Playwright
+    # storage_state export or a raw extension cookie-array export.
     if FB_SESSION_COOKIE and not os.path.exists(FB_COOKIE_PATH):
         try:
+            normalized = _normalize_session_json(FB_SESSION_COOKIE)
             with open(FB_COOKIE_PATH, "w") as f:
-                f.write(FB_SESSION_COOKIE)
+                f.write(normalized)
         except Exception as e:
             logger.warning(f"[fbimg] failed to seed FB_SESSION_COOKIE to {FB_COOKIE_PATH}: {e}")
 
