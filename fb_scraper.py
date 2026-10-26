@@ -81,12 +81,50 @@ def _cookie_samesite_fix(v):
     return v if v in ("Strict", "Lax", "None") else "Lax"
 
 
+def _parse_netscape_cookie_txt(raw: str) -> list:
+    """Parses a Netscape/Mozilla cookie-jar .txt export (tab-separated:
+    domain, include_subdomains, path, secure, expires, name, value),
+    keeping only facebook.com cookies (export may contain all sites)."""
+    cookies = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) != 7:
+            continue
+        domain, _subdomains, path, secure, expires, name, value = parts
+        if "facebook.com" not in domain:
+            continue
+        try:
+            expires_f = float(expires)
+        except ValueError:
+            expires_f = -1
+        cookies.append({
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": path or "/",
+            "expires": expires_f,
+            "httpOnly": False,
+            "secure": secure.upper() == "TRUE",
+            "sameSite": "Lax",
+        })
+    return cookies
+
+
 def _normalize_session_json(raw: str) -> str:
-    """Accepts either a Playwright storage_state JSON (passed through as-is)
-    or a raw browser-extension cookie export (EditThisCookie / Cookie-Editor
-    style: a plain list of {name, value, domain, path, expirationDate,
-    httpOnly, secure, sameSite, ...}) and converts the latter into a minimal
-    valid storage_state object Playwright can load."""
+    """Accepts a Playwright storage_state JSON (passed through as-is), a
+    raw browser-extension cookie export (EditThisCookie / Cookie-Editor
+    style JSON list), or a Netscape cookie-jar .txt export, and converts
+    whichever was given into a minimal valid storage_state object
+    Playwright can load."""
+    stripped = raw.strip()
+    if stripped.startswith("# Netscape") or (stripped and not stripped.startswith(("{", "["))):
+        cookies = _parse_netscape_cookie_txt(raw)
+        if not cookies:
+            raise ValueError("No facebook.com cookies found in Netscape cookie file")
+        return json.dumps({"cookies": cookies, "origins": []})
     data = json.loads(raw)
     if isinstance(data, dict) and "cookies" in data:
         return raw  # already storage_state format
