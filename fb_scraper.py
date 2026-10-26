@@ -90,7 +90,29 @@ async def _ensure_logged_in(context, page):
         await page.goto("https://www.facebook.com/login", wait_until="domcontentloaded", timeout=30000)
         await page.fill("input[name='email']", FB_EMAIL)
         await page.fill("input[name='pass']", FB_PASSWORD)
-        await page.click("button[name='login']")
+
+        login_selectors = [
+            "button[name='login']",
+            "button[data-testid='royal_login_button']",
+            "#loginbutton",
+            "button[type='submit']",
+        ]
+        clicked = False
+        for sel in login_selectors:
+            try:
+                await page.locator(sel).click(timeout=8000)
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            # Last resort: submit the password field directly
+            await page.press("input[name='pass']", "Enter")
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
         await _human_delay(4000, 6500)
 
         if "checkpoint" in page.url or "login" in page.url:
