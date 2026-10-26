@@ -261,6 +261,17 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
         try:
             await _ensure_logged_in(context, page)
 
+            # A real user lands on the home feed after opening FB, not
+            # straight on a deep post link -- warm up there briefly with a
+            # bit of idle scroll before navigating to the actual post.
+            try:
+                await page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=20000)
+                await _human_delay(1500, 3000)
+                await page.mouse.wheel(0, random.randint(300, 700))
+                await _human_delay(800, 1800)
+            except Exception:
+                pass
+
             await page.goto(post_url, wait_until="domcontentloaded", timeout=45000)
             await _human_delay(2500, 4500)
 
@@ -278,6 +289,8 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
             try:
                 photo_link = page.locator("a[href*='/photo/'], a[href*='/photos/']").first
                 if await photo_link.count() > 0:
+                    await photo_link.hover(timeout=3000)
+                    await _human_delay(300, 700)
                     await photo_link.click(timeout=5000)
                     await _human_delay(1800, 3000)
 
@@ -294,8 +307,10 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
                         if await next_btn.count() == 0:
                             break
                         try:
+                            await next_btn.hover(timeout=2000)
+                            await _human_delay(150, 400)
                             await next_btn.click(timeout=3000)
-                            await _human_delay(900, 1800)
+                            await _human_delay(900, 2200)
                         except Exception:
                             break
                     if urls:
@@ -313,8 +328,14 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
                     if src and src not in seen and "scontent" in src:
                         seen.add(src)
                         urls.append(src)
-                await page.mouse.wheel(0, 1500)
-                await _human_delay(800, 1600)
+                # Vary scroll distance/speed like a real user instead of a
+                # fixed robotic jump, with an occasional longer pause (as if
+                # reading a caption).
+                await page.mouse.wheel(0, random.randint(900, 1900))
+                if random.random() < 0.25:
+                    await _human_delay(1800, 3200)
+                else:
+                    await _human_delay(700, 1700)
                 if len(urls) >= max_images:
                     break
 
