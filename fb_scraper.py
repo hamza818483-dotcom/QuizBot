@@ -257,14 +257,15 @@ async def extract_image_urls(post_url: str, max_images: int = 60, progress_cb=No
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             ),
         )
-        # Hide the most common headless/automation tells that FB's
-        # bot-detection checks for (navigator.webdriver, missing plugins,
-        # inconsistent languages).
-        await context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-            "Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});"
-            "Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});"
-        )
+        # Comprehensive automation-fingerprint masking (navigator.webdriver,
+        # plugins, chrome runtime, WebGL vendor/renderer, permissions, etc.)
+        # -- replaces the old hand-rolled init_script with a maintained lib
+        # that covers far more detection points.
+        try:
+            from playwright_stealth import Stealth
+            await Stealth().apply_stealth_async(context)
+        except Exception as e:
+            logger.warning(f"[fbimg] stealth init failed (continuing without it): {e}")
         page = await context.new_page()
 
         try:
