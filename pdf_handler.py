@@ -297,6 +297,7 @@ class GeminiKeyRotator:
     # burst signature even when the account is under its concurrency cap.
 
     ACCOUNT_DAILY_CALL_CAP = 2000  # soft ceiling on total calls per account
+    KEY_DAILY_CALL_CAP = 20  # free-tier real per-key daily request cap
     # per rolling 24h. Free-tier keys used at sustained bot/commercial-scale
     # volume is itself a suspension trigger regardless of per-minute/burst
     # shaping -- this caps the aggregate daily footprint per Google account
@@ -384,6 +385,7 @@ class GeminiKeyRotator:
         self._key_first_seen = {}  # key -> unix ts first observed (D1-backed, rehydrated at startup)
         self._key_inflight = {}  # key -> current in-flight count (used only during warm-up)
         self._key_daily_calls = {}  # key -> list[float] rolling-24h call timestamps, for within-account balance
+        self._key_success_calls = {}  # key -> list[float] rolling-24h SUCCESSFUL call timestamps (quota-consuming only)
         self._load_keys()
 
     def warmup_days_elapsed(self, key: str) -> float:
@@ -1017,6 +1019,23 @@ class GeminiKeyRotator:
     def mark_healthy(self, key: str):
         self._cooldown_until.pop(key, None)
         _mark_gemini_key_healthy_today(key)
+        # Count only successful (quota-consuming) requests here, not every
+        # attempt (errors/timeouts/cancels often don't consume Google's
+        # quota) — so the proactive daily cap reflects real usage.
+        now = time.time()
+        cutoff = now - 86400
+        times = [t for t in self._key_success_calls.get(key, []) if t > cutoff]
+        times.append(now)
+        self._key_success_calls[key] = times
+        if len(times) >= self.KEY_DAILY_CALL_CAP:
+            _mark_gemini_key_exhausted_today(key)
+
+    def key_daily_success_count(self, key: str) -> int:
+        now = time.time()
+        cutoff = now - 86400
+        times = [t for t in self._key_success_calls.get(key, []) if t > cutoff]
+        self._key_success_calls[key] = times
+        return len(times)
 
 key_rotator = GeminiKeyRotator()
 
