@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 FB_EMAIL = os.environ.get("FB_EMAIL", "")
 FB_PASSWORD = os.environ.get("FB_PASSWORD", "")
 FB_COOKIE_PATH = os.environ.get("FB_COOKIE_PATH", "/tmp/fb_session.json")
+# Manually-exported session (storage_state JSON as a string) — bypasses
+# password login (and the 2FA/checkpoint wall) entirely when set.
+FB_SESSION_COOKIE = os.environ.get("FB_SESSION_COOKIE", "")
 
 # --- Safety limits (tunable via env) ---
 FB_MIN_COOLDOWN_SEC = int(os.environ.get("FB_MIN_COOLDOWN_SEC", "45"))   # min gap between any two scrapes
@@ -75,6 +78,15 @@ async def _human_delay(min_ms: int, max_ms: int):
 
 async def _ensure_logged_in(context, page):
     """Load cached session if valid; otherwise log in fresh and cache it."""
+    # Seed cookie file from env on first use (survives restarts without
+    # needing a writable persistent disk).
+    if FB_SESSION_COOKIE and not os.path.exists(FB_COOKIE_PATH):
+        try:
+            with open(FB_COOKIE_PATH, "w") as f:
+                f.write(FB_SESSION_COOKIE)
+        except Exception as e:
+            logger.warning(f"[fbimg] failed to seed FB_SESSION_COOKIE to {FB_COOKIE_PATH}: {e}")
+
     if os.path.exists(FB_COOKIE_PATH):
         try:
             await page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
