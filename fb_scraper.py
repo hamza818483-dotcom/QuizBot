@@ -221,9 +221,18 @@ def _normalize_fb_url(url: str) -> str:
     return url
 
 
-async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
-    """Open the FB post and collect full-resolution image URLs."""
+async def extract_image_urls(post_url: str, max_images: int = 60, progress_cb=None) -> list:
+    """Open the FB post and collect full-resolution image URLs.
+    progress_cb(stage: str, found: int, total_hint: int|None), if given, is
+    awaited on every state change so a caller can render a live dashboard."""
     from playwright.async_api import async_playwright
+
+    async def _report(stage, found=0, total_hint=None):
+        if progress_cb:
+            try:
+                await progress_cb(stage, found, total_hint)
+            except Exception:
+                pass
 
     post_url = _normalize_fb_url(post_url)
     urls = []
@@ -259,8 +268,10 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
         page = await context.new_page()
 
         try:
+            await _report("login")
             await _ensure_logged_in(context, page)
 
+            await _report("warmup")
             # A real user lands on the home feed after opening FB, not
             # straight on a deep post link -- warm up there briefly with a
             # bit of idle scroll before navigating to the actual post.
@@ -274,6 +285,7 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
 
             await page.goto(post_url, wait_until="domcontentloaded", timeout=45000)
             await _human_delay(2500, 4500)
+            await _report("opening_post")
 
             # Reject anything that isn't a plain public post/photo view (checkpoint,
             # login wall, or a restricted/private post all redirect or show a wall).
@@ -302,6 +314,7 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
                             if src and src not in seen and "scontent" in src:
                                 seen.add(src)
                                 urls.append(src)
+                        await _report("collecting", found=len(urls))
                         # advance carousel
                         next_btn = page.locator("div[aria-label='Next photo']").first
                         if await next_btn.count() == 0:
@@ -328,6 +341,7 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
                     if src and src not in seen and "scontent" in src:
                         seen.add(src)
                         urls.append(src)
+                await _report("collecting", found=len(urls))
                 # Vary scroll distance/speed like a real user instead of a
                 # fixed robotic jump, with an occasional longer pause (as if
                 # reading a caption).
@@ -384,19 +398,32 @@ def images_to_pdf_bytes(image_bytes_list: list) -> bytes:
     return img2pdf.convert(image_bytes_list)
 
 
-async def fb_post_to_pdf(post_url: str, max_images: int = 60) -> tuple:
+async def fb_post_to_pdf(post_url: str, max_images: int = 60, progress_cb=None) -> tuple:
     """
     Full pipeline: post URL -> PDF bytes.
     Returns (pdf_bytes, image_count).
+    progress_cb(stage, found, total_hint), if given, is awaited on every
+    stage change (login/warmup/opening_post/collecting/downloading/compiling)
+    for a caller-rendered live status.
     """
+    async def _report(stage, found=0, total_hint=None):
+        if progress_cb:
+            try:
+                await progress_cb(stage, found, total_hint)
+            except Exception:
+                pass
+
+    await _report("rate_limit_check")
     await _enforce_rate_limit()
-    urls = await extract_image_urls(post_url, max_images=max_images)
+    urls = await extract_image_urls(post_url, max_images=max_images, progress_cb=progress_cb)
     if not urls:
         raise FBScrapeError("কোনো ছবি পাওয়া যায়নি — post টা public কিনা বা link সঠিক কিনা চেক করুন।")
 
+    await _report("downloading", found=len(urls), total_hint=len(urls))
     img_bytes_list = await download_images(urls)
     if not img_bytes_list:
         raise FBScrapeError("ছবি download করা যায়নি।")
 
+    await _report("compiling", found=len(img_bytes_list), total_hint=len(urls))
     pdf_bytes = images_to_pdf_bytes(img_bytes_list)
     return pdf_bytes, len(img_bytes_list)
