@@ -33,8 +33,11 @@ FB_COOKIE_PATH = os.environ.get("FB_COOKIE_PATH", "/tmp/fb_session.json")
 FB_SESSION_COOKIE = os.environ.get("FB_SESSION_COOKIE", "")
 
 # --- Safety limits (tunable via env) ---
-FB_MIN_COOLDOWN_SEC = int(os.environ.get("FB_MIN_COOLDOWN_SEC", "45"))   # min gap between any two scrapes
-FB_DAILY_CAP = int(os.environ.get("FB_DAILY_CAP", "25"))                 # max scrapes per rolling 24h
+# Tightened defaults: a logged-in cookie session looks more like a real
+# account to Facebook than a fresh password login, so sustained automated
+# traffic on it is the main remaining flag risk -- slower pace reduces that.
+FB_MIN_COOLDOWN_SEC = int(os.environ.get("FB_MIN_COOLDOWN_SEC", "90"))   # min gap between any two scrapes
+FB_DAILY_CAP = int(os.environ.get("FB_DAILY_CAP", "12"))                 # max scrapes per rolling 24h
 
 _LOGIN_LOCK = asyncio.Lock()
 _RATE_LOCK = asyncio.Lock()
@@ -228,16 +231,30 @@ async def extract_image_urls(post_url: str, max_images: int = 60) -> list:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=[
+                "--no-sandbox", "--disable-dev-shm-usage",
+                # reduce automation fingerprint surface
+                "--disable-blink-features=AutomationControlled",
+            ],
         )
         storage_state = FB_COOKIE_PATH if os.path.exists(FB_COOKIE_PATH) else None
         context = await browser.new_context(
             storage_state=storage_state,
-            viewport={"width": 1280, "height": 1600},
+            viewport={"width": 1366, "height": 768},
+            locale="en-US",
+            timezone_id="Asia/Dhaka",
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             ),
+        )
+        # Hide the most common headless/automation tells that FB's
+        # bot-detection checks for (navigator.webdriver, missing plugins,
+        # inconsistent languages).
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            "Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});"
+            "Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});"
         )
         page = await context.new_page()
 
