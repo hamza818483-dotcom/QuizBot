@@ -36390,13 +36390,14 @@ async def handle_message(msg: dict):
             _spawn_command_task(uid, handle_poll_range_practice(msg, *_rng))
             return
 
-    # Plain Facebook post link পাঠালেই (কোনো command ছাড়া) auto /fbimg চালানো
-    if (is_private and text and not text.startswith("/")
-            and re.fullmatch(r"https?://(www\.|m\.)?facebook\.com/\S+", text.strip())):
-        fake_msg = dict(msg)
-        fake_msg["text"] = "/fbimg " + text.strip()
-        await handle_message(fake_msg)
-        return
+    # Facebook post link থাকলেই (extra text/caption সহ হলেও) auto /fbimg চালানো
+    if is_private and text and not text.startswith("/"):
+        _fb_m = re.search(r"https?://(www\.|m\.)?facebook\.com/\S+", text.strip())
+        if _fb_m:
+            fake_msg = dict(msg)
+            fake_msg["text"] = "/fbimg " + _fb_m.group(0)
+            await handle_message(fake_msg)
+            return
 
     # Plain t.me link পাঠালেই (কোনো command ছাড়া) auto-resolve করে ID দিয়ে দেওয়া
     if (is_private and text and not text.startswith("/")
