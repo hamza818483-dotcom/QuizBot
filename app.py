@@ -37185,6 +37185,30 @@ async def handle_message(msg: dict):
             logger.error(f"[Ping] error: {e}")
             await send_msg(chat_id, f"🏓 Pong! (stats error: {e})")
             await send_msg(chat_id, f"❌ /error check failed: {e}")
+    elif text.startswith("/fbimg"):
+        fb_url = text[len("/fbimg"):].strip()
+        if not fb_url:
+            await send_msg(chat_id, "ব্যবহার: /fbimg <facebook post link>")
+        elif not re.match(r"^https?://(www\.|m\.)?facebook\.com/", fb_url):
+            await send_msg(chat_id, "❌ সঠিক Facebook post link দিন।")
+        else:
+            _status_r = await send_msg(chat_id, "⏳ Post থেকে ছবি সংগ্রহ করা হচ্ছে...")
+            _status_id = _status_r.get("result", {}).get("message_id") if isinstance(_status_r, dict) else None
+            try:
+                from fb_scraper import fb_post_to_pdf, FBScrapeError
+                pdf_bytes, img_count = await fb_post_to_pdf(fb_url)
+                if _status_id:
+                    await edit_msg(chat_id, _status_id, f"✅ {img_count}টি ছবি পাওয়া গেছে — PDF বানানো হচ্ছে...")
+                await send_document(chat_id, pdf_bytes, filename="fb_images.pdf",
+                                    caption=f"📄 {img_count}টি ছবি থেকে তৈরি PDF",
+                                    mime_type="application/pdf")
+                if _status_id:
+                    await edit_msg(chat_id, _status_id, f"✅ সম্পন্ন — {img_count}টি ছবি")
+            except FBScrapeError as e:
+                await send_msg(chat_id, f"❌ {e}")
+            except Exception as e:
+                logger.error(f"[fbimg] error: {e}")
+                await send_msg(chat_id, f"❌ /fbimg failed: {e}")
 
 
 # ============================================================
