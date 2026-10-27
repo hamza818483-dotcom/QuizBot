@@ -1,0 +1,23 @@
+name: QuizBot Render Keepalive (b)
+
+on:
+  schedule:
+    - cron: "22,52 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: quizbot-keepalive-b
+  cancel-in-progress: false
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 32
+    steps:
+      - name: Ping every 3 minutes for ~29 minutes
+        run: |
+          end=$((SECONDS + 1740))
+          while [ $SECONDS -lt $end ]; do
+            curl -sS --max-time 60 -o /dev/null -w "%{http_code}\n" https://quizbot-s482.onrender.com/health || echo "ping failed (cold start?)"
+            sleep 180
+          done

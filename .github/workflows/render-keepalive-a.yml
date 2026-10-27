@@ -1,0 +1,28 @@
+name: QuizBot Render Keepalive (a)
+
+# GitHub cron often delays/drops runs (10-min gaps become 20-30 min), letting
+# the free Render instance sleep. This job stays alive ~29 min and pings
+# /health every 3 minutes itself; cron only restarts it every 30 min.
+# Two copies (a/b) are staggered so coverage overlaps. Read-only GET, no secrets.
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: quizbot-keepalive-a
+  cancel-in-progress: false
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 32
+    steps:
+      - name: Ping every 3 minutes for ~29 minutes
+        run: |
+          end=$((SECONDS + 1740))
+          while [ $SECONDS -lt $end ]; do
+            curl -sS --max-time 60 -o /dev/null -w "%{http_code}\n" https://quizbot-s482.onrender.com/health || echo "ping failed (cold start?)"
+            sleep 180
+          done
