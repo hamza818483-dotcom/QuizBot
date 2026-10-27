@@ -23,6 +23,23 @@ import string
 import re
 import html as _html_mod
 
+# RAM safety (small-RAM hosts, e.g. Render free 512MB): cap this process's
+# own address space so a runaway allocation (large PDF decode, stacked
+# parallel Gemini-image calls) raises a catchable MemoryError in that one
+# request/task instead of the OS OOM-killing the whole process (which drops
+# every in-flight user and restarts the bot). Best-effort: RLIMIT_AS isn't
+# available on Windows, and the platform may not honor it -- failures here
+# are silently ignored rather than crashing startup.
+try:
+    import resource as _resource
+    _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "450"))  # stay under Render's 512MB
+    _RAM_CAP_BYTES = _RAM_CAP_MB * 1024 * 1024
+    _soft, _hard = _resource.getrlimit(_resource.RLIMIT_AS)
+    _new_hard = _RAM_CAP_BYTES if (_hard == _resource.RLIM_INFINITY or _hard > _RAM_CAP_BYTES) else _hard
+    _resource.setrlimit(_resource.RLIMIT_AS, (_RAM_CAP_BYTES, _new_hard))
+except Exception:
+    pass
+
 def _html_escape(s: str) -> str:
     return _html_mod.escape(s or "", quote=False)
 
