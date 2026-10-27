@@ -9,8 +9,6 @@ pytesseract
 reportlab
 httpx
 websockets
-playwright
-playwright-stealth
 img2pdf
 python-dotenv
 fastapi

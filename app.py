@@ -36390,15 +36390,6 @@ async def handle_message(msg: dict):
             _spawn_command_task(uid, handle_poll_range_practice(msg, *_rng))
             return
 
-    # Facebook post link থাকলেই (extra text/caption সহ হলেও) auto /fbimg চালানো
-    if is_private and text and not text.startswith("/"):
-        _fb_m = re.search(r"https?://(www\.|m\.)?facebook\.com/\S+", text.strip())
-        if _fb_m:
-            fake_msg = dict(msg)
-            fake_msg["text"] = "/fbimg " + _fb_m.group(0)
-            await handle_message(fake_msg)
-            return
-
     # Plain t.me link পাঠালেই (কোনো command ছাড়া) auto-resolve করে ID দিয়ে দেওয়া
     if (is_private and text and not text.startswith("/")
             and re.fullmatch(r'(https?://)?t\.me/\S+', text)):
@@ -37194,69 +37185,6 @@ async def handle_message(msg: dict):
             logger.error(f"[Ping] error: {e}")
             await send_msg(chat_id, f"🏓 Pong! (stats error: {e})")
             await send_msg(chat_id, f"❌ /error check failed: {e}")
-    elif text.startswith("/fbimg"):
-        fb_url = text[len("/fbimg"):].strip()
-        if not fb_url:
-            await send_msg(chat_id, "ব্যবহার: /fbimg <facebook post link>")
-        elif not re.match(r"^https?://(www\.|m\.)?facebook\.com/", fb_url):
-            await send_msg(chat_id, "❌ সঠিক Facebook post link দিন।")
-        else:
-            _fb_start = time.time()
-            _status_r = await send_msg(chat_id, "⏳ শুরু হচ্ছে...")
-            _status_id = _status_r.get("result", {}).get("message_id") if isinstance(_status_r, dict) else None
-
-            _FB_STAGE_LABEL = {
-                "rate_limit_check": "🔎 Rate-limit চেক করা হচ্ছে",
-                "login": "🔐 Login session লোড হচ্ছে",
-                "warmup": "🏠 Facebook home warm-up",
-                "opening_post": "📂 Post খোলা হচ্ছে",
-                "collecting": "🖼️ ছবি সংগ্রহ করা হচ্ছে",
-                "downloading": "⬇️ ছবি ডাউনলোড হচ্ছে",
-                "compiling": "📄 PDF বানানো হচ্ছে",
-            }
-            _fb_last_edit = [0.0]
-
-            async def _fb_progress(stage, found, total_hint):
-                now = time.time()
-                # throttle edits to avoid Telegram rate limits
-                if now - _fb_last_edit[0] < 1.2 and stage == "collecting":
-                    return
-                _fb_last_edit[0] = now
-                elapsed = int(now - _fb_start)
-                label = _FB_STAGE_LABEL.get(stage, stage)
-                found_line = f"\n🖼️ পাওয়া গেছে: {found}টি ছবি" if found else ""
-                total_line = f" / মোট: {total_hint}টি" if total_hint else ""
-                text = (
-                    "⏳ <b>/fbimg Processing...</b>\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"{label}{found_line}{total_line}\n"
-                    f"⏱️ সময় লেগেছে: {elapsed}s\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━"
-                )
-                if _status_id:
-                    try:
-                        await edit_msg(chat_id, _status_id, text, parse_mode="HTML")
-                    except Exception:
-                        pass
-
-            try:
-                from fb_scraper import fb_post_to_pdf, FBScrapeError
-                pdf_bytes, img_count = await fb_post_to_pdf(fb_url, progress_cb=_fb_progress)
-                _elapsed_total = int(time.time() - _fb_start)
-                if _status_id:
-                    await edit_msg(chat_id, _status_id,
-                                    f"✅ {img_count}টি ছবি পাওয়া গেছে ({_elapsed_total}s) — PDF পাঠানো হচ্ছে...")
-                await send_document(chat_id, pdf_bytes, filename="fb_images.pdf",
-                                    caption=f"📄 {img_count}টি ছবি থেকে তৈরি PDF — {_elapsed_total}s",
-                                    mime_type="application/pdf")
-                if _status_id:
-                    await edit_msg(chat_id, _status_id, f"✅ সম্পন্ন — {img_count}টি ছবি, মোট সময়: {_elapsed_total}s")
-            except FBScrapeError as e:
-                await send_msg(chat_id, f"❌ {e}")
-            except Exception as e:
-                logger.error(f"[fbimg] error: {e}")
-                await send_msg(chat_id, f"❌ /fbimg failed: {e}")
-
 
 # ============================================================
 # IMAGE → MCQ FEATURE (ported from AtlasBot)
