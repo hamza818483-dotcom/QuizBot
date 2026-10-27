@@ -1003,6 +1003,172 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             f"📦 ব্যাচ: {job.get('batches_done', 0)}/{job.get('batches_total', len(batches))}"
         )
 
+    if exam_groups and not links_only:
+        # Multi-exam, FULL flow ("all" mode / mood-1), serial:
+        # exam_groups=[{"exam_title","subject","chapter","batches"},...].
+        # Each exam runs its own complete topic->poll loop + its own merged
+        # PDF, one exam fully finished before the next starts (same forum
+        # topic/thread_id for all of them if one's given). NO per-exam
+        # summary post and NO per-exam cover image -- only ONE combined
+        # summary (csv_get_multi_exam_master_summary) at the very end,
+        # covering every exam's topics/links together.
+        try:
+            is_admin, admin_err = await _check_bot_admin(channel_id)
+            if not is_admin:
+                job["status"] = "error"
+                job["error"] = admin_err
+                asyncio.create_task(_lms_job_db_write(job_id, job))
+                return
+            chat_type = await _get_chat_type(channel_id)
+            ask_score = chat_type == "channel"
+            job["status"] = "running"
+            asyncio.create_task(_lms_job_db_write(job_id, job))
+
+            try:
+                dm_r = await tg_post("sendMessage", {
+                    "chat_id": OWNER_ID,
+                    "text": _dm_progress_text("⏳ শুরু হচ্ছে... (একাধিক এক্সাম)"),
+                    "reply_markup": dm_kb,
+                })
+                if dm_r.get("ok"):
+                    dm_msg_id = dm_r["result"]["message_id"]
+            except Exception as e:
+                logger.warning(f"[LMS-Send-Multi] DM progress start failed: {e}")
+
+            if not thread_id:
+                _first_title = (exam_groups[0].get("exam_title") if exam_groups else None) or "MCQ"
+                auto_thread_id = await _create_forum_topic(channel_id, _first_title)
+                if auto_thread_id:
+                    thread_id = auto_thread_id
+
+            job_cancel_check = lambda: job.get("cancel_requested", False)
+            bot_un = await get_bot_username()
+            exam_entries = []  # (exam_title, subject, total, total_batches, batch_links) per exam
+            overall_sent = 0
+            overall_batches_done = 0
+            grand_total_batches = sum(len([b for b in (g.get("batches") or []) if b.get("mcqs")]) for g in exam_groups)
+
+            for g_idx, g in enumerate(exam_groups):
+                if job.get("cancel_requested"):
+                    job["status"] = "cancelled"
+                    if dm_msg_id:
+                        try:
+                            await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("🛑 বন্ধ করা হয়েছে"))
+                        except Exception as e:
+                            logger.warning(f"[LMS-Send-Multi] DM progress cancel-edit failed: {e}")
+                    asyncio.create_task(_lms_job_db_write(job_id, job))
+                    return
+                g_title = (g.get("exam_title") or "MCQ").strip()
+                g_subject = (g.get("subject") or "").strip()
+                g_chapter = (g.get("chapter") or "").strip()
+                g_batches = [b for b in (g.get("batches") or []) if b.get("mcqs")]
+                if not g_batches:
+                    continue
+                g_batch_links = []
+                g_sent = 0
+                g_all_mcqs = []
+                for b_idx, batch in enumerate(g_batches):
+                    if job.get("cancel_requested"):
+                        job["status"] = "cancelled"
+                        asyncio.create_task(_lms_job_db_write(job_id, job))
+                        return
+                    topic = batch.get("topic") or "Special MCQ By ATLAS"
+                    mcqs = batch.get("mcqs") or []
+                    if not mcqs:
+                        continue
+                    try:
+                        sent, first_link, batch_cache_id = await _send_one_lms_batch(channel_id, thread_id, topic, mcqs, ask_score, cancel_check=job_cancel_check, subject=g_subject, exam_title=g_title, reply_to_message_id=None, is_channel=(chat_type == "channel"))
+                        g_sent += sent
+                        g_all_mcqs.extend(mcqs)
+                        if first_link:
+                            quiz_link = f"https://t.me/{bot_un}?start=pdf_{batch_cache_id}"
+                            exam_link = f"{GH_PAGES_EXAM_URL}?id={batch_cache_id}"
+                            poll_again_link = f"https://t.me/{bot_un}?start=poll_{batch_cache_id}"
+                            g_batch_links.append((b_idx + 1, first_link, sent, topic, quiz_link, exam_link, poll_again_link))
+                        overall_sent += sent
+                    except Exception as e:
+                        logger.error(f"[LMS-Send-Multi] exam '{g_title}' batch '{topic}' failed: {e}")
+                        job["error"] = f"'{g_title}' / '{topic}': {e}"
+                    overall_batches_done += 1
+                    job["sent_total"] = overall_sent
+                    job["batches_done"] = overall_batches_done
+                    job["pct"] = int(overall_batches_done * 100 / grand_total_batches) if grand_total_batches else 100
+                    if dm_msg_id:
+                        try:
+                            await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text(f"⏳ চলছে... ({g_idx + 1}/{len(exam_groups)} এক্সাম)"), reply_markup=dm_kb)
+                        except Exception as e:
+                            logger.warning(f"[LMS-Send-Multi] DM progress update failed: {e}")
+
+                # This exam's own merged PDF, sent right after its polls —
+                # before moving to the next exam (keeps per-exam content
+                # grouped together in the channel, same as separate mode).
+                if g_all_mcqs:
+                    topic_groups = [
+                        (batch.get("topic") or f"Part-{i+1:02d}", batch.get("mcqs") or [])
+                        for i, batch in enumerate(g_batches)
+                        if batch.get("mcqs")
+                    ]
+                    safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", g_title or "MCQ")[:50] or "ATLAS_Sheet"
+                    try:
+                        merged_pdf_bytes = await _generate_combined_topicwise_pdf(topic_groups, g_title or "MCQ", channel_id)
+                        if merged_pdf_bytes:
+                            merged_caption = f"📖 ATLAS Practice Sheet\n🎯 {g_title or 'MCQ'}\n📝 মোট MCQ: {g_sent}\n🚀 Visit: Atlascourses.com"
+                            await send_document(
+                                channel_id, merged_pdf_bytes, f"{safe_title}_full_style1.pdf",
+                                caption=merged_caption,
+                                message_thread_id=thread_id,
+                            )
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send-Multi] exam '{g_title}' merged PDF send failed: {e}")
+
+                exam_entries.append((g_title, g_subject, g_sent, len(g_batch_links), g_batch_links))
+
+            if job.get("cancel_requested"):
+                job["status"] = "cancelled"
+            else:
+                # ONE combined summary at the very end, covering every exam.
+                if exam_entries:
+                    combined_text = csv_get_multi_exam_master_summary(exam_entries)
+                    summary_data = {
+                        "chat_id": channel_id, "text": combined_text,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                    }
+                    if thread_id:
+                        summary_data["message_thread_id"] = thread_id
+                    try:
+                        r = await tg_post("sendMessage", summary_data)
+                        if not r.get("ok") and thread_id:
+                            summary_data.pop("message_thread_id", None)
+                            r = await tg_post("sendMessage", summary_data)
+                        if r.get("ok"):
+                            _msg_id = r.get("result", {}).get("message_id")
+                            if _msg_id and chat_type in ("group", "supergroup"):
+                                try:
+                                    await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": _msg_id, "disable_notification": True})
+                                except Exception as e:
+                                    logger.warning(f"[LMS-Send-Multi] combined summary pin failed: {e}")
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send-Multi] combined summary send failed: {e}")
+                job["status"] = "done"
+                job["pct"] = 100
+                if dm_msg_id:
+                    try:
+                        await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("✅ সম্পন্ন (সব এক্সাম)"))
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send-Multi] DM progress done-edit failed: {e}")
+        except Exception as e:
+            logger.error(f"[LMS-Send-Multi] job {job_id} error: {e}")
+            job["status"] = "error"
+            job["error"] = str(e)
+            if dm_msg_id:
+                try:
+                    await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text(f"❌ ত্রুটি: {e}"))
+                except Exception as e2:
+                    logger.warning(f"[LMS-Send-Multi] DM progress error-edit failed: {e2}")
+        asyncio.create_task(_lms_job_db_write(job_id, job))
+        return
+
     if links_only:
         # Simple synchronous-style path (still inside the spawned task so
         # the caller gets an immediate job_id back like normal, but there's
@@ -10336,6 +10502,64 @@ def csv_get_master_summary(topic: str, total: int,
         if exam_link:
             block += f"\n\n<b>🌐Website Link:</b>\n{exam_link}"
         text += "<blockquote>" + block + "</blockquote>\n" + f"{sep}\n\n"
+    text += (
+        "<blockquote>"
+        "📌 এটলাসের Exam Batch এ অসংখ্য প্রশ্ন প্রাক্টিসের সুযোগ আছে।\n"
+        "💬 Whatsapp: wa.me/8801999681290\n"
+        "🌟 Website: Atlascourses.com"
+        "</blockquote>"
+    )
+    return text
+
+
+def csv_get_multi_exam_master_summary(exam_entries: list) -> str:
+    """Final combined summary for a serial multi-exam 'all' mode send
+    (LMS bulk-send, bulkPostMode='single', sendMode='all'/'poll_quiz_pdf'
+    etc. still goes through links_only -- THIS function backs the NEW
+    'full flow, one post at a time, one combined summary at the end' mode).
+
+    exam_entries = [(exam_title, subject, total, total_batches, batch_links), ...]
+    one tuple per exam, in send order. batch_links shape matches
+    csv_get_master_summary's (same 7-tuple with quiz/exam/poll_again links).
+    Each exam gets its own bold sub-header + topic blocks; one shared
+    marketing footer at the very end.
+    """
+    sep = "▬▬▬▬▬▬▬▬▬▬"
+    grand_total = sum(e[2] for e in exam_entries)
+    grand_batches = sum(e[3] for e in exam_entries)
+    text = (
+        f"🟥<b>একাধিক এক্সাম — সম্মিলিত সামারি</b>\n"
+        f"{sep}\n"
+        f"🌟মোট প্রশ্ন (সব এক্সাম): {grand_total}\n"
+        f"📦 মোট টপিক সংখ্যা: {grand_batches}\n"
+        f"📚 মোট এক্সাম: {len(exam_entries)}\n\n"
+    )
+    for ex_idx, (ex_title, ex_subject, ex_total, ex_total_batches, batch_links) in enumerate(exam_entries):
+        header_bits = []
+        if ex_subject:
+            header_bits.append(f"🟧<b>{_html_escape(ex_subject)}</b>")
+        header_bits.append(f"◼️<b>{_html_escape(ex_title or 'MCQ')}</b>")
+        text += "\n".join(header_bits) + f"\n🌟প্রশ্ন: {ex_total} | 📦 টপিক: {ex_total_batches}\n\n"
+        for entry in batch_links:
+            part_n, link, count = entry[0], entry[1], entry[2]
+            batch_topic = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
+            quiz_link = entry[4] if len(entry) > 4 and entry[4] else ""
+            exam_link = entry[5] if len(entry) > 5 and entry[5] else ""
+            poll_again_link = entry[6] if len(entry) > 6 and entry[6] else ""
+            block = f"🔰Topic-{part_n:02d}\n📍({batch_topic})({count})"
+            if link:
+                block += f"\n🔗First Poll Link:\n{link}"
+            if poll_again_link:
+                block += f"\n\n<b>🔄Poll Again:</b>\n{poll_again_link}"
+            if quiz_link:
+                block += f"\n\n<b>🎯Quiz Again:</b>\n{quiz_link}"
+            if exam_link:
+                block += f"\n\n<b>🌐Website Link:</b>\n{exam_link}"
+            text += "<blockquote>" + block + "</blockquote>\n"
+        if ex_idx < len(exam_entries) - 1:
+            text += f"{sep}\n{sep}\n\n"
+        else:
+            text += f"{sep}\n\n"
     text += (
         "<blockquote>"
         "📌 এটলাসের Exam Batch এ অসংখ্য প্রশ্ন প্রাক্টিসের সুযোগ আছে।\n"
