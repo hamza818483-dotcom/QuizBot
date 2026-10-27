@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: quizbot
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: 7860
+      # Set these in the Render dashboard (Environment tab) after first
+      # deploy -- do not commit real secrets here:
+      #   TELEGRAM_BOT_TOKEN
+      #   GEMINI_API_KEYS (and/or GROQ_API_KEYS, OPENROUTER_API_KEYS, etc.)
+      #   D1_TOKEN, CF_WORKER_URL, SUPABASE_URL, SUPABASE_KEY, ...
+      #   RENDER_URL  -> set to this service's own https://xxxx.onrender.com URL
+      #                  once known, so the Worker's HF_SPACE_URL/RENDER_URL
+      #                  fallback points here instead of the paused HF Space.
