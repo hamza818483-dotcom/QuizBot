@@ -10330,11 +10330,11 @@ def csv_get_master_summary(topic: str, total: int,
         if link:
             block += f"\n🔗First Poll Link:\n{link}"
         if poll_again_link:
-            block += f"\n🔄Poll Again:\n{poll_again_link}"
+            block += f"\n\n<b>🔄Poll Again:</b>\n{poll_again_link}"
         if quiz_link:
-            block += f"\n🎯Quiz Again:\n{quiz_link}"
+            block += f"\n\n<b>🎯Quiz Again:</b>\n{quiz_link}"
         if exam_link:
-            block += f"\n🌐Website Link:\n{exam_link}"
+            block += f"\n\n<b>🌐Website Link:</b>\n{exam_link}"
         text += "<blockquote>" + block + "</blockquote>\n" + f"{sep}\n\n"
     text += (
         "<blockquote>"
