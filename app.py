@@ -1293,7 +1293,10 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links, subject=subject or "MCQ")
 
         try:
-            cover_bytes = await _generate_lms_cover_image(subject or "MCQ", exam_title or "MCQ", chapter or "")
+            # Forum-topic sends already have a topic header/icon in the chat
+            # UI itself, so skip generating/sending the cover image there —
+            # go straight to the text-only master summary.
+            cover_bytes = None if thread_id else await _generate_lms_cover_image(subject or "MCQ", exam_title or "MCQ", chapter or "")
             caption_txt = _live_master_summary_text()
             master_is_photo_ok = False
             if cover_bytes:
