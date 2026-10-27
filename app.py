@@ -1385,7 +1385,8 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     bot_un = await get_bot_username()
                     quiz_link = f"https://t.me/{bot_un}?start=pdf_{batch_cache_id}"
                     exam_link = f"{GH_PAGES_EXAM_URL}?id={batch_cache_id}"
-                    batch_links.append((b_idx + 1, first_link, sent, topic, quiz_link, exam_link))
+                    poll_again_link = f"https://t.me/{bot_un}?start=poll_{batch_cache_id}"
+                    batch_links.append((b_idx + 1, first_link, sent, topic, quiz_link, exam_link, poll_again_link))
             except Exception as e:
                 logger.error(f"[LMS-Send] batch '{topic}' failed: {e}")
                 job["error"] = f"'{topic}': {e}"
@@ -10322,10 +10323,16 @@ def csv_get_master_summary(topic: str, total: int,
     for entry in batch_links:
         part_n, link, count = entry[0], entry[1], entry[2]
         batch_topic = entry[3] if len(entry) > 3 and entry[3] else f"Part-{part_n:02d}"
+        quiz_link = entry[4] if len(entry) > 4 and entry[4] else ""
         exam_link = entry[5] if len(entry) > 5 and entry[5] else ""
+        poll_again_link = entry[6] if len(entry) > 6 and entry[6] else ""
         block = f"🔰Topic-{part_n:02d}\n📍({batch_topic})({count})"
         if link:
             block += f"\n🔗First Poll Link:\n{link}"
+        if poll_again_link:
+            block += f"\n🔄Poll Again:\n{poll_again_link}"
+        if quiz_link:
+            block += f"\n🎯Quiz Again:\n{quiz_link}"
         if exam_link:
             block += f"\n🌐Website Link:\n{exam_link}"
         text += "<blockquote>" + block + "</blockquote>\n" + f"{sep}\n\n"
