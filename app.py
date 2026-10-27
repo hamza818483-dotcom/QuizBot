@@ -32,7 +32,16 @@ import html as _html_mod
 # are silently ignored rather than crashing startup.
 try:
     import resource as _resource
-    _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "450"))  # stay under Render's 512MB
+    # 2026-10-27: raised 450->1000. RLIMIT_AS caps virtual address space, not
+    # physical RSS -- OpenBLAS (numpy/opencv) pre-reserves large virtual thread-pool
+    # buffers on startup that count against this limit even though they're barely
+    # touched physically, so 450MB was tripping on normal library init, not actual
+    # memory pressure (OpenBLAS "Memory allocation still failed after 10 retries").
+    # 1000MB keeps a real safety margin under Render's 512MB *physical* limit --
+    # virtual space is cheap/overcommitted, so this still catches genuine runaway
+    # allocations (large PDF decode, stacked parallel image calls) without
+    # false-triggering on library startup reservations.
+    _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "1000"))
     _RAM_CAP_BYTES = _RAM_CAP_MB * 1024 * 1024
     _soft, _hard = _resource.getrlimit(_resource.RLIMIT_AS)
     _new_hard = _RAM_CAP_BYTES if (_hard == _resource.RLIM_INFINITY or _hard > _RAM_CAP_BYTES) else _hard
