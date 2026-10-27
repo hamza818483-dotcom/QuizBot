@@ -735,6 +735,33 @@ SMS_RELAY_SECRET = os.environ.get("SMS_RELAY_SECRET", "")
 # can never race to read/approve the same pending payment_requests row.
 SMS_RELAY_LOCK = asyncio.Lock()
 LMS_SEND_JOBS = {}  # job_id -> {"status", "pct", "sent_total", "total", "batches_done", "batches_total", "error"}
+# 2026-10-27: LMS_SEND_JOBS used to be purely in-memory, so a Render
+# restart/redeploy mid-send wiped all job state -- the LMS frontend's
+# subsequent /status/{job_id} poll got a 404, and if the restart happened
+# during the *initial* POST itself, the response could be cut short
+# (seen as HTTP 206 on the LMS side, misreported there as "bot sleeping").
+# Mirror every job write into Supabase `lms_send_jobs` (best-effort, never
+# blocks/throws) so status survives a restart; dict stays the fast
+# read/write path for the job's own lifetime, DB is only consulted when
+# a job_id is missing from memory (i.e. after a restart).
+async def _lms_job_db_write(job_id: str, job: dict):
+    try:
+        await sb_exec(lambda: sb.table("lms_send_jobs").upsert({
+            "id": job_id, **job
+        }).execute())
+    except Exception as e:
+        logger.warning(f"[LMS-Send] job DB mirror write failed (non-fatal): {e}")
+
+async def _lms_job_db_read(job_id: str) -> dict:
+    try:
+        r = await sb_exec(lambda: sb.table("lms_send_jobs").select("*").eq("id", job_id).execute())
+        if r.data:
+            row = dict(r.data[0])
+            row.pop("id", None)
+            return row
+    except Exception as e:
+        logger.warning(f"[LMS-Send] job DB mirror read failed (non-fatal): {e}")
+    return None
 DM_STOP_FLAGS = {}   # uid -> True while user has requested /stop (checked inside Poll Practice loop)
 DM_LAST_SESSION = {}  # uid -> in-memory mirror, kept in sync with D1 (see dm_session_set/get below)
 
@@ -1208,6 +1235,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             logger.error(f"[LMS-Send-Links] job {job_id} error: {e}")
             job["status"] = "error"
             job["error"] = str(e)
+        asyncio.create_task(_lms_job_db_write(job_id, job))
         return
 
     try:
@@ -1215,11 +1243,13 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
         if not is_admin:
             job["status"] = "error"
             job["error"] = admin_err
+            asyncio.create_task(_lms_job_db_write(job_id, job))
             return
 
         chat_type = await _get_chat_type(channel_id)
         ask_score = chat_type == "channel"
         job["status"] = "running"
+        asyncio.create_task(_lms_job_db_write(job_id, job))
 
         # DM progress + Cancel button to the bot owner — mirrors the website
         # card's own progress bar/Stop button, so an admin watching Telegram
@@ -1486,6 +1516,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text(f"❌ ত্রুটি: {e}"))
             except Exception as e2:
                 logger.warning(f"[LMS-Send] DM progress error-edit failed: {e2}")
+    asyncio.create_task(_lms_job_db_write(job_id, job))
 
 
 @app.post("/api/gemini-proxy")
@@ -1629,6 +1660,7 @@ async def lms_send_channel(request: Request):
         "batches_done": 0, "batches_total": batches_total, "error": None,
         "exam_id": exam_id, "cancel_requested": False,
     }
+    asyncio.create_task(_lms_job_db_write(job_id, LMS_SEND_JOBS[job_id]))
     _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject, links_only=links_only, exam_groups=exam_groups, links_variant=links_variant, chapter=chapter))
     return JSONResponse({"ok": True, "job_id": job_id})
 
@@ -1636,6 +1668,13 @@ async def lms_send_channel(request: Request):
 @app.get("/api/lms-send-channel/status/{job_id}")
 async def lms_send_channel_status(job_id: str):
     job = LMS_SEND_JOBS.get(job_id)
+    if not job:
+        # Not in memory -- likely a restart happened mid-send. Fall back to
+        # the DB mirror so the LMS frontend still gets real status instead
+        # of a 404 (which it was misreading as "bot sleeping").
+        job = await _lms_job_db_read(job_id)
+        if job:
+            LMS_SEND_JOBS[job_id] = job  # repopulate cache for subsequent polls
     if not job:
         return JSONResponse({"error": "job not found"}, status_code=404)
     return JSONResponse(job)
