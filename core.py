@@ -215,15 +215,21 @@ async def d1_query(sql: str, params: list = None, is_select: bool = True, suppre
         body = {"sql": sql, "params": params or [], "token": D1_TOKEN}
         c = await _get_shared_http_client()
         r = await c.post(f"{CF_WORKER_URL}/d1/query", json=body, timeout=15)
-        data = r.json()
-        if not data.get("ok"):
+        try:
+            data = r.json()
+        except Exception:
             if not suppress_log:
-                logger.warning(f"[D1] query error: {data.get('error')}")
-            return {"ok": False, "error": data.get("error")}
+                logger.warning(f"[D1] query error: non-JSON response (status={r.status_code}) body={r.text[:300]!r} sql={sql[:120]!r}")
+            return {"ok": False, "error": f"non-JSON response (status={r.status_code})"}
+        if not data.get("ok"):
+            err = data.get("error") or f"no error field (status={r.status_code}) raw={str(data)[:300]}"
+            if not suppress_log:
+                logger.warning(f"[D1] query error: {err} sql={sql[:120]!r}")
+            return {"ok": False, "error": err}
         return data
     except Exception as e:
         if not suppress_log:
-            logger.warning(f"[D1] query error: {e}")
+            logger.warning(f"[D1] query error: {type(e).__name__}: {e} sql={sql[:120]!r}")
         return {"ok": False, "error": str(e)}
 
 async def d1_select(sql: str, params: list = None) -> list:
