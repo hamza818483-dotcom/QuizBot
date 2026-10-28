@@ -1272,8 +1272,8 @@ async def notify_owner_edit(text: str, msg_id_box: dict):
 # ============================================================
 # PYROGRAM CLIENT (large file download, >20MB, Bot API getFile bypass)
 # ============================================================
-TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
-TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID") or os.getenv("API_ID")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH") or os.getenv("API_HASH")
 _pyro_client = None
 
 _shared_http_client = None
