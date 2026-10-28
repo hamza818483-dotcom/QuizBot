@@ -11807,14 +11807,22 @@ async def _handle_cut_pdf_command_inner(msg: dict):
             writer = PdfWriter()
             for p in range(start_page - 1, end_page):
                 writer.add_page(reader.pages[p])
-            out_io = BytesIO()
-            writer.write(out_io)
-            out_bytes = out_io.getvalue()
             out_name = f"{base_name}_p{start_page}-{end_page}.pdf"
-            if status_msg_id:
-                await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
-            send_res = await send_document(chat_id, out_bytes, out_name,
-                                 caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)")
+            tmp_path = f"/tmp/cut_{chat_id}_{int(time.time()*1000)}.pdf"
+            try:
+                with open(tmp_path, "wb") as f:
+                    writer.write(f)
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
+                with open(tmp_path, "rb") as f:
+                    out_bytes = f.read()
+                send_res = await send_document(chat_id, out_bytes, out_name,
+                                     caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)")
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
             if not send_res.get("ok"):
                 err = send_res.get("error") or send_res.get("description") or "unknown error"
                 logger.error(f"[Cut] send_document failed: {err}")
@@ -11848,6 +11856,11 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                 return
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "✅ সম্পন্ন!")
+    except MemoryError:
+        logger.error("[Cut] MemoryError: page range too large/memory-heavy for this instance")
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, "❌ এই PDF/page range টা server memory-তে ধরছে না। ছোট range দিয়ে ট্রাই করো (যেমন ১০-১৫ পাতা করে ভাগ করে)।")
+        return
     except Exception as e:
         logger.error(f"[Cut] error: {e}", exc_info=True)
         if status_msg_id:
