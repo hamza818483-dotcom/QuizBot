@@ -37,11 +37,22 @@ try:
     # buffers on startup that count against this limit even though they're barely
     # touched physically, so 450MB was tripping on normal library init, not actual
     # memory pressure (OpenBLAS "Memory allocation still failed after 10 retries").
-    # 1000MB keeps a real safety margin under Render's 512MB *physical* limit --
-    # virtual space is cheap/overcommitted, so this still catches genuine runaway
-    # allocations (large PDF decode, stacked parallel image calls) without
-    # false-triggering on library startup reservations.
-    _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "1000"))
+    #
+    # 2026-10-29: raised 1000->2500. CONFIRMED via diagnostic logging that
+    # 1000MB was STILL false-triggering: a /cut MemoryError logged
+    # RSS=400MB VMS=994MB -- physical memory (RSS) was nowhere near
+    # Render's 512MB limit, but virtual address space (VMS) had climbed to
+    # the 1000MB RLIMIT_AS cap from heap fragmentation accumulated across
+    # PRIOR requests in the same long-lived process (CPython rarely
+    # returns freed heap pages to the OS). The actual safety net against
+    # real OOM is the OS's physical RAM limit (512MB) combined with the
+    # existing per-request MemoryError handlers -- RLIMIT_AS only needs to
+    # be high enough that normal fragmentation growth across many requests
+    # never hits it, while still catching a genuinely pathological
+    # runaway allocation (e.g. an accidental multi-GB buffer). 2500MB
+    # gives real headroom for fragmentation while still well below what a
+    # true runaway leak would reach.
+    _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "2500"))
     _RAM_CAP_BYTES = _RAM_CAP_MB * 1024 * 1024
     _soft, _hard = _resource.getrlimit(_resource.RLIMIT_AS)
     _new_hard = _RAM_CAP_BYTES if (_hard == _resource.RLIM_INFINITY or _hard > _RAM_CAP_BYTES) else _hard
