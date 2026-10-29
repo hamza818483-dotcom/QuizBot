@@ -11759,7 +11759,19 @@ async def _handle_cut_pdf_command_inner(msg: dict):
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB")
     status_msg_id = status_r.get("result", {}).get("message_id")
 
-    if file_id in _cut_pdf_cache:
+    # 2026-10-29: files above this go straight to disk (pyrogram download +
+    # pypdf reads the file path, never loading the whole thing into RAM) to
+    # avoid stacking pdf_bytes + cache-copy + PdfReader + PdfWriter in
+    # memory at once -- that stacking was the real OOM source for large
+    # scanned PDFs (100MB+) on Render's 512MB physical RAM, not just
+    # sendDoc's base64 step. Small/medium files keep the fast in-memory
+    # path with its cache.
+    DISK_PATH_THRESHOLD = 35 * 1024 * 1024  # ~35MB
+    use_disk = file_size and file_size > DISK_PATH_THRESHOLD
+    pdf_bytes = None
+    disk_src_path = None
+
+    if not use_disk and file_id in _cut_pdf_cache:
         pdf_bytes = _cut_pdf_cache[file_id]
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, "⚡ Cache থেকে নেওয়া হলো!\n⏳ Cut হচ্ছে...")
@@ -11783,24 +11795,45 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                     pass
 
         try:
-            pdf_bytes = await download_tg_file(file_id, progress_cb=_progress,
-                                                chat_id=chat_id, message_id=reply["message_id"])
-            _cut_pdf_cache[file_id] = pdf_bytes
-            if len(_cut_pdf_cache) > _CUT_CACHE_MAX:
-                _cut_pdf_cache.pop(next(iter(_cut_pdf_cache)))
+            if use_disk:
+                disk_src_path = f"/tmp/cutsrc_{chat_id}_{int(time.time()*1000)}.pdf"
+                result_path = await download_large_file_to_disk(
+                    chat_id, reply["message_id"], disk_src_path, progress_cb=_progress)
+                if not result_path:
+                    # Disk path needs pyrogram + original chat/message context;
+                    # fall back to the in-memory path if it's unavailable so
+                    # large files still work (just with more RAM pressure)
+                    # rather than failing outright.
+                    logger.warning("[Cut] disk download failed/unavailable, falling back to in-memory download")
+                    pdf_bytes = await download_tg_file(file_id, progress_cb=_progress,
+                                                        chat_id=chat_id, message_id=reply["message_id"])
+                    disk_src_path = None
+            else:
+                pdf_bytes = await download_tg_file(file_id, progress_cb=_progress,
+                                                    chat_id=chat_id, message_id=reply["message_id"])
+                _cut_pdf_cache[file_id] = pdf_bytes
+                if len(_cut_pdf_cache) > _CUT_CACHE_MAX:
+                    _cut_pdf_cache.pop(next(iter(_cut_pdf_cache)))
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "✅ Download সম্পূর্ণ!\n⏳ Cut হচ্ছে...")
         except Exception as e:
             logger.error(f"[Cut] download error: {e}", exc_info=True)
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
+            if disk_src_path:
+                try:
+                    os.remove(disk_src_path)
+                except Exception:
+                    pass
             return
 
     base_name = re.sub(r'\.pdf$', '', file_name, flags=re.I)
 
     try:
         from pypdf import PdfReader, PdfWriter
-        reader = PdfReader(BytesIO(pdf_bytes))
+        # Disk path: pypdf reads lazily from the file object, never pulling
+        # the full source PDF into a single Python bytes buffer.
+        reader = PdfReader(disk_src_path) if disk_src_path else PdfReader(BytesIO(pdf_bytes))
         num_pages = len(reader.pages)
 
         if is_range:
@@ -11845,8 +11878,12 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id, f"❌ PDF এ মোট {num_pages} পাতা আছে, {single_page} পাতা নেই!")
                 return
-            from pdf2image import convert_from_bytes
-            images = convert_from_bytes(pdf_bytes, first_page=single_page, last_page=single_page, dpi=200, use_cropbox=True)
+            if disk_src_path:
+                from pdf2image import convert_from_path
+                images = convert_from_path(disk_src_path, first_page=single_page, last_page=single_page, dpi=200, use_cropbox=True)
+            else:
+                from pdf2image import convert_from_bytes
+                images = convert_from_bytes(pdf_bytes, first_page=single_page, last_page=single_page, dpi=200, use_cropbox=True)
             if not images:
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id, "❌ Page render করা যায়নি!")
@@ -11875,6 +11912,12 @@ async def _handle_cut_pdf_command_inner(msg: dict):
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, f"❌ Error: {e}")
         return
+    finally:
+        if disk_src_path:
+            try:
+                os.remove(disk_src_path)
+            except Exception:
+                pass
 
 
 async def handle_cut_csv_command(msg: dict):

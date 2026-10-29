@@ -1433,6 +1433,61 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_c
             logger.warning("[pyrogram] dropped dead client after connection error, will reconnect next call")
         return None
 
+async def download_large_file_to_disk(chat_id: int, message_id: int, dest_path: str, progress_cb=None) -> Optional[str]:
+    """Like download_large_file_pyrogram, but streams straight to dest_path
+    on disk instead of buffering the whole file in memory. For large files
+    (e.g. 100MB+ scanned PDFs) on small-RAM hosts (Render free 512MB), the
+    in_memory=True path alone can push RSS past the physical limit before
+    any PDF processing even starts. Returns dest_path on success, None on
+    failure (caller should fall back to the in-memory path for non-PDF or
+    smaller-file call sites)."""
+    try:
+        client = await _get_pyro_client()
+        if not client:
+            return None
+        msg = await client.get_messages(chat_id, message_id)
+        if not msg or not (msg.document or msg.video or msg.audio):
+            return None
+
+        _progress_fn = None
+        if progress_cb:
+            async def _progress_fn(current, total):
+                try:
+                    res = progress_cb(current, total)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    pass
+
+        result = await client.download_media(msg, file_name=dest_path, progress=_progress_fn)
+        if not result or not os.path.exists(result):
+            return None
+        expected = getattr(msg.document, "file_size", None) or getattr(msg.video, "file_size", None) \
+            or getattr(msg.audio, "file_size", None)
+        actual = os.path.getsize(result)
+        if expected and actual < expected:
+            logger.error(f"[pyrogram] Incomplete disk download: got {actual} of {expected} bytes")
+            try:
+                os.remove(result)
+            except Exception:
+                pass
+            return None
+        return result
+    except Exception as e:
+        logger.error(f"[pyrogram] disk download error: {e}")
+        err_str = str(e).lower()
+        if any(s in err_str for s in ("connection lost", "socket.send", "not connected",
+                                       "connection is closed", "transport is closed")):
+            global _pyro_client
+            try:
+                await client.stop()
+            except Exception:
+                pass
+            _pyro_client = None
+            logger.warning("[pyrogram] dropped dead client after connection error, will reconnect next call")
+        return None
+
+
 async def resolve_private_invite_link(invite_link: str) -> dict:
     """
     Private invite link (t.me/+xxx বা t.me/joinchat/xxx) থেকে chat ID resolve করে।
