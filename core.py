@@ -1012,7 +1012,16 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
     # ONLY path that actually works here, so keep this threshold close to
     # Telegram's own 50MB bot upload ceiling rather than bailing out early
     # into a direct-upload path that can never succeed.
-    SKIP_CF_THRESHOLD = 45 * 1024 * 1024  # ~45MB raw (base64 ~60MB, under CF's 100MB body limit)
+    # 2026-10-28: lowered 45MB->15MB. On Render free (512MB physical), the
+    # base64.b64encode() above (line ~990) holds raw file_bytes AND its
+    # base64 copy (1.33x larger) in memory simultaneously -- a mid-size PDF
+    # (15-20MB) already risks tipping total process RSS over 512MB when
+    # combined with other in-flight state (D1 writes, Gemini buffers),
+    # causing "Cannot allocate memory" across unrelated code paths (sendDoc,
+    # D1 query) in the same request, not just this one. Skip the b64 CF
+    # path earlier and go straight to raw-bytes direct multipart upload
+    # (no in-memory doubling) for anything above 15MB.
+    SKIP_CF_THRESHOLD = 15 * 1024 * 1024  # ~15MB raw -- avoid base64 double-buffer on 512MB host
     skip_cf = len(file_bytes) > SKIP_CF_THRESHOLD
     if skip_cf:
         logger.warning(f"[sendDoc] file {len(file_bytes)}B exceeds CF threshold, skipping CF Worker paths")
