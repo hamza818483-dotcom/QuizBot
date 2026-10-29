@@ -2712,6 +2712,12 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
             overlay = PdfReader(packet)
             page.merge_page(overlay.pages[0])
             writer.add_page(page)
+            # Free this page's overlay canvas/packet/reader before the next
+            # page -- on a large multi-page PDF these otherwise pile up as
+            # live references (each holds its own reportlab buffer +
+            # PdfReader), adding to peak RSS alongside the source PDF and
+            # the writer's growing output.
+            del packet, overlay, c
 
         buf = _io.BytesIO()
         try:
@@ -2802,6 +2808,7 @@ def add_header_box_to_pdf(pdf_bytes: bytes, name_text: str) -> bytes:
             overlay = PdfReader(packet)
             page.merge_page(overlay.pages[0])
             writer.add_page(page)
+            del packet, overlay, c  # free per-page overlay buffers before next page
 
         buf = _io.BytesIO()
         try:
@@ -2859,6 +2866,7 @@ def add_footer_box_to_pdf(pdf_bytes: bytes, footer_text: str) -> bytes:
             overlay = PdfReader(packet)
             page.merge_page(overlay.pages[0])
             writer.add_page(page)
+            del packet, overlay, c  # free per-page overlay buffers before next page
 
         buf = _io.BytesIO()
         try:

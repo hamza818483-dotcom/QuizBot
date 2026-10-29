@@ -13458,6 +13458,9 @@ async def _apply_footer_to_pdf(chat_id: int, file_id: str, footer_text: str, mes
     try:
         pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=message_id)
         out_bytes = add_footer_box_to_pdf(pdf_bytes, footer_text)
+        del pdf_bytes
+        import gc as _gc
+        _gc.collect()
         out_name = _tg_safe_filename(orig_filename, default="footer.pdf")
         name_line = f"📄 {orig_filename}\n" if orig_filename else ""
         send_res = await send_document(chat_id, out_bytes,
@@ -13525,16 +13528,34 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
     await send_msg(chat_id, "⏳ বসছে — " + ", ".join(parts_desc), parse_mode="HTML")
 
     try:
+        import gc as _gc
         pdf_bytes = await download_tg_file(file_id, chat_id=chat_id, message_id=reply["message_id"])
+        # 2026-10-29: each add_*_to_pdf() call below fully rebuilds the PDF
+        # (PdfReader + PdfWriter + a per-page reportlab overlay canvas +
+        # a brand-new output buffer) and the old pdf_bytes isn't freed
+        # until Python's GC gets around to it -- chaining wm+h+f stacked
+        # 3 full-size rebuilds' worth of live references at once, which is
+        # what pushed a 24MB *output* PDF (meaning a larger/heavier source)
+        # past 512MB on Render free. Explicit gc.collect() between steps
+        # forces each stale copy to actually free before the next rebuild.
         if "wm" in combo:
+            _prev = pdf_bytes
             pdf_bytes = add_watermark_to_pdf(
                 pdf_bytes, combo["wm"],
                 title=(orig_filename.rsplit(".", 1)[0] if orig_filename else None)
             )
+            del _prev
+            _gc.collect()
         if "h" in combo:
+            _prev = pdf_bytes
             pdf_bytes = add_header_box_to_pdf(pdf_bytes, combo["h"])
+            del _prev
+            _gc.collect()
         if "f" in combo:
+            _prev = pdf_bytes
             pdf_bytes = add_footer_box_to_pdf(pdf_bytes, combo["f"])
+            del _prev
+            _gc.collect()
 
         if "rename" in combo:
             out_name = re.sub(r'[\\/:*?"<>|]', '_', combo["rename"].strip())
