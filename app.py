@@ -11285,7 +11285,12 @@ async def _handle_clean_command_inner(msg: dict):
 
 
 _cut_pdf_cache = {}  # file_id -> pdf_bytes (small in-memory cache to skip re-download)
-_CUT_CACHE_MAX = 5
+# 2026-10-29: lowered 5->2. Render free tier is 512MB physical RAM -- each
+# cached PDF can be 10-20MB+, and /cut already peaks memory hard (original
+# bytes + PdfReader + PdfWriter + output bytes all live at once during a
+# cut), so a stale 5-slot cache was adding unnecessary baseline RSS that
+# left too little headroom for the actual cut/send operation.
+_CUT_CACHE_MAX = 2
 
 _YT_LINK_RE = re.compile(r"(https?://(?:www\.)?(?:youtube\.com/watch\?v=[\w-]+|youtu\.be/[\w-]+|youtube\.com/shorts/[\w-]+)[^\s]*)", re.IGNORECASE)
 
@@ -11808,21 +11813,25 @@ async def _handle_cut_pdf_command_inner(msg: dict):
             for p in range(start_page - 1, end_page):
                 writer.add_page(reader.pages[p])
             out_name = f"{base_name}_p{start_page}-{end_page}.pdf"
-            tmp_path = f"/tmp/cut_{chat_id}_{int(time.time()*1000)}.pdf"
+            # 2026-10-29: write straight to an in-memory buffer instead of a
+            # tmp file + re-read. The old path held pdf_bytes + reader +
+            # writer + a written-to-disk copy + a re-read-into-memory copy
+            # all at once -- on Render's 512MB physical RAM that stacking
+            # (not just sendDoc's base64 step) was the real OOM source.
+            out_io = BytesIO()
+            writer.write(out_io)
+            out_bytes = out_io.getvalue()
+            out_io.close()
+            del writer, reader
             try:
-                with open(tmp_path, "wb") as f:
-                    writer.write(f)
-                if status_msg_id:
-                    await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
-                with open(tmp_path, "rb") as f:
-                    out_bytes = f.read()
-                send_res = await send_document(chat_id, out_bytes, out_name,
-                                     caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)")
-            finally:
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
+                import gc as _gc
+                _gc.collect()
+            except Exception:
+                pass
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
+            send_res = await send_document(chat_id, out_bytes, out_name,
+                                 caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)")
             if not send_res.get("ok"):
                 err = send_res.get("error") or send_res.get("description") or "unknown error"
                 logger.error(f"[Cut] send_document failed: {err}")
