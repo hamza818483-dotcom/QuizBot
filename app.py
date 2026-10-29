@@ -11760,17 +11760,6 @@ async def _handle_cut_pdf_command_inner(msg: dict):
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB")
     status_msg_id = status_r.get("result", {}).get("message_id")
 
-    # 2026-10-29: log baseline RSS before this /cut even starts downloading,
-    # so repeated-call OOM (RSS already high from a PRIOR /cut's leftover
-    # references before this request begins) is distinguishable from
-    # this-request-alone being too heavy.
-    try:
-        import psutil as _psutil_pre
-        _rss_pre = _psutil_pre.Process(os.getpid()).memory_info().rss
-        logger.info(f"[Cut] baseline RSS before download: {_rss_pre/1024/1024:.0f}MB")
-    except Exception:
-        pass
-
     # 2026-10-29: files above this go straight to disk (pyrogram download +
     # pypdf reads the file path, never loading the whole thing into RAM) to
     # avoid stacking pdf_bytes + cache-copy + PdfReader + PdfWriter in
@@ -11855,106 +11844,18 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                 return
             end_page = min(end_page, num_pages)
             writer = PdfWriter()
-            # 2026-10-29: live RSS check while adding pages instead of a
-            # fixed page-count cap. Render free is 512MB physical -- stop
-            # adding pages once RSS crosses a safe margin (leaves headroom
-            # for writer.write()'s own buffer + send_document()'s buffers
-            # afterward) and send whatever fit instead of failing the whole
-            # range with a bare MemoryError. This auto-adapts to actual
-            # page weight (scanned/image-heavy vs text-only) rather than
-            # guessing a page count up front.
-            # 2026-10-29: use a RISE above this request's own starting RSS,
-            # not an absolute RSS number. CPython rarely returns freed heap
-            # pages to the OS (malloc arena fragmentation), so after one
-            # large /cut, baseline RSS can sit elevated (e.g. 250-300MB)
-            # even with nothing live referenced -- an absolute 300MB cap
-            # then false-triggers on page 0 of the VERY NEXT /cut, before
-            # any real new allocation happens. A relative budget tracks
-            # actual growth caused by THIS request's own page-adding work.
-            # 2026-10-29: lowered 180MB->90MB, ceiling 460MB->380MB. The
-            # add_page() loop isn't the only place RSS spikes -- writer.write()
-            # right after it (serializing the whole output, re-encoding
-            # cross-ref tables/streams for every added page's image data)
-            # is UNMONITORED and can itself spike significantly past
-            # whatever RSS the loop stopped at, especially for image-heavy
-            # scanned pages. A page range that looked "safe" during add_page
-            # was still MemoryError-ing on write() with no headroom left.
-            # Smaller budget during the loop leaves real margin for that
-            # write step afterward.
-            SAFE_RSS_GROWTH_BYTES = 90 * 1024 * 1024
-            HARD_RSS_CEILING_BYTES = 380 * 1024 * 1024
-            _mem_ok = True
-            try:
-                import psutil as _psutil
-                _proc = _psutil.Process(os.getpid())
-                _rss_baseline = _proc.memory_info().rss
-            except Exception:
-                _proc = None
-                _rss_baseline = 0
-            actual_end_page = end_page
             for p in range(start_page - 1, end_page):
-                if _proc is not None:
-                    try:
-                        _rss_now = _proc.memory_info().rss
-                        if _rss_now > HARD_RSS_CEILING_BYTES or (_rss_now - _rss_baseline) > SAFE_RSS_GROWTH_BYTES:
-                            actual_end_page = p  # p is 0-indexed; last added was p-1 (1-indexed: p)
-                            logger.warning(f"[Cut] RSS safety stop at page {p} (of requested {start_page}-{end_page}) -- sending partial range")
-                            _mem_ok = False
-                            break
-                    except Exception:
-                        pass
                 writer.add_page(reader.pages[p])
-            end_page = actual_end_page if not _mem_ok else end_page
-            if end_page < start_page:
-                # Hit the RSS limit before even one page fit (rare -- huge
-                # per-page images) -- nothing to send.
-                del writer, reader
-                if status_msg_id:
-                    await edit_msg(chat_id, status_msg_id, "❌ এই PDF-এর পাতাগুলো এতটাই ভারী যে একটা পাতাও server memory-তে ধরছে না। ছোট/কম resolution PDF দিয়ে ট্রাই করো।")
-                return
+            out_name = f"{base_name}_p{start_page}-{end_page}.pdf"
             # 2026-10-29: write straight to an in-memory buffer instead of a
             # tmp file + re-read. The old path held pdf_bytes + reader +
             # writer + a written-to-disk copy + a re-read-into-memory copy
             # all at once -- on Render's 512MB physical RAM that stacking
             # (not just sendDoc's base64 step) was the real OOM source.
-            #
-            # writer.write() itself (serializing cross-ref tables/streams
-            # for every page's image data) is a second, separately-sized
-            # spike that the add_page-loop RSS budget above can't fully
-            # predict -- so if it STILL MemoryErrors here, back off by
-            # dropping the last few pages and retrying the write with a
-            # smaller writer, instead of failing the whole range outright.
-            _orig_requested_end = end_page
-            _write_retry_pages = end_page - start_page + 1
-            out_bytes = None
-            while _write_retry_pages > 0:
-                try:
-                    out_io = BytesIO()
-                    writer.write(out_io)
-                    out_bytes = out_io.getvalue()
-                    out_io.close()
-                    break
-                except MemoryError:
-                    if _write_retry_pages <= 1:
-                        raise  # nothing left to drop -- let outer handler report failure
-                    # Rebuild a smaller writer with fewer pages from the
-                    # already-open reader (reader itself was never the
-                    # issue -- it's lazy/disk-backed when use_disk is set).
-                    _write_retry_pages = max(1, _write_retry_pages - 5)
-                    end_page = start_page + _write_retry_pages - 1
-                    logger.warning(f"[Cut] writer.write() MemoryError, retrying with fewer pages: {start_page}-{end_page}")
-                    del writer
-                    try:
-                        import gc as _gc2
-                        _gc2.collect()
-                    except Exception:
-                        pass
-                    writer = PdfWriter()
-                    for p in range(start_page - 1, end_page):
-                        writer.add_page(reader.pages[p])
-            if end_page < _orig_requested_end:
-                _mem_ok = False  # write-step also had to shrink the range -- caption below must reflect it
-            out_name = f"{base_name}_p{start_page}-{end_page}.pdf"
+            out_io = BytesIO()
+            writer.write(out_io)
+            out_bytes = out_io.getvalue()
+            out_io.close()
             del writer, reader
             try:
                 import gc as _gc
@@ -11963,11 +11864,8 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                 pass
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
-            _caption = f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)"
-            if not _mem_ok:
-                _caption += f"\n⚠️ Server memory limit-এর কারণে পুরো range পাঠানো যায়নি, {start_page}-{end_page} পর্যন্ত পাঠানো হলো। বাকিটা আলাদাভাবে চাও (যেমন /cut {end_page + 1}-{(end_page - start_page + 1) + end_page})।"
             send_res = await send_document(chat_id, out_bytes, out_name,
-                                 caption=_caption)
+                                 caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)")
             if not send_res.get("ok"):
                 err = send_res.get("error") or send_res.get("description") or "unknown error"
                 logger.error(f"[Cut] send_document failed: {err}")
