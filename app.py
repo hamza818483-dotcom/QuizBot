@@ -11871,8 +11871,18 @@ async def _handle_cut_pdf_command_inner(msg: dict):
             # then false-triggers on page 0 of the VERY NEXT /cut, before
             # any real new allocation happens. A relative budget tracks
             # actual growth caused by THIS request's own page-adding work.
-            SAFE_RSS_GROWTH_BYTES = 180 * 1024 * 1024  # ~180MB of new growth allowed
-            HARD_RSS_CEILING_BYTES = 460 * 1024 * 1024  # absolute stop regardless of baseline
+            # 2026-10-29: lowered 180MB->90MB, ceiling 460MB->380MB. The
+            # add_page() loop isn't the only place RSS spikes -- writer.write()
+            # right after it (serializing the whole output, re-encoding
+            # cross-ref tables/streams for every added page's image data)
+            # is UNMONITORED and can itself spike significantly past
+            # whatever RSS the loop stopped at, especially for image-heavy
+            # scanned pages. A page range that looked "safe" during add_page
+            # was still MemoryError-ing on write() with no headroom left.
+            # Smaller budget during the loop leaves real margin for that
+            # write step afterward.
+            SAFE_RSS_GROWTH_BYTES = 90 * 1024 * 1024
+            HARD_RSS_CEILING_BYTES = 380 * 1024 * 1024
             _mem_ok = True
             try:
                 import psutil as _psutil
@@ -11902,16 +11912,49 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                 if status_msg_id:
                     await edit_msg(chat_id, status_msg_id, "❌ এই PDF-এর পাতাগুলো এতটাই ভারী যে একটা পাতাও server memory-তে ধরছে না। ছোট/কম resolution PDF দিয়ে ট্রাই করো।")
                 return
-            out_name = f"{base_name}_p{start_page}-{end_page}.pdf"
             # 2026-10-29: write straight to an in-memory buffer instead of a
             # tmp file + re-read. The old path held pdf_bytes + reader +
             # writer + a written-to-disk copy + a re-read-into-memory copy
             # all at once -- on Render's 512MB physical RAM that stacking
             # (not just sendDoc's base64 step) was the real OOM source.
-            out_io = BytesIO()
-            writer.write(out_io)
-            out_bytes = out_io.getvalue()
-            out_io.close()
+            #
+            # writer.write() itself (serializing cross-ref tables/streams
+            # for every page's image data) is a second, separately-sized
+            # spike that the add_page-loop RSS budget above can't fully
+            # predict -- so if it STILL MemoryErrors here, back off by
+            # dropping the last few pages and retrying the write with a
+            # smaller writer, instead of failing the whole range outright.
+            _orig_requested_end = end_page
+            _write_retry_pages = end_page - start_page + 1
+            out_bytes = None
+            while _write_retry_pages > 0:
+                try:
+                    out_io = BytesIO()
+                    writer.write(out_io)
+                    out_bytes = out_io.getvalue()
+                    out_io.close()
+                    break
+                except MemoryError:
+                    if _write_retry_pages <= 1:
+                        raise  # nothing left to drop -- let outer handler report failure
+                    # Rebuild a smaller writer with fewer pages from the
+                    # already-open reader (reader itself was never the
+                    # issue -- it's lazy/disk-backed when use_disk is set).
+                    _write_retry_pages = max(1, _write_retry_pages - 5)
+                    end_page = start_page + _write_retry_pages - 1
+                    logger.warning(f"[Cut] writer.write() MemoryError, retrying with fewer pages: {start_page}-{end_page}")
+                    del writer
+                    try:
+                        import gc as _gc2
+                        _gc2.collect()
+                    except Exception:
+                        pass
+                    writer = PdfWriter()
+                    for p in range(start_page - 1, end_page):
+                        writer.add_page(reader.pages[p])
+            if end_page < _orig_requested_end:
+                _mem_ok = False  # write-step also had to shrink the range -- caption below must reflect it
+            out_name = f"{base_name}_p{start_page}-{end_page}.pdf"
             del writer, reader
             try:
                 import gc as _gc
