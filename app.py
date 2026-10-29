@@ -11844,8 +11844,41 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                 return
             end_page = min(end_page, num_pages)
             writer = PdfWriter()
+            # 2026-10-29: live RSS check while adding pages instead of a
+            # fixed page-count cap. Render free is 512MB physical -- stop
+            # adding pages once RSS crosses a safe margin (leaves headroom
+            # for writer.write()'s own buffer + send_document()'s buffers
+            # afterward) and send whatever fit instead of failing the whole
+            # range with a bare MemoryError. This auto-adapts to actual
+            # page weight (scanned/image-heavy vs text-only) rather than
+            # guessing a page count up front.
+            SAFE_RSS_BYTES = 300 * 1024 * 1024  # 300MB -- leaves ~200MB headroom under 512MB
+            _mem_ok = True
+            try:
+                import psutil as _psutil
+                _proc = _psutil.Process(os.getpid())
+            except Exception:
+                _proc = None
+            actual_end_page = end_page
             for p in range(start_page - 1, end_page):
+                if _proc is not None:
+                    try:
+                        if _proc.memory_info().rss > SAFE_RSS_BYTES:
+                            actual_end_page = p  # p is 0-indexed; last added was p-1 (1-indexed: p)
+                            logger.warning(f"[Cut] RSS safety stop at page {p} (of requested {start_page}-{end_page}) -- sending partial range")
+                            _mem_ok = False
+                            break
+                    except Exception:
+                        pass
                 writer.add_page(reader.pages[p])
+            end_page = actual_end_page if not _mem_ok else end_page
+            if end_page < start_page:
+                # Hit the RSS limit before even one page fit (rare -- huge
+                # per-page images) -- nothing to send.
+                del writer, reader
+                if status_msg_id:
+                    await edit_msg(chat_id, status_msg_id, "❌ এই PDF-এর পাতাগুলো এতটাই ভারী যে একটা পাতাও server memory-তে ধরছে না। ছোট/কম resolution PDF দিয়ে ট্রাই করো।")
+                return
             out_name = f"{base_name}_p{start_page}-{end_page}.pdf"
             # 2026-10-29: write straight to an in-memory buffer instead of a
             # tmp file + re-read. The old path held pdf_bytes + reader +
@@ -11864,8 +11897,11 @@ async def _handle_cut_pdf_command_inner(msg: dict):
                 pass
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
+            _caption = f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)"
+            if not _mem_ok:
+                _caption += f"\n⚠️ Server memory limit-এর কারণে পুরো range পাঠানো যায়নি, {start_page}-{end_page} পর্যন্ত পাঠানো হলো। বাকিটা আলাদাভাবে চাও (যেমন /cut {end_page + 1}-{(end_page - start_page + 1) + end_page})।"
             send_res = await send_document(chat_id, out_bytes, out_name,
-                                 caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)")
+                                 caption=_caption)
             if not send_res.get("ok"):
                 err = send_res.get("error") or send_res.get("description") or "unknown error"
                 logger.error(f"[Cut] send_document failed: {err}")
