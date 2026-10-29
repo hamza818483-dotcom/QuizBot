@@ -11759,6 +11759,16 @@ async def _handle_cut_pdf_command_inner(msg: dict):
 
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB")
     status_msg_id = status_r.get("result", {}).get("message_id")
+    # 2026-10-29: diagnostic only -- log RSS/VMS at the start of every /cut
+    # so a later MemoryError's RSS/VMS numbers can be compared against this
+    # baseline to confirm/rule out cross-request leftover virtual memory
+    # (see the matching log in the MemoryError handler below).
+    try:
+        import psutil as _psutil_cutstart
+        _mi0 = _psutil_cutstart.Process(os.getpid()).memory_info()
+        logger.info(f"[Cut] start {file_name} RSS={_mi0.rss/1024/1024:.0f}MB VMS={_mi0.vms/1024/1024:.0f}MB")
+    except Exception:
+        pass
 
     # 2026-10-29: files above this go straight to disk (pyrogram download +
     # pypdf reads the file path, never loading the whole thing into RAM) to
@@ -11904,7 +11914,19 @@ async def _handle_cut_pdf_command_inner(msg: dict):
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "✅ সম্পন্ন!")
     except MemoryError:
-        logger.error("[Cut] MemoryError: page range too large/memory-heavy for this instance")
+        # 2026-10-29: diagnostic only (no behavior change) -- log actual
+        # RSS (physical) vs VMS (virtual, the thing RLIMIT_AS caps) to
+        # tell apart "genuinely out of physical RAM" from "virtual address
+        # space cap (RAM_CAP_MB/RLIMIT_AS) hit due to heap fragmentation
+        # from a PRIOR request, even though physical RAM is free". CPython
+        # rarely returns freed heap pages to the OS, so VMS can climb
+        # across repeated /cut calls even as RSS stays flat.
+        try:
+            import psutil as _psutil_diag
+            _mi = _psutil_diag.Process(os.getpid()).memory_info()
+            logger.error(f"[Cut] MemoryError: page range too large/memory-heavy for this instance (RSS={_mi.rss/1024/1024:.0f}MB VMS={_mi.vms/1024/1024:.0f}MB)")
+        except Exception:
+            logger.error("[Cut] MemoryError: page range too large/memory-heavy for this instance")
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id, "❌ এই PDF/page range টা server memory-তে ধরছে না। ছোট range দিয়ে ট্রাই করো (যেমন ১০-১৫ পাতা করে ভাগ করে)।")
         return
