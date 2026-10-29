@@ -11760,6 +11760,17 @@ async def _handle_cut_pdf_command_inner(msg: dict):
     status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}\n📦 {size_kb} KB")
     status_msg_id = status_r.get("result", {}).get("message_id")
 
+    # 2026-10-29: log baseline RSS before this /cut even starts downloading,
+    # so repeated-call OOM (RSS already high from a PRIOR /cut's leftover
+    # references before this request begins) is distinguishable from
+    # this-request-alone being too heavy.
+    try:
+        import psutil as _psutil_pre
+        _rss_pre = _psutil_pre.Process(os.getpid()).memory_info().rss
+        logger.info(f"[Cut] baseline RSS before download: {_rss_pre/1024/1024:.0f}MB")
+    except Exception:
+        pass
+
     # 2026-10-29: files above this go straight to disk (pyrogram download +
     # pypdf reads the file path, never loading the whole thing into RAM) to
     # avoid stacking pdf_bytes + cache-copy + PdfReader + PdfWriter in
@@ -11852,18 +11863,30 @@ async def _handle_cut_pdf_command_inner(msg: dict):
             # range with a bare MemoryError. This auto-adapts to actual
             # page weight (scanned/image-heavy vs text-only) rather than
             # guessing a page count up front.
-            SAFE_RSS_BYTES = 300 * 1024 * 1024  # 300MB -- leaves ~200MB headroom under 512MB
+            # 2026-10-29: use a RISE above this request's own starting RSS,
+            # not an absolute RSS number. CPython rarely returns freed heap
+            # pages to the OS (malloc arena fragmentation), so after one
+            # large /cut, baseline RSS can sit elevated (e.g. 250-300MB)
+            # even with nothing live referenced -- an absolute 300MB cap
+            # then false-triggers on page 0 of the VERY NEXT /cut, before
+            # any real new allocation happens. A relative budget tracks
+            # actual growth caused by THIS request's own page-adding work.
+            SAFE_RSS_GROWTH_BYTES = 180 * 1024 * 1024  # ~180MB of new growth allowed
+            HARD_RSS_CEILING_BYTES = 460 * 1024 * 1024  # absolute stop regardless of baseline
             _mem_ok = True
             try:
                 import psutil as _psutil
                 _proc = _psutil.Process(os.getpid())
+                _rss_baseline = _proc.memory_info().rss
             except Exception:
                 _proc = None
+                _rss_baseline = 0
             actual_end_page = end_page
             for p in range(start_page - 1, end_page):
                 if _proc is not None:
                     try:
-                        if _proc.memory_info().rss > SAFE_RSS_BYTES:
+                        _rss_now = _proc.memory_info().rss
+                        if _rss_now > HARD_RSS_CEILING_BYTES or (_rss_now - _rss_baseline) > SAFE_RSS_GROWTH_BYTES:
                             actual_end_page = p  # p is 0-indexed; last added was p-1 (1-indexed: p)
                             logger.warning(f"[Cut] RSS safety stop at page {p} (of requested {start_page}-{end_page}) -- sending partial range")
                             _mem_ok = False
