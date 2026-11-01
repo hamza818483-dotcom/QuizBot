@@ -9468,6 +9468,22 @@ async def handle_gallery_command(msg: dict):
         await _safe_error_reply(chat_id, e)
         return
 
+    # Hard size cap — on Render's 512MB plan, pdf_bytes sits fully resident
+    # in RAM for the whole /g session (cached, then re-read per page by
+    # poppler), on top of the app's own baseline + poppler's per-page render
+    # memory. A handful of very-high-res phone-scanned pages can make the
+    # raw file itself 100-300MB+, which is enough alone to explain an OOM
+    # even at 2-3 pages — low page count doesn't mean low file size.
+    _pdf_mb = len(pdf_bytes) / 1024 / 1024
+    logger.info(f"[Gallery] downloaded pdf: {_pdf_mb:.1f}MB")
+    _GALLERY_MAX_PDF_MB = 25
+    if _pdf_mb > _GALLERY_MAX_PDF_MB:
+        if loading_id:
+            await edit_msg(chat_id, loading_id,
+                f"❌ এই PDF-টা {_pdf_mb:.0f}MB — সর্বোচ্চ {_GALLERY_MAX_PDF_MB}MB পর্যন্ত সাপোর্টেড "
+                f"(খুব বেশি resolution-এ scan করা PDF হলে RAM limit-এ আটকে যায়)।")
+        return
+
     try:
         total_pages = await asyncio.to_thread(get_pdf_page_count, pdf_bytes)
     except Exception:
