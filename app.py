@@ -9521,11 +9521,26 @@ async def handle_gallery_download_callback(query: dict):
         # dpi=200: noticeably sharper than the 150 used for MCQ-extraction
         # elsewhere in the bot — here the image *is* the deliverable the user
         # will keep, so quality matters more than render speed.
-        pages = await asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=200, thread_count=4, use_cropbox=True)
+        # thread_count=1 (was 4): on Render's free plan (~0.5 CPU, 512MB RAM)
+        # 4 concurrent poppler threads caused CPU/RAM contention that hung
+        # the whole request indefinitely (observed: stuck forever even on a
+        # 3-page PDF) instead of erroring out. 1 thread is slower per-page
+        # but actually completes. 90s hard timeout as a safety net so a
+        # stuck render fails loud instead of hanging the status message
+        # forever.
+        pages = await asyncio.wait_for(
+            asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=200, thread_count=1, use_cropbox=True),
+            timeout=90,
+        )
+    except asyncio.TimeoutError:
+        logger.error("[Gallery] PDF render timed out after 90s")
+        if status_id:
+            await edit_msg(chat_id, status_id, "❌ PDF থেকে ছবি বানাতে বেশি সময় লাগছে (timeout)। Server busy থাকলে একটু পর আবার চেষ্টা করো।")
+        return
     except Exception as e:
         logger.error(f"[Gallery] PDF render failed: {e}")
         if status_id:
-            await edit_msg(chat_id, status_id, "❌ PDF থেকে ছবি বানাতে সমস্যা হয়েছে।")
+            await edit_msg(chat_id, status_id, f"❌ PDF থেকে ছবি বানাতে সমস্যা হয়েছে: {e}")
         return
 
     if not pages:
