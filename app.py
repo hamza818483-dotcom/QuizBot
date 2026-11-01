@@ -460,7 +460,15 @@ from special_module import (
 # abandoned upload flow (user never finishes channel-select) can't leak heavy
 # decoded images forever. Self-overwrites per uid, but this adds a hard
 # ceiling + oldest-key eviction as a safety net.
-_PAGE_CACHE_MAX_ENTRIES = 50
+#
+# 2026-11-02: lowered 50->8. This bot runs on Render's 512MB free tier, not
+# HF's 16GB -- the old value (and the raw-bytes/render caches below) were
+# sized as if 16GB was available, so decoded PIL-image pages from every
+# PDF/image ever processed during process uptime kept accumulating until a
+# totally unrelated, tiny (3-page/3MB) /qbm request was the one that finally
+# tipped the already-bloated cache over 512MB and got OOM-killed. 8 keeps
+# genuine multi-user in-flight speed benefit without the slow unbounded growth.
+_PAGE_CACHE_MAX_ENTRIES = 8
 
 def _cap_page_cache(cache: dict) -> None:
     while len(cache) > _PAGE_CACHE_MAX_ENTRIES:
@@ -471,7 +479,11 @@ def _cap_page_cache(cache: dict) -> None:
 # download entirely. Small cap + oldest-eviction, same safety pattern as
 # _cap_page_cache. In-memory only — resets on deploy/restart, which is fine
 # since it's purely a speed optimization, never a correctness dependency.
-_PDF_BYTES_CACHE_MAX = 40  # HF has 16GB RAM (not Render free tier) — safe to hold more raw PDFs
+# 2026-11-02: lowered 40->6 — this bot actually runs on Render's 512MB free
+# tier (the "HF 16GB" assumption below was wrong for this deployment); raw
+# PDF files can each be tens of MB, so 40 of them resident was a direct OOM
+# contributor, unrelated to whatever PDF a user happens to send next.
+_PDF_BYTES_CACHE_MAX = 6
 _pdf_bytes_cache = {}  # file_id -> bytes
 
 # SPEED: Telegram's file_id changes on every re-upload/re-forward of the SAME
@@ -597,7 +609,10 @@ async def _download_pdf_cached(file_id: str, progress_cb=None, chat_id: int = No
 # of /pdf on the same file+range skips pdf2image rasterization too (the
 # heaviest CPU step). Keyed by a hash of the actual PDF bytes (not file_id),
 # so this also hits when the same PDF is re-uploaded under a new file_id.
-_PDF_RENDER_CACHE_MAX = 15
+# 2026-11-02: lowered 15->4 for Render's 512MB — this holds decoded PIL
+# images (the most RAM-heavy artifact in the whole pipeline), same root
+# cause as the two caches above.
+_PDF_RENDER_CACHE_MAX = 4
 _pdf_render_cache = {}  # (content_hash, page_range) -> pages list
 
 def _cap_pdf_render_cache() -> None:
