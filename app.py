@@ -461,30 +461,50 @@ from special_module import (
 # decoded images forever. Self-overwrites per uid, but this adds a hard
 # ceiling + oldest-key eviction as a safety net.
 #
-# 2026-11-02: lowered 50->8. This bot runs on Render's 512MB free tier, not
-# HF's 16GB -- the old value (and the raw-bytes/render caches below) were
-# sized as if 16GB was available, so decoded PIL-image pages from every
-# PDF/image ever processed during process uptime kept accumulating until a
-# totally unrelated, tiny (3-page/3MB) /qbm request was the one that finally
-# tipped the already-bloated cache over 512MB and got OOM-killed. 8 keeps
-# genuine multi-user in-flight speed benefit without the slow unbounded growth.
-_PAGE_CACHE_MAX_ENTRIES = 8
+# 2026-11-02: switched from entry-count to a real byte-size cap, same reason
+# as the render cache below (defined later in this file, _pdf_render_cache):
+# these store decoded PIL images too (per-uid pdf_img_/pdfm_img_/qbm_img_
+# keys), so a single "entry" could be a 1-page or a 150-page decoded set --
+# entry count never reflected actual RAM. This bot runs on Render's 512MB
+# free tier, not the 16GB this was originally sized for. 40MB ceiling, using
+# the same _estimate_pages_bytes() helper as the render cache so all these
+# per-uid caches share one consistent sizing rule.
+_PAGE_CACHE_MAX_BYTES = 40 * 1024 * 1024
+
+def _estimate_pages_bytes(pages) -> int:
+    total = 0
+    try:
+        for _, img in pages:
+            try:
+                total += img.width * img.height * len(img.getbands())
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return total
 
 def _cap_page_cache(cache: dict) -> None:
-    while len(cache) > _PAGE_CACHE_MAX_ENTRIES:
-        cache.pop(next(iter(cache)), None)
+    total = sum(_estimate_pages_bytes(v) for v in cache.values())
+    while total > _PAGE_CACHE_MAX_BYTES and cache:
+        evicted_key = next(iter(cache))
+        evicted = cache.pop(evicted_key, None)
+        if evicted is not None:
+            total -= _estimate_pages_bytes(evicted)
 
 # SPEED: cache raw downloaded PDF bytes by file_id so re-running /pdf on the
 # SAME file (retry, different page range, re-generate) skips the Telegram
 # download entirely. Small cap + oldest-eviction, same safety pattern as
 # _cap_page_cache. In-memory only — resets on deploy/restart, which is fine
 # since it's purely a speed optimization, never a correctness dependency.
-# 2026-11-02: lowered 40->6 — this bot actually runs on Render's 512MB free
-# tier (the "HF 16GB" assumption below was wrong for this deployment); raw
-# PDF files can each be tens of MB, so 40 of them resident was a direct OOM
-# contributor, unrelated to whatever PDF a user happens to send next.
-_PDF_BYTES_CACHE_MAX = 6
+# 2026-11-02: switched from entry-count cap to a real byte-size cap. Entry
+# count never reflected actual RAM -- a 50-page scanned PDF and a 1-page
+# PDF both counted as "1 entry", so a count cap gave no real guarantee on
+# this bot's actual host (Render 512MB free tier, not HF's 16GB as originally
+# assumed). 60MB total ceiling leaves headroom under 512MB alongside the
+# render cache, the app's own baseline, and in-flight request memory.
+_PDF_BYTES_CACHE_MAX_BYTES = 60 * 1024 * 1024
 _pdf_bytes_cache = {}  # file_id -> bytes
+_pdf_bytes_cache_size = {"v": 0}  # running total of _pdf_bytes_cache values, in bytes
 
 # SPEED: Telegram's file_id changes on every re-upload/re-forward of the SAME
 # file, but file_unique_id stays identical for identical file content across
@@ -493,10 +513,23 @@ _pdf_bytes_cache = {}  # file_id -> bytes
 # instead of re-downloading just because the file_id differs this time.
 _pdf_unique_id_index = {}  # file_unique_id -> file_id (points into _pdf_bytes_cache)
 
+def _pdf_bytes_cache_set(file_id: str, data: bytes) -> None:
+    """Single write path for _pdf_bytes_cache -- keeps _pdf_bytes_cache_size
+    accurate no matter which call site sets an entry. Always use this instead
+    of `_pdf_bytes_cache[file_id] = data` directly."""
+    old = _pdf_bytes_cache.get(file_id)
+    if old is not None:
+        _pdf_bytes_cache_size["v"] -= len(old)
+    _pdf_bytes_cache[file_id] = data
+    _pdf_bytes_cache_size["v"] += len(data)
+    _cap_pdf_bytes_cache()
+
 def _cap_pdf_bytes_cache() -> None:
-    while len(_pdf_bytes_cache) > _PDF_BYTES_CACHE_MAX:
+    while _pdf_bytes_cache_size["v"] > _PDF_BYTES_CACHE_MAX_BYTES and _pdf_bytes_cache:
         evicted_fid = next(iter(_pdf_bytes_cache))
-        _pdf_bytes_cache.pop(evicted_fid, None)
+        evicted_data = _pdf_bytes_cache.pop(evicted_fid, None)
+        if evicted_data is not None:
+            _pdf_bytes_cache_size["v"] -= len(evicted_data)
         # Also drop any unique_id index entries pointing at the evicted file_id
         for uid, fid in list(_pdf_unique_id_index.items()):
             if fid == evicted_fid:
@@ -586,38 +619,52 @@ async def _download_pdf_cached(file_id: str, progress_cb=None, chat_id: int = No
         if prior_fid and prior_fid in _pdf_bytes_cache:
             logger.info(f"[PDF Cache] hit via file_unique_id={file_unique_id[:16]}... (re-upload) skipping download")
             data = _pdf_bytes_cache[prior_fid]
-            _pdf_bytes_cache[file_id] = data  # also index under new file_id for this session
-            _cap_pdf_bytes_cache()
+            _pdf_bytes_cache_set(file_id, data)  # also index under new file_id for this session
             return data
         # In-memory missed (likely a restart since last time) -> check disk.
         disk_data = await asyncio.to_thread(_pdf_disk_cache_get, file_unique_id)
         if disk_data is not None:
             logger.info(f"[PDF DiskCache] hit via file_unique_id={file_unique_id[:16]}... (post-restart) skipping download")
-            _pdf_bytes_cache[file_id] = disk_data
+            _pdf_bytes_cache_set(file_id, disk_data)
             _pdf_unique_id_index[file_unique_id] = file_id
-            _cap_pdf_bytes_cache()
             return disk_data
     data = await download_tg_file(file_id, progress_cb=progress_cb, chat_id=chat_id, message_id=message_id)
-    _pdf_bytes_cache[file_id] = data
+    _pdf_bytes_cache_set(file_id, data)
     if file_unique_id:
         _pdf_unique_id_index[file_unique_id] = file_id
         await asyncio.to_thread(_pdf_disk_cache_put, file_unique_id, data)
-    _cap_pdf_bytes_cache()
     return data
 
 # SPEED: cache RENDERED page images by (content_hash, page_range) so a re-run
 # of /pdf on the same file+range skips pdf2image rasterization too (the
 # heaviest CPU step). Keyed by a hash of the actual PDF bytes (not file_id),
 # so this also hits when the same PDF is re-uploaded under a new file_id.
-# 2026-11-02: lowered 15->4 for Render's 512MB — this holds decoded PIL
-# images (the most RAM-heavy artifact in the whole pipeline), same root
-# cause as the two caches above.
-_PDF_RENDER_CACHE_MAX = 4
+# 2026-11-02: switched from entry-count to a real byte-size cap. This holds
+# decoded PIL images -- uncompressed RGB bitmaps in RAM (width*height*3
+# bytes), far bigger than the source PDF file and wildly variable per PDF
+# (a 3-page vs 50-page entry were both "1 entry" under the old cap), so
+# entry count was an even worse RAM proxy here than for the raw-bytes cache.
+# 40MB ceiling for this bot's actual host (Render 512MB free tier, not the
+# 16GB this was originally sized for).
+_PDF_RENDER_CACHE_MAX_BYTES = 40 * 1024 * 1024
 _pdf_render_cache = {}  # (content_hash, page_range) -> pages list
+_pdf_render_cache_size = {"v": 0}  # running total estimated bytes
+# (uses _estimate_pages_bytes defined earlier, near _cap_page_cache)
+
+def _pdf_render_cache_set(key, pages) -> None:
+    old = _pdf_render_cache.get(key)
+    if old is not None:
+        _pdf_render_cache_size["v"] -= _estimate_pages_bytes(old)
+    _pdf_render_cache[key] = pages
+    _pdf_render_cache_size["v"] += _estimate_pages_bytes(pages)
+    _cap_pdf_render_cache()
 
 def _cap_pdf_render_cache() -> None:
-    while len(_pdf_render_cache) > _PDF_RENDER_CACHE_MAX:
-        _pdf_render_cache.pop(next(iter(_pdf_render_cache)), None)
+    while _pdf_render_cache_size["v"] > _PDF_RENDER_CACHE_MAX_BYTES and _pdf_render_cache:
+        evicted_key = next(iter(_pdf_render_cache))
+        evicted = _pdf_render_cache.pop(evicted_key, None)
+        if evicted is not None:
+            _pdf_render_cache_size["v"] -= _estimate_pages_bytes(evicted)
 
 def _render_pdf_cached(file_id: str, pdf_bytes: bytes, page_range: str = None):
     """Wraps pdf_to_images_safe with a render cache keyed by (content_hash, page_range)
@@ -638,8 +685,7 @@ def _render_pdf_cached(file_id: str, pdf_bytes: bytes, page_range: str = None):
         return True, list(cached)
     ok, pages = pdf_to_images_safe(pdf_bytes, page_range)
     if ok and pages:
-        _pdf_render_cache[key] = list(pages)
-        _cap_pdf_render_cache()
+        _pdf_render_cache_set(key, list(pages))
     return ok, pages
 
 PIN_ENABLED = {}  # chat_id -> bool (in-memory, also saved to DB)
