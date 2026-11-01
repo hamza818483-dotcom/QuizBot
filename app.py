@@ -9520,6 +9520,15 @@ async def handle_gallery_download_callback(query: dict):
 
     from pdf2image import convert_from_bytes
 
+    def _rss_mb():
+        try:
+            import resource as _r
+            return _r.getrusage(_r.RUSAGE_SELF).ru_maxrss / 1024  # KB->MB on Linux
+        except Exception:
+            return -1
+
+    logger.info(f"[Gallery] start: pdf_bytes={len(pdf_bytes)/1024/1024:.1f}MB rss_peak={_rss_mb():.0f}MB")
+
     try:
         total = await asyncio.to_thread(get_pdf_page_count, pdf_bytes)
     except Exception as e:
@@ -9556,6 +9565,7 @@ async def handle_gallery_download_callback(query: dict):
                 timeout=30,
             )
             img = page_imgs[0]
+            logger.info(f"[Gallery] page {page_num} rendered: size={img.size} rss_peak={_rss_mb():.0f}MB")
         except asyncio.TimeoutError:
             last_err = "render timeout (30s)"
             failed_pages.append((page_num, last_err))
@@ -9592,6 +9602,7 @@ async def handle_gallery_download_callback(query: dict):
             result = await send_photo(chat_id, buf.getvalue(), caption=f"📄 Page {page_num}/{total}")
         except Exception as e:
             result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        logger.info(f"[Gallery] page {page_num} sent (ok={result.get('ok')}) rss_peak={_rss_mb():.0f}MB")
 
         if result.get("ok"):
             sent += 1
