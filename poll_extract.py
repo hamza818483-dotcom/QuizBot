@@ -283,7 +283,8 @@ async def extract_polls_telethon(channel, start_id: int, end_id: int, progress_c
         import time as _time
         extract_start = _time.monotonic()
         BATCH_SIZE = 15
-        MEMORY_LIMIT_MB = 10000  # 16GB RAM er beshirbhag, ei level cross korle checkpoint CSV pathabe (safety net)
+        from core import IS_RENDER as _IS_RENDER_PE
+        MEMORY_LIMIT_MB = 300 if _IS_RENDER_PE else 10000  # host-aware safety-net checkpoint threshold (fix 2026-11-02)
         checkpoint_sent_for_level = 0  # kotobar checkpoint hoyeche track kore, duplicate na hoy
 
         _last_msg_id_seen = None
@@ -1002,7 +1003,8 @@ async def extract_polls_by_topic(client, entity, channel, topic_id: int, progres
                 raise Exception(f"Topic message scan {collect_attempts} bar fail holo: {e}")
 
     BATCH_SIZE = 15
-    MEMORY_LIMIT_MB = 10000  # 16GB RAM er beshirbhag, ei level cross korle checkpoint CSV pathabe (safety net)
+    from core import IS_RENDER as _IS_RENDER_PE
+    MEMORY_LIMIT_MB = 300 if _IS_RENDER_PE else 10000  # host-aware safety-net checkpoint threshold (fix 2026-11-02)
     checkpoint_sent_for_level = 0
 
     try:

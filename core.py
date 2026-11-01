@@ -65,6 +65,13 @@ GH_PAGES_QUICK_URL = os.environ.get("GH_PAGES_QUICK_URL", "https://hamza818483-d
 
 # Render এ চললে directly TG API, HF এ চললে CF proxy (HF তে TG blocked)
 _running_on = os.environ.get("RUNNING_ON", "") or "HuggingFace Space"
+# Single source of truth for "are we on the 512MB Render free tier or the
+# 16GB HF Space" -- every RAM-sized constant across the codebase (caches,
+# concurrency semaphores, conversion thread counts, RAM-guard thresholds)
+# should branch on THIS, not redefine its own copy of the check, so a host
+# ever gets mis-sized in only one of many places (as several already had).
+IS_RENDER = (_running_on == "Render") or bool(RENDER_URL and "onrender.com" in RENDER_URL)
+
 if _running_on == "Render" or (RENDER_URL and "onrender.com" in RENDER_URL):
     TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
     _tg_mode = "direct"

@@ -1735,7 +1735,10 @@ import threading as _threading
 # than enough to OOM-kill a 512MB container on even a single small PDF the
 # instant two uploads/retries overlapped. Detect the host the same way
 # core.py does and scale down there.
-_ON_RENDER = (os.environ.get("RUNNING_ON", "") == "Render") or ("onrender.com" in os.environ.get("RENDER_URL", ""))
+try:
+    from core import IS_RENDER as _ON_RENDER
+except Exception:
+    _ON_RENDER = (os.environ.get("RUNNING_ON", "") == "Render") or ("onrender.com" in os.environ.get("RENDER_URL", ""))
 _PDF_CONVERT_LOCK = _threading.Semaphore(1 if _ON_RENDER else 6)
 _PDF_CONVERT_THREAD_COUNT = 1 if _ON_RENDER else 4
 _PDF_MAX_PAGES_PER_CALL = 200
