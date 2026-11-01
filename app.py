@@ -39795,9 +39795,20 @@ async def _ram_guard_task() -> None:
     # platform's real 512MB limit OOM-killed the process outright -- the
     # guard was silently useless on Render. Now mirrors core.py's _running_on
     # detection instead of assuming the 16GB host every time.
-    limit_mb = 400 if IS_RENDER else 14000
+    # FIX 2026-11-02: limit_mb lowered 400->320 on Render -- actual OOM kills kept
+    # happening even with the 400MB/60s-poll guard, meaning real RSS was shooting
+    # past 512MB faster than the old thresholds (380/352MB) left room to react.
+    # 320MB base gives threshold=240MB/hard_cap=281MB/oom_mb=304MB, leaving far
+    # more headroom below the platform's real 512MB kill line.
+    limit_mb = 320 if IS_RENDER else 14000
     threshold_mb = int(limit_mb * 0.75)
-    await asyncio.sleep(60)
+    check_interval = 5 if IS_RENDER else 60  # FIX 2026-11-02: 60s was far too slow on
+    # Render -- a Chromium launch + concurrent page render can spike RSS from well
+    # under threshold to past the platform's 512MB hard OOM kill in a few seconds,
+    # so the guard's 60s poll routinely missed the window entirely and the platform
+    # killed the process before this code ever saw the high RSS. 5s on Render closes
+    # that gap; HF Space keeps 60s since it has ample headroom and no urgency.
+    await asyncio.sleep(check_interval)
     while True:
         try:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
@@ -39832,7 +39843,7 @@ async def _ram_guard_task() -> None:
                 logger.info(f"[RAMGuard] RSS {rss_mb:.0f}MB approaching threshold ({threshold_mb}MB)")
         except Exception as e:
             logger.warning(f"[RAMGuard] check failed: {e}")
-        await asyncio.sleep(60)
+        await asyncio.sleep(check_interval)
 
 
 async def _keepalive_task() -> None:
