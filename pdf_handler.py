@@ -1726,7 +1726,18 @@ async def generate_pdfs_call2_mcqs(img: Image.Image, headings: list, topic: str,
 # Now on 16GB HF Space there's ample headroom, so both are raised substantially
 # while still keeping some ceiling as a sanity guard against runaway usage.
 import threading as _threading
-_PDF_CONVERT_LOCK = _threading.Semaphore(6)
+# BUGFIX 2026-11-02: this file imports nothing from core.py, so it never
+# knew which host it's actually running on -- the semaphore(6) + thread_count=4
+# below were sized for the 16GB HF Space and stayed that way even on the
+# 512MB Render instance (same deploy, selected via RUNNING_ON/RENDER_URL env
+# vars, not a different codebase). On Render this meant up to 6 concurrent
+# poppler conversions, each spawning 4 internal threads at dpi=150 -- more
+# than enough to OOM-kill a 512MB container on even a single small PDF the
+# instant two uploads/retries overlapped. Detect the host the same way
+# core.py does and scale down there.
+_ON_RENDER = (os.environ.get("RUNNING_ON", "") == "Render") or ("onrender.com" in os.environ.get("RENDER_URL", ""))
+_PDF_CONVERT_LOCK = _threading.Semaphore(1 if _ON_RENDER else 6)
+_PDF_CONVERT_THREAD_COUNT = 1 if _ON_RENDER else 4
 _PDF_MAX_PAGES_PER_CALL = 200
 
 
@@ -1745,7 +1756,7 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
             hit 100% (19 pages = 19 separate subprocess spins). Falls back
             to per-page conversion only if the batch call itself fails."""
             try:
-                imgs = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150, thread_count=4, use_cropbox=True)
+                imgs = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150, thread_count=_PDF_CONVERT_THREAD_COUNT, use_cropbox=True)
                 if imgs and len(imgs) == (last - first + 1):
                     return imgs
             except Exception as _conv_e:
@@ -1763,7 +1774,7 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
             backoffs = [1, 2, 3, 4]
             for _attempt in range(5):
                 try:
-                    imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=4, use_cropbox=True)
+                    imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=_PDF_CONVERT_THREAD_COUNT, use_cropbox=True)
                     if imgs:
                         return imgs[0]
                 except Exception as _conv_e:
@@ -1771,7 +1782,7 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
                 if _attempt < len(backoffs):
                     time.sleep(backoffs[_attempt])
             try:
-                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=100, thread_count=4, use_cropbox=True)
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=100, thread_count=_PDF_CONVERT_THREAD_COUNT, use_cropbox=True)
                 if imgs:
                     logger.warning(f"[PDF] Page {p} recovered via dpi=100 fallback after 5 failed dpi=150 attempts")
                     return imgs[0]
