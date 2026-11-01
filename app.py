@@ -9554,6 +9554,7 @@ async def handle_gallery_download_callback(query: dict):
     sent = 0
     consecutive_fail = 0
     last_err = None
+    failed_pages = []  # [(page_num, err), ...] — every failure, not just the final streak
     for i, img in enumerate(pages):
         page_num = i + 1
         buf = BytesIO()
@@ -9561,12 +9562,17 @@ async def handle_gallery_download_callback(query: dict):
         # well under Telegram's per-photo size limit for large A4 pages.
         img.save(buf, format="JPEG", quality=95)
 
-        result = await send_photo(chat_id, buf.getvalue(), caption=f"📄 Page {page_num}/{total}")
+        try:
+            result = await send_photo(chat_id, buf.getvalue(), caption=f"📄 Page {page_num}/{total}")
+        except Exception as e:
+            result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
         if result.get("ok"):
             sent += 1
             consecutive_fail = 0
         else:
             last_err = result.get("description") or result.get("error") or str(result)
+            failed_pages.append((page_num, last_err))
             logger.error(f"[Gallery] sendPhoto page {page_num} failed: {last_err}")
             consecutive_fail += 1
             # 3 বার টানা fail হলে আর চেষ্টা না করে থেমে যাও — নাহলে বাকি
@@ -9597,7 +9603,10 @@ async def handle_gallery_download_callback(query: dict):
                 f"ক্রম নির্ভর করবে, guaranteed serial না।)"
             )
         else:
-            await edit_msg(chat_id, status_id, f"⚠️ {sent}/{total} page পাঠানো গেছে, কিছু page fail হয়েছে।")
+            fail_lines = "\n".join(f"• Page {p}: {e}" for p, e in failed_pages[:10])
+            more = f"\n...আরও {len(failed_pages) - 10}টা" if len(failed_pages) > 10 else ""
+            await edit_msg(chat_id, status_id,
+                f"⚠️ {sent}/{total} page পাঠানো গেছে, {len(failed_pages)}টা fail হয়েছে।\n\n{fail_lines}{more}")
 
 
 # ============================================================
