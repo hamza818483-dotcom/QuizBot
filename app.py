@@ -9518,45 +9518,71 @@ async def handle_gallery_download_callback(query: dict):
     status = await send_msg(chat_id, "⏳ Photo গুলো তৈরি হচ্ছে...")
     status_id = status.get("result", {}).get("message_id")
 
-    try:
-        from pdf2image import convert_from_bytes
-        # dpi=200: noticeably sharper than the 150 used for MCQ-extraction
-        # elsewhere in the bot — here the image *is* the deliverable the user
-        # will keep, so quality matters more than render speed.
-        # thread_count=1 (was 4): on Render's free plan (~0.5 CPU, 512MB RAM)
-        # 4 concurrent poppler threads caused CPU/RAM contention that hung
-        # the whole request indefinitely (observed: stuck forever even on a
-        # 3-page PDF) instead of erroring out. 1 thread is slower per-page
-        # but actually completes. 90s hard timeout as a safety net so a
-        # stuck render fails loud instead of hanging the status message
-        # forever.
-        pages = await asyncio.wait_for(
-            asyncio.to_thread(convert_from_bytes, pdf_bytes, dpi=200, thread_count=1, use_cropbox=True),
-            timeout=90,
-        )
-    except asyncio.TimeoutError:
-        logger.error("[Gallery] PDF render timed out after 90s")
-        if status_id:
-            await edit_msg(chat_id, status_id, "❌ PDF থেকে ছবি বানাতে বেশি সময় লাগছে (timeout)। Server busy থাকলে একটু পর আবার চেষ্টা করো।")
-        return
-    except Exception as e:
-        logger.error(f"[Gallery] PDF render failed: {e}")
-        if status_id:
-            await edit_msg(chat_id, status_id, f"❌ PDF থেকে ছবি বানাতে সমস্যা হয়েছে: {e}")
-        return
+    from pdf2image import convert_from_bytes
 
-    if not pages:
+    try:
+        total = await asyncio.to_thread(get_pdf_page_count, pdf_bytes)
+    except Exception as e:
+        logger.error(f"[Gallery] page count failed: {e}")
+        if status_id:
+            await edit_msg(chat_id, status_id, f"❌ PDF পড়তে সমস্যা হয়েছে: {e}")
+        return
+    if not total:
         if status_id:
             await edit_msg(chat_id, status_id, "❌ কোনো page পাওয়া যায়নি।")
         return
 
-    total = len(pages)
+    # dpi=200: noticeably sharper than the 150 used for MCQ-extraction
+    # elsewhere in the bot — here the image *is* the deliverable the user
+    # will keep, so quality matters more than render speed.
+    #
+    # One page at a time (was: convert_from_bytes(pdf_bytes) with no page
+    # range) — that decoded every page into a PIL image in memory
+    # simultaneously before sending any of them, which is what was blowing
+    # past Render's 512MB limit on larger PDFs (confirmed OOM kill). Now at
+    # most one decoded page is ever resident; each page's render has its
+    # own 30s timeout so one bad page can't hang the whole run silently.
     sent = 0
     consecutive_fail = 0
     last_err = None
     failed_pages = []  # [(page_num, err), ...] — every failure, not just the final streak
-    for i, img in enumerate(pages):
-        page_num = i + 1
+    for page_num in range(1, total + 1):
+        try:
+            page_imgs = await asyncio.wait_for(
+                asyncio.to_thread(
+                    convert_from_bytes, pdf_bytes, dpi=200, thread_count=1,
+                    use_cropbox=True, first_page=page_num, last_page=page_num,
+                ),
+                timeout=30,
+            )
+            img = page_imgs[0]
+        except asyncio.TimeoutError:
+            last_err = "render timeout (30s)"
+            failed_pages.append((page_num, last_err))
+            logger.error(f"[Gallery] page {page_num} render timed out after 30s")
+            consecutive_fail += 1
+            if consecutive_fail >= 3:
+                if status_id:
+                    await edit_msg(chat_id, status_id,
+                        f"❌ Photo বানাতে সমস্যা হচ্ছে (page {page_num} পর্যন্ত {sent}টা পাঠানো গেছে)।\n"
+                        f"কারণ: {last_err}")
+                getattr(app.state, "gallery_cache", {}).pop(f"gallery_{uid}", None)
+                return
+            continue
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            failed_pages.append((page_num, last_err))
+            logger.error(f"[Gallery] page {page_num} render failed: {last_err}")
+            consecutive_fail += 1
+            if consecutive_fail >= 3:
+                if status_id:
+                    await edit_msg(chat_id, status_id,
+                        f"❌ Photo বানাতে সমস্যা হচ্ছে (page {page_num} পর্যন্ত {sent}টা পাঠানো গেছে)।\n"
+                        f"কারণ: {last_err}")
+                getattr(app.state, "gallery_cache", {}).pop(f"gallery_{uid}", None)
+                return
+            continue
+
         buf = BytesIO()
         # quality=95: high quality, still JPEG-compressed enough to stay
         # well under Telegram's per-photo size limit for large A4 pages.
@@ -9585,6 +9611,10 @@ async def handle_gallery_download_callback(query: dict):
                         f"কারণ: {last_err}")
                 getattr(app.state, "gallery_cache", {}).pop(f"gallery_{uid}", None)
                 return
+        buf.close()
+        img.close()
+        del page_imgs, img, buf
+
         if status_id and (page_num % 3 == 0 or page_num == total):
             pct = int(sent * 100 / total)
             try:
