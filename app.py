@@ -141,7 +141,7 @@ from pdf_handler import (
 from core import (
     logger, app, sb, sb_exec,
     BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
-    CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, GH_PAGES_QUICK_URL, _tg_mode,
+    CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, GH_PAGES_QUICK_URL, _tg_mode, _running_on,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, send_rich_msg, edit_rich_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
     send_document, send_media_group, send_poll, notify_owner, notify_owner_edit, clear_owner_job, download_tg_file,
@@ -26357,7 +26357,11 @@ async def _qbm_ram_aware_acquire():
     try:
         import psutil
         proc = psutil.Process(os.getpid())
-        limit_mb = 14000  # 16GB instance ceiling, matches _ram_guard_task
+        # Same host-aware ceiling as _ram_guard_task (was hardcoded 14000 ->
+        # never throttled on the 512MB Render instance, so concurrent /qbm
+        # pages kept piling up RAM until the platform OOM-killed the process
+        # instead of this guard ever pausing new extraction slots).
+        limit_mb = 400 if (_running_on == "Render" or (RENDER_URL and "onrender.com" in RENDER_URL)) else 14000
         safe_ceiling_mb = int(limit_mb * 0.75)  # leave margin under the 85% RAMGuard threshold
         while True:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
@@ -33016,7 +33020,12 @@ async def qbm_extract_all_pages(
     # window before moving to the next), so ordering guarantees and the
     # cross-page answer-lookahead (which needs earlier pages already
     # resolved) are unaffected.
-    WINDOW = 2
+    # On the 512MB Render instance, 2 pages' full-res images + 3-call
+    # pipelines in flight at once was itself enough to OOM a tiny 3-page
+    # PDF (the RAM guard above couldn't catch it in time since a single
+    # window already blew the budget). Strict-sequential there; HF Space
+    # (16GB) keeps the faster windowed pipeline.
+    WINDOW = 1 if (_running_on == "Render" or (RENDER_URL and "onrender.com" in RENDER_URL)) else 2
 
     async def _extract_one_slotted(slot, idx, page_num, img):
         _qbm_key_offset_ctx.set(slot)
@@ -39722,14 +39731,22 @@ async def _ram_guard_task() -> None:
         logger.warning("[RAMGuard] psutil not installed -> proactive RAM guard disabled")
         return
     proc = psutil.Process(os.getpid())
-    limit_mb = 14000  # 16GB instance, ~14GB usable ceiling (leave OS/runtime headroom)
+    # BUGFIX 2026-11-02: this was hardcoded to the 16GB HF Space ceiling
+    # unconditionally -- on an actual 512MB Render instance (this bot runs
+    # on BOTH, picked at deploy time via RUNNING_ON/RENDER_URL, see core.py)
+    # the guard's own threshold (10500MB) and hard cap (12320MB) never
+    # triggered, so it could never free caches or restart before the
+    # platform's real 512MB limit OOM-killed the process outright -- the
+    # guard was silently useless on Render. Now mirrors core.py's _running_on
+    # detection instead of assuming the 16GB host every time.
+    limit_mb = 400 if (_running_on == "Render" or (RENDER_URL and "onrender.com" in RENDER_URL)) else 14000
     threshold_mb = int(limit_mb * 0.75)
     await asyncio.sleep(60)
     while True:
         try:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
             hard_cap_mb = int(limit_mb * 0.88)
-            oom_mb = 15200  # ~95% of the 16GB container: the platform would OOM-kill us right after anyway
+            oom_mb = int(limit_mb * 0.95)  # the platform would OOM-kill us right after anyway
             if rss_mb >= hard_cap_mb:
                 if _active_jobs.get("count", 0) > 0 and rss_mb < oom_mb:
                     # 2026-09-20: never self-restart in the middle of a running job.
