@@ -9535,6 +9535,8 @@ async def handle_gallery_download_callback(query: dict):
 
     total = len(pages)
     sent = 0
+    consecutive_fail = 0
+    last_err = None
     for i, img in enumerate(pages):
         page_num = i + 1
         buf = BytesIO()
@@ -9545,8 +9547,21 @@ async def handle_gallery_download_callback(query: dict):
         result = await send_photo(chat_id, buf.getvalue(), caption=f"📄 Page {page_num}/{total}")
         if result.get("ok"):
             sent += 1
+            consecutive_fail = 0
         else:
-            logger.error(f"[Gallery] sendPhoto page {page_num} failed: {result.get('description') or result.get('error')}")
+            last_err = result.get("description") or result.get("error") or str(result)
+            logger.error(f"[Gallery] sendPhoto page {page_num} failed: {last_err}")
+            consecutive_fail += 1
+            # 3 বার টানা fail হলে আর চেষ্টা না করে থেমে যাও — নাহলে বাকি
+            # সব page একই কারণে silently fail হতে হতে Render-এর request
+            # timeout-এ পুরো টাস্ক কেটে যায়, user কিছুই বুঝতে পারে না।
+            if consecutive_fail >= 3:
+                if status_id:
+                    await edit_msg(chat_id, status_id,
+                        f"❌ Photo পাঠাতে সমস্যা হচ্ছে (page {page_num} পর্যন্ত {sent}টা পাঠানো গেছে)।\n"
+                        f"কারণ: {last_err}")
+                getattr(app.state, "gallery_cache", {}).pop(f"gallery_{uid}", None)
+                return
         if status_id and (page_num % 3 == 0 or page_num == total):
             pct = int(sent * 100 / total)
             try:
