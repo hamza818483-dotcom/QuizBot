@@ -70,7 +70,23 @@ _running_on = os.environ.get("RUNNING_ON", "") or "HuggingFace Space"
 # concurrency semaphores, conversion thread counts, RAM-guard thresholds)
 # should branch on THIS, not redefine its own copy of the check, so a host
 # ever gets mis-sized in only one of many places (as several already had).
-IS_RENDER = (_running_on == "Render") or bool(RENDER_URL and "onrender.com" in RENDER_URL)
+#
+# ROOT-CAUSE FIX 2026-11-02 (same day, second pass): this previously relied
+# ONLY on the manually-set RUNNING_ON env var and a RENDER_URL containing
+# "onrender.com" -- neither is set anywhere in Dockerfile/render.yaml by
+# default (render.yaml even says "set in dashboard... once known"), so on
+# an actual fresh Render deploy with no manual env setup, IS_RENDER was
+# silently FALSE the whole time and every RAM fix made earlier today never
+# activated -- explains why the same OOM kept recurring after those fixes.
+# Render auto-injects its own `RENDER=true` env var on every service with
+# zero manual config needed (https://render.com/docs/environment-variables)
+# -- checking that directly makes this self-detecting instead of depending
+# on a setup step that's easy to skip or forget.
+IS_RENDER = (
+    bool(os.environ.get("RENDER"))
+    or _running_on == "Render"
+    or bool(RENDER_URL and "onrender.com" in RENDER_URL)
+)
 
 if _running_on == "Render" or (RENDER_URL and "onrender.com" in RENDER_URL):
     TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
