@@ -13455,6 +13455,8 @@ async def handle_wm_command(msg: dict):
                 for i, t in enumerate(history)
             ]}
             _FOOTER_HISTORY_CACHE[chat_id] = history
+            while len(_FOOTER_HISTORY_CACHE) > 500:  # was unbounded -- fix 2026-11-02 RAM sweep
+                _FOOTER_HISTORY_CACHE.pop(next(iter(_FOOTER_HISTORY_CACHE)), None)
         await send_msg(chat_id,
             "📌 Usage:\n"
             "<code>/wm YourName</code> — PDF-e reply করে দিলে সেটাতে diagonal watermark বসবে\n"
@@ -13997,10 +13999,48 @@ _last_pdf_error = {"msg": ""}
 
 _PW_BROWSER = {"browser": None, "playwright": None}
 _PW_LOCK = asyncio.Lock()
+_PW_LAST_USED = {"ts": 0.0}
+
+# RAM FINDING 2026-11-02: once launched, this Chromium process was kept
+# alive FOREVER (reused across every PDF generation, never closed) -- a
+# headless Chromium idles at ~100-150MB RSS permanently resident. On HF
+# Space (16GB) that's a rounding error; on the 512MB Render instance it
+# alone eats a quarter-to-a-third of the ENTIRE container, permanently,
+# the first time anyone generates any PDF -- leaving very little headroom
+# for everything else (qbm page images, PDF render cache, etc.), which
+# explains OOM crashes even on small files once a PDF had been generated
+# earlier in that process's life. On Render, an idle watchdog now closes
+# the browser after a minute of no use, freeing that RAM back; it relaunches
+# on the next PDF request at a small one-time latency cost. HF Space keeps
+# the original always-on behavior since it has the headroom to spare.
+async def _pw_idle_watchdog():
+    if not IS_RENDER:
+        return
+    while True:
+        await asyncio.sleep(30)
+        try:
+            async with _PW_LOCK:
+                browser = _PW_BROWSER["browser"]
+                if browser is not None and time.time() - _PW_LAST_USED["ts"] > 60:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+                    try:
+                        await _PW_BROWSER["playwright"].stop()
+                    except Exception:
+                        pass
+                    _PW_BROWSER["browser"] = None
+                    _PW_BROWSER["playwright"] = None
+                    logger.info("[PDF Gen] Idle Chromium closed (Render RAM reclaim)")
+        except Exception as e:
+            logger.warning(f"[PDF Gen] idle watchdog check failed: {e}")
+
 
 async def _get_pw_browser():
     """Reuses a single Playwright browser instance across all PDF generations —
     matches AtlasMasterBot's AsyncPDFExporter pattern (proven working system)."""
+    _PW_LAST_USED["ts"] = time.time()
     async with _PW_LOCK:
         browser = _PW_BROWSER["browser"]
         if browser is not None and not browser.is_connected():
@@ -15956,6 +15996,7 @@ def _am_build_html(data, heading, fmt, hdr_txt="", ftr_txt=""):
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}{tbl}{f}</body></html>'
 
 _sheet_cache = {}
+_SHEET_CACHE_MAX = 50  # was unbounded -- fix 2026-11-02 RAM sweep
 
 async def handle_sheet_command(msg: dict):
     chat_id = msg["chat"]["id"]
@@ -16018,6 +16059,8 @@ async def handle_sheet_command(msg: dict):
 
         cache_key = f"{chat_id}:{loading_id}"
         _sheet_cache[cache_key] = {"mcqs": mcqs, "title": title}
+        while len(_sheet_cache) > _SHEET_CACHE_MAX:
+            _sheet_cache.pop(next(iter(_sheet_cache)), None)
 
         # 2026-08-23: /sheet style menu trimmed to only style1, style2,
         # style3, style7 per request. _AM_FORMAT_NAMES (format_01..05) and
@@ -40184,6 +40227,7 @@ async def startup():
     _spawn_task(_supervised(_webhook_healer_task, "_webhook_healer_task"))
     _spawn_task(_supervised(_memory_cleanup_task, "_memory_cleanup_task"))
     _spawn_task(_supervised(_ram_guard_task, "_ram_guard_task"))
+    _spawn_task(_supervised(_pw_idle_watchdog, "_pw_idle_watchdog"))
     _spawn_task(_supervised(_scheduled_restart_task, "_scheduled_restart_task"))
     _spawn_task(_lms_live_quiz_startup_recovery())  # one-shot, not a recurring poller
     # _spawn_task(_supervised(_watchdog_task, "_watchdog_task"))  # DISABLED — AtlasBot monitors instead
