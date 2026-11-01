@@ -163,6 +163,56 @@ async def sb_exec(fn, timeout: float = 20.0):
 # ============================================================
 app = FastAPI(title="ATLAS BOT", version="4.2.0")
 
+# ── A-to-Z failure capture: catch failures that never hit an explicit
+#    logger.error() call, so /error is never blind to them. ──
+import sys as _sys
+
+
+@app.exception_handler(Exception)
+async def _catch_all_route_exceptions(request, exc: Exception):
+    """Any route handler exception that escaped its own try/except
+    (bug, bad input, dependency crash) — logged here instead of only
+    surfacing as a raw 500 with nothing in /error."""
+    logger.error(f"[UnhandledRoute] {request.method} {request.url.path}: {exc}", exc_info=True)
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=500, content={"ok": False, "error": "internal_error"})
+
+
+def _asyncio_exception_handler(loop, context):
+    """Fire-and-forget asyncio.create_task(...) calls whose exception is
+    never awaited/caught normally vanish into asyncio's default handler
+    (stderr only, invisible to /error). Route them into the same logger."""
+    exc = context.get("exception")
+    msg = context.get("message", "asyncio error")
+    if exc:
+        logger.error(f"[AsyncioTask] {msg}: {exc}", exc_info=exc)
+    else:
+        logger.error(f"[AsyncioTask] {msg}: {context}")
+
+
+def _install_asyncio_exception_handler():
+    """Must run once the real event loop (uvicorn's) is running, not at
+    import time — else this attaches to a throwaway loop uvicorn discards."""
+    try:
+        asyncio.get_running_loop().set_exception_handler(_asyncio_exception_handler)
+    except RuntimeError:
+        pass  # no running loop yet; call again from the startup event
+
+
+def _sys_excepthook(exc_type, exc_value, exc_tb):
+    """Last-resort net: a truly uncaught exception in the main thread
+    (process-crashing bug) still gets written to today's error log
+    before Python's default hook prints it and exits/propagates."""
+    try:
+        logger.error("[Uncaught] fatal exception", exc_info=(exc_type, exc_value, exc_tb))
+    except Exception:
+        pass
+    _sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+_sys.excepthook = _sys_excepthook
+_install_asyncio_exception_handler()
+
 # ============================================================
 # D1 (CLOUDFLARE) HELPERS
 # ============================================================

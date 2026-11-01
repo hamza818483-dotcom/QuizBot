@@ -40002,6 +40002,9 @@ async def startup():
     BOT_START_TIME = time.time()
     logger.info("[App] ATLAS BOT v4.1 starting...")
 
+    from core import _install_asyncio_exception_handler
+    _install_asyncio_exception_handler()  # now the real (uvicorn) loop is running
+
     # SECURITY GUARD: warn loudly (never crash -- a crash-on-detect here
     # would itself be a DoS vector if triggered by a false positive) if a
     # secret-looking file exists in the deployed working directory. This
