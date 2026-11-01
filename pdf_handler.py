@@ -1088,6 +1088,20 @@ _qbm_key_offset_ctx = contextvars.ContextVar("_qbm_key_offset_ctx", default=0)
 # fresh account).
 _qbm_page_used_accounts_ctx = contextvars.ContextVar("_qbm_page_used_accounts_ctx", default=None)
 
+# Tracks which Gemini key/account + which attempt# actually succeeded on the
+# MOST RECENT generate_mcq_from_image() call, across every caller (/pdf, /rd,
+# /qbm, /img, /math, everything that goes through this function) -- not just
+# the /qbm-specific accounts-used-this-page set above. Set right before the
+# successful return inside the Gemini retry loop; callers (app.py's per-page
+# dashboard update) read it immediately after awaiting generate_mcq_from_image
+# to show "which account + which key# succeeded" in the progress message.
+# Each new attempt overwrites it, so after the call returns it always holds
+# info for the ATTEMPT THAT ACTUALLY WON (or stays as the prior value if this
+# call fell through to Groq/other providers entirely without any Gemini
+# success -- callers should treat a stale/unchanged value as "not Gemini"
+# when out/mcqs came from a non-Gemini fallback).
+_last_gemini_success_ctx = contextvars.ContextVar("_last_gemini_success_ctx", default=None)
+
 # ============================================================
 # OPENROUTER KEY ROTATION
 # ============================================================
@@ -2477,6 +2491,16 @@ async def generate_mcq_from_image(
                     logger.warning(f"[Gemini] Page {page}: response OK but 0 valid MCQs parsed (attempt {attempt+1}, model={model_name}) — likely malformed/truncated JSON, not a real 'page has no content'")
                 key_rotator.mark_healthy(key)
                 logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name})")
+                try:
+                    _last_gemini_success_ctx.set({
+                        "account": key_rotator.account_of(key),
+                        "key_hash": _gemini_key_hash(key),
+                        "attempt": attempt + 1,
+                        "model": model_name,
+                        "page": page,
+                    })
+                except Exception:
+                    pass
                 return valid
             except Exception as e:
                 last_exc = e

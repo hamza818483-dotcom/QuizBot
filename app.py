@@ -18712,6 +18712,28 @@ def _pdf_dashboard_kb(chat_id, pages, page_status):
         rows.append(done_buttons[i:i+3])
     return {"inline_keyboard": rows}
 
+def _attach_gemini_success_info(status_entry: dict, mcqs: list, page_num) -> None:
+    """2026-11 (user request): after a page succeeds, record which Gemini
+    account + which key attempt# actually won, so the progress dashboard can
+    show it (🔑acctX#N) instead of just the provider name. Reads
+    pdf_handler._last_gemini_success_ctx, which generate_mcq_from_image()
+    sets right before its successful return -- only trusted when this page's
+    MCQs actually carry a Gemini _provider tag (not Groq/other fallback) AND
+    the context's own page number matches this page (guards against reading
+    a stale value from a different page/call that happened to run most
+    recently in the same async context)."""
+    if not mcqs or not any(str(m.get("_provider", "")).lower().startswith("gemini") for m in mcqs):
+        return
+    try:
+        from pdf_handler import _last_gemini_success_ctx
+        info = _last_gemini_success_ctx.get()
+    except Exception:
+        return
+    if info and info.get("page") == page_num:
+        status_entry["gemini_account"] = info["account"]
+        status_entry["gemini_attempt"] = info["attempt"]
+
+
 def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=None, ai_calls_breakdown=None, topic_breakdown=None, live_topic=None):
     elapsed = int(time.time() - start_time)
     mins, secs = divmod(elapsed, 60)
@@ -18745,7 +18767,10 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 secs_str = f" ⏱{secs_gen}s" if secs_gen is not None else ""
                 calls_n = s.get("req_calls", 0)
                 calls_str = f" 🤖{calls_n}" if calls_n is not None else ""
-                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str} ✓")
+                _g_acct = s.get("gemini_account")
+                _g_att = s.get("gemini_attempt")
+                acct_str = f" 🔑{_g_acct}#{_g_att}" if _g_acct else ""
+                lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str}{acct_str} ✓")
         elif s["current"]:
             _stage = s.get("stage") or "Processing..."
             _pg_start = s.get("page_start_time")
@@ -18808,6 +18833,9 @@ def _build_dashboard_md(file_name, topic, pages, page_status, start_time, total_
                 if page_topic: parts.append(f"📂{page_topic}")
                 if secs_gen is not None: parts.append(f"⏱{secs_gen}s")
                 if calls_n is not None: parts.append(f"🤖{calls_n}")
+                _g_acct = s.get("gemini_account")
+                _g_att = s.get("gemini_attempt")
+                if _g_acct: parts.append(f"🔑{_g_acct}#{_g_att}")
                 detail = " · ".join(parts)
             rows.append(f"| {pg} | ✅ Done | {detail} |")
         elif s["current"]:
@@ -19025,6 +19053,7 @@ async def pdf_generate_all_pages(
                     _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
                 if _model_counts:
                     page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
+                _attach_gemini_success_info(page_status[idx], mcqs, page_num)
                 if status_msg_id:
                     await _update_pdf_dashboard(chat_id, status_msg_id,
                         file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
@@ -19833,6 +19862,7 @@ async def _process_pdf_pages_inner(
                 _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
+            _attach_gemini_success_info(page_status[idx], mcqs, page_num)
             page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - page_status[idx].get("_ai_calls_before", _page_ai_calls_before)
             await _update_pdf_dashboard(chat_id, status_msg_id,
                 file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), reply_markup=_cancel_kb(chat_id))
@@ -20582,6 +20612,7 @@ async def _process_pdfs_pages_inner(
                 _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
+                _attach_gemini_success_info(page_status[idx], mcqs, page_num)
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id), topic_breakdown=_pdfs_topic_breakdown), reply_markup=_cancel_kb(chat_id))
             await sb_exec(lambda: sb.table("pdf_sessions").update({"processed_pages": page_num}).eq("id", session_id).execute())
@@ -21221,6 +21252,7 @@ async def _process_pdfm_pages_impl(
                 _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
             if _model_counts:
                 page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
+                _attach_gemini_success_info(page_status[idx], mcqs, page_num)
             await edit_msg(chat_id, status_msg_id,
                 _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)), reply_markup=_cancel_kb(chat_id))
 
@@ -23542,6 +23574,7 @@ async def _bio_generate_per_topic_pages(chat_id: int, pages: list, topic: str, s
             _model_counts[_prov] = _model_counts.get(_prov, 0) + 1
         if _model_counts:
             page_status[idx]["model"] = ", ".join(f"{k}:{v}" for k, v in _model_counts.items())
+            _attach_gemini_success_info(page_status[idx], mcqs, page_num)
         total_mcq += len(mcqs)
         await _bio_safe_dash_edit()
 
