@@ -9507,6 +9507,8 @@ async def handle_gallery_download_callback(query: dict):
     if caller_uid != uid:
         return
 
+    await tg_post("answerCallbackQuery", {"callback_query_id": query["id"]})
+
     cache = getattr(app.state, "gallery_cache", {}).get(f"gallery_{uid}")
     if not cache:
         await send_msg(chat_id, "❌ Session expired — আবার PDF-এ reply করে /g দাও।")
