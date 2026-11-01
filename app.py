@@ -28668,6 +28668,15 @@ async def handle_qbm(msg: dict, mode_v: bool = False):
 
 
 async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
+    # DIAGNOSTIC (2026-11-02): log RSS at /qbm entry so an OOM-kill log can
+    # be matched against "was RAM already high before this request started"
+    # vs "this one request itself caused the spike".
+    try:
+        import psutil as _psutil_qbm_diag
+        _rss_qbm0 = _psutil_qbm_diag.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+        logger.warning(f"[RAMGuard] /qbm entry: rss={_rss_qbm0:.0f}MB IS_RENDER={IS_RENDER}")
+    except Exception:
+        pass
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     uname = msg["from"].get("first_name", "User")
@@ -40065,6 +40074,20 @@ async def startup():
     global BOT_START_TIME
     BOT_START_TIME = time.time()
     logger.info("[App] ATLAS BOT v4.1 starting...")
+
+    # DIAGNOSTIC (2026-11-02): confirm host-detection actually fired and show
+    # baseline RSS before any request is served -- every RAM fix so far
+    # assumed IS_RENDER is True on Render, but we've had no direct visibility
+    # into whether that's actually true at runtime. If OOM still happens
+    # and this line shows IS_RENDER=False, detection itself is still broken;
+    # if it shows a high baseline RSS (before any PDF/qbm work), the leak is
+    # in imports/startup, not in request handling.
+    try:
+        import psutil as _psutil_diag
+        _rss0 = _psutil_diag.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+        logger.warning(f"[RAMGuard] startup diagnostic: IS_RENDER={IS_RENDER} RENDER_env={os.environ.get('RENDER')!r} RUNNING_ON={os.environ.get('RUNNING_ON')!r} baseline_rss={_rss0:.0f}MB")
+    except Exception as e:
+        logger.warning(f"[RAMGuard] startup diagnostic failed: {e}")
 
     from core import _install_asyncio_exception_handler
     _install_asyncio_exception_handler()  # now the real (uvicorn) loop is running
