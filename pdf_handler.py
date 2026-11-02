@@ -1741,7 +1741,21 @@ except Exception:
     _ON_RENDER = (os.environ.get("RUNNING_ON", "") == "Render") or ("onrender.com" in os.environ.get("RENDER_URL", ""))
 _PDF_CONVERT_LOCK = _threading.Semaphore(1 if _ON_RENDER else 6)
 _PDF_CONVERT_THREAD_COUNT = 1 if _ON_RENDER else 4
-_PDF_MAX_PAGES_PER_CALL = 200
+# FIX 2026-11-02 (v2): this cap was NOT host-aware (200 on both Render and
+# HF Space) -- but it bounds how many pages _convert_batch() accumulates
+# into ONE returned list (`all_imgs`), regardless of the internal chunk
+# size used to get there. _PDF_RASTER_BATCH_SIZE=4 only limits how many
+# pages are decoded PER POPPLER CALL at a time during conversion -- every
+# chunk's images still get appended to the same all_imgs list and held
+# together afterward. A 150-page PDF (well under the old 200 cap) still
+# ends with 150 raw decoded bitmaps live in RAM at once: at dpi=150 an A4
+# page is ~1240x1754x3 bytes (~6.5MB raw), so 150 pages ~= 975MB -- an
+# instant, pre-extraction OOM on a 512MB box, before a single /qbm page
+# has even started processing (matches "restart হয়েছিল ... এখনো কোনো page
+# সম্পন্ন হয়নি" reports). Capped to 25 on Render so the whole-PDF render
+# step itself can never exceed a safe fraction of RAM_LIMIT_MB; HF Space
+# keeps 200 since it has the headroom.
+_PDF_MAX_PAGES_PER_CALL = 25 if _ON_RENDER else 200
 # FIX 2026-11-02: _PDF_MAX_PAGES_PER_CALL (200) was ALSO used as the internal
 # poppler batch size -- _convert_batch() rasterized up to 200 pages into RAM
 # in ONE convert_from_bytes call before returning any of them. Even with the
