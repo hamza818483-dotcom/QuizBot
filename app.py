@@ -646,6 +646,17 @@ async def _download_pdf_cached(file_id: str, progress_cb=None, chat_id: int = No
 # entry count was an even worse RAM proxy here than for the raw-bytes cache.
 # 40MB ceiling for this bot's actual host (Render 512MB free tier, not the
 # 16GB this was originally sized for).
+# 2026-11-02: turned off entirely on the 512MB Render instance. This cache's
+# only payoff is skipping re-rasterization on a retry/resume of the SAME pdf
+# bytes+range -- but every real caller already holds the full `pages` list
+# (decoded PIL bitmaps, the single biggest RAM cost in this bot) live for the
+# whole duration of its own processing loop, so any non-empty cache entry is
+# by definition a second full copy of pages still being worked on. On a
+# 512MB box that's a guaranteed RAM spike for a cache whose hit case (retry
+# the identical upload within the eviction window) is rare. Flip back to
+# True only if this bot moves to a host where headroom actually permits a
+# standing duplicate copy of in-flight page images.
+_PDF_RENDER_CACHE_ENABLED = False
 _PDF_RENDER_CACHE_MAX_BYTES = 40 * 1024 * 1024
 _pdf_render_cache = {}  # (content_hash, page_range) -> pages list
 _pdf_render_cache_size = {"v": 0}  # running total estimated bytes
@@ -678,6 +689,8 @@ def _render_pdf_cached(file_id: str, pdf_bytes: bytes, page_range: str = None, s
     decoded page image resident at once on the 512MB Render instance -- the
     cache's own RAM savings (skip re-rasterizing on retry) aren't worth that
     duplicate peak for a path that normally runs once per upload anyway."""
+    if not _PDF_RENDER_CACHE_ENABLED:
+        return pdf_to_images_safe(pdf_bytes, page_range)
     content_hash = hashlib.sha256(pdf_bytes).hexdigest()
     key = (content_hash, page_range or "ALL")
     cached = _pdf_render_cache.get(key)
