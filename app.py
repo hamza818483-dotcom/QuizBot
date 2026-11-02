@@ -26434,7 +26434,13 @@ def _qbm_dedup_list(mcqs: list) -> list:
 # platform's hard 512MB OOM-kill with no further gate to stop it (matches
 # "Ran out of memory (used over 512MB)" crash reports). Lowered to 6,
 # matched to the actual working budget this host has after RAM_LIMIT_MB.
-_QBM_EXTRACT_HARD_CAP = asyncio.Semaphore(6 if IS_RENDER else 150)  # host-aware (fix 2026-11-02)
+# FIX 2026-11-02 (v2): 6 was STILL causing restarts mid-/qbm-run. Each slot's
+# own RSS growth (page image + base64 payload to Gemini/Groq + growing MCQ
+# list) happens AFTER admission, invisible to this gate until the NEXT
+# page's acquire call -- so 6 pages admitted back-to-back while RSS was
+# still under the 75%-of-420MB=315MB ceiling could all still be ramping up
+# together when the hard-restart line (88%=369MB) got crossed. Cut to 3.
+_QBM_EXTRACT_HARD_CAP = asyncio.Semaphore(3 if IS_RENDER else 150)  # host-aware (fix 2026-11-02 v2)
 _qbm_ram_gate_lock = asyncio.Lock()
 
 async def _qbm_ram_aware_acquire():
@@ -26449,7 +26455,13 @@ async def _qbm_ram_aware_acquire():
         # fix to one site only), so this gate kept admitting new /qbm pages
         # past the point the restart guard itself considers unsafe.
         limit_mb = RAM_LIMIT_MB
-        safe_ceiling_mb = int(limit_mb * 0.75)  # leave margin under the 85% RAMGuard threshold
+        # FIX 2026-11-02 (v2): 0.75 put admission at the SAME line as the
+        # guard's own soft-restart threshold (also 0.75) -- a page got
+        # waved in with zero headroom left before its own RSS growth (image
+        # decode + base64 payload + MCQ accumulation) pushed past that line
+        # and triggered a restart mid-job. Dropped to 0.55 so an admitted
+        # page has real room to grow before hitting the guard's thresholds.
+        safe_ceiling_mb = int(limit_mb * 0.55)
         while True:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
             if rss_mb < safe_ceiling_mb:
