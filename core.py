@@ -1464,6 +1464,35 @@ async def download_large_file_pyrogram(chat_id: int, message_id: int, progress_c
         if not msg or not (msg.document or msg.video or msg.audio):
             return None
 
+        # FIX 2026-11-02: in_memory=True buffers the ENTIRE file as raw bytes
+        # inside pyrogram before this function even sees it -- on a 512MB
+        # Render instance, a 20-40MB PDF download alone can be the spike that
+        # pushes RSS straight past RAMGuard's hard cap (crash reports: "PDF
+        # downloads, then crashes", right at this step). Mirror
+        # download_large_file_to_disk's size check: stream anything above a
+        # small RAM-safe threshold to a temp file instead, then read it back
+        # -- peak RSS during download stays bounded regardless of file size.
+        expected_sz = getattr(msg.document, "file_size", None) or getattr(msg.video, "file_size", None) \
+            or getattr(msg.audio, "file_size", None) or 0
+        _RAM_SAFE_INMEM_BYTES = 15 * 1024 * 1024  # 15MB
+        if IS_RENDER and expected_sz and expected_sz > _RAM_SAFE_INMEM_BYTES:
+            import tempfile
+            tmp_path = os.path.join(tempfile.gettempdir(), f"pyro_dl_{message_id}_{int(time.time()*1000)}.bin")
+            try:
+                disk_path = await download_large_file_to_disk(chat_id, message_id, tmp_path, progress_cb=progress_cb)
+                if disk_path is None:
+                    return None
+                with open(disk_path, "rb") as f:
+                    data = f.read()
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            if not data:
+                return None
+            return data
+
         _progress_fn = None
         if progress_cb:
             async def _progress_fn(current, total):
