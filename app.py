@@ -27232,6 +27232,16 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         from pdf_handler import key_rotator, image_to_base64, _is_gemini_key_exhausted_today, _qbm_page_used_accounts_ctx
         if not key_rotator.keys:
             return "" if gemini_only else await _gen_groq_raw_text(img, prompt)
+        # BUGFIX 2026-11-02: _dead_accounts was referenced (line ~27351,
+        # ~27434 below) but never initialized in this function -- every
+        # single Gemini call in /qbm hit "name '_dead_accounts' is not
+        # defined" immediately, which the broad except Exception below
+        # swallowed as a generic failure, making every key look dead and
+        # every page return 0 MCQ. Mirrors the same per-call dead-account
+        # tracking already used in the other Gemini-call functions (e.g.
+        # /unmesh's version above) -- banned/invalid accounts hit during
+        # THIS call are skipped for the rest of this call's key loop.
+        _dead_accounts = set()
         # Same persistent, process-lifetime exhaustion memory /tf and /img
         # use -- if every key was already confirmed daily-exhausted by an
         # earlier call in this process, skip straight to Groq instead of
