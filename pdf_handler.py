@@ -1757,11 +1757,26 @@ _PDF_RASTER_BATCH_SIZE = 4 if _ON_RENDER else _PDF_MAX_PAGES_PER_CALL
 # root cause: rendered bitmap size depends on PHYSICAL PAGE DIMENSIONS, not
 # file size. convert_from_bytes(dpi=150) on an oversized/poster-sized
 # MediaBox (or a malformed one) allocates a proportionally huge raw bitmap
-# regardless of how small or few-paged the source PDF is. Check each page's
-# MediaBox cheaply via pypdf (no rasterization) before calling poppler, and
-# clamp the effective dpi for that batch so decoded pixel dimensions never
-# exceed a safe ceiling.
-_PDF_RENDER_MAX_PIXELS = 4000 * 4000  # ~16MP cap per rendered page (RGB ~48MB undecoded)
+# regardless of how small or few-paged the source PDF is -- a real case hit
+# this with pages at 2242x3000pt (~31x42in physical size -- a scanned poster
+# sheet, not A4), where dpi=150 alone decodes to ~29MP/page (~87MB raw RGB).
+# Check each page's MediaBox cheaply via pypdf (no rasterization) before
+# calling poppler, and clamp the effective dpi for that batch so decoded
+# pixel dimensions never exceed a safe, HOST-AWARE ceiling.
+#
+# FIX 2026-11-02 (tightened): the original 16MP cap (~48MB raw/page even
+# after clamping) was still too generous for a 512MB Render instance once
+# poppler's own subprocess overhead + the PIL decode buffer + JPEG encode
+# buffer + base64 string (sent to Gemini, ~33% larger again) are all added
+# on top of 2-3 pages in flight at once. Lowered the Render ceiling to 6MP
+# (~18MB raw/page), independent of _PDF_RASTER_BATCH_SIZE above -- that
+# controls how many pages rasterize *concurrently*, this controls how big
+# *each one* is allowed to be, so together they bound total peak RAM
+# regardless of page count AND regardless of how oversized any single page
+# is. min dpi floor kept at 72 (not 50) so clamped text stays legible enough
+# for Gemini OCR/extraction even on extreme poster-sized pages.
+_PDF_RENDER_MAX_PIXELS = (2000 * 3000) if _ON_RENDER else (4000 * 4000)  # 6MP on Render (~18MB raw/page) vs 16MP elsewhere
+_PDF_RENDER_MIN_DPI = 72  # floor -- never clamp below legible OCR resolution
 
 def _safe_dpi_for_batch(pdf_bytes: bytes, first: int, last: int, requested_dpi: int) -> int:
     try:
@@ -1780,7 +1795,7 @@ def _safe_dpi_for_batch(pdf_bytes: bytes, first: int, last: int, requested_dpi: 
         if px_w * px_h <= _PDF_RENDER_MAX_PIXELS:
             return requested_dpi
         scale = (_PDF_RENDER_MAX_PIXELS / (px_w * px_h)) ** 0.5
-        safe_dpi = max(50, int(requested_dpi * scale))
+        safe_dpi = max(_PDF_RENDER_MIN_DPI, int(requested_dpi * scale))
         if safe_dpi < requested_dpi:
             logger.warning(f"[PDF] Oversized page dims ({max_w_pt:.0f}x{max_h_pt:.0f}pt) detected for pages {first}-{last} -- clamping dpi {requested_dpi}->{safe_dpi} to avoid OOM")
         return safe_dpi
