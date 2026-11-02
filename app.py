@@ -141,7 +141,7 @@ from pdf_handler import (
 from core import (
     logger, app, sb, sb_exec,
     BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
-    CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, GH_PAGES_QUICK_URL, _tg_mode, _running_on, IS_RENDER, RAM_LIMIT_MB,
+    CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, GH_PAGES_QUICK_URL, _tg_mode, _running_on, IS_RENDER, RAM_LIMIT_MB, _malloc_trim,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, send_rich_msg, edit_rich_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
     send_document, send_media_group, send_poll, notify_owner, notify_owner_edit, clear_owner_job, download_tg_file,
@@ -12071,6 +12071,8 @@ async def _handle_cut_pdf_command_inner(msg: dict):
             try:
                 import gc as _gc
                 _gc.collect()
+                if IS_RENDER:
+                    _malloc_trim()  # actually return the freed reader/writer pages to the OS
             except Exception:
                 pass
             if status_msg_id:
@@ -28761,6 +28763,16 @@ async def handle_qbm(msg: dict, mode_v: bool = False):
             if IS_RENDER:
                 import gc
                 gc.collect()
+                # FIX 2026-11-02 (v2): gc.collect() alone reclaims Python
+                # objects but glibc's malloc keeps the freed arena pages
+                # mapped for reuse rather than returning them to the OS --
+                # so RSS (what this job_end_after_gc log and the NEXT
+                # RAMGuard poll actually measure) can stay exactly as high
+                # as the comment above describes even after this collect.
+                # malloc_trim(0) is the explicit call that forces glibc to
+                # hand those pages back, so the RSS this logs/the guard
+                # reads next reflects what's really still in use.
+                _malloc_trim()
                 _qbm_rss_log("job_end_after_gc")
 
 
@@ -39961,6 +39973,15 @@ async def _ram_guard_task() -> None:
                             except Exception:
                                 pass
                     gc.collect()
+                    # FIX 2026-11-02 (v2): this is the mid-job rescue path --
+                    # gc.collect() frees Python objects but glibc may keep
+                    # those pages mapped rather than returning them to the
+                    # OS, so the NEXT poll (5s later) could see almost the
+                    # same RSS and have to re-run this same branch with no
+                    # visible progress. malloc_trim(0) forces the actual
+                    # give-back so this cleanup has a real chance to pull
+                    # RSS back under hard_cap_mb before the job finishes.
+                    _malloc_trim()
                     logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= hard cap {hard_cap_mb}MB but {_active_jobs.get('count')} job(s) active -> freed caches, NOT restarting (restart only at >= {oom_mb}MB)")
                 else:
                     logger.warning(f"[RAMGuard] RSS {rss_mb:.0f}MB >= hard cap {hard_cap_mb}MB -> forced restart")

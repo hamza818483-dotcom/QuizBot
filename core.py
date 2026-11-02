@@ -96,6 +96,24 @@ IS_RENDER = (
 # guard itself now considers unsafe. Both now import this one constant.
 RAM_LIMIT_MB = 420 if IS_RENDER else 14000
 
+# FIX 2026-11-02: gc.collect() only reclaims Python-level objects (reference
+# cycles) -- on glibc (this image is python:3.11-slim, glibc-based) the
+# underlying malloc arenas that held those objects are NOT handed back to
+# the OS after a free; glibc keeps those pages mapped for fast reuse. So
+# RSS (what _ram_guard_task and _qbm_ram_aware_acquire actually measure)
+# can stay high long after gc.collect() ran and every object is gone,
+# causing premature self-restarts and /qbm admission stalls that aren't
+# backed by real memory pressure. malloc_trim(0) is the explicit libc call
+# that forces glibc to release those held-but-unused pages back to the OS.
+# Best-effort: wrapped in try/except since it's a glibc-specific libc call
+# (no-op/absence is fine on any other platform this might ever run on).
+def _malloc_trim():
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
 if _running_on == "Render" or (RENDER_URL and "onrender.com" in RENDER_URL):
     TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
     _tg_mode = "direct"
