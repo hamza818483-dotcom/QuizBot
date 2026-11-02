@@ -141,7 +141,7 @@ from pdf_handler import (
 from core import (
     logger, app, sb, sb_exec,
     BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, OWNER_ID,
-    CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, GH_PAGES_QUICK_URL, _tg_mode, _running_on, IS_RENDER,
+    CF_WORKER_URL, CF_WORKER_URL_2, HF_SPACE_URL, RENDER_URL, D1_TOKEN, TG_API, GH_PAGES_EXAM_URL, GH_PAGES_QUICK_URL, _tg_mode, _running_on, IS_RENDER, RAM_LIMIT_MB,
     d1_set, d1_get, d1_del, d1_query, d1_select, d1_run,
     tg_post, send_msg, send_rich_msg, edit_rich_msg, edit_msg, edit_msg_caption, send_photo, send_photo_by_id,
     send_document, send_media_group, send_poll, notify_owner, notify_owner_edit, clear_owner_job, download_tg_file,
@@ -26404,11 +26404,12 @@ async def _qbm_ram_aware_acquire():
     try:
         import psutil
         proc = psutil.Process(os.getpid())
-        # Same host-aware ceiling as _ram_guard_task (was hardcoded 14000 ->
-        # never throttled on the 512MB Render instance, so concurrent /qbm
-        # pages kept piling up RAM until the platform OOM-killed the process
-        # instead of this guard ever pausing new extraction slots).
-        limit_mb = 400 if IS_RENDER else 14000
+        # Same host-aware ceiling as _ram_guard_task -- imports core.RAM_LIMIT_MB
+        # (single source of truth) instead of a local hardcoded copy. The two
+        # were previously out of sync (400 here vs 320 in the guard after a
+        # fix to one site only), so this gate kept admitting new /qbm pages
+        # past the point the restart guard itself considers unsafe.
+        limit_mb = RAM_LIMIT_MB
         safe_ceiling_mb = int(limit_mb * 0.75)  # leave margin under the 85% RAMGuard threshold
         while True:
             rss_mb = proc.memory_info().rss / (1024 * 1024)
@@ -39795,12 +39796,11 @@ async def _ram_guard_task() -> None:
     # platform's real 512MB limit OOM-killed the process outright -- the
     # guard was silently useless on Render. Now mirrors core.py's _running_on
     # detection instead of assuming the 16GB host every time.
-    # FIX 2026-11-02: limit_mb lowered 400->320 on Render -- actual OOM kills kept
-    # happening even with the 400MB/60s-poll guard, meaning real RSS was shooting
-    # past 512MB faster than the old thresholds (380/352MB) left room to react.
-    # 320MB base gives threshold=240MB/hard_cap=281MB/oom_mb=304MB, leaving far
-    # more headroom below the platform's real 512MB kill line.
-    limit_mb = 320 if IS_RENDER else 14000
+    # FIX 2026-11-02: imports core.RAM_LIMIT_MB (single source of truth, 320 on
+    # Render) instead of a local hardcoded literal -- was previously 400 here
+    # while a separate gate (_qbm_ram_aware_acquire) had its own stale copy,
+    # so the two drifted out of sync after only one got fixed.
+    limit_mb = RAM_LIMIT_MB
     threshold_mb = int(limit_mb * 0.75)
     check_interval = 5 if IS_RENDER else 60  # FIX 2026-11-02: 60s was far too slow on
     # Render -- a Chromium launch + concurrent page render can spike RSS from well

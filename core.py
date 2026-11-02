@@ -88,6 +88,14 @@ IS_RENDER = (
     or bool(RENDER_URL and "onrender.com" in RENDER_URL)
 )
 
+# FIX 2026-11-02: single source of truth for the Render RSS ceiling. Was
+# duplicated as a hardcoded literal at two separate call sites in app.py
+# (_ram_guard_task and _qbm_ram_aware_acquire) -- a fix to one (400->320)
+# silently left the other stale at the old, looser 400, so the /qbm
+# concurrency gate kept admitting new pages past the point the restart
+# guard itself now considers unsafe. Both now import this one constant.
+RAM_LIMIT_MB = 320 if IS_RENDER else 14000
+
 if _running_on == "Render" or (RENDER_URL and "onrender.com" in RENDER_URL):
     TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
     _tg_mode = "direct"
