@@ -7964,7 +7964,8 @@ async def handle_start(msg: dict):
             "## 📊 Info\n"
             "| Command | কাজ |\n"
             "| --- | --- |\n"
-            "| `/info2` | Bot stats |\n\n"
+            "| `/info2` | Bot stats |\n"
+            "| `/ramdebug` | RAM tracing (diagnostic) |\n\n"
             "## 🔖 Bookmark\n"
             "| Command | কাজ |\n"
             "| --- | --- |\n"
@@ -8022,7 +8023,8 @@ async def handle_start(msg: dict):
             "<code>/remove [user_id] </code> Admin remove\n"
             "<code>/pinon / /pinoff  </code> Auto-pin on/off\n\n"
             "📊 <b>Info</b>\n"
-            "<code>/info2   </code> Bot stats\n\n"
+            "<code>/info2   </code> Bot stats\n"
+            "<code>/ramdebug</code> RAM tracing (diagnostic)\n\n"
             "🔖 <b>Bookmark</b>\n"
             "<code>/bm      </code> Bookmark PDF\n"
             "<code>/bmexam  </code> Bookmark MCQ → Quiz\n\n"
@@ -13782,6 +13784,87 @@ async def handle_combo_wm_h_f_command(msg: dict, combo: dict):
             await send_msg(chat_id, f"❌ পাঠাতে ব্যর্থ: {err}")
     except Exception as e:
         await send_msg(chat_id, f"❌ Combo error: {e}")
+
+
+# 2026-11-02: owner-only RAM profiling command. tracemalloc traces every
+# Python allocation's call-stack, which is the actual expert tool for
+# answering "what is REALLY holding this memory" instead of guessing from
+# RSS numbers and code comments alone (RAMGuard/_qbm_rss_log tell you WHEN
+# RSS rose; tracemalloc tells you WHICH objects/lines are responsible).
+# Deliberately NOT started automatically at boot -- tracemalloc itself adds
+# per-allocation bookkeeping overhead (both CPU and a slice of RAM to store
+# the trace table), which is exactly the wrong thing to run unconditionally
+# on an already RAM-tight 512MB instance. Owner turns it on only while
+# actively chasing a RAM issue, and off again afterward.
+_ramdebug_snapshot = {"snap": None, "started": False}
+
+async def handle_ramdebug(msg: dict):
+    chat_id = msg["chat"]["id"]
+    uid = msg["from"]["id"]
+    if uid != OWNER_ID:
+        await send_msg(chat_id, "❌ Owner only!")
+        return
+    text = (msg.get("text") or "").strip()
+    arg = text.split(maxsplit=1)[1].strip().lower() if " " in text else ""
+    try:
+        import tracemalloc
+        if arg == "off":
+            if _ramdebug_snapshot["started"]:
+                tracemalloc.stop()
+                _ramdebug_snapshot["started"] = False
+                _ramdebug_snapshot["snap"] = None
+            await send_msg(chat_id, "🛑 RAM tracing বন্ধ করা হয়েছে (overhead ছাড়াই আগের মতো চলবে)।")
+            return
+
+        try:
+            import psutil
+            rss_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+        except Exception:
+            rss_mb = None
+
+        if not _ramdebug_snapshot["started"]:
+            tracemalloc.start(10)  # 10 frames of traceback per allocation
+            _ramdebug_snapshot["started"] = True
+            _ramdebug_snapshot["snap"] = tracemalloc.take_snapshot()
+            head = f"📊 বর্তমান RSS: {rss_mb:.0f}MB\n\n" if rss_mb is not None else ""
+            await send_msg(chat_id,
+                f"✅ RAM tracing চালু হলো।\n{head}"
+                f"এখন কিছুক্ষণ bot স্বাভাবিকভাবে চলতে দাও (একটা `/qbm` বা ভারী কাজ করাও), "
+                f"তারপর আবার <code>/ramdebug</code> পাঠাও — তখন এই মুহূর্ত থেকে এখন পর্যন্ত "
+                f"ঠিক কোন লাইন/অবজেক্ট সবচেয়ে বেশি মেমরি বাড়িয়েছে সেটা দেখাবে।\n\n"
+                f"বন্ধ করতে: <code>/ramdebug off</code>")
+            return
+
+        new_snap = tracemalloc.take_snapshot()
+        top_diff = new_snap.compare_to(_ramdebug_snapshot["snap"], "lineno")[:12]
+        top_total = new_snap.statistics("lineno")[:8]
+        _ramdebug_snapshot["snap"] = new_snap
+
+        lines = []
+        head = f"📊 বর্তমান RSS: {rss_mb:.0f}MB\n" if rss_mb is not None else ""
+        lines.append(f"{head}\n<b>🔺 গত স্ন্যাপশট থেকে যা বেড়েছে</b> (top 12, lineno):")
+        any_growth = False
+        for stat in top_diff:
+            if stat.size_diff <= 0:
+                continue
+            any_growth = True
+            frame = stat.traceback[0]
+            fname = frame.filename.split("/")[-1]
+            lines.append(f"  +{stat.size_diff/1024:.0f}KB ({stat.count_diff:+d} objs) — {fname}:{frame.lineno}")
+        if not any_growth:
+            lines.append("  (উল্লেখযোগ্য কোনো বৃদ্ধি নেই এই দুই স্ন্যাপশটের মধ্যে)")
+
+        lines.append("\n<b>📦 এই মুহূর্তে সবচেয়ে বড় allocation (total, top 8)</b>:")
+        for stat in top_total:
+            frame = stat.traceback[0]
+            fname = frame.filename.split("/")[-1]
+            lines.append(f"  {stat.size/1024:.0f}KB ({stat.count} objs) — {fname}:{frame.lineno}")
+
+        lines.append("\nআবার <code>/ramdebug</code> পাঠালে এই মুহূর্ত থেকে পরের diff দেখাবে। বন্ধ করতে <code>/ramdebug off</code>")
+        await send_msg(chat_id, "\n".join(lines))
+    except Exception as e:
+        logger.error(f"[ramdebug] error: {e}")
+        await send_msg(chat_id, f"❌ ramdebug error: {e}")
 
 
 async def handle_info2(msg: dict):
@@ -36992,6 +37075,7 @@ async def set_bot_commands(notify_chat_id: int = None):
         {"command": "pinon", "description": "Auto-pin চালু করো"},
         {"command": "pinoff", "description": "Auto-pin বন্ধ করো"},
         {"command": "info2", "description": "Bot stats দেখো"},
+        {"command": "ramdebug", "description": "RAM tracing (diagnostic, on/off)"},
         {"command": "pdfc", "description": "Image collection শুরু করো"},
         {"command": "done", "description": "Image collection শেষ করো — PDF বানাও"},
         {"command": "q", "description": "CSV থেকে D1 quiz তৈরি করো"},
@@ -37512,6 +37596,8 @@ async def handle_message(msg: dict):
                 await send_msg(chat_id, "📩 DM চেক করো — channel list পাঠানো হয়েছে।")
     elif text == "/info2":
         await handle_info2(msg)
+    elif text == "/ramdebug" or text.startswith("/ramdebug "):
+        await handle_ramdebug(msg)
     elif text.startswith("/qbmprompt"):
         # /qbmprompt <new prompt text> -> permanently overrides the active
         # QBM extraction prompt (Call 1). Persists in Supabase (quiz_sessions,
