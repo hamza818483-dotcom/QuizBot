@@ -142,6 +142,48 @@ since it will keep failing every rotation cycle forever with no recovery.
 
 ---
 
+## 6. Render 512MB RAM — current state of defenses (reference, not a bug)
+
+**Context:** Render free-tier hard-caps this container at 512MB RSS; the
+platform OOM-kills with no graceful warning if crossed. Since this isn't a
+code bug but a platform limit, here's the current full list of defenses so
+future debugging doesn't re-derive or re-add them:
+
+- `RAM_LIMIT_MB=420` (`core.py`) — working budget under the 512MB hard cap.
+- `_ram_guard_task` (`app.py`) — background RSS poll (every 5s on Render).
+  At 75% of limit (315MB) with no active job: clean self-restart. At 88%
+  (369MB) even mid-job: frees caches, force-restarts if still climbing.
+- `_qbm_ram_aware_acquire` + `_QBM_EXTRACT_HARD_CAP` — admits a new `/qbm`
+  page only when RSS < 55% of limit, hard-capped at 3 concurrent pages
+  (global across ALL users, not per-user).
+- `_PDF_SEMAPHORE = 2` (global) — caps concurrent Chromium PDF renders.
+- `_pw_idle_watchdog` — closes the Chromium browser after 60s unused on
+  Render (idle Chromium alone holds ~100-150MB RSS permanently otherwise).
+- `OPENBLAS_NUM_THREADS` / `OMP_NUM_THREADS` / `MKL_NUM_THREADS` /
+  `NUMEXPR_NUM_THREADS` all pinned to 1 in the Dockerfile (2026-11-02) —
+  stops BLAS libraries from pre-reserving a large per-core virtual
+  thread-pool on a host with no real benefit from it here.
+- `RLIMIT_AS` set to 1000MB (best-effort virtual memory cap, separate from
+  physical RSS).
+- In-memory caches (`pdf_cache`/`qbm_cache`/`img_cache`, `_QBM_MCQ_CACHE_MAX`)
+  are all capped, not unbounded.
+- `_qbm_rss_log()` — logs RSS at every `/qbm` checkpoint (`[RAMGuard]` tag)
+  so a restart can be pinned to the exact step that crossed the threshold.
+
+**Already checked and found NOT to be an issue (don't re-investigate):**
+no `cv2`/`pandas`/`numpy` imports at module load; heavy libs (PIL, fitz,
+psutil, playwright) are already imported lazily inside the functions that
+use them, not at startup.
+
+**If RAM problems reappear despite all of the above:** the remaining levers
+are (a) upgrade the Render plan (512MB → 2GB on Starter), or (b) move the
+heaviest jobs (`/qbm`, `/cut`, Chromium PDF render) to a separate worker
+host with more RAM, proxied through the existing Cloudflare Worker —
+further tightening the concurrency caps above has diminishing returns and
+risks making jobs too slow to be usable.
+
+---
+
 ## General debugging tip
 When "[AI-ROT] all providers exhausted for page 1" appears, check the error immediately
 above it for EACH provider in order (Groq → Gemini → OpenRouter → NVIDIA/Nemotron/Gemma/HF)

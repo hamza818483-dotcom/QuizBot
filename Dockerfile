@@ -2,6 +2,17 @@ FROM python:3.11-slim
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1
+# 2026-11-02 (RAM fix): OpenBLAS/OpenMP/MKL default to spawning one thread
+# per CPU core and pre-reserving a large virtual thread-pool per thread --
+# on a multi-core Render host this inflates baseline virtual memory (and
+# contributes to RSS via thread stacks) for a single-request bot process
+# that gets no real benefit from multi-threaded BLAS (numpy/opencv calls
+# here are small, not the bottleneck). Pinning all three to 1 thread keeps
+# that pre-reservation minimal. See KNOWN_ISSUES.md RAM section.
+ENV OPENBLAS_NUM_THREADS=1
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV NUMEXPR_NUM_THREADS=1
 
 RUN apt-get update && apt-get install -y \
     poppler-utils \
