@@ -8614,6 +8614,7 @@ async def handle_poll_range_practice(msg: dict, src_chat, id_a: int, id_b: int):
                 await _edit(_poll_range_progress_text(checked, total, found))
 
         try:
+            from poll_extract import extract_polls_telethon
             polls_result = await extract_polls_telethon(src_chat, start_id, end_id, progress_cb=_progress)
         except Exception as e:
             desc = str(e).lower()
@@ -9484,8 +9485,16 @@ async def handle_livetime(msg: dict):
 
 # ============================================================
 # FEATURE: /poll — Poll Extract (see poll_extract.py)
+# FIX 2026-11-02: this was a module-level (eager) import, so poll_extract.py's
+# own top-level `from telethon.errors import FloodWaitError` pulled all of
+# telethon (+24.4MB measured RSS) into EVERY bot process at startup -- paid
+# by every single command including /qbm, which never touches telethon at
+# all. There's only one bot process; a cost paid at import time is paid for
+# the whole process's lifetime regardless of which command actually runs.
+# Each use below now does its own lazy import at the call site instead
+# (same pattern already used for crop_module/ocr_module in this file), so
+# telethon only loads into RAM if /poll or /ok is actually invoked.
 # ============================================================
-from poll_extract import handle_poll_extract, handle_ok_command, handle_ok_topic_range, handle_ok_single_topic, handle_ok_all_topics, extract_polls_telethon
 
 
 # ============================================================
@@ -37601,6 +37610,7 @@ async def handle_message(msg: dict):
         if not is_auth:
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
+        from poll_extract import handle_poll_extract
         _spawn_command_task(uid, handle_poll_extract(msg))
 
     elif text.startswith("/ok") and re.search(r"/ok\s+(\d+)\s*-\s*(\d+)", text) and "t.me/" in text:
@@ -37611,6 +37621,7 @@ async def handle_message(msg: dict):
         _start_n, _end_n = int(_m.group(1)), int(_m.group(2))
         _lines = [l.strip() for l in text.splitlines() if "t.me/" in l]
         _group_ref = _lines[0] if _lines else ""
+        from poll_extract import handle_ok_topic_range
         _spawn_command_task(uid, handle_ok_topic_range(msg, _group_ref, _start_n, _end_n))
 
     elif text.startswith("/ok") and "\n" in text and "t.me/" in text:
@@ -37623,12 +37634,15 @@ async def handle_message(msg: dict):
             # Bare group link (no /<message_id> or /<topic_id> suffix) →
             # scan ALL topics, auto-continue, retry, DM each CSV.
             if re.search(r"t\.me/(c/\d+|\+[\w-]+|[A-Za-z0-9_]+)/?\s*$", _single_ref):
+                from poll_extract import handle_ok_all_topics
                 _spawn_command_task(uid, handle_ok_all_topics(msg, _single_ref))
             else:
                 # Single topic link → per-topic CSV DM mode
+                from poll_extract import handle_ok_single_topic
                 _spawn_command_task(uid, handle_ok_single_topic(msg, _single_ref))
         else:
             # Two links (range) → old batch-scan summary mode
+            from poll_extract import handle_ok_command
             _spawn_command_task(uid, handle_ok_command(msg))
 
     elif text.startswith("/poll") and "\n" in text and "t.me/" in text:
@@ -37636,6 +37650,7 @@ async def handle_message(msg: dict):
             logger.warning(f"[UNAUTH] /poll blocked for uid={uid} (type={type(uid).__name__}), OWNER_ID={OWNER_ID} (type={type(OWNER_ID).__name__}), chat_id={chat_id}")
             await _send_unauth_and_track(chat_id, uid, msg.get("from", {}).get("username", ""), text[:30])
             return
+        from poll_extract import handle_poll_extract
         _spawn_command_task(uid, handle_poll_extract(msg))
 
     elif text.startswith("/livetime"):
