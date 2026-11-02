@@ -94,7 +94,7 @@ IS_RENDER = (
 # silently left the other stale at the old, looser 400, so the /qbm
 # concurrency gate kept admitting new pages past the point the restart
 # guard itself now considers unsafe. Both now import this one constant.
-RAM_LIMIT_MB = 320 if IS_RENDER else 14000
+RAM_LIMIT_MB = 420 if IS_RENDER else 14000
 
 if _running_on == "Render" or (RENDER_URL and "onrender.com" in RENDER_URL):
     TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
