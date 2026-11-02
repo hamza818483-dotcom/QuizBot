@@ -33389,7 +33389,7 @@ async def process_qbm_pages(
                         if not unresolved:
                             break
                         _, lookahead_img = display_pages[idx + lookahead_offset]
-                        found_map = await _qbm_scan_answer_key(lookahead_img, unresolved)
+                        found_map = await _qbm_scan_answer_key(lookahead_img, unresolved, gemini_only=True)
                         if found_map:
                             for m in mcqs:
                                 key = (m.get("question") or "").strip()[:80]
@@ -33399,11 +33399,11 @@ async def process_qbm_pages(
                                         "Answer not found in source", ""
                                     ).strip()
                                     if not m["explanation"]:
-                                        m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"])
+                                        m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=True)
                             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
                 if unresolved:
                     for m in unresolved:
-                        resolved = await _qbm_web_resolve_answer(m)
+                        resolved = await _qbm_web_resolve_answer(m, gemini_only=True)
                         if resolved:
                             m["answer"] = resolved["answer"]
                             m["explanation"] = resolved["explanation"] or (m.get("explanation") or "").replace(
