@@ -28674,7 +28674,11 @@ async def handle_qbm(msg: dict, mode_v: bool = False):
             pass
     async with lock:
         _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
-        return await _handle_qbm_impl(msg, mode_v=mode_v)
+        _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+        try:
+            return await _handle_qbm_impl(msg, mode_v=mode_v)
+        finally:
+            _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
 
 
 async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
@@ -29046,7 +29050,11 @@ async def handle_topic(msg: dict):
             pass
     async with lock:
         _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
-        return await _handle_topic_impl(msg)
+        _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+        try:
+            return await _handle_topic_impl(msg)
+        finally:
+            _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
 
 
 async def _handle_topic_impl(msg: dict):
@@ -29209,7 +29217,11 @@ async def handle_bio(msg: dict):
         _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
         token = _BIO_MODE.set(True)
         try:
-            return await _handle_bio_impl(msg)
+            _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+            try:
+                return await _handle_bio_impl(msg)
+            finally:
+                _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
         finally:
             _BIO_MODE.reset(token)
 
@@ -29484,7 +29496,11 @@ async def handle_unmesh(msg: dict):
             pass
     async with lock:
         _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
-        return await _handle_unmesh_impl(msg)
+        _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+        try:
+            return await _handle_unmesh_impl(msg)
+        finally:
+            _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
 
 
 async def _handle_unmesh_impl(msg: dict):
@@ -29684,7 +29700,11 @@ async def handle_bcs(msg: dict):
             pass
     async with lock:
         _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
-        return await _handle_bcs_impl(msg)
+        _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+        try:
+            return await _handle_bcs_impl(msg)
+        finally:
+            _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
 
 
 async def _handle_bcs_impl(msg: dict):
@@ -29892,7 +29912,11 @@ async def handle_chem(msg: dict):
         _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
         token = _CHEM_MODE.set(True)
         try:
-            return await _handle_chem_impl(msg)
+            _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+            try:
+                return await _handle_chem_impl(msg)
+            finally:
+                _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
         finally:
             _CHEM_MODE.reset(token)
 
