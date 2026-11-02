@@ -28731,6 +28731,19 @@ async def handle_qbm(msg: dict, mode_v: bool = False):
             return await _handle_qbm_impl(msg, mode_v=mode_v)
         finally:
             _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+            # FIX 2026-11-02: RAMGuard logs showed a "clean self-restart"
+            # firing seconds AFTER a /qbm job finished (count back to 0,
+            # RSS still 322MB >= 315MB threshold) -- the decoded page
+            # images + MCQ lists from the just-finished job were still
+            # sitting in Python's object graph/allocator arenas, not yet
+            # reclaimed, so the NEXT RAMGuard poll (every 5s on Render)
+            # restarted the bot even though no PDF was actively processing.
+            # Forcing a collect right when a /qbm job's refs go out of
+            # scope reclaims that RAM immediately instead of waiting on
+            # Python's own GC cadence, cutting idle-triggered restarts.
+            if IS_RENDER:
+                import gc
+                gc.collect()
 
 
 async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
