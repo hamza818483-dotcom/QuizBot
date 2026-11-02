@@ -666,9 +666,18 @@ def _cap_pdf_render_cache() -> None:
         if evicted is not None:
             _pdf_render_cache_size["v"] -= _estimate_pages_bytes(evicted)
 
-def _render_pdf_cached(file_id: str, pdf_bytes: bytes, page_range: str = None):
+def _render_pdf_cached(file_id: str, pdf_bytes: bytes, page_range: str = None, store: bool = True):
     """Wraps pdf_to_images_safe with a render cache keyed by (content_hash, page_range)
-    -- content_hash (not file_id) so a re-upload of the identical PDF still hits."""
+    -- content_hash (not file_id) so a re-upload of the identical PDF still hits.
+
+    store=False (used by /qbm's main entry): still reads a cache hit if one
+    exists (e.g. a resume path already populated it), but never writes a new
+    entry. /qbm already holds the full rasterized `pages` list live in RAM for
+    the entire per-page extraction loop (lookahead needs later pages too), so
+    caching the same list a second time here means two full copies of every
+    decoded page image resident at once on the 512MB Render instance -- the
+    cache's own RAM savings (skip re-rasterizing on retry) aren't worth that
+    duplicate peak for a path that normally runs once per upload anyway."""
     content_hash = hashlib.sha256(pdf_bytes).hexdigest()
     key = (content_hash, page_range or "ALL")
     cached = _pdf_render_cache.get(key)
@@ -684,7 +693,7 @@ def _render_pdf_cached(file_id: str, pdf_bytes: bytes, page_range: str = None):
         # entry got evicted.
         return True, list(cached)
     ok, pages = pdf_to_images_safe(pdf_bytes, page_range)
-    if ok and pages:
+    if ok and pages and store:
         _pdf_render_cache_set(key, list(pages))
     return ok, pages
 
@@ -28791,7 +28800,7 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
         else:
             pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id,
                                                     message_id=reply["message_id"], file_unique_id=file_unique_id)
-            ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+            ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range, False)
             if not ok:
                 await send_msg(chat_id, pages)
                 return
