@@ -26404,7 +26404,15 @@ def _qbm_dedup_list(mcqs: list) -> list:
 # a new page into the pipeline -- lets many run in parallel while RAM is
 # free, throttles automatically as it fills, protecting against a 100-user
 # spike without hardcoding a number that's wrong for either extreme.
-_QBM_EXTRACT_HARD_CAP = asyncio.Semaphore(20 if IS_RENDER else 150)  # host-aware (fix 2026-11-02)
+# FIX 2026-11-02: 20 concurrent /qbm page slots on a 512MB Render instance
+# was far too many -- each in-flight page holds a decoded page image +
+# growing MCQ list, and the RAM-aware acquire below only checks RSS at
+# ADMISSION time, not continuously, so once ~5-6 pages were all admitted
+# and running their Gemini calls together, RSS kept climbing past the
+# platform's hard 512MB OOM-kill with no further gate to stop it (matches
+# "Ran out of memory (used over 512MB)" crash reports). Lowered to 6,
+# matched to the actual working budget this host has after RAM_LIMIT_MB.
+_QBM_EXTRACT_HARD_CAP = asyncio.Semaphore(6 if IS_RENDER else 150)  # host-aware (fix 2026-11-02)
 _qbm_ram_gate_lock = asyncio.Lock()
 
 async def _qbm_ram_aware_acquire():
