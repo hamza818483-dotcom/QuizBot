@@ -15,8 +15,8 @@ import uuid
 import logging
 import urllib.parse
 
+import csv
 import httpx
-import pandas as pd
 from bs4 import BeautifulSoup
 from PIL import Image
 
@@ -1564,7 +1564,23 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
 
 
 def results_to_csv_bytes(results: list) -> bytes:
-    df = pd.DataFrame(results)
-    csv_buf = io.BytesIO()
-    df.to_csv(csv_buf, index=False, encoding='utf-8-sig')
-    return csv_buf.getvalue()
+    # FIX 2026-11-02: pandas (+ its numpy dependency) was imported at module
+    # level just for this one DataFrame->CSV call, eagerly loading ~80-150MB
+    # RSS into EVERY bot startup regardless of whether this mhtml feature was
+    # ever used that session -- on the 512MB Render instance that's a large,
+    # permanent, avoidable chunk of the already-thin OOM margin. Replaced with
+    # the stdlib csv module (same utf-8-sig encoding, same column behavior:
+    # union of all dict keys across rows, missing keys left blank).
+    if not results:
+        return "".encode("utf-8-sig")
+    fieldnames = []
+    for row in results:
+        for k in row.keys():
+            if k not in fieldnames:
+                fieldnames.append(k)
+    csv_buf = io.StringIO()
+    writer = csv.DictWriter(csv_buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in results:
+        writer.writerow(row)
+    return csv_buf.getvalue().encode("utf-8-sig")
