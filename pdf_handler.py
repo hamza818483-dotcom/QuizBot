@@ -1743,6 +1743,42 @@ _PDF_CONVERT_LOCK = _threading.Semaphore(1 if _ON_RENDER else 6)
 _PDF_CONVERT_THREAD_COUNT = 1 if _ON_RENDER else 4
 _PDF_MAX_PAGES_PER_CALL = 200
 
+# FIX 2026-11-02: a small file (e.g. 3MB, 3 pages) crashed with "Ran out of
+# memory (used over 512MB)" even with page-count/concurrency caps in place --
+# root cause: rendered bitmap size depends on PHYSICAL PAGE DIMENSIONS, not
+# file size. convert_from_bytes(dpi=150) on an oversized/poster-sized
+# MediaBox (or a malformed one) allocates a proportionally huge raw bitmap
+# regardless of how small or few-paged the source PDF is. Check each page's
+# MediaBox cheaply via pypdf (no rasterization) before calling poppler, and
+# clamp the effective dpi for that batch so decoded pixel dimensions never
+# exceed a safe ceiling.
+_PDF_RENDER_MAX_PIXELS = 4000 * 4000  # ~16MP cap per rendered page (RGB ~48MB undecoded)
+
+def _safe_dpi_for_batch(pdf_bytes: bytes, first: int, last: int, requested_dpi: int) -> int:
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(BytesIO(pdf_bytes))
+        max_w_pt = max_h_pt = 0.0
+        for i in range(first - 1, min(last, len(reader.pages))):
+            box = reader.pages[i].mediabox
+            w_pt, h_pt = float(box.width), float(box.height)
+            max_w_pt = max(max_w_pt, w_pt)
+            max_h_pt = max(max_h_pt, h_pt)
+        if max_w_pt <= 0 or max_h_pt <= 0:
+            return requested_dpi
+        px_w = max_w_pt / 72.0 * requested_dpi
+        px_h = max_h_pt / 72.0 * requested_dpi
+        if px_w * px_h <= _PDF_RENDER_MAX_PIXELS:
+            return requested_dpi
+        scale = (_PDF_RENDER_MAX_PIXELS / (px_w * px_h)) ** 0.5
+        safe_dpi = max(50, int(requested_dpi * scale))
+        if safe_dpi < requested_dpi:
+            logger.warning(f"[PDF] Oversized page dims ({max_w_pt:.0f}x{max_h_pt:.0f}pt) detected for pages {first}-{last} -- clamping dpi {requested_dpi}->{safe_dpi} to avoid OOM")
+        return safe_dpi
+    except Exception as e:
+        logger.warning(f"[PDF] mediabox safety check failed (continuing at requested dpi): {e}")
+        return requested_dpi
+
 
 def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
     # Bounded wait (5 min) instead of indefinite block -- avoids thread-pool
@@ -1759,7 +1795,8 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
             hit 100% (19 pages = 19 separate subprocess spins). Falls back
             to per-page conversion only if the batch call itself fails."""
             try:
-                imgs = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=150, thread_count=_PDF_CONVERT_THREAD_COUNT, use_cropbox=True)
+                _dpi = _safe_dpi_for_batch(pdf_bytes, first, last, 150)
+                imgs = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=_dpi, thread_count=_PDF_CONVERT_THREAD_COUNT, use_cropbox=True)
                 if imgs and len(imgs) == (last - first + 1):
                     return imgs
             except Exception as _conv_e:
@@ -1775,17 +1812,19 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
             # memory/complexity but succeed at lower dpi).
             imgs = None
             backoffs = [1, 2, 3, 4]
+            _p_dpi = _safe_dpi_for_batch(pdf_bytes, p, p, 150)
             for _attempt in range(5):
                 try:
-                    imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=150, thread_count=_PDF_CONVERT_THREAD_COUNT, use_cropbox=True)
+                    imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=_p_dpi, thread_count=_PDF_CONVERT_THREAD_COUNT, use_cropbox=True)
                     if imgs:
                         return imgs[0]
                 except Exception as _conv_e:
-                    logger.warning(f"[PDF] Page {p} convert attempt {_attempt+1}/5 (dpi=150) raised: {_conv_e}")
+                    logger.warning(f"[PDF] Page {p} convert attempt {_attempt+1}/5 (dpi={_p_dpi}) raised: {_conv_e}")
                 if _attempt < len(backoffs):
                     time.sleep(backoffs[_attempt])
             try:
-                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=100, thread_count=_PDF_CONVERT_THREAD_COUNT, use_cropbox=True)
+                _p_dpi_fallback = min(100, _p_dpi)
+                imgs = convert_from_bytes(pdf_bytes, first_page=p, last_page=p, dpi=_p_dpi_fallback, thread_count=_PDF_CONVERT_THREAD_COUNT, use_cropbox=True)
                 if imgs:
                     logger.warning(f"[PDF] Page {p} recovered via dpi=100 fallback after 5 failed dpi=150 attempts")
                     return imgs[0]
