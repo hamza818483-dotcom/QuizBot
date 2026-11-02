@@ -12636,6 +12636,23 @@ async def _resume_page_job(job_row: dict):
             logger.warning(f"[Page-Resume] Skipping malformed/already-finished job row: {job_row}")
             return
 
+        # FIX 2026-11-02 (user request): /qbm auto-resume temporarily OFF.
+        # While the restart-frequency itself is being root-caused, a bot
+        # that OOM-restarts mid-/qbm then immediately re-downloads +
+        # re-renders + re-extracts the SAME pages on every boot was turning
+        # one underlying RAM problem into a repeating, user-visible loop
+        # ("eta onekbar ashe ektana"). Mark the job done (so it's not
+        # retried again on the next boot either) and tell the user plainly
+        # instead of silently retrying.
+        if job_type in ("qbm", "qbm_extract"):
+            logger.warning(f"[Page-Resume] /qbm auto-resume disabled -- dropping job_id={job_id} (job_type={job_type}) instead of retrying")
+            try:
+                await send_msg(chat_id, "🔄 Bot restart হয়েছিল — /qbm auto-resume আপাতত বন্ধ আছে, দয়া করে /qbm আবার চালাও।")
+            except Exception:
+                pass
+            await db_finish_page_job(job_id)
+            return
+
         if job_type == "pdf":
             mcq_count_raw = job_row.get("mcq_count") or ""
             mcq_count = int(mcq_count_raw) if str(mcq_count_raw).isdigit() else None
@@ -28744,18 +28761,27 @@ async def handle_qbm(msg: dict, mode_v: bool = False):
             if IS_RENDER:
                 import gc
                 gc.collect()
+                _qbm_rss_log("job_end_after_gc")
+
+
+# DIAGNOSTIC (2026-11-02 v2): root-cause breadcrumb trail for /qbm RAM.
+# One log line per checkpoint (download done, render done, each page done,
+# job end) so a restart can be pinned to the EXACT step that pushed RSS
+# over the line, instead of only knowing "somewhere in this job". Cheap
+# (single psutil call), warning-level so it's never filtered out of prod
+# logs, always tagged [RAMGuard] so it's easy to grep/follow live.
+def _qbm_rss_log(tag: str, **extra) -> None:
+    try:
+        import psutil as _p
+        rss = _p.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+        extras = " ".join(f"{k}={v}" for k, v in extra.items())
+        logger.warning(f"[RAMGuard] /qbm {tag}: rss={rss:.0f}MB {extras}".rstrip())
+    except Exception:
+        pass
 
 
 async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
-    # DIAGNOSTIC (2026-11-02): log RSS at /qbm entry so an OOM-kill log can
-    # be matched against "was RAM already high before this request started"
-    # vs "this one request itself caused the spike".
-    try:
-        import psutil as _psutil_qbm_diag
-        _rss_qbm0 = _psutil_qbm_diag.Process(os.getpid()).memory_info().rss / (1024 * 1024)
-        logger.warning(f"[RAMGuard] /qbm entry: rss={_rss_qbm0:.0f}MB IS_RENDER={IS_RENDER}")
-    except Exception:
-        pass
+    _qbm_rss_log("entry", IS_RENDER=IS_RENDER)
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
     uname = msg["from"].get("first_name", "User")
@@ -28838,7 +28864,9 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
         else:
             pdf_bytes = await _download_pdf_cached(file_id, progress_cb=_dl_progress_pdf, chat_id=chat_id,
                                                     message_id=reply["message_id"], file_unique_id=file_unique_id)
+            _qbm_rss_log("after_download", pdf_mb=f"{len(pdf_bytes)/1024/1024:.1f}")
             ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range, False)
+            _qbm_rss_log("after_render", ok=ok, pages=(len(pages) if ok and pages else 0))
             if not ok:
                 await send_msg(chat_id, pages)
                 return
@@ -33127,6 +33155,8 @@ async def qbm_extract_all_pages(
         page_status[idx]["mcq"] = len(mcqs)
         page_status[idx]["gen_seconds"] = round(time.time() - _page_start_ts, 1)
         page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
+        if IS_RENDER:
+            _qbm_rss_log("page_done", page=page_num, mcq=len(mcqs))
         if job_id and mcqs:
             # Best-effort crash-recovery checkpoint -- never blocks/fails
             # the actual extraction if D1 is slow/down.
