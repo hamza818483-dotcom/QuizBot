@@ -1742,6 +1742,15 @@ except Exception:
 _PDF_CONVERT_LOCK = _threading.Semaphore(1 if _ON_RENDER else 6)
 _PDF_CONVERT_THREAD_COUNT = 1 if _ON_RENDER else 4
 _PDF_MAX_PAGES_PER_CALL = 200
+# FIX 2026-11-02: _PDF_MAX_PAGES_PER_CALL (200) was ALSO used as the internal
+# poppler batch size -- _convert_batch() rasterized up to 200 pages into RAM
+# in ONE convert_from_bytes call before returning any of them. Even with the
+# per-page dpi clamp above, 200 simultaneous decoded bitmaps (each several MB)
+# is what actually OOM-kills a 512MB Render instance, independent of overall
+# file size -- a "small" 3MB/40-page PDF triggers this just as easily as a
+# huge one. Rasterization must be chunked into small batches on Render,
+# regardless of how many pages the user is allowed to request per call.
+_PDF_RASTER_BATCH_SIZE = 4 if _ON_RENDER else _PDF_MAX_PAGES_PER_CALL
 
 # FIX 2026-11-02: a small file (e.g. 3MB, 3 pages) crashed with "Ran out of
 # memory (used over 512MB)" even with page-count/concurrency caps in place --
@@ -1789,18 +1798,27 @@ def pdf_to_images(pdf_bytes: bytes, page_range: str = None) -> list:
     try:
         from pdf2image import convert_from_bytes
         def _convert_batch(first: int, last: int):
-            """Convert a whole page range in ONE convert_from_bytes call
-            (single poppler subprocess) instead of one call per page --
-            was the actual bottleneck causing long stalls after download
-            hit 100% (19 pages = 19 separate subprocess spins). Falls back
-            to per-page conversion only if the batch call itself fails."""
+            """Convert a page range via poppler, chunked to _PDF_RASTER_BATCH_SIZE
+            pages per convert_from_bytes call on Render -- a single oversized
+            batch call (e.g. 40+ pages at once) decodes that many bitmaps into
+            RAM simultaneously before returning any, which is what actually
+            OOM-kills a 512MB instance regardless of source file size. Still
+            far fewer subprocess spins than one-call-per-page, while capping
+            peak concurrent decoded-image RAM. Falls back to per-page
+            conversion only if any chunk itself fails."""
             try:
-                _dpi = _safe_dpi_for_batch(pdf_bytes, first, last, 150)
-                imgs = convert_from_bytes(pdf_bytes, first_page=first, last_page=last, dpi=_dpi, thread_count=_PDF_CONVERT_THREAD_COUNT, use_cropbox=True)
-                if imgs and len(imgs) == (last - first + 1):
-                    return imgs
+                all_imgs = []
+                for chunk_first in range(first, last + 1, _PDF_RASTER_BATCH_SIZE):
+                    chunk_last = min(chunk_first + _PDF_RASTER_BATCH_SIZE - 1, last)
+                    _dpi = _safe_dpi_for_batch(pdf_bytes, chunk_first, chunk_last, 150)
+                    imgs = convert_from_bytes(pdf_bytes, first_page=chunk_first, last_page=chunk_last, dpi=_dpi, thread_count=_PDF_CONVERT_THREAD_COUNT, use_cropbox=True)
+                    if not imgs or len(imgs) != (chunk_last - chunk_first + 1):
+                        raise ValueError(f"chunk {chunk_first}-{chunk_last} returned {len(imgs) if imgs else 0} images")
+                    all_imgs.extend(imgs)
+                if len(all_imgs) == (last - first + 1):
+                    return all_imgs
             except Exception as _conv_e:
-                logger.warning(f"[PDF] Batch convert pages {first}-{last} (dpi=150) raised: {_conv_e}")
+                logger.warning(f"[PDF] Batch convert pages {first}-{last} (chunked) raised: {_conv_e}")
             return None
 
         def _convert_one_page(p):
