@@ -16619,6 +16619,15 @@ async def handle_tf(msg: dict):
                         )
                     except Exception:
                         pass
+                # Release the decoded bitmap immediately; keeping all page
+                # images alive until the whole PDF finishes can exhaust Render's
+                # 512MB container even though extraction itself is sequential.
+                try:
+                    page_img.close()
+                except Exception:
+                    pass
+                pages[idx - 1] = (page_no, None)
+                page_img = None
                 continue
 
             if per_page_max and per_page_max > 0:
@@ -16629,6 +16638,14 @@ async def handle_tf(msg: dict):
             all_mcqs_for_csv.extend(mcqs)
             ok_count += 1
             page_stats.append((page_no, len(mcqs), time.monotonic() - page_start, provider_used))
+            # Same cleanup on success: the AI result is now independent of the
+            # source PIL bitmap, so return that page's decoded memory to the OS.
+            try:
+                page_img.close()
+            except Exception:
+                pass
+            pages[idx - 1] = (page_no, None)
+            page_img = None
 
         total_elapsed = time.monotonic() - overall_start
 
