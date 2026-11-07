@@ -1755,7 +1755,7 @@ _PDF_CONVERT_THREAD_COUNT = 1 if _ON_RENDER else 4
 # সম্পন্ন হয়নি" reports). Capped to 25 on Render so the whole-PDF render
 # step itself can never exceed a safe fraction of RAM_LIMIT_MB; HF Space
 # keeps 200 since it has the headroom.
-_PDF_MAX_PAGES_PER_CALL = 25 if _ON_RENDER else 200
+_PDF_MAX_PAGES_PER_CALL = 8 if _ON_RENDER else 200  # keep total decoded pages within a small Render RAM budget
 # FIX 2026-11-02: _PDF_MAX_PAGES_PER_CALL (200) was ALSO used as the internal
 # poppler batch size -- _convert_batch() rasterized up to 200 pages into RAM
 # in ONE convert_from_bytes call before returning any of them. Even with the
@@ -1764,7 +1764,7 @@ _PDF_MAX_PAGES_PER_CALL = 25 if _ON_RENDER else 200
 # file size -- a "small" 3MB/40-page PDF triggers this just as easily as a
 # huge one. Rasterization must be chunked into small batches on Render,
 # regardless of how many pages the user is allowed to request per call.
-_PDF_RASTER_BATCH_SIZE = 4 if _ON_RENDER else _PDF_MAX_PAGES_PER_CALL
+_PDF_RASTER_BATCH_SIZE = 1 if _ON_RENDER else _PDF_MAX_PAGES_PER_CALL  # one decoded bitmap per Poppler call on 512MB Render
 
 # FIX 2026-11-02: a small file (e.g. 3MB, 3 pages) crashed with "Ran out of
 # memory (used over 512MB)" even with page-count/concurrency caps in place --
@@ -1789,7 +1789,7 @@ _PDF_RASTER_BATCH_SIZE = 4 if _ON_RENDER else _PDF_MAX_PAGES_PER_CALL
 # regardless of page count AND regardless of how oversized any single page
 # is. min dpi floor kept at 72 (not 50) so clamped text stays legible enough
 # for Gemini OCR/extraction even on extreme poster-sized pages.
-_PDF_RENDER_MAX_PIXELS = (2000 * 3000) if _ON_RENDER else (4000 * 4000)  # 6MP on Render (~18MB raw/page) vs 16MP elsewhere
+_PDF_RENDER_MAX_PIXELS = (2000 * 2000) if _ON_RENDER else (4000 * 4000)  # 4MP (~12MB raw RGB/page) on Render
 _PDF_RENDER_MIN_DPI = 72  # floor -- never clamp below legible OCR resolution
 
 def _safe_dpi_for_batch(pdf_bytes: bytes, first: int, last: int, requested_dpi: int) -> int:
