@@ -14130,7 +14130,49 @@ def _premium_pdf_cache_put(cache_id: str, pdf_bytes: bytes):
         _, evicted = _PREMIUM_PDF_CACHE.popitem()
         _PREMIUM_PDF_CACHE_BYTES["v"] -= len(evicted)
 
-_last_pdf_error = {"msg": ""}
+_last_pdf_error = {"msg": "", "detail": "", "stage": "idle", "started_at": 0.0}
+
+def _pdf_host_diagnostics() -> str:
+    """Best-effort snapshot of container state when Chromium PDF generation fails."""
+    rows = [f"Stage: {_last_pdf_error.get('stage', 'unknown')}"]
+    try:
+        started = float(_last_pdf_error.get("started_at") or 0)
+        if started:
+            rows.append(f"Elapsed: {max(0, time.time() - started):.1f}s")
+        browser = _PW_BROWSER.get("browser")
+        rows.append(f"Browser connected: {bool(browser and browser.is_connected())}")
+        rows.append(f"Active renders: {_PW_ACTIVE_RENDERS.get('count', 0)}")
+    except Exception as e:
+        rows.append(f"Runtime state: {type(e).__name__}: {str(e)[:120]}")
+    for label, path in (("memory.current", "/sys/fs/cgroup/memory.current"),
+                        ("memory.max", "/sys/fs/cgroup/memory.max"),
+                        ("memory.events", "/sys/fs/cgroup/memory.events"),
+                        ("process status", "/proc/self/status")):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                value = f.read(1200).strip()
+            if label == "process status":
+                value = "\\n".join(x for x in value.splitlines()
+                    if x.startswith(("VmRSS:", "VmHWM:", "VmSize:", "Threads:")))
+            if value:
+                rows.append(f"{label}: {value}")
+        except Exception:
+            pass
+    return _html_escape("\\n".join(rows))
+
+
+async def _notify_pdf_failure(context: str) -> None:
+    try:
+        detail = (_last_pdf_error.get("detail") or _last_pdf_error.get("msg")
+                  or "No exception detail captured")[-2200:]
+        message = (f"⚠️ <b>{_html_escape(context)} PDF failed</b>\\n"
+                   f"<b>Error / traceback:</b> <pre>{_html_escape(detail)}</pre>\\n"
+                   f"<b>Host snapshot:</b> <pre>{_pdf_host_diagnostics()}</pre>")
+        await notify_owner(message)
+    except Exception as e:
+        logger.error(f"[PDF Gen] diagnostic DM failed: {type(e).__name__}: {str(e)[:200]}")
+
+
 
 _PW_BROWSER = {"browser": None, "playwright": None}
 _PW_LOCK = asyncio.Lock()
@@ -14394,13 +14436,16 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
         output_path = None
         page = None
         try:
+            _last_pdf_error.update({"stage": "semaphore acquired", "started_at": time.time(), "detail": ""})
             if progress_cb:
                 await progress_cb(15)
             page = None
             last_err = None
             for attempt in range(3):
                 try:
+                    _last_pdf_error["stage"] = "Chromium launch / reuse"
                     browser = await _get_pw_browser()
+                    _last_pdf_error["stage"] = "new_page"
                     page = await asyncio.wait_for(browser.new_page(), timeout=15)
                     break
                 except Exception as e:
@@ -14424,6 +14469,7 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                 f.write(html)
                 temp_path = f.name
 
+            _last_pdf_error["stage"] = "page.goto / networkidle"
             await page.goto(f"file://{os.path.abspath(temp_path)}", wait_until="networkidle", timeout=20000)
             await asyncio.wait_for(page.evaluate("document.fonts.ready"), timeout=10)
             # আগে blind 1.5s wait ছিল "just in case" রেন্ডার সম্পূর্ণ হওয়ার জন্য —
@@ -14764,12 +14810,15 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                 await progress_cb(100)
             return pdf_bytes
         except Exception as e:
-            logger.error(f"[PDF Gen] Playwright error: {e}")
+            logger.error(f"[PDF Gen] Playwright error: {e}\\n{traceback.format_exc()}")
+            _last_pdf_error["detail"] = traceback.format_exc()[-5000:]
             # Keep user-facing diagnostics to one safe line. The full
             # Playwright traceback/browser log remains in server logs; passing
             # its raw '<launching>' tags to Telegram HTML parse mode breaks the
             # error notification itself.
             _last_pdf_error["msg"] = f"{type(e).__name__}: {str(e).splitlines()[0][:300]}"
+            if not _last_pdf_error.get("detail"):
+                _last_pdf_error["detail"] = f"{type(e).__name__}: {e}"
             return None
         finally:
             if page:
@@ -16383,10 +16432,7 @@ async def handle_sheet_style_callback(callback_query: dict):
 
         if not pdf_bytes:
             await edit_msg(chat_id, status_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
-            try:
-                await notify_owner(f"⚠️ /sheet PDF gen failed, style={style_key}, title={title}, mcqs={len(mcqs)}\nError: {_last_pdf_error['msg']}")
-            except Exception:
-                pass
+            await _notify_pdf_failure(f"/sheet | style={style_key} | title={title[:100]} | MCQs={len(mcqs)}")
             return
 
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Sheet"
@@ -16397,10 +16443,13 @@ async def handle_sheet_style_callback(callback_query: dict):
         logger.error(f"[SHEET STYLE] Error: {e}")
         if status_id:
             await edit_msg(chat_id, status_id, "❌ PDF generate করতে সমস্যা হয়েছে!")
-        try:
-            await notify_owner(f"⚠️ /sheet PDF gen exception: {str(e)[:300]}")
-        except Exception:
-            pass
+        _last_pdf_error.update({
+            "msg": f"{type(e).__name__}: {str(e).splitlines()[0][:300]}",
+            "detail": traceback.format_exc()[-5000:],
+            "stage": "sheet handler exception",
+            "started_at": _last_pdf_error.get("started_at") or time.time(),
+        })
+        await _notify_pdf_failure(f"/sheet exception | style={style_key} | title={title[:100]} | MCQs={len(mcqs)}")
 
 # ============================================================
 # SOLVE SHEET PDF — Practice Sheet same style (2-col, boxed)
