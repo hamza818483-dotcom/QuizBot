@@ -38,21 +38,14 @@ try:
     # touched physically, so 450MB was tripping on normal library init, not actual
     # memory pressure (OpenBLAS "Memory allocation still failed after 10 retries").
     #
-    # 2026-10-29: raised 1000->2500. CONFIRMED via diagnostic logging that
-    # 1000MB was STILL false-triggering: a /cut MemoryError logged
-    # RSS=400MB VMS=994MB -- physical memory (RSS) was nowhere near
-    # Render's 512MB limit, but virtual address space (VMS) had climbed to
-    # the 1000MB RLIMIT_AS cap from heap fragmentation accumulated across
-    # PRIOR requests in the same long-lived process (CPython rarely
-    # returns freed heap pages to the OS). The actual safety net against
-    # real OOM is the OS's physical RAM limit (512MB) combined with the
-    # existing per-request MemoryError handlers -- RLIMIT_AS only needs to
-    # be high enough that normal fragmentation growth across many requests
-    # never hits it, while still catching a genuinely pathological
-    # runaway allocation (e.g. an accidental multi-GB buffer). 2500MB
-    # gives real headroom for fragmentation while still well below what a
-    # true runaway leak would reach.
-    _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "2500"))
+    # 2026-11-08: Chromium/ V8 reserves large VIRTUAL address ranges at
+    # startup (including a multi-GB pointer-compression cage). RLIMIT_AS is
+    # inherited by Playwright's Chromium child processes, so a 2500MB cap
+    # can make Chromium abort during launch even when physical RSS is low.
+    # Keep this virtual-address guard generous; Render's actual 512MB
+    # container memory limit still enforces the physical RAM ceiling.
+    # 8192MB is a VIRTUAL address-space limit, not an 8GB RAM allocation.
+    _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "8192"))
     _RAM_CAP_BYTES = _RAM_CAP_MB * 1024 * 1024
     _soft, _hard = _resource.getrlimit(_resource.RLIMIT_AS)
     _new_hard = _RAM_CAP_BYTES if (_hard == _resource.RLIM_INFINITY or _hard > _RAM_CAP_BYTES) else _hard
@@ -14772,7 +14765,11 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
             return pdf_bytes
         except Exception as e:
             logger.error(f"[PDF Gen] Playwright error: {e}")
-            _last_pdf_error["msg"] = str(e)
+            # Keep user-facing diagnostics to one safe line. The full
+            # Playwright traceback/browser log remains in server logs; passing
+            # its raw '<launching>' tags to Telegram HTML parse mode breaks the
+            # error notification itself.
+            _last_pdf_error["msg"] = f"{type(e).__name__}: {str(e).splitlines()[0][:300]}"
             return None
         finally:
             if page:
