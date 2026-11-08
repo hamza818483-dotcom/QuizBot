@@ -2898,9 +2898,9 @@ def _build_math_prompt(topic: str) -> str:
         f'   "options":["1.671292184 × 10²³ টি","3.342584368 × 10²³ টি",'
         f'"6.022 × 10²³ টি","3.011 × 10²⁴ টি"],\n'
         f'   "answer":"B",\n'
-        f'   "explanation":"সূত্র: n = W/M (W=ভর, M=আণবিক ভর)\nপানির মোল, '
-        f'n = 5/18 = 0.2778 mol\nমোট H পরমাণুর মোল = 2 × 0.2778 = '
-        f'0.5556 mol (পানির প্রতি অণুতে 2টি H)\nH পরমাণুর সংখ্যা = '
+        f'   "explanation":"সূত্র: n = W/M (W=ভর, M=আণবিক ভর)\\nপানির মোল, '
+        f'n = 5/18 = 0.2778 mol\\nমোট H পরমাণুর মোল = 2 × 0.2778 = '
+        f'0.5556 mol (পানির প্রতি অণুতে 2টি H)\\nH পরমাণুর সংখ্যা = '
         f'0.5556 × 6.022 × 10²³ = 3.342584368 × 10²³ টি"}}\n\n'
         f"Notice in the correct output: (1) NO \"সমস্যা-৩.১(খ) অনুযায়ী\" "
         f"or any problem-number label anywhere — question starts directly "
@@ -2976,7 +2976,7 @@ def _build_math_prompt(topic: str) -> str:
         f"- Language: match the source page's language (Bengali/English) "
         f"for question + explanation.\n"
         f"- Explanation: always formula → values substituted → "
-        f"calculation → final answer, each on its own line (\n between "
+        f"calculation → final answer, each on its own line (\\n between "
         f"lines) — matching the worked example above exactly, for both "
         f"page questions and self-made ones.\n\n"
 
@@ -4612,7 +4612,7 @@ async def _math_generate_explanations_chunk(chunk: list) -> dict:
     prompt = f"""তুমি একজন Physics/Chemistry শিক্ষক। নিচে কিছু সাংখ্যিক (numeric) MCQ (প্রশ্ন + অপশন + সঠিক উত্তর) দেওয়া আছে, প্রতিটার জন্য একটা সম্পূর্ণ গাণিতিক সমাধান-ব্যাখ্যা (explanation) লিখতে হবে।
 
 কঠোর নিয়ম (এটাই একমাত্র বাধ্যতামূলক structure, ভুল option নিয়ে আলাদা বিশ্লেষণের দরকার নেই):
-- সরাসরি ব্যবহৃত সূত্র/রাশি দিয়ে শুরু করবে (কোনো "সূত্র:" লেবেল/শব্দ লেখা যাবে না, সরাসরি রাশিমালা যেমন "n = W / M" লিখে শুরু করবে), তারপর মান বসিয়ে ধাপে ধাপে হিসাব -- প্রতিটা ধাপ আলাদা লাইনে (\n দিয়ে), প্রতি ধাপে দৃশ্যমান "=" সহ সংখ্যা বসানো, শেষে চূড়ান্ত মান (কোনো "চূড়ান্ত উত্তর:" জাতীয় লেবেল ছাড়াই, option-এর মান সহ শেষ লাইনেই থাকবে)।
+- সরাসরি ব্যবহৃত সূত্র/রাশি দিয়ে শুরু করবে (কোনো "সূত্র:" লেবেল/শব্দ লেখা যাবে না, সরাসরি রাশিমালা যেমন "n = W / M" লিখে শুরু করবে), তারপর মান বসিয়ে ধাপে ধাপে হিসাব -- প্রতিটা ধাপ আলাদা লাইনে (\\n দিয়ে), প্রতি ধাপে দৃশ্যমান "=" সহ সংখ্যা বসানো, শেষে চূড়ান্ত মান (কোনো "চূড়ান্ত উত্তর:" জাতীয় লেবেল ছাড়াই, option-এর মান সহ শেষ লাইনেই থাকবে)।
 - প্রথমবার কোনো ভেরিয়েবলের (W, M, N, NA ইত্যাদি) মান বসানোর সময় সেটা কী রাশি তা বলে দিতে হবে -- শুধু "M = 32 g/mol" নয়, লিখতে হবে "আণবিক ভর, M = 32 g/mol" স্টাইলে (রাশির নাম + প্রতীক + মান)।
 - শুধু উত্তর repeat/restate করা INVALID -- "H পরমাণুর সংখ্যা 3.34×10²³ টি" জাতীয় এক লাইনের answer-only বাক্য কখনো একা থাকবে না, তার আগে রাশি ও হিসাবের ধাপ অবশ্যই থাকতে হবে।
 - গুণ চিহ্নের জন্য সবসময় "×" ব্যবহার করবে, কখনো "*" ব্যবহার করা যাবে না।
@@ -14173,7 +14173,6 @@ async def _notify_pdf_failure(context: str) -> None:
         logger.error(f"[PDF Gen] diagnostic DM failed: {type(e).__name__}: {str(e)[:200]}")
 
 
-
 _PW_BROWSER = {"browser": None, "playwright": None}
 _PW_LOCK = asyncio.Lock()
 _PW_LAST_USED = {"ts": 0.0}
@@ -14812,7 +14811,7 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                 await progress_cb(100)
             return pdf_bytes
         except Exception as e:
-            logger.error(f"[PDF Gen] Playwright error: {e}\n{traceback.format_exc()}")
+            logger.error(f"[PDF Gen] Playwright error: {e}\\n{traceback.format_exc()}")
             _last_pdf_error["detail"] = traceback.format_exc()[-5000:]
             # Keep user-facing diagnostics to one safe line. The full
             # Playwright traceback/browser log remains in server logs; passing
@@ -15028,10 +15027,10 @@ def _slide_font(weight: str, size: int):
 def _slide_wrap_text_pil(text: str, font, max_width: int, draw) -> list:
     """Word-wrap text using actual PIL-measured (raqm-shaped) width, so
     wrapping matches real rendered glyph widths for Bengali/English.
-    Existing '\n' line breaks in the source text (e.g. each roman-numeral
+    Existing '\\n' line breaks in the source text (e.g. each roman-numeral
     i./ii./iii. statement on its own CSV line) are preserved as hard
     breaks -- only over-wide segments get further wrapped, never merged
-    across a '\n'."""
+    across a '\\n'."""
     lines = []
     for segment in text.split("\n"):
         words = segment.split(" ")
@@ -17536,7 +17535,7 @@ def _dagano_apply_topic_reuse(mcqs: list) -> list:
     (copy verbatim) instead of trusting each MCQ's own possibly-drifted
     extra_info -- saves nothing on tokens already spent, but keeps the
     topic-wide info CONSISTENT across same-topic MCQs. Also merges
-    final explanation = main_explanation + ('\n\n' + extra_info if any)."""
+    final explanation = main_explanation + ('\\n\\n' + extra_info if any)."""
     seen_extra = {}
     for m in mcqs:
         tk = (m.get("topic_key") or "").strip()
@@ -21919,7 +21918,7 @@ BCS_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": THIS PAGE STYLE (BCS প্রশ্ন ও সমাধান compilation) marks a new topic with a small banner badge identified by ALL of these signals TOGETHER:\n'
     '  i) WHITE / PLAIN background (NOT a black or dark-filled box) — a small badge/box, not a full-width bar.\n'
-    '  ii) A Bangla number (e.g. ৫০, ৪৪, ৪১) printed in bold INSIDE A ROUND/CIRCLE-SHAPED badge (a circle, not a rectangle/box), with the word "তম" printed directly beneath that circle (outside/under it, still part of the same badge unit), together forming an ordinal like "(৫০)\nতম".\n'
+    '  ii) A Bangla number (e.g. ৫০, ৪৪, ৪১) printed in bold INSIDE A ROUND/CIRCLE-SHAPED badge (a circle, not a rectangle/box), with the word "তম" printed directly beneath that circle (outside/under it, still part of the same badge unit), together forming an ordinal like "(৫০)\\nতম".\n'
     '  iii) The recurring common title text "বিসিএস প্রশ্ন ও সমাধান" printed beside/near the number+তম badge — this exact phrase is COMMON to every such banner and is NEVER itself part of the topic name, it only helps you recognize this is a real topic banner (as opposed to random bold text elsewhere).\n'
     '  iv) Directly below that title text is the actual CATEGORY name for this section — e.g. "বাংলাদেশ", "আন্তর্জাতিক", "বাংলা", "সাধারণ বিজ্ঞান", "গাণিতিক যুক্তি", etc. — this category word/phrase is the part that actually changes from banner to banner and is CRITICAL for topic-splitting.\n'
     '  A banner is a real topic_hint ONLY when i, ii, iii are all present together (white bg + number-তম badge + the common "বিসিএস প্রশ্ন ও সমাধান" phrase); iv (the category line) is what supplies the distinguishing name. Build the topic_hint STRING exactly as: "<number> তম বিসিএস(<category>)" — e.g. number ৫০ + category বাংলাদেশ → "৫০ তম বিসিএস(বাংলাদেশ)"; number ৫০ + category আন্তর্জাতিক → "৫০ তম বিসিএস(আন্তর্জাতিক)". Read the Bangla number and the category text exactly as printed; do not translate or alter them.\n'
@@ -27182,11 +27181,11 @@ _V_RULES = """RULES:
 - Synonym/antonym MCQs: question+options stay 100% English, no Bangla gloss.
 - Forbidden phrases in question/explanation: never say WHERE info lives (চিত্রে/বক্সে/ছকে/উদ্দীপকে/সারণিতে/পৃষ্ঠায়/প্যাসেজে/"as shown in figure/table/passage"). State the fact directly.
 - DIAGRAM: if the question needs a diagram/figure, add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) covering the whole diagram + labels edge-to-edge. Omit if none. Options never get bbox.
-- EXPLANATION = EXACTLY 4 lines separated by \n, one line per option in order A, B, C, D. Line format: "A) <why this option is correct / why it is wrong>". Each line <=45 chars (whole explanation <=190 chars), real relevant fact (never bare "ভুল"/"incorrect"). If the page itself has an explanation, use its facts. Bengali unless the MCQ is English.
+- EXPLANATION = EXACTLY 4 lines separated by \\n, one line per option in order A, B, C, D. Line format: "A) <why this option is correct / why it is wrong>". Each line <=45 chars (whole explanation <=190 chars), real relevant fact (never bare "ভুল"/"incorrect"). If the page itself has an explanation, use its facts. Bengali unless the MCQ is English.
 """
 
 _V_SCHEMA = """OUTPUT: valid JSON array only, no markdown, no extra text.
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"A) ...\nB) ...\nC) ...\nD) ...","qsn_bbox":[100,200,400,450]}]
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"A) ...\\nB) ...\\nC) ...\\nD) ...","qsn_bbox":[100,200,400,450]}]
 """
 
 V_CALL1_PROMPT = "STRICT MCQ EXTRACTOR (CALL 1). Extract every MCQ on this page image, in strict serial order. This page ALWAYS contains MCQs and EVERY MCQ has its answer printed on the page (circled letter at the right end of the MCQ block) — scan the whole page carefully, never return an empty list, never skip an MCQ or its answer.\n\n" + _V_RULES + "\n" + _V_SCHEMA
@@ -28099,7 +28098,7 @@ async def _ai_generate_explanations_chunk(chunk: list) -> dict:
 - যদি input-এ আগে থেকেই কোনো explanation থাকে সেটা উপেক্ষা করে নতুন করে সঠিক ও তথ্যবহুল explanation বানাও।
 - সংখ্যা (digit) সবসময় English/Arabic (0-9) দিয়ে লিখতে হবে, কখনো বাংলা সংখ্যা (০-৯) ব্যবহার করা যাবে না, বাক্যের বাকি অংশ বাংলা হলেও।
 - এই প্রশ্নটা বইয়ের কোন সমস্যা নম্বর/অনুচ্ছেদ থেকে এসেছে তার কোনো reference ("সমস্যা-X.X অনুযায়ী", "এর সমাধান অনুযায়ী" ইত্যাদি) explanation-এ কখনো লেখা যাবে না -- explanation সবসময় স্বয়ংসম্পূর্ণ হবে।
-- যদি প্রশ্নটা গাণিতিক/সাংখ্যিক হিসাব-নির্ভর হয় (যেমন mol, ভর, আয়তন, অণুর সংখ্যা ইত্যাদি বের করা), শুধু উত্তর repeat করলে চলবে না -- সূত্র (formula) কী ব্যবহার হয়েছে, তারপর মান বসিয়ে ধাপে ধাপে (প্রতি ধাপ আলাদা লাইনে, \n দিয়ে) হিসাব দেখাতে হবে, শেষে চূড়ান্ত উত্তর।
+- যদি প্রশ্নটা গাণিতিক/সাংখ্যিক হিসাব-নির্ভর হয় (যেমন mol, ভর, আয়তন, অণুর সংখ্যা ইত্যাদি বের করা), শুধু উত্তর repeat করলে চলবে না -- সূত্র (formula) কী ব্যবহার হয়েছে, তারপর মান বসিয়ে ধাপে ধাপে (প্রতি ধাপ আলাদা লাইনে, \\n দিয়ে) হিসাব দেখাতে হবে, শেষে চূড়ান্ত উত্তর।
 - যদি প্রশ্নটা Synonym/Antonym (প্রতিশব্দ/বিপরীত শব্দ) টাইপের হয় (ইংরেজি শব্দের প্রতিশব্দ/বিপরীত শব্দ বাছাই করতে বলা হয়েছে), explanation-এ প্রতিটা option-এর (৪টা শব্দের) বাংলা অর্থ আলাদা আলাদা করে লিখতে হবে -- প্রতিটা শব্দ ও তার বাংলা অর্থ স্পষ্টভাবে উল্লেখ করে বুঝিয়ে দিতে হবে কেন সঠিক option-টাই প্রশ্নের শব্দের সমার্থক/বিপরীতার্থক, এবং বাকি ৩টা কেন না। এর পাশাপাশি, প্রশ্নে যে মূল ইংরেজি শব্দটার synonym/antonym চাওয়া হয়েছে, সেই মূল শব্দটার আরও কিছু relevant/প্রচলিত synonym (যদি প্রশ্নে synonym চাওয়া হয়) অথবা antonym (যদি antonym চাওয়া হয়) -- ২-৩টা অতিরিক্ত শব্দ ইংরেজি + তাদের বাংলা অর্থসহ উল্লেখ করতে হবে, যাতে ভবিষ্যতে ওই শব্দটা অন্য কোনো option/প্রশ্নে এলেও চেনা যায়।
 
 INPUT MCQs (in order):
@@ -28502,7 +28501,7 @@ async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str, 
     when the correct answer is already known (e.g. matched from an
     answer-key on a nearby page) but no real explanation text came with
     it. Main line (why the correct option is right) capped at ~200 chars,
-    then one line per wrong option -- each on its own line (\n-separated).
+    then one line per wrong option -- each on its own line (\\n-separated).
     NEVER references the source, page, or how the answer was found.
 
     gemini_only (default False): when True (/unmesh, per user request
@@ -30563,7 +30562,7 @@ def _onu_filter_mcqs(mcqs: list):
 # math formatting, no explanation-generation rules -- those aren't part of
 # /onu's job and were only bloating the prompt for QBM's use case.
 _EXPLANATION_DEPTH_RULE = """
-EXPLANATION FORMAT (always, whenever you write/generate an explanation yourself rather than copying page text verbatim): write it STEP-BY-STEP, each step on its OWN separate line (use \n between steps, not one run-on paragraph):
+EXPLANATION FORMAT (always, whenever you write/generate an explanation yourself rather than copying page text verbatim): write it STEP-BY-STEP, each step on its OWN separate line (use \\n between steps, not one run-on paragraph):
 
 FOR MATH/NUMERICAL/CALCULATION questions (the question requires solving, computing, or deriving a numeric/formula-based result): show the actual WORKED SOLUTION step-by-step, one calculation step per line, e.g.:
 Line 1: given values / what's being found.
@@ -30574,7 +30573,7 @@ FOR CONCEPTUAL/FACTUAL questions (non-numerical):
 Line 1 (MAIN explanation — why the correct option is right, tied to the question's context/subject): keep this line within ~200 characters, since this is the core answer and must survive on its own.
 Line 2 onward (one line per wrong option, in order): briefly state what that option actually is/means and why it doesn't fit this question, using real distinguishing facts (never a bare "ভুল"/"incorrect" with no reason).
 
-Never a single generic one-line filler; every option/step gets real, specific content. No headings/labels like "Step 1:" — just the plain lines separated by \n."""
+Never a single generic one-line filler; every option/step gets real, specific content. No headings/labels like "Step 1:" — just the plain lines separated by \\n."""
 
 _MATH_UNICODE_RULE = """
 MATH/CHEMISTRY FORMATTING (always, in question/options/explanation): NEVER output raw LaTeX commands (no \\vec, \\hat, \\frac, \\sqrt, \\sum, \\int, ^, _, {, } used as LaTeX syntax) — always convert to proper Unicode instead:
@@ -36198,7 +36197,7 @@ async def handle_savelabel_command(msg: dict):
     await _label_index_add(name)
     await send_msg(chat_id,
         f"✅ সেভ হয়েছে: <b>{name}</b> ({len(step_lines)} ধাপ)\n"
-        f"পরে ব্যবহার করতে: <code>/autolms\nuse:{name}\n---\nsub=...</code>",
+        f"পরে ব্যবহার করতে: <code>/autolms\\nuse:{name}\\n---\\nsub=...</code>",
         parse_mode="HTML")
 
 
