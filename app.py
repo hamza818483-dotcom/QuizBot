@@ -14142,6 +14142,8 @@ _last_pdf_error = {"msg": ""}
 _PW_BROWSER = {"browser": None, "playwright": None}
 _PW_LOCK = asyncio.Lock()
 _PW_LAST_USED = {"ts": 0.0}
+# Count active Chromium PDF jobs so the idle watchdog never kills a long render.
+_PW_ACTIVE_RENDERS = {"count": 0}
 
 # RAM FINDING 2026-11-02: once launched, this Chromium process was kept
 # alive FOREVER (reused across every PDF generation, never closed) -- a
@@ -14163,7 +14165,9 @@ async def _pw_idle_watchdog():
         try:
             async with _PW_LOCK:
                 browser = _PW_BROWSER["browser"]
-                if browser is not None and time.time() - _PW_LAST_USED["ts"] > 60:
+                if (browser is not None
+                        and _PW_ACTIVE_RENDERS["count"] == 0
+                        and time.time() - _PW_LAST_USED["ts"] > 60):
                     try:
                         await browser.close()
                     except Exception:
@@ -14390,6 +14394,8 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
     custom-size print style, otherwise Playwright silently overrides the
     CSS @page size with A4 and content gets clipped/rescaled unpredictably."""
     async with _PDF_SEMAPHORE:
+        _PW_ACTIVE_RENDERS["count"] += 1
+        _PW_LAST_USED["ts"] = time.time()
         import tempfile
         temp_path = None
         output_path = None
@@ -14780,6 +14786,8 @@ async def _html_to_pdf(html: str, progress_cb=None, use_css_page_size: bool = Fa
                         os.unlink(p)
                     except Exception:
                         pass
+            _PW_ACTIVE_RENDERS["count"] = max(0, _PW_ACTIVE_RENDERS["count"] - 1)
+            _PW_LAST_USED["ts"] = time.time()
 
 # ============================================================
 # FEATURE: /qpdf — chorcha.net mhtml/html (ক/খ ভান্ডার, CQ) → Premium PDF
@@ -16138,7 +16146,31 @@ def _am_build_html(data, heading, fmt, hdr_txt="", ftr_txt=""):
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}{tbl}{f}</body></html>'
 
 _sheet_cache = {}
-_SHEET_CACHE_MAX = 50  # was unbounded -- fix 2026-11-02 RAM sweep
+# /sheet cache is bounded by both entry count and source CSV bytes. Parsed MCQ
+# dictionaries occupy several times the CSV size, so a count-only cap is unsafe.
+_SHEET_CACHE_MAX = 8
+_SHEET_CACHE_MAX_BYTES = 6 * 1024 * 1024
+_SHEET_CACHE_TTL_SECONDS = 30 * 60
+_sheet_cache_bytes = {"v": 0}
+
+
+def _sheet_cache_remove(cache_key: str):
+    entry = _sheet_cache.pop(cache_key, None)
+    if entry:
+        _sheet_cache_bytes["v"] = max(0, _sheet_cache_bytes["v"] - entry.get("_cache_size", 0))
+
+
+def _sheet_cache_prune(now: float = None):
+    now = now or time.time()
+    for key, entry in list(_sheet_cache.items()):
+        if now - entry.get("_cached_at", 0) > _SHEET_CACHE_TTL_SECONDS:
+            _sheet_cache_remove(key)
+    while (len(_sheet_cache) > _SHEET_CACHE_MAX
+           or _sheet_cache_bytes["v"] > _SHEET_CACHE_MAX_BYTES):
+        oldest_key = next(iter(_sheet_cache), None)
+        if oldest_key is None:
+            break
+        _sheet_cache_remove(oldest_key)
 
 async def handle_sheet_command(msg: dict):
     chat_id = msg["chat"]["id"]
@@ -16176,9 +16208,16 @@ async def handle_sheet_command(msg: dict):
     try:
         csv_bytes = await download_tg_file(doc["file_id"], progress_cb=_dl_progress_sheet,
                                             chat_id=chat_id, message_id=reply["message_id"])
+        csv_size_bytes = len(csv_bytes)
+        if csv_size_bytes > _SHEET_CACHE_MAX_BYTES:
+            if loading_id:
+                await edit_msg(chat_id, loading_id,
+                    "❌ CSV ফাইলটি 6MB-এর বেশি। Render-এর RAM নিরাপদ রাখতে ছোট ছোট CSV ভাগ করে /sheet দাও।")
+            return
         if loading_id:
             await edit_msg(chat_id, loading_id, f"✅ Download সম্পূর্ণ!\n📄 {file_name}\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
         mcqs = _parse_csv_bytes(csv_bytes)
+        del csv_bytes
 
         if not mcqs:
             if loading_id:
@@ -16200,9 +16239,14 @@ async def handle_sheet_command(msg: dict):
             await edit_msg(chat_id, loading_id, f"✅ {len(mcqs)} টি MCQ পাওয়া গেছে!\n🎨 Print Style বেছে নাও:")
 
         cache_key = f"{chat_id}:{loading_id}"
-        _sheet_cache[cache_key] = {"mcqs": mcqs, "title": title}
-        while len(_sheet_cache) > _SHEET_CACHE_MAX:
-            _sheet_cache.pop(next(iter(_sheet_cache)), None)
+        _sheet_cache_prune()
+        _sheet_cache_remove(cache_key)
+        _sheet_cache[cache_key] = {
+            "mcqs": mcqs, "title": title,
+            "_cache_size": csv_size_bytes, "_cached_at": time.time()
+        }
+        _sheet_cache_bytes["v"] += csv_size_bytes
+        _sheet_cache_prune()
 
         # 2026-08-23: /sheet style menu trimmed to only style1, style2,
         # style3, style7 per request. _AM_FORMAT_NAMES (format_01..05) and
@@ -16288,6 +16332,7 @@ async def handle_sheet_style_callback(callback_query: dict):
     if len(parts) != 3:
         return
     _, style_key, cache_key = parts
+    _sheet_cache_prune()
     cached = _sheet_cache.get(cache_key)
     if not cached:
         await tg_post("answerCallbackQuery", {"callback_query_id": callback_query["id"], "text": "❌ Session expired, আবার /sheet দাও।", "show_alert": True})

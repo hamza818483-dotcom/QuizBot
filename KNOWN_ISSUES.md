@@ -167,6 +167,11 @@ future debugging doesn't re-derive or re-add them:
   physical RSS).
 - In-memory caches (`pdf_cache`/`qbm_cache`/`img_cache`, `_QBM_MCQ_CACHE_MAX`)
   are all capped, not unbounded.
+- `/sheet` cache is capped at 8 entries / 6MB of source CSV, expires after
+  30 minutes, and rejects a single CSV above 6MB to avoid retaining oversized
+  parsed MCQ dictionaries on the 512MB Render process.
+- Chromium idle watchdog checks the active PDF-render count before closing
+  the browser, so a long `/sheet` render is not terminated at the 60s idle mark.
 - `_qbm_rss_log()` — logs RSS at every `/qbm` checkpoint (`[RAMGuard]` tag)
   so a restart can be pinned to the exact step that crossed the threshold.
 
