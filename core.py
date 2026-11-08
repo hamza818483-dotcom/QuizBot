@@ -1068,7 +1068,8 @@ def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 10
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",
-                        message_thread_id: int = None, reply_markup: dict = None) -> dict:
+                        message_thread_id: int = None, reply_markup: dict = None,
+                        prefer_direct: bool = False) -> dict:
     if caption and len(caption) > 1024:
         caption = caption[:1021] + "..."
 
@@ -1086,7 +1087,6 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
     data = {
         "chat_id": str(chat_id), "caption": caption, "parse_mode": parse_mode,
         "filename": filename, "mime_type": mime_type,
-        "doc_b64": base64.b64encode(file_bytes).decode()
     }
     if reply_to_message_id: data["reply_to_message_id"] = reply_to_message_id
     if message_thread_id: data["message_thread_id"] = message_thread_id
@@ -1121,7 +1121,11 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
     # path earlier and go straight to raw-bytes direct multipart upload
     # (no in-memory doubling) for anything above 15MB.
     SKIP_CF_THRESHOLD = 15 * 1024 * 1024  # ~15MB raw -- avoid base64 double-buffer on 512MB host
-    skip_cf = len(file_bytes) > SKIP_CF_THRESHOLD
+    # /sheet on Render uses raw multipart upload to avoid a 1.33x base64
+    # copy and a second large JSON body in the 512MB Python process.
+    skip_cf = prefer_direct or len(file_bytes) > SKIP_CF_THRESHOLD
+    if not skip_cf:
+        data["doc_b64"] = base64.b64encode(file_bytes).decode()
     if skip_cf:
         logger.warning(f"[sendDoc] file {len(file_bytes)}B exceeds CF threshold, skipping CF Worker paths")
 
@@ -2759,6 +2763,7 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
     /wm and every _apply_saved_watermark() caller only adds the watermark."""
     try:
         import io as _io
+        import tempfile as _tempfile
         import base64 as _b64_wm
         from pypdf import PdfReader, PdfWriter
         from reportlab.pdfgen import canvas
@@ -2847,7 +2852,6 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
             # the writer's growing output.
             del packet, overlay, c
 
-        buf = _io.BytesIO()
         try:
             if reader.metadata:
                 writer.add_metadata(reader.metadata)
@@ -2855,8 +2859,12 @@ def add_watermark_to_pdf(pdf_bytes: bytes, watermark_text: str, footer_text: str
                 writer.add_metadata({"/Title": title})
         except Exception as me:
             logger.warning(f"[Watermark] metadata copy failed: {me}")
-        writer.write(buf)
-        return buf.getvalue()
+        # Disk-backed output avoids retaining the complete PDF in BytesIO and
+        # materializing another full-size bytes copy with getvalue().
+        with _tempfile.TemporaryFile(mode="w+b") as out_f:
+            writer.write(out_f)
+            out_f.seek(0)
+            return out_f.read()
     except Exception as e:
         logger.error(f"[Watermark] error: {e}")
         return pdf_bytes

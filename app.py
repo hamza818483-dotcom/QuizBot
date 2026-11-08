@@ -16138,7 +16138,8 @@ def _am_build_html(data, heading, fmt, hdr_txt="", ftr_txt=""):
     return f'<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8">{css}</head><body>{body}{tbl}{f}</body></html>'
 
 _sheet_cache = {}
-_SHEET_CACHE_MAX = 50  # was unbounded -- fix 2026-11-02 RAM sweep
+# Keep parsed MCQ datasets bounded on the 512MB Render host.
+_SHEET_CACHE_MAX = 2 if IS_RENDER else 50
 
 async def handle_sheet_command(msg: dict):
     chat_id = msg["chat"]["id"]
@@ -16234,20 +16235,26 @@ async def _sheet_auto_style1(chat_id: int, mcqs: list, title: str, status_id: in
     branch, just triggered automatically instead of via button tap."""
     start_t = time.time()
     try:
-        _topics_order, _topic_map = _group_pdfs_mcqs(mcqs, title)
-        html_out = _build_topicwise_pdf_html(_topics_order, _topic_map, title)
+        # Serialize the full sheet pipeline on Render: HTML building and
+        # watermarking also consume RAM while Chromium is busy.
+        async with _get_sheet_lock(chat_id):
+            _topics_order, _topic_map = _group_pdfs_mcqs(mcqs, title)
+            html_out = _build_topicwise_pdf_html(_topics_order, _topic_map, title)
 
-        async def _progress(pct):
-            if not status_id:
-                return
-            elapsed = time.time() - start_t
-            try:
-                await edit_msg(chat_id, status_id, f"🎨 Style1 (Topic-wise)\n⏳ {pct}% — {elapsed:.1f}s")
-            except Exception:
-                pass
+            async def _progress(pct):
+                if not status_id:
+                    return
+                elapsed = time.time() - start_t
+                try:
+                    await edit_msg(chat_id, status_id, f"🎨 Style1 (Topic-wise)\n⏳ {pct}% — {elapsed:.1f}s")
+                except Exception:
+                    pass
 
-        pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress, use_css_page_size=False, page_width_mm=420)
-        pdf_bytes = await _apply_saved_watermark(pdf_bytes)
+            pdf_bytes = await _html_to_pdf(html_out, progress_cb=_progress, use_css_page_size=False, page_width_mm=420)
+            topic_count = len(_topics_order)
+            # Release the large HTML/topic structures before watermark/upload.
+            del html_out, _topic_map, _topics_order
+            pdf_bytes = await _apply_saved_watermark(pdf_bytes)
 
         if not pdf_bytes:
             if status_id:
@@ -16256,7 +16263,9 @@ async def _sheet_auto_style1(chat_id: int, mcqs: list, title: str, status_id: in
 
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", title)[:50] or "ATLAS_Sheet"
         await send_document(chat_id, pdf_bytes, f"{safe_title}_style1.pdf",
-            caption=f"📖 Practice Sheet (Style1, Topic-wise)\n📝 মোট MCQ: {len(mcqs)}\n📂 Topics: {len(_topics_order)}\n🚀 ATLAS APP")
+            caption=f"📖 Practice Sheet (Style1, Topic-wise)\n📝 মোট MCQ: {len(mcqs)}\n📂 Topics: {topic_count}\n🚀 ATLAS APP",
+            prefer_direct=IS_RENDER)
+        del pdf_bytes
         if status_id:
             await tg_post("deleteMessage", {"chat_id": chat_id, "message_id": status_id})
     except Exception as e:
@@ -16267,16 +16276,25 @@ async def _sheet_auto_style1(chat_id: int, mcqs: list, title: str, status_id: in
 
 
 import asyncio as _asyncio_sheet
-# 2026-08-22 BUGFIX: was a single global lock wrapping the entire HTML+PDF
-# render for every /sheet request, serializing ALL users' sheet exports
-# one-at-a-time bot-wide. Switched to per-user locks so users don't queue
-# behind each other; each uid still serializes its own repeated taps.
+# Render has 512MB: serialize sheet HTML creation, Chromium, and watermarking
+# across users instead of letting multiple large documents queue in RAM.
+_SHEET_RENDER_LOCK = _asyncio_sheet.Lock()
 _SHEET_USER_LOCKS: dict = {}
 def _get_sheet_lock(uid: int) -> _asyncio_sheet.Lock:
+    if IS_RENDER:
+        return _SHEET_RENDER_LOCK
     lock = _SHEET_USER_LOCKS.get(uid)
     if lock is None:
         lock = _asyncio_sheet.Lock()
         _SHEET_USER_LOCKS[uid] = lock
+        # Bound the non-Render lock registry for long-lived hosts.
+        if len(_SHEET_USER_LOCKS) > 512:
+            for old_uid, old_lock in list(_SHEET_USER_LOCKS.items()):
+                if old_lock.locked():
+                    continue
+                _SHEET_USER_LOCKS.pop(old_uid, None)
+                if len(_SHEET_USER_LOCKS) <= 384:
+                    break
     return lock
 
 async def handle_sheet_style_callback(callback_query: dict):
@@ -16337,6 +16355,17 @@ async def handle_sheet_style_callback(callback_query: dict):
                 use_css_page_size=_uses_dynamic_page,
                 page_width_mm=(210 if style_key == "style8" else 420)
             )
+            # Chromium has finished with the document; release large HTML and
+            # intermediate lists before pypdf allocates watermark data.
+            del html_out
+            if "data_adapted" in locals():
+                del data_adapted
+            if "am_data" in locals():
+                del am_data
+            if "_topic_map" in locals():
+                del _topic_map
+            if "_topics_order" in locals():
+                del _topics_order
             pdf_bytes = await _apply_saved_watermark(pdf_bytes)
 
         if not pdf_bytes:
