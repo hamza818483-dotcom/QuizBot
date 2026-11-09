@@ -21809,11 +21809,9 @@ OPTION ORDER: any source label system (A-D/a-d/ক-ঘ/১-৪/bullets/none) →
 
 উদ্দীপক (PASSAGE): prepend full passage to each linked MCQ (self-contained), copied per MCQ if shared. Strip ONLY navigation sentences like "উদ্দীপকের আলোকে ২১-২২ নং প্রশ্নের উত্তর দাও" / "Answer questions 21-22 based on the stimulus above". Do NOT strip sentences that are the actual question just because they contain "উদ্দীপক".
 
-EXPLANATION (priority, max 190 chars Bengali unless case 1):
+EXPLANATION (keep simple, max 190 chars Bengali unless case 1):
 1) Explanation/reasoning exists on page → copy 100% verbatim, byte-for-byte, no edits (overrides char limit).
-2) No direct explanation but relevant info exists (note/box/table/fact) → build from it: correct option's fact FIRST, then why each of 3 wrong options doesn't fit (never bare "ভুল"/"incorrect").
-3) Nothing relevant → generate from own knowledge, same structure (correct-first, then real reasons for wrong options).
-Check case 1 first; never mix verbatim text with edits.
+2) Nothing on page → one short line: "সঠিক উত্তর: <letter> (<option text>)". Do NOT write a long multi-option breakdown or invent reasoning from outside knowledge — main job is extracting the MCQ as-is, not writing new explanations.
 
 MATH/CHEM FORMATTING: never output raw LaTeX (\vec,\hat,\frac,\sqrt,\sum,\int,^,_,{,}) — convert to Unicode:
 Vectors: \vec{A}→A⃗, \hat{i}→î. Fractions: \frac{a}{b}→a/b or a⁄b. Roots: \sqrt{x}→√x, \sqrt[3]{x}→∛x.
@@ -27114,20 +27112,14 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
         _qbm_balance_answer_with_options(mc)
 
         if not (mc.get("explanation") or "").strip():
+            # SIMPLIFIED (per request): no extra AI call to generate a long
+            # explanation -- just a short deterministic "correct answer is X"
+            # line, zero extra tokens/API calls.
             ans = mc.get("answer", "A")
-            try:
-                mc["explanation"] = await _qbm_build_explanation_for_known_answer(mc, ans, gemini_only=gemini_only)
-            except Exception as e:
-                logger.warning(f"[QBM safety-net] Explanation backfill attempt 1 failed: {e}, retrying once")
-                try:
-                    mc["explanation"] = await _qbm_build_explanation_for_known_answer(mc, ans, gemini_only=gemini_only)
-                except Exception as e2:
-                    logger.error(f"[QBM safety-net] Explanation backfill retry also failed: {e2}")
-            if not (mc.get("explanation") or "").strip():
-                opt_letters = ["A", "B", "C", "D"]
-                idx = opt_letters.index(ans) if ans in opt_letters else 0
-                ans_text = opts[idx] if idx < len(opts) else ""
-                mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
+            opt_letters = ["A", "B", "C", "D"]
+            idx = opt_letters.index(ans) if ans in opt_letters else 0
+            ans_text = opts[idx] if idx < len(opts) else ""
+            mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
 
         if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
             pending_bbox_idx[len(fixed)] = mc["question"]
@@ -33234,8 +33226,20 @@ async def qbm_extract_all_pages(
             ex_task = _spawn_task(_run_extract())
             watcher = _spawn_task(_watch_cancel_inner(ex_task))
             try:
-                mcqs = await ex_task
+                # PAGE-STALL GUARD: one page must never block the whole job
+                # forever -- if a single page's extraction (API hang/dead
+                # key/etc.) exceeds 180s, abandon that page and move on so
+                # the rest of the pages still get processed.
+                mcqs = await asyncio.wait_for(ex_task, timeout=180)
             except asyncio.CancelledError:
+                mcqs = []
+            except asyncio.TimeoutError:
+                logger.warning(f"[QBM] page {page_num} timed out after 180s — skipping, moving to next page")
+                ex_task.cancel()
+                try:
+                    await ex_task
+                except Exception:
+                    pass
                 mcqs = []
             finally:
                 watcher.cancel()
