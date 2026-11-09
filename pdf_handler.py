@@ -622,20 +622,48 @@ class GeminiKeyRotator:
         return self._account_slot_cond
 
     async def acquire_account_slot_blocking(self, key: str):
-        """Hard-blocking version of acquire_account_slot: waits indefinitely
-        (no timeout/give-up) until this key's account has a free concurrent
-        slot under ACCOUNT_CONCURRENT_CAP. The old acquire_account_slot's
-        caller gave up after ~2s and proceeded anyway, which meant the cap
-        was cosmetic under real load -- a 5-key account WOULD end up with
-        more than ACCOUNT_CONCURRENT_CAP calls in flight simultaneously
-        whenever the 2s wait elapsed. This guarantees the cap actually
-        holds, at the cost of calls queueing longer under heavy same-account
-        load -- the correct trade-off given the whole point of the cap is
-        exactly this kind of enforcement."""
+        """Hard-blocking version of acquire_account_slot: waits until this
+        key's account has a free concurrent slot under ACCOUNT_CONCURRENT_CAP.
+        The old acquire_account_slot's caller gave up after ~2s and proceeded
+        anyway, which meant the cap was cosmetic under real load -- a 5-key
+        account WOULD end up with more than ACCOUNT_CONCURRENT_CAP calls in
+        flight simultaneously whenever the 2s wait elapsed. This guarantees
+        the cap actually holds, at the cost of calls queueing longer under
+        heavy same-account load -- the correct trade-off given the whole
+        point of the cap is exactly this kind of enforcement.
+
+        2026-11-10 (RAM/hang fix): was previously truly indefinite (no
+        timeout at all on cond.wait()) -- if ANY caller acquired a slot and
+        then died before its finally-block ran release_account_slot_blocking
+        (e.g. a RAMGuard forced os._exit(0) mid-call, or an unhandled
+        exception between acquire and the try/finally in _ThrottleGuard),
+        that slot leaked permanently and every future call for that account
+        queued forever with zero logging -- exactly the silent multi-minute
+        /qbm stall this was traced to. A bounded per-wait timeout (90s) lets
+        a leaked slot self-heal: if nothing frees up in 90s, force the slot
+        open anyway (logging loudly) rather than hang indefinitely. 90s is
+        comfortably above the largest per-attempt Gemini timeout (60s) used
+        elsewhere in this file, so a slot that's still genuinely busy (not
+        leaked) won't be falsely stolen under normal operation.
+        """
         cond = self._get_account_slot_cond()
+        _waited = 0.0
+        _TIMEOUT_PER_WAIT = 90.0
         async with cond:
             while not self.acquire_account_slot(key):
-                await cond.wait()
+                try:
+                    await asyncio.wait_for(cond.wait(), timeout=_TIMEOUT_PER_WAIT)
+                except asyncio.TimeoutError:
+                    _waited += _TIMEOUT_PER_WAIT
+                    acct = self.account_of(key)
+                    logger.error(
+                        f"[GeminiRotator] account slot wait for '{acct}' exceeded "
+                        f"{_waited:.0f}s (cap={self.ACCOUNT_CONCURRENT_CAP}) -- "
+                        f"likely a leaked slot from a crashed/killed caller; "
+                        f"forcing the slot open to avoid an indefinite hang"
+                    )
+                    self._account_inflight[acct] = 0
+                    break
 
     async def release_account_slot_blocking(self, key: str):
         cond = self._get_account_slot_cond()
@@ -653,13 +681,42 @@ class GeminiKeyRotator:
         accounts are currently in-flight, OR this account already holds a
         slot (re-entrant per account -- multiple calls on the SAME account
         don't count against account diversity, only different accounts do).
-        Caller must pair with release_distinct_account_slot in a finally."""
+        Caller must pair with release_distinct_account_slot in a finally.
+
+        2026-11-10 (RAM/hang fix): same leaked-slot risk as
+        acquire_account_slot_blocking above (a caller that dies before its
+        finally runs leaves its account stuck in _distinct_accounts_inflight
+        forever) -- once DISTINCT_ACCOUNT_CONCURRENT_CAP accounts leak this
+        way, every account's keys hang indefinitely with no log line,
+        regardless of how many total Gemini keys/accounts are configured.
+        Bounded 90s per-wait timeout self-heals a leak instead of hanging.
+        """
         cond = self._get_distinct_account_cond()
+        _waited = 0.0
+        _TIMEOUT_PER_WAIT = 90.0
         async with cond:
             while (acct not in self._distinct_accounts_inflight
                    and len(self._distinct_accounts_inflight) >= self.DISTINCT_ACCOUNT_CONCURRENT_CAP):
-                await cond.wait()
+                try:
+                    await asyncio.wait_for(cond.wait(), timeout=_TIMEOUT_PER_WAIT)
+                except asyncio.TimeoutError:
+                    _waited += _TIMEOUT_PER_WAIT
+                    logger.error(
+                        f"[GeminiRotator] distinct-account slot wait for '{acct}' exceeded "
+                        f"{_waited:.0f}s (cap={self.DISTINCT_ACCOUNT_CONCURRENT_CAP}, "
+                        f"currently held by {sorted(self._distinct_accounts_inflight)}) -- "
+                        f"likely a leaked slot from a crashed/killed caller; "
+                        f"forcing a slot open to avoid an indefinite hang"
+                    )
+                    self._distinct_accounts_inflight.clear()
+                    break
             self._distinct_accounts_inflight.add(acct)
+            # 2026-11-10: visibility into real account rotation (user
+            # request -- confirm account-wise keys are actually being used,
+            # not silently stuck on one account). INFO level, one line per
+            # acquire -- cheap and gives a live trace of which accounts are
+            # in flight at any moment from the logs alone.
+            logger.info(f"[GeminiRotator] account '{acct}' acquired (in-flight accounts: {sorted(self._distinct_accounts_inflight)})")
 
     async def release_distinct_account_slot(self, acct: str):
         cond = self._get_distinct_account_cond()
@@ -678,7 +735,48 @@ class GeminiKeyRotator:
             self._got_account_slot = False
             self._got_warmup_slot = False
             self._got_distinct_slot = None
+            self._got_global_sem = False
         async def __aenter__(self):
+            # 2026-11-10 (RAM/hang fix): __aexit__ only ever runs if
+            # __aenter__ RETURNS successfully -- if anything below raises or
+            # gets cancelled (e.g. a RAMGuard os._exit, or asyncio.sleep
+            # cancellation during shutdown) partway through acquiring these
+            # slots, __aexit__ never fires and whatever was already acquired
+            # (global semaphore, distinct-account slot, warmup slot) leaks
+            # permanently -- the exact mechanism behind the silent
+            # multi-minute /qbm stalls this was traced to. Wrapping the body
+            # in try/except and releasing whatever was already grabbed
+            # before re-raising means a failed acquisition never leaks,
+            # regardless of where it fails.
+            try:
+                return await self._do_enter()
+            except BaseException:
+                await self._rollback_partial_acquire()
+                raise
+
+        async def _rollback_partial_acquire(self):
+            r = self.rotator
+            if self._got_account_slot:
+                try:
+                    await self.rotator.release_account_slot_blocking(self.key)
+                except Exception:
+                    pass
+                self._got_account_slot = False
+            if self._got_distinct_slot is not None:
+                try:
+                    await self.rotator.release_distinct_account_slot(self._got_distinct_slot)
+                except Exception:
+                    pass
+                self._got_distinct_slot = None
+            if self._got_warmup_slot:
+                n = r._key_inflight.get(self.key, 0)
+                r._key_inflight[self.key] = max(0, n - 1)
+                self._got_warmup_slot = False
+            if self._got_global_sem:
+                r._global_sem.release()
+                self._got_global_sem = False
+
+        async def _do_enter(self):
             r = self.rotator
             # Warm-up concurrency gate: a still-warming key is capped at
             # WARMUP_MAX_CONCURRENT in-flight calls regardless of the
@@ -693,6 +791,7 @@ class GeminiKeyRotator:
                         break
                     await asyncio.sleep(0.1)
             await r._global_sem.acquire()
+            self._got_global_sem = True
             async with r._global_lock:
                 now = time.time()
                 # jitter added so call spacing isn't perfectly uniform
@@ -724,14 +823,7 @@ class GeminiKeyRotator:
                 self._got_account_slot = True
             return self
         async def __aexit__(self, exc_type, exc, tb):
-            if self._got_account_slot:
-                await self.rotator.release_account_slot_blocking(self.key)
-            if self._got_distinct_slot is not None:
-                await self.rotator.release_distinct_account_slot(self._got_distinct_slot)
-            if self._got_warmup_slot:
-                n = self.rotator._key_inflight.get(self.key, 0)
-                self.rotator._key_inflight[self.key] = max(0, n - 1)
-            self.rotator._global_sem.release()
+            await self._rollback_partial_acquire()
             return False
 
     def throttled_call(self, key: str = None):
