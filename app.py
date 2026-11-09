@@ -26772,7 +26772,7 @@ async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bo
     """
     await _qbm_ram_aware_acquire()
     try:
-        for _pipeline_attempt in range(3):
+        for _pipeline_attempt in range(2):
             cached_call1 = _qbm_mcq_result_cache.get(cache_key) if (cache_key and not bypass_cache) else None
             if cached_call1:
                 logger.info(f"[QBM MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
@@ -26789,8 +26789,8 @@ async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bo
                 # empty page -- run one independent final scan before confirming.
                 final_check = await _qbm_final_empty_page_scan(img, gemini_only=gemini_only)
                 if not final_check:
-                    if _pipeline_attempt < 2:
-                        logger.warning(f"[QBM] Call1+final-scan both empty on attempt {_pipeline_attempt+1}/3 — retrying full pipeline before confirming empty page")
+                    if _pipeline_attempt < 1:
+                        logger.warning(f"[QBM] Call1+final-scan both empty on attempt {_pipeline_attempt+1}/2 — retrying full pipeline before confirming empty page")
                         continue
                     return []  # both independent passes agree: genuinely no MCQ
                 verified = await _qbm_call2_miss_check(img, final_check, gemini_only=gemini_only)
