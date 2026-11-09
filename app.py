@@ -19552,6 +19552,31 @@ async def pdf_generate_all_pages(
                 return
             await asyncio.sleep(0.3)
 
+    # LIVE ELAPSED-TIME TICKER: dashboard above only updates on page
+    # start/finish events -- if a page takes 30-90s to generate, "Elapsed"
+    # looked frozen the whole time (same issue /qbm already fixed with its
+    # own ticker). This refreshes the same message every few seconds purely
+    # for the live clock, independent of page completion events.
+    _dash_stop = asyncio.Event()
+    async def _dashboard_ticker():
+        _ticker_deadline = time.time() + 1800  # 30-min safety cap
+        while not _dash_stop.is_set() and time.time() < _ticker_deadline:
+            try:
+                await asyncio.wait_for(_dash_stop.wait(), timeout=4)
+            except asyncio.TimeoutError:
+                pass
+            if _dash_stop.is_set():
+                break
+            if status_msg_id:
+                try:
+                    await _update_pdf_dashboard(chat_id, status_msg_id,
+                        file_name, topic, pages, page_status, start_time, total_mcq_box["n"], 0,
+                        ai_calls=_get_ai_call_count(chat_id), ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id),
+                        reply_markup=_pdf_dashboard_kb(chat_id, pages, page_status))
+                except Exception:
+                    pass
+    _dash_ticker_task = _spawn_task(_dashboard_ticker())
+
     try:
         if status_msg_id:
             await edit_msg(chat_id, status_msg_id,
@@ -19569,6 +19594,11 @@ async def pdf_generate_all_pages(
         except asyncio.CancelledError:
             pass
     finally:
+        _dash_stop.set()
+        try:
+            await asyncio.wait_for(_dash_ticker_task, timeout=2)
+        except Exception:
+            pass
         _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
         clear_active_job(chat_id)
         _unregister_pdf_regen_queue(chat_id)
