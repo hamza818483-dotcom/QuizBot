@@ -156,7 +156,7 @@ future debugging doesn't re-derive or re-add them:
 - `_qbm_ram_aware_acquire` + `_QBM_EXTRACT_HARD_CAP` — admits a new `/qbm`
   page only when RSS < 55% of limit, hard-capped at 3 concurrent pages
   (global across ALL users, not per-user).
-- `_PDF_SEMAPHORE = 2` (global) — caps concurrent Chromium PDF renders.
+- `_PDF_SEMAPHORE = 1` on Render (8 off-Render) — caps concurrent Chromium PDF renders; only one at a time on the 512MB host (`app.py`).
 - `_pw_idle_watchdog` — closes the Chromium browser after 60s unused on
   Render (idle Chromium alone holds ~100-150MB RSS permanently otherwise).
 - `OPENBLAS_NUM_THREADS` / `OMP_NUM_THREADS` / `MKL_NUM_THREADS` /
@@ -170,6 +170,10 @@ future debugging doesn't re-derive or re-add them:
 - `/sheet` cache is capped at 8 entries / 6MB of source CSV, expires after
   30 minutes, and rejects a single CSV above 6MB to avoid retaining oversized
   parsed MCQ dictionaries on the 512MB Render process.
+- `_extra_page_has_highlight_marks` / `_dagano_page_has_marks` (2026-11-10) —
+  rewritten in pure Pillow (`_hsv_highlight_ratio`), no cv2/numpy import on
+  that path, to trim per-call RSS. `_detect_chok_boxes` still uses cv2
+  (contour finding has no simple Pillow equivalent) — left as-is.
 - Chromium idle watchdog checks the active PDF-render count before closing
   the browser, so a long `/sheet` render is not terminated at the 60s idle mark.
 - `_qbm_rss_log()` — logs RSS at every `/qbm` checkpoint (`[RAMGuard]` tag)

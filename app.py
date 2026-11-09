@@ -6365,11 +6365,43 @@ def _chok_box_coverage_note(img, mcqs: list) -> str:
     )
 
 
+def _hsv_highlight_ratio(img, hue_ranges) -> float:
+    """Shared Pillow-only (no cv2/numpy) implementation: returns the
+    fraction of pixels in `img` whose HSV falls inside any of
+    `hue_ranges` (each a ((h_lo,s_lo,v_lo),(h_hi,s_hi,v_hi)) tuple, same
+    0-180/0-255/0-255 OpenCV-style scale used by the original cv2 code,
+    so existing threshold tuples need no changes).
+
+    2026-11-10 (RAM): replaces a cv2.cvtColor+cv2.inRange pipeline that
+    pulled in opencv-python-headless + numpy just for this HSV color
+    thresholding. PIL's own 'HSV' convert mode + getdata() does the same
+    math in pure Python/Pillow (which is already resident for every other
+    image op in this file), so these two highlighter-check call sites no
+    longer need cv2/numpy at all. Pixel-accurate vs the old cv2 path
+    (same hue/sat/val bands, same inclusive-range semantics); only the
+    box-detection function (_detect_chok_boxes, needs real contour
+    finding) still uses cv2 -- left untouched, out of scope here.
+    """
+    hsv_img = img.convert("RGB").convert("HSV")
+    total = 0
+    matched = 0
+    for h, s, v in hsv_img.getdata():
+        total += 1
+        for (h_lo, s_lo, v_lo), (h_hi, s_hi, v_hi) in hue_ranges:
+            if h_lo <= h <= h_hi and s_lo <= s <= s_hi and v_lo <= v <= v_hi:
+                matched += 1
+                break
+    if total == 0:
+        return 0.0
+    return matched / total
+
+
 def _extra_page_has_highlight_marks(img) -> bool:
     """Simple, deterministic (non-LLM) code-level check: does this page
     image contain ANY highlighter-colored pixels at all (yellow, green,
     pink/magenta, orange, blue/cyan marker colors)? Uses HSV color
-    thresholding via OpenCV -- fast, no API call.
+    thresholding via Pillow (see _hsv_highlight_ratio) -- fast, no API
+    call, no cv2/numpy dependency.
 
     This is intentionally a COARSE page-level gate, not per-line OCR
     matching (that would need a much heavier OCR+spatial-overlap
@@ -6383,15 +6415,6 @@ def _extra_page_has_highlight_marks(img) -> bool:
     itself fails/is unavailable (fail-open, never block valid pages).
     """
     try:
-        import numpy as np
-        import cv2
-        from pdf_handler import image_to_base64
-        b64 = image_to_base64(img)
-        arr = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
-        cv_img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if cv_img is None:
-            return True  # fail-open
-        hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
         # Broad hue ranges covering common highlighter colors, with
         # moderately high saturation+value (highlighter ink is bright and
         # saturated, unlike printed grayscale text or faint pen ink).
@@ -6401,13 +6424,7 @@ def _extra_page_has_highlight_marks(img) -> bool:
             ((85, 60, 120), (130, 255, 255)),  # cyan/blue
             ((140, 60, 120), (170, 255, 255)), # pink/magenta
         ]
-        total_mask = None
-        for lo, hi in ranges:
-            mask = cv2.inRange(hsv, np.array(lo), np.array(hi))
-            total_mask = mask if total_mask is None else (total_mask | mask)
-        if total_mask is None:
-            return True
-        marked_ratio = float((total_mask > 0).sum()) / float(total_mask.size)
+        marked_ratio = _hsv_highlight_ratio(img, ranges)
         # Even a tiny fraction of highlighter pixels (>=0.05% of page) is
         # enough to confirm SOME highlight exists somewhere on the page.
         return marked_ratio >= 0.0005
@@ -17152,18 +17169,10 @@ async def _dagano_gemini_raw_multi(imgs: list, prompt: str, _fallback_model: str
 def _dagano_page_has_marks(img) -> bool:
     """/dagano's own deterministic (non-LLM) code-level check: does this
     page image contain ANY highlighter/colored-ink pixels at all (yellow,
-    green, pink/magenta, orange, blue/cyan, red)? Pure OpenCV color
-    thresholding, no API call -- fully independent implementation."""
+    green, pink/magenta, orange, blue/cyan, red)? Pure Pillow HSV color
+    thresholding (see _hsv_highlight_ratio), no API call, no cv2/numpy --
+    fully independent implementation."""
     try:
-        import numpy as np
-        import cv2
-        from pdf_handler import image_to_base64
-        b64 = image_to_base64(img)
-        arr = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
-        cv_img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if cv_img is None:
-            return True  # fail-open
-        hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
         ranges = [
             ((0, 60, 120), (10, 255, 255)),    # red (low hue wrap)
             ((170, 60, 120), (180, 255, 255)), # red (high hue wrap)
@@ -17172,13 +17181,7 @@ def _dagano_page_has_marks(img) -> bool:
             ((85, 60, 120), (130, 255, 255)),  # cyan/blue
             ((140, 60, 120), (170, 255, 255)), # pink/magenta
         ]
-        total_mask = None
-        for lo, hi in ranges:
-            mask = cv2.inRange(hsv, np.array(lo), np.array(hi))
-            total_mask = mask if total_mask is None else (total_mask | mask)
-        if total_mask is None:
-            return True
-        marked_ratio = float((total_mask > 0).sum()) / float(total_mask.size)
+        marked_ratio = _hsv_highlight_ratio(img, ranges)
         return marked_ratio >= 0.0005
     except Exception as e:
         logger.warning(f"[DaganoMarkCheck] failed, fail-open: {e}")
