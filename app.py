@@ -33228,19 +33228,23 @@ async def qbm_extract_all_pages(
             try:
                 # PAGE-STALL GUARD: one page must never block the whole job
                 # forever -- if a single page's extraction (API hang/dead
-                # key/etc.) exceeds 180s, abandon that page and move on so
-                # the rest of the pages still get processed.
-                mcqs = await asyncio.wait_for(ex_task, timeout=180)
+                # key/etc.) exceeds 120s (2 min), abandon that page and move
+                # on so the rest of the pages still get processed.
+                mcqs = await asyncio.wait_for(ex_task, timeout=120)
             except asyncio.CancelledError:
                 mcqs = []
             except asyncio.TimeoutError:
-                logger.warning(f"[QBM] page {page_num} timed out after 180s — skipping, moving to next page")
+                logger.warning(f"[QBM] page {page_num} timed out after 120s — skipping, moving to next page")
                 ex_task.cancel()
                 try:
                     await ex_task
                 except Exception:
                     pass
                 mcqs = []
+                try:
+                    await send_msg(chat_id, f"⏱️ Page {page_num}: 2 minute-এও শেষ হয়নি (API hang/dead key সম্ভবত) — skip করে পরের page-এ যাচ্ছি।")
+                except Exception:
+                    pass
             finally:
                 watcher.cancel()
                 try:
