@@ -14259,7 +14259,21 @@ async def _get_pw_browser():
                     # 2026-09-21: "--single-process" removed. In that mode any page close/crash takes the WHOLE
                     # browser down: the next new_page() then hangs (15s TimeoutError, empty message in the log)
                     # and every PDF paid a 15s stall + full relaunch. Multi-process is stable and HF has RAM.
-                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-extensions", "--mute-audio"]
+                    # 2026-11-10 (RAM): added standard low-memory Chromium flags (all
+                    # multi-process-safe, none touch the single-process issue above):
+                    # --disable-background-networking/--disable-sync/--disable-translate/
+                    # --disable-default-apps trim idle background services Chromium
+                    # otherwise keeps running; --js-flags=--max-old-space-size caps V8's
+                    # heap per renderer (pages here are static HTML->PDF, not JS-heavy, so
+                    # a small heap is safe); --disable-features=TranslateUI avoids loading
+                    # the translate component. None change page-render behavior/output.
+                    args=[
+                        "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+                        "--disable-gpu", "--disable-extensions", "--mute-audio",
+                        "--disable-background-networking", "--disable-sync",
+                        "--disable-translate", "--disable-default-apps",
+                        "--disable-features=TranslateUI", "--js-flags=--max-old-space-size=128",
+                    ]
                 ), timeout=30
             )
         return _PW_BROWSER["browser"]
