@@ -425,10 +425,17 @@ async def _process_rayvila_auto(msg: dict, url: str):
     try:
         result = await scrape_rayvila_exam(url, progress_cb=_progress)
     except Exception as e:
+        # Playwright exceptions can contain raw browser log lines full of
+        # "<launching>", "<gracefully close start>" etc. -- literal angle
+        # brackets that Telegram's HTML parser chokes on if sent unescaped
+        # (caused the dashboard to vanish with no visible error before).
+        # Also cap length: these tracebacks/browser-logs can be huge.
+        err_msg = str(e).split("\n")[0][:500]  # first line only, short
         logger.error(f"[rayvila] failed for {url} (step={RAYVILA_JOBS.get(job_id, {}).get('step')}): {e}", exc_info=True)
         job = RAYVILA_JOBS.get(job_id)
         if job:
             job["status"] = "done"
+        safe_err = html_lib.escape(err_msg)
         # Edit the dashboard message into the error (don't delete it — a
         # sudden disappearance with no error shown looked like a silent
         # "vanish" when the flow failed fast, e.g. a bad URL/timeout within
@@ -436,11 +443,11 @@ async def _process_rayvila_auto(msg: dict, url: str):
         if loading_id:
             try:
                 await edit_msg(chat_id, loading_id,
-                               f"❌ <b>Rayvila scrape ব্যর্থ হয়েছে</b>\n{e}", parse_mode="HTML")
+                               f"❌ <b>Rayvila scrape ব্যর্থ হয়েছে</b>\n{safe_err}", parse_mode="HTML")
             except Exception:
-                await send_msg(chat_id, f"❌ Rayvila exam scrape করা যায়নি: {e}")
+                await send_msg(chat_id, f"❌ Rayvila exam scrape করা যায়নি: {safe_err}")
         else:
-            await send_msg(chat_id, f"❌ Rayvila exam scrape করা যায়নি: {e}")
+            await send_msg(chat_id, f"❌ Rayvila exam scrape করা যায়নি: {safe_err}")
         RAYVILA_JOBS.pop(job_id, None)
         return
 
@@ -449,7 +456,8 @@ async def _process_rayvila_auto(msg: dict, url: str):
         job["status"] = "done"
 
     if result.get("error") or not result.get("csv_bytes"):
-        err_text = f"❌ কোনো প্রশ্ন পাওয়া যায়নি: {result.get('error') or 'unknown error'}"
+        safe_err = html_lib.escape(str(result.get("error") or "unknown error")[:500])
+        err_text = f"❌ কোনো প্রশ্ন পাওয়া যায়নি: {safe_err}"
         if loading_id:
             try:
                 await edit_msg(chat_id, loading_id, err_text, parse_mode="HTML")

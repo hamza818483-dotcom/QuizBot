@@ -296,10 +296,17 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student", progres
     result = {"csv_bytes": None, "mcq_count": 0, "error": None}
 
     async with async_playwright() as pw:
+        # NOTE: --single-process was dropped here — on this host it crashed
+        # Chromium's launch itself (TargetClosedError, SIGTRAP) before any
+        # page could even open. atlas_url_capture.py uses the same flag
+        # successfully for its simpler single-snapshot flow, but Rayvila's
+        # longer multi-page click-through session appears to need the
+        # normal multi-process model to stay alive. Keep the rest of the
+        # args (matches atlas_url_capture.py's proven low-resource set).
         browser = await pw.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage", "--disable-gpu", "--single-process"],
+                  "--disable-dev-shm-usage", "--disable-gpu"],
         )
         try:
             context = await browser.new_context(viewport={"width": 1280, "height": 900})
