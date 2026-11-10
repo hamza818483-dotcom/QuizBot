@@ -1536,6 +1536,140 @@ def _parse_zoro_realm(soup, progress_cb=None):
             "total_cards_seen": total, "skipped": skipped}
 
 
+# ============================================================
+# RAYVILA (rayvila.com/exam/view_result.php) — exam result/review page
+#   wrapper   : div.result-card3 -- all questions as one flat text blob,
+#               each question block separated by <hr/>
+#   question  : line starting with "Q<n>." up to the first "A." option
+#   options   : lines/segments starting with "A." "B." "C." "D." (up to 4;
+#               E/5th option not observed on this site but handled just in
+#               case) -- option text runs until the next "X." marker or
+#               "Right Answer"
+#   answer    : "Right Answer : <letter>" -- maps letter -> option index
+#   no explanation field on this page format
+# ============================================================
+def _parse_rayvila(soup, img_map, progress_cb=None):
+    card = soup.select_one('div.result-card3')
+    if not card:
+        return None
+
+    # Split the card into per-question chunks at each <hr/> boundary --
+    # mirrors the source page's own visual separation of questions, and
+    # is far more robust than trying to regex-split the flattened text
+    # (which has no reliable boundary once "Right Answer" bleeds into the
+    # next question's "Q<n>." with only whitespace between them).
+    chunks = []
+    current = []
+    for node in card.children:
+        if getattr(node, 'name', None) == 'hr':
+            chunks.append(current)
+            current = []
+        else:
+            current.append(node)
+    if current:
+        chunks.append(current)
+
+    results, skipped = [], []
+    total = len(chunks)
+    OPT_LETTERS = ['A', 'B', 'C', 'D', 'E']
+
+    for ci, chunk_nodes in enumerate(chunks, 1):
+        try:
+            wrapper = BeautifulSoup('', 'lxml').new_tag('div')
+            for n in chunk_nodes:
+                wrapper.append(n.extract() if hasattr(n, 'extract') else n)
+            # This page has no math/LaTeX/sub-sup markup to clean up and
+            # each option already lives in its own <p> (or a bare text
+            # node) -- format_content()'s line_tags heuristic sometimes
+            # drops content that sits outside <li>/<p> (e.g. the "Q2."
+            # stem and first option here are bare text nodes before any
+            # <p>), so a plain get_text() with a separator is safer and
+            # sufficient for this format's structure. Images are still
+            # routed through format_content on the extracted text only if
+            # the chunk contains an <img>, to keep image-upload handling.
+            if wrapper.find('img'):
+                text = format_content(wrapper, img_map)
+            else:
+                text = wrapper.get_text(separator=" ", strip=True)
+                text = re.sub(r'\s+', ' ', text)
+            text = text.strip()
+            if not text or not re.search(r'Q\s*\d+\s*\.', text):
+                if text:
+                    skipped.append((ci, "no question marker found in chunk"))
+                continue
+
+            # Strip leading "Q<n>." marker
+            text = re.sub(r'^\s*Q\s*\d+\s*\.\s*', '', text, count=1)
+
+            # Locate the Right Answer marker (letter)
+            ans_m = re.search(r'Right\s*Answer\s*:\s*([A-E])\b', text, re.IGNORECASE)
+            ans_letter = ans_m.group(1).upper() if ans_m else ""
+
+            # Everything before the first option marker is the question;
+            # everything from "Right Answer" onward is dropped (status/
+            # metadata, e.g. "Not Attempted").
+            body = text[:ans_m.start()] if ans_m else text
+
+            # Find option marker positions: "A." "B." "C." "D." "E." each
+            # immediately followed by a space then the option's first
+            # character. format_content() collapses this page's <p>-tag
+            # line breaks into a single space-joined run (no literal \n
+            # between options), so markers can't be anchored to line
+            # start -- instead require a preceding space/start-of-string
+            # so a stray "A." inside question prose (rare, but possible)
+            # isn't matched mid-word. Markers must appear in A,B,C,D(,E)
+            # order with nothing but option text between them, so scan
+            # for a run that monotonically advances through the letters.
+            marker_pat = re.compile(r'(?:^|(?<=\s))([A-E])\.\s?')
+            raw_matches = list(marker_pat.finditer(body))
+            matches = []
+            expected_idx = 0
+            for m in raw_matches:
+                letter_idx = OPT_LETTERS.index(m.group(1))
+                if letter_idx == expected_idx:
+                    matches.append(m)
+                    expected_idx += 1
+            if len(matches) < 2:
+                skipped.append((ci, "fewer than 2 option markers found"))
+                continue
+
+            q_text = body[:matches[0].start()].strip()
+            if not q_text:
+                skipped.append((ci, "question text empty after option-split"))
+                continue
+
+            options = {}
+            for mi, m in enumerate(matches):
+                letter = m.group(1)
+                start = m.end()
+                end = matches[mi + 1].start() if mi + 1 < len(matches) else len(body)
+                options[letter] = body[start:end].strip()
+
+            opt_list = [options.get(l, "") for l in OPT_LETTERS[:4]]
+            while len(opt_list) < 5:
+                opt_list.append("")
+
+            ans_idx = str(OPT_LETTERS.index(ans_letter) + 1) if ans_letter in OPT_LETTERS else "1"
+            if not ans_letter:
+                skipped.append((ci, "no Right Answer marker found — defaulted to option 1"))
+
+            results.append({"questions": q_text, "option1": opt_list[0], "option2": opt_list[1],
+                            "option3": opt_list[2], "option4": opt_list[3], "option5": opt_list[4],
+                            "answer": ans_idx, "explanation": "", "type": 1, "section": 1})
+        except Exception as e:
+            skipped.append((ci, f"parse error: {str(e)[:80]}"))
+        if progress_cb:
+            try:
+                progress_cb(ci, total)
+            except Exception:
+                pass
+
+    results = post_process(results)
+    gc.collect()
+    return {"source": "Rayvila", "results": results,
+            "total_cards_seen": total, "skipped": skipped}
+
+
 def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> dict:
     """
     progress_cb(done:int, total:int) — optional callback, called after each
@@ -1558,6 +1692,7 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
         # largest text/html part, which is virtually always the real page.
         main_loc = msg.get('Snapshot-Content-Location', '')
         html_candidates = []  # (is_main_match, size, decoded_text)
+        first_main_match = None  # first part whose Content-Location == main_loc, in document order
         for part in msg.walk():
             if part.get_content_type() == 'text/html':
                 raw = part.get_payload(decode=True)
@@ -1565,6 +1700,16 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
                     continue
                 text = raw.decode(part.get_content_charset() or 'utf-8', errors='ignore')
                 is_main = bool(main_loc) and part.get('Content-Location', '') == main_loc
+                if is_main and first_main_match is None:
+                    # The root page's OWN frame is always the first part in the
+                    # MIME walk with this Content-Location -- an embedded ad
+                    # iframe can share the exact same Content-Location (seen on
+                    # Rayvila result pages) and, if picked by size, can easily
+                    # be larger than the real page, silently replacing it.
+                    # Document order is the only reliable signal here, so the
+                    # first match wins outright and is never swapped for a
+                    # later, bigger same-location part.
+                    first_main_match = text
                 html_candidates.append((is_main, len(text), text))
             elif part.get_content_type().startswith('image/'):
                 loc, raw = part.get('Content-Location', ''), part.get_payload(decode=True)
@@ -1572,9 +1717,12 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
                     b64_data = base64.b64encode(raw).decode('utf-8')
                     img_map[loc] = b64_data
                     img_map[urllib.parse.unquote(loc)] = b64_data
-        if html_candidates:
-            # main-location match first, else the largest part
-            html_candidates.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        if first_main_match is not None:
+            html_body = first_main_match
+        elif html_candidates:
+            # No Content-Location match at all -- fall back to the largest
+            # text/html part, which is virtually always the real page.
+            html_candidates.sort(key=lambda t: t[1], reverse=True)
             html_body = html_candidates[0][2]
     else:
         html_body = file_bytes.decode('utf-8', errors='ignore')
@@ -1620,6 +1768,16 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
     _zoro = _parse_zoro_realm(soup, progress_cb)
     if _zoro is not None and _zoro["results"]:
         return _zoro
+
+    # RAYVILA (view_result.php exam result page) — চেনা গেলে এখানেই শেষ
+    _rayvila = _parse_rayvila(soup, img_map, progress_cb)
+    if _rayvila is not None and _rayvila["results"]:
+        return _rayvila
+
+    # RAYVILA (view_result.php exam-result page) — চেনা গেলে এখানেই শেষ
+    _rayvila = _parse_rayvila(soup, img_map, progress_cb)
+    if _rayvila is not None and _rayvila["results"]:
+        return _rayvila
 
     # ============================================================
     # CHORCHA.NET
