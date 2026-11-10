@@ -118,7 +118,7 @@ import pytz
 import html as html_lib
 
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from supabase.client import Client
@@ -1956,6 +1956,42 @@ async def lms_send_channel_active_by_exam(exam_id: str):
         if job.get("exam_id") == exam_id and job.get("status") in ("queued", "running"):
             return JSONResponse({"ok": True, "job_id": jid, **job})
     return JSONResponse({"ok": True, "job_id": None})
+
+
+@app.post("/api/mhtml-to-csv")
+async def mhtml_to_csv(file: UploadFile = File(...), secret: str = Form("")):
+    """LMS ExamForm 'CSV আপলোড করুন' card: saved chorcha.net/Testmoz .mhtml
+    (or .html) file in -> parsed MCQ CSV bytes out, using the exact same
+    parse_mhtml_to_mcqs / results_to_csv_bytes pipeline the Telegram
+    /qcsv command uses (same-to-same, no reimplementation)."""
+    if not LMS_API_SECRET:
+        logger.warning("[mhtml-to-csv] SECURITY: LMS_API_SECRET not set -- endpoint accepting unauthenticated requests!")
+    if LMS_API_SECRET and secret != LMS_API_SECRET:
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)
+
+    file_name = file.filename or "upload.mhtml"
+    if not (file_name.lower().endswith(".mhtml") or file_name.lower().endswith(".html") or file_name.lower().endswith(".htm")):
+        return JSONResponse({"ok": False, "error": "শুধু .mhtml বা .html file support করে!"}, status_code=400)
+
+    raw_bytes = await file.read()
+    try:
+        parsed = await asyncio.to_thread(parse_mhtml_to_mcqs, raw_bytes, file_name)
+    except Exception as e:
+        logger.error(f"[mhtml-to-csv] parse failed: {e}", exc_info=True)
+        return JSONResponse({"ok": False, "error": "ফাইল পার্স করা যায়নি।"}, status_code=400)
+
+    results = parsed.get("results") or []
+    if not results:
+        return JSONResponse({"ok": False, "error": "কোনো প্রশ্ন খুঁজে পাওয়া যায়নি।"}, status_code=400)
+
+    csv_bytes = results_to_csv_bytes(results)
+    return JSONResponse({
+        "ok": True,
+        "source": parsed.get("source"),
+        "count": len(results),
+        "csv_base64": base64.b64encode(csv_bytes).decode("ascii"),
+        "file_name": re.sub(r"\.(mhtml|mht|html|htm)$", "", file_name, flags=re.I) + ".csv",
+    })
 
 
 # ── LMS "Live Quiz" send mode ──────────────────────────────────────────
