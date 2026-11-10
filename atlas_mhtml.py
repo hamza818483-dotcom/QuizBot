@@ -939,6 +939,33 @@ def _format_content_inner(element, img_map):
         '→': r'\xrightarrow', '⟶': r'\xrightarrow',
         '←': r'\xleftarrow', '⟵': r'\xleftarrow',
     }
+    # Vector notation: <mover><mi>P</mi><mo>→</mo></mover> (letter with an
+    # arrow stacked ON TOP of it, e.g. P⃗, i^) is the OPPOSITE shape from
+    # ARROW_MOVER_MAP above (where the arrow IS the base and something
+    # else sits over it, e.g. \xrightarrow{Z}). Without this, the overlay
+    # arrow/hat falls into the generic "base(overlay)" fallback below and
+    # produces literal text like "P(→)" or "i(^)" instead of the intended
+    # P⃗ / î. Catch it here as its own case: an arrow overlay becomes the
+    # U+20D7 combining vector-arrow mark (same mark the plain-text regex
+    # fix elsewhere in this file already uses for "V →" style input), and
+    # a caret/circumflex overlay (unit-vector hat notation) becomes the
+    # real U+0302 combining circumflex, both appended directly to the
+    # base letter so they render stacked rather than as a trailing token.
+    VECTOR_OVERLAY_ARROWS = {'→', '⟶'}
+    HAT_OVERLAY_CHARS = {'^', 'ˆ', '∧'}
+    for mover in element.find_all('mover'):
+        kids = mover.find_all(recursive=False)
+        if len(kids) == 2:
+            base_t = kids[0].get_text(strip=True)
+            over_t = kids[1].get_text(strip=True)
+            if over_t in VECTOR_OVERLAY_ARROWS and base_t and base_t not in ARROW_MOVER_MAP:
+                mover.replace_with(base_t + '\u20D7')
+                continue
+            if over_t in HAT_OVERLAY_CHARS and base_t and base_t not in ARROW_MOVER_MAP:
+                mover.replace_with(base_t + '\u0302')
+                continue
+        # fall through to the existing handling below for every other case
+        # (arrow-as-base, overline, and the generic fallback)
     # Overline bar over a letter/base (e.g. mean/average notation Ā, or a
     # repeating-decimal vinculum) is ALSO a <mover>, with the overlay being
     # a bar character ('‾' U+203E, '¯' U+00AF, or '-'/'−' used as a bar in
@@ -1448,6 +1475,11 @@ def _parse_zoro_realm(soup, progress_cb=None):
                 if label:
                     label.extract()
                 exp_text = format_content(exp_box, {}).strip()
+                # explanation-এ থাকা যেকোনো [...] bracket block (citation
+                # ref বা অন্য যাই থাকুক) পুরোপুরি বাদ -- user explicitly
+                # চেয়েছে কোনো exception ছাড়াই; bracket-সহ পুরো অংশ remove
+                exp_text = re.sub(r'\[[^\]]*\]', '', exp_text)
+                exp_text = re.sub(r'[ \t]+', ' ', exp_text).strip()
 
             results.append({"questions": q_text, "option1": options[0], "option2": options[1],
                             "option3": options[2], "option4": options[3], "option5": "",
