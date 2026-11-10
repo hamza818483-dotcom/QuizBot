@@ -37459,19 +37459,26 @@ async def handle_message(msg: dict):
             or _dmime in ("text/html", "message/rfc822", "multipart/related", "application/x-mimearchive")
             or _dmime.startswith("text/")
         )
-        if not _is_html_like and not _dfn:
-            # No filename AND no recognizable mime -- last resort: peek at
-            # the first bytes to detect HTML/MHTML content (e.g. "<html",
-            # "<!doctype", or an MHTML "MIME-Version:"/"Content-Type:"
-            # header block), so a file sent with a stripped/missing
-            # extension and a generic mime (application/octet-stream)
-            # still gets auto-detected instead of silently ignored.
+        if not _is_html_like:
+            # Browser "direct download" files often arrive with no extension
+            # at all, or a wrong/stripped one (e.g. just "page", "download",
+            # ".bin") and a generic mime (application/octet-stream) -- peek
+            # at the first bytes to detect real HTML/MHTML content so these
+            # still get auto-detected instead of silently ignored.
             try:
                 _peek = await download_tg_file(_doc["file_id"])
                 _head = _peek[:512].lower()
-                if (b"<html" in _head or b"<!doctype" in _head
-                        or b"mime-version:" in _head or b"content-type: multipart/related" in _head):
+                if b"mime-version:" in _head or b"content-type: multipart/related" in _head:
                     _is_html_like = True
+                    _fixed_ext = ".mhtml"
+                elif b"<html" in _head or b"<!doctype" in _head:
+                    _is_html_like = True
+                    _fixed_ext = ".html"
+                if _is_html_like:
+                    # Give it a proper extension so downstream parsing
+                    # (which branches on file_name) picks the right path.
+                    _base = re.sub(r"\.[a-zA-Z0-9]{1,6}$", "", _doc.get("file_name", "") or "") or "auto_capture"
+                    _doc["file_name"] = _base + _fixed_ext
             except Exception:
                 pass
         if _is_html_like:
