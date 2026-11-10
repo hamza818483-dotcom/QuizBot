@@ -295,22 +295,55 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student", progres
 
     result = {"csv_bytes": None, "mcq_count": 0, "error": None}
 
+    # Diagnostic: log available memory before launch, since "Target page,
+    # context or browser has been closed" from BrowserType.launch is
+    # Playwright's generic message for the browser process dying right
+    # after spawn -- on a memory-constrained host (this app targets a
+    # 512MB Render instance per atlas_mhtml.py's notes) that's almost
+    # always an OOM kill, not a real Playwright/Chromium bug. --single-process
+    # was removed then re-added below because dropping it did NOT fix the
+    # crash (confirmed by user) -- so the earlier "launch args" theory was
+    # wrong, and this looks environment/memory-related instead.
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        logger.info(
+            f"[rayvila] pre-launch memory: available={vm.available/1024/1024:.0f}MB "
+            f"total={vm.total/1024/1024:.0f}MB used%={vm.percent}"
+        )
+    except Exception as e:
+        logger.info(f"[rayvila] pre-launch memory check skipped (psutil unavailable: {e})")
+
     async with async_playwright() as pw:
-        # NOTE: --single-process was dropped here — on this host it crashed
-        # Chromium's launch itself (TargetClosedError, SIGTRAP) before any
-        # page could even open. atlas_url_capture.py uses the same flag
-        # successfully for its simpler single-snapshot flow, but Rayvila's
-        # longer multi-page click-through session appears to need the
-        # normal multi-process model to stay alive. Keep the rest of the
-        # args (matches atlas_url_capture.py's proven low-resource set).
+        # --single-process restored (removing it did not fix the crash) and
+        # kept alongside extra low-memory flags, since the real constraint
+        # appears to be available RAM, not this specific flag. Chromium's
+        # heaviest default consumers (GPU compositor, extensions, background
+        # trial/network features) are all disabled to shrink the footprint
+        # as much as possible on a small instance.
         browser = await pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage", "--disable-gpu"],
+            args=[
+                "--no-sandbox", "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage", "--disable-gpu", "--single-process",
+                "--disable-extensions", "--disable-background-networking",
+                "--disable-default-apps", "--disable-sync",
+                "--disable-translate", "--mute-audio",
+                "--js-flags=--max-old-space-size=256",
+            ],
         )
         try:
             context = await browser.new_context(viewport={"width": 1280, "height": 900})
             page = await context.new_page()
+            # Block images/fonts/media (not needed for text/DOM scraping)
+            # to reduce memory and bandwidth during the multi-page flow.
+            try:
+                await page.route(
+                    re.compile(r"\.(png|jpe?g|gif|webp|svg|woff2?|ttf|mp4|mp3)(\?.*)?$", re.I),
+                    lambda route: route.abort(),
+                )
+            except Exception as e:
+                logger.debug(f"[rayvila] route-blocking setup skipped: {e}")
             try:
                 await _goto_exam_page(page, url, candidate_name, progress_cb=progress_cb)
                 html = await page.content()
