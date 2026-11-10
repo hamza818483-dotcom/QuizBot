@@ -40,13 +40,16 @@ async def capture_url_as_mhtml(url: str) -> bytes:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
-            # --single-process removed -- it's an unsupported/unstable
-            # Chromium mode that caused a SIGTRAP crash in atlas_rayvila.py's
-            # multi-page flow (see that file). This capture only does a
-            # single page.goto so it hadn't surfaced here yet, but the same
-            # flag set is the same risk.
+            # --no-zygote added to match atlas_rayvila.py's fix: the SIGTRAP
+            # Chromium crashes seen there happen in the zygote helper
+            # process's own early sandbox/namespace setup, before the
+            # single-process/multi-process decision is made -- so it's a
+            # risk here too, just not yet triggered by this file's
+            # single-page flow. See atlas_rayvila.py for the full
+            # explanation.
             args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage", "--disable-gpu"],
+                  "--disable-dev-shm-usage", "--disable-gpu",
+                  "--no-zygote", "--single-process"],
         )
         try:
             context = await browser.new_context(viewport={"width": 1280, "height": 900})

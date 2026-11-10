@@ -304,20 +304,29 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student", progres
             logger.info(f"[rayvila] chromium executable: {pw.chromium.executable_path}")
         except Exception:
             pass
-        # --single-process was removed: the traceback shows the crash
-        # (SIGTRAP immediately on launch, both for the bundled Chromium
-        # AND the system-chromium fallback below -- same flag set used
-        # both times) is specific to that flag, not the binary. Chromium's
-        # --single-process mode has been unsupported/unstable for a long
-        # time (no real process/site isolation), and is far more likely to
-        # crash on a flow like this one that opens several pages/navigations
-        # in sequence (_goto_exam_page) than atlas_url_capture.py's single
-        # page.goto -- which is why that one "worked" while this one didn't;
-        # it was surviving on borrowed time, not proof --single-process is
-        # safe. Dropping it is the standard, supported headless-container
-        # recipe (no-sandbox + disable-dev-shm-usage + disable-gpu).
+        # Correction to the previous fix: removing --single-process alone
+        # did NOT stop the crash (redeployed, same SIGTRAP, same signature,
+        # on both the bundled chrome-headless-shell and the system-chromium
+        # fallback -- confirmed from a fresh prod log). That rules out
+        # --single-process as the cause: the signal fires identically with
+        # or without it.
+        #
+        # SIGTRAP (not SIGKILL/SIGSEGV) immediately on launch is Chromium's
+        # own CHECK()/DCHECK() trap, not an OOM kill or a generic segfault.
+        # The most common source of that specific trap on a launch with
+        # --no-sandbox already set is the zygote host: Chromium forks a
+        # "zygote" helper process very early in startup (before the
+        # single-process/multi-process decision is even made -- which is
+        # why toggling --single-process had no effect), and that fork can
+        # itself require sandbox/namespace setup (e.g. CLONE_NEWUSER) that
+        # a locked-down PaaS container (Render) blocks at the kernel/runtime
+        # level. --no-zygote skips that helper process entirely instead of
+        # letting it attempt and trap. This is also why the long-"working"
+        # atlas_url_capture.py was never actually proven safe by comparison
+        # -- same zygote step, same risk, just not yet triggered there.
         _launch_args = ["--no-sandbox", "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage", "--disable-gpu"]
+                        "--disable-dev-shm-usage", "--disable-gpu",
+                        "--no-zygote", "--single-process"]
         try:
             browser = await pw.chromium.launch(headless=True, args=_launch_args)
         except Exception as e:
