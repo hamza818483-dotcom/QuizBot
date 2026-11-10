@@ -335,8 +335,29 @@ _RAYVILA_STEP_LABELS = {
 }
 
 
+_RAYVILA_STEP_ORDER = [
+    "opening", "login", "home", "waiting_ad", "confirm",
+    "pre_test_preparation", "exam", "parsing", "done",
+]
+
+_RAYVILA_STEP_SHORT = {
+    "opening": "Open", "login": "Login", "home": "Home",
+    "waiting_ad": "Ad wait", "confirm": "Confirm",
+    "pre_test_preparation": "Prep", "exam": "Exam",
+    "parsing": "Parse", "done": "Done",
+}
+
+
+def _rayvila_big_bar(pct: int) -> str:
+    """Larger, more eye-catching 20-block progress bar."""
+    pct = max(0, min(100, int(pct)))
+    filled = round(pct / 5)
+    return "🟩" * filled + "⬜" * (20 - filled)
+
+
 async def _rayvila_live_updater(job_id: str, chat_id: int, loading_id: int):
-    """Edits the TG loading message every ~1s with live step, %, elapsed time."""
+    """Edits the TG loading message every ~1s with a big eye-catching overall %,
+    a step checklist, and elapsed time."""
     last_text = ""
     while True:
         job = RAYVILA_JOBS.get(job_id)
@@ -344,13 +365,37 @@ async def _rayvila_live_updater(job_id: str, chat_id: int, loading_id: int):
             break
         step = job.get("step", "opening")
         pct = job.get("pct", 0)
-        bar = _mhtml_progress_bar(pct)
         label = _RAYVILA_STEP_LABELS.get(step, "⏳ প্রসেসিং চলছে...")
         elapsed_sec = int(time.time() - job["started_at"])
-        text = f"{label}\n[{bar}] {pct}%\n⌛ শুরু: {_fmt_eta(elapsed_sec)} আগে"
+        bar = _rayvila_big_bar(pct)
+
+        try:
+            cur_idx = _RAYVILA_STEP_ORDER.index(step)
+        except ValueError:
+            cur_idx = 0
+        checklist_lines = []
+        for i, s in enumerate(_RAYVILA_STEP_ORDER):
+            if s == "done":
+                continue
+            short = _RAYVILA_STEP_SHORT[s]
+            if i < cur_idx:
+                checklist_lines.append(f"✅ {short}")
+            elif i == cur_idx:
+                checklist_lines.append(f"▶️ <b>{short}</b>")
+            else:
+                checklist_lines.append(f"⬜ {short}")
+        checklist = "  ".join(checklist_lines)
+
+        text = (
+            f"🤖 <b>RAYVILA SCRAPER</b>\n"
+            f"<b>{pct}%</b>  [{bar}]\n\n"
+            f"{label}\n"
+            f"{checklist}\n\n"
+            f"⌛ শুরু থেকে: {_fmt_eta(elapsed_sec)}"
+        )
         if text != last_text and loading_id:
             try:
-                await edit_msg(chat_id, loading_id, text)
+                await edit_msg(chat_id, loading_id, text, parse_mode="HTML")
                 last_text = text
             except Exception:
                 pass
