@@ -163,6 +163,9 @@ from chorcha_pdf import build_chorcha_pdf_html
 # ATLAS full mhtml/html → CSV converter (Chorcha.net + Testmoz, LaTeX cleanup, imgbb images)
 # Ported 100% from AtlasMasterBot's mhtml_handler.py
 from atlas_mhtml import parse_mhtml_to_mcqs, results_to_csv_bytes
+# Generic "send a link → auto .mhtml + auto CSV" feature (any public URL,
+# no chorcha.net login needed — see atlas_url_capture.py)
+from atlas_url_capture import is_plain_url, process_url_to_mhtml_and_csv
 
 # ============================================================
 # mhtml/html AUTO QUEUE SYSTEM (ported from AtlasMasterBot)
@@ -281,6 +284,39 @@ async def _mhtml_live_updater(job_id: str, chat_id: int, loading_id: int):
 async def _cleanup_job_later(job_id: str, delay: int = 30):
     await asyncio.sleep(delay)
     MHTML_JOBS.pop(job_id, None)
+
+
+async def _process_url_auto(msg: dict, url: str):
+    """Plain URL text message -> auto .mhtml capture + auto CSV, both sent in DM."""
+    chat_id = msg["chat"]["id"]
+    loading = await send_msg(chat_id, "🌐 Page লোড ও capture করা হচ্ছে...")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    def _progress(stage):
+        labels = {"fetching": "🌐 Page লোড ও capture করা হচ্ছে...",
+                  "parsing": "🔍 MCQ detect করা হচ্ছে..."}
+        if loading_id and stage in labels:
+            _spawn_task(edit_msg(chat_id, loading_id, labels[stage]))
+
+    try:
+        result = await process_url_to_mhtml_and_csv(url, progress_cb=_progress)
+    except Exception as e:
+        logger.error(f"[url-capture] failed for {url}: {e}", exc_info=True)
+        await send_msg(chat_id, f"❌ Page capture করা যায়নি: {e}")
+        return
+
+    await send_document(chat_id, result["mhtml_bytes"], result["file_name"],
+                        caption="📄 Page-টার .mhtml snapshot")
+
+    if result["csv_bytes"]:
+        csv_name = re.sub(r"\.mhtml$", "", result["file_name"]) + ".csv"
+        await send_document(chat_id, result["csv_bytes"], csv_name,
+                            caption=f"✅ {result['mcq_count']}টা MCQ পাওয়া গেছে")
+    else:
+        await send_msg(chat_id, "ℹ️ এই page-এ কোনো MCQ খুঁজে পাওয়া যায়নি (শুধু .mhtml পাঠানো হলো)।")
+
+    if loading_id:
+        _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id}))
 
 
 async def _process_mhtml_auto(msg: dict):
@@ -37406,6 +37442,12 @@ async def handle_message(msg: dict):
         handled = await handle_standalone_image(msg)
         if handled:
             return
+
+    # Auto URL → .mhtml capture + auto CSV (any public webpage link, no
+    # command needed — user just pastes the URL as a plain message)
+    if text and not msg.get("reply_to_message") and is_plain_url(text):
+        _spawn_command_task(uid, _process_url_auto(msg, text.strip()))
+        return
 
     # Auto mhtml/html → smart detect (MCQ→CSV queue, Q&A/CQ→tell user to use /qpdf)
     if msg.get("document") and not msg.get("reply_to_message"):
