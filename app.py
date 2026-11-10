@@ -2030,6 +2030,43 @@ async def mhtml_to_csv(file: UploadFile = File(...), secret: str = Form("")):
     })
 
 
+@app.post("/api/url-to-csv")
+async def url_to_csv(url: str = Form(...), secret: str = Form("")):
+    """LMS ExamForm 'লিংক দিন' card: paste a public webpage URL in -> the
+    bot headlessly captures it as .mhtml (atlas_url_capture.py, same
+    Page.captureSnapshot approach as the Telegram DM link-capture feature)
+    and parses it with the same parse_mhtml_to_mcqs / results_to_csv_bytes
+    pipeline /api/mhtml-to-csv uses. No manual save/upload round-trip."""
+    if not LMS_API_SECRET:
+        logger.warning("[url-to-csv] SECURITY: LMS_API_SECRET not set -- endpoint accepting unauthenticated requests!")
+    if LMS_API_SECRET and secret != LMS_API_SECRET:
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)
+
+    from atlas_url_capture import is_plain_url, process_url_to_mhtml_and_csv
+
+    url = (url or "").strip()
+    if not is_plain_url(url):
+        return JSONResponse({"ok": False, "error": "Valid http(s) URL দিন।"}, status_code=400)
+
+    try:
+        result = await process_url_to_mhtml_and_csv(url)
+    except Exception as e:
+        logger.error(f"[url-to-csv] capture failed for {url}: {e}", exc_info=True)
+        return JSONResponse({"ok": False, "error": "পেজ capture করা যায়নি।"}, status_code=400)
+
+    if result.get("error") or not result.get("csv_bytes"):
+        return JSONResponse({"ok": False, "error": "কোনো প্রশ্ন খুঁজে পাওয়া যায়নি।"}, status_code=400)
+
+    csv_bytes = result["csv_bytes"]
+    file_stem = re.sub(r"\.(mhtml|mht|html|htm)$", "", result["file_name"], flags=re.I)
+    return JSONResponse({
+        "ok": True,
+        "count": result["mcq_count"],
+        "csv_base64": base64.b64encode(csv_bytes).decode("ascii"),
+        "file_name": file_stem + ".csv",
+    })
+
+
 # ── LMS "Live Quiz" send mode ──────────────────────────────────────────
 # Exam-bank-sourced Telegram live quiz (poll → stopPoll → reveal → next,
 # same as /live), fired instantly or scheduled for later. See
