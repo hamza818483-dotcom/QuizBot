@@ -1397,9 +1397,27 @@ def _convert_sutonny_spans(node):
                 break
         raw_parts = [s.get_text() for s in all_in_run]
         joined = "".join(raw_parts)
+
+        def _bijoy_convert(t):
+            # The external `unicodeconverter` package's Bijoy map is missing
+            # two real entries, confirmed against actual SutonnyMJ page bytes:
+            #   - "¤œ" (an alternate non-connecting glyph for ম + œ, e.g. in
+            #     "wb¤œ" -> নিম্ন) isn't recognized as the same ম্ন conjunct
+            #     that "gœ" already correctly maps to -- pre-normalize it to
+            #     the working "gœ" spelling before handing off to the library.
+            #   - "æ" (the ু matra specifically after a precomposed ref/
+            #     conjunct glyph, e.g. "Îæ" after ত্র -> ত্রু, "aªæ" after
+            #     ধ্র -> ধ্রু) has no mapping at all and leaks straight
+            #     through unconverted -- "æ" is never a valid Bangla output
+            #     character, so replacing any leftover "æ" post-conversion
+            #     is a safe, targeted fix.
+            t = t.replace("¤œ", "gœ")
+            out = _uc.convert_bijoy_to_unicode(t)
+            return out.replace("æ", "ু")
+
         if joined:
             try:
-                converted = _uc.convert_bijoy_to_unicode(joined)
+                converted = _bijoy_convert(joined)
             except Exception as e:
                 logger.warning(f"[MHTML] Bijoy convert failed for whole run ({len(all_in_run)} spans, {joined!r}): {e}; retrying per-span")
                 converted = None
@@ -1418,7 +1436,7 @@ def _convert_sutonny_spans(node):
                         per_span.append("")
                         continue
                     try:
-                        per_span.append(_uc.convert_bijoy_to_unicode(t))
+                        per_span.append(_bijoy_convert(t))
                     except Exception as e2:
                         logger.warning(f"[MHTML] Bijoy convert failed for single span {t!r}: {e2}; leaving this fragment raw")
                         per_span.append(t)
