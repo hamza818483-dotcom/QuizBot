@@ -295,43 +295,41 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student", progres
 
     result = {"csv_bytes": None, "mcq_count": 0, "error": None}
 
-    # Diagnostic: log available memory before launch, since "Target page,
-    # context or browser has been closed" from BrowserType.launch is
-    # Playwright's generic message for the browser process dying right
-    # after spawn -- on a memory-constrained host (this app targets a
-    # 512MB Render instance per atlas_mhtml.py's notes) that's almost
-    # always an OOM kill, not a real Playwright/Chromium bug. --single-process
-    # was removed then re-added below because dropping it did NOT fix the
-    # crash (confirmed by user) -- so the earlier "launch args" theory was
-    # wrong, and this looks environment/memory-related instead.
-    try:
-        import psutil
-        vm = psutil.virtual_memory()
-        logger.info(
-            f"[rayvila] pre-launch memory: available={vm.available/1024/1024:.0f}MB "
-            f"total={vm.total/1024/1024:.0f}MB used%={vm.percent}"
-        )
-    except Exception as e:
-        logger.info(f"[rayvila] pre-launch memory check skipped (psutil unavailable: {e})")
-
     async with async_playwright() as pw:
-        # --single-process restored (removing it did not fix the crash) and
-        # kept alongside extra low-memory flags, since the real constraint
-        # appears to be available RAM, not this specific flag. Chromium's
-        # heaviest default consumers (GPU compositor, extensions, background
-        # trial/network features) are all disabled to shrink the footprint
-        # as much as possible on a small instance.
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox", "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage", "--disable-gpu", "--single-process",
-                "--disable-extensions", "--disable-background-networking",
-                "--disable-default-apps", "--disable-sync",
-                "--disable-translate", "--mute-audio",
-                "--js-flags=--max-old-space-size=256",
-            ],
-        )
+        # RAM was confirmed NOT the cause (production host logged 10+GB free
+        # right before an identical crash). Diagnostic kept instead: log
+        # which Chromium binary Playwright will try to launch, to help spot
+        # an install/version mismatch if this crash recurs.
+        try:
+            logger.info(f"[rayvila] chromium executable: {pw.chromium.executable_path}")
+        except Exception:
+            pass
+        # Use the EXACT flag set atlas_url_capture.py already runs
+        # successfully in this same container/image, rather than guessing
+        # more flags -- the crash (SIGTRAP on launch) wasn't reproducible
+        # in a separate sandbox with extra flags, so it's specific to this
+        # container's Chromium build, not any particular flag.
+        _launch_args = ["--no-sandbox", "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
+        try:
+            browser = await pw.chromium.launch(headless=True, args=_launch_args)
+        except Exception as e:
+            # Fallback: retry once with the system/apt-installed chromium
+            # binary (CHROMIUM_PATH env, set in the Dockerfile) instead of
+            # Playwright's own bundled chromium_headless_shell build -- in
+            # case it's specifically that bundled revision that's broken/
+            # incompatible in this container.
+            import os
+            sys_chromium = os.environ.get("CHROMIUM_PATH")
+            logger.warning(
+                f"[rayvila] bundled Chromium launch failed ({e}); "
+                f"retrying with system chromium at {sys_chromium!r}"
+            )
+            if not sys_chromium:
+                raise
+            browser = await pw.chromium.launch(
+                headless=True, executable_path=sys_chromium, args=_launch_args
+            )
         try:
             context = await browser.new_context(viewport={"width": 1280, "height": 900})
             page = await context.new_page()
