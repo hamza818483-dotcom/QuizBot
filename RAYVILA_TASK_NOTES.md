@@ -158,3 +158,14 @@ scripted clicks instead of a single page snapshot.
   reproduced from the 5 real .mhtml captures in this doc. If a real run
   surfaces selector mismatches (especially on pre_test_preparation.php,
   flagged as the main risk area), re-open this file and adjust.
+
+## Follow-up: live DM dashboard (commits 045c613 + 856cd63)
+- `atlas_rayvila.py`: `scrape_rayvila_exam()` and `_goto_exam_page()` now take
+  `progress_cb(step, pct)`, called at each flow stage (opening/login/home/
+  waiting_ad/confirm/pre_test_preparation/exam/parsing/done).
+- `app.py`: `_process_rayvila_auto()` now spawns `_rayvila_live_updater()`
+  (same pattern as `_mhtml_live_updater`/`MHTML_JOBS`, own `RAYVILA_JOBS`
+  dict) which edits the Telegram DM loading message every ~1s with:
+  current step label (Bengali), progress bar + %, elapsed time since start.
+  No "premium%" concept beyond plain progress % — user confirmed that's
+  what they meant when asked.
