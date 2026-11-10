@@ -1,4 +1,4 @@
-# Task: Rayvila auto-scraper (Playwright) — IN PROGRESS, not yet coded
+# Task: Rayvila auto-scraper (Playwright) — DONE (commits 864f1f3 + df95519)
 
 ## Goal
 User gives a Rayvila exam link (e.g. `https://www.rayvila.com/g.php/240831004923`).
@@ -139,17 +139,22 @@ scripted clicks instead of a single page snapshot.
     result).
 
 ## State as of this note
-- NOTHING coded yet for this specific feature. `atlas_rayvila.py` does
-  NOT exist yet. This note IS the full spec — next session should go
-  straight to implementation, no need to re-derive the flow from the user.
-- Repo state: HEAD is quizbot commit `8971c58` (JSON-body fix for
-  `/api/url-to-csv`, unrelated generic feature, already pushed). lms-1 is
-  at `e7088aa` (ExamForm mhtml-upload auto-extension-detect, unrelated).
-- Playwright is already a dependency (`requirements.txt` has it) and
-  already used successfully in `atlas_url_capture.py` — reuse its launch
-  args verbatim (headless chromium, `--no-sandbox` etc, same timeouts
-  pattern) rather than reinventing.
-- Push discipline per user's standing instruction: implement
-  `atlas_rayvila.py` fully, test syntax (`python3 -m py_compile`), commit,
-  push to `main` immediately — don't batch multiple files/features into
-  one commit. Then wire app.py, commit+push separately.
+- DONE: `atlas_rayvila.py` implemented (commit `864f1f3`) — `is_rayvila_url()`,
+  `scrape_rayvila_exam()` with full login→home→confirm→pre_test_preparation→exam
+  click-through, DOM parsing of exam.php via BeautifulSoup, CSV via
+  `atlas_mhtml.results_to_csv_bytes()`.
+- DONE: `app.py` wired (commit `df95519`):
+  - `/api/url-to-csv` branches to `scrape_rayvila_exam()` when `is_rayvila_url(url)`.
+  - Telegram DM `handle_message` checks `is_rayvila_url(text)` before the
+    generic `is_plain_url(text)` branch, routing to `_process_rayvila_auto()`
+    which sends the resulting CSV back in DM.
+- NOT implemented (per spec, intentionally out of scope): the optional
+  Submit → view_result.php secondary verification path (step 6/7) — step 5's
+  DOM scrape is the primary/sufficient data source per the task notes.
+- Submit click (`a#sub2`/`input#sub`) was also left out since it's optional
+  and not needed for the CSV output; only the exam.php DOM is scraped.
+- Not yet tested against a live Rayvila exam link (no live URL/session was
+  available during this task) — implementation follows the exact markup
+  reproduced from the 5 real .mhtml captures in this doc. If a real run
+  surfaces selector mismatches (especially on pre_test_preparation.php,
+  flagged as the main risk area), re-open this file and adjust.
