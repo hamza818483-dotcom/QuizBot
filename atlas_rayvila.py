@@ -304,6 +304,30 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student", progres
             logger.info(f"[rayvila] chromium executable: {pw.chromium.executable_path}")
         except Exception:
             pass
+        # Two flag-based guesses (--single-process removal, then adding
+        # --no-zygote) have NOT been confirmed to fix the SIGTRAP crash --
+        # we were guessing from the signal name alone, with no visibility
+        # into what Chromium itself printed before dying. If it crashes
+        # again, we need that real reason instead of another guess, so:
+        # turn on Playwright's own verbose browser-process logging and
+        # pipe the crashed browser's stderr/stdout straight into our logs.
+        # (Safe to set unconditionally: Playwright reads this env var at
+        # launch time, so setting it here, even if a previous call in this
+        # same process already launched a browser, still takes effect for
+        # this launch.)
+        import os as _os
+        _os.environ["DEBUG"] = "pw:browser"
+        # Also log the container's process-count limit. A very low
+        # "pids" cgroup limit (common on cheap PaaS tiers) can make the
+        # extra helper processes Chromium spawns on launch (zygote +
+        # renderer) fail immediately -- which looks exactly like this
+        # SIGTRAP, but is a host-side cap, not anything fixable with
+        # Chromium flags.
+        try:
+            import resource as _resource
+            logger.info(f"[rayvila] RLIMIT_NPROC: {_resource.getrlimit(_resource.RLIMIT_NPROC)}")
+        except Exception as _e:
+            logger.debug(f"[rayvila] could not read RLIMIT_NPROC: {_e}")
         # Correction to the previous fix: removing --single-process alone
         # did NOT stop the crash (redeployed, same SIGTRAP, same signature,
         # on both the bundled chrome-headless-shell and the system-chromium
