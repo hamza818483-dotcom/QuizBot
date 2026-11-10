@@ -320,20 +320,79 @@ async def _process_url_auto(msg: dict, url: str):
         _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id}))
 
 
+RAYVILA_JOBS = {}
+
+_RAYVILA_STEP_LABELS = {
+    "opening": "🌐 Exam link খোলা হচ্ছে...",
+    "login": "🔑 Login করা হচ্ছে...",
+    "home": "🏠 Home page লোড হয়েছে...",
+    "waiting_ad": "⏳ Ad banner settle হওয়ার জন্য অপেক্ষা (Start Test শীঘ্রই)...",
+    "confirm": "✅ Confirm page — Continue করা হচ্ছে...",
+    "pre_test_preparation": "🧭 Pre-test preparation page handle করা হচ্ছে...",
+    "exam": "📋 Exam page পাওয়া গেছে — প্রশ্ন লোড হচ্ছে...",
+    "parsing": "🔍 প্রশ্ন/উত্তর parse করা হচ্ছে...",
+    "done": "🎉 সম্পন্ন!",
+}
+
+
+async def _rayvila_live_updater(job_id: str, chat_id: int, loading_id: int):
+    """Edits the TG loading message every ~1s with live step, %, elapsed time."""
+    last_text = ""
+    while True:
+        job = RAYVILA_JOBS.get(job_id)
+        if not job or job["status"] != "running":
+            break
+        step = job.get("step", "opening")
+        pct = job.get("pct", 0)
+        bar = _mhtml_progress_bar(pct)
+        label = _RAYVILA_STEP_LABELS.get(step, "⏳ প্রসেসিং চলছে...")
+        elapsed_sec = int(time.time() - job["started_at"])
+        text = f"{label}\n[{bar}] {pct}%\n⌛ শুরু: {_fmt_eta(elapsed_sec)} আগে"
+        if text != last_text and loading_id:
+            try:
+                await edit_msg(chat_id, loading_id, text)
+                last_text = text
+            except Exception:
+                pass
+        await asyncio.sleep(1)
+
+
 async def _process_rayvila_auto(msg: dict, url: str):
-    """Rayvila exam link -> scripted Playwright flow -> auto CSV, sent in DM."""
+    """Rayvila exam link -> scripted Playwright flow -> auto CSV, sent in DM.
+    Live-updates the loading message with current step, progress %, elapsed time."""
     chat_id = msg["chat"]["id"]
     loading = await send_msg(chat_id, "🌐 Rayvila exam flow চালানো হচ্ছে (login → exam)...")
     loading_id = loading.get("result", {}).get("message_id")
 
+    job_id = gen_session_id()
+    RAYVILA_JOBS[job_id] = {
+        "status": "running", "step": "opening", "pct": 0,
+        "started_at": time.time(),
+    }
+    updater_task = _spawn_task(_rayvila_live_updater(job_id, chat_id, loading_id))
+
+    def _progress(step, pct):
+        job = RAYVILA_JOBS.get(job_id)
+        if job:
+            job["step"] = step
+            job["pct"] = pct
+
     try:
-        result = await scrape_rayvila_exam(url)
+        result = await scrape_rayvila_exam(url, progress_cb=_progress)
     except Exception as e:
         logger.error(f"[rayvila] failed for {url}: {e}", exc_info=True)
+        job = RAYVILA_JOBS.get(job_id)
+        if job:
+            job["status"] = "done"
         await send_msg(chat_id, f"❌ Rayvila exam scrape করা যায়নি: {e}")
         if loading_id:
             _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id}))
+        RAYVILA_JOBS.pop(job_id, None)
         return
+
+    job = RAYVILA_JOBS.get(job_id)
+    if job:
+        job["status"] = "done"
 
     if result.get("error") or not result.get("csv_bytes"):
         await send_msg(chat_id, f"❌ কোনো প্রশ্ন পাওয়া যায়নি: {result.get('error') or 'unknown error'}")
@@ -344,6 +403,7 @@ async def _process_rayvila_auto(msg: dict, url: str):
 
     if loading_id:
         _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id}))
+    RAYVILA_JOBS.pop(job_id, None)
 
 
 async def _process_mhtml_auto(msg: dict):
