@@ -13,6 +13,7 @@ playwright
 img2pdf
 python-dotenv
 fastapi
+python-multipart
 uvicorn
 requests
 pyrogram
