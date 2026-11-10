@@ -337,20 +337,37 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student", progres
         #
         # SIGTRAP (not SIGKILL/SIGSEGV) immediately on launch is Chromium's
         # own CHECK()/DCHECK() trap, not an OOM kill or a generic segfault.
-        # The most common source of that specific trap on a launch with
-        # --no-sandbox already set is the zygote host: Chromium forks a
-        # "zygote" helper process very early in startup (before the
-        # single-process/multi-process decision is even made -- which is
-        # why toggling --single-process had no effect), and that fork can
-        # itself require sandbox/namespace setup (e.g. CLONE_NEWUSER) that
-        # a locked-down PaaS container (Render) blocks at the kernel/runtime
-        # level. --no-zygote skips that helper process entirely instead of
-        # letting it attempt and trap. This is also why the long-"working"
-        # atlas_url_capture.py was never actually proven safe by comparison
-        # -- same zygote step, same risk, just not yet triggered there.
+        # --no-zygote (added above) did NOT fix it either -- a fresh prod
+        # log shows the identical SIGTRAP, same ~250ms-after-launch timing,
+        # on both binaries, now with THREE different flag combinations
+        # tried (original, --single-process removed, --no-zygote added).
+        # That log also now has DEBUG=pw:browser verbose output, and it's
+        # telling: Chromium prints NOTHING of its own before dying --  no
+        # error, no warning, just Playwright's own launch/kill lines. A
+        # process that dies that fast, that identically, across every flag
+        # combo and both binaries, isn't being killed by a flag decision
+        # inside Chromium's normal startup path (those would at least log
+        # something) -- it's being stopped by something outside Chromium
+        # entirely, before its own logging even runs.
+        #
+        # The one thing EVERY one of these launches does unconditionally,
+        # regardless of --no-sandbox/--no-zygote/--single-process, is start
+        # Crashpad (Chromium's crash-reporting handler) -- and Crashpad's
+        # handshake with the browser process uses a ptrace-like mechanism
+        # that a locked-down container can block even with the renderer
+        # sandbox already fully disabled. --disable-crashpad-for-testing is
+        # Chromium's own flag for exactly this (used internally in
+        # Chromium's own sandboxed CI runners for the same reason).
+        #
+        # Flagging clearly: this is still a hypothesis, not a confirmed
+        # fix -- if this crashes again with the identical signature, the
+        # cause is very likely outside anything launch flags can fix (a
+        # Render container/runtime restriction), and the next step should
+        # be asking Render support directly rather than trying more flags.
         _launch_args = ["--no-sandbox", "--disable-setuid-sandbox",
                         "--disable-dev-shm-usage", "--disable-gpu",
-                        "--no-zygote", "--single-process"]
+                        "--no-zygote", "--single-process",
+                        "--disable-crashpad-for-testing"]
         try:
             browser = await pw.chromium.launch(headless=True, args=_launch_args)
         except Exception as e:

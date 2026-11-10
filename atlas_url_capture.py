@@ -40,16 +40,19 @@ async def capture_url_as_mhtml(url: str) -> bytes:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
-            # --no-zygote added to match atlas_rayvila.py's fix: the SIGTRAP
-            # Chromium crashes seen there happen in the zygote helper
-            # process's own early sandbox/namespace setup, before the
-            # single-process/multi-process decision is made -- so it's a
-            # risk here too, just not yet triggered by this file's
-            # single-page flow. See atlas_rayvila.py for the full
-            # explanation.
+            # Kept in sync with atlas_rayvila.py -- see that file for the
+            # full story. Short version: the SIGTRAP crash there survived
+            # three different flag combos unchanged, with Chromium printing
+            # nothing of its own before dying, which points to Crashpad's
+            # (Chromium's crash-reporter) startup handshake being blocked by
+            # the container rather than anything fixable via the sandbox/
+            # process-model flags alone. --disable-crashpad-for-testing
+            # added as the next (still unconfirmed) attempt; not yet
+            # triggered in this single-page flow but the same risk applies.
             args=["--no-sandbox", "--disable-setuid-sandbox",
                   "--disable-dev-shm-usage", "--disable-gpu",
-                  "--no-zygote", "--single-process"],
+                  "--no-zygote", "--single-process",
+                  "--disable-crashpad-for-testing"],
         )
         try:
             context = await browser.new_context(viewport={"width": 1280, "height": 900})
