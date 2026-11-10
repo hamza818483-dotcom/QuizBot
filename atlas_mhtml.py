@@ -1400,8 +1400,29 @@ def _convert_sutonny_spans(node):
         if joined:
             try:
                 converted = _uc.convert_bijoy_to_unicode(joined)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[MHTML] Bijoy convert failed for whole run ({len(all_in_run)} spans, {joined!r}): {e}; retrying per-span")
                 converted = None
+            if converted is None and len(all_in_run) > 1:
+                # Whole-run join conversion threw -- one bad glyph/sequence
+                # anywhere in the run was taking down the ENTIRE joined
+                # sentence/option (every other span in it silently left raw
+                # Bijoy too, even though only one tiny piece was actually
+                # unconvertable). Retry smaller: convert each span on its
+                # own so a single bad fragment only costs that one fragment,
+                # not the whole run.
+                per_span = []
+                for s in all_in_run:
+                    t = s.get_text()
+                    if not t:
+                        per_span.append("")
+                        continue
+                    try:
+                        per_span.append(_uc.convert_bijoy_to_unicode(t))
+                    except Exception as e2:
+                        logger.warning(f"[MHTML] Bijoy convert failed for single span {t!r}: {e2}; leaving this fragment raw")
+                        per_span.append(t)
+                converted = "".join(per_span)
             if converted is not None:
                 # Put the whole converted run's text on the FIRST span and
                 # blank out the rest. Splitting the converted text back
