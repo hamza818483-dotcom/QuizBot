@@ -54,11 +54,35 @@ async def _try_close_popup(page):
         logger.debug(f"[rayvila] popup-close check skipped: {e}")
 
 
-async def _goto_exam_page(page, url: str, candidate_name: str):
+# Step name -> approximate progress % for live-dashboard callbacks.
+RAYVILA_STEP_PCT = {
+    "opening": 5,
+    "login": 15,
+    "home": 25,
+    "waiting_ad": 35,
+    "confirm": 55,
+    "pre_test_preparation": 65,
+    "exam": 80,
+    "parsing": 90,
+    "done": 100,
+}
+
+
+def _notify(progress_cb, step: str):
+    if progress_cb:
+        try:
+            progress_cb(step, RAYVILA_STEP_PCT.get(step, 0))
+        except Exception:
+            pass
+
+
+async def _goto_exam_page(page, url: str, candidate_name: str, progress_cb=None):
     """Scripted click-through from the given Rayvila URL (any step of the
     flow — login/home/confirm/exam) to exam.php, landing with the questions
     DOM loaded. Returns nothing; raises on unrecoverable failure (caller
-    captures a screenshot/HTML dump for debugging)."""
+    captures a screenshot/HTML dump for debugging).
+    progress_cb(step: str, pct: int) -- optional callback for live-dashboard updates."""
+    _notify(progress_cb, "opening")
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
     except Exception:
@@ -66,6 +90,7 @@ async def _goto_exam_page(page, url: str, candidate_name: str):
 
     # ---- Step 1: login.php (only if we actually land there) ----
     if "login.php" in page.url:
+        _notify(progress_cb, "login")
         try:
             name_input = page.locator("input#name")
             if await name_input.count() > 0:
@@ -79,6 +104,8 @@ async def _goto_exam_page(page, url: str, candidate_name: str):
 
     # ---- Step 2: home.php -> wait for ad banner to settle, click "Start Test" ----
     if "home.php" in page.url:
+        _notify(progress_cb, "home")
+        _notify(progress_cb, "waiting_ad")
         await page.wait_for_timeout(AD_SETTLE_WAIT_MS)
         await _try_close_popup(page)
         try:
@@ -94,6 +121,7 @@ async def _goto_exam_page(page, url: str, candidate_name: str):
 
     # ---- Step 3: confirm.php -> click "Continue" ----
     if "confirm.php" in page.url:
+        _notify(progress_cb, "confirm")
         try:
             cont_btn = page.locator("a.res2", has_text="Continue")
             if await cont_btn.count() == 0:
@@ -105,6 +133,7 @@ async def _goto_exam_page(page, url: str, candidate_name: str):
 
     # ---- Step 4: pre_test_preparation.php -> unknown shape, handle both cases ----
     if "pre_test_preparation.php" in page.url:
+        _notify(progress_cb, "pre_test_preparation")
         landed_on_exam = False
         try:
             await page.wait_for_url(re.compile(r"exam\.php"), timeout=PREP_PAGE_TIMEOUT_MS)
@@ -154,6 +183,8 @@ async def _goto_exam_page(page, url: str, candidate_name: str):
             await page.wait_for_url(re.compile(r"exam\.php"), timeout=PREP_PAGE_TIMEOUT_MS)
         except Exception as e:
             raise RuntimeError(f"Never reached exam.php (stuck at {page.url}): {e}")
+
+    _notify(progress_cb, "exam")
 
 
 def _parse_exam_html(html: str) -> list:
@@ -250,11 +281,14 @@ def _parse_exam_html(html: str) -> list:
     return results
 
 
-async def scrape_rayvila_exam(url: str, candidate_name: str = "Student") -> dict:
+async def scrape_rayvila_exam(url: str, candidate_name: str = "Student", progress_cb=None) -> dict:
     """Full pipeline: Playwright click-through to exam.php -> parse DOM -> CSV bytes.
 
     Returns {"csv_bytes": bytes|None, "mcq_count": int, "error": str|None}
     (same shape atlas_url_capture.process_url_to_mhtml_and_csv returns).
+    progress_cb(step: str, pct: int) -- optional callback for live-dashboard updates;
+    steps: opening, login, home, waiting_ad, confirm, pre_test_preparation, exam,
+    parsing, done.
     """
     from playwright.async_api import async_playwright
     from atlas_mhtml import results_to_csv_bytes
@@ -271,7 +305,7 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student") -> dict
             context = await browser.new_context(viewport={"width": 1280, "height": 900})
             page = await context.new_page()
             try:
-                await _goto_exam_page(page, url, candidate_name)
+                await _goto_exam_page(page, url, candidate_name, progress_cb=progress_cb)
                 html = await page.content()
             except Exception as e:
                 logger.error(f"[rayvila] flow failed for {url}: {e}", exc_info=True)
@@ -280,6 +314,7 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student") -> dict
         finally:
             await browser.close()
 
+    _notify(progress_cb, "parsing")
     try:
         parsed_results = _parse_exam_html(html)
     except Exception as e:
@@ -293,4 +328,5 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student") -> dict
 
     result["csv_bytes"] = results_to_csv_bytes(parsed_results)
     result["mcq_count"] = len(parsed_results)
+    _notify(progress_cb, "done")
     return result
