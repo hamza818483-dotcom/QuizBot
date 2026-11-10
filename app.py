@@ -166,6 +166,7 @@ from atlas_mhtml import parse_mhtml_to_mcqs, results_to_csv_bytes
 # Generic "send a link → auto .mhtml + auto CSV" feature (any public URL,
 # no chorcha.net login needed — see atlas_url_capture.py)
 from atlas_url_capture import is_plain_url, process_url_to_mhtml_and_csv
+from atlas_rayvila import is_rayvila_url, scrape_rayvila_exam
 
 # ============================================================
 # mhtml/html AUTO QUEUE SYSTEM (ported from AtlasMasterBot)
@@ -314,6 +315,32 @@ async def _process_url_auto(msg: dict, url: str):
                             caption=f"✅ {result['mcq_count']}টা MCQ পাওয়া গেছে")
     else:
         await send_msg(chat_id, "ℹ️ এই page-এ কোনো MCQ খুঁজে পাওয়া যায়নি (শুধু .mhtml পাঠানো হলো)।")
+
+    if loading_id:
+        _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id}))
+
+
+async def _process_rayvila_auto(msg: dict, url: str):
+    """Rayvila exam link -> scripted Playwright flow -> auto CSV, sent in DM."""
+    chat_id = msg["chat"]["id"]
+    loading = await send_msg(chat_id, "🌐 Rayvila exam flow চালানো হচ্ছে (login → exam)...")
+    loading_id = loading.get("result", {}).get("message_id")
+
+    try:
+        result = await scrape_rayvila_exam(url)
+    except Exception as e:
+        logger.error(f"[rayvila] failed for {url}: {e}", exc_info=True)
+        await send_msg(chat_id, f"❌ Rayvila exam scrape করা যায়নি: {e}")
+        if loading_id:
+            _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id}))
+        return
+
+    if result.get("error") or not result.get("csv_bytes"):
+        await send_msg(chat_id, f"❌ কোনো প্রশ্ন পাওয়া যায়নি: {result.get('error') or 'unknown error'}")
+    else:
+        csv_name = re.sub(r"[^a-zA-Z0-9]+", "_", url.split("//", 1)[-1]).strip("_")[:60] + ".csv"
+        await send_document(chat_id, result["csv_bytes"], csv_name,
+                            caption=f"✅ {result['mcq_count']}টা MCQ পাওয়া গেছে (Rayvila)")
 
     if loading_id:
         _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id}))
@@ -2050,8 +2077,12 @@ async def url_to_csv(request: Request):
     if not is_plain_url(url):
         return JSONResponse({"ok": False, "error": "Valid http(s) URL দিন।"}, status_code=400)
 
+    is_rayvila = is_rayvila_url(url)
     try:
-        result = await process_url_to_mhtml_and_csv(url)
+        if is_rayvila:
+            result = await scrape_rayvila_exam(url)
+        else:
+            result = await process_url_to_mhtml_and_csv(url)
     except Exception as e:
         logger.error(f"[url-to-csv] capture failed for {url}: {e}", exc_info=True)
         return JSONResponse({"ok": False, "error": "পেজ capture করা যায়নি।"}, status_code=400)
@@ -2060,7 +2091,11 @@ async def url_to_csv(request: Request):
         return JSONResponse({"ok": False, "error": "কোনো প্রশ্ন খুঁজে পাওয়া যায়নি।"}, status_code=400)
 
     csv_bytes = result["csv_bytes"]
-    file_stem = re.sub(r"\.(mhtml|mht|html|htm)$", "", result["file_name"], flags=re.I)
+    file_stem = (
+        re.sub(r"[^a-zA-Z0-9]+", "_", url.split("//", 1)[-1]).strip("_")[:60] or "rayvila_exam"
+        if is_rayvila
+        else re.sub(r"\.(mhtml|mht|html|htm)$", "", result["file_name"], flags=re.I)
+    )
     return JSONResponse({
         "ok": True,
         "count": result["mcq_count"],
@@ -37481,6 +37516,12 @@ async def handle_message(msg: dict):
         handled = await handle_standalone_image(msg)
         if handled:
             return
+
+    # Auto Rayvila exam link → scripted login→exam flow + auto CSV (checked
+    # before the generic URL capture below, since it needs a different pipeline)
+    if text and not msg.get("reply_to_message") and is_rayvila_url(text):
+        _spawn_command_task(uid, _process_rayvila_auto(msg, text.strip()))
+        return
 
     # Auto URL → .mhtml capture + auto CSV (any public webpage link, no
     # command needed — user just pastes the URL as a plain message)
