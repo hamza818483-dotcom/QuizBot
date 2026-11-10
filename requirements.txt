@@ -23,6 +23,7 @@ google-genai
 pandas
 pytz
 lxml
+unicodeconverter
 telethon
 psutil
 numpy

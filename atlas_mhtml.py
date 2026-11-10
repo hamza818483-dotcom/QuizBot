@@ -1302,6 +1302,169 @@ def _parse_aapathshala(soup, img_map, progress_cb=None):
             "total_cards_seen": total, "skipped": skipped}
 
 
+# ============================================================
+# REALM-OF-ZORO (realm-of-zoro.pages.dev/result/...) — exam result review page
+#   card wrapper : div.text-card-foreground.p-4.rounded-[20px].bg-muted/30
+#   question     : first div.mathjax-content inside the card header row
+#   options      : A/B/C/D badge (span) + sibling div.mathjax-content,
+#                  each wrapped in a div.flex row; correct one's row has
+#                  class "bg-success/10" (badge has border-success too)
+#   explanation  : div.mt-3.bg-accent (text after the "ব্যাখ্যা:" label)
+#   text quirk   : legacy SutonnyMJ (Bijoy) font spans need bijoy->unicode
+#                  conversion; Times New Roman / plain spans and MathJax
+#                  are already correct and must be left untouched
+# ============================================================
+def _convert_sutonny_spans(node):
+    """SutonnyMJ (Bijoy legacy) <span style="font-family: SutonnyMJ">
+    text in-place -> Unicode Bangla. Only spans tagged with that font are
+    touched; Times New Roman / math spans are left exactly as-is.
+
+    The source HTML often splits one continuous Bijoy sentence across many
+    tiny adjacent SutonnyMJ spans (sometimes one glyph each, e.g. a '‡'
+    conjunct-marker on its own). Bijoy's reordering needs the full run of
+    text together -- converting each micro-fragment in isolation breaks
+    conjuncts and drops/garbles characters. So: walk each run of
+    consecutive sibling SutonnyMJ spans, join their raw text, convert
+    once, then split the converted text back across those spans roughly
+    proportionally to each span's original length (good enough since the
+    only thing done with these spans afterwards is get_text() on the
+    parent -- exact per-span boundaries don't matter, only that no text is
+    lost or duplicated)."""
+    if node is None:
+        return node
+    try:
+        import unicodeconverter as _uc
+    except Exception:
+        return node
+
+    all_spans = node.find_all('span', style=True)
+    n = len(all_spans)
+
+    def _is_sutonny(s):
+        return 'SutonnyMJ' in (s.get('style', '') or '')
+
+    def _is_bridgeable_gap(s):
+        # a non-SutonnyMJ span that's only whitespace (e.g. a stray
+        # "font-family: SolaimanLipi" span holding a single space between
+        # two SutonnyMJ fragments) doesn't carry real content of its own,
+        # so it shouldn't break a Bijoy run's context -- skip over it.
+        return not _is_sutonny(s) and not s.get_text().strip()
+
+    i = 0
+    while i < n:
+        if not _is_sutonny(all_spans[i]):
+            i += 1
+            continue
+        run = [all_spans[i]]       # SutonnyMJ spans in this run, in order
+        all_in_run = [all_spans[i]]  # run spans + bridging gap spans, in order (defines join text)
+        j = i + 1
+        while j < n:
+            if _is_sutonny(all_spans[j]):
+                run.append(all_spans[j])
+                all_in_run.append(all_spans[j])
+                j += 1
+            elif _is_bridgeable_gap(all_spans[j]) and j + 1 < n and _is_sutonny(all_spans[j + 1]):
+                all_in_run.append(all_spans[j])  # its space is kept in the joined text
+                j += 1
+            else:
+                break
+        raw_parts = [s.get_text() for s in all_in_run]
+        joined = "".join(raw_parts)
+        if joined:
+            try:
+                converted = _uc.convert_bijoy_to_unicode(joined)
+            except Exception:
+                converted = None
+            if converted is not None:
+                # Put the whole converted run's text on the FIRST span and
+                # blank out the rest. Splitting the converted text back
+                # across the original fragment boundaries doesn't work:
+                # Bijoy reordering can change character counts/positions
+                # relative to the raw input (conjuncts, reordered matras),
+                # so a proportional split landed mid-glyph and produced
+                # stray spaces inside words. Since nothing downstream reads
+                # these spans individually (only get_text() on the parent),
+                # collapsing the run to one span is safe and correct.
+                all_in_run[0].string = converted
+                for s in all_in_run[1:]:
+                    s.string = ""
+        i = j  # j already skipped past any trailing gap_spans not followed by SutonnyMJ
+    return node
+
+
+def _parse_zoro_realm(soup, progress_cb=None):
+    cards = [
+        c for c in soup.select('div.text-card-foreground')
+        if c.select_one('div.mathjax-content')
+        and c.select('span.rounded-full.border-2')  # A/B/C/D badges -> real question card
+    ]
+    if not cards:
+        return None
+    results, skipped = [], []
+    total = len(cards)
+    for ci, card in enumerate(cards, 1):
+        try:
+            # Convert each text block separately (question, each option,
+            # explanation) rather than the whole card at once: find_all on
+            # the whole card flattens spans from unrelated DOM subtrees
+            # into one list with no boundary between them, so a run could
+            # bridge straight from the question's last span into an
+            # option's first span and merge their text together.
+            for _block in card.select('div.mathjax-content') + card.select('div.mt-3.bg-accent'):
+                _convert_sutonny_spans(_block)
+
+            header = card.select_one('div.flex.items-start.gap-2')
+            q_node = header.select_one('div.mathjax-content') if header else card.select_one('div.mathjax-content')
+            q_text = format_content(q_node, {}) if q_node else ""
+            q_text = q_text.strip()
+            if not q_text:
+                skipped.append((ci, "question text empty"))
+                continue
+
+            opt_rows = card.select('span.rounded-full.border-2')
+            options, ans_idx = [], ""
+            for i, badge in enumerate(opt_rows, 1):
+                row = badge.find_parent('div', class_='flex')
+                otext_node = row.select_one('div.mathjax-content') if row else None
+                otext = format_content(otext_node, {}).strip() if otext_node else ""
+                options.append(otext)
+                is_correct = (row and 'bg-success/10' in (row.get('class') or [])) or 'border-success' in (badge.get('class') or [])
+                if is_correct:
+                    ans_idx = str(i)
+            if len(options) < 2:
+                skipped.append((ci, "fewer than 2 options"))
+                continue
+            options = options[:5]
+            while len(options) < 5:
+                options.append("")
+            if not ans_idx:
+                ans_idx = "1"
+                skipped.append((ci, "no correct-answer mark found — defaulted to option 1"))
+
+            exp_box = card.select_one('div.mt-3.bg-accent')
+            exp_text = ""
+            if exp_box:
+                label = exp_box.select_one('span.font-medium')
+                if label:
+                    label.extract()
+                exp_text = format_content(exp_box, {}).strip()
+
+            results.append({"questions": q_text, "option1": options[0], "option2": options[1],
+                            "option3": options[2], "option4": options[3], "option5": "",
+                            "answer": ans_idx, "explanation": exp_text, "type": 1, "section": 1})
+        except Exception as e:
+            skipped.append((ci, f"parse error: {str(e)[:80]}"))
+        if progress_cb:
+            try:
+                progress_cb(ci, total)
+            except Exception:
+                pass
+    results = post_process(results)
+    gc.collect()
+    return {"source": "Realm of Zoro", "results": results,
+            "total_cards_seen": total, "skipped": skipped}
+
+
 def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> dict:
     """
     progress_cb(done:int, total:int) — optional callback, called after each
@@ -1314,16 +1477,34 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
 
     if file_name.lower().endswith(('.mhtml', '.mht')):
         msg = email.message_from_bytes(file_bytes, policy=_policy.default)
+        # A saved page's MHTML can contain several text/html parts (ad
+        # iframes, recaptcha frames, etc. alongside the real page) — picking
+        # "the last one seen" silently grabbed whichever tiny iframe loaded
+        # last instead of the actual page. The root page's own Content-Type
+        # header names it via the boundary="main_frame" Content-Location
+        # (Snapshot-Content-Location on the message), so prefer the part
+        # whose Content-Location matches that; otherwise fall back to the
+        # largest text/html part, which is virtually always the real page.
+        main_loc = msg.get('Snapshot-Content-Location', '')
+        html_candidates = []  # (is_main_match, size, decoded_text)
         for part in msg.walk():
             if part.get_content_type() == 'text/html':
-                html_body = part.get_payload(decode=True).decode(
-                    part.get_content_charset() or 'utf-8', errors='ignore')
+                raw = part.get_payload(decode=True)
+                if not raw:
+                    continue
+                text = raw.decode(part.get_content_charset() or 'utf-8', errors='ignore')
+                is_main = bool(main_loc) and part.get('Content-Location', '') == main_loc
+                html_candidates.append((is_main, len(text), text))
             elif part.get_content_type().startswith('image/'):
                 loc, raw = part.get('Content-Location', ''), part.get_payload(decode=True)
                 if loc and raw:
                     b64_data = base64.b64encode(raw).decode('utf-8')
                     img_map[loc] = b64_data
                     img_map[urllib.parse.unquote(loc)] = b64_data
+        if html_candidates:
+            # main-location match first, else the largest part
+            html_candidates.sort(key=lambda t: (t[0], t[1]), reverse=True)
+            html_body = html_candidates[0][2]
     else:
         html_body = file_bytes.decode('utf-8', errors='ignore')
 
@@ -1363,6 +1544,11 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
     _aap = _parse_aapathshala(soup, img_map, progress_cb)
     if _aap is not None and _aap["results"]:
         return _aap
+
+    # REALM-OF-ZORO (result-review page, SutonnyMJ legacy font) — চেনা গেলে এখানেই শেষ
+    _zoro = _parse_zoro_realm(soup, progress_cb)
+    if _zoro is not None and _zoro["results"]:
+        return _zoro
 
     # ============================================================
     # CHORCHA.NET
