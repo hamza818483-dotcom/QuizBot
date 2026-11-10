@@ -2031,20 +2031,22 @@ async def mhtml_to_csv(file: UploadFile = File(...), secret: str = Form("")):
 
 
 @app.post("/api/url-to-csv")
-async def url_to_csv(url: str = Form(...), secret: str = Form("")):
-    """LMS ExamForm 'লিংক দিন' card: paste a public webpage URL in -> the
-    bot headlessly captures it as .mhtml (atlas_url_capture.py, same
-    Page.captureSnapshot approach as the Telegram DM link-capture feature)
-    and parses it with the same parse_mhtml_to_mcqs / results_to_csv_bytes
-    pipeline /api/mhtml-to-csv uses. No manual save/upload round-trip."""
+async def url_to_csv(request: Request):
+    """LMS ExamForm 'লিংক দিন' card (via supabase/functions/quizbot-proxy,
+    same JSON-body + allowlisted-path pattern as /api/lms-send-channel):
+    paste a public webpage URL in -> the bot headlessly captures it as
+    .mhtml (atlas_url_capture.py, same Page.captureSnapshot approach as
+    the Telegram DM link-capture feature) and parses it with the same
+    parse_mhtml_to_mcqs / results_to_csv_bytes pipeline /api/mhtml-to-csv
+    uses. No manual save/upload round-trip.
+    Body: {secret, url}"""
     if not LMS_API_SECRET:
         logger.warning("[url-to-csv] SECURITY: LMS_API_SECRET not set -- endpoint accepting unauthenticated requests!")
-    if LMS_API_SECRET and secret != LMS_API_SECRET:
+    data = await request.json()
+    if LMS_API_SECRET and data.get("secret") != LMS_API_SECRET:
         return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)
 
-    from atlas_url_capture import is_plain_url, process_url_to_mhtml_and_csv
-
-    url = (url or "").strip()
+    url = str(data.get("url") or "").strip()
     if not is_plain_url(url):
         return JSONResponse({"ok": False, "error": "Valid http(s) URL দিন।"}, status_code=400)
 
