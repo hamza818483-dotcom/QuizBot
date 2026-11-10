@@ -304,13 +304,20 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student", progres
             logger.info(f"[rayvila] chromium executable: {pw.chromium.executable_path}")
         except Exception:
             pass
-        # Use the EXACT flag set atlas_url_capture.py already runs
-        # successfully in this same container/image, rather than guessing
-        # more flags -- the crash (SIGTRAP on launch) wasn't reproducible
-        # in a separate sandbox with extra flags, so it's specific to this
-        # container's Chromium build, not any particular flag.
+        # --single-process was removed: the traceback shows the crash
+        # (SIGTRAP immediately on launch, both for the bundled Chromium
+        # AND the system-chromium fallback below -- same flag set used
+        # both times) is specific to that flag, not the binary. Chromium's
+        # --single-process mode has been unsupported/unstable for a long
+        # time (no real process/site isolation), and is far more likely to
+        # crash on a flow like this one that opens several pages/navigations
+        # in sequence (_goto_exam_page) than atlas_url_capture.py's single
+        # page.goto -- which is why that one "worked" while this one didn't;
+        # it was surviving on borrowed time, not proof --single-process is
+        # safe. Dropping it is the standard, supported headless-container
+        # recipe (no-sandbox + disable-dev-shm-usage + disable-gpu).
         _launch_args = ["--no-sandbox", "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
+                        "--disable-dev-shm-usage", "--disable-gpu"]
         try:
             browser = await pw.chromium.launch(headless=True, args=_launch_args)
         except Exception as e:
