@@ -425,13 +425,22 @@ async def _process_rayvila_auto(msg: dict, url: str):
     try:
         result = await scrape_rayvila_exam(url, progress_cb=_progress)
     except Exception as e:
-        logger.error(f"[rayvila] failed for {url}: {e}", exc_info=True)
+        logger.error(f"[rayvila] failed for {url} (step={RAYVILA_JOBS.get(job_id, {}).get('step')}): {e}", exc_info=True)
         job = RAYVILA_JOBS.get(job_id)
         if job:
             job["status"] = "done"
-        await send_msg(chat_id, f"❌ Rayvila exam scrape করা যায়নি: {e}")
+        # Edit the dashboard message into the error (don't delete it — a
+        # sudden disappearance with no error shown looked like a silent
+        # "vanish" when the flow failed fast, e.g. a bad URL/timeout within
+        # the first few seconds).
         if loading_id:
-            _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id}))
+            try:
+                await edit_msg(chat_id, loading_id,
+                               f"❌ <b>Rayvila scrape ব্যর্থ হয়েছে</b>\n{e}", parse_mode="HTML")
+            except Exception:
+                await send_msg(chat_id, f"❌ Rayvila exam scrape করা যায়নি: {e}")
+        else:
+            await send_msg(chat_id, f"❌ Rayvila exam scrape করা যায়নি: {e}")
         RAYVILA_JOBS.pop(job_id, None)
         return
 
@@ -440,14 +449,28 @@ async def _process_rayvila_auto(msg: dict, url: str):
         job["status"] = "done"
 
     if result.get("error") or not result.get("csv_bytes"):
-        await send_msg(chat_id, f"❌ কোনো প্রশ্ন পাওয়া যায়নি: {result.get('error') or 'unknown error'}")
+        err_text = f"❌ কোনো প্রশ্ন পাওয়া যায়নি: {result.get('error') or 'unknown error'}"
+        if loading_id:
+            try:
+                await edit_msg(chat_id, loading_id, err_text, parse_mode="HTML")
+            except Exception:
+                await send_msg(chat_id, err_text)
+        else:
+            await send_msg(chat_id, err_text)
     else:
         csv_name = re.sub(r"[^a-zA-Z0-9]+", "_", url.split("//", 1)[-1]).strip("_")[:60] + ".csv"
+        if loading_id:
+            try:
+                await edit_msg(chat_id, loading_id,
+                               f"🎉 <b>সম্পন্ন!</b> {result['mcq_count']}টা MCQ পাওয়া গেছে। CSV পাঠানো হচ্ছে...",
+                               parse_mode="HTML")
+            except Exception:
+                pass
         await send_document(chat_id, result["csv_bytes"], csv_name,
                             caption=f"✅ {result['mcq_count']}টা MCQ পাওয়া গেছে (Rayvila)")
+        if loading_id:
+            _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id}))
 
-    if loading_id:
-        _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": loading_id}))
     RAYVILA_JOBS.pop(job_id, None)
 
 
