@@ -1670,6 +1670,102 @@ def _parse_rayvila(soup, img_map, progress_cb=None):
             "total_cards_seen": total, "skipped": skipped}
 
 
+def _parse_testmoz_new(soup, img_map, progress_cb=None):
+    """
+    New Testmoz result-review export (div.component / question-wrapper /
+    response-wrapper / the-explanation), distinct from the older
+    rounded-lg+shadow-md card layout still handled below.
+
+    Correct-answer detection quirk of this format: when the student
+    answered CORRECTLY, the chosen option's answer-check div has
+    <span class="correct"> (check.svg). When the student answered
+    WRONG or left it BLANK, no option gets a "correct" span at all --
+    instead the options the UI flags red both get <span class="incorrect">
+    (check-wrong.svg / times.svg): the student's own wrong pick (radio
+    checked) AND, separately, the actual correct option (radio NOT
+    checked) share that same "incorrect" class/icon with no other
+    distinguishing marker. So: correct = the option with a "correct"
+    span (checked); failing that, the "incorrect"-flagged option whose
+    radio is NOT checked (the un-checked red one is the real answer,
+    the checked red one is the student's wrong guess).
+    """
+    components = soup.find_all('div', class_='component')
+    if not components:
+        return None
+    q_wrapper_present = any(c.find('div', class_='question-wrapper') for c in components)
+    if not q_wrapper_present:
+        return None
+
+    results = []
+    skipped = []
+    total = len(components)
+
+    for ci, comp in enumerate(components, 1):
+        try:
+            qw = comp.find('div', class_='question-wrapper')
+            if not qw:
+                skipped.append((ci, "no question-wrapper in this component"))
+                continue
+
+            q_header = qw.find('div', class_='question-header')
+            q_div = q_header.find('div', class_='question') if q_header else None
+            q_text = format_content(q_div, img_map) if q_div else ""
+            if not q_text.strip():
+                skipped.append((ci, "empty question text"))
+                continue
+
+            resp_wrapper = qw.find('div', class_='response-wrapper')
+            opt_list = ["", "", "", "", ""]
+            ans_idx = ""
+
+            if resp_wrapper:
+                labels = resp_wrapper.find_all('label', class_='answer')
+                correct_i = None
+                incorrect_unchecked_i = None
+                for i, label in enumerate(labels[:5]):
+                    text_div = label.find_all('div', recursive=False)
+                    opt_text_src = text_div[-1] if text_div else label
+                    opt_text = format_content(opt_text_src, img_map)
+                    opt_list[i] = opt_text
+
+                    ac = label.find('div', class_='answer-check')
+                    is_checked = label.find('input', attrs={'checked': 'checked'}) is not None
+                    if ac and ac.find('span', class_='correct'):
+                        correct_i = i
+                    elif ac and ac.find('span', class_='incorrect') and not is_checked:
+                        incorrect_unchecked_i = i
+
+                if correct_i is not None:
+                    ans_idx = str(correct_i + 1)
+                elif incorrect_unchecked_i is not None:
+                    ans_idx = str(incorrect_unchecked_i + 1)
+                # else: truly unmarkable (e.g. all blank with no red flags at all) -> ans_idx stays ""
+
+            exp_div = qw.find('div', class_='the-explanation')
+            exp_resp = exp_div.find('div', class_='response') if exp_div else None
+            exp_text = format_content(exp_resp, img_map) if exp_resp else ""
+
+            if not ans_idx:
+                skipped.append((ci, "could not determine correct answer (no correct/incorrect marker found)"))
+
+            results.append({"questions": q_text, "option1": opt_list[0], "option2": opt_list[1],
+                             "option3": opt_list[2], "option4": opt_list[3], "option5": opt_list[4],
+                             "answer": ans_idx, "explanation": exp_text, "type": 1, "section": 1})
+        except Exception as e:
+            skipped.append((ci, f"parse error: {str(e)[:80]}"))
+
+        if progress_cb:
+            try:
+                progress_cb(ci, total)
+            except Exception:
+                pass
+
+    results = post_process(results)
+    gc.collect()
+    return {"source": "Testmoz", "results": results,
+            "total_cards_seen": total, "skipped": skipped}
+
+
 def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> dict:
     """
     progress_cb(done:int, total:int) — optional callback, called after each
@@ -1778,6 +1874,11 @@ def parse_mhtml_to_mcqs(file_bytes: bytes, file_name: str, progress_cb=None) -> 
     _rayvila = _parse_rayvila(soup, img_map, progress_cb)
     if _rayvila is not None and _rayvila["results"]:
         return _rayvila
+
+    # TESTMOZ (new component/question-wrapper result-review layout) — চেনা গেলে এখানেই শেষ
+    _tmz_new = _parse_testmoz_new(soup, img_map, progress_cb)
+    if _tmz_new is not None and _tmz_new["results"]:
+        return _tmz_new
 
     # ============================================================
     # CHORCHA.NET
