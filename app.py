@@ -12786,6 +12786,14 @@ async def _send_csv_polls_to_channel(
                 continue
 
             if error_code and 400 <= error_code < 500 and error_code != 429:
+                if thread_id and ("thread not found" in desc or "message thread" in desc):
+                    # Stale/invalid forum-topic thread_id — same fallback the
+                    # pre-message already does: retry once without it, and
+                    # clear thread_id so the REST of this batch's polls don't
+                    # keep failing (and silently getting "skipped") one by one.
+                    logger.warning(f"[CSV] Poll {i+1} thread_id={thread_id} invalid ({desc}) — retrying without thread_id")
+                    thread_id = None
+                    continue
                 # Genuinely bad request (malformed poll data etc.) — retrying
                 # won't help, skip this one MCQ so the rest of the batch continues.
                 logger.error(f"[CSV] Poll {i+1} non-retryable error ({error_code}): {desc} — skipping this MCQ")
