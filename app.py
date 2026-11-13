@@ -13353,16 +13353,17 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
         # marker না থাকলে (বা একটাই topic group হলে) আগের single-batch পথেই যায়।
         _topics_order, _topic_groups = [], {}
         for _m in mcqs:
-            _mt = (_m.get("_pdfs_topic") or "").strip()
-            if not _mt:
-                continue
+            # v: আগে marker-বিহীন MCQ থাকলে (topic cell blank/first-row-before-
+            # first-marker) পুরো topicwise split-ই বাতিল হয়ে single-batch এ
+            # চলে যেত (_all_tagged সব-বা-কিছুই না চেক)। এখন marker-বিহীন
+            # MCQ গুলো আসল টপিকের নামে (default "topic") একটা নিজস্ব group এ
+            # পড়ে — কোনো MCQ silently বাদ যায় না, আর partial tagging হলেও
+            # topicwise split কাজ করে।
+            _mt = (_m.get("_pdfs_topic") or "").strip() or topic
             if _mt not in _topic_groups:
                 _topic_groups[_mt] = []
                 _topics_order.append(_mt)
             _topic_groups[_mt].append(_m)
-        # সব MCQ কোনো না কোনো topic marker-এর আওতায় পড়েছে কিনা যাচাই — না হলে
-        # (marker আংশিক/অনুপস্থিত হলে) নিরাপদে single-batch পথেই যাওয়া উচিত,
-        # নাহলে marker-বিহীন MCQ গুলো silently বাদ পড়ে যাবে।
         _all_tagged = sum(len(v) for v in _topic_groups.values()) == total
         _is_topicwise = len(_topics_order) > 1 and _all_tagged
 
