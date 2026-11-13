@@ -12742,7 +12742,18 @@ async def _send_csv_polls_to_channel(
         opts = mcq.get("options", [])[:4]
         ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
 
-        q_text = mcq["question"]
+        raw_q_text = str(mcq.get("question") or "").strip()
+        _non_empty_opts = [o for o in opts if str(o or "").strip()]
+        if not raw_q_text or len(_non_empty_opts) < 2:
+            # Topic-marker / blank row leaked through from the sheet (topic
+            # name sits alone in the question cell, no real options) --
+            # sending this as a poll shows an empty "নতুন প্রশ্ন লিখুন" /
+            # blank-options poll in the channel. Skip it silently, don't
+            # count it as sent, move on to the next real MCQ.
+            total = max(0, total - 1)
+            continue
+
+        q_text = raw_q_text
         if tag:
             q_text = f"{tag}\n\n{q_text}"
 
