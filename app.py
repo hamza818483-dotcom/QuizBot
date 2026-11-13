@@ -29585,7 +29585,13 @@ async def _post_topic_groups_to_channel(channel_id, topic_groups: list, thread_i
         for mcq in mcqs:
             opts = mcq.get("options", [])[:4]
             ans_idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(mcq.get("answer", "A"), 0)
-            q_text = mcq.get("question", "")
+            raw_q_text = str(mcq.get("question") or "").strip()
+            if raw_q_text and all(not str(o or "").strip() for o in opts):
+                # Topic-marker row: only the question column has text (the
+                # topic name), every other column blank -- skip, don't send
+                # as a poll.
+                continue
+            q_text = raw_q_text
             if tag:
                 q_text = f"{tag}\n\n{q_text}"
             exp = mcq.get("explanation", "")
