@@ -1213,14 +1213,24 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
         except Exception as e:
             logger.warning(f"[LMS-Send] pre-msg link edit failed: {e}")
 
-    if first_poll_msg_id:
+    if pre_msg_id and sent:
+        # সব poll পাঠানো শেষ হওয়ার পর — pre-message (topic name) কে reply
+        # করে আলাদা একটা নতুন message পাঠানো হয়, তাতেই Poll Again/Quiz
+        # Again/Premium PDF বাটন embedded থাকে (আগে প্রথম poll-এর নিজের
+        # reply_markup edit করে বসানো হতো, যেটা মাঝেমধ্যে 429/transient
+        # error-এ silently miss হয়ে যেত কোনো topic-এ — এখন নতুন sendMessage
+        # হওয়ায় সরাসরি একবারেই button-সহ যায়, আর retry থাকায় কোনো topic
+        # miss করে না)।
         _kb = await _lms_first_poll_kb(batch_cache_id)
         _btn_ok = False
         for _attempt in range(4):  # retry w/ backoff — survives 429 bursts right after the poll-send loop
             try:
-                _r = await tg_post("editMessageReplyMarkup", {
-                    "chat_id": channel_id, "message_id": first_poll_msg_id,
-                    "reply_markup": _kb
+                _r = await tg_post("sendMessage", {
+                    "chat_id": channel_id,
+                    "text": "👆 এই টপিকের MCQ গুলো আবার practice করতে নিচের বাটন ব্যবহার করো:",
+                    "reply_to_message_id": pre_msg_id,
+                    **({"message_thread_id": thread_id} if thread_id else {}),
+                    "reply_markup": _kb,
                 })
                 if _r.get("ok"):
                     _btn_ok = True
@@ -1230,18 +1240,30 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
                     _wait = _r.get("parameters", {}).get("retry_after", 2 + _attempt * 2)
                     await asyncio.sleep(_wait)
                     continue
-                if "message to edit not found" in _desc or "message can't be edited" in _desc:
-                    break  # non-retryable — poll message itself is gone/uneditable
+                if "message to reply to not found" in _desc:
+                    # reply target gone — retry once plain, still don't skip the buttons
+                    try:
+                        _r2 = await tg_post("sendMessage", {
+                            "chat_id": channel_id,
+                            "text": "👆 এই টপিকের MCQ গুলো আবার practice করতে নিচের বাটন ব্যবহার করো:",
+                            **({"message_thread_id": thread_id} if thread_id else {}),
+                            "reply_markup": _kb,
+                        })
+                        if _r2.get("ok"):
+                            _btn_ok = True
+                    except Exception:
+                        pass
+                    break
                 await asyncio.sleep(1.5 + _attempt)
             except Exception as e:
-                logger.warning(f"[LMS-Send] first-poll button attach attempt {_attempt+1} failed: {e}")
+                logger.warning(f"[LMS-Send] topic button message attempt {_attempt+1} failed: {e}")
                 await asyncio.sleep(1.5 + _attempt)
         if not _btn_ok:
-            logger.error(f"[LMS-Send] first-poll button attach FAILED after retries — topic='{topic}' msg_id={first_poll_msg_id} chat={channel_id}")
+            logger.error(f"[LMS-Send] topic button message FAILED after retries — topic='{topic}' pre_msg_id={pre_msg_id} chat={channel_id}")
             try:
                 await tg_post("sendMessage", {
                     "chat_id": OWNER_ID,
-                    "text": f"⚠️ LMS Send: '{topic}' টপিকের প্রথম poll-এ বাটন বসানো যায়নি (retry শেষেও)। ম্যানুয়ালি চেক করো।"
+                    "text": f"⚠️ LMS Send: '{topic}' টপিকের practice বাটন message পাঠানো যায়নি (retry শেষেও)। ম্যানুয়ালি চেক করো।"
                 })
             except Exception:
                 pass
@@ -35473,7 +35495,10 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int, star
     else:
         pre_caption = (
             f"🔄 <b>Poll Practice শুরু হচ্ছে!</b>\n\n"
-            f"🌟 Topic: {topic}\n📝 Total MCQ: {total}\n\n⏱️ Are you ready?"
+            f"🌟 Topic: {topic}\n📝 Total MCQ: {total}\n\n"
+            f"🛑 মাঝপথে থামাতে চাইলে <b>/stop</b> বা <b>stop</b> লিখো — যেখানে থামবে, "
+            f"সেখান থেকেই \"▶️ আবার শুরু করুন\" বাটনে আবার শুরু করতে পারবে।\n\n"
+            f"⏱️ Are you ready?"
         )
         if img_id:
             r = await send_photo_by_id(chat_id, img_id, pre_caption, parse_mode="HTML")
@@ -36060,7 +36085,10 @@ async def start_sequential_quiz(chat_id: int, uid: int, uname: str,
 
     pre_caption = (
         f"{title}\n\n🌟 Topic: {topic}\n"
-        f"📝 Total MCQ: {total}\n⏱️ প্রতিটা প্রশ্নে {QUIZ_Q_SEC} সেকেন্ড সময়\n\nপ্রস্তুত থাকো!"
+        f"📝 Total MCQ: {total}\n⏱️ প্রতিটা প্রশ্নে {QUIZ_Q_SEC} সেকেন্ড সময়\n\n"
+        f"🛑 মাঝপথে থামাতে চাইলে <b>/stop</b> বা <b>stop</b> লিখো — যেখানে থামবে, "
+        f"সেখান থেকেই \"▶️ আবার শুরু করুন\" বাটনে আবার শুরু করতে পারবে।\n\n"
+        f"প্রস্তুত থাকো!"
     )
     img_id = cache.get("image_file_id")
     if img_id:
