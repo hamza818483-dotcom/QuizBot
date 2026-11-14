@@ -40662,7 +40662,20 @@ async def _webhook_healer_task() -> None:
     regardless of direct or cf-proxy mode. If broken, re-sets webhook using
     whichever URL is already configured (preserving direct-mode Render URLs
     instead of force-switching to the CF proxy), falling back to HF Space
-    only as a last resort if re-setting fails outright."""
+    only as a last resort if re-setting fails outright.
+
+    ⚠️ HF/Telegram ToS GUARDRAIL — READ BEFORE EDITING ⚠️
+    Only ONE host (CF proxy target OR a direct HF/Render URL) may ever be the
+    live Telegram webhook at the same time. Two bot instances (e.g. primary
+    HF Space + fallback HF Space, or HF + Render) BOTH polling/webhooking
+    Telegram concurrently for the same BOT_TOKEN caused a real Telegram
+    account ban in the past (see DEPLOYMENT.md, docs/DEPLOYMENT_SETUP.md).
+    This task's whole job is to make sure exactly one webhook URL is set —
+    never add logic here (or anywhere else) that calls setWebhook against a
+    second/fallback host "just in case" or "for redundancy" while the
+    primary is still active. Fallback hosts (see DEPLOYMENT.md's
+    hamza-02/QuizBot vs test02-HF05/QuizBot) must stay code-synced only,
+    with their webhook NOT set, until a human deliberately switches primary."""
     await asyncio.sleep(120)
     logger.info("[App] Webhook healer task started")
     _REQUIRED_UPDATES = {"message", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"}
@@ -40872,6 +40885,13 @@ async def health():
 
 @app.on_event("startup")
 async def startup():
+    # ⚠️ ToS GUARDRAIL: this process, wherever it's deployed (HF Space,
+    # Render, etc.), will try to become THE active Telegram webhook target
+    # below. Never run two deployed instances of this app with webhooks
+    # both pointed live at the same BOT_TOKEN — Telegram/HF flagged this
+    # before (account ban, see DEPLOYMENT.md). If you spin up a second
+    # instance for testing, keep RUNNING_ON/webhook-set logic pointed at a
+    # TEST bot token, not the production BOT_TOKEN.
     global BOT_START_TIME
     BOT_START_TIME = time.time()
     logger.info("[App] ATLAS BOT v4.1 starting...")

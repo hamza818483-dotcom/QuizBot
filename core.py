@@ -4,6 +4,25 @@
 # Supabase helpers, FastAPI app instance.
 # Imported by both app.py and quiz.py — no circular dependency.
 # ============================================================
+#
+# ⚠️ HOSTING / HF ToS CONSTRAINTS — READ BEFORE TOUCHING DEPLOY/WEBHOOK CODE ⚠️
+# Full details: DEPLOYMENT.md, docs/DEPLOYMENT_SETUP.md (repo root/docs).
+# 1. HF Spaces network sandbox BLOCKS outbound calls to api.telegram.org
+#    directly AND to *.workers.dev — only *.pages.dev is reachable from HF.
+#    That's why all Telegram calls go through tg_post() → CF proxy
+#    (CF_WORKER_URL / CF_WORKER_URL_2), never httpx straight to Telegram,
+#    when _ON_HUGGINGFACE is True. See _ON_HUGGINGFACE below.
+# 2. Only ONE deployed instance may ever hold the live Telegram webhook for
+#    the production BOT_TOKEN at a time. Running two hosts (primary +
+#    fallback HF Space, or HF + Render) with webhooks BOTH pointed live has
+#    caused a real account ban before. GitHub Actions syncs CODE to a
+#    fallback HF Space, but its webhook must stay inactive until a human
+#    deliberately switches primary (see .github/workflows/sync-to-hf.yml).
+# 3. RENDER_URL is a historical name — it means "current primary backend
+#    URL", which today is almost always the HF Space, not Render.
+# Do not add code that calls setWebhook against more than one host, or that
+# calls api.telegram.org/workers.dev directly when running on HF.
+# ============================================================
 
 import os
 import io
