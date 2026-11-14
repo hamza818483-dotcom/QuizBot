@@ -11165,17 +11165,23 @@ async def _rd_group_end_kb(cache_id: str) -> dict:
           SAME poll set; Quiz Solve lets them solve the same MCQs in
           quiz-mode — both in DM, never posted/replayed inside the
           channel/group itself.
-    Row2: Website Exam (URL button, GH Pages exam link).
+    Row2: Website Exam (URL button, GH Pages exam link) + PDF (URL button,
+    same exam page with ?mode=pdf -- opens the browser-side, print-ready
+    Solve Sheet/answer-key view directly, no server-side PDF generation at
+    all; user can tap "Print/Save PDF" there for a native browser
+    print-to-PDF download if they want one).
     New Poll / New Quiz permanently removed from /csv everywhere (both
     channel and group) per user request."""
     bot_un = await get_bot_username()
     exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+    pdf_view_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}&mode=pdf"
     poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
     quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
     return {"inline_keyboard": [
         [{"text": "🔄 Poll Again", "url": poll_url},
          {"text": "🎯 Quiz Solve", "url": quiz_url}],
-        [{"text": "🌐 Website Exam", "url": exam_url}],
+        [{"text": "🌐 Website Exam", "url": exam_url},
+         {"text": "📄 PDF", "url": pdf_view_url}],
     ]}
 
 def _get_first_poll_link(channel_id: str, msg_id: int) -> str:

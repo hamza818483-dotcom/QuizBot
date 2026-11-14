@@ -501,6 +501,14 @@ async function init() {
 
     totalSec = Math.max(30, Math.ceil(questions.length * SEC_PER_Q));
 
+    // 2026-11-14 (user request): ?mode=pdf opens straight into a browser-
+    // side, print-ready answer-key view (same #solveSheet markup/CSS used
+    // on the result page) — no server-side PDF generation anywhere, no
+    // quiz-taking required first. User sees it directly in-browser and can
+    // tap "🖨️ Print/Save PDF" (native browser print-to-PDF) if they want
+    // a downloadable file.
+    if (_qs.get('mode') === 'pdf') { showPdfView(); return; }
+
     // v4.2: Pre-exam screen totally removed — instant exam start always.
     startHall();
     if (!FROM_TELEGRAM && !localStorage.getItem('atlas_name')) {
@@ -863,6 +871,51 @@ function doSubmit(){
   }, 100);
 }
 
+
+// 2026-11-14 (user request): pure browser-side "PDF" view — an answer-key
+// render of the full #solveSheet (reuses its exact CSS/print styling), with
+// no backend result POST, no score card, and no server PDF generation at
+// all. userAnswers stays {} (set in startHall() style init above), so every
+// question renders as "⏭️ স্কিপ" with the correct option marked ✅ — i.e. a
+// plain answer key, not someone's attempt.
+function showPdfView(){
+  userAnswers = {};
+  let html = `
+  <div class="result-score-card">
+    <div class="result-name">📄 ${examData.topic||'ATLAS Exam'}</div>
+    <div><span class="result-big">${questions.length}</span><span class="result-denom"> MCQ</span></div>
+    <div class="result-total-lbl">Answer Key / Solve Sheet</div>
+  </div>
+  <div class="result-btns">
+    <button class="result-btn primary" onclick="printSolveSheet()">🖨️ Print/Save PDF</button>
+    <button class="result-btn" onclick="window.open('https://Atlascourses.com','_blank')">🌐 ATLAS Courses</button>
+  </div>
+  <div class="divider"></div>
+  <div class="section-title">📋 Solve Sheet</div>
+  <div id="solveSheet">`;
+
+  questions.forEach((q,i)=>{
+    const ci=['A','B','C','D'].indexOf(q.answer);
+    const qTxt=tag?tag+'\n\n'+q.question:q.question;
+    let exp=q.explanation||'';
+    if(expFooter) exp=exp?exp+'\n'+expFooter:expFooter;
+    html+=`<div class="mcq-card solve-item" data-status="skip">
+      <div class="q-head"><span class="q-num">প্রশ্ন ${i+1}/${questions.length}</span></div>
+      <div class="q-text">${qTxt.replace(/\n/g,'<br>')}</div>`;
+    q.options.forEach((opt,oi)=>{
+      let cls='opt locked',icon='';
+      if(oi===ci){cls+=' correct-r';icon='<span class="opt-icon">✅</span>';}
+      else cls+=' dim';
+      html+=`<div class="${cls}"><span class="opt-radio">${['A','B','C','D'][oi]}</span><span>${opt}</span>${icon}</div>`;
+    });
+    if(exp) html+=`<div class="exp-box"><div class="exp-hd">📋 ব্যাখ্যা</div>${renderExpWithImg(exp)}</div>`;
+    html+=`</div>`;
+  });
+  html+=`</div>`;
+
+  document.getElementById('resultWrap').innerHTML = html;
+  setMode('Result');
+}
 
 function imgLoadFail(el){ el.outerHTML = '<div class="exp-img-broken" style="font-size:12px;color:#888;margin:4px 0;">🖼️ ছবি লোড হয়নি</div>'; }
 function renderExpWithImg(exp){
