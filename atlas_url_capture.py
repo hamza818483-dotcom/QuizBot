@@ -36,23 +36,31 @@ def is_plain_url(text: str) -> bool:
 async def capture_url_as_mhtml(url: str) -> bytes:
     """Open `url` in a headless browser and return its full page as .mhtml bytes."""
     from playwright.async_api import async_playwright
+    import os
+
+    # Kept in sync with atlas_rayvila.py -- see that file for the full
+    # story. --disable-crashpad-for-testing alone did NOT fix the SIGTRAP
+    # here (confirmed 2026-11-14, same signature) -- falling back to the
+    # system/apt-installed chromium binary (CHROMIUM_PATH env, set in the
+    # Dockerfile) like rayvila/autoscrape already do.
+    _launch_args = ["--no-sandbox", "--disable-setuid-sandbox",
+                     "--disable-dev-shm-usage", "--disable-gpu",
+                     "--disable-crashpad-for-testing"]
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            # Kept in sync with atlas_rayvila.py -- see that file for the
-            # full story. Short version: the SIGTRAP crash there survived
-            # three different flag combos unchanged, with Chromium printing
-            # nothing of its own before dying, which points to Crashpad's
-            # (Chromium's crash-reporter) startup handshake being blocked by
-            # the container rather than anything fixable via the sandbox/
-            # process-model flags alone. --disable-crashpad-for-testing
-            # added as the next (still unconfirmed) attempt; not yet
-            # triggered in this single-page flow but the same risk applies.
-            args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage", "--disable-gpu",
-                  "--disable-crashpad-for-testing"],
-        )
+        try:
+            browser = await pw.chromium.launch(headless=True, args=_launch_args)
+        except Exception as e:
+            sys_chromium = os.environ.get("CHROMIUM_PATH")
+            logger.warning(
+                f"[url-capture] bundled Chromium launch failed ({e}); "
+                f"retrying with system chromium at {sys_chromium!r}"
+            )
+            if not sys_chromium:
+                raise
+            browser = await pw.chromium.launch(
+                headless=True, executable_path=sys_chromium, args=_launch_args
+            )
         try:
             context = await browser.new_context(viewport={"width": 1280, "height": 900})
             page = await context.new_page()
