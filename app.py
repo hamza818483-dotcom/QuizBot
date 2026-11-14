@@ -1196,7 +1196,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     batch_cache_id = gen_session_id()
     await db_save_mcq_cache(batch_cache_id, batch_cache_id, 0, topic, mcqs, channel_id=channel_id)
 
-    sent, first_link = await _send_csv_polls_to_channel(
+    sent, first_link, first_poll_msg_id = await _send_csv_polls_to_channel(
         channel_id, mcqs, topic, chat_id=0, pre_msg_id=pre_msg_id,
         thread_id=thread_id, csv_fname=topic, extra_cancel_check=cancel_check
     )
@@ -1212,6 +1212,15 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
             await edit_msg(channel_id, pre_msg_id, lms_get_pre_message(subject, exam_title, topic, len(mcqs), first_link))
         except Exception as e:
             logger.warning(f"[LMS-Send] pre-msg link edit failed: {e}")
+
+    if first_poll_msg_id:
+        try:
+            await tg_post("editMessageReplyMarkup", {
+                "chat_id": channel_id, "message_id": first_poll_msg_id,
+                "reply_markup": await _lms_first_poll_kb(batch_cache_id)
+            })
+        except Exception as e:
+            logger.warning(f"[LMS-Send] first-poll button attach failed: {e}")
 
     pdf_bytes = await _generate_style1_pdf_guaranteed(mcqs, topic, chat_id=0)
     if pdf_bytes:
@@ -1283,11 +1292,22 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
     dm_kb = {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": f"lmscancel_{job_id}"}]]}
 
     def _dm_progress_text(status_line: str) -> str:
+        _b_done = job.get('batches_done', 0)
+        _b_total = job.get('batches_total', len(batches))
+        _pct = int(_b_done * 100 / _b_total) if _b_total else 0
+        _elapsed = int(time.time() - job.get("started_at", time.time()))
+        _emins, _esecs = divmod(_elapsed, 60)
+        _topics = job.get("topics_done", [])
+        _topics_line = ""
+        if _topics:
+            _topics_line = "\n📋 সম্পন্ন টপিক:\n" + "\n".join(f"  ✓ {t}" for t in _topics)
         return (
             f"📤 LMS Send — {exam_title or 'MCQ'}\n"
             f"{status_line}\n"
             f"✅ পাঠানো হয়েছে: {job.get('sent_total', 0)}\n"
-            f"📦 ব্যাচ: {job.get('batches_done', 0)}/{job.get('batches_total', len(batches))}"
+            f"📦 ব্যাচ: {_b_done}/{_b_total} ({_pct}%)\n"
+            f"⏱️ সময়: {_emins}:{_esecs:02d}"
+            f"{_topics_line}"
         )
 
     if exam_groups and not links_only:
@@ -1379,6 +1399,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     overall_batches_done += 1
                     job["sent_total"] = overall_sent
                     job["batches_done"] = overall_batches_done
+                    job.setdefault("topics_done", []).append(topic)
                     job["pct"] = int(overall_batches_done * 100 / grand_total_batches) if grand_total_batches else 100
                     if dm_msg_id:
                         try:
@@ -1415,7 +1436,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             else:
                 # ONE combined summary at the very end, covering every exam.
                 if exam_entries:
-                    combined_text = csv_get_multi_exam_master_summary(exam_entries)
+                    combined_text = csv_get_multi_exam_master_summary(exam_entries, show_website_link=False)
                     summary_data = {
                         "chat_id": channel_id, "text": combined_text,
                         "parse_mode": "HTML",
@@ -1743,7 +1764,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 topic_i = (batches[i].get("topic") or "Special MCQ By ATLAS")
                 count_i = len(batches[i].get("mcqs") or [])
                 pending_links.append((i + 1, "⏳ চলমান..." if i == len(batch_links) else "", count_i, topic_i))
-            return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links, subject=subject or "MCQ")
+            return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links, subject=subject or "MCQ", show_website_link=False)
 
         try:
             # Forum-topic sends already have a topic header/icon in the chat
@@ -1846,6 +1867,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 # non-fatal for the whole job -- continue with remaining batches
             job["sent_total"] = sent_total
             job["batches_done"] = b_idx + 1
+            job.setdefault("topics_done", []).append(topic)
             job["pct"] = int((b_idx + 1) * 100 / total_batches) if total_batches else 100
             if master_msg_id:
                 try:
@@ -2116,6 +2138,7 @@ async def lms_send_channel(request: Request):
         "status": "queued", "pct": 0, "sent_total": 0, "total": total_q,
         "batches_done": 0, "batches_total": batches_total, "error": None,
         "exam_id": exam_id, "cancel_requested": False,
+        "started_at": time.time(), "topics_done": [],
     }
     asyncio.create_task(_lms_job_db_write(job_id, LMS_SEND_JOBS[job_id]))
     _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject, links_only=links_only, exam_groups=exam_groups, links_variant=links_variant, chapter=chapter))
@@ -10947,7 +10970,7 @@ def csv_get_ending_message(topic: str, count: int, first_link: str = "", ask_sco
 
 def csv_get_master_summary(topic: str, total: int,
                             total_batches: int, batch_links: list,
-                            subject: str = None) -> str:
+                            subject: str = None, show_website_link: bool = True) -> str:
     """
     batch_links = [(part_num, link, count, batch_topic), ...]
     link states: "" (pending, not started yet -- no link line shown),
@@ -10995,7 +11018,7 @@ def csv_get_master_summary(topic: str, total: int,
             block += f"\n\n<b>🔄Poll Again:</b>\n{poll_again_link}"
         if quiz_link:
             block += f"\n\n<b>🎯Quiz Again:</b>\n{quiz_link}"
-        if exam_link:
+        if exam_link and show_website_link:
             block += f"\n\n<b>🌐Website Link:</b>\n{exam_link}"
         text += "<blockquote>" + block + "</blockquote>\n" + f"{sep}\n\n"
     text += (
@@ -11008,7 +11031,7 @@ def csv_get_master_summary(topic: str, total: int,
     return text
 
 
-def csv_get_multi_exam_master_summary(exam_entries: list) -> str:
+def csv_get_multi_exam_master_summary(exam_entries: list, show_website_link: bool = True) -> str:
     """Final combined summary for a serial multi-exam 'all' mode send
     (LMS bulk-send, bulkPostMode='single', sendMode='all'/'poll_quiz_pdf'
     etc. still goes through links_only -- THIS function backs the NEW
@@ -11049,7 +11072,7 @@ def csv_get_multi_exam_master_summary(exam_entries: list) -> str:
                 block += f"\n\n<b>🔄Poll Again:</b>\n{poll_again_link}"
             if quiz_link:
                 block += f"\n\n<b>🎯Quiz Again:</b>\n{quiz_link}"
-            if exam_link:
+            if exam_link and show_website_link:
                 block += f"\n\n<b>🌐Website Link:</b>\n{exam_link}"
             text += "<blockquote>" + block + "</blockquote>\n"
         if ex_idx < len(exam_entries) - 1:
@@ -11132,6 +11155,19 @@ async def _csv_pre_buttons(cache_id: str) -> dict:
          {"text": "🔄 Poll Again", "url": poll_url}],
         [{"text": "🌐 Website Exam", "url": exam_url},
          {"text": "💎 Premium PDF", "url": premium_url}],
+    ]}
+
+async def _lms_first_poll_kb(cache_id: str) -> dict:
+    """LMS-send per-topic first-poll reply keyboard: Poll Again, Quiz
+    Again, Premium PDF — no Website Exam (user request, 2026-11-14)."""
+    bot_un = await get_bot_username()
+    poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+    quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+    premium_url = f"https://t.me/{bot_un}?start=premium_{cache_id}"
+    return {"inline_keyboard": [
+        [{"text": "🔄 Poll Again", "url": poll_url},
+         {"text": "🎯 Quiz Again", "url": quiz_url}],
+        [{"text": "💎 Premium PDF", "url": premium_url}],
     ]}
 
 async def _csv_pre_buttons_no_premium(cache_id: str) -> dict:
@@ -12698,7 +12734,7 @@ async def _send_csv_polls_to_channel(
     extra_cancel_check: chat_id-keyed CANCEL_FLAGS ছাড়া আরেকটা cancel source
     check করার জন্য (যেমন LMS send-to-channel job-এর নিজস্ব cancel_requested
     flag, যেটা chat_id=0 দিয়ে চলে তাই is_cancelled(chat_id) কখনো true হয় না)।
-    Returns: (sent_count, first_poll_link)
+    Returns: (sent_count, first_poll_link, first_poll_msg_id)
     """
     settings = await db_get_settings()
     tag = settings.get("tag", "")
@@ -12707,6 +12743,7 @@ async def _send_csv_polls_to_channel(
     sent = start_index
     total = len(mcqs)
     first_poll_link = first_poll_link_so_far
+    first_poll_msg_id = None
 
     # Adaptive pacing — Telegram channel/group এ প্রতি ~60s এ ~20টা message
     # burst limit আছে। আগে fixed 1.1s gap দিয়ে 19-20টা পাঠিয়ে হার্ড 429 খেয়ে
@@ -12786,8 +12823,9 @@ async def _send_csv_polls_to_channel(
             )
             if poll_r.get("ok"):
                 if sent == 0:
+                    first_poll_msg_id = poll_r["result"]["message_id"]
                     first_poll_link = _get_first_poll_link(
-                        channel_id, poll_r["result"]["message_id"]
+                        channel_id, first_poll_msg_id
                     )
                 sent += 1
                 break
@@ -12844,7 +12882,7 @@ async def _send_csv_polls_to_channel(
         # hitting that ceiling instead of only reacting after a 429.
         await asyncio.sleep(_adaptive_gap())
 
-    return sent, first_poll_link
+    return sent, first_poll_link, first_poll_msg_id
 
 # ============================================================
 # CSV→CHANNEL SERIAL QUEUE
@@ -13236,7 +13274,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             all_batch_mcqs.extend(batch)
 
             # Polls পাঠাও (pre-msg কে reply করে)
-            sent, first_link = await _send_csv_polls_to_channel(
+            sent, first_link, first_poll_msg_id = await _send_csv_polls_to_channel(
                 channel_id, batch, batch_topic, chat_id, pre_msg_id,
                 thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname
             )
@@ -13466,7 +13504,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
                 all_batch_mcqs.extend(batch)
 
-                sent, first_link = await _send_csv_polls_to_channel(
+                sent, first_link, first_poll_msg_id = await _send_csv_polls_to_channel(
                     channel_id, batch, batch_topic, chat_id, pre_msg_id,
                     thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname
                 )
@@ -13672,7 +13710,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 sent_index=0, total=total, first_poll_link="", status="running"
             )
 
-        sent, first_link = await _send_csv_polls_to_channel(
+        sent, first_link, first_poll_msg_id = await _send_csv_polls_to_channel(
             channel_id, mcqs, topic, chat_id, pre_msg_id,
             thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname,
             job_id=job_id, start_index=resume_from, first_poll_link_so_far=resume_link
