@@ -11144,12 +11144,15 @@ async def _check_bot_admin(channel_id) -> tuple:
     return True, ""
 
 async def _csv_pre_buttons(cache_id: str) -> dict:
-    """Pre-message এর সাথে যুক্ত 4 inline button (deep-link URL, cache_id লাগবেই)"""
+    """Pre-message এর সাথে যুক্ত 4 inline button (deep-link URL, cache_id লাগবেই).
+    Premium PDF opens the browser-side Solve Sheet (?mode=pdf), same as
+    _rd_group_end_kb — not the bot-DM premium_ deep-link (2026-11-14 fix,
+    for consistency with LMS-send's identical button)."""
     bot_un = await get_bot_username()
     quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
     poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
     exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
-    premium_url = f"https://t.me/{bot_un}?start=premium_{cache_id}"
+    premium_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}&mode=pdf"
     return {"inline_keyboard": [
         [{"text": "📝 Quiz Solve", "url": quiz_url},
          {"text": "🔄 Poll Again", "url": poll_url}],
