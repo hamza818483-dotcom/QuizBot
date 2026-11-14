@@ -34764,6 +34764,16 @@ async def start_live_quiz(group_id, session_id: str, topic: str,
                            mcqs: list, admin_chat: int, per_q_time: int, *args, **kwargs):
     """Live Quiz main runner (v4). Backward-compatible signature."""
     bd_time = _get_bd_time()
+    # v: topic-marker row (CSV-তে শুধু 'questions' column ভরা, options/answer/
+    # explanation সব blank -- এটা real MCQ না, topic-এর নাম) আগে filter না
+    # হওয়ায় "নতুন প্রশ্ন লিখুন" টাইপ ফাঁকা poll পাঠাতো /live এ (/csv ও /topic
+    # এর জন্য আগে থেকেই এই skip ছিল, /live এ ছিল না)। এখন শুরুতেই বাদ দেওয়া
+    # হচ্ছে, যাতে total/header/idx সব real MCQ অনুযায়ী ঠিক থাকে।
+    mcqs = [
+        m for m in mcqs
+        if not (str(m.get("question") or "").strip()
+                and all(not str(o or "").strip() for o in m.get("options", [])))
+    ]
     total   = len(mcqs)
 
     pre_text = (
