@@ -145,9 +145,15 @@ since it will keep failing every rotation cycle forever with no recovery.
 ## 6. Render 512MB RAM — current state of defenses (reference, not a bug)
 
 **Context:** Render free-tier hard-caps this container at 512MB RSS; the
-platform OOM-kills with no graceful warning if crossed. Since this isn't a
-code bug but a platform limit, here's the current full list of defenses so
-future debugging doesn't re-derive or re-add them:
+platform OOM-kills with no graceful warning if crossed. **Current host is
+HuggingFace Space (16GB) — Render is NOT in active use**, so none of these
+defenses are actually biting right now; they only activate if `IS_RENDER`
+is true again. Since this isn't a code bug but a platform limit, here's
+the current full list of defenses so future debugging doesn't re-derive
+or re-add them. See also `CLAUDE.md` at repo root for the mandatory
+"gate every RAM/host tuning behind `IS_RENDER`" rule — two real bugs
+(2026-11-14, commits `08ef75b` and `5612c6d`) came from Render-sized
+limits being applied unconditionally on HF with no `IS_RENDER` check.
 
 - `RAM_LIMIT_MB=420` (`core.py`) — working budget under the 512MB hard cap.
 - `_ram_guard_task` (`app.py`) — background RSS poll (every 5s on Render).
@@ -167,9 +173,10 @@ future debugging doesn't re-derive or re-add them:
   physical RSS).
 - In-memory caches (`pdf_cache`/`qbm_cache`/`img_cache`, `_QBM_MCQ_CACHE_MAX`)
   are all capped, not unbounded.
-- `/sheet` cache is capped at 8 entries / 6MB of source CSV, expires after
-  30 minutes, and rejects a single CSV above 6MB to avoid retaining oversized
-  parsed MCQ dictionaries on the 512MB Render process.
+- `/sheet` cache is capped at 8 entries / 6MB of source CSV on Render (300
+  entries / 256MB on HF — fixed 2026-11-14, commit `5612c6d`, this was
+  unconditional before and wrongly rejected large CSVs on HF too), expires
+  after 30 minutes.
 - `_extra_page_has_highlight_marks` / `_dagano_page_has_marks` (2026-11-10) —
   rewritten in pure Pillow (`_hsv_highlight_ratio`), no cv2/numpy import on
   that path, to trim per-call RSS. `_detect_chok_boxes` still uses cv2
