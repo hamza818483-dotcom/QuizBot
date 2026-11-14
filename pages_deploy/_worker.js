@@ -63,7 +63,7 @@ export default {
     // the LMS side itself polls /status/{job_id} separately so this just
     // needs to survive the initial "job started" response.
     if (url.pathname.startsWith('/api/lms-send-channel')) {
-      const RENDER = env.HF_SPACE_URL || env.RENDER_URL || 'https://hamza-02-quizbot.hf.space';
+      const RENDER = 'https://hamza-02-quizbot.hf.space';
       const renderReq = new Request(RENDER + url.pathname + url.search, {
         method: request.method,
         headers: request.headers,
@@ -80,7 +80,7 @@ export default {
     // pattern as /api/lms-send-channel above, since the schedule/cancel
     // logic (and the cron that fires due rows) all lives in app.py.
     if (url.pathname.startsWith('/api/lms-live-quiz')) {
-      const RENDER = env.HF_SPACE_URL || env.RENDER_URL || 'https://hamza-02-quizbot.hf.space';
+      const RENDER = 'https://hamza-02-quizbot.hf.space';
       const renderReq = new Request(RENDER + url.pathname + url.search, {
         method: request.method,
         headers: request.headers,
@@ -96,7 +96,7 @@ export default {
     // ATLAS SMS Relay Android app posts parsed bKash/Nagad SMS here —
     // same plain proxy-to-backend pattern as the route above.
     if (url.pathname.startsWith('/api/sms-payment')) {
-      const RENDER = env.HF_SPACE_URL || env.RENDER_URL || 'https://hamza-02-quizbot.hf.space';
+      const RENDER = 'https://hamza-02-quizbot.hf.space';
       const renderReq = new Request(RENDER + url.pathname + url.search, {
         method: request.method,
         headers: request.headers,
@@ -113,7 +113,7 @@ export default {
                      '/api/leaderboard', '/api/solve-pdf',
                      '/api/tg-image', '/api/new-exam/status'];
     if (HF_ONLY.some(p => url.pathname.startsWith(p))) {
-      const hosts = [env.HF_SPACE_URL || env.RENDER_URL || 'https://hamza-02-quizbot.hf.space', env.RENDER_URL_2].filter(Boolean);
+      const hosts = ['https://hamza-02-quizbot.hf.space', env.RENDER_URL_2].filter(Boolean);
       for (const RENDER of hosts) {
         const renderReq = new Request(RENDER + url.pathname + url.search, {
           method: request.method,
@@ -212,7 +212,7 @@ async function runCronCheck(env) {
     // PRIMARY (same precedence fix as forwardToHF) — was env.RENDER_URL
     // first, so this ping (and the failover logic below) was checking the
     // dead Render instance's health instead of HF's.
-    const RENDER_URL   = env.HF_SPACE_URL || env.RENDER_URL || 'https://hamza-02-quizbot.hf.space';
+    const RENDER_URL   = 'https://hamza-02-quizbot.hf.space';
     const RENDER_URL_2 = env.RENDER_URL_2 || '';
     const BOT_TOKEN     = env.ATLAS_BOT_TOKEN || env.QUIZ_BOT_TOKEN || '';
     const OWNER_ID      = env.OWNER_ID || '';
@@ -495,7 +495,7 @@ async function _fetchPremiumPdfBytes(id, env) {
     }
   }
 
-  const hosts = [env.HF_SPACE_URL || env.RENDER_URL || 'https://hamza-02-quizbot.hf.space', env.RENDER_URL_2].filter(Boolean);
+  const hosts = ['https://hamza-02-quizbot.hf.space', env.RENDER_URL_2].filter(Boolean);
   for (const RENDER of hosts) {
     try {
       const r = await fetch(`${RENDER}/api/premium-pdf-view/${id}`, { signal: AbortSignal.timeout(30000) });
@@ -965,7 +965,7 @@ async function handleQuizData(request, url, env, ctx) {
     const SB_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiZHlqcGpiY3pmdW55aGhtdHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2OTI5ODAsImV4cCI6MjA5NjI2ODk4MH0.0WR1sgVsl_1XWZfSd0Pwoe6Uxp-2GMTksfseMn5aWjg';
     const SB2_URL = 'https://xnkuuzstschdovcyomfk.supabase.co';
     const SB2_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhua3V1enN0c2NoZG92Y3lvbWZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTI3NzUsImV4cCI6MjA5ODMyODc3NX0.rD6p4U1fdqnM2M6t7wA3qsMY1p3KEFD2S1WzSIZehW4';
-    const RENDER_URL   = (env && (env.HF_SPACE_URL || env.RENDER_URL)) || 'https://hamza-02-quizbot.hf.space';
+    const RENDER_URL   = 'https://hamza-02-quizbot.hf.space';
     const RENDER_URL_2 = (env && env.RENDER_URL_2) || '';
 
     function toMcqs(questions) {
@@ -1219,7 +1219,7 @@ async function forwardToHF(request, env) {
   // and never reached HF at all (502 after retries, Telegram got its 200 OK
   // from the Worker already so it never resent). RENDER_URL (if still set)
   // is now only the fallback.
-  const PRIMARY      = (env.HF_SPACE_URL || env.RENDER_URL || 'https://hamza-02-quizbot.hf.space') + '/webhook';
+  const PRIMARY      = ('https://hamza-02-quizbot.hf.space') + '/webhook';
   const SECONDARY    = env.RENDER_URL_2 ? (env.RENDER_URL_2 + '/webhook') : (env.RENDER_URL ? (env.RENDER_URL + '/webhook') : '');
   const TG_API       = `https://api.telegram.org/bot${BOT_TOKEN}`;
   const body = await request.text();
