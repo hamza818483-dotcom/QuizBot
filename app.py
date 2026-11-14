@@ -16501,8 +16501,13 @@ def _am_build_html(data, heading, fmt, hdr_txt="", ftr_txt=""):
 _sheet_cache = {}
 # /sheet cache is bounded by both entry count and source CSV bytes. Parsed MCQ
 # dictionaries occupy several times the CSV size, so a count-only cap is unsafe.
-_SHEET_CACHE_MAX = 8
-_SHEET_CACHE_MAX_BYTES = 6 * 1024 * 1024
+# ROOT-CAUSE FIX 2026-11-14: these caps were hardcoded for the 512MB Render
+# host (unconditionally, unlike every other RAM constant in this file) and
+# stayed in force even after moving to the 16GB HF Space -- rejecting any
+# CSV over 6MB with a Render-specific error message on a host that has RAM
+# to spare. Gated to IS_RENDER like the rest.
+_SHEET_CACHE_MAX = 8 if IS_RENDER else 300
+_SHEET_CACHE_MAX_BYTES = (6 if IS_RENDER else 256) * 1024 * 1024
 _SHEET_CACHE_TTL_SECONDS = 30 * 60
 _sheet_cache_bytes = {"v": 0}
 
@@ -16565,7 +16570,7 @@ async def handle_sheet_command(msg: dict):
         if csv_size_bytes > _SHEET_CACHE_MAX_BYTES:
             if loading_id:
                 await edit_msg(chat_id, loading_id,
-                    "❌ CSV ফাইলটি 6MB-এর বেশি। Render-এর RAM নিরাপদ রাখতে ছোট ছোট CSV ভাগ করে /sheet দাও।")
+                    f"❌ CSV ফাইলটি {_SHEET_CACHE_MAX_BYTES // (1024*1024)}MB-এর বেশি। ছোট ছোট CSV ভাগ করে /sheet দাও।")
             return
         if loading_id:
             await edit_msg(chat_id, loading_id, f"✅ Download সম্পূর্ণ!\n📄 {file_name}\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
