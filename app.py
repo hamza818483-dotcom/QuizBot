@@ -14659,30 +14659,22 @@ async def _get_pw_browser():
                     # 2026-09-21: "--single-process" removed. In that mode any page close/crash takes the WHOLE
                     # browser down: the next new_page() then hangs (15s TimeoutError, empty message in the log)
                     # and every PDF paid a 15s stall + full relaunch. Multi-process is stable and HF has RAM.
-                    # 2026-11-10 (RAM): added standard low-memory Chromium flags (all
-                    # multi-process-safe, none touch the single-process issue above):
-                    # --disable-background-networking/--disable-sync/--disable-translate/
-                    # --disable-default-apps trim idle background services Chromium
-                    # otherwise keeps running; --disable-features=TranslateUI avoids
-                    # loading the translate component. None change page-render
-                    # behavior/output.
-                    # ROOT-CAUSE FIX 2026-11-14: --js-flags=--max-old-space-size=128
-                    # (added 2026-11-10 for Render's 512MB RAM) was being applied
-                    # unconditionally on EVERY host, including HF Space. On the
-                    # chromium-headless-shell binary this 128MB V8 heap cap made the
-                    # browser process crash immediately on launch (SIGTRAP right
-                    # after <launched>, before any page ever opened) -- every /sheet,
-                    # /qbm PDF etc. failed ("BrowserType.launch: Target page, context
-                    # or browser has been closed") with no RAM pressure involved at
-                    # all. Now gated to IS_RENDER only, same pattern as every other
-                    # RAM-sizing constant in this file.
-                    args=[
-                        "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-                        "--disable-gpu", "--disable-extensions", "--mute-audio",
-                        "--disable-background-networking", "--disable-sync",
-                        "--disable-translate", "--disable-default-apps",
-                        "--disable-features=TranslateUI",
-                    ] + (["--js-flags=--max-old-space-size=128"] if IS_RENDER else [])
+                    # REVERTED 2026-11-15: the full 2026-11-10 "RAM" flag set below
+                    # (--disable-gpu/--disable-extensions/--disable-background-networking/
+                    # --disable-sync/--disable-translate/--disable-default-apps/
+                    # --disable-features=TranslateUI/--js-flags) was causing the exact
+                    # SIGTRAP-right-after-<launched> crash confirmed again on HF Space
+                    # on 2026-11-15 (/sheet style3 PDF failed, 22s stage="Chromium process
+                    # launch", Browser connected: False) -- same symptom the 2026-11-14
+                    # "ROOT-CAUSE FIX" below only partially addressed by gating ONE flag
+                    # (--js-flags) to IS_RENDER while leaving the rest unconditional on
+                    # every host including HF. Back to the pre-2026-11-10 minimal,
+                    # proven-stable multi-process arg set; RAM flags gated to IS_RENDER
+                    # only if ever reintroduced.
+                    args=(
+                        ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+                        if IS_RENDER else []
+                    )
                 ), timeout=30
             )
         return _PW_BROWSER["browser"]
