@@ -40609,16 +40609,30 @@ async def _webhook_healer_task() -> None:
                 # dropped poll_answer, which is exactly what caused quiz
                 # answers to stop auto-advancing while timeouts kept working).
                 missing_updates = bool(current_allowed) and not _REQUIRED_UPDATES.issubset(current_allowed)
-                if not current_url or missing_updates:
+                # 2026-11-14: if the currently-set URL points at RENDER_URL
+                # while THIS instance is not running on Render (IS_RENDER is
+                # False, i.e. we're on HF/elsewhere), Render was switched off
+                # on purpose -- that URL is dead even though it's non-empty
+                # and allowed_updates may look fine, so the old check below
+                # was silently treating a dead webhook as healthy and never
+                # fixing it. Same idea in reverse for safety.
+                stale_render_url = bool(
+                    current_url and RENDER_URL and not IS_RENDER
+                    and current_url.rstrip("/").startswith(RENDER_URL.rstrip("/"))
+                )
+                if not current_url or missing_updates or stale_render_url:
                     if missing_updates:
                         logger.warning(f"[App] Webhook healer: allowed_updates missing required types! "
                                        f"current={current_allowed} required={_REQUIRED_UPDATES} — repairing")
-                    if current_url:
+                    if stale_render_url:
+                        logger.warning(f"[App] Webhook healer: webhook still points at Render ({current_url}) "
+                                        f"but this instance is not on Render — repointing to HF/CF.")
+                    if current_url and not stale_render_url:
                         # Keep whatever URL is already correctly working — only
                         # allowed_updates needs fixing. Force-switching to
                         # CF_WORKER_URL here would be wrong in direct/Render mode.
                         target_webhook = current_url
-                    elif _tg_mode == "direct":
+                    elif _tg_mode == "direct" and not stale_render_url:
                         target_webhook = RENDER_URL.rstrip("/") + f"/webhook/{BOT_TOKEN}"
                     else:
                         target_webhook = CF_WORKER_URL.rstrip("/") + "/webhook"
