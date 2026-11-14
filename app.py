@@ -14659,19 +14659,27 @@ async def _get_pw_browser():
                     # 2026-09-21: "--single-process" removed. In that mode any page close/crash takes the WHOLE
                     # browser down: the next new_page() then hangs (15s TimeoutError, empty message in the log)
                     # and every PDF paid a 15s stall + full relaunch. Multi-process is stable and HF has RAM.
-                    # ROOT-CAUSE FIX 2026-11-15: --no-sandbox/--disable-setuid-sandbox/
+                    # ROOT-CAUSE FIX 2026-11-15 (part 1): --no-sandbox/--disable-setuid-sandbox/
                     # --disable-dev-shm-usage are NOT "RAM savers" -- they're mandatory
                     # for running Chromium as root inside a container (HF Space runs as
-                    # root), regardless of host RAM size. Without --no-sandbox, Chromium's
-                    # sandbox init itself fails as root -> SIGTRAP right after <launched>,
-                    # before any page opens -- exactly the crash seen on HF Space after
-                    # these were wrongly gated to IS_RENDER only (Render is no longer even
-                    # used -- HF only now). The ACTUAL RAM-only flags removed on 2026-11-15
-                    # (--disable-gpu/--disable-extensions/--disable-background-networking/
-                    # --disable-sync/--disable-translate/--disable-default-apps/
-                    # --disable-features=TranslateUI/--js-flags) stay gone -- those really
-                    # were optional and were never the cause of the sandbox crash.
-                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+                    # root), regardless of host RAM size.
+                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+                    # ROOT-CAUSE FIX 2026-11-15 (part 2): part 1 alone did NOT fix the
+                    # SIGTRAP (confirmed by a second HF alert after that fix+redeploy --
+                    # same crash, same stage, same chrome-headless-shell binary). The
+                    # Dockerfile installs TWO separate Chromiums: `apt-get install chromium`
+                    # (full system Debian browser, deps resolved by apt, at /usr/bin/chromium
+                    # -- CHROMIUM_PATH env already points here but was never actually wired
+                    # into any launch() call) AND `playwright install --with-deps chromium`
+                    # (playwright's own bundled chrome-headless-shell under
+                    # /root/.cache/ms-playwright/ -- this is the one crashing with SIGTRAP
+                    # right after launch, on every attempt, regardless of flags). Likely a
+                    # missing runtime .so `--with-deps` didn't fully cover on this slim base
+                    # image for the *headless-shell* variant specifically. Point Playwright
+                    # at the system chromium instead -- same binary already proven to launch
+                    # fine via atlas_url_capture.py's system-chromium fallback (881f82b).
+                    executable_path=(os.environ.get("CHROMIUM_PATH") or "/usr/bin/chromium")
+                    if os.path.exists(os.environ.get("CHROMIUM_PATH") or "/usr/bin/chromium") else None,
                 ), timeout=30
             )
         return _PW_BROWSER["browser"]
