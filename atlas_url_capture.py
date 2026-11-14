@@ -51,7 +51,6 @@ async def capture_url_as_mhtml(url: str) -> bytes:
             # triggered in this single-page flow but the same risk applies.
             args=["--no-sandbox", "--disable-setuid-sandbox",
                   "--disable-dev-shm-usage", "--disable-gpu",
-                  "--no-zygote", "--single-process",
                   "--disable-crashpad-for-testing"],
         )
         try:
