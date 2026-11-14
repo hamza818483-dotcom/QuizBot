@@ -567,7 +567,29 @@ _TG_RATE_LIMITED_METHODS = {
 }
 
 
-async def tg_post(method: str, data: dict) -> dict:
+async def tg_post(method: str, data: dict, _entity_retry: bool = False) -> dict:
+    result = await _tg_post_inner(method, data)
+    # ── Telegram HTML parse_mode chokes on literal '<'/'>' that end up in
+    #    text/caption from interpolated exception strings, browser/Playwright
+    #    log lines, scraped page content, etc. ("can't parse entities: ...").
+    #    Instead of hunting down every f-string call site, catch it centrally
+    #    here: on this specific error, HTML-escape the text/caption and send
+    #    once more so the message still goes out (as literal text) instead of
+    #    silently failing. ──
+    if (not _entity_retry and isinstance(result, dict) and not result.get("ok")
+            and data.get("parse_mode") == "HTML"
+            and "can't parse entities" in (result.get("description") or "").lower()):
+        field = "text" if isinstance(data.get("text"), str) else (
+            "caption" if isinstance(data.get("caption"), str) else None)
+        if field:
+            import html as _html_mod
+            escaped_data = dict(data, **{field: _html_mod.escape(data[field])})
+            logger.warning(f"[TG] {method} entity parse error, retrying with escaped {field}")
+            return await tg_post(method, escaped_data, _entity_retry=True)
+    return result
+
+
+async def _tg_post_inner(method: str, data: dict) -> dict:
     if method in _TG_RATE_LIMITED_METHODS:
         await _tg_rate_limit_wait()
     # ── Global MESSAGE_TOO_LONG guard: editMessageText has no chunking option
