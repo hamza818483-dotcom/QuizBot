@@ -11159,11 +11159,15 @@ async def _csv_pre_buttons(cache_id: str) -> dict:
 
 async def _lms_first_poll_kb(cache_id: str) -> dict:
     """LMS-send per-topic first-poll reply keyboard: Poll Again, Quiz
-    Again, Premium PDF — no Website Exam (user request, 2026-11-14)."""
+    Again, Premium PDF — no Website Exam (user request, 2026-11-14).
+    Premium PDF opens the browser-side Solve Sheet (?mode=pdf on the GH
+    Pages exam page) — same system LMS's own "Practice Sheet" button
+    uses (client-side render, no server PDF), NOT the bot-DM premium_
+    deep-link flow."""
     bot_un = await get_bot_username()
     poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
     quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
-    premium_url = f"https://t.me/{bot_un}?start=premium_{cache_id}"
+    premium_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}&mode=pdf"
     return {"inline_keyboard": [
         [{"text": "🔄 Poll Again", "url": poll_url},
          {"text": "🎯 Quiz Again", "url": quiz_url}],
