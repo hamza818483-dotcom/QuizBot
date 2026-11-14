@@ -48,6 +48,42 @@ concurrency, or Chromium/Playwright launch args:
   (per the user's standing workflow preference) — don't batch unrelated
   changes into one commit.
 
+## PLATFORM BAN HISTORY — never repeat these, on this bot or any future automation
+
+Two real account bans have already happened on this project. Both are
+"never do X" rules, not just bugs:
+
+1. **Dual-webhook / dual-live-instance ban (Telegram, via HF+Render).**
+   Running two deployed instances (two hosts, e.g. HF Space + Render, or
+   primary + fallback HF Space) with the Telegram webhook effectively live
+   on both at once got the bot account banned. Guardrail comments are
+   already in place at `core.py` (module header), `app.py`
+   (`_webhook_healer_task`, `startup()`), and `pages_deploy/_worker.js`
+   (header) — read those before touching webhook/deploy-target code. Full
+   writeup: `DEPLOYMENT.md`, `docs/DEPLOYMENT_SETUP.md`. **Rule: exactly
+   one host may ever hold the live webhook for the production `BOT_TOKEN`
+   at a time. Never add a "set webhook on a second host too, just in case"
+   path.**
+
+2. **Facebook automation ban (separate past project/feature).** Automating
+   actions on Facebook (posting, scraping, auto-login, bulk messaging,
+   etc. in a way that mimics a human or bypasses normal API use) got a past
+   account banned. This repo currently has **no** Facebook integration —
+   if one is ever added here (or to a sibling repo like `lms-repo`), it
+   must go through Facebook's official Graph API with a registered app and
+   documented permissions, never headless-browser automation of the
+   facebook.com web UI, and must respect rate limits explicitly (no
+   rapid-fire posting/DM loops). Treat any "automate Facebook" request as
+   high-risk and confirm the exact approach with the user before writing
+   code.
+
+**General principle for any future platform integration (Telegram, FB, or
+anything else):** before writing automation against a third-party
+platform, check whether it (a) runs multiple live instances against one
+account, or (b) mimics human UI actions instead of using an official API —
+both are the two patterns that have already caused real bans here. When in
+doubt, ask the user rather than assuming it's safe.
+
 ## When RAM-saving code is removed/restored for "no longer on Render" reasons
 
 If a past commit removed a feature or shrank something *specifically to
