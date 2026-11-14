@@ -14529,17 +14529,26 @@ async def _get_pw_browser():
                     # multi-process-safe, none touch the single-process issue above):
                     # --disable-background-networking/--disable-sync/--disable-translate/
                     # --disable-default-apps trim idle background services Chromium
-                    # otherwise keeps running; --js-flags=--max-old-space-size caps V8's
-                    # heap per renderer (pages here are static HTML->PDF, not JS-heavy, so
-                    # a small heap is safe); --disable-features=TranslateUI avoids loading
-                    # the translate component. None change page-render behavior/output.
+                    # otherwise keeps running; --disable-features=TranslateUI avoids
+                    # loading the translate component. None change page-render
+                    # behavior/output.
+                    # ROOT-CAUSE FIX 2026-11-14: --js-flags=--max-old-space-size=128
+                    # (added 2026-11-10 for Render's 512MB RAM) was being applied
+                    # unconditionally on EVERY host, including HF Space. On the
+                    # chromium-headless-shell binary this 128MB V8 heap cap made the
+                    # browser process crash immediately on launch (SIGTRAP right
+                    # after <launched>, before any page ever opened) -- every /sheet,
+                    # /qbm PDF etc. failed ("BrowserType.launch: Target page, context
+                    # or browser has been closed") with no RAM pressure involved at
+                    # all. Now gated to IS_RENDER only, same pattern as every other
+                    # RAM-sizing constant in this file.
                     args=[
                         "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
                         "--disable-gpu", "--disable-extensions", "--mute-audio",
                         "--disable-background-networking", "--disable-sync",
                         "--disable-translate", "--disable-default-apps",
-                        "--disable-features=TranslateUI", "--js-flags=--max-old-space-size=128",
-                    ]
+                        "--disable-features=TranslateUI",
+                    ] + (["--js-flags=--max-old-space-size=128"] if IS_RENDER else [])
                 ), timeout=30
             )
         return _PW_BROWSER["browser"]
