@@ -10964,16 +10964,9 @@ def csv_get_master_summary(topic: str, total: int,
     subject (optional, LMS-send path only): when given, the header shows
     subject and exam/topic title as two bold, line-separated lines instead
     of the single plain line other /csv callers use.
-
-    Overall % (user request, live dashboard): computed from how many
-    topics already have a real link (done) vs. total_batches -- shown
-    right under the topic count so the single edited message also
-    tracks total progress, not just per-topic state.
     """
     main_text = topic or "Special MCQ By ATLAS"
     sep = "▬▬▬▬▬▬▬▬▬▬"
-    _done_batches = sum(1 for e in batch_links if e[1] and e[1] != "⏳ চলমান...")
-    _overall_pct = round(_done_batches * 100 / total_batches) if total_batches else 0
     if subject:
         text = (
             f"🟥<b>{_html_escape(subject)}</b>\n"
@@ -10981,15 +10974,13 @@ def csv_get_master_summary(topic: str, total: int,
             f"◼️<b>{_html_escape(main_text)}</b>\n"
             f"{sep}\n"
             f"🌟মোট প্রশ্ন: {total}\n"
-            f"📦 মোট টপিক সংখ্যা: {total_batches}\n"
-            f"📊 Overall: {_done_batches}/{total_batches} ({_overall_pct}%)\n\n"
+            f"📦 মোট টপিক সংখ্যা: {total_batches}\n\n"
         )
     else:
         text = (
             f"🟥{main_text}\n"
             f"🌟মোট প্রশ্ন: {total}\n"
-            f"📦 মোট টপিক সংখ্যা: {total_batches}\n"
-            f"📊 Overall: {_done_batches}/{total_batches} ({_overall_pct}%)\n\n"
+            f"📦 মোট টপিক সংখ্যা: {total_batches}\n\n"
         )
     for entry in batch_links:
         part_n, link, count = entry[0], entry[1], entry[2]
@@ -13488,31 +13479,68 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 # 2026-09-13 (user request): only the master summary stays
                 # pinned -- per-topic pre-messages are no longer pinned.
 
-                # 2026-11-14 (user request): no server-side PDF generation
-                # per topic anymore (RAM problem) -- end message is now
-                # always the plain-text message with just the 3 buttons
-                # (Poll Again / Quiz Solve / Website Exam). Website Exam
-                # already opens browser-side, which covers the
-                # "view without generating a PDF" need; a user who still
-                # wants a PDF can use Quiz Solve's own PDF option in DM.
+                batch_pdf_bytes = await _generate_style1_pdf_guaranteed(batch, batch_topic, chat_id)
+                # 2026-09-13 (user request): end message split into TWO
+                # separate messages. Msg-1 (PDF + caption, no score-ask)
+                # is identical for channel and group. Msg-2 (score-ask +
+                # first poll link) is sent ONLY for plain channels
+                # (ask_score == chat_type=="channel") -- groups never get
+                # a score-ask message at all.
                 ending = csv_get_ending_message(batch_topic, sent, "", ask_score=False)
                 end_msg_id_saved = None
-                end_send_data2 = {
-                    "chat_id": channel_id,
-                    "text": ending,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                    "reply_markup": await _rd_group_end_kb(batch_cache_id)
-                }
-                if pre_msg_id:
-                    end_send_data2["reply_to_message_id"] = pre_msg_id
-                if thread_id:
-                    end_send_data2["message_thread_id"] = thread_id
-                end_r = await tg_post("sendMessage", end_send_data2)
-                if not end_r.get("ok"):
+                if batch_pdf_bytes:
+                    # Per-topic end message (msg-1): the PDF of this topic's
+                    # polls IS the end message itself (caption = ending
+                    # text, no score-ask), with the 2-row Poll Again/Quiz
+                    # Solve (DM deep-links) + Website Exam keyboard attached
+                    # directly. Identical for channel and group forum-topic.
+                    safe_btitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", batch_topic)[:50] or "ATLAS_Sheet"
+                    btn_kb = await _rd_group_end_kb(batch_cache_id)
+                    pdf_doc_r = await send_document(
+                        channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
+                        caption=ending,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=pre_msg_id
+                    )
+                    if not (pdf_doc_r and pdf_doc_r.get("ok")):
+                        pdf_doc_r = await send_document(  # one retry
+                            channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
+                            caption=ending,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=pre_msg_id
+                        )
+                    if pdf_doc_r and pdf_doc_r.get("ok"):
+                        pdf_msg_id = pdf_doc_r.get("result", {}).get("message_id")
+                        end_msg_id_saved = pdf_msg_id
+                        if pdf_msg_id:
+                            try:
+                                await tg_post("editMessageReplyMarkup", {
+                                    "chat_id": channel_id, "message_id": pdf_msg_id,
+                                    "reply_markup": btn_kb
+                                })
+                            except Exception as e:
+                                logger.warning(f"[CSV-Topicwise] PDF button attach failed: {e}")
+                    end_r = pdf_doc_r
+                else:
+                    # PDF generation genuinely failed -- fall back to the
+                    # old plain-text end message (with the same new keyboard)
+                    # so the topic still ends with a usable message+buttons.
+                    end_send_data2 = {
+                        "chat_id": channel_id,
+                        "text": ending,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                        "reply_markup": await _rd_group_end_kb(batch_cache_id)
+                    }
+                    if pre_msg_id:
+                        end_send_data2["reply_to_message_id"] = pre_msg_id
+                    if thread_id:
+                        end_send_data2["message_thread_id"] = thread_id
                     end_r = await tg_post("sendMessage", end_send_data2)
-                if end_r.get("ok"):
-                    end_msg_id_saved = end_r["result"]["message_id"]
+                    if not end_r.get("ok"):
+                        end_r = await tg_post("sendMessage", end_send_data2)
+                    if end_r.get("ok"):
+                        end_msg_id_saved = end_r["result"]["message_id"]
 
                 if end_r.get("ok"):
                     await db_update_cache(batch_cache_id, {
@@ -13561,11 +13589,26 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 await asyncio.sleep(2.5)
 
             if total_batches > 1:
-                # 2026-11-14 (user request): combined end-of-job PDF removed
-                # (RAM problem) — Website Exam links already give a
-                # browser-side view of every topic without generating any
-                # PDF. Master summary (edited live throughout) remains the
-                # single dashboard for the whole job.
+                # /sheet কমান্ডের topicwise PDF (style1, _pdfs_topic দিয়ে
+                # গ্রুপ করা) এর সাথে হুবহু একই বিল্ডার ব্যবহার করে একটাই
+                # সম্মিলিত PDF।
+                try:
+                    _combined_topics_order, _combined_topic_map = _group_pdfs_mcqs(all_batch_mcqs, topic)
+                    _combined_html = _build_topicwise_pdf_html(_combined_topics_order, _combined_topic_map, topic)
+                    _combined_pdf_bytes = await _html_to_pdf(_combined_html, use_css_page_size=False, page_width_mm=420)
+                    _combined_pdf_bytes = await _apply_saved_watermark(_combined_pdf_bytes)
+                    if _combined_pdf_bytes:
+                        _safe_ctitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                        _combined_send_data = {}
+                        if thread_id:
+                            _combined_send_data["message_thread_id"] = thread_id
+                        await send_document(
+                            channel_id, _combined_pdf_bytes, f"{_safe_ctitle}_combined.pdf",
+                            caption=f"📖 সম্মিলিত Practice Sheet (Topic-wise)\n📝 মোট MCQ: {total}\n📂 Topics: {total_batches}\n🚀 ATLAS APP",
+                            message_thread_id=thread_id
+                        )
+                except Exception as e:
+                    logger.warning(f"[CSV-Topicwise] combined PDF failed, skipping: {e}")
 
                 # Master summary was already sent first and live-updated
                 # per topic above (2026-09-13) — final edit here just
