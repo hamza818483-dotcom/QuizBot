@@ -40625,7 +40625,13 @@ async def _ram_guard_task() -> None:
 async def _keepalive_task() -> None:
     """Self-ping own service URL /health every 5 min for 24/7 uptime
     (prevents platform sleep). Alerting disabled — AtlasBot handles
-    monitoring/alerts now."""
+    monitoring/alerts now.
+
+    Note: this only pings /health (harmless, read-only) — it does NOT set
+    or touch the Telegram webhook. Keep it that way. Do not extend this (or
+    any keepalive/watchdog task) to also call setWebhook/activate a second
+    host "while we're here" — that's exactly the dual-instance pattern that
+    caused a past ban (see core.py header, DEPLOYMENT.md)."""
     await asyncio.sleep(60)
     logger.info("[App] Keep-alive task started")
     while True:

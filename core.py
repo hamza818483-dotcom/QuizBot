@@ -106,6 +106,20 @@ IS_RENDER = (
     or _running_on == "Render"
     or bool(RENDER_URL and "onrender.com" in RENDER_URL)
 )
+# ⚠️ ToS DANGER ZONE — IS_RENDER / _ON_HUGGINGFACE decide which backend THIS
+# process thinks it is. Never write code that turns on/activates the Render
+# service and the HF Space (or any two hosts) as live bot instances AT THE
+# SAME TIME for the same BOT_TOKEN. Past real incidents:
+#   - Dual-webhook/dual-instance (HF + Render both live) → Telegram account
+#     ban (see DEPLOYMENT.md, docs/DEPLOYMENT_SETUP.md).
+#   - A separate Facebook-automation project got banned before for running
+#     overlapping/parallel automated sessions — same root cause pattern
+#     (platform sees >1 concurrent automated actor on one account/token and
+#     treats it as abuse). Treat "only one live instance, ever" as a hard
+#     rule across ALL platforms this bot touches (Telegram, Facebook, any
+#     future integration), not just HF vs Render.
+# If you need a second instance for testing, point it at a TEST bot token /
+# test account, never the production one, and never enable both at once.
 
 # FIX 2026-11-02: single source of truth for the Render RSS ceiling. Was
 # duplicated as a hardcoded literal at two separate call sites in app.py

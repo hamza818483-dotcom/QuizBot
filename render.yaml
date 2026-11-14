@@ -1,3 +1,13 @@
+# ⚠️⚠️ ToS DANGER — READ BEFORE RESUMING/DEPLOYING THIS SERVICE ⚠️⚠️
+# This Render service is a FALLBACK ONLY, kept suspended on purpose.
+# DO NOT resume/redeploy this while the HF Space (or any other host) is
+# still live with the SAME BOT_TOKEN. Having two instances both polling or
+# webhooking Telegram for one account/token at the same time has already
+# caused a real Telegram account ban (see DEPLOYMENT.md,
+# docs/DEPLOYMENT_SETUP.md "Failover Runbook"). The correct sequence to
+# switch to Render is always: (1) stop/suspend the other live host FIRST,
+# (2) THEN resume this service, (3) THEN repoint CF Pages' RENDER_URL here.
+# Never run both at once "just to test" or "just for a minute."
 services:
   - type: web
     name: quizbot
@@ -17,3 +27,5 @@ services:
       #   RENDER_URL  -> set to this service's own https://xxxx.onrender.com URL
       #                  once known, so the Worker's HF_SPACE_URL/RENDER_URL
       #                  fallback points here instead of the paused HF Space.
+      #                  ⚠️ Only do this AFTER the HF Space is stopped — see
+      #                  warning above.
