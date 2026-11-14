@@ -22133,40 +22133,51 @@ def _get_bd_time() -> str:
 # qbm_get_active_prompt() auto-detect a stale DB-cached prompt from before
 # the code update and self-heal to the new default, without needing a manual
 # `DELETE FROM quiz_sessions WHERE key='qbm_active_prompt'` after every edit.
-QBM_PROMPT_VERSION = 5
+QBM_PROMPT_VERSION = 4
 
 QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page — never invent, never skip. 0 MCQs→[]. N MCQs→exactly N.
 
 RULES:
 - Multi-column: COLUMN-MAJOR order (finish left column top-to-bottom, then next). Never zigzag.
 - Never guess without source proof. Never reword question/options (strip only numbering like ১./1./Q1./ক.). Never translate.
-- Synonym/antonym MCQs: question+options stay 100% English, no Bangla gloss added.
-- Verify count matches visible MCQs; don't miss the last one per column.
-- Fix obvious OCR/spelling errors without changing meaning; verify char-by-char, watch for visually similar Bangla letters.
+- Synonym/antonym MCQs (প্রতিশব্দ/সমার্থক/বিপরীত or "synonym/antonym of"): question+options stay 100% English, no Bangla gloss added anywhere.
+- 3+ read-throughs; verify count matches visible MCQs; don't miss the last one per column.
+- Fix obvious spelling errors without changing meaning; verify char-by-char.
+- OCR confusion pairs — check against these: বসতি≠বৃষ্টি, প্রাচীন≠প্রাচীর, দক্ষিণ≠রক্ষণ, রাজধানী≠রাজবাড়ী, সীমান্ত≠সিমেন্ট, অবস্থান≠অবস্থা, বিভাগ≠বিভাজন, জনসংখ্যা≠জনসংখ্যক, স্বাধীনতা≠সাধারণত, কর্তৃক≠কর্তব্য. Re-check glyph shape before committing.
 - Never truncate — question/options end only at proper punctuation (?।); compare length vs source.
-- Hard-to-read word/name: infer full word from context/general knowledge, never leave blank.
+- Hard-to-read word/name: infer full word from context/partial letters/general knowledge, never leave blank.
+- Question unclear but options readable: infer question type from options + general knowledge.
 
-ANSWER DETECTION (priority A>B>C>D, match by Q number):
-A) Visual mark on option (circle/✓/✗/underline/bold/highlight) — overrides all
+ANSWER DETECTION (priority A>B>C>D>E, triple-check, match by Q number):
+A) Visual mark on option (circle/✓/✗/underline/bold/highlight/star) — overrides all
 B) Answer right after MCQ block
 C) Answer table at page bottom ("1-A,2-C...")
-D) Answer key on a later/adjacent page (scan forward)
-None found → "A" + note "Answer not found in source".
+D) Combined answer key on later pages (scan forward)
+E) Answer key on adjacent page
+None found → "A" + note "Answer not found in source". Convert to A/B/C/D. Re-verify twice.
 
-OPTION ORDER: map by VISUAL POSITION only: 1st→A,2nd→B,3rd→C,4th→D, regardless of source labels (a-d/ক-ঘ/১-৪/bullets). Answer letter = position of correct text in OUTPUT. Keep source numeral system exactly.
+UNDERLINE MARKING (independent of answer-detection): any individual underlined word/phrase in question or options → wrap as **word**. Don't confuse with bold/italic. No underline → no ** markers.
 
-উদ্দীপক (PASSAGE): prepend full passage to each linked MCQ. Strip ONLY navigation sentences like "উদ্দীপকের আলোকে ২১-২২ নং প্রশ্নের উত্তর দাও".
+OPTION ORDER: any source label system (A-D/a-d/ক-ঘ/১-৪/bullets/none) → map by VISUAL POSITION only: 1st→A,2nd→B,3rd→C,4th→D. Never sort by label/text. Answer letter = position of correct text in OUTPUT (e.g. source order গ,খ,ক,ঘ, correct="ক" → slot C → answer="C"). Numbers/years: keep source numeral system exactly (no Bengali↔English conversion); verify digit-by-digit.
+
+উদ্দীপক (PASSAGE): prepend full passage to each linked MCQ (self-contained), copied per MCQ if shared. Strip ONLY navigation sentences like "উদ্দীপকের আলোকে ২১-২২ নং প্রশ্নের উত্তর দাও" / "Answer questions 21-22 based on the stimulus above". Do NOT strip sentences that are the actual question just because they contain "উদ্দীপক".
 
 EXPLANATION (keep simple, max 190 chars Bengali unless case 1):
-1) Explanation/reasoning exists on page → copy 100% verbatim, byte-for-byte, no edits.
-2) Nothing on page → one short line: "সঠিক উত্তর: <letter> (<option text>)". Do NOT write a long breakdown or invent outside-knowledge reasoning — the job is extracting the MCQ as-is, not writing new explanations.
+1) Explanation/reasoning exists on page → copy 100% verbatim, byte-for-byte, no edits (overrides char limit).
+2) Nothing on page → one short line: "সঠিক উত্তর: <letter> (<option text>)". Do NOT write a long multi-option breakdown or invent reasoning from outside knowledge — main job is extracting the MCQ as-is, not writing new explanations.
 
-MATH/CHEM: never raw LaTeX — convert to Unicode (H₂O, x², √x, Na⁺, °C, × etc).
+MATH/CHEM FORMATTING: never output raw LaTeX (\vec,\hat,\frac,\sqrt,\sum,\int,^,_,{,}) — convert to Unicode:
+Vectors: \vec{A}→A⃗, \hat{i}→î. Fractions: \frac{a}{b}→a/b or a⁄b. Roots: \sqrt{x}→√x, \sqrt[3]{x}→∛x.
+Sub/superscript: H₂O, CO₂, Na⁺, Ca²⁺, Cl⁻, SO₄²⁻, x², 10³, E=mc² (never H2O, x^2, x_0).
+Units/symbols: °C, cm³, ×, ·, ∑ ∫ ∞ ∂ √ ± ≤ ≥ ≠ ≈ ∝ ∆ π θ α β γ λ μ Ω as Unicode.
+Never mix LaTeX+Unicode in one MCQ. Exception: only a genuinely unrepresentable expression (complex matrix/nested integral) may keep minimal LaTeX.
 
-Never say WHERE info lives (চিত্রে/বক্সে/ছকে/উদ্দীপকে/পৃষ্ঠায়/"as shown in figure/table") — state facts directly.
+FORBIDDEN SOURCE-REFERENCE PHRASES (question+explanation): never say WHERE info lives (চিত্রে/বক্সে/ছকে/উদ্দীপকে/সারণিতে/পৃষ্ঠায়/প্যাসেজে/অনুচ্ছেদে/গ্রাফে/"দেখা যাচ্ছে"/"বলা আছে"/"প্রদত্ত"/English "as shown in figure/table/passage"/"mentioned in text") — always state the fact directly, as general knowledge. Structural rule: any container-pointing phrase forbidden regardless of wording.
+
+DIAGRAM: question needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) covering entire diagram+labels+arrows edge-to-edge, small margin. Caption like "চিত্র: G"/"Figure 1" near question = proof diagram exists → bbox required. Omit if none. Options never get bbox.
 
 OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]
 """
 
 
@@ -27463,9 +27474,9 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
             ans_text = opts[idx] if idx < len(opts) else ""
             mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
 
-        # NOTE (per request): diagram/উদ্দীপক image crop+link feature removed
-        # from /qbm -- no bbox recovery call, no image attach. Prompt no
-        # longer emits qsn_bbox either.
+        if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
+            pending_bbox_idx[len(fixed)] = mc["question"]
+            batch_items.append({"idx": len(fixed), "type": "bbox", "question": mc["question"]})
 
         fixed.append(mc)
 
@@ -27476,7 +27487,13 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
             r = results.get(idx)
             reread = r if (isinstance(r, str) and r and r != "NOT_FOUND") else ""
             fixed[idx]["question"] = reread if reread else _qbm_reconstruct_question_from_options(q, opts)
+        for idx, question in pending_bbox_idx.items():
+            r = results.get(idx)
+            if isinstance(r, list) and len(r) == 4:
+                fixed[idx]["qsn_bbox"] = r
+                logger.info(f"[QBM safety-net] Recovered missed diagram bbox for: {question[:50]}")
 
+    fixed = await _attach_option_images_if_missing(fixed, img)
     return fixed
 
 
