@@ -37708,11 +37708,15 @@ async def handle_message(msg: dict):
         _dfn = _doc.get("file_name", "").lower()
         _dmime = _doc.get("mime_type", "").lower()
         _is_html_like = (
-            _dfn.endswith((".mhtml", ".mht", ".html", ".htm"))
-            or _dmime in ("text/html", "message/rfc822", "multipart/related", "application/x-mimearchive")
-            or _dmime.startswith("text/")
+            not _dfn.endswith((".csv", ".tsv"))
+            and _dmime not in ("text/csv", "text/tab-separated-values")
+            and (
+                _dfn.endswith((".mhtml", ".mht", ".html", ".htm"))
+                or _dmime in ("text/html", "message/rfc822", "multipart/related", "application/x-mimearchive")
+                or _dmime.startswith("text/")
+            )
         )
-        if not _is_html_like:
+        if not _is_html_like and not _dfn.endswith((".csv", ".tsv")) and _dmime not in ("text/csv", "text/tab-separated-values"):
             # Browser "direct download" files often arrive with no extension
             # at all, or a wrong/stripped one (e.g. just "page", "download",
             # ".bin") and a generic mime (application/octet-stream) -- peek
