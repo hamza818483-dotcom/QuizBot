@@ -14659,22 +14659,19 @@ async def _get_pw_browser():
                     # 2026-09-21: "--single-process" removed. In that mode any page close/crash takes the WHOLE
                     # browser down: the next new_page() then hangs (15s TimeoutError, empty message in the log)
                     # and every PDF paid a 15s stall + full relaunch. Multi-process is stable and HF has RAM.
-                    # REVERTED 2026-11-15: the full 2026-11-10 "RAM" flag set below
+                    # ROOT-CAUSE FIX 2026-11-15: --no-sandbox/--disable-setuid-sandbox/
+                    # --disable-dev-shm-usage are NOT "RAM savers" -- they're mandatory
+                    # for running Chromium as root inside a container (HF Space runs as
+                    # root), regardless of host RAM size. Without --no-sandbox, Chromium's
+                    # sandbox init itself fails as root -> SIGTRAP right after <launched>,
+                    # before any page opens -- exactly the crash seen on HF Space after
+                    # these were wrongly gated to IS_RENDER only (Render is no longer even
+                    # used -- HF only now). The ACTUAL RAM-only flags removed on 2026-11-15
                     # (--disable-gpu/--disable-extensions/--disable-background-networking/
                     # --disable-sync/--disable-translate/--disable-default-apps/
-                    # --disable-features=TranslateUI/--js-flags) was causing the exact
-                    # SIGTRAP-right-after-<launched> crash confirmed again on HF Space
-                    # on 2026-11-15 (/sheet style3 PDF failed, 22s stage="Chromium process
-                    # launch", Browser connected: False) -- same symptom the 2026-11-14
-                    # "ROOT-CAUSE FIX" below only partially addressed by gating ONE flag
-                    # (--js-flags) to IS_RENDER while leaving the rest unconditional on
-                    # every host including HF. Back to the pre-2026-11-10 minimal,
-                    # proven-stable multi-process arg set; RAM flags gated to IS_RENDER
-                    # only if ever reintroduced.
-                    args=(
-                        ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-                        if IS_RENDER else []
-                    )
+                    # --disable-features=TranslateUI/--js-flags) stay gone -- those really
+                    # were optional and were never the cause of the sandbox crash.
+                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
                 ), timeout=30
             )
         return _PW_BROWSER["browser"]
