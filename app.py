@@ -27919,6 +27919,11 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
                 _used = _qbm_page_used_accounts_ctx.get()
                 if _used is not None:
                     _used.add(key_rotator.account_of(key))
+                try:
+                    from pdf_handler import _gemini_key_hash
+                    logger.info(f"[QBM Gemini] success — account={key_rotator.account_of(key)} key={_gemini_key_hash(key)}")
+                except Exception:
+                    pass
                 return response.text or ""
             except Exception as e:
                 msg = str(e)
@@ -28162,6 +28167,20 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 _used_set = _qbm_page_used_accounts_ctx.get()
                 if _used_set is not None:
                     _used_set.add(_used_acct)
+                # 2026-11-16 (user request): /qbm tracked account_of(key) only
+                # internally (to avoid repeat-account retries) -- never logged
+                # or exposed which account/key actually won, unlike /pdf's
+                # pipeline (_attach_gemini_success_info). Mirror that here.
+                try:
+                    from pdf_handler import _gemini_key_hash, _last_gemini_success_ctx
+                    logger.info(f"[QBM Gemini] success — account={_used_acct} key={_gemini_key_hash(key)}")
+                    _last_gemini_success_ctx.set({
+                        "account": _used_acct,
+                        "key_hash": _gemini_key_hash(key),
+                        "model": _fallback_model or "gemini-3.6-flash",
+                    })
+                except Exception:
+                    pass
                 # 2026-09-08 ROOT-CAUSE DIAGNOSTIC: response.text can be
                 # empty/short for reasons that never surface as an exception
                 # -- SAFETY block, MAX_TOKENS cutoff, RECITATION block, or a
@@ -28417,6 +28436,11 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                 _used_set_multi = _qbm_page_used_accounts_ctx.get()
                 if _used_set_multi is not None:
                     _used_set_multi.add(key_rotator.account_of(key))
+                try:
+                    from pdf_handler import _gemini_key_hash
+                    logger.info(f"[QBM Gemini] success (multi-image) — account={key_rotator.account_of(key)} key={_gemini_key_hash(key)}")
+                except Exception:
+                    pass
                 _rtext_multi = response.text or ""
                 if len(_rtext_multi) < 50:
                     try:
