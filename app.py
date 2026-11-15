@@ -1271,7 +1271,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     pdf_bytes = await _generate_style1_pdf_guaranteed(mcqs, topic, chat_id=0)
     if pdf_bytes:
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
-        btn_kb = await _csv_pre_buttons_no_premium(batch_cache_id)
+        btn_kb = await _lms_pdf_buttons_poll_quiz_only(batch_cache_id)
         pdf_doc_r = await send_document(
             channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
             caption=csv_get_pdf_caption(topic, is_channel=is_channel),
@@ -11219,19 +11219,26 @@ async def _csv_pre_buttons(cache_id: str) -> dict:
 
 async def _lms_first_poll_kb(cache_id: str) -> dict:
     """LMS-send per-topic first-poll reply keyboard: Poll Again, Quiz
-    Again, Premium PDF — no Website Exam (user request, 2026-11-14).
-    Premium PDF opens the browser-side Solve Sheet (?mode=pdf on the GH
-    Pages exam page) — same system LMS's own "Practice Sheet" button
-    uses (client-side render, no server PDF), NOT the bot-DM premium_
-    deep-link flow."""
+    Again only — no Website Exam, no Premium PDF (user request,
+    2026-11-16; Premium PDF previously added 2026-11-14, now removed)."""
     bot_un = await get_bot_username()
     poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
     quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
-    premium_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}&mode=pdf"
     return {"inline_keyboard": [
         [{"text": "🔄 Poll Again", "url": poll_url},
          {"text": "🎯 Quiz Again", "url": quiz_url}],
-        [{"text": "💎 Premium PDF", "url": premium_url}],
+    ]}
+
+async def _lms_pdf_buttons_poll_quiz_only(cache_id: str) -> dict:
+    """Mood 1 (LMS 'all' flow) per-topic PDF-attached buttons: ONLY Quiz
+    Solve + Poll Again -- no Website Exam, no Premium PDF (user request,
+    2026-11-16)."""
+    bot_un = await get_bot_username()
+    quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+    poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+    return {"inline_keyboard": [
+        [{"text": "📝 Quiz Solve", "url": quiz_url},
+         {"text": "🔄 Poll Again", "url": poll_url}],
     ]}
 
 async def _csv_pre_buttons_no_premium(cache_id: str) -> dict:
