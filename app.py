@@ -14748,14 +14748,21 @@ async def _get_pw_browser():
                     # chromium) only produced repeated SIGTRAP crashes on HF Space.
                     # Going back to exactly what worked: playwright's own bundled
                     # chromium (no executable_path override), these 6 flags, every host.
-                    # 2026-11-16: newer Playwright versions (unpinned in requirements.txt)
-                    # default headless=True launches to the "chromium-headless-shell"
-                    # binary instead of full Chromium -- that shell build doesn't support
-                    # page.pdf() the way full Chromium does and was crashing with
-                    # SIGTRAP on launch (not a memory/OOM issue -- RSS was ~200MB).
-                    # channel="chromium" forces the full Chromium binary, restoring the
-                    # exact pre-regression behavior.
-                    channel="chromium",
+                    # 2026-11-16: root cause of the SIGTRAP crashes finally found --
+                    # requirements.txt had playwright UNPINNED, so every rebuild pulled
+                    # the newest release. Playwright 1.49 changed headless=True's default
+                    # to launch "chromium-headless-shell" instead of full Chromium, which
+                    # doesn't support page.pdf() the way full Chromium does (SIGTRAP on
+                    # launch, not memory/OOM -- RSS was ~200MB). Tried channel="chromium"
+                    # to force full Chromium back -- that hit a SEPARATE known Playwright
+                    # bug (microsoft/playwright-java#1871): full Chromium launched via the
+                    # default --remote-debugging-pipe transport SIGTRAPs in some sandboxed
+                    # containers (works fine via manual --remote-debugging-port instead,
+                    # but that needs a different launch path, not worth the churn here).
+                    # Real fix: pin playwright==1.48.0 in requirements.txt (the last
+                    # release before the headless-shell default changed) and drop
+                    # channel= entirely -- restores the exact 2026-09-21 behavior with
+                    # no new code paths and no version-drift risk on the next rebuild.
                     args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
                           "--disable-gpu", "--disable-extensions", "--mute-audio"]
                 ), timeout=30

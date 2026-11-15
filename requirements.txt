@@ -9,7 +9,7 @@ pytesseract
 reportlab
 httpx
 websockets
-playwright
+playwright==1.48.0
 img2pdf
 python-dotenv
 fastapi
