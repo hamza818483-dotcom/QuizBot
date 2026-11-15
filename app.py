@@ -1349,9 +1349,42 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job_cancel_check = lambda: job.get("cancel_requested", False)
             bot_un = await get_bot_username()
             exam_entries = []  # (exam_title, subject, total, total_batches, batch_links) per exam
+            merged_pdfs_to_send = []  # (safe_title, pdf_bytes, exam_title, sent_count) -- sent after the summary
             overall_sent = 0
             overall_batches_done = 0
             grand_total_batches = sum(len([b for b in (g.get("batches") or []) if b.get("mcqs")]) for g in exam_groups)
+
+            # Combined summary sent FIRST (pending topics, no links yet),
+            # then live-edited after every exam's batches finish — same
+            # pattern as the single-exam path's _live_master_summary_text.
+            master_msg_id = None
+
+            def _live_multi_summary_text() -> str:
+                pending_entries = list(exam_entries)
+                for gi in range(len(pending_entries), len(exam_groups)):
+                    gg = exam_groups[gi]
+                    gg_batches = [b for b in (gg.get("batches") or []) if b.get("mcqs")]
+                    gg_total = sum(len(b.get("mcqs") or []) for b in gg_batches)
+                    pending_entries.append((gg.get("exam_title") or "MCQ", gg.get("subject") or "", gg_total, len(gg_batches), []))
+                return csv_get_multi_exam_master_summary(pending_entries, show_website_link=False)
+
+            try:
+                master_r = await tg_post("sendMessage", {
+                    "chat_id": channel_id,
+                    "text": _live_multi_summary_text(),
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                    **({"message_thread_id": thread_id} if thread_id else {}),
+                })
+                if master_r.get("ok"):
+                    master_msg_id = master_r["result"]["message_id"]
+                    if chat_type in ("group", "supergroup"):
+                        try:
+                            await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": master_msg_id, "disable_notification": True})
+                        except Exception as e:
+                            logger.warning(f"[LMS-Send-Multi] initial summary pin failed: {e}")
+            except Exception as e:
+                logger.warning(f"[LMS-Send-Multi] initial summary send failed: {e}")
 
             for g_idx, g in enumerate(exam_groups):
                 if job.get("cancel_requested"):
@@ -1405,9 +1438,8 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                         except Exception as e:
                             logger.warning(f"[LMS-Send-Multi] DM progress update failed: {e}")
 
-                # This exam's own merged PDF, sent right after its polls —
-                # before moving to the next exam (keeps per-exam content
-                # grouped together in the channel, same as separate mode).
+                # This exam's own merged PDF — generated now, sent AFTER the
+                # loop (replying to the final summary), not mid-loop.
                 if g_all_mcqs:
                     topic_groups = [
                         (batch.get("topic") or f"Part-{i+1:02d}", batch.get("mcqs") or [])
@@ -1418,68 +1450,56 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     try:
                         merged_pdf_bytes = await _generate_combined_topicwise_pdf(topic_groups, g_title or "MCQ", channel_id)
                         if merged_pdf_bytes:
-                            merged_caption = f"📖 ATLAS Practice Sheet\n🎯 {g_title or 'MCQ'}\n📝 মোট MCQ: {g_sent}\n🚀 Visit: Atlascourses.com"
-                            # Light-weight merged cache row (no PDF re-render --
-                            # just a DB upsert) so Premium PDF can browser-view
-                            # ALL of this exam's topics combined, same R2-cached
-                            # /api/premium-pdf-view pipeline every other Premium
-                            # PDF link uses.
-                            master_cache_id = None
-                            try:
-                                master_cache_id = gen_session_id()
-                                await db_save_mcq_cache(master_cache_id, master_cache_id, 0, g_title or "MCQ", g_all_mcqs, channel_id=channel_id)
-                            except Exception as ce:
-                                logger.warning(f"[LMS-Send-Multi] exam '{g_title}' master cache save failed: {ce}")
-                                master_cache_id = None
-                            master_pdf_r = await send_document(
-                                channel_id, merged_pdf_bytes, f"{safe_title}_full_style1.pdf",
-                                caption=merged_caption,
-                                message_thread_id=thread_id,
-                            )
-                            if master_cache_id and master_pdf_r and master_pdf_r.get("ok"):
-                                master_pdf_msg_id = master_pdf_r.get("result", {}).get("message_id")
-                                if master_pdf_msg_id:
-                                    try:
-                                        premium_url = f"{GH_PAGES_EXAM_URL}?id={master_cache_id}&mode=pdf"
-                                        await tg_post("editMessageReplyMarkup", {
-                                            "chat_id": channel_id, "message_id": master_pdf_msg_id,
-                                            "reply_markup": {"inline_keyboard": [[{"text": "💎 Premium PDF", "url": premium_url}]]}
-                                        })
-                                        asyncio.create_task(_prewarm_premium_pdf(f"{CF_WORKER_URL_2}/api/premium-pdf-view/{master_cache_id}?raw=1"))
-                                    except Exception as be:
-                                        logger.warning(f"[LMS-Send-Multi] exam '{g_title}' master PDF button attach failed: {be}")
+                            merged_pdfs_to_send.append((safe_title, merged_pdf_bytes, g_title, g_sent))
                     except Exception as e:
-                        logger.warning(f"[LMS-Send-Multi] exam '{g_title}' merged PDF send failed: {e}")
+                        logger.warning(f"[LMS-Send-Multi] exam '{g_title}' merged PDF generation failed: {e}")
 
                 exam_entries.append((g_title, g_subject, g_sent, len(g_batch_links), g_batch_links))
+                if master_msg_id:
+                    try:
+                        await edit_msg(channel_id, master_msg_id, _live_multi_summary_text())
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send-Multi] summary live-edit failed: {e}")
 
             if job.get("cancel_requested"):
                 job["status"] = "cancelled"
             else:
-                # ONE combined summary at the very end, covering every exam.
-                if exam_entries:
-                    combined_text = csv_get_multi_exam_master_summary(exam_entries, show_website_link=False)
-                    summary_data = {
-                        "chat_id": channel_id, "text": combined_text,
-                        "parse_mode": "HTML",
-                        "disable_web_page_preview": True,
-                    }
-                    if thread_id:
-                        summary_data["message_thread_id"] = thread_id
+                # Final summary edit (same message, now with every real link
+                # resolved) instead of a new message.
+                if exam_entries and master_msg_id:
                     try:
-                        r = await tg_post("sendMessage", summary_data)
-                        if not r.get("ok") and thread_id:
-                            summary_data.pop("message_thread_id", None)
-                            r = await tg_post("sendMessage", summary_data)
-                        if r.get("ok"):
-                            _msg_id = r.get("result", {}).get("message_id")
-                            if _msg_id and chat_type in ("group", "supergroup"):
-                                try:
-                                    await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": _msg_id, "disable_notification": True})
-                                except Exception as e:
-                                    logger.warning(f"[LMS-Send-Multi] combined summary pin failed: {e}")
+                        await edit_msg(channel_id, master_msg_id, _live_multi_summary_text())
                     except Exception as e:
-                        logger.warning(f"[LMS-Send-Multi] combined summary send failed: {e}")
+                        logger.warning(f"[LMS-Send-Multi] final summary edit failed: {e}")
+                elif exam_entries:
+                    # Initial summary send failed earlier — fall back to a
+                    # fresh message so the summary isn't lost entirely.
+                    try:
+                        combined_text = csv_get_multi_exam_master_summary(exam_entries, show_website_link=False)
+                        r = await tg_post("sendMessage", {
+                            "chat_id": channel_id, "text": combined_text,
+                            "parse_mode": "HTML", "disable_web_page_preview": True,
+                            **({"message_thread_id": thread_id} if thread_id else {}),
+                        })
+                        if r.get("ok"):
+                            master_msg_id = r["result"]["message_id"]
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send-Multi] fallback summary send failed: {e}")
+
+                # Every exam's merged PDF, sent AFTER the summary, replying to
+                # it — no Premium PDF button.
+                for safe_title, merged_pdf_bytes, g_title, g_sent in merged_pdfs_to_send:
+                    try:
+                        merged_caption = f"📖 ATLAS Practice Sheet\n🎯 {g_title or 'MCQ'}\n📝 মোট MCQ: {g_sent}\n🚀 Visit: Atlascourses.com"
+                        await send_document(
+                            channel_id, merged_pdf_bytes, f"{safe_title}_full_style1.pdf",
+                            caption=merged_caption,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=master_msg_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send-Multi] exam '{g_title}' merged PDF send failed: {e}")
+
                 job["status"] = "done"
                 job["pct"] = 100
                 if dm_msg_id:
