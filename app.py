@@ -14702,6 +14702,14 @@ async def _get_pw_browser():
                     # chromium) only produced repeated SIGTRAP crashes on HF Space.
                     # Going back to exactly what worked: playwright's own bundled
                     # chromium (no executable_path override), these 6 flags, every host.
+                    # 2026-11-16: newer Playwright versions (unpinned in requirements.txt)
+                    # default headless=True launches to the "chromium-headless-shell"
+                    # binary instead of full Chromium -- that shell build doesn't support
+                    # page.pdf() the way full Chromium does and was crashing with
+                    # SIGTRAP on launch (not a memory/OOM issue -- RSS was ~200MB).
+                    # channel="chromium" forces the full Chromium binary, restoring the
+                    # exact pre-regression behavior.
+                    channel="chromium",
                     args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
                           "--disable-gpu", "--disable-extensions", "--mute-audio"]
                 ), timeout=30
