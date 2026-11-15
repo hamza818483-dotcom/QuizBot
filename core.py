@@ -2988,7 +2988,7 @@ def add_header_box_to_pdf(pdf_bytes: bytes, name_text: str) -> bytes:
                             width=page_width, height=box_h, mask=None,
                             preserveAspectRatio=False)
             except Exception as be:
-                logger.warning(f"[Header] box image render failed, falling back to plain box: {be}")
+                logger.error(f"[Header] box image render failed, falling back to plain box: {type(be).__name__}: {be}", exc_info=True)
                 c.setFillColorRGB(0, 128 / 255, 0)
                 c.rect(0, page_height - box_h, page_width, box_h, fill=1, stroke=0)
 
@@ -3046,7 +3046,7 @@ def add_footer_box_to_pdf(pdf_bytes: bytes, footer_text: str) -> bytes:
                             width=page_width, height=box_h, mask=None,
                             preserveAspectRatio=False)
             except Exception as fe:
-                logger.warning(f"[Footer] box image render failed, falling back to plain box: {fe}")
+                logger.error(f"[Footer] box image render failed, falling back to plain box: {type(fe).__name__}: {fe}", exc_info=True)
                 c.setFillColorRGB(1, 0, 0)
                 c.rect(0, 0, page_width, box_h, fill=1, stroke=0)
 
