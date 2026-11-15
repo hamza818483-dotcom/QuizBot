@@ -1213,60 +1213,9 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
         except Exception as e:
             logger.warning(f"[LMS-Send] pre-msg link edit failed: {e}")
 
-    if pre_msg_id and sent:
-        # সব poll পাঠানো শেষ হওয়ার পর — pre-message (topic name) কে reply
-        # করে আলাদা একটা নতুন message পাঠানো হয়, তাতেই Poll Again/Quiz
-        # Again/Premium PDF বাটন embedded থাকে (আগে প্রথম poll-এর নিজের
-        # reply_markup edit করে বসানো হতো, যেটা মাঝেমধ্যে 429/transient
-        # error-এ silently miss হয়ে যেত কোনো topic-এ — এখন নতুন sendMessage
-        # হওয়ায় সরাসরি একবারেই button-সহ যায়, আর retry থাকায় কোনো topic
-        # miss করে না)।
-        _kb = await _lms_first_poll_kb(batch_cache_id)
-        _btn_ok = False
-        for _attempt in range(4):  # retry w/ backoff — survives 429 bursts right after the poll-send loop
-            try:
-                _r = await tg_post("sendMessage", {
-                    "chat_id": channel_id,
-                    "text": "👆 এই টপিকের MCQ গুলো আবার practice করতে নিচের বাটন ব্যবহার করো:",
-                    "reply_to_message_id": pre_msg_id,
-                    **({"message_thread_id": thread_id} if thread_id else {}),
-                    "reply_markup": _kb,
-                })
-                if _r.get("ok"):
-                    _btn_ok = True
-                    break
-                _desc = (_r.get("description") or "").lower()
-                if "retry_after" in _r or "too many requests" in _desc:
-                    _wait = _r.get("parameters", {}).get("retry_after", 2 + _attempt * 2)
-                    await asyncio.sleep(_wait)
-                    continue
-                if "message to reply to not found" in _desc:
-                    # reply target gone — retry once plain, still don't skip the buttons
-                    try:
-                        _r2 = await tg_post("sendMessage", {
-                            "chat_id": channel_id,
-                            "text": "👆 এই টপিকের MCQ গুলো আবার practice করতে নিচের বাটন ব্যবহার করো:",
-                            **({"message_thread_id": thread_id} if thread_id else {}),
-                            "reply_markup": _kb,
-                        })
-                        if _r2.get("ok"):
-                            _btn_ok = True
-                    except Exception:
-                        pass
-                    break
-                await asyncio.sleep(1.5 + _attempt)
-            except Exception as e:
-                logger.warning(f"[LMS-Send] topic button message attempt {_attempt+1} failed: {e}")
-                await asyncio.sleep(1.5 + _attempt)
-        if not _btn_ok:
-            logger.error(f"[LMS-Send] topic button message FAILED after retries — topic='{topic}' pre_msg_id={pre_msg_id} chat={channel_id}")
-            try:
-                await tg_post("sendMessage", {
-                    "chat_id": OWNER_ID,
-                    "text": f"⚠️ LMS Send: '{topic}' টপিকের practice বাটন message পাঠানো যায়নি (retry শেষেও)। ম্যানুয়ালি চেক করো।"
-                })
-            except Exception:
-                pass
+    # 2026-11-16: separate post-poll "আবার practice করতে..." message+button
+    # removed per request — PDF (below), which already replies to pre_msg_id
+    # and carries Poll Again/Quiz Again buttons, covers this on its own.
 
     pdf_bytes = await _generate_style1_pdf_guaranteed(mcqs, topic, chat_id=0)
     if pdf_bytes:
