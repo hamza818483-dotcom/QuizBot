@@ -1467,11 +1467,35 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                         merged_pdf_bytes = await _generate_combined_topicwise_pdf(topic_groups, g_title or "MCQ", channel_id)
                         if merged_pdf_bytes:
                             merged_caption = f"📖 ATLAS Practice Sheet\n🎯 {g_title or 'MCQ'}\n📝 মোট MCQ: {g_sent}\n🚀 Visit: Atlascourses.com"
-                            await send_document(
+                            # Light-weight merged cache row (no PDF re-render --
+                            # just a DB upsert) so Premium PDF can browser-view
+                            # ALL of this exam's topics combined, same R2-cached
+                            # /api/premium-pdf-view pipeline every other Premium
+                            # PDF link uses.
+                            master_cache_id = None
+                            try:
+                                master_cache_id = gen_session_id()
+                                await db_save_mcq_cache(master_cache_id, master_cache_id, 0, g_title or "MCQ", g_all_mcqs, channel_id=channel_id)
+                            except Exception as ce:
+                                logger.warning(f"[LMS-Send-Multi] exam '{g_title}' master cache save failed: {ce}")
+                                master_cache_id = None
+                            master_pdf_r = await send_document(
                                 channel_id, merged_pdf_bytes, f"{safe_title}_full_style1.pdf",
                                 caption=merged_caption,
                                 message_thread_id=thread_id,
                             )
+                            if master_cache_id and master_pdf_r and master_pdf_r.get("ok"):
+                                master_pdf_msg_id = master_pdf_r.get("result", {}).get("message_id")
+                                if master_pdf_msg_id:
+                                    try:
+                                        premium_url = f"{GH_PAGES_EXAM_URL}?id={master_cache_id}&mode=pdf"
+                                        await tg_post("editMessageReplyMarkup", {
+                                            "chat_id": channel_id, "message_id": master_pdf_msg_id,
+                                            "reply_markup": {"inline_keyboard": [[{"text": "💎 Premium PDF", "url": premium_url}]]}
+                                        })
+                                        asyncio.create_task(_prewarm_premium_pdf(f"{CF_WORKER_URL_2}/api/premium-pdf-view/{master_cache_id}?raw=1"))
+                                    except Exception as be:
+                                        logger.warning(f"[LMS-Send-Multi] exam '{g_title}' master PDF button attach failed: {be}")
                     except Exception as e:
                         logger.warning(f"[LMS-Send-Multi] exam '{g_title}' merged PDF send failed: {e}")
 
