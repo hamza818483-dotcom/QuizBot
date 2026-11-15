@@ -45,7 +45,18 @@ try:
     # Keep this virtual-address guard generous; Render's actual 512MB
     # container memory limit still enforces the physical RAM ceiling.
     # 8192MB is a VIRTUAL address-space limit, not an 8GB RAM allocation.
-    _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "8192"))
+    #
+    # 2026-11-16: raised 8192->49152 (48GB). Chromium's PartitionAlloc reserves
+    # a "GigaCage" of virtual address space on startup (regular + BRP pools,
+    # tens of GB combined on 64-bit) even though almost none of it is ever
+    # committed/touched physically. An 8GB RLIMIT_AS (inherited by Playwright's
+    # Chromium child process) is well under that reservation, so Chromium
+    # aborted with "partition_address_space.cc Check failed: false" /
+    # HandleGigaCageAllocFailureOutOfVASpace on every launch. 48GB of VIRTUAL
+    # headroom costs nothing in actual RAM -- the real physical ceiling is
+    # still the host's container memory limit (e.g. Render/HF's 512MB-1GB),
+    # which this rlimit does not and should not substitute for.
+    _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "49152"))
     _RAM_CAP_BYTES = _RAM_CAP_MB * 1024 * 1024
     _soft, _hard = _resource.getrlimit(_resource.RLIMIT_AS)
     _new_hard = _RAM_CAP_BYTES if (_hard == _resource.RLIM_INFINITY or _hard > _RAM_CAP_BYTES) else _hard
