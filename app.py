@@ -1722,12 +1722,20 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 except Exception as e:
                     logger.warning(f"[LMS-Send-Links] cover image failed: {e}")
                     _cover_bytes = None
+            _part_msg_ids = []  # every sent part's message_id, in order -- every one gets pinned
+            _pin_fail_count = 0
             for _i, _txt in enumerate(_msgs):
                 if job.get("cancel_requested"):
                     job["status"] = "cancelled"
                     return
+                # 2026-11-16: when content overflows into multiple posts, tag
+                # each part with a "Part N/Total" header so the series reads
+                # clearly in the channel (every part also gets pinned below).
+                _part_txt = _txt
+                if _n > 1:
+                    _part_txt = f"◼️<b>Part {_i + 1:02d}/{_n:02d}</b>\n{sep}\n{_txt}"
                 send_data = {
-                    "chat_id": channel_id, "text": _txt,
+                    "chat_id": channel_id, "text": _part_txt,
                     "parse_mode": "HTML",
                     "disable_web_page_preview": True,
                 }
@@ -1735,7 +1743,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     send_data["message_thread_id"] = thread_id
                 r = None
                 if _i == 0 and _cover_bytes:
-                    r = await send_photo(channel_id, _cover_bytes, caption=_txt, message_thread_id=thread_id or None)
+                    r = await send_photo(channel_id, _cover_bytes, caption=_part_txt, message_thread_id=thread_id or None)
                     if not r.get("ok"):
                         logger.warning(f"[LMS-Send-Links] cover photo send failed ({r.get('description') or r.get('error')}) -> text fallback")
                         r = None
@@ -1755,19 +1763,57 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 if _i == 0:
                     sent_chat = r.get("result", {}).get("chat", {})
                     sent_msg_id = r.get("result", {}).get("message_id")
-                    # the main post (image + gathered summary) gets PINNED, same as the "all" mode
-                    if sent_msg_id:
-                        _pok, _pdesc = await _lms_pin_main_post(channel_id, sent_msg_id)
-                        if not _pok:
-                            logger.warning(f"[LMS-Send-Links] main post pin failed: {_pdesc}")
-                            job["warning"] = f"pin failed: {_pdesc}"
-                            try:
-                                await tg_post("sendMessage", {"chat_id": OWNER_ID, "text": f"⚠️ LMS Send: main post pin করা যায়নি ({_pdesc or 'unknown'}).\nবটকে ওই চ্যাটে 'Pin messages' permission দাও।"})
-                            except Exception:
-                                pass
+                _this_msg_id = r.get("result", {}).get("message_id")
+                if _this_msg_id:
+                    _part_msg_ids.append(_this_msg_id)
+                    # EVERY part gets pinned now (not just the first) -- each
+                    # one is a standalone post the student may land on first.
+                    _pok, _pdesc = await _lms_pin_main_post(channel_id, _this_msg_id)
+                    if not _pok:
+                        _pin_fail_count += 1
+                        logger.warning(f"[LMS-Send-Links] part {_i + 1}/{_n} pin failed: {_pdesc}")
                 job["pct"] = int((_i + 1) * 100 / _n)
                 if _i < _n - 1:
                     await asyncio.sleep(1.2)  # groups allow ~20 msgs/min
+            if _pin_fail_count:
+                job["warning"] = f"{_pin_fail_count}/{_n} part(s) pin করা যায়নি"
+                try:
+                    await tg_post("sendMessage", {"chat_id": OWNER_ID, "text": f"⚠️ LMS Send: {_pin_fail_count}/{_n} part pin করা যায়নি।\nবটকে ওই চ্যাটে 'Pin messages' permission দাও।"})
+                except Exception:
+                    pass
+            # 2026-11-16: when the content had to be split into multiple
+            # parts, close out with one summary post listing every topic and
+            # which part it landed in (Part-01, 02, 03...) -- then pin that
+            # summary too, so both the series and the index stay pinned.
+            if _n > 1:
+                _topic_names = []
+                for g in groups:
+                    for batch in (g.get("batches") or []):
+                        if batch.get("mcqs"):
+                            _topic_names.append((batch.get("topic") or "Special MCQ By ATLAS").strip())
+                _summary_lines = [f"📋 <b>সামারি — মোট {_n}টি Part এ পাঠানো হয়েছে</b>", sep]
+                for _tn_i, _tn in enumerate(_topic_names):
+                    _summary_lines.append(f"{_tn_i + 1}. {_html_escape(_tn)}")
+                _summary_lines.append(sep)
+                _summary_lines.append(f"📦 মোট Part: {_n}টি (" + ", ".join(f"Part-{_k+1:02d}" for _k in range(_n)) + ")")
+                _summary_text = "\n".join(_summary_lines)
+                try:
+                    _sum_r = await tg_post("sendMessage", {
+                        "chat_id": channel_id, "text": _summary_text,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                        **({"message_thread_id": thread_id} if thread_id else {}),
+                    })
+                    if _sum_r.get("ok"):
+                        _sum_msg_id = _sum_r.get("result", {}).get("message_id")
+                        if _sum_msg_id:
+                            _spok, _spdesc = await _lms_pin_main_post(channel_id, _sum_msg_id)
+                            if not _spok:
+                                logger.warning(f"[LMS-Send-Links] summary post pin failed: {_spdesc}")
+                    else:
+                        logger.warning(f"[LMS-Send-Links] summary post send failed: {_sum_r.get('description')}")
+                except Exception as e:
+                    logger.warning(f"[LMS-Send-Links] summary post error: {e}")
             logger.info(
                 f"[LMS-Send-Links] posted OK ({_n} msg) -> chat_id={channel_id} resolved_chat={sent_chat.get('id')} "
                 f"type={sent_chat.get('type')} title={sent_chat.get('title')!r} first_message_id={sent_msg_id} thread_id={thread_id}"
