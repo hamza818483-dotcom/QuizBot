@@ -1608,18 +1608,15 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                             f"<a href=\"{pdf_link}\"><b>📄 Premium PDF</b></a>"
                         )
                     elif links_variant == "links_only":
-                        # Mood 2: ONLY Poll Practice, Quiz Solve, Website Exam --
-                        # no Rapid Practice, no Premium PDF.
-                        exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+                        # Mood 2: ONLY Poll Practice, Quiz Solve -- no Website
+                        # Exam, no Rapid Practice, no Premium PDF.
                         quote_body = (
                             f"<b>{_serial}. {_html_escape(topic)}</b>\n"
                             f"📌 মোট MCQ: {len(mcqs)}\n"
                             f"───────────\n"
                             f"<a href=\"{poll_link}\"><b>🔰 Poll Practice</b></a>"
                             f"   "
-                            f"<a href=\"{quiz_link}\"><b>🔗 Quiz Solve</b></a>\n"
-                            f"───────────\n"
-                            f"<a href=\"{exam_link}\"><b>🌐 Website Exam</b></a>"
+                            f"<a href=\"{quiz_link}\"><b>🔗 Quiz Solve</b></a>"
                         )
                     else:
                         exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
