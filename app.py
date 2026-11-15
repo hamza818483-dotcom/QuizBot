@@ -1586,7 +1586,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     poll_link = f"https://t.me/{bot_un}?start=poll_{cache_id}"
                     quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
                     pdf_link = f"{CF_WORKER_URL_2}/api/premium-pdf-view/{cache_id}"
-                    if not website_only:
+                    if not website_only and links_variant != "links_only":
                         asyncio.create_task(_prewarm_premium_pdf(f"{pdf_link}?raw=1"))
                     if website_only:
                         exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
@@ -1606,6 +1606,20 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                             f"<a href=\"{quiz_link}\"><b>🔗 Quiz Solve</b></a>\n"
                             f"───────────\n"
                             f"<a href=\"{pdf_link}\"><b>📄 Premium PDF</b></a>"
+                        )
+                    elif links_variant == "links_only":
+                        # Mood 2: ONLY Poll Practice, Quiz Solve, Website Exam --
+                        # no Rapid Practice, no Premium PDF.
+                        exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+                        quote_body = (
+                            f"<b>{_serial}. {_html_escape(topic)}</b>\n"
+                            f"📌 মোট MCQ: {len(mcqs)}\n"
+                            f"───────────\n"
+                            f"<a href=\"{poll_link}\"><b>🔰 Poll Practice</b></a>"
+                            f"   "
+                            f"<a href=\"{quiz_link}\"><b>🔗 Quiz Solve</b></a>\n"
+                            f"───────────\n"
+                            f"<a href=\"{exam_link}\"><b>🌐 Website Exam</b></a>"
                         )
                     else:
                         exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
