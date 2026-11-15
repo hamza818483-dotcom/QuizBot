@@ -23,46 +23,28 @@ import string
 import re
 import html as _html_mod
 
-# RAM safety (small-RAM hosts, e.g. Render free 512MB): cap this process's
-# own address space so a runaway allocation (large PDF decode, stacked
-# parallel Gemini-image calls) raises a catchable MemoryError in that one
-# request/task instead of the OS OOM-killing the whole process (which drops
-# every in-flight user and restarts the bot). Best-effort: RLIMIT_AS isn't
-# available on Windows, and the platform may not honor it -- failures here
-# are silently ignored rather than crashing startup.
-try:
-    import resource as _resource
-    # 2026-10-27: raised 450->1000. RLIMIT_AS caps virtual address space, not
-    # physical RSS -- OpenBLAS (numpy/opencv) pre-reserves large virtual thread-pool
-    # buffers on startup that count against this limit even though they're barely
-    # touched physically, so 450MB was tripping on normal library init, not actual
-    # memory pressure (OpenBLAS "Memory allocation still failed after 10 retries").
-    #
-    # 2026-11-08: Chromium/ V8 reserves large VIRTUAL address ranges at
-    # startup (including a multi-GB pointer-compression cage). RLIMIT_AS is
-    # inherited by Playwright's Chromium child processes, so a 2500MB cap
-    # can make Chromium abort during launch even when physical RSS is low.
-    # Keep this virtual-address guard generous; Render's actual 512MB
-    # container memory limit still enforces the physical RAM ceiling.
-    # 8192MB is a VIRTUAL address-space limit, not an 8GB RAM allocation.
-    #
-    # 2026-11-16: raised 8192->49152 (48GB). Chromium's PartitionAlloc reserves
-    # a "GigaCage" of virtual address space on startup (regular + BRP pools,
-    # tens of GB combined on 64-bit) even though almost none of it is ever
-    # committed/touched physically. An 8GB RLIMIT_AS (inherited by Playwright's
-    # Chromium child process) is well under that reservation, so Chromium
-    # aborted with "partition_address_space.cc Check failed: false" /
-    # HandleGigaCageAllocFailureOutOfVASpace on every launch. 48GB of VIRTUAL
-    # headroom costs nothing in actual RAM -- the real physical ceiling is
-    # still the host's container memory limit (e.g. Render/HF's 512MB-1GB),
-    # which this rlimit does not and should not substitute for.
-    _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "49152"))
-    _RAM_CAP_BYTES = _RAM_CAP_MB * 1024 * 1024
-    _soft, _hard = _resource.getrlimit(_resource.RLIMIT_AS)
-    _new_hard = _RAM_CAP_BYTES if (_hard == _resource.RLIM_INFINITY or _hard > _RAM_CAP_BYTES) else _hard
-    _resource.setrlimit(_resource.RLIMIT_AS, (_RAM_CAP_BYTES, _new_hard))
-except Exception:
-    pass
+# RAM safety (small-RAM hosts, e.g. Render free 512MB) -- ONLY on Render.
+# 2026-11-16: this entire RLIMIT_AS cap is disabled outside Render. It was
+# built to catch runaway allocations on Render's 512MB box, but it
+# unconditionally capped virtual address space on every host, and Chromium's
+# PartitionAlloc GigaCage reservation (tens of GB virtual on startup, almost
+# none physically committed) kept exceeding it -- "partition_address_space.cc
+# Check failed: false" / HandleGigaCageAllocFailureOutOfVASpace on every
+# Playwright Chromium launch. HF has real RAM headroom and no equivalent
+# constraint, so the whole guard is skipped there rather than tuned further;
+# this mirrors IS_RENDER gating used throughout the rest of the codebase
+# (RAM_LIMIT_MB in core.py, PDF/parallelism caps, etc).
+_IS_RENDER_ENV = bool(os.environ.get("RENDER")) or "render.com" in (os.environ.get("RENDER_EXTERNAL_URL", "") or "")
+if _IS_RENDER_ENV:
+    try:
+        import resource as _resource
+        _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "1000"))
+        _RAM_CAP_BYTES = _RAM_CAP_MB * 1024 * 1024
+        _soft, _hard = _resource.getrlimit(_resource.RLIMIT_AS)
+        _new_hard = _RAM_CAP_BYTES if (_hard == _resource.RLIM_INFINITY or _hard > _RAM_CAP_BYTES) else _hard
+        _resource.setrlimit(_resource.RLIMIT_AS, (_RAM_CAP_BYTES, _new_hard))
+    except Exception:
+        pass
 
 def _html_escape(s: str) -> str:
     return _html_mod.escape(s or "", quote=False)
