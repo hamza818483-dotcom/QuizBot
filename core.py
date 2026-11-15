@@ -1175,7 +1175,13 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
     # D1 query) in the same request, not just this one. Skip the b64 CF
     # path earlier and go straight to raw-bytes direct multipart upload
     # (no in-memory doubling) for anything above 15MB.
-    SKIP_CF_THRESHOLD = 15 * 1024 * 1024  # ~15MB raw -- avoid base64 double-buffer on 512MB host
+    # 2026-11-15: direct api.telegram.org is network-unreachable from this
+    # host (ConnectError on every attempt — see comment above), so skipping
+    # CF Worker above this threshold sent files straight into a dead path
+    # with guaranteed failure. Raised close to Telegram's 50MB ceiling so
+    # CF Worker (the only path that works here) is always tried first;
+    # the base64 double-buffer risk is secondary to a guaranteed failure.
+    SKIP_CF_THRESHOLD = 45 * 1024 * 1024  # ~45MB raw -- keep CF Worker as primary path up to near TG's 50MB cap
     skip_cf = len(file_bytes) > SKIP_CF_THRESHOLD
     if skip_cf:
         logger.warning(f"[sendDoc] file {len(file_bytes)}B exceeds CF threshold, skipping CF Worker paths")
