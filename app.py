@@ -2282,7 +2282,7 @@ async def url_to_csv(request: Request):
     if not is_plain_url(url):
         return JSONResponse({"ok": False, "error": "Valid http(s) URL দিন।"}, status_code=400)
 
-    is_rayvila = is_rayvila_url(url)
+    is_rayvila = False  # 2026-11-16: Rayvila system disabled; was: is_rayvila_url(url)
     try:
         if is_rayvila:
             result = await scrape_rayvila_exam(url)
@@ -37811,7 +37811,10 @@ async def handle_message(msg: dict):
 
     # Auto Rayvila exam link → scripted login→exam flow + auto CSV (checked
     # before the generic URL capture below, since it needs a different pipeline)
-    if text and not msg.get("reply_to_message") and is_rayvila_url(text):
+    # 2026-11-16: DISABLED per request — Rayvila link system turned off at
+    # the trigger. atlas_rayvila.py / scrape_rayvila_exam / /api/url-to-csv
+    # Rayvila branch left intact, just unreachable from this entry point.
+    if False and text and not msg.get("reply_to_message") and is_rayvila_url(text):
         _spawn_command_task(uid, _process_rayvila_auto(msg, text.strip()))
         return
 
