@@ -1276,14 +1276,13 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
     branching behavior inside the job.
 
     links_variant (only relevant when links_only=True):
-      "full"          — Poll Practice, Quiz Solve, Website Exam, Rapid
-                        Practice Game, Premium PDF (existing behavior).
-      "poll_quiz_pdf" — only Poll Practice, Quiz Solve, Premium PDF; no
-                        Website Exam / Rapid Practice Game link anywhere,
-                        including the footer's "Website:" line.
-      "website_only"  — only a single Website Exam link per topic; no
-                        Poll Practice / Quiz Solve / Rapid Practice Game /
-                        Premium PDF link anywhere.
+      "links_only"    — Mood 2: only Poll Practice, Quiz Solve.
+      "poll_quiz_pdf" — Mood 3: only Poll Practice, Quiz Solve, Premium PDF.
+      "website_only"  — Mood 4: only a single Website Exam link per topic.
+      "all_links"     — Mood 5: ALL 5 — Poll Practice, Quiz Solve, Website
+                        Exam, Rapid Practice Game, Premium PDF.
+      "full" / anything unrecognized — same as "all_links" (fallback,
+                        kept for backward compatibility).
     """
     job = LMS_SEND_JOBS[job_id]
     dm_msg_id = None
@@ -1615,6 +1614,11 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                             f"<a href=\"{quiz_link}\"><b>🔗 Quiz Solve</b></a>"
                         )
                     else:
+                        # Mood 5 (links_variant="all_links"; also the
+                        # fallback for "full"/unrecognized values, same as
+                        # before): ALL 5 links in one post -- Poll Practice,
+                        # Quiz Solve, Website Exam, Rapid Practice Game,
+                        # Premium PDF.
                         exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
                         quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
                         quote_body = (
