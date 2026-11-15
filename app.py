@@ -1221,7 +1221,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     if pdf_bytes:
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
         btn_kb = await _lms_pdf_buttons_poll_quiz_only(batch_cache_id)
-        _pdf_caption = csv_get_pdf_caption(topic, is_channel=is_channel)
+        _pdf_caption = f"📌Topic:{topic or 'Special MCQ By ATLAS'}\n✅MCQ:{len(mcqs)}"
         if first_link:
             _pdf_caption += f"\n\n🔗 First Poll Link:\n{first_link}"
         pdf_doc_r = await send_document(
