@@ -11751,16 +11751,31 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
                     _cur_sub = _row_subtopic or None
                 elif _row_subtopic:
                     _cur_sub = _row_subtopic
-            opts_raw = [
+            opt5_raw = (row_norm.get("option5") or "").strip()
+            opts4_raw = [
                 row_norm.get("option1", ""), row_norm.get("option2", ""),
-                row_norm.get("option3", ""), row_norm.get("option4", ""), row_norm.get("option5", "")
+                row_norm.get("option3", ""), row_norm.get("option4", "")
             ]
-            opts = [o.strip() for o in opts_raw if o.strip()]
-            if len(opts) < 2:
-                continue
+            opts4 = [o.strip() for o in opts4_raw if o.strip()]
             ans_raw = str(row_norm.get("answer", "1")).strip().upper()
-            ans_map = {"1": "A", "2": "B", "3": "C", "4": "D", "A": "A", "B": "B", "C": "C", "D": "D"}
-            ans = ans_map.get(ans_raw, "A")
+            # answer == "5" is the double/multi-answer sentinel: option5
+            # holds the correct answers' own text joined by '+', not a
+            # real 5th choice -- decode it into a list of letters by
+            # matching each '+'-split piece back to its option1-4 text.
+            if ans_raw == "5" and opt5_raw:
+                opts = opts4
+                if len(opts) < 2:
+                    continue
+                correct_texts = [p.strip() for p in opt5_raw.split("+") if p.strip()]
+                letter_by_text = {o: chr(65 + i) for i, o in enumerate(opts4_raw[:4]) if o.strip()}
+                letters = [letter_by_text[t] for t in correct_texts if t in letter_by_text]
+                ans = letters if len(letters) > 1 else (letters[0] if letters else "A")
+            else:
+                opts = opts4
+                if len(opts) < 2:
+                    continue
+                ans_map = {"1": "A", "2": "B", "3": "C", "4": "D", "A": "A", "B": "B", "C": "C", "D": "D"}
+                ans = ans_map.get(ans_raw, "A")
             mcq = {
                 "question": _strip_q_numbering(q.strip()), "options": opts, "answer": ans,
                 "explanation": row_norm.get("explanation", "").strip()
@@ -11821,8 +11836,64 @@ async def _ensure_explanations_before_csv(mcqs: list) -> list:
     return mcqs
 
 
-async def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
-    """MCQ list → CSV bytes. NEW dual-purpose style: writes 'topic'/
+_UNDERLINE_MARK_RE = re.compile(r'\*\*(.+?)\*\*')
+
+def _convert_underline_markers(text: str) -> tuple:
+    """Converts the extraction pipeline's '**word**' underline-marker
+    convention into literal '<u>word</u>' HTML tags for CSV output.
+    Returns (converted_text, had_underline: bool)."""
+    if not text or '**' not in text:
+        return text, False
+    converted = _UNDERLINE_MARK_RE.sub(lambda m: f"<u>{m.group(1)}</u>", text)
+    return converted, (converted != text)
+
+def _mcq_has_underline(m: dict) -> bool:
+    """Checks question + all options for any '**..**' underline marker
+    (pre-conversion) — used to build the per-file underline-Q caption."""
+    if '**' in (m.get("question") or ""):
+        return True
+    for o in (m.get("options") or []):
+        if isinstance(o, str) and '**' in o:
+            return True
+    return False
+
+def _get_mcq_answer_letters(m: dict) -> list:
+    """Normalizes an MCQ's answer into a list of A/B/C/D letters.
+    Supports: single letter 'B', a list/tuple ['B','C'], or a combined
+    string like 'BC' / 'B,C' / 'B+C' (all treated as multi-answer)."""
+    raw = m.get("answer", "A")
+    if isinstance(raw, (list, tuple)):
+        letters = [str(x).strip().upper() for x in raw if str(x).strip()]
+    else:
+        s = str(raw).strip().upper()
+        if re.fullmatch(r'[ABCD]{2,4}', s):
+            letters = list(s)
+        else:
+            letters = [p.strip().upper() for p in re.split(r'[+,/]', s) if p.strip()]
+    letters = [l for l in letters if l in ("A", "B", "C", "D")]
+    return letters or ["A"]
+
+def _format_mcq_answer_cell(m: dict, opts: list) -> tuple:
+    """Builds the (answer_cell, option5_cell) pair for one CSV row.
+    Single correct answer -> answer = 1/2/3/4 (position), option5 blank
+    (unchanged behavior). Multiple correct answers -> option5 = the
+    correct answers' OWN TEXT joined with '+' (e.g. 'রামপুরা+সোনারগাঁও'),
+    answer = literal '5' (sentinel: downstream reads option5, not a
+    real 5th choice)."""
+    letters = _get_mcq_answer_letters(m)
+    idx_map = {"A": 0, "B": 1, "C": 2, "D": 3}
+    if len(letters) <= 1:
+        ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+        return ans_map.get(letters[0] if letters else "A", "1"), ""
+    texts = []
+    for l in letters:
+        i = idx_map.get(l)
+        if i is not None and i < len(opts) and opts[i]:
+            texts.append(opts[i])
+    return "5", "+".join(texts)
+
+async def _mcqs_to_csv_bytes(mcqs: list) -> tuple:
+    """MCQ list → (csv_bytes, meta). NEW dual-purpose style: writes 'topic'/
     'subtopic' columns, filling them in only on the row where a segment
     actually changes (blank on every row that continues the same
     topic/subtopic) — matches _parse_csv_bytes's NEW-style reading and
@@ -11832,6 +11903,16 @@ async def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
     2026-08-29: now auto-fills any missing/thin explanation before writing
     (same logic /ai runs manually) so every QuizBot-generated CSV already
     has full explanations, no separate /ai step needed.
+
+    2026-11-16: (1) underline markers ('**word**') from extraction are
+    converted to '<u>word</u>' in question/option text, and 'meta
+    ["underline_qnos"]' lists the 1-based row numbers that had underline,
+    for the caller to mention in the file caption. (2) MCQs with more
+    than one correct answer are written with option5 = correct answers'
+    text joined by '+' and answer = '5' (sentinel) instead of the normal
+    1-4 position; 'meta["multi_answer_qnos"]' lists those row numbers.
+    Returns a tuple (csv_bytes, meta) — NOT bytes alone; callers must
+    unpack it.
     """
     mcqs = await _ensure_explanations_before_csv(mcqs)
     import io, csv as csv_mod_local
@@ -11839,21 +11920,54 @@ async def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
     w = csv_mod_local.writer(buf)
     w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                 "answer", "explanation", "type", "section", "topic", "subtopic"])
-    ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
     _last_main, _last_sub = None, None
-    for m in mcqs:
-        opts = (m.get("options", []) + ["", "", "", ""])[:4]
+    underline_qnos = []
+    multi_answer_qnos = []
+    for row_no, m in enumerate(mcqs, start=1):
+        if _mcq_has_underline(m):
+            underline_qnos.append(row_no)
+
+        q_text, _ = _convert_underline_markers(m.get("question", ""))
+        raw_opts = (m.get("options", []) + ["", "", "", ""])[:4]
+        opts = []
+        for o in raw_opts:
+            o_text, _ = _convert_underline_markers(o if isinstance(o, str) else "")
+            opts.append(o_text)
+
+        ans_cell, opt5_cell = _format_mcq_answer_cell(m, opts)
+        if opt5_cell:
+            multi_answer_qnos.append(row_no)
+
         main_t = m.get("_pdfs_topic") or ""
         sub_t = m.get("_pdfs_subtopic") or ""
         topic_cell = main_t if main_t != _last_main else ""
         subtopic_cell = sub_t if (sub_t != _last_sub or topic_cell) else ""
         _last_main, _last_sub = main_t, sub_t
         w.writerow([
-            m.get("question", ""), opts[0], opts[1], opts[2], opts[3], "",
-            ans_map.get(m.get("answer", "A"), "1"), _strip_img_tag(m.get("explanation", "")), "1", "1",
+            q_text, opts[0], opts[1], opts[2], opts[3], opt5_cell,
+            ans_cell, _strip_img_tag(m.get("explanation", "")), "1", "1",
             topic_cell, subtopic_cell
         ])
-    return buf.getvalue().encode("utf-8-sig")
+    meta = {"underline_qnos": underline_qnos, "multi_answer_qnos": multi_answer_qnos}
+    return buf.getvalue().encode("utf-8-sig"), meta
+
+
+def _csv_meta_caption_suffix(meta: dict) -> str:
+    """Builds the extra caption lines reporting underline / multi-answer
+    MCQs found in this CSV, so the person can spot-check them. Returns ''
+    when neither occurred (no extra lines added)."""
+    if not meta:
+        return ""
+    lines = []
+    u = meta.get("underline_qnos") or []
+    if u:
+        nos = ", ".join(f"Q{n}" for n in u)
+        lines.append(f"✏️ Underline ছিল: {nos}")
+    ma = meta.get("multi_answer_qnos") or []
+    if ma:
+        nos = ", ".join(f"Q{n}" for n in ma)
+        lines.append(f"🔀 Double answer (option5 দেখো): {nos}")
+    return ("\n" + "\n".join(lines)) if lines else ""
 
 def _strip_opt_prefix(opt: str) -> str:
     """Option টেক্সটের শুরুতে A) B) ক) খ) 1) 2) ইত্যাদি marker সরায়।"""
@@ -11941,13 +12055,14 @@ async def _handle_clean_command_inner(msg: dict):
         return
 
     cleaned = _clean_mcqs(mcqs)
-    out_bytes = await _mcqs_to_csv_bytes(cleaned)
+    out_bytes, _csv_meta = await _mcqs_to_csv_bytes(cleaned)
     base_name = re.sub(r'\.(csv|json)$', '', file_name, flags=re.I)
 
     if status_msg_id:
         await edit_msg(chat_id, status_msg_id, f"✅ {len(cleaned)}টি MCQ clean হয়েছে!")
     await send_document(chat_id, out_bytes, f"{base_name}_clean.csv",
-                         caption=f"✅ Clean CSV — {len(cleaned)}টি MCQ (numbering/source-tag/option-marker মুক্ত)")
+                         caption=f"✅ Clean CSV — {len(cleaned)}টি MCQ (numbering/source-tag/option-marker মুক্ত)"
+                                 f"{_csv_meta_caption_suffix(_csv_meta)}")
 
 
 _cut_pdf_cache = {}  # file_id -> pdf_bytes (small in-memory cache to skip re-download)
@@ -12694,10 +12809,11 @@ async def _handle_cut_csv_command_inner(msg: dict):
             f"✅ {total}টি MCQ পাওয়া গেছে!\n⏳ {start_no}-{end_no_clamped} range কাটা হচ্ছে...")
 
     base_name = re.sub(r'\.(csv|json)$', '', file_name, flags=re.I)
-    out_bytes = await _mcqs_to_csv_bytes(cut_slice)
+    out_bytes, _csv_meta = await _mcqs_to_csv_bytes(cut_slice)
     out_name = f"{base_name}_cut{start_no}-{end_no_clamped}.csv"
     r = await send_document(chat_id, out_bytes, out_name,
-        caption=f"✂️ Cut: {start_no}-{end_no_clamped} | 📊 {len(cut_slice)}টি MCQ",
+        caption=f"✂️ Cut: {start_no}-{end_no_clamped} | 📊 {len(cut_slice)}টি MCQ"
+                f"{_csv_meta_caption_suffix(_csv_meta)}",
         reply_to_message_id=status_msg_id)
     if not r.get("ok"):
         err = r.get("error") or r.get("description") or "unknown error"
@@ -12778,10 +12894,10 @@ async def _handle_split_command_inner(msg: dict):
     try:
         for i in range(total_parts):
             chunk = mcqs[i * chunk_size:(i + 1) * chunk_size]
-            part_bytes = await _mcqs_to_csv_bytes(chunk)
+            part_bytes, _csv_meta = await _mcqs_to_csv_bytes(chunk)
             part_name = f"{base_name}_part{i+1:02d}.csv"
             r = await send_document(chat_id, part_bytes, part_name,
-                caption=f"📄 Part-{i+1:02d} | 📊 {len(chunk)}টি MCQ")
+                caption=f"📄 Part-{i+1:02d} | 📊 {len(chunk)}টি MCQ{_csv_meta_caption_suffix(_csv_meta)}")
             if not r.get("ok"):
                 logger.error(f"[Split] send_document failed: {r}")
             if status_msg_id:
@@ -18730,9 +18846,10 @@ async def _handle_dagano_impl(msg: dict):
         try:
             all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
             if all_mcqs_flat:
-                csv_bytes = await _mcqs_to_csv_bytes(all_mcqs_flat)
+                csv_bytes, _csv_meta = await _mcqs_to_csv_bytes(all_mcqs_flat)
                 await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
-                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv")
+                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}",
+                    mime_type="text/csv")
         except Exception as csv_err:
             logger.warning(f"[Dagano] CSV auto-send failed: {csv_err}")
 
@@ -19160,10 +19277,10 @@ async def _handle_extra_impl(msg: dict):
         all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
         try:
             if all_mcqs_flat:
-                csv_bytes = await _mcqs_to_csv_bytes(all_mcqs_flat)
+                csv_bytes, _csv_meta = await _mcqs_to_csv_bytes(all_mcqs_flat)
                 await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
-                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv",
-                    reply_to_message_id=status_msg_id)
+                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}",
+                    mime_type="text/csv", reply_to_message_id=status_msg_id)
             else:
                 await send_msg(chat_id, "⚠️ কোনো hand-marked MCQ পাওয়া যায়নি।",
                     reply_to_message_id=status_msg_id)
@@ -19575,9 +19692,10 @@ async def handle_pdf(msg: dict):
             try:
                 all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
                 if all_mcqs_flat:
-                    csv_bytes = await _mcqs_to_csv_bytes(all_mcqs_flat)
+                    csv_bytes, _csv_meta = await _mcqs_to_csv_bytes(all_mcqs_flat)
                     await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
-                        caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv")
+                        caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}",
+                        mime_type="text/csv")
             except Exception as csv_err:
                 logger.warning(f"[PDF] CSV auto-send failed: {csv_err}")
 
