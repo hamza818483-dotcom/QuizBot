@@ -22417,7 +22417,7 @@ def _get_bd_time() -> str:
 # qbm_get_active_prompt() auto-detect a stale DB-cached prompt from before
 # the code update and self-heal to the new default, without needing a manual
 # `DELETE FROM quiz_sessions WHERE key='qbm_active_prompt'` after every edit.
-QBM_PROMPT_VERSION = 4
+QBM_PROMPT_VERSION = 5
 
 QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page — never invent, never skip. 0 MCQs→[]. N MCQs→exactly N.
 
@@ -22465,6 +22465,25 @@ DIAGRAM: question needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2]
 OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]
 """
+
+
+# 2026-11-14 (user request): /qbm specifically doesn't need any explanation
+# at all -- drop the whole EXPLANATION section (verbatim-copy case + the
+# synthesized "সঠিক উত্তর: X" fallback) so the model has less to read/decide
+# and less to generate per MCQ (smaller prompt, smaller output -> faster,
+# cheaper, and less likely to hit the DEADLINE_EXCEEDED timeouts seen under
+# load). "explanation" stays in the output JSON schema as an always-empty
+# string rather than being removed outright, since several call sites do
+# mcq.get("explanation", "") downstream -- keeping the key just means they
+# get "" instead of needing special-casing for a missing key.
+QBM_EXTRACT_PROMPT_NO_EXPLANATION = re.sub(
+    r"EXPLANATION \(keep simple.*?not writing new explanations\.\n\n",
+    "",
+    QBM_EXTRACT_PROMPT_DEFAULT,
+    flags=re.DOTALL,
+).replace(
+    '"explanation":"...",', '"explanation":"",'
+)
 
 
 # 2026-08-27 (per request): Groq (qwen/qwen3.8-27b) has an 8000 TPM hard
@@ -26615,8 +26634,8 @@ async def qbm_get_active_prompt() -> str:
                 logger.info(f"[QBM] DB-cached prompt is stale (v{saved_version} < v{QBM_PROMPT_VERSION}) — auto-healing to new code default")
     except Exception as e:
         logger.warning(f"[QBM] prompt memory load failed: {e}")
-    _qbm_prompt_cache["prompt"] = QBM_EXTRACT_PROMPT_DEFAULT
-    return QBM_EXTRACT_PROMPT_DEFAULT
+    _qbm_prompt_cache["prompt"] = QBM_EXTRACT_PROMPT_NO_EXPLANATION
+    return QBM_EXTRACT_PROMPT_NO_EXPLANATION
 
 async def qbm_set_active_prompt(new_prompt: str, version: int = QBM_PROMPT_VERSION):
     """New prompt update এলে সেটাকে permanent করে save করে — পরের বার থেকে
