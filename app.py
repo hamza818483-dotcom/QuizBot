@@ -22605,6 +22605,44 @@ UNMESH_EXTRACT_PROMPT_GROQ_COMPACT = _swap_to_compact_base(UNMESH_EXTRACT_PROMPT
 ENG_EXTRACT_PROMPT_GROQ_COMPACT = _swap_to_compact_base(ENG_EXTRACT_PROMPT)
 
 
+# 2026-11-16 (per request): /topic, /chem, /bcs, /eng, /unmesh all route
+# through /qbm's generation pipeline but must NOT spend model effort
+# writing explanations -- only /qbm itself keeps explanation generation.
+# This strips (a) the EXPLANATION instruction block and (b) the
+# "explanation" key from the JSON output schema, for every derived
+# prompt. Model still outputs answer/qsn_no/topic_hint etc exactly as
+# before -- explanation is simply never requested, so there's no
+# generation cost/latency for it and no hallucination risk from it.
+def _strip_explanation(prompt: str) -> str:
+    out = prompt
+    out = out.replace(
+        'EXPLANATION (keep simple, max 190 chars Bengali unless case 1):\n'
+        '1) Explanation/reasoning exists on page → copy 100% verbatim, byte-for-byte, no edits (overrides char limit).\n'
+        '2) Nothing on page → one short line: "সঠিক উত্তর: <letter> (<option text>)". Do NOT write a long multi-option breakdown or invent reasoning from outside knowledge — main job is extracting the MCQ as-is, not writing new explanations.\n\n',
+        ''
+    )
+    out = out.replace(
+        'EXPLANATION (max 190 chars Bengali unless verbatim source text): if page has explanation text for this MCQ, copy VERBATIM (overrides length limit). Otherwise build from any relevant page info, correct-option reasoning first. Nothing relevant → best explanation from own knowledge, same structure. Never use phrases like "চিত্রে দেখা যাচ্ছে"/"as shown in the figure" — state facts directly.\n\n',
+        ''
+    )
+    out = out.replace('"explanation":"... (max 190 chars Bengali)",', '')
+    out = out.replace('"explanation":"...",', '')
+    out = out.replace(', "explanation": "..."', '')
+    return out
+
+
+TOPIC_EXTRACT_PROMPT = _strip_explanation(TOPIC_EXTRACT_PROMPT)
+CHEM_EXTRACT_PROMPT = _strip_explanation(CHEM_EXTRACT_PROMPT)
+UNMESH_EXTRACT_PROMPT = _strip_explanation(UNMESH_EXTRACT_PROMPT)
+ENG_EXTRACT_PROMPT = _strip_explanation(ENG_EXTRACT_PROMPT)
+BCS_EXTRACT_PROMPT = _strip_explanation(BCS_EXTRACT_PROMPT)
+BCS_EXTRACT_PROMPT_CALL1 = _strip_explanation(BCS_EXTRACT_PROMPT_CALL1)
+TOPIC_EXTRACT_PROMPT_GROQ_COMPACT = _strip_explanation(TOPIC_EXTRACT_PROMPT_GROQ_COMPACT)
+CHEM_EXTRACT_PROMPT_GROQ_COMPACT = _strip_explanation(CHEM_EXTRACT_PROMPT_GROQ_COMPACT)
+UNMESH_EXTRACT_PROMPT_GROQ_COMPACT = _strip_explanation(UNMESH_EXTRACT_PROMPT_GROQ_COMPACT)
+ENG_EXTRACT_PROMPT_GROQ_COMPACT = _strip_explanation(ENG_EXTRACT_PROMPT_GROQ_COMPACT)
+
+
 def _check_segment_topic_consistency(mcqs: list, context: str = "", forced_boundaries: set = None) -> list:
     """CODE-LEVEL CHECK (used at both Call1 and Call2 stages): walks mcqs in
     read order and finds every 'segment' — the run of MCQs from one
