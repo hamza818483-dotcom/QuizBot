@@ -1120,21 +1120,25 @@ def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 10
     return best
 
 
+# 2026-11-14 (user request): fixed storage group the userbot account AND the
+# bot are both members of. >50MB files get uploaded here by the userbot
+# session, then the BOT forwards that message into the real target chat —
+# forwardMessage is server-side (no re-upload), so it carries no size limit
+# at all, and the message the user sees is a normal bot forward, not
+# something sent from the personal/userbot account directly.
+_LARGE_FILE_STORAGE_GROUP = -1002017050507
+
+
 async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
                                       caption: str = "", reply_to_message_id: int = None,
                                       message_thread_id: int = None) -> Optional[dict]:
-    """2026-11-14 (user request): files over Telegram's 50MB bot-upload cap
-    get uploaded by the existing Telethon USER session instead (real account,
-    not a bot — Telegram allows up to 2GB/4GB-premium per file for those).
-    This reuses poll_extract.SESSION_STR/API_ID/API_HASH, the exact same
-    session /delete already runs in production, so no new login/session is
-    needed. Returns None (caller falls through to its normal error) if the
-    session isn't configured or the upload itself fails for any reason —
-    never raises. The user account must already be a member of chat_id (same
-    requirement /delete has) for this to work in a group/channel; for a
-    private chat with the bot, the user account must share a chat with that
-    user, which generally is NOT the case — this path is mainly useful for
-    groups/channels the owner's own account is already in.
+    """Files over Telegram's 50MB bot-upload cap: upload via the existing
+    Telethon USER session (poll_extract.SESSION_STR — same one /delete already
+    runs, no new login needed; a real account, not a bot, so Telegram allows
+    up to 2GB/4GB-premium per file) into _LARGE_FILE_STORAGE_GROUP, then have
+    the BOT forward that message straight into chat_id. Returns None (caller
+    falls through to its normal 50MB error) if the session isn't configured
+    or anything in the upload/forward fails — never raises.
     """
     try:
         from poll_extract import SESSION_STR as _USR_SESSION, API_ID as _USR_API_ID, API_HASH as _USR_API_HASH
@@ -1153,16 +1157,26 @@ async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
             return None
         buf = _io.BytesIO(file_bytes)
         buf.name = filename
-        sent = await uclient.send_file(
-            chat_id, buf,
+        stored = await uclient.send_file(
+            _LARGE_FILE_STORAGE_GROUP, buf,
             caption=caption or None,
-            reply_to=reply_to_message_id,
             force_document=True,
         )
         await uclient.disconnect()
         size_mb = len(file_bytes) / 1024 / 1024
-        logger.info(f"[sendDoc] {size_mb:.1f}MB file sent via userbot fallback (bot API 50MB cap bypassed)")
-        return {"ok": True, "result": {"message_id": getattr(sent, "id", None)}, "_via": "userbot"}
+
+        # Bot-side forward: server copies the message, no size limit at all.
+        fwd = await tg_post("forwardMessage", {
+            "chat_id": str(chat_id),
+            "from_chat_id": str(_LARGE_FILE_STORAGE_GROUP),
+            "message_id": stored.id,
+        })
+        if not fwd.get("ok"):
+            logger.warning(f"[sendDoc] userbot uploaded ({size_mb:.1f}MB) but bot forward failed: {fwd}")
+            return None
+        logger.info(f"[sendDoc] {size_mb:.1f}MB file: userbot→storage-group, bot forwarded to {chat_id} (50MB cap bypassed)")
+        fwd["_via"] = "userbot+forward"
+        return fwd
     except Exception as e:
         logger.warning(f"[sendDoc] userbot fallback failed: {e}")
         return None
