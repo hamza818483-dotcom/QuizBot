@@ -22388,8 +22388,8 @@ OUTPUT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].
 
 
 TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
-    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    'OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": the text inside the widest, full-page-width BLACK/DARK BACKGROUND banner bar that this MCQ falls under (e.g. "বাংলাদেশ পরিচিতি", "বর্তমান ও পুরাতন নাম, ভৌগোলিক উপনাম", "বাংলাদেশের অবস্থান, আয়তন ও সীমানা") — this is the actual topic name and is CRITICAL, used to detect topic boundaries. STRICT SIZE/COLOR RULE: only a bar that (i) spans the FULL width of the page/column area (edge to edge, not a small box) AND (ii) has a SOLID FULL BLACK background qualifies as a topic banner. A small/short box, a lightly-shaded or colored (non-black) box, or any box that does not stretch the full width is NEVER a topic_hint, no matter what text it contains — treat it as ordinary content and keep the previously active topic_hint. Rules:\n'
@@ -22428,8 +22428,8 @@ ENG_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     'D) Combined answer key on later/adjacent pages (scan forward)\n'
     'None found → "A" + note "Answer not found in source". Convert source letter to the OUTPUT option\'s A/B/C/D position (per OPTION ORDER rule below) — a badge letter is still just a label, it must be remapped the same as any other source answer-letter. Re-verify twice.',
 ).replace(
-    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    'OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ. A brand-new topic on this page ALWAYS restarts numbering at 1 — seeing qsn_no go back to 1 (or a fresh "1.") after a higher number is itself a strong signal a new topic has started here, even before you check for a new banner.\n'
     '- "topic_hint": the text inside the widest, full-page-width BLACK/DARK FILLED BAR that this MCQ falls under (e.g. "Medical Admission 2022-2023 (From APEX English)", "Medical Admission Test 2021-2022") — this is the actual topic name and is CRITICAL, used to detect topic boundaries. STRICT RULE: only a bar that (i) spans the FULL width of the page/column area (edge to edge, not a small box) AND (ii) has a SOLID BLACK/DARK FILLED background AND (iii) has its text printed in WHITE font INSIDE that bar qualifies as a topic banner. A small/short box, a lightly-shaded or colored (non-black) box, a black box with non-white (e.g. black or dark) text, or any bar that does not stretch the full width is NEVER a topic_hint, no matter what text it contains — treat it as ordinary content and keep the previously active topic_hint. Do NOT confuse this full-width WHITE-FONT-ON-BLACK-BAR topic banner with the small black "Ans" answer badge (that one is tiny, sits beside one single MCQ, and only ever contains a single answer letter — never a topic name). Rules:\n'
@@ -22445,8 +22445,8 @@ ENG_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 
 
 CHEM_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
-    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    'OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": the topic-heading text that this MCQ falls under. THIS PAGE STYLE (chemistry/science textbook chapter layout) uses a topic-marker design identified by these signals, checked TOGETHER on any candidate heading line:\n'
@@ -22477,8 +22477,8 @@ BCS_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     'Absolute priority A>B>C>D>E, match by question number. None found → "A" + note "Answer not found in source". Convert source format to A/B/C/D. Re-verify twice.',
     'Absolute priority A>B>C>D>E, match by question number. HARD RULE FOR /bcs: the answer MUST be traced to an actual visual mark/answer table/answer key found in the source images — NEVER pick an answer using your own subject knowledge of what seems factually correct, not even as a tie-breaker; your own knowledge may ONLY be used to build the "explanation" text, never to decide "answer". None of A-E found anywhere in source → output "answer":"A" but ALWAYS also set "no_mark": true and put the literal note "Answer not found in source" as the "explanation" (do not guess a knowledge-based explanation either in this specific case). Convert source format to A/B/C/D. Re-verify twice.'
 ).replace(
-    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    'OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": THIS PAGE STYLE (BCS প্রশ্ন ও সমাধান compilation) marks a new topic with a small banner badge identified by ALL of these signals TOGETHER:\n'
@@ -22536,7 +22536,7 @@ BCS_EXTRACT_PROMPT_CALL1 = BCS_EXTRACT_PROMPT.replace(
 UNMESH_CODE_VERSION_MARKER = "306adaf-groq-fallback-v1"  # bump this any time recovery logic changes; log it once per /unmesh run to confirm deployed code version from Telegram output alone, no server log access needed
 
 UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": the topic-heading text that this MCQ falls under. A topic heading here is identified by ALL THREE of the following together, right before the heading text:\n'
@@ -22592,7 +22592,7 @@ def _swap_to_compact_base(full_prompt: str) -> str:
     that exact shared prefix, strips it off, and prepends the compact base
     instead -- keeping 100% of the topic-detection/segment-ordering rules
     the .replace() call added on top, untouched."""
-    _marker = 'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]'
+    _marker = 'OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].\n[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]'
     prefix_len = QBM_EXTRACT_PROMPT_DEFAULT.find(_marker)
     if prefix_len == -1 or not full_prompt.startswith(QBM_EXTRACT_PROMPT_DEFAULT[:prefix_len]):
         return full_prompt  # prefix mismatch -- leave untouched, safer than guessing
