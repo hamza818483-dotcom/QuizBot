@@ -4,6 +4,25 @@
 # Supabase helpers, FastAPI app instance.
 # Imported by both app.py and quiz.py — no circular dependency.
 # ============================================================
+#
+# ⚠️ HOSTING / HF ToS CONSTRAINTS — READ BEFORE TOUCHING DEPLOY/WEBHOOK CODE ⚠️
+# Full details: DEPLOYMENT.md, docs/DEPLOYMENT_SETUP.md (repo root/docs).
+# 1. HF Spaces network sandbox BLOCKS outbound calls to api.telegram.org
+#    directly AND to *.workers.dev — only *.pages.dev is reachable from HF.
+#    That's why all Telegram calls go through tg_post() → CF proxy
+#    (CF_WORKER_URL / CF_WORKER_URL_2), never httpx straight to Telegram,
+#    when _ON_HUGGINGFACE is True. See _ON_HUGGINGFACE below.
+# 2. Only ONE deployed instance may ever hold the live Telegram webhook for
+#    the production BOT_TOKEN at a time. Running two hosts (primary +
+#    fallback HF Space, or HF + Render) with webhooks BOTH pointed live has
+#    caused a real account ban before. GitHub Actions syncs CODE to a
+#    fallback HF Space, but its webhook must stay inactive until a human
+#    deliberately switches primary (see .github/workflows/sync-to-hf.yml).
+# 3. RENDER_URL is a historical name — it means "current primary backend
+#    URL", which today is almost always the HF Space, not Render.
+# Do not add code that calls setWebhook against more than one host, or that
+# calls api.telegram.org/workers.dev directly when running on HF.
+# ============================================================
 
 import os
 import io
@@ -87,6 +106,20 @@ IS_RENDER = (
     or _running_on == "Render"
     or bool(RENDER_URL and "onrender.com" in RENDER_URL)
 )
+# ⚠️ ToS DANGER ZONE — IS_RENDER / _ON_HUGGINGFACE decide which backend THIS
+# process thinks it is. Never write code that turns on/activates the Render
+# service and the HF Space (or any two hosts) as live bot instances AT THE
+# SAME TIME for the same BOT_TOKEN. Past real incidents:
+#   - Dual-webhook/dual-instance (HF + Render both live) → Telegram account
+#     ban (see DEPLOYMENT.md, docs/DEPLOYMENT_SETUP.md).
+#   - A separate Facebook-automation project got banned before for running
+#     overlapping/parallel automated sessions — same root cause pattern
+#     (platform sees >1 concurrent automated actor on one account/token and
+#     treats it as abuse). Treat "only one live instance, ever" as a hard
+#     rule across ALL platforms this bot touches (Telegram, Facebook, any
+#     future integration), not just HF vs Render.
+# If you need a second instance for testing, point it at a TEST bot token /
+# test account, never the production one, and never enable both at once.
 
 # FIX 2026-11-02: single source of truth for the Render RSS ceiling. Was
 # duplicated as a hardcoded literal at two separate call sites in app.py
@@ -567,7 +600,29 @@ _TG_RATE_LIMITED_METHODS = {
 }
 
 
-async def tg_post(method: str, data: dict) -> dict:
+async def tg_post(method: str, data: dict, _entity_retry: bool = False) -> dict:
+    result = await _tg_post_inner(method, data)
+    # ── Telegram HTML parse_mode chokes on literal '<'/'>' that end up in
+    #    text/caption from interpolated exception strings, browser/Playwright
+    #    log lines, scraped page content, etc. ("can't parse entities: ...").
+    #    Instead of hunting down every f-string call site, catch it centrally
+    #    here: on this specific error, HTML-escape the text/caption and send
+    #    once more so the message still goes out (as literal text) instead of
+    #    silently failing. ──
+    if (not _entity_retry and isinstance(result, dict) and not result.get("ok")
+            and data.get("parse_mode") == "HTML"
+            and "can't parse entities" in (result.get("description") or "").lower()):
+        field = "text" if isinstance(data.get("text"), str) else (
+            "caption" if isinstance(data.get("caption"), str) else None)
+        if field:
+            import html as _html_mod
+            escaped_data = dict(data, **{field: _html_mod.escape(data[field])})
+            logger.warning(f"[TG] {method} entity parse error, retrying with escaped {field}")
+            return await tg_post(method, escaped_data, _entity_retry=True)
+    return result
+
+
+async def _tg_post_inner(method: str, data: dict) -> dict:
     if method in _TG_RATE_LIMITED_METHODS:
         await _tg_rate_limit_wait()
     # ── Global MESSAGE_TOO_LONG guard: editMessageText has no chunking option
@@ -1120,7 +1175,13 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
     # D1 query) in the same request, not just this one. Skip the b64 CF
     # path earlier and go straight to raw-bytes direct multipart upload
     # (no in-memory doubling) for anything above 15MB.
-    SKIP_CF_THRESHOLD = 15 * 1024 * 1024  # ~15MB raw -- avoid base64 double-buffer on 512MB host
+    # 2026-11-15: direct api.telegram.org is network-unreachable from this
+    # host (ConnectError on every attempt — see comment above), so skipping
+    # CF Worker above this threshold sent files straight into a dead path
+    # with guaranteed failure. Raised close to Telegram's 50MB ceiling so
+    # CF Worker (the only path that works here) is always tried first;
+    # the base64 double-buffer risk is secondary to a guaranteed failure.
+    SKIP_CF_THRESHOLD = 45 * 1024 * 1024  # ~45MB raw -- keep CF Worker as primary path up to near TG's 50MB cap
     skip_cf = len(file_bytes) > SKIP_CF_THRESHOLD
     if skip_cf:
         logger.warning(f"[sendDoc] file {len(file_bytes)}B exceeds CF threshold, skipping CF Worker paths")
@@ -2927,7 +2988,7 @@ def add_header_box_to_pdf(pdf_bytes: bytes, name_text: str) -> bytes:
                             width=page_width, height=box_h, mask=None,
                             preserveAspectRatio=False)
             except Exception as be:
-                logger.warning(f"[Header] box image render failed, falling back to plain box: {be}")
+                logger.error(f"[Header] box image render failed, falling back to plain box: {type(be).__name__}: {be}", exc_info=True)
                 c.setFillColorRGB(0, 128 / 255, 0)
                 c.rect(0, page_height - box_h, page_width, box_h, fill=1, stroke=0)
 
@@ -2985,7 +3046,7 @@ def add_footer_box_to_pdf(pdf_bytes: bytes, footer_text: str) -> bytes:
                             width=page_width, height=box_h, mask=None,
                             preserveAspectRatio=False)
             except Exception as fe:
-                logger.warning(f"[Footer] box image render failed, falling back to plain box: {fe}")
+                logger.error(f"[Footer] box image render failed, falling back to plain box: {type(fe).__name__}: {fe}", exc_info=True)
                 c.setFillColorRGB(1, 0, 0)
                 c.rect(0, 0, page_width, box_h, fill=1, stroke=0)
 

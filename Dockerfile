@@ -25,10 +25,13 @@ RUN apt-get update && apt-get install -y \
     curl \
     unzip \
     gcc \
+    make \
+    cmake \
     python3-dev \
     chromium \
     ffmpeg \
     fonts-noto-color-emoji \
+    fonts-unifont \
     libraqm0 \
     libraqm-dev \
     libfribidi-dev \
@@ -38,6 +41,19 @@ RUN apt-get update && apt-get install -y \
     libfreetype-dev \
     libopenjp2-7-dev \
     libtiff5-dev \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2t64 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CHROMIUM_PATH=/usr/bin/chromium
@@ -74,7 +90,7 @@ ENV PATH="/root/.deno/bin:${PATH}"
 # warning) instead of the whole image failing.
 RUN pip install --no-cache-dir --no-binary=:all: --force-reinstall pillow \
     || pip install --no-cache-dir --force-reinstall pillow
-RUN playwright install --with-deps chromium
+RUN playwright install chromium
 
 COPY . .
 

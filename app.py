@@ -23,35 +23,28 @@ import string
 import re
 import html as _html_mod
 
-# RAM safety (small-RAM hosts, e.g. Render free 512MB): cap this process's
-# own address space so a runaway allocation (large PDF decode, stacked
-# parallel Gemini-image calls) raises a catchable MemoryError in that one
-# request/task instead of the OS OOM-killing the whole process (which drops
-# every in-flight user and restarts the bot). Best-effort: RLIMIT_AS isn't
-# available on Windows, and the platform may not honor it -- failures here
-# are silently ignored rather than crashing startup.
-try:
-    import resource as _resource
-    # 2026-10-27: raised 450->1000. RLIMIT_AS caps virtual address space, not
-    # physical RSS -- OpenBLAS (numpy/opencv) pre-reserves large virtual thread-pool
-    # buffers on startup that count against this limit even though they're barely
-    # touched physically, so 450MB was tripping on normal library init, not actual
-    # memory pressure (OpenBLAS "Memory allocation still failed after 10 retries").
-    #
-    # 2026-11-08: Chromium/ V8 reserves large VIRTUAL address ranges at
-    # startup (including a multi-GB pointer-compression cage). RLIMIT_AS is
-    # inherited by Playwright's Chromium child processes, so a 2500MB cap
-    # can make Chromium abort during launch even when physical RSS is low.
-    # Keep this virtual-address guard generous; Render's actual 512MB
-    # container memory limit still enforces the physical RAM ceiling.
-    # 8192MB is a VIRTUAL address-space limit, not an 8GB RAM allocation.
-    _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "8192"))
-    _RAM_CAP_BYTES = _RAM_CAP_MB * 1024 * 1024
-    _soft, _hard = _resource.getrlimit(_resource.RLIMIT_AS)
-    _new_hard = _RAM_CAP_BYTES if (_hard == _resource.RLIM_INFINITY or _hard > _RAM_CAP_BYTES) else _hard
-    _resource.setrlimit(_resource.RLIMIT_AS, (_RAM_CAP_BYTES, _new_hard))
-except Exception:
-    pass
+# RAM safety (small-RAM hosts, e.g. Render free 512MB) -- ONLY on Render.
+# 2026-11-16: this entire RLIMIT_AS cap is disabled outside Render. It was
+# built to catch runaway allocations on Render's 512MB box, but it
+# unconditionally capped virtual address space on every host, and Chromium's
+# PartitionAlloc GigaCage reservation (tens of GB virtual on startup, almost
+# none physically committed) kept exceeding it -- "partition_address_space.cc
+# Check failed: false" / HandleGigaCageAllocFailureOutOfVASpace on every
+# Playwright Chromium launch. HF has real RAM headroom and no equivalent
+# constraint, so the whole guard is skipped there rather than tuned further;
+# this mirrors IS_RENDER gating used throughout the rest of the codebase
+# (RAM_LIMIT_MB in core.py, PDF/parallelism caps, etc).
+_IS_RENDER_ENV = bool(os.environ.get("RENDER")) or "render.com" in (os.environ.get("RENDER_EXTERNAL_URL", "") or "")
+if _IS_RENDER_ENV:
+    try:
+        import resource as _resource
+        _RAM_CAP_MB = int(os.environ.get("RAM_CAP_MB", "1000"))
+        _RAM_CAP_BYTES = _RAM_CAP_MB * 1024 * 1024
+        _soft, _hard = _resource.getrlimit(_resource.RLIMIT_AS)
+        _new_hard = _RAM_CAP_BYTES if (_hard == _resource.RLIM_INFINITY or _hard > _RAM_CAP_BYTES) else _hard
+        _resource.setrlimit(_resource.RLIMIT_AS, (_RAM_CAP_BYTES, _new_hard))
+    except Exception:
+        pass
 
 def _html_escape(s: str) -> str:
     return _html_mod.escape(s or "", quote=False)
@@ -1196,7 +1189,7 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
     batch_cache_id = gen_session_id()
     await db_save_mcq_cache(batch_cache_id, batch_cache_id, 0, topic, mcqs, channel_id=channel_id)
 
-    sent, first_link = await _send_csv_polls_to_channel(
+    sent, first_link, first_poll_msg_id = await _send_csv_polls_to_channel(
         channel_id, mcqs, topic, chat_id=0, pre_msg_id=pre_msg_id,
         thread_id=thread_id, csv_fname=topic, extra_cancel_check=cancel_check
     )
@@ -1213,13 +1206,20 @@ async def _send_one_lms_batch(channel_id: str, thread_id: int, topic: str, mcqs:
         except Exception as e:
             logger.warning(f"[LMS-Send] pre-msg link edit failed: {e}")
 
+    # 2026-11-16: separate post-poll "আবার practice করতে..." message+button
+    # removed per request — PDF (below), which already replies to pre_msg_id
+    # and carries Poll Again/Quiz Again buttons, covers this on its own.
+
     pdf_bytes = await _generate_style1_pdf_guaranteed(mcqs, topic, chat_id=0)
     if pdf_bytes:
         safe_title = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
-        btn_kb = await _csv_pre_buttons_no_premium(batch_cache_id)
+        btn_kb = await _lms_pdf_buttons_poll_quiz_only(batch_cache_id)
+        _pdf_caption = f"📌Topic:{topic or 'Special MCQ By ATLAS'}\n✅MCQ:{len(mcqs)}"
+        if first_link:
+            _pdf_caption += f"\n\n🔗 First Poll Link:\n{first_link}"
         pdf_doc_r = await send_document(
             channel_id, pdf_bytes, f"{safe_title}_style1.pdf",
-            caption=csv_get_pdf_caption(topic, is_channel=is_channel),
+            caption=_pdf_caption,
             message_thread_id=thread_id,
             reply_to_message_id=pre_msg_id
         )
@@ -1269,25 +1269,36 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
     branching behavior inside the job.
 
     links_variant (only relevant when links_only=True):
-      "full"          — Poll Practice, Quiz Solve, Website Exam, Rapid
-                        Practice Game, Premium PDF (existing behavior).
-      "poll_quiz_pdf" — only Poll Practice, Quiz Solve, Premium PDF; no
-                        Website Exam / Rapid Practice Game link anywhere,
-                        including the footer's "Website:" line.
-      "website_only"  — only a single Website Exam link per topic; no
-                        Poll Practice / Quiz Solve / Rapid Practice Game /
-                        Premium PDF link anywhere.
+      "links_only"    — Mood 2: only Poll Practice, Quiz Solve.
+      "poll_quiz_pdf" — Mood 3: only Poll Practice, Quiz Solve, Premium PDF.
+      "website_only"  — Mood 4: only a single Website Exam link per topic.
+      "all_links"     — Mood 5: ALL 5 — Poll Practice, Quiz Solve, Website
+                        Exam, Rapid Practice Game, Premium PDF.
+      "website_rapid" — Mood 6: only Website Exam + Rapid Practice Game.
+      "full" / anything unrecognized — same as "all_links" (fallback,
+                        kept for backward compatibility).
     """
     job = LMS_SEND_JOBS[job_id]
     dm_msg_id = None
     dm_kb = {"inline_keyboard": [[{"text": "🛑 Cancel", "callback_data": f"lmscancel_{job_id}"}]]}
 
     def _dm_progress_text(status_line: str) -> str:
+        _b_done = job.get('batches_done', 0)
+        _b_total = job.get('batches_total', len(batches))
+        _pct = int(_b_done * 100 / _b_total) if _b_total else 0
+        _elapsed = int(time.time() - job.get("started_at", time.time()))
+        _emins, _esecs = divmod(_elapsed, 60)
+        _topics = job.get("topics_done", [])
+        _topics_line = ""
+        if _topics:
+            _topics_line = "\n📋 সম্পন্ন টপিক:\n" + "\n".join(f"  ✓ {t}" for t in _topics)
         return (
             f"📤 LMS Send — {exam_title or 'MCQ'}\n"
             f"{status_line}\n"
             f"✅ পাঠানো হয়েছে: {job.get('sent_total', 0)}\n"
-            f"📦 ব্যাচ: {job.get('batches_done', 0)}/{job.get('batches_total', len(batches))}"
+            f"📦 ব্যাচ: {_b_done}/{_b_total} ({_pct}%)\n"
+            f"⏱️ সময়: {_emins}:{_esecs:02d}"
+            f"{_topics_line}"
         )
 
     if exam_groups and not links_only:
@@ -1331,9 +1342,42 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
             job_cancel_check = lambda: job.get("cancel_requested", False)
             bot_un = await get_bot_username()
             exam_entries = []  # (exam_title, subject, total, total_batches, batch_links) per exam
+            merged_pdfs_to_send = []  # (safe_title, pdf_bytes, exam_title, sent_count) -- sent after the summary
             overall_sent = 0
             overall_batches_done = 0
             grand_total_batches = sum(len([b for b in (g.get("batches") or []) if b.get("mcqs")]) for g in exam_groups)
+
+            # Combined summary sent FIRST (pending topics, no links yet),
+            # then live-edited after every exam's batches finish — same
+            # pattern as the single-exam path's _live_master_summary_text.
+            master_msg_id = None
+
+            def _live_multi_summary_text() -> str:
+                pending_entries = list(exam_entries)
+                for gi in range(len(pending_entries), len(exam_groups)):
+                    gg = exam_groups[gi]
+                    gg_batches = [b for b in (gg.get("batches") or []) if b.get("mcqs")]
+                    gg_total = sum(len(b.get("mcqs") or []) for b in gg_batches)
+                    pending_entries.append((gg.get("exam_title") or "MCQ", gg.get("subject") or "", gg_total, len(gg_batches), []))
+                return csv_get_multi_exam_master_summary(pending_entries, show_website_link=False)
+
+            try:
+                master_r = await tg_post("sendMessage", {
+                    "chat_id": channel_id,
+                    "text": _live_multi_summary_text(),
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                    **({"message_thread_id": thread_id} if thread_id else {}),
+                })
+                if master_r.get("ok"):
+                    master_msg_id = master_r["result"]["message_id"]
+                    if chat_type in ("group", "supergroup"):
+                        try:
+                            await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": master_msg_id, "disable_notification": True})
+                        except Exception as e:
+                            logger.warning(f"[LMS-Send-Multi] initial summary pin failed: {e}")
+            except Exception as e:
+                logger.warning(f"[LMS-Send-Multi] initial summary send failed: {e}")
 
             for g_idx, g in enumerate(exam_groups):
                 if job.get("cancel_requested"):
@@ -1379,6 +1423,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     overall_batches_done += 1
                     job["sent_total"] = overall_sent
                     job["batches_done"] = overall_batches_done
+                    job.setdefault("topics_done", []).append(topic)
                     job["pct"] = int(overall_batches_done * 100 / grand_total_batches) if grand_total_batches else 100
                     if dm_msg_id:
                         try:
@@ -1386,9 +1431,8 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                         except Exception as e:
                             logger.warning(f"[LMS-Send-Multi] DM progress update failed: {e}")
 
-                # This exam's own merged PDF, sent right after its polls —
-                # before moving to the next exam (keeps per-exam content
-                # grouped together in the channel, same as separate mode).
+                # This exam's own merged PDF — generated now, sent AFTER the
+                # loop (replying to the final summary), not mid-loop.
                 if g_all_mcqs:
                     topic_groups = [
                         (batch.get("topic") or f"Part-{i+1:02d}", batch.get("mcqs") or [])
@@ -1399,44 +1443,56 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     try:
                         merged_pdf_bytes = await _generate_combined_topicwise_pdf(topic_groups, g_title or "MCQ", channel_id)
                         if merged_pdf_bytes:
-                            merged_caption = f"📖 ATLAS Practice Sheet\n🎯 {g_title or 'MCQ'}\n📝 মোট MCQ: {g_sent}\n🚀 Visit: Atlascourses.com"
-                            await send_document(
-                                channel_id, merged_pdf_bytes, f"{safe_title}_full_style1.pdf",
-                                caption=merged_caption,
-                                message_thread_id=thread_id,
-                            )
+                            merged_pdfs_to_send.append((safe_title, merged_pdf_bytes, g_title, g_sent))
                     except Exception as e:
-                        logger.warning(f"[LMS-Send-Multi] exam '{g_title}' merged PDF send failed: {e}")
+                        logger.warning(f"[LMS-Send-Multi] exam '{g_title}' merged PDF generation failed: {e}")
 
                 exam_entries.append((g_title, g_subject, g_sent, len(g_batch_links), g_batch_links))
+                if master_msg_id:
+                    try:
+                        await edit_msg(channel_id, master_msg_id, _live_multi_summary_text())
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send-Multi] summary live-edit failed: {e}")
 
             if job.get("cancel_requested"):
                 job["status"] = "cancelled"
             else:
-                # ONE combined summary at the very end, covering every exam.
-                if exam_entries:
-                    combined_text = csv_get_multi_exam_master_summary(exam_entries)
-                    summary_data = {
-                        "chat_id": channel_id, "text": combined_text,
-                        "parse_mode": "HTML",
-                        "disable_web_page_preview": True,
-                    }
-                    if thread_id:
-                        summary_data["message_thread_id"] = thread_id
+                # Final summary edit (same message, now with every real link
+                # resolved) instead of a new message.
+                if exam_entries and master_msg_id:
                     try:
-                        r = await tg_post("sendMessage", summary_data)
-                        if not r.get("ok") and thread_id:
-                            summary_data.pop("message_thread_id", None)
-                            r = await tg_post("sendMessage", summary_data)
-                        if r.get("ok"):
-                            _msg_id = r.get("result", {}).get("message_id")
-                            if _msg_id and chat_type in ("group", "supergroup"):
-                                try:
-                                    await tg_post("pinChatMessage", {"chat_id": channel_id, "message_id": _msg_id, "disable_notification": True})
-                                except Exception as e:
-                                    logger.warning(f"[LMS-Send-Multi] combined summary pin failed: {e}")
+                        await edit_msg(channel_id, master_msg_id, _live_multi_summary_text())
                     except Exception as e:
-                        logger.warning(f"[LMS-Send-Multi] combined summary send failed: {e}")
+                        logger.warning(f"[LMS-Send-Multi] final summary edit failed: {e}")
+                elif exam_entries:
+                    # Initial summary send failed earlier — fall back to a
+                    # fresh message so the summary isn't lost entirely.
+                    try:
+                        combined_text = csv_get_multi_exam_master_summary(exam_entries, show_website_link=False)
+                        r = await tg_post("sendMessage", {
+                            "chat_id": channel_id, "text": combined_text,
+                            "parse_mode": "HTML", "disable_web_page_preview": True,
+                            **({"message_thread_id": thread_id} if thread_id else {}),
+                        })
+                        if r.get("ok"):
+                            master_msg_id = r["result"]["message_id"]
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send-Multi] fallback summary send failed: {e}")
+
+                # Every exam's merged PDF, sent AFTER the summary, replying to
+                # it — no Premium PDF button.
+                for safe_title, merged_pdf_bytes, g_title, g_sent in merged_pdfs_to_send:
+                    try:
+                        merged_caption = f"📖 ATLAS Practice Sheet\n🎯 {g_title or 'MCQ'}\n📝 মোট MCQ: {g_sent}\n🚀 Visit: Atlascourses.com"
+                        await send_document(
+                            channel_id, merged_pdf_bytes, f"{safe_title}_full_style1.pdf",
+                            caption=merged_caption,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=master_msg_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[LMS-Send-Multi] exam '{g_title}' merged PDF send failed: {e}")
+
                 job["status"] = "done"
                 job["pct"] = 100
                 if dm_msg_id:
@@ -1519,7 +1575,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     poll_link = f"https://t.me/{bot_un}?start=poll_{cache_id}"
                     quiz_link = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
                     pdf_link = f"{CF_WORKER_URL_2}/api/premium-pdf-view/{cache_id}"
-                    if not website_only:
+                    if not website_only and links_variant not in ("links_only", "website_rapid"):
                         asyncio.create_task(_prewarm_premium_pdf(f"{pdf_link}?raw=1"))
                     if website_only:
                         exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
@@ -1540,7 +1596,36 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                             f"───────────\n"
                             f"<a href=\"{pdf_link}\"><b>📄 Premium PDF</b></a>"
                         )
+                    elif links_variant == "links_only":
+                        # Mood 2: ONLY Poll Practice, Quiz Solve -- no Website
+                        # Exam, no Rapid Practice, no Premium PDF.
+                        quote_body = (
+                            f"<b>{_serial}. {_html_escape(topic)}</b>\n"
+                            f"📌 মোট MCQ: {len(mcqs)}\n"
+                            f"───────────\n"
+                            f"<a href=\"{poll_link}\"><b>🔰 Poll Practice</b></a>"
+                            f"   "
+                            f"<a href=\"{quiz_link}\"><b>🔗 Quiz Solve</b></a>"
+                        )
+                    elif links_variant == "website_rapid":
+                        # Mood 6: ONLY Website Exam + Rapid Practice Game --
+                        # no Poll Practice, no Quiz Solve, no Premium PDF.
+                        exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
+                        quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
+                        quote_body = (
+                            f"<b>{_serial}. {_html_escape(topic)}</b>\n"
+                            f"📌 মোট MCQ: {len(mcqs)}\n"
+                            f"───────────\n"
+                            f"<a href=\"{exam_link}\"><b>🌐 Website Exam</b></a>"
+                            f"   "
+                            f"<a href=\"{quick_link}\"><b>⚡ Rapid Practice Game</b></a>"
+                        )
                     else:
+                        # Mood 5 (links_variant="all_links"; also the
+                        # fallback for "full"/unrecognized values, same as
+                        # before): ALL 5 links in one post -- Poll Practice,
+                        # Quiz Solve, Website Exam, Rapid Practice Game,
+                        # Premium PDF.
                         exam_link = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
                         quick_link = f"{GH_PAGES_QUICK_URL}?id={cache_id}"
                         quote_body = (
@@ -1630,12 +1715,20 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 except Exception as e:
                     logger.warning(f"[LMS-Send-Links] cover image failed: {e}")
                     _cover_bytes = None
+            _part_msg_ids = []  # every sent part's message_id, in order -- every one gets pinned
+            _pin_fail_count = 0
             for _i, _txt in enumerate(_msgs):
                 if job.get("cancel_requested"):
                     job["status"] = "cancelled"
                     return
+                # 2026-11-16: when content overflows into multiple posts, tag
+                # each part with a "Part N/Total" header so the series reads
+                # clearly in the channel (every part also gets pinned below).
+                _part_txt = _txt
+                if _n > 1:
+                    _part_txt = f"◼️<b>Part {_i + 1:02d}/{_n:02d}</b>\n{sep}\n{_txt}"
                 send_data = {
-                    "chat_id": channel_id, "text": _txt,
+                    "chat_id": channel_id, "text": _part_txt,
                     "parse_mode": "HTML",
                     "disable_web_page_preview": True,
                 }
@@ -1643,7 +1736,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     send_data["message_thread_id"] = thread_id
                 r = None
                 if _i == 0 and _cover_bytes:
-                    r = await send_photo(channel_id, _cover_bytes, caption=_txt, message_thread_id=thread_id or None)
+                    r = await send_photo(channel_id, _cover_bytes, caption=_part_txt, message_thread_id=thread_id or None)
                     if not r.get("ok"):
                         logger.warning(f"[LMS-Send-Links] cover photo send failed ({r.get('description') or r.get('error')}) -> text fallback")
                         r = None
@@ -1663,19 +1756,57 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 if _i == 0:
                     sent_chat = r.get("result", {}).get("chat", {})
                     sent_msg_id = r.get("result", {}).get("message_id")
-                    # the main post (image + gathered summary) gets PINNED, same as the "all" mode
-                    if sent_msg_id:
-                        _pok, _pdesc = await _lms_pin_main_post(channel_id, sent_msg_id)
-                        if not _pok:
-                            logger.warning(f"[LMS-Send-Links] main post pin failed: {_pdesc}")
-                            job["warning"] = f"pin failed: {_pdesc}"
-                            try:
-                                await tg_post("sendMessage", {"chat_id": OWNER_ID, "text": f"⚠️ LMS Send: main post pin করা যায়নি ({_pdesc or 'unknown'}).\nবটকে ওই চ্যাটে 'Pin messages' permission দাও।"})
-                            except Exception:
-                                pass
+                _this_msg_id = r.get("result", {}).get("message_id")
+                if _this_msg_id:
+                    _part_msg_ids.append(_this_msg_id)
+                    # EVERY part gets pinned now (not just the first) -- each
+                    # one is a standalone post the student may land on first.
+                    _pok, _pdesc = await _lms_pin_main_post(channel_id, _this_msg_id)
+                    if not _pok:
+                        _pin_fail_count += 1
+                        logger.warning(f"[LMS-Send-Links] part {_i + 1}/{_n} pin failed: {_pdesc}")
                 job["pct"] = int((_i + 1) * 100 / _n)
                 if _i < _n - 1:
                     await asyncio.sleep(1.2)  # groups allow ~20 msgs/min
+            if _pin_fail_count:
+                job["warning"] = f"{_pin_fail_count}/{_n} part(s) pin করা যায়নি"
+                try:
+                    await tg_post("sendMessage", {"chat_id": OWNER_ID, "text": f"⚠️ LMS Send: {_pin_fail_count}/{_n} part pin করা যায়নি।\nবটকে ওই চ্যাটে 'Pin messages' permission দাও।"})
+                except Exception:
+                    pass
+            # 2026-11-16: when the content had to be split into multiple
+            # parts, close out with one summary post listing every topic and
+            # which part it landed in (Part-01, 02, 03...) -- then pin that
+            # summary too, so both the series and the index stay pinned.
+            if _n > 1:
+                _topic_names = []
+                for g in groups:
+                    for batch in (g.get("batches") or []):
+                        if batch.get("mcqs"):
+                            _topic_names.append((batch.get("topic") or "Special MCQ By ATLAS").strip())
+                _summary_lines = [f"📋 <b>সামারি — মোট {_n}টি Part এ পাঠানো হয়েছে</b>", sep]
+                for _tn_i, _tn in enumerate(_topic_names):
+                    _summary_lines.append(f"{_tn_i + 1}. {_html_escape(_tn)}")
+                _summary_lines.append(sep)
+                _summary_lines.append(f"📦 মোট Part: {_n}টি (" + ", ".join(f"Part-{_k+1:02d}" for _k in range(_n)) + ")")
+                _summary_text = "\n".join(_summary_lines)
+                try:
+                    _sum_r = await tg_post("sendMessage", {
+                        "chat_id": channel_id, "text": _summary_text,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                        **({"message_thread_id": thread_id} if thread_id else {}),
+                    })
+                    if _sum_r.get("ok"):
+                        _sum_msg_id = _sum_r.get("result", {}).get("message_id")
+                        if _sum_msg_id:
+                            _spok, _spdesc = await _lms_pin_main_post(channel_id, _sum_msg_id)
+                            if not _spok:
+                                logger.warning(f"[LMS-Send-Links] summary post pin failed: {_spdesc}")
+                    else:
+                        logger.warning(f"[LMS-Send-Links] summary post send failed: {_sum_r.get('description')}")
+                except Exception as e:
+                    logger.warning(f"[LMS-Send-Links] summary post error: {e}")
             logger.info(
                 f"[LMS-Send-Links] posted OK ({_n} msg) -> chat_id={channel_id} resolved_chat={sent_chat.get('id')} "
                 f"type={sent_chat.get('type')} title={sent_chat.get('title')!r} first_message_id={sent_msg_id} thread_id={thread_id}"
@@ -1743,7 +1874,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 topic_i = (batches[i].get("topic") or "Special MCQ By ATLAS")
                 count_i = len(batches[i].get("mcqs") or [])
                 pending_links.append((i + 1, "⏳ চলমান..." if i == len(batch_links) else "", count_i, topic_i))
-            return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links, subject=subject or "MCQ")
+            return csv_get_master_summary(exam_title or "MCQ", sent_total, total_batches, pending_links, subject=subject or "MCQ", show_website_link=False)
 
         try:
             # Forum-topic sends already have a topic header/icon in the chat
@@ -1846,6 +1977,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 # non-fatal for the whole job -- continue with remaining batches
             job["sent_total"] = sent_total
             job["batches_done"] = b_idx + 1
+            job.setdefault("topics_done", []).append(topic)
             job["pct"] = int((b_idx + 1) * 100 / total_batches) if total_batches else 100
             if master_msg_id:
                 try:
@@ -2116,6 +2248,7 @@ async def lms_send_channel(request: Request):
         "status": "queued", "pct": 0, "sent_total": 0, "total": total_q,
         "batches_done": 0, "batches_total": batches_total, "error": None,
         "exam_id": exam_id, "cancel_requested": False,
+        "started_at": time.time(), "topics_done": [],
     }
     asyncio.create_task(_lms_job_db_write(job_id, LMS_SEND_JOBS[job_id]))
     _spawn_task(_run_lms_channel_send_job(job_id, channel_id, thread_id, batches, exam_title, subject, links_only=links_only, exam_groups=exam_groups, links_variant=links_variant, chapter=chapter))
@@ -2213,7 +2346,7 @@ async def url_to_csv(request: Request):
     if not is_plain_url(url):
         return JSONResponse({"ok": False, "error": "Valid http(s) URL দিন।"}, status_code=400)
 
-    is_rayvila = is_rayvila_url(url)
+    is_rayvila = False  # 2026-11-16: Rayvila system disabled; was: is_rayvila_url(url)
     try:
         if is_rayvila:
             result = await scrape_rayvila_exam(url)
@@ -10947,7 +11080,7 @@ def csv_get_ending_message(topic: str, count: int, first_link: str = "", ask_sco
 
 def csv_get_master_summary(topic: str, total: int,
                             total_batches: int, batch_links: list,
-                            subject: str = None) -> str:
+                            subject: str = None, show_website_link: bool = True) -> str:
     """
     batch_links = [(part_num, link, count, batch_topic), ...]
     link states: "" (pending, not started yet -- no link line shown),
@@ -10964,16 +11097,9 @@ def csv_get_master_summary(topic: str, total: int,
     subject (optional, LMS-send path only): when given, the header shows
     subject and exam/topic title as two bold, line-separated lines instead
     of the single plain line other /csv callers use.
-
-    Overall % (user request, live dashboard): computed from how many
-    topics already have a real link (done) vs. total_batches -- shown
-    right under the topic count so the single edited message also
-    tracks total progress, not just per-topic state.
     """
     main_text = topic or "Special MCQ By ATLAS"
     sep = "▬▬▬▬▬▬▬▬▬▬"
-    _done_batches = sum(1 for e in batch_links if e[1] and e[1] != "⏳ চলমান...")
-    _overall_pct = round(_done_batches * 100 / total_batches) if total_batches else 0
     if subject:
         text = (
             f"🟥<b>{_html_escape(subject)}</b>\n"
@@ -10981,15 +11107,13 @@ def csv_get_master_summary(topic: str, total: int,
             f"◼️<b>{_html_escape(main_text)}</b>\n"
             f"{sep}\n"
             f"🌟মোট প্রশ্ন: {total}\n"
-            f"📦 মোট টপিক সংখ্যা: {total_batches}\n"
-            f"📊 Overall: {_done_batches}/{total_batches} ({_overall_pct}%)\n\n"
+            f"📦 মোট টপিক সংখ্যা: {total_batches}\n\n"
         )
     else:
         text = (
             f"🟥{main_text}\n"
             f"🌟মোট প্রশ্ন: {total}\n"
-            f"📦 মোট টপিক সংখ্যা: {total_batches}\n"
-            f"📊 Overall: {_done_batches}/{total_batches} ({_overall_pct}%)\n\n"
+            f"📦 মোট টপিক সংখ্যা: {total_batches}\n\n"
         )
     for entry in batch_links:
         part_n, link, count = entry[0], entry[1], entry[2]
@@ -11004,7 +11128,7 @@ def csv_get_master_summary(topic: str, total: int,
             block += f"\n\n<b>🔄Poll Again:</b>\n{poll_again_link}"
         if quiz_link:
             block += f"\n\n<b>🎯Quiz Again:</b>\n{quiz_link}"
-        if exam_link:
+        if exam_link and show_website_link:
             block += f"\n\n<b>🌐Website Link:</b>\n{exam_link}"
         text += "<blockquote>" + block + "</blockquote>\n" + f"{sep}\n\n"
     text += (
@@ -11017,7 +11141,7 @@ def csv_get_master_summary(topic: str, total: int,
     return text
 
 
-def csv_get_multi_exam_master_summary(exam_entries: list) -> str:
+def csv_get_multi_exam_master_summary(exam_entries: list, show_website_link: bool = True) -> str:
     """Final combined summary for a serial multi-exam 'all' mode send
     (LMS bulk-send, bulkPostMode='single', sendMode='all'/'poll_quiz_pdf'
     etc. still goes through links_only -- THIS function backs the NEW
@@ -11058,7 +11182,7 @@ def csv_get_multi_exam_master_summary(exam_entries: list) -> str:
                 block += f"\n\n<b>🔄Poll Again:</b>\n{poll_again_link}"
             if quiz_link:
                 block += f"\n\n<b>🎯Quiz Again:</b>\n{quiz_link}"
-            if exam_link:
+            if exam_link and show_website_link:
                 block += f"\n\n<b>🌐Website Link:</b>\n{exam_link}"
             text += "<blockquote>" + block + "</blockquote>\n"
         if ex_idx < len(exam_entries) - 1:
@@ -11130,17 +11254,48 @@ async def _check_bot_admin(channel_id) -> tuple:
     return True, ""
 
 async def _csv_pre_buttons(cache_id: str) -> dict:
-    """Pre-message এর সাথে যুক্ত 4 inline button (deep-link URL, cache_id লাগবেই)"""
+    """Pre-message এর সাথে যুক্ত 4 inline button (deep-link URL, cache_id লাগবেই).
+    Premium PDF opens the browser-side Solve Sheet (?mode=pdf), same as
+    _rd_group_end_kb — not the bot-DM premium_ deep-link (2026-11-14 fix,
+    for consistency with LMS-send's identical button)."""
     bot_un = await get_bot_username()
     quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
     poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
     exam_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}"
-    premium_url = f"https://t.me/{bot_un}?start=premium_{cache_id}"
+    premium_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}&mode=pdf"
     return {"inline_keyboard": [
         [{"text": "📝 Quiz Solve", "url": quiz_url},
          {"text": "🔄 Poll Again", "url": poll_url}],
         [{"text": "🌐 Website Exam", "url": exam_url},
          {"text": "💎 Premium PDF", "url": premium_url}],
+    ]}
+
+async def _lms_first_poll_kb(cache_id: str) -> dict:
+    """LMS-send per-topic first-poll reply keyboard: Poll Again, Quiz
+    Again, Premium PDF — no Website Exam (restored 2026-11-16; was
+    mistakenly dropped along with Website Exam earlier same day).
+    Premium PDF opens the browser-side Solve Sheet (?mode=pdf on the GH
+    Pages exam page), NOT the bot-DM premium_ deep-link flow."""
+    bot_un = await get_bot_username()
+    poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+    quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+    premium_url = f"{GH_PAGES_EXAM_URL}?id={cache_id}&mode=pdf"
+    return {"inline_keyboard": [
+        [{"text": "🔄 Poll Again", "url": poll_url},
+         {"text": "🎯 Quiz Again", "url": quiz_url}],
+        [{"text": "💎 Premium PDF", "url": premium_url}],
+    ]}
+
+async def _lms_pdf_buttons_poll_quiz_only(cache_id: str) -> dict:
+    """Mood 1 (LMS 'all' flow) per-topic PDF-attached buttons: ONLY Quiz
+    Solve + Poll Again -- no Website Exam, no Premium PDF (user request,
+    2026-11-16)."""
+    bot_un = await get_bot_username()
+    quiz_url = f"https://t.me/{bot_un}?start=pdf_{cache_id}"
+    poll_url = f"https://t.me/{bot_un}?start=poll_{cache_id}"
+    return {"inline_keyboard": [
+        [{"text": "📝 Quiz Solve", "url": quiz_url},
+         {"text": "🔄 Poll Again", "url": poll_url}],
     ]}
 
 async def _csv_pre_buttons_no_premium(cache_id: str) -> dict:
@@ -11596,16 +11751,31 @@ def _parse_csv_bytes(csv_bytes: bytes) -> list:
                     _cur_sub = _row_subtopic or None
                 elif _row_subtopic:
                     _cur_sub = _row_subtopic
-            opts_raw = [
+            opt5_raw = (row_norm.get("option5") or "").strip()
+            opts4_raw = [
                 row_norm.get("option1", ""), row_norm.get("option2", ""),
-                row_norm.get("option3", ""), row_norm.get("option4", ""), row_norm.get("option5", "")
+                row_norm.get("option3", ""), row_norm.get("option4", "")
             ]
-            opts = [o.strip() for o in opts_raw if o.strip()]
-            if len(opts) < 2:
-                continue
+            opts4 = [o.strip() for o in opts4_raw if o.strip()]
             ans_raw = str(row_norm.get("answer", "1")).strip().upper()
-            ans_map = {"1": "A", "2": "B", "3": "C", "4": "D", "A": "A", "B": "B", "C": "C", "D": "D"}
-            ans = ans_map.get(ans_raw, "A")
+            # answer == "5" is the double/multi-answer sentinel: option5
+            # holds the correct answers' own text joined by '+', not a
+            # real 5th choice -- decode it into a list of letters by
+            # matching each '+'-split piece back to its option1-4 text.
+            if ans_raw == "5" and opt5_raw:
+                opts = opts4
+                if len(opts) < 2:
+                    continue
+                correct_texts = [p.strip() for p in opt5_raw.split("+") if p.strip()]
+                letter_by_text = {o: chr(65 + i) for i, o in enumerate(opts4_raw[:4]) if o.strip()}
+                letters = [letter_by_text[t] for t in correct_texts if t in letter_by_text]
+                ans = letters if len(letters) > 1 else (letters[0] if letters else "A")
+            else:
+                opts = opts4
+                if len(opts) < 2:
+                    continue
+                ans_map = {"1": "A", "2": "B", "3": "C", "4": "D", "A": "A", "B": "B", "C": "C", "D": "D"}
+                ans = ans_map.get(ans_raw, "A")
             mcq = {
                 "question": _strip_q_numbering(q.strip()), "options": opts, "answer": ans,
                 "explanation": row_norm.get("explanation", "").strip()
@@ -11666,8 +11836,64 @@ async def _ensure_explanations_before_csv(mcqs: list) -> list:
     return mcqs
 
 
-async def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
-    """MCQ list → CSV bytes. NEW dual-purpose style: writes 'topic'/
+_UNDERLINE_MARK_RE = re.compile(r'\*\*(.+?)\*\*')
+
+def _convert_underline_markers(text: str) -> tuple:
+    """Converts the extraction pipeline's '**word**' underline-marker
+    convention into literal '<u>word</u>' HTML tags for CSV output.
+    Returns (converted_text, had_underline: bool)."""
+    if not text or '**' not in text:
+        return text, False
+    converted = _UNDERLINE_MARK_RE.sub(lambda m: f"<u>{m.group(1)}</u>", text)
+    return converted, (converted != text)
+
+def _mcq_has_underline(m: dict) -> bool:
+    """Checks question + all options for any '**..**' underline marker
+    (pre-conversion) — used to build the per-file underline-Q caption."""
+    if '**' in (m.get("question") or ""):
+        return True
+    for o in (m.get("options") or []):
+        if isinstance(o, str) and '**' in o:
+            return True
+    return False
+
+def _get_mcq_answer_letters(m: dict) -> list:
+    """Normalizes an MCQ's answer into a list of A/B/C/D letters.
+    Supports: single letter 'B', a list/tuple ['B','C'], or a combined
+    string like 'BC' / 'B,C' / 'B+C' (all treated as multi-answer)."""
+    raw = m.get("answer", "A")
+    if isinstance(raw, (list, tuple)):
+        letters = [str(x).strip().upper() for x in raw if str(x).strip()]
+    else:
+        s = str(raw).strip().upper()
+        if re.fullmatch(r'[ABCD]{2,4}', s):
+            letters = list(s)
+        else:
+            letters = [p.strip().upper() for p in re.split(r'[+,/]', s) if p.strip()]
+    letters = [l for l in letters if l in ("A", "B", "C", "D")]
+    return letters or ["A"]
+
+def _format_mcq_answer_cell(m: dict, opts: list) -> tuple:
+    """Builds the (answer_cell, option5_cell) pair for one CSV row.
+    Single correct answer -> answer = 1/2/3/4 (position), option5 blank
+    (unchanged behavior). Multiple correct answers -> option5 = the
+    correct answers' OWN TEXT joined with '+' (e.g. 'রামপুরা+সোনারগাঁও'),
+    answer = literal '5' (sentinel: downstream reads option5, not a
+    real 5th choice)."""
+    letters = _get_mcq_answer_letters(m)
+    idx_map = {"A": 0, "B": 1, "C": 2, "D": 3}
+    if len(letters) <= 1:
+        ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+        return ans_map.get(letters[0] if letters else "A", "1"), ""
+    texts = []
+    for l in letters:
+        i = idx_map.get(l)
+        if i is not None and i < len(opts) and opts[i]:
+            texts.append(opts[i])
+    return "5", "+".join(texts)
+
+async def _mcqs_to_csv_bytes(mcqs: list) -> tuple:
+    """MCQ list → (csv_bytes, meta). NEW dual-purpose style: writes 'topic'/
     'subtopic' columns, filling them in only on the row where a segment
     actually changes (blank on every row that continues the same
     topic/subtopic) — matches _parse_csv_bytes's NEW-style reading and
@@ -11677,6 +11903,16 @@ async def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
     2026-08-29: now auto-fills any missing/thin explanation before writing
     (same logic /ai runs manually) so every QuizBot-generated CSV already
     has full explanations, no separate /ai step needed.
+
+    2026-11-16: (1) underline markers ('**word**') from extraction are
+    converted to '<u>word</u>' in question/option text, and 'meta
+    ["underline_qnos"]' lists the 1-based row numbers that had underline,
+    for the caller to mention in the file caption. (2) MCQs with more
+    than one correct answer are written with option5 = correct answers'
+    text joined by '+' and answer = '5' (sentinel) instead of the normal
+    1-4 position; 'meta["multi_answer_qnos"]' lists those row numbers.
+    Returns a tuple (csv_bytes, meta) — NOT bytes alone; callers must
+    unpack it.
     """
     mcqs = await _ensure_explanations_before_csv(mcqs)
     import io, csv as csv_mod_local
@@ -11684,21 +11920,54 @@ async def _mcqs_to_csv_bytes(mcqs: list) -> bytes:
     w = csv_mod_local.writer(buf)
     w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
                 "answer", "explanation", "type", "section", "topic", "subtopic"])
-    ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
     _last_main, _last_sub = None, None
-    for m in mcqs:
-        opts = (m.get("options", []) + ["", "", "", ""])[:4]
+    underline_qnos = []
+    multi_answer_qnos = []
+    for row_no, m in enumerate(mcqs, start=1):
+        if _mcq_has_underline(m):
+            underline_qnos.append(row_no)
+
+        q_text, _ = _convert_underline_markers(m.get("question", ""))
+        raw_opts = (m.get("options", []) + ["", "", "", ""])[:4]
+        opts = []
+        for o in raw_opts:
+            o_text, _ = _convert_underline_markers(o if isinstance(o, str) else "")
+            opts.append(o_text)
+
+        ans_cell, opt5_cell = _format_mcq_answer_cell(m, opts)
+        if opt5_cell:
+            multi_answer_qnos.append(row_no)
+
         main_t = m.get("_pdfs_topic") or ""
         sub_t = m.get("_pdfs_subtopic") or ""
         topic_cell = main_t if main_t != _last_main else ""
         subtopic_cell = sub_t if (sub_t != _last_sub or topic_cell) else ""
         _last_main, _last_sub = main_t, sub_t
         w.writerow([
-            m.get("question", ""), opts[0], opts[1], opts[2], opts[3], "",
-            ans_map.get(m.get("answer", "A"), "1"), _strip_img_tag(m.get("explanation", "")), "1", "1",
+            q_text, opts[0], opts[1], opts[2], opts[3], opt5_cell,
+            ans_cell, _strip_img_tag(m.get("explanation", "")), "1", "1",
             topic_cell, subtopic_cell
         ])
-    return buf.getvalue().encode("utf-8-sig")
+    meta = {"underline_qnos": underline_qnos, "multi_answer_qnos": multi_answer_qnos}
+    return buf.getvalue().encode("utf-8-sig"), meta
+
+
+def _csv_meta_caption_suffix(meta: dict) -> str:
+    """Builds the extra caption lines reporting underline / multi-answer
+    MCQs found in this CSV, so the person can spot-check them. Returns ''
+    when neither occurred (no extra lines added)."""
+    if not meta:
+        return ""
+    lines = []
+    u = meta.get("underline_qnos") or []
+    if u:
+        nos = ", ".join(f"Q{n}" for n in u)
+        lines.append(f"✏️ Underline ছিল: {nos}")
+    ma = meta.get("multi_answer_qnos") or []
+    if ma:
+        nos = ", ".join(f"Q{n}" for n in ma)
+        lines.append(f"🔀 Double answer (option5 দেখো): {nos}")
+    return ("\n" + "\n".join(lines)) if lines else ""
 
 def _strip_opt_prefix(opt: str) -> str:
     """Option টেক্সটের শুরুতে A) B) ক) খ) 1) 2) ইত্যাদি marker সরায়।"""
@@ -11786,13 +12055,14 @@ async def _handle_clean_command_inner(msg: dict):
         return
 
     cleaned = _clean_mcqs(mcqs)
-    out_bytes = await _mcqs_to_csv_bytes(cleaned)
+    out_bytes, _csv_meta = await _mcqs_to_csv_bytes(cleaned)
     base_name = re.sub(r'\.(csv|json)$', '', file_name, flags=re.I)
 
     if status_msg_id:
         await edit_msg(chat_id, status_msg_id, f"✅ {len(cleaned)}টি MCQ clean হয়েছে!")
     await send_document(chat_id, out_bytes, f"{base_name}_clean.csv",
-                         caption=f"✅ Clean CSV — {len(cleaned)}টি MCQ (numbering/source-tag/option-marker মুক্ত)")
+                         caption=f"✅ Clean CSV — {len(cleaned)}টি MCQ (numbering/source-tag/option-marker মুক্ত)"
+                                 f"{_csv_meta_caption_suffix(_csv_meta)}")
 
 
 _cut_pdf_cache = {}  # file_id -> pdf_bytes (small in-memory cache to skip re-download)
@@ -12539,10 +12809,11 @@ async def _handle_cut_csv_command_inner(msg: dict):
             f"✅ {total}টি MCQ পাওয়া গেছে!\n⏳ {start_no}-{end_no_clamped} range কাটা হচ্ছে...")
 
     base_name = re.sub(r'\.(csv|json)$', '', file_name, flags=re.I)
-    out_bytes = await _mcqs_to_csv_bytes(cut_slice)
+    out_bytes, _csv_meta = await _mcqs_to_csv_bytes(cut_slice)
     out_name = f"{base_name}_cut{start_no}-{end_no_clamped}.csv"
     r = await send_document(chat_id, out_bytes, out_name,
-        caption=f"✂️ Cut: {start_no}-{end_no_clamped} | 📊 {len(cut_slice)}টি MCQ",
+        caption=f"✂️ Cut: {start_no}-{end_no_clamped} | 📊 {len(cut_slice)}টি MCQ"
+                f"{_csv_meta_caption_suffix(_csv_meta)}",
         reply_to_message_id=status_msg_id)
     if not r.get("ok"):
         err = r.get("error") or r.get("description") or "unknown error"
@@ -12623,10 +12894,10 @@ async def _handle_split_command_inner(msg: dict):
     try:
         for i in range(total_parts):
             chunk = mcqs[i * chunk_size:(i + 1) * chunk_size]
-            part_bytes = await _mcqs_to_csv_bytes(chunk)
+            part_bytes, _csv_meta = await _mcqs_to_csv_bytes(chunk)
             part_name = f"{base_name}_part{i+1:02d}.csv"
             r = await send_document(chat_id, part_bytes, part_name,
-                caption=f"📄 Part-{i+1:02d} | 📊 {len(chunk)}টি MCQ")
+                caption=f"📄 Part-{i+1:02d} | 📊 {len(chunk)}টি MCQ{_csv_meta_caption_suffix(_csv_meta)}")
             if not r.get("ok"):
                 logger.error(f"[Split] send_document failed: {r}")
             if status_msg_id:
@@ -12707,7 +12978,7 @@ async def _send_csv_polls_to_channel(
     extra_cancel_check: chat_id-keyed CANCEL_FLAGS ছাড়া আরেকটা cancel source
     check করার জন্য (যেমন LMS send-to-channel job-এর নিজস্ব cancel_requested
     flag, যেটা chat_id=0 দিয়ে চলে তাই is_cancelled(chat_id) কখনো true হয় না)।
-    Returns: (sent_count, first_poll_link)
+    Returns: (sent_count, first_poll_link, first_poll_msg_id)
     """
     settings = await db_get_settings()
     tag = settings.get("tag", "")
@@ -12716,6 +12987,7 @@ async def _send_csv_polls_to_channel(
     sent = start_index
     total = len(mcqs)
     first_poll_link = first_poll_link_so_far
+    first_poll_msg_id = None
 
     # Adaptive pacing — Telegram channel/group এ প্রতি ~60s এ ~20টা message
     # burst limit আছে। আগে fixed 1.1s gap দিয়ে 19-20টা পাঠিয়ে হার্ড 429 খেয়ে
@@ -12795,8 +13067,9 @@ async def _send_csv_polls_to_channel(
             )
             if poll_r.get("ok"):
                 if sent == 0:
+                    first_poll_msg_id = poll_r["result"]["message_id"]
                     first_poll_link = _get_first_poll_link(
-                        channel_id, poll_r["result"]["message_id"]
+                        channel_id, first_poll_msg_id
                     )
                 sent += 1
                 break
@@ -12853,7 +13126,7 @@ async def _send_csv_polls_to_channel(
         # hitting that ceiling instead of only reacting after a 429.
         await asyncio.sleep(_adaptive_gap())
 
-    return sent, first_poll_link
+    return sent, first_poll_link, first_poll_msg_id
 
 # ============================================================
 # CSV→CHANNEL SERIAL QUEUE
@@ -13245,7 +13518,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
             all_batch_mcqs.extend(batch)
 
             # Polls পাঠাও (pre-msg কে reply করে)
-            sent, first_link = await _send_csv_polls_to_channel(
+            sent, first_link, first_poll_msg_id = await _send_csv_polls_to_channel(
                 channel_id, batch, batch_topic, chat_id, pre_msg_id,
                 thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname
             )
@@ -13475,7 +13748,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 pre_msg_id = pre_r.get("result", {}).get("message_id") if pre_r.get("ok") else None
                 all_batch_mcqs.extend(batch)
 
-                sent, first_link = await _send_csv_polls_to_channel(
+                sent, first_link, first_poll_msg_id = await _send_csv_polls_to_channel(
                     channel_id, batch, batch_topic, chat_id, pre_msg_id,
                     thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname
                 )
@@ -13488,31 +13761,68 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 # 2026-09-13 (user request): only the master summary stays
                 # pinned -- per-topic pre-messages are no longer pinned.
 
-                # 2026-11-14 (user request): no server-side PDF generation
-                # per topic anymore (RAM problem) -- end message is now
-                # always the plain-text message with just the 3 buttons
-                # (Poll Again / Quiz Solve / Website Exam). Website Exam
-                # already opens browser-side, which covers the
-                # "view without generating a PDF" need; a user who still
-                # wants a PDF can use Quiz Solve's own PDF option in DM.
+                batch_pdf_bytes = await _generate_style1_pdf_guaranteed(batch, batch_topic, chat_id)
+                # 2026-09-13 (user request): end message split into TWO
+                # separate messages. Msg-1 (PDF + caption, no score-ask)
+                # is identical for channel and group. Msg-2 (score-ask +
+                # first poll link) is sent ONLY for plain channels
+                # (ask_score == chat_type=="channel") -- groups never get
+                # a score-ask message at all.
                 ending = csv_get_ending_message(batch_topic, sent, "", ask_score=False)
                 end_msg_id_saved = None
-                end_send_data2 = {
-                    "chat_id": channel_id,
-                    "text": ending,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                    "reply_markup": await _rd_group_end_kb(batch_cache_id)
-                }
-                if pre_msg_id:
-                    end_send_data2["reply_to_message_id"] = pre_msg_id
-                if thread_id:
-                    end_send_data2["message_thread_id"] = thread_id
-                end_r = await tg_post("sendMessage", end_send_data2)
-                if not end_r.get("ok"):
+                if batch_pdf_bytes:
+                    # Per-topic end message (msg-1): the PDF of this topic's
+                    # polls IS the end message itself (caption = ending
+                    # text, no score-ask), with the 2-row Poll Again/Quiz
+                    # Solve (DM deep-links) + Website Exam keyboard attached
+                    # directly. Identical for channel and group forum-topic.
+                    safe_btitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", batch_topic)[:50] or "ATLAS_Sheet"
+                    btn_kb = await _rd_group_end_kb(batch_cache_id)
+                    pdf_doc_r = await send_document(
+                        channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
+                        caption=ending,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=pre_msg_id
+                    )
+                    if not (pdf_doc_r and pdf_doc_r.get("ok")):
+                        pdf_doc_r = await send_document(  # one retry
+                            channel_id, batch_pdf_bytes, f"{safe_btitle}_style1.pdf",
+                            caption=ending,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=pre_msg_id
+                        )
+                    if pdf_doc_r and pdf_doc_r.get("ok"):
+                        pdf_msg_id = pdf_doc_r.get("result", {}).get("message_id")
+                        end_msg_id_saved = pdf_msg_id
+                        if pdf_msg_id:
+                            try:
+                                await tg_post("editMessageReplyMarkup", {
+                                    "chat_id": channel_id, "message_id": pdf_msg_id,
+                                    "reply_markup": btn_kb
+                                })
+                            except Exception as e:
+                                logger.warning(f"[CSV-Topicwise] PDF button attach failed: {e}")
+                    end_r = pdf_doc_r
+                else:
+                    # PDF generation genuinely failed -- fall back to the
+                    # old plain-text end message (with the same new keyboard)
+                    # so the topic still ends with a usable message+buttons.
+                    end_send_data2 = {
+                        "chat_id": channel_id,
+                        "text": ending,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                        "reply_markup": await _rd_group_end_kb(batch_cache_id)
+                    }
+                    if pre_msg_id:
+                        end_send_data2["reply_to_message_id"] = pre_msg_id
+                    if thread_id:
+                        end_send_data2["message_thread_id"] = thread_id
                     end_r = await tg_post("sendMessage", end_send_data2)
-                if end_r.get("ok"):
-                    end_msg_id_saved = end_r["result"]["message_id"]
+                    if not end_r.get("ok"):
+                        end_r = await tg_post("sendMessage", end_send_data2)
+                    if end_r.get("ok"):
+                        end_msg_id_saved = end_r["result"]["message_id"]
 
                 if end_r.get("ok"):
                     await db_update_cache(batch_cache_id, {
@@ -13561,11 +13871,26 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 await asyncio.sleep(2.5)
 
             if total_batches > 1:
-                # 2026-11-14 (user request): combined end-of-job PDF removed
-                # (RAM problem) — Website Exam links already give a
-                # browser-side view of every topic without generating any
-                # PDF. Master summary (edited live throughout) remains the
-                # single dashboard for the whole job.
+                # /sheet কমান্ডের topicwise PDF (style1, _pdfs_topic দিয়ে
+                # গ্রুপ করা) এর সাথে হুবহু একই বিল্ডার ব্যবহার করে একটাই
+                # সম্মিলিত PDF।
+                try:
+                    _combined_topics_order, _combined_topic_map = _group_pdfs_mcqs(all_batch_mcqs, topic)
+                    _combined_html = _build_topicwise_pdf_html(_combined_topics_order, _combined_topic_map, topic)
+                    _combined_pdf_bytes = await _html_to_pdf(_combined_html, use_css_page_size=False, page_width_mm=420)
+                    _combined_pdf_bytes = await _apply_saved_watermark(_combined_pdf_bytes)
+                    if _combined_pdf_bytes:
+                        _safe_ctitle = re.sub(r"[^\w\u0980-\u09FF\-]+", "_", topic)[:50] or "ATLAS_Sheet"
+                        _combined_send_data = {}
+                        if thread_id:
+                            _combined_send_data["message_thread_id"] = thread_id
+                        await send_document(
+                            channel_id, _combined_pdf_bytes, f"{_safe_ctitle}_combined.pdf",
+                            caption=f"📖 সম্মিলিত Practice Sheet (Topic-wise)\n📝 মোট MCQ: {total}\n📂 Topics: {total_batches}\n🚀 ATLAS APP",
+                            message_thread_id=thread_id
+                        )
+                except Exception as e:
+                    logger.warning(f"[CSV-Topicwise] combined PDF failed, skipping: {e}")
 
                 # Master summary was already sent first and live-updated
                 # per topic above (2026-09-13) — final edit here just
@@ -13629,7 +13954,7 @@ async def _process_csv_to_channel_impl(cache_id: str, channel_id: str,
                 sent_index=0, total=total, first_poll_link="", status="running"
             )
 
-        sent, first_link = await _send_csv_polls_to_channel(
+        sent, first_link, first_poll_msg_id = await _send_csv_polls_to_channel(
             channel_id, mcqs, topic, chat_id, pre_msg_id,
             thread_id=thread_id, loading_id=loading_id, csv_fname=csv_fname,
             job_id=job_id, start_index=resume_from, first_poll_link_so_far=resume_link
@@ -14525,21 +14850,30 @@ async def _get_pw_browser():
                     # 2026-09-21: "--single-process" removed. In that mode any page close/crash takes the WHOLE
                     # browser down: the next new_page() then hangs (15s TimeoutError, empty message in the log)
                     # and every PDF paid a 15s stall + full relaunch. Multi-process is stable and HF has RAM.
-                    # 2026-11-10 (RAM): added standard low-memory Chromium flags (all
-                    # multi-process-safe, none touch the single-process issue above):
-                    # --disable-background-networking/--disable-sync/--disable-translate/
-                    # --disable-default-apps trim idle background services Chromium
-                    # otherwise keeps running; --js-flags=--max-old-space-size caps V8's
-                    # heap per renderer (pages here are static HTML->PDF, not JS-heavy, so
-                    # a small heap is safe); --disable-features=TranslateUI avoids loading
-                    # the translate component. None change page-render behavior/output.
-                    args=[
-                        "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-                        "--disable-gpu", "--disable-extensions", "--mute-audio",
-                        "--disable-background-networking", "--disable-sync",
-                        "--disable-translate", "--disable-default-apps",
-                        "--disable-features=TranslateUI", "--js-flags=--max-old-space-size=128",
-                    ]
+                    # REVERTED 2026-11-15 to the exact pre-RAM-churn config from
+                    # 2026-09-21 (commit f602666) -- this ran stable for 30+ days.
+                    # Every "RAM fix" layered on top since (2026-11-10 extra flags,
+                    # 2026-11-14 IS_RENDER-gating, 2026-11-15 executable_path to system
+                    # chromium) only produced repeated SIGTRAP crashes on HF Space.
+                    # Going back to exactly what worked: playwright's own bundled
+                    # chromium (no executable_path override), these 6 flags, every host.
+                    # 2026-11-16: root cause of the SIGTRAP crashes finally found --
+                    # requirements.txt had playwright UNPINNED, so every rebuild pulled
+                    # the newest release. Playwright 1.49 changed headless=True's default
+                    # to launch "chromium-headless-shell" instead of full Chromium, which
+                    # doesn't support page.pdf() the way full Chromium does (SIGTRAP on
+                    # launch, not memory/OOM -- RSS was ~200MB). Tried channel="chromium"
+                    # to force full Chromium back -- that hit a SEPARATE known Playwright
+                    # bug (microsoft/playwright-java#1871): full Chromium launched via the
+                    # default --remote-debugging-pipe transport SIGTRAPs in some sandboxed
+                    # containers (works fine via manual --remote-debugging-port instead,
+                    # but that needs a different launch path, not worth the churn here).
+                    # Real fix: pin playwright==1.48.0 in requirements.txt (the last
+                    # release before the headless-shell default changed) and drop
+                    # channel= entirely -- restores the exact 2026-09-21 behavior with
+                    # no new code paths and no version-drift risk on the next rebuild.
+                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+                          "--disable-gpu", "--disable-extensions", "--mute-audio"]
                 ), timeout=30
             )
         return _PW_BROWSER["browser"]
@@ -16492,8 +16826,13 @@ def _am_build_html(data, heading, fmt, hdr_txt="", ftr_txt=""):
 _sheet_cache = {}
 # /sheet cache is bounded by both entry count and source CSV bytes. Parsed MCQ
 # dictionaries occupy several times the CSV size, so a count-only cap is unsafe.
-_SHEET_CACHE_MAX = 8
-_SHEET_CACHE_MAX_BYTES = 6 * 1024 * 1024
+# ROOT-CAUSE FIX 2026-11-14: these caps were hardcoded for the 512MB Render
+# host (unconditionally, unlike every other RAM constant in this file) and
+# stayed in force even after moving to the 16GB HF Space -- rejecting any
+# CSV over 6MB with a Render-specific error message on a host that has RAM
+# to spare. Gated to IS_RENDER like the rest.
+_SHEET_CACHE_MAX = 8 if IS_RENDER else 300
+_SHEET_CACHE_MAX_BYTES = (6 if IS_RENDER else 256) * 1024 * 1024
 _SHEET_CACHE_TTL_SECONDS = 30 * 60
 _sheet_cache_bytes = {"v": 0}
 
@@ -16556,7 +16895,7 @@ async def handle_sheet_command(msg: dict):
         if csv_size_bytes > _SHEET_CACHE_MAX_BYTES:
             if loading_id:
                 await edit_msg(chat_id, loading_id,
-                    "❌ CSV ফাইলটি 6MB-এর বেশি। Render-এর RAM নিরাপদ রাখতে ছোট ছোট CSV ভাগ করে /sheet দাও।")
+                    f"❌ CSV ফাইলটি {_SHEET_CACHE_MAX_BYTES // (1024*1024)}MB-এর বেশি। ছোট ছোট CSV ভাগ করে /sheet দাও।")
             return
         if loading_id:
             await edit_msg(chat_id, loading_id, f"✅ Download সম্পূর্ণ!\n📄 {file_name}\n[██████████ 100%]\n⏳ CSV parse হচ্ছে...")
@@ -18507,9 +18846,10 @@ async def _handle_dagano_impl(msg: dict):
         try:
             all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
             if all_mcqs_flat:
-                csv_bytes = await _mcqs_to_csv_bytes(all_mcqs_flat)
+                csv_bytes, _csv_meta = await _mcqs_to_csv_bytes(all_mcqs_flat)
                 await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
-                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv")
+                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}",
+                    mime_type="text/csv")
         except Exception as csv_err:
             logger.warning(f"[Dagano] CSV auto-send failed: {csv_err}")
 
@@ -18937,10 +19277,10 @@ async def _handle_extra_impl(msg: dict):
         all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
         try:
             if all_mcqs_flat:
-                csv_bytes = await _mcqs_to_csv_bytes(all_mcqs_flat)
+                csv_bytes, _csv_meta = await _mcqs_to_csv_bytes(all_mcqs_flat)
                 await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
-                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv",
-                    reply_to_message_id=status_msg_id)
+                    caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}",
+                    mime_type="text/csv", reply_to_message_id=status_msg_id)
             else:
                 await send_msg(chat_id, "⚠️ কোনো hand-marked MCQ পাওয়া যায়নি।",
                     reply_to_message_id=status_msg_id)
@@ -19352,9 +19692,10 @@ async def handle_pdf(msg: dict):
             try:
                 all_mcqs_flat = [m for _, _, mcqs in generated_pages for m in mcqs]
                 if all_mcqs_flat:
-                    csv_bytes = await _mcqs_to_csv_bytes(all_mcqs_flat)
+                    csv_bytes, _csv_meta = await _mcqs_to_csv_bytes(all_mcqs_flat)
                     await send_document(chat_id, csv_bytes, f"{topic}_mcq.csv",
-                        caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ", mime_type="text/csv")
+                        caption=f"📄 {topic} — {len(all_mcqs_flat)} MCQ{_csv_meta_caption_suffix(_csv_meta)}",
+                        mime_type="text/csv")
             except Exception as csv_err:
                 logger.warning(f"[PDF] CSV auto-send failed: {csv_err}")
 
@@ -22076,40 +22417,53 @@ def _get_bd_time() -> str:
 # qbm_get_active_prompt() auto-detect a stale DB-cached prompt from before
 # the code update and self-heal to the new default, without needing a manual
 # `DELETE FROM quiz_sessions WHERE key='qbm_active_prompt'` after every edit.
-QBM_PROMPT_VERSION = 5
+QBM_PROMPT_VERSION = 4
 
 QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page — never invent, never skip. 0 MCQs→[]. N MCQs→exactly N.
 
 RULES:
 - Multi-column: COLUMN-MAJOR order (finish left column top-to-bottom, then next). Never zigzag.
 - Never guess without source proof. Never reword question/options (strip only numbering like ১./1./Q1./ক.). Never translate.
-- Synonym/antonym MCQs: question+options stay 100% English, no Bangla gloss added.
-- Verify count matches visible MCQs; don't miss the last one per column.
-- Fix obvious OCR/spelling errors without changing meaning; verify char-by-char, watch for visually similar Bangla letters.
+- Synonym/antonym MCQs (প্রতিশব্দ/সমার্থক/বিপরীত or "synonym/antonym of"): question+options stay 100% English, no Bangla gloss added anywhere.
+- 3+ read-throughs; verify count matches visible MCQs; don't miss the last one per column.
+- Fix obvious spelling errors without changing meaning; verify char-by-char.
+- OCR confusion pairs — check against these: বসতি≠বৃষ্টি, প্রাচীন≠প্রাচীর, দক্ষিণ≠রক্ষণ, রাজধানী≠রাজবাড়ী, সীমান্ত≠সিমেন্ট, অবস্থান≠অবস্থা, বিভাগ≠বিভাজন, জনসংখ্যা≠জনসংখ্যক, স্বাধীনতা≠সাধারণত, কর্তৃক≠কর্তব্য. Re-check glyph shape before committing.
 - Never truncate — question/options end only at proper punctuation (?।); compare length vs source.
-- Hard-to-read word/name: infer full word from context/general knowledge, never leave blank.
+- Hard-to-read word/name: infer full word from context/partial letters/general knowledge, never leave blank.
+- Question unclear but options readable: infer question type from options + general knowledge.
 
-ANSWER DETECTION (priority A>B>C>D, match by Q number):
-A) Visual mark on option (circle/✓/✗/underline/bold/highlight) — overrides all
+ANSWER DETECTION (priority A>B>C>D>E, triple-check, match by Q number):
+A) Visual mark on option (circle/✓/✗/underline/bold/highlight/star) — overrides all
 B) Answer right after MCQ block
 C) Answer table at page bottom ("1-A,2-C...")
-D) Answer key on a later/adjacent page (scan forward)
-None found → "A" + note "Answer not found in source".
+D) Combined answer key on later pages (scan forward)
+E) Answer key on adjacent page
+None found → "A" + note "Answer not found in source". Convert to A/B/C/D. Re-verify twice.
 
-OPTION ORDER: map by VISUAL POSITION only: 1st→A,2nd→B,3rd→C,4th→D, regardless of source labels (a-d/ক-ঘ/১-৪/bullets). Answer letter = position of correct text in OUTPUT. Keep source numeral system exactly.
+MULTIPLE CORRECT ANSWERS (rare — only when the SAME source evidence above proves it, never guess or invent a second answer): if the visual mark/answer table/answer key shows MORE THAN ONE option is correct for this MCQ (e.g. two options both circled/ticked, or the key explicitly lists two letters like "B,D" or "both B and D") → output "answer" as those letters concatenated with NO separator, in A/B/C/D order (e.g. "BD", "AC"). The vast majority of MCQs have exactly one correct answer — keep "answer" as a single letter exactly as before unless the source itself genuinely shows two+.
 
-উদ্দীপক (PASSAGE): prepend full passage to each linked MCQ. Strip ONLY navigation sentences like "উদ্দীপকের আলোকে ২১-২২ নং প্রশ্নের উত্তর দাও".
+UNDERLINE MARKING (independent of answer-detection): any individual underlined word/phrase in question or options → wrap as **word**. Don't confuse with bold/italic. No underline → no ** markers.
+
+OPTION ORDER: any source label system (A-D/a-d/ক-ঘ/১-৪/bullets/none) → map by VISUAL POSITION only: 1st→A,2nd→B,3rd→C,4th→D. Never sort by label/text. Answer letter = position of correct text in OUTPUT (e.g. source order গ,খ,ক,ঘ, correct="ক" → slot C → answer="C"). Numbers/years: keep source numeral system exactly (no Bengali↔English conversion); verify digit-by-digit.
+
+উদ্দীপক (PASSAGE): prepend full passage to each linked MCQ (self-contained), copied per MCQ if shared. Strip ONLY navigation sentences like "উদ্দীপকের আলোকে ২১-২২ নং প্রশ্নের উত্তর দাও" / "Answer questions 21-22 based on the stimulus above". Do NOT strip sentences that are the actual question just because they contain "উদ্দীপক".
 
 EXPLANATION (keep simple, max 190 chars Bengali unless case 1):
-1) Explanation/reasoning exists on page → copy 100% verbatim, byte-for-byte, no edits.
-2) Nothing on page → one short line: "সঠিক উত্তর: <letter> (<option text>)". Do NOT write a long breakdown or invent outside-knowledge reasoning — the job is extracting the MCQ as-is, not writing new explanations.
+1) Explanation/reasoning exists on page → copy 100% verbatim, byte-for-byte, no edits (overrides char limit).
+2) Nothing on page → one short line: "সঠিক উত্তর: <letter> (<option text>)". Do NOT write a long multi-option breakdown or invent reasoning from outside knowledge — main job is extracting the MCQ as-is, not writing new explanations.
 
-MATH/CHEM: never raw LaTeX — convert to Unicode (H₂O, x², √x, Na⁺, °C, × etc).
+MATH/CHEM FORMATTING: never output raw LaTeX (\vec,\hat,\frac,\sqrt,\sum,\int,^,_,{,}) — convert to Unicode:
+Vectors: \vec{A}→A⃗, \hat{i}→î. Fractions: \frac{a}{b}→a/b or a⁄b. Roots: \sqrt{x}→√x, \sqrt[3]{x}→∛x.
+Sub/superscript: H₂O, CO₂, Na⁺, Ca²⁺, Cl⁻, SO₄²⁻, x², 10³, E=mc² (never H2O, x^2, x_0).
+Units/symbols: °C, cm³, ×, ·, ∑ ∫ ∞ ∂ √ ± ≤ ≥ ≠ ≈ ∝ ∆ π θ α β γ λ μ Ω as Unicode.
+Never mix LaTeX+Unicode in one MCQ. Exception: only a genuinely unrepresentable expression (complex matrix/nested integral) may keep minimal LaTeX.
 
-Never say WHERE info lives (চিত্রে/বক্সে/ছকে/উদ্দীপকে/পৃষ্ঠায়/"as shown in figure/table") — state facts directly.
+FORBIDDEN SOURCE-REFERENCE PHRASES (question+explanation): never say WHERE info lives (চিত্রে/বক্সে/ছকে/উদ্দীপকে/সারণিতে/পৃষ্ঠায়/প্যাসেজে/অনুচ্ছেদে/গ্রাফে/"দেখা যাচ্ছে"/"বলা আছে"/"প্রদত্ত"/English "as shown in figure/table/passage"/"mentioned in text") — always state the fact directly, as general knowledge. Structural rule: any container-pointing phrase forbidden regardless of wording.
+
+DIAGRAM: question needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) covering entire diagram+labels+arrows edge-to-edge, small margin. Caption like "চিত্র: G"/"Figure 1" near question = proof diagram exists → bbox required. Omit if none. Options never get bbox.
 
 OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]
 """
 
 
@@ -22139,6 +22493,10 @@ RULES (zero tolerance):
 
 ANSWER DETECTION (priority order, trace to actual source, never guess): A) any visual mark on an option (circle/tick/cross/underline/bold/highlight) — overrides all; B) answer right after the MCQ block; C) answer table at page bottom; D) combined answer key on later/adjacent pages. None found → "A" + note "Answer not found in source". Convert to A/B/C/D format.
 
+MULTIPLE CORRECT ANSWERS (rare, only if source evidence itself shows it — never guess): if more than one option is genuinely marked/keyed correct for this MCQ, output "answer" as those letters concatenated with no separator in A/B/C/D order (e.g. "BD"). Normal single-answer MCQs unaffected.
+
+UNDERLINE MARKING (independent of answer-detection): any individual underlined word/phrase in question or options → wrap as **word**. Don't confuse with bold/italic. No underline → no ** markers.
+
 OPTION ORDER (absolute): source's 1st option → output A, 2nd → B, 3rd → C, 4th → D, regardless of source's own labels (a/b/c/d, ক/খ/গ/ঘ, ১/২/৩/৪, bullets). Answer letter = position of correct text in OUTPUT, not the source's original label. Numbers/years stay exactly as source (never convert Bengali↔English numerals).
 
 উদ্দীপক (PASSAGE): prepend full passage text to each linked MCQ. Remove ONLY the navigation sentence like "উদ্দীপকের আলোকে ২১-২২ নং প্রশ্নের উত্তর দাও" — never strip a sentence just for containing "উদ্দীপক" if it's the actual question.
@@ -22154,8 +22512,8 @@ OUTPUT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].
 
 
 TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
-    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    'OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": the text inside the widest, full-page-width BLACK/DARK BACKGROUND banner bar that this MCQ falls under (e.g. "বাংলাদেশ পরিচিতি", "বর্তমান ও পুরাতন নাম, ভৌগোলিক উপনাম", "বাংলাদেশের অবস্থান, আয়তন ও সীমানা") — this is the actual topic name and is CRITICAL, used to detect topic boundaries. STRICT SIZE/COLOR RULE: only a bar that (i) spans the FULL width of the page/column area (edge to edge, not a small box) AND (ii) has a SOLID FULL BLACK background qualifies as a topic banner. A small/short box, a lightly-shaded or colored (non-black) box, or any box that does not stretch the full width is NEVER a topic_hint, no matter what text it contains — treat it as ordinary content and keep the previously active topic_hint. Rules:\n'
@@ -22179,9 +22537,40 @@ TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
 )
 
 
-CHEM_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
+ENG_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
+    'ANSWER DETECTION (priority A>B>C>D>E, triple-check, match by Q number):\n'
+    'A) Visual mark on option (circle/✓/✗/underline/bold/highlight/star) — overrides all\n'
+    'B) Answer right after MCQ block\n'
+    'C) Answer table at page bottom ("1-A,2-C...")\n'
+    'D) Combined answer key on later pages (scan forward)\n'
+    'E) Answer key on adjacent page\n'
+    'None found → "A" + note "Answer not found in source". Convert to A/B/C/D. Re-verify twice.',
+    'ANSWER DETECTION (priority A>B>C>D, triple-check, match by Q number):\n'
+    'A) A SMALL BLACK/DARK FILLED BOX printed to the right of that MCQ (next to the question line or right after the option row), with the answer letter written INSIDE it in WHITE font (e.g. "Ans: c", "Ans: d") — this small black "Ans" badge is the PRIMARY and HIGHEST-PRIORITY signal, it OVERRIDES every other signal below and also overrides any circle/tick mark drawn on an option. Read the letter exactly as printed inside the white-font badge.\n'
+    'B) No such black "Ans" badge for this MCQ → visual mark on option (circle/✓/✗/underline/bold/highlight/star)\n'
+    'C) Answer right after MCQ block, or an answer table at page bottom ("1-A,2-C...")\n'
+    'D) Combined answer key on later/adjacent pages (scan forward)\n'
+    'None found → "A" + note "Answer not found in source". Convert source letter to the OUTPUT option\'s A/B/C/D position (per OPTION ORDER rule below) — a badge letter is still just a label, it must be remapped the same as any other source answer-letter. Re-verify twice.',
+).replace(
+    'OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]',
+    'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
+    '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ. A brand-new topic on this page ALWAYS restarts numbering at 1 — seeing qsn_no go back to 1 (or a fresh "1.") after a higher number is itself a strong signal a new topic has started here, even before you check for a new banner.\n'
+    '- "topic_hint": the text inside the widest, full-page-width BLACK/DARK FILLED BAR that this MCQ falls under (e.g. "Medical Admission 2022-2023 (From APEX English)", "Medical Admission Test 2021-2022") — this is the actual topic name and is CRITICAL, used to detect topic boundaries. STRICT RULE: only a bar that (i) spans the FULL width of the page/column area (edge to edge, not a small box) AND (ii) has a SOLID BLACK/DARK FILLED background AND (iii) has its text printed in WHITE font INSIDE that bar qualifies as a topic banner. A small/short box, a lightly-shaded or colored (non-black) box, a black box with non-white (e.g. black or dark) text, or any bar that does not stretch the full width is NEVER a topic_hint, no matter what text it contains — treat it as ordinary content and keep the previously active topic_hint. Do NOT confuse this full-width WHITE-FONT-ON-BLACK-BAR topic banner with the small black "Ans" answer badge (that one is tiny, sits beside one single MCQ, and only ever contains a single answer letter — never a topic name). Rules:\n'
+    '  a) If a new full-width black-bar/white-font banner appears anywhere on THIS page (even partway down, even if a different banner was active at the top of the page), every MCQ from that point onward gets the NEW banner text; MCQs above it on the same page keep the banner that was already active for them.\n'
+    '  b) A new topic\'s MCQ numbering ALWAYS restarts at 1 right under its banner — use this to confirm a banner you are unsure about, and conversely, if you see numbering jump back to 1 anywhere on the page even without a clearly re-read banner, treat that point as a new-topic boundary and carry the nearest such banner\'s text forward from there.\n'
+    '  c) If this specific page has genuinely no full-width black-bar/white-font banner visible anywhere on it (pure continuation page, no new banner printed), use "" (empty string) for every MCQ on this page — do not guess or invent one.\n'
+    '  d) Every MCQ under the same visible banner on this page must get the EXACT SAME topic_hint string, character-for-character.\n\n'
+    'OUTPUT ORDER: top-to-bottom, column-major as in the base rules above — single column on this page style, so just read straight down, carrying topic_hint/qsn_no boundaries exactly as they occur in that reading order.\n'
+    'Before finalizing output, recount: every MCQ visible on the page MUST appear exactly once in the JSON array — zero skipped, zero duplicated. IMPORTANT PRIORITY: getting every MCQ extracted (none skipped) is more important than getting the topic boundary perfectly placed — if unsure exactly where a boundary falls, still include every MCQ you can see.\n\n'
     'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450],"qsn_no":1,"topic_hint":"..."}]'
+)
+
+
+CHEM_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
+    'OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": the topic-heading text that this MCQ falls under. THIS PAGE STYLE (chemistry/science textbook chapter layout) uses a topic-marker design identified by these signals, checked TOGETHER on any candidate heading line:\n'
@@ -22212,8 +22601,8 @@ BCS_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
     'Absolute priority A>B>C>D>E, match by question number. None found → "A" + note "Answer not found in source". Convert source format to A/B/C/D. Re-verify twice.',
     'Absolute priority A>B>C>D>E, match by question number. HARD RULE FOR /bcs: the answer MUST be traced to an actual visual mark/answer table/answer key found in the source images — NEVER pick an answer using your own subject knowledge of what seems factually correct, not even as a tie-breaker; your own knowledge may ONLY be used to build the "explanation" text, never to decide "answer". None of A-E found anywhere in source → output "answer":"A" but ALWAYS also set "no_mark": true and put the literal note "Answer not found in source" as the "explanation" (do not guess a knowledge-based explanation either in this specific case). Convert source format to A/B/C/D. Re-verify twice.'
 ).replace(
-    'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n'
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    'OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].\n'
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": THIS PAGE STYLE (BCS প্রশ্ন ও সমাধান compilation) marks a new topic with a small banner badge identified by ALL of these signals TOGETHER:\n'
@@ -22271,7 +22660,7 @@ BCS_EXTRACT_PROMPT_CALL1 = BCS_EXTRACT_PROMPT.replace(
 UNMESH_CODE_VERSION_MARKER = "306adaf-groq-fallback-v1"  # bump this any time recovery logic changes; log it once per /unmesh run to confirm deployed code version from Telegram output alone, no server log access needed
 
 UNMESH_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
-    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]',
+    '[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]',
     'ADDITIONALLY (for topic-grouping) extract for EACH MCQ:\n'
     '- "qsn_no": the question\'s own printed serial number on the page, as an integer (e.g. প্রশ্ন-১ → 1, ২১. → 21, Q5 → 5). This is CRITICAL and used to detect topic boundaries — read it carefully and precisely for every single MCQ, never skip it if a number is printed. Use null ONLY if truly zero visible numbering exists for that MCQ.\n'
     '- "topic_hint": the topic-heading text that this MCQ falls under. A topic heading here is identified by ALL THREE of the following together, right before the heading text:\n'
@@ -22327,7 +22716,7 @@ def _swap_to_compact_base(full_prompt: str) -> str:
     that exact shared prefix, strips it off, and prepends the compact base
     instead -- keeping 100% of the topic-detection/segment-ordering rules
     the .replace() call added on top, untouched."""
-    _marker = 'OUTPUT FORMAT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].\n[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"... (max 190 chars Bengali)","qsn_bbox":[100,200,400,450]}]'
+    _marker = 'OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].\n[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]'
     prefix_len = QBM_EXTRACT_PROMPT_DEFAULT.find(_marker)
     if prefix_len == -1 or not full_prompt.startswith(QBM_EXTRACT_PROMPT_DEFAULT[:prefix_len]):
         return full_prompt  # prefix mismatch -- leave untouched, safer than guessing
@@ -22337,6 +22726,45 @@ def _swap_to_compact_base(full_prompt: str) -> str:
 TOPIC_EXTRACT_PROMPT_GROQ_COMPACT = _swap_to_compact_base(TOPIC_EXTRACT_PROMPT)
 CHEM_EXTRACT_PROMPT_GROQ_COMPACT = _swap_to_compact_base(CHEM_EXTRACT_PROMPT)
 UNMESH_EXTRACT_PROMPT_GROQ_COMPACT = _swap_to_compact_base(UNMESH_EXTRACT_PROMPT)
+ENG_EXTRACT_PROMPT_GROQ_COMPACT = _swap_to_compact_base(ENG_EXTRACT_PROMPT)
+
+
+# 2026-11-16 (per request): /topic, /chem, /bcs, /eng, /unmesh all route
+# through /qbm's generation pipeline but must NOT spend model effort
+# writing explanations -- only /qbm itself keeps explanation generation.
+# This strips (a) the EXPLANATION instruction block and (b) the
+# "explanation" key from the JSON output schema, for every derived
+# prompt. Model still outputs answer/qsn_no/topic_hint etc exactly as
+# before -- explanation is simply never requested, so there's no
+# generation cost/latency for it and no hallucination risk from it.
+def _strip_explanation(prompt: str) -> str:
+    out = prompt
+    out = out.replace(
+        'EXPLANATION (keep simple, max 190 chars Bengali unless case 1):\n'
+        '1) Explanation/reasoning exists on page → copy 100% verbatim, byte-for-byte, no edits (overrides char limit).\n'
+        '2) Nothing on page → one short line: "সঠিক উত্তর: <letter> (<option text>)". Do NOT write a long multi-option breakdown or invent reasoning from outside knowledge — main job is extracting the MCQ as-is, not writing new explanations.\n\n',
+        ''
+    )
+    out = out.replace(
+        'EXPLANATION (max 190 chars Bengali unless verbatim source text): if page has explanation text for this MCQ, copy VERBATIM (overrides length limit). Otherwise build from any relevant page info, correct-option reasoning first. Nothing relevant → best explanation from own knowledge, same structure. Never use phrases like "চিত্রে দেখা যাচ্ছে"/"as shown in the figure" — state facts directly.\n\n',
+        ''
+    )
+    out = out.replace('"explanation":"... (max 190 chars Bengali)",', '')
+    out = out.replace('"explanation":"...",', '')
+    out = out.replace(', "explanation": "..."', '')
+    return out
+
+
+TOPIC_EXTRACT_PROMPT = _strip_explanation(TOPIC_EXTRACT_PROMPT)
+CHEM_EXTRACT_PROMPT = _strip_explanation(CHEM_EXTRACT_PROMPT)
+UNMESH_EXTRACT_PROMPT = _strip_explanation(UNMESH_EXTRACT_PROMPT)
+ENG_EXTRACT_PROMPT = _strip_explanation(ENG_EXTRACT_PROMPT)
+BCS_EXTRACT_PROMPT = _strip_explanation(BCS_EXTRACT_PROMPT)
+BCS_EXTRACT_PROMPT_CALL1 = _strip_explanation(BCS_EXTRACT_PROMPT_CALL1)
+TOPIC_EXTRACT_PROMPT_GROQ_COMPACT = _strip_explanation(TOPIC_EXTRACT_PROMPT_GROQ_COMPACT)
+CHEM_EXTRACT_PROMPT_GROQ_COMPACT = _strip_explanation(CHEM_EXTRACT_PROMPT_GROQ_COMPACT)
+UNMESH_EXTRACT_PROMPT_GROQ_COMPACT = _strip_explanation(UNMESH_EXTRACT_PROMPT_GROQ_COMPACT)
+ENG_EXTRACT_PROMPT_GROQ_COMPACT = _strip_explanation(ENG_EXTRACT_PROMPT_GROQ_COMPACT)
 
 
 def _check_segment_topic_consistency(mcqs: list, context: str = "", forced_boundaries: set = None) -> list:
@@ -22698,6 +23126,112 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
         mcqs = _check_segment_serial_order(mcqs, context="Call2")
     except Exception as e:
         logger.warning(f"[TOPIC verify] audit pass failed, skipping: {e}")
+
+    return mcqs
+
+
+async def _eng_extract_from_image(img, cache_key: tuple = None) -> list:
+    """/eng's extractor — same pipeline shape as /topic's _topic_extract_from_image
+    (Call1 extract + Call2 audit) but with ENG_EXTRACT_PROMPT: answer comes
+    from the small black "Ans" box (white font) beside each MCQ instead of a
+    circled option, and topic boundary is a full-width black bar with WHITE
+    font topic text (+ qsn_no resetting to 1). Own cache namespace
+    (_eng_mcq_result_cache) since this command's extraction shape differs
+    from /topic's."""
+    async def _run_extract_call(bypass_cache: bool = False):
+        cached = _eng_mcq_result_cache.get(cache_key) if (cache_key and not bypass_cache) else None
+        if cached:
+            logger.info(f"[ENG MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
+            return _qbm_dedup_list(cached)
+        gem = await _qbm_gemini_extract(img, ENG_EXTRACT_PROMPT)
+        result = _qbm_dedup_list(gem) if gem else []
+        if result and cache_key:
+            _eng_mcq_result_cache[cache_key] = result
+            _cap_qbm_mcq_cache(_eng_mcq_result_cache)
+        return result
+
+    mcqs = await _run_extract_call()
+    if not mcqs:
+        return mcqs
+
+    # CODE-LEVEL CHECK (Call1 stage): same two boundary signals as /topic —
+    # within this single page's extraction, every MCQ between one
+    # qsn_no==1 and the next must share one topic_hint.
+    mcqs = _check_segment_topic_consistency(mcqs, context="ENG-Call1")
+    mcqs = _check_segment_serial_order(mcqs, context="ENG-Call1")
+
+    # Call 2: audit pass against Call1's own output (reuses /topic's generic
+    # verify-prompt builder — it already checks count/serial/word-accuracy/
+    # answer-mark/topic-banner generically, nothing /topic-specific in it).
+    try:
+        verify_prompt = _build_topic_verify_prompt(mcqs)
+        check_txt = await _qbm_gemini_raw(img, verify_prompt)
+        check = _parse_count_check_json(check_txt)
+
+        missing_nums = set(n for n in (check.get("missing_qsn_no") or []) if isinstance(n, int))
+        wrong_serials = check.get("wrong_serials") or []
+        word_fixes = check.get("word_fixes") or []
+        topic_leaks = check.get("topic_leaks") or []
+
+        by_qsn = {m.get("qsn_no"): m for m in mcqs if isinstance(m.get("qsn_no"), int)}
+
+        if missing_nums:
+            logger.warning(f"[ENG verify] missing qsn_no {sorted(missing_nums)} — re-extracting page")
+            for _retry_attempt in range(2):
+                if not missing_nums:
+                    break
+                retry_mcqs = await _run_extract_call(bypass_cache=True)
+                retry_got = {m.get("qsn_no"): m for m in retry_mcqs if isinstance(m.get("qsn_no"), int)}
+                recovered = set()
+                for n in missing_nums:
+                    if n in retry_got:
+                        mcqs.append(retry_got[n])
+                        by_qsn[n] = retry_got[n]
+                        recovered.add(n)
+                missing_nums -= recovered
+                if missing_nums and _retry_attempt == 0:
+                    logger.warning(f"[ENG verify] still missing qsn_no {sorted(missing_nums)} after retry 1 — trying once more")
+
+        for fix in wrong_serials:
+            was = fix.get("was")
+            correct = fix.get("qsn_no_wrong")
+            if isinstance(was, int) and isinstance(correct, int) and was in by_qsn:
+                by_qsn[was]["qsn_no"] = correct
+                logger.warning(f"[ENG verify] serial fixed: {was} -> {correct}")
+
+        for fix in word_fixes:
+            n = fix.get("qsn_no")
+            field = (fix.get("field") or "").strip().lower().replace(" ", "").replace("_", "")
+            text = fix.get("correct_text")
+            if not (isinstance(n, int) and text and n in by_qsn):
+                continue
+            m = by_qsn[n]
+            if field == "question":
+                m["question"] = text
+                logger.warning(f"[ENG verify] word fix qsn {n} question")
+            elif field == "answer":
+                m["answer"] = text
+                logger.warning(f"[ENG verify] word fix qsn {n} answer -> {text}")
+            elif field in _OPT_FIELD_IDX and isinstance(m.get("options"), list) and len(m["options"]) == 4:
+                m["options"][_OPT_FIELD_IDX[field]] = text
+                logger.warning(f"[ENG verify] word fix qsn {n} {field}")
+
+        # Log-only: suspected topic leaks (same conservative policy as /topic
+        # — never auto-applied, just logged for review).
+        for leak in topic_leaks:
+            n = leak.get("qsn_no")
+            actual = (leak.get("actual_banner") or "").strip()
+            logger.warning(
+                f"[ENG verify] possible topic leak qsn {n}: "
+                f"extracted='{(leak.get('extracted_hint') or '')[:30]}' "
+                f"actual='{actual[:30]}' (not auto-fixed)"
+            )
+
+        mcqs = _qbm_dedup_list(mcqs)
+        mcqs = _check_segment_topic_consistency(mcqs, context="ENG-Call2")
+        mcqs = _check_segment_serial_order(mcqs, context="ENG-Call2")
+    except Exception as e:
+        logger.warning(f"[ENG verify] audit pass failed, skipping: {e}")
 
     return mcqs
 
@@ -27006,6 +27540,7 @@ _qbm_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict] (post-C
 # fields (qsn_no/topic_hint) and a shared cache would silently return the
 # wrong-shaped result across commands.
 _topic_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
+_eng_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict], /eng's own cache namespace
 _unmesh_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
 _bcs_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
 _chem_mcq_result_cache = {}  # (content_hash, page_num) -> list[mcq dict]
@@ -27406,9 +27941,9 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
             ans_text = opts[idx] if idx < len(opts) else ""
             mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
 
-        # NOTE (per request): diagram/উদ্দীপক image crop+link feature removed
-        # from /qbm -- no bbox recovery call, no image attach. Prompt no
-        # longer emits qsn_bbox either.
+        if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
+            pending_bbox_idx[len(fixed)] = mc["question"]
+            batch_items.append({"idx": len(fixed), "type": "bbox", "question": mc["question"]})
 
         fixed.append(mc)
 
@@ -27419,7 +27954,13 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
             r = results.get(idx)
             reread = r if (isinstance(r, str) and r and r != "NOT_FOUND") else ""
             fixed[idx]["question"] = reread if reread else _qbm_reconstruct_question_from_options(q, opts)
+        for idx, question in pending_bbox_idx.items():
+            r = results.get(idx)
+            if isinstance(r, list) and len(r) == 4:
+                fixed[idx]["qsn_bbox"] = r
+                logger.info(f"[QBM safety-net] Recovered missed diagram bbox for: {question[:50]}")
 
+    fixed = await _attach_option_images_if_missing(fixed, img)
     return fixed
 
 
@@ -27679,6 +28220,11 @@ async def _qbm_gemini_raw_only(img, prompt: str, careful: bool = False) -> str:
                 _used = _qbm_page_used_accounts_ctx.get()
                 if _used is not None:
                     _used.add(key_rotator.account_of(key))
+                try:
+                    from pdf_handler import _gemini_key_hash
+                    logger.info(f"[QBM Gemini] success — account={key_rotator.account_of(key)} key={_gemini_key_hash(key)}")
+                except Exception:
+                    pass
                 return response.text or ""
             except Exception as e:
                 msg = str(e)
@@ -27922,6 +28468,20 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 _used_set = _qbm_page_used_accounts_ctx.get()
                 if _used_set is not None:
                     _used_set.add(_used_acct)
+                # 2026-11-16 (user request): /qbm tracked account_of(key) only
+                # internally (to avoid repeat-account retries) -- never logged
+                # or exposed which account/key actually won, unlike /pdf's
+                # pipeline (_attach_gemini_success_info). Mirror that here.
+                try:
+                    from pdf_handler import _gemini_key_hash, _last_gemini_success_ctx
+                    logger.info(f"[QBM Gemini] success — account={_used_acct} key={_gemini_key_hash(key)}")
+                    _last_gemini_success_ctx.set({
+                        "account": _used_acct,
+                        "key_hash": _gemini_key_hash(key),
+                        "model": _fallback_model or "gemini-3.6-flash",
+                    })
+                except Exception:
+                    pass
                 # 2026-09-08 ROOT-CAUSE DIAGNOSTIC: response.text can be
                 # empty/short for reasons that never surface as an exception
                 # -- SAFETY block, MAX_TOKENS cutoff, RECITATION block, or a
@@ -28177,6 +28737,11 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
                 _used_set_multi = _qbm_page_used_accounts_ctx.get()
                 if _used_set_multi is not None:
                     _used_set_multi.add(key_rotator.account_of(key))
+                try:
+                    from pdf_handler import _gemini_key_hash
+                    logger.info(f"[QBM Gemini] success (multi-image) — account={key_rotator.account_of(key)} key={_gemini_key_hash(key)}")
+                except Exception:
+                    pass
                 _rtext_multi = response.text or ""
                 if len(_rtext_multi) < 50:
                     try:
@@ -29793,6 +30358,173 @@ async def _handle_topic_impl(msg: dict):
 
     except Exception as e:
         logger.error(f"[TOPIC] Error: {e}", exc_info=True)
+        await _safe_error_reply(chat_id, e)
+
+
+async def handle_eng(msg: dict):
+    """/eng -p (pages) — same arg style as /topic/pdf/qbm. Extracts existing
+    MCQ (never generates new) like /topic, but tuned for the APEX-English
+    style page: answer comes from a small black box with the letter in
+    WHITE font beside each MCQ (not a circled option), and topic boundary is
+    a full-width BLACK bar with the topic name in WHITE font (+ qsn_no
+    restarting at 1). Sends ONE separate CSV per detected topic plus a
+    merged CSV with topic-marker rows, exactly like /topic's output."""
+    uid = msg["from"]["id"]
+    chat_id = msg["chat"]["id"]
+    lock = _get_pdfm_lock(uid)
+    if lock.locked():
+        _PDFM_USER_QUEUE_LEN[uid] = _PDFM_USER_QUEUE_LEN.get(uid, 0) + 1
+        pos = _PDFM_USER_QUEUE_LEN[uid]
+        try:
+            await send_msg(chat_id, f"⏳ আগের PDF/PPT কাজ শেষ হচ্ছে... তোমার এই request queue তে #{pos} নম্বরে আছে, একে একে সব হয়ে যাবে।")
+        except Exception:
+            pass
+    async with lock:
+        _PDFM_USER_QUEUE_LEN[uid] = max(0, _PDFM_USER_QUEUE_LEN.get(uid, 1) - 1)
+        _active_jobs["count"] = _active_jobs.get("count", 0) + 1
+        try:
+            return await _handle_eng_impl(msg)
+        finally:
+            _active_jobs["count"] = max(0, _active_jobs.get("count", 1) - 1)
+
+
+async def _handle_eng_impl(msg: dict):
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+    reply = msg.get("reply_to_message")
+
+    if not reply or not reply.get("document"):
+        await send_msg(chat_id,
+            "❌ PDF-এ reply করে /eng দাও!\n\n"
+            "<b>Format:</b>\n"
+            "<code>/eng -p 1-10</code>\n\n"
+            "📌 Page-এ থাকা MCQ extract করে (নতুন বানায় না) — answer নেয় প্রতিটা MCQ-র পাশের "
+            "ছোট কালো বক্সের ভিতরের সাদা ফন্টের \"Ans\" থেকে, আর topic ধরে full-width কালো "
+            "ব্যানারে সাদা ফন্টে লেখা নাম (+ serial 1 থেকে শুরু) দেখে।\n"
+            "📌 -p = page range (না দিলে সব page)\n"
+            "📌 -c channel_id = দিলে CSV না, প্রতি টপিকের নামসহ header দিয়ে channel-এ সরাসরি poll পাঠাবে"
+        )
+        return
+
+    file_name = reply["document"].get("file_name", "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await send_msg(chat_id, "❌ শুধু PDF file support করে!")
+        return
+
+    file_id = reply["document"]["file_id"]
+    file_unique_id = reply["document"].get("file_unique_id")
+    params = _parse_pdfm_params(text)
+    page_range = params["page_range"]
+    eng_channel_id = params["channel_id"]
+    eng_thread_id = params["thread_id"]
+
+    status_r = await send_msg(chat_id, f"⏳ PDF download হচ্ছে...\n📄 {file_name}")
+    status_msg_id = status_r.get("result", {}).get("message_id") if status_r.get("ok") else None
+
+    try:
+        pdf_bytes = await _download_pdf_cached(file_id, chat_id=chat_id,
+                                                message_id=reply["message_id"], file_unique_id=file_unique_id)
+        ok, pages = await asyncio.to_thread(_render_pdf_cached, file_id, pdf_bytes, page_range)
+        if not ok:
+            await send_msg(chat_id, pages)
+            return
+        if not pages:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ Page পাওয়া যায়নি!")
+            return
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id, f"✅ {len(pages)} page পাওয়া গেছে!\n⏳ MCQ Extraction শুরু হচ্ছে (topic detect সহ)...")
+
+        extracted_pages = await qbm_extract_all_pages(
+            chat_id, pages, "Eng Extract", file_name, status_msg_id,
+            extractor=_eng_extract_from_image, file_id=file_id
+        )
+
+        total_mcq_found = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+        if not total_mcq_found:
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id, "❌ কোনো MCQ পাওয়া যায়নি!")
+            return
+
+        topic_groups = _topic_group_mcqs(extracted_pages)
+
+        if status_msg_id:
+            breakdown = "\n".join(f"📂 {name}: {len(mcqs)} MCQ" for name, mcqs in topic_groups)
+            next_step = "channel-এ poll পাঠানো হচ্ছে..." if eng_channel_id else "CSV পাঠানো হচ্ছে..."
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ Extraction Complete!\n📝 Total MCQ: {total_mcq_found} | 📂 Topics: {len(topic_groups)}\n\n{breakdown}\n\n⏳ {next_step}")
+
+        if eng_channel_id:
+            total_polls = await _post_topic_groups_to_channel(eng_channel_id, topic_groups, eng_thread_id)
+            if status_msg_id:
+                await edit_msg(chat_id, status_msg_id,
+                    f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে {total_polls}টি poll channel-এ পাঠানো হয়েছে।")
+            return
+
+        _ans_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+        import io as _io_eng, csv as _csv_eng
+        _running_count = 0
+        _cmd_msg_id = msg.get("message_id")
+        _merged_buf = _io_eng.StringIO()
+        _merged_w = _csv_eng.writer(_merged_buf)
+        _merged_w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                             "answer", "explanation", "type", "section"])
+        for name, mcqs in topic_groups:
+            buf = _io_eng.StringIO()
+            w = _csv_eng.writer(buf)
+            w.writerow(["questions", "option1", "option2", "option3", "option4", "option5",
+                        "answer", "explanation", "type", "section"])
+            _num_mg, _bn_name_mg = _split_topic_number_and_bangla_name(name)
+            _merged_w.writerow([_bn_name_mg, "", "", "", "", "", "", "", "", ""])
+            for m in mcqs:
+                opts = m.get("options", ["", "", "", ""])
+                row = [
+                    m.get("question", ""), opts[0] if len(opts) > 0 else "",
+                    opts[1] if len(opts) > 1 else "", opts[2] if len(opts) > 2 else "",
+                    opts[3] if len(opts) > 3 else "", opts[4] if len(opts) > 4 else "",
+                    _ans_map.get(m.get("answer", "A"), "1"),
+                    _strip_img_tag(m.get("explanation", "")), "1", "1"
+                ]
+                w.writerow(row)
+                _merged_w.writerow(row)
+            _num_fn, _bn_name_fn = _split_topic_number_and_bangla_name(name)
+            safe_name = re.sub(r'[\\/:*?"<>|]', '_', _bn_name_fn).strip() or "Topic"
+            range_start = _running_count + 1
+            range_end = _running_count + len(mcqs)
+            _running_count = range_end
+            _pg_nums = sorted({m.get("_page_num") for m in mcqs if m.get("_page_num") is not None})
+            if _pg_nums:
+                page_range_text = f"{_pg_nums[0]}" if len(_pg_nums) == 1 else f"{_pg_nums[0]}–{_pg_nums[-1]}"
+            else:
+                page_range_text = "N/A"
+            _num, _bn_name = _split_topic_number_and_bangla_name(name)
+            _num_prefix = f"{_html_escape(_num)} " if _num else ""
+            await send_document(chat_id, buf.getvalue().encode("utf-8"),
+                f"{safe_name}.csv",
+                caption=(f"📂 {_num_prefix}<code>{_html_escape(_bn_name)}</code>\n"
+                         f"📄 PDF Page: {page_range_text}\n"
+                         f"🔢 MCQ Range: {range_start}–{range_end}\n"
+                         f"💎 Total: {len(mcqs)}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if len(topic_groups) > 1:
+            _merged_file_base = re.sub(r'[\\/:*?"<>|]', '_', file_name.rsplit(".", 1)[0]).strip() or "Topic"
+            await send_document(chat_id, _merged_buf.getvalue().encode("utf-8"),
+                f"{_merged_file_base}_Merged.csv",
+                caption=(f"📚 <b>All Topics Merged</b>\n"
+                         f"📂 Topics: {len(topic_groups)}\n"
+                         f"💎 Total MCQ: {total_mcq_found}"),
+                mime_type="text/csv",
+                reply_to_message_id=_cmd_msg_id)
+
+        if status_msg_id:
+            await edit_msg(chat_id, status_msg_id,
+                f"✅ সম্পন্ন! মোট {total_mcq_found} MCQ, {len(topic_groups)}টি টপিকে ভাগ করে CSV পাঠানো হয়েছে।")
+
+    except Exception as e:
+        logger.error(f"[ENG] Error: {e}", exc_info=True)
         await _safe_error_reply(chat_id, e)
 
 
@@ -35330,7 +36062,10 @@ async def _handle_poll_again_inner(cache_id: str, user: dict, chat_id: int, star
     else:
         pre_caption = (
             f"🔄 <b>Poll Practice শুরু হচ্ছে!</b>\n\n"
-            f"🌟 Topic: {topic}\n📝 Total MCQ: {total}\n\n⏱️ Are you ready?"
+            f"🌟 Topic: {topic}\n📝 Total MCQ: {total}\n\n"
+            f"🛑 মাঝপথে থামাতে চাইলে <b>/stop</b> বা <b>stop</b> লিখো — যেখানে থামবে, "
+            f"সেখান থেকেই \"▶️ আবার শুরু করুন\" বাটনে আবার শুরু করতে পারবে।\n\n"
+            f"⏱️ Are you ready?"
         )
         if img_id:
             r = await send_photo_by_id(chat_id, img_id, pre_caption, parse_mode="HTML")
@@ -35917,7 +36652,10 @@ async def start_sequential_quiz(chat_id: int, uid: int, uname: str,
 
     pre_caption = (
         f"{title}\n\n🌟 Topic: {topic}\n"
-        f"📝 Total MCQ: {total}\n⏱️ প্রতিটা প্রশ্নে {QUIZ_Q_SEC} সেকেন্ড সময়\n\nপ্রস্তুত থাকো!"
+        f"📝 Total MCQ: {total}\n⏱️ প্রতিটা প্রশ্নে {QUIZ_Q_SEC} সেকেন্ড সময়\n\n"
+        f"🛑 মাঝপথে থামাতে চাইলে <b>/stop</b> বা <b>stop</b> লিখো — যেখানে থামবে, "
+        f"সেখান থেকেই \"▶️ আবার শুরু করুন\" বাটনে আবার শুরু করতে পারবে।\n\n"
+        f"প্রস্তুত থাকো!"
     )
     img_id = cache.get("image_file_id")
     if img_id:
@@ -37655,7 +38393,10 @@ async def handle_message(msg: dict):
 
     # Auto Rayvila exam link → scripted login→exam flow + auto CSV (checked
     # before the generic URL capture below, since it needs a different pipeline)
-    if text and not msg.get("reply_to_message") and is_rayvila_url(text):
+    # 2026-11-16: DISABLED per request — Rayvila link system turned off at
+    # the trigger. atlas_rayvila.py / scrape_rayvila_exam / /api/url-to-csv
+    # Rayvila branch left intact, just unreachable from this entry point.
+    if False and text and not msg.get("reply_to_message") and is_rayvila_url(text):
         _spawn_command_task(uid, _process_rayvila_auto(msg, text.strip()))
         return
 
@@ -38083,6 +38824,14 @@ async def handle_message(msg: dict):
         # /topic = same extraction as /qbm but groups MCQs into separate
         # CSVs per detected topic (serial-number reset / heading change)
         _spawn_command_task(uid, handle_topic(msg))
+    elif text.startswith("/eng"):
+        # /eng = same idea as /topic (extracts existing MCQ, groups by
+        # detected topic into per-topic CSV + merged CSV with topic-marker
+        # rows) but tuned for the APEX-English page style: answer comes from
+        # a small black box with the letter in WHITE font beside each MCQ
+        # (not a circled option), and topic boundary is a full-width BLACK
+        # banner with the topic name in WHITE font (+ qsn_no restarting at 1)
+        _spawn_command_task(uid, handle_eng(msg))
     elif text.startswith("/biot"):
         # /biot = Call1-ONLY diagnostic for /bio: runs just the heading-scan
         # stage (no MCQ generation, no CSV) and reports whether the scan is
@@ -40554,7 +41303,13 @@ async def _ram_guard_task() -> None:
 async def _keepalive_task() -> None:
     """Self-ping own service URL /health every 5 min for 24/7 uptime
     (prevents platform sleep). Alerting disabled — AtlasBot handles
-    monitoring/alerts now."""
+    monitoring/alerts now.
+
+    Note: this only pings /health (harmless, read-only) — it does NOT set
+    or touch the Telegram webhook. Keep it that way. Do not extend this (or
+    any keepalive/watchdog task) to also call setWebhook/activate a second
+    host "while we're here" — that's exactly the dual-instance pattern that
+    caused a past ban (see core.py header, DEPLOYMENT.md)."""
     await asyncio.sleep(60)
     logger.info("[App] Keep-alive task started")
     while True:
@@ -40591,7 +41346,20 @@ async def _webhook_healer_task() -> None:
     regardless of direct or cf-proxy mode. If broken, re-sets webhook using
     whichever URL is already configured (preserving direct-mode Render URLs
     instead of force-switching to the CF proxy), falling back to HF Space
-    only as a last resort if re-setting fails outright."""
+    only as a last resort if re-setting fails outright.
+
+    ⚠️ HF/Telegram ToS GUARDRAIL — READ BEFORE EDITING ⚠️
+    Only ONE host (CF proxy target OR a direct HF/Render URL) may ever be the
+    live Telegram webhook at the same time. Two bot instances (e.g. primary
+    HF Space + fallback HF Space, or HF + Render) BOTH polling/webhooking
+    Telegram concurrently for the same BOT_TOKEN caused a real Telegram
+    account ban in the past (see DEPLOYMENT.md, docs/DEPLOYMENT_SETUP.md).
+    This task's whole job is to make sure exactly one webhook URL is set —
+    never add logic here (or anywhere else) that calls setWebhook against a
+    second/fallback host "just in case" or "for redundancy" while the
+    primary is still active. Fallback hosts (see DEPLOYMENT.md's
+    hamza-02/QuizBot vs test02-HF05/QuizBot) must stay code-synced only,
+    with their webhook NOT set, until a human deliberately switches primary."""
     await asyncio.sleep(120)
     logger.info("[App] Webhook healer task started")
     _REQUIRED_UPDATES = {"message", "callback_query", "poll_answer", "poll", "chat_member", "chat_join_request"}
@@ -40801,6 +41569,13 @@ async def health():
 
 @app.on_event("startup")
 async def startup():
+    # ⚠️ ToS GUARDRAIL: this process, wherever it's deployed (HF Space,
+    # Render, etc.), will try to become THE active Telegram webhook target
+    # below. Never run two deployed instances of this app with webhooks
+    # both pointed live at the same BOT_TOKEN — Telegram/HF flagged this
+    # before (account ban, see DEPLOYMENT.md). If you spin up a second
+    # instance for testing, keep RUNNING_ON/webhook-set logic pointed at a
+    # TEST bot token, not the production BOT_TOKEN.
     global BOT_START_TIME
     BOT_START_TIME = time.time()
     logger.info("[App] ATLAS BOT v4.1 starting...")

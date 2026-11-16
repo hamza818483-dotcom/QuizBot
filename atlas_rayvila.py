@@ -366,7 +366,6 @@ async def scrape_rayvila_exam(url: str, candidate_name: str = "Student", progres
         # be asking Render support directly rather than trying more flags.
         _launch_args = ["--no-sandbox", "--disable-setuid-sandbox",
                         "--disable-dev-shm-usage", "--disable-gpu",
-                        "--no-zygote", "--single-process",
                         "--disable-crashpad-for-testing"]
         try:
             browser = await pw.chromium.launch(headless=True, args=_launch_args)

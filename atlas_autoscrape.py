@@ -1542,12 +1542,29 @@ async def run_auto_click_sequence(
 
     from playwright.async_api import async_playwright
 
+    # Kept in sync with atlas_rayvila.py -- see that file for the full
+    # story. --single-process/--no-zygote reliably SIGTRAP here in the
+    # sandboxed container; --disable-crashpad-for-testing works around
+    # Crashpad's blocked startup handshake instead.
+    _launch_args = ["--no-sandbox", "--disable-setuid-sandbox",
+                     "--disable-dev-shm-usage", "--disable-gpu",
+                     "--disable-crashpad-for-testing"]
+
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
-        )
+        try:
+            browser = await pw.chromium.launch(headless=True, args=_launch_args)
+        except Exception as e:
+            import os
+            sys_chromium = os.environ.get("CHROMIUM_PATH")
+            logger.warning(
+                f"[autoscrape] bundled Chromium launch failed ({e}); "
+                f"retrying with system chromium at {sys_chromium!r}"
+            )
+            if not sys_chromium:
+                raise
+            browser = await pw.chromium.launch(
+                headless=True, executable_path=sys_chromium, args=_launch_args
+            )
         try:
             context = await browser.new_context(viewport={"width": 1280, "height": 900})
             await context.add_cookies(cookies)

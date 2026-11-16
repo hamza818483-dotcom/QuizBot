@@ -2,6 +2,18 @@
 // ATLAS BOT — Cloudflare Worker (Proxy + D1)
 // Minimal proxy: TG API, file download, photo/doc upload, D1 SQL
 // All quiz logic lives in Python (app.py on HF Space)
+//
+// ⚠️ Deployed as Cloudflare PAGES (not Workers) — HF Space blocks outbound
+// calls to *.workers.dev but allows *.pages.dev. Full reasoning:
+// docs/DEPLOYMENT_SETUP.md ("Why Cloudflare Pages, not Workers").
+// forwardToHF()/RENDER_URL env var = "whatever the current primary bot
+// backend URL is" (usually the HF Space, name is historical).
+// ⚠️ Only forward to ONE backend at a time — never dual-forward to two
+// live bot instances (HF ban risk, see core.py header + DEPLOYMENT.md).
+// ⚠️ Any proxy/header change here must explicitly re-check that
+// X-Telegram-Bot-Api-Secret-Token still gets forwarded to the backend —
+// it is NOT part of generic pass-through (see docs/DEPLOYMENT_SETUP.md,
+// "Lesson: Webhook Secret Token" incident).
 // ============================================================
 
 export default {
