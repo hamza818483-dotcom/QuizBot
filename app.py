@@ -22440,6 +22440,8 @@ D) Combined answer key on later pages (scan forward)
 E) Answer key on adjacent page
 None found → "A" + note "Answer not found in source". Convert to A/B/C/D. Re-verify twice.
 
+MULTIPLE CORRECT ANSWERS (rare — only when the SAME source evidence above proves it, never guess or invent a second answer): if the visual mark/answer table/answer key shows MORE THAN ONE option is correct for this MCQ (e.g. two options both circled/ticked, or the key explicitly lists two letters like "B,D" or "both B and D") → output "answer" as those letters concatenated with NO separator, in A/B/C/D order (e.g. "BD", "AC"). The vast majority of MCQs have exactly one correct answer — keep "answer" as a single letter exactly as before unless the source itself genuinely shows two+.
+
 UNDERLINE MARKING (independent of answer-detection): any individual underlined word/phrase in question or options → wrap as **word**. Don't confuse with bold/italic. No underline → no ** markers.
 
 OPTION ORDER: any source label system (A-D/a-d/ক-ঘ/১-৪/bullets/none) → map by VISUAL POSITION only: 1st→A,2nd→B,3rd→C,4th→D. Never sort by label/text. Answer letter = position of correct text in OUTPUT (e.g. source order গ,খ,ক,ঘ, correct="ক" → slot C → answer="C"). Numbers/years: keep source numeral system exactly (no Bengali↔English conversion); verify digit-by-digit.
@@ -22490,6 +22492,10 @@ RULES (zero tolerance):
 - 0 MCQs → []. N MCQs → exactly N.
 
 ANSWER DETECTION (priority order, trace to actual source, never guess): A) any visual mark on an option (circle/tick/cross/underline/bold/highlight) — overrides all; B) answer right after the MCQ block; C) answer table at page bottom; D) combined answer key on later/adjacent pages. None found → "A" + note "Answer not found in source". Convert to A/B/C/D format.
+
+MULTIPLE CORRECT ANSWERS (rare, only if source evidence itself shows it — never guess): if more than one option is genuinely marked/keyed correct for this MCQ, output "answer" as those letters concatenated with no separator in A/B/C/D order (e.g. "BD"). Normal single-answer MCQs unaffected.
+
+UNDERLINE MARKING (independent of answer-detection): any individual underlined word/phrase in question or options → wrap as **word**. Don't confuse with bold/italic. No underline → no ** markers.
 
 OPTION ORDER (absolute): source's 1st option → output A, 2nd → B, 3rd → C, 4th → D, regardless of source's own labels (a/b/c/d, ক/খ/গ/ঘ, ১/২/৩/৪, bullets). Answer letter = position of correct text in OUTPUT, not the source's original label. Numbers/years stay exactly as source (never convert Bengali↔English numerals).
 
