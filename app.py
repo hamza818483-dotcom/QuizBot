@@ -34429,6 +34429,20 @@ async def qbm_extract_all_pages(
         page_status[idx]["mcq"] = len(mcqs)
         page_status[idx]["gen_seconds"] = round(time.time() - _page_start_ts, 1)
         page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
+        # 2026-11-16 (user request): show which Gemini account won this page
+        # on /qbm's live dashboard too (🔑acct tag), same as /pdf already
+        # shows via _attach_gemini_success_info. /qbm's own Gemini call
+        # paths now set _last_gemini_success_ctx (no "attempt"/"page" key,
+        # unlike /pdf's — so no page-number cross-check here, best-effort).
+        if mcqs and any(str(m.get("_provider", "")).lower().startswith("gemini") for m in mcqs):
+            try:
+                from pdf_handler import _last_gemini_success_ctx
+                _ginfo = _last_gemini_success_ctx.get()
+                if _ginfo and _ginfo.get("account"):
+                    page_status[idx]["gemini_account"] = _ginfo["account"]
+                    page_status[idx]["gemini_attempt"] = 1
+            except Exception:
+                pass
         if IS_RENDER:
             _qbm_rss_log("page_done", page=page_num, mcq=len(mcqs))
         if job_id and mcqs:
