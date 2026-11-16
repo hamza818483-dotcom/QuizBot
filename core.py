@@ -1120,6 +1120,54 @@ def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 10
     return best
 
 
+async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
+                                      caption: str = "", reply_to_message_id: int = None,
+                                      message_thread_id: int = None) -> Optional[dict]:
+    """2026-11-14 (user request): files over Telegram's 50MB bot-upload cap
+    get uploaded by the existing Telethon USER session instead (real account,
+    not a bot — Telegram allows up to 2GB/4GB-premium per file for those).
+    This reuses poll_extract.SESSION_STR/API_ID/API_HASH, the exact same
+    session /delete already runs in production, so no new login/session is
+    needed. Returns None (caller falls through to its normal error) if the
+    session isn't configured or the upload itself fails for any reason —
+    never raises. The user account must already be a member of chat_id (same
+    requirement /delete has) for this to work in a group/channel; for a
+    private chat with the bot, the user account must share a chat with that
+    user, which generally is NOT the case — this path is mainly useful for
+    groups/channels the owner's own account is already in.
+    """
+    try:
+        from poll_extract import SESSION_STR as _USR_SESSION, API_ID as _USR_API_ID, API_HASH as _USR_API_HASH
+    except Exception:
+        return None
+    if not _USR_SESSION:
+        return None
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        import io as _io
+        uclient = TelegramClient(StringSession(_USR_SESSION), _USR_API_ID, _USR_API_HASH)
+        await uclient.connect()
+        if not await uclient.is_user_authorized():
+            await uclient.disconnect()
+            return None
+        buf = _io.BytesIO(file_bytes)
+        buf.name = filename
+        sent = await uclient.send_file(
+            chat_id, buf,
+            caption=caption or None,
+            reply_to=reply_to_message_id,
+            force_document=True,
+        )
+        await uclient.disconnect()
+        size_mb = len(file_bytes) / 1024 / 1024
+        logger.info(f"[sendDoc] {size_mb:.1f}MB file sent via userbot fallback (bot API 50MB cap bypassed)")
+        return {"ok": True, "result": {"message_id": getattr(sent, "id", None)}, "_via": "userbot"}
+    except Exception as e:
+        logger.warning(f"[sendDoc] userbot fallback failed: {e}")
+        return None
+
+
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",
@@ -1135,7 +1183,19 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
     TG_MAX_UPLOAD = 50 * 1024 * 1024
     if len(file_bytes) > TG_MAX_UPLOAD:
         size_mb = len(file_bytes) / 1024 / 1024
-        logger.error(f"[sendDoc] file {size_mb:.1f}MB exceeds Telegram's 50MB bot upload limit")
+        # 2026-11-14 (user request): don't just give up at 50MB — the app
+        # already runs a Telethon USER session (poll_extract.SESSION_STR,
+        # same one /delete uses) which, being a real account and not a bot,
+        # can upload up to 2GB (4GB on Telegram Premium). Try that before
+        # failing outright.
+        userbot_r = await _send_document_via_userbot(
+            chat_id, file_bytes, filename, caption,
+            reply_to_message_id=reply_to_message_id,
+            message_thread_id=message_thread_id,
+        )
+        if userbot_r is not None:
+            return userbot_r
+        logger.error(f"[sendDoc] file {size_mb:.1f}MB exceeds Telegram's 50MB bot upload limit (userbot fallback unavailable/failed)")
         return {"ok": False, "error": f"File is {size_mb:.1f}MB — Telegram bots can only upload files up to 50MB."}
 
     data = {
