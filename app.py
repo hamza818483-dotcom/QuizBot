@@ -37659,11 +37659,14 @@ async def handle_message(msg: dict):
         _spawn_command_task(uid, _process_rayvila_auto(msg, text.strip()))
         return
 
-    # Auto URL → .mhtml capture + auto CSV (any public webpage link, no
-    # command needed — user just pastes the URL as a plain message)
-    if text and not msg.get("reply_to_message") and is_plain_url(text):
-        _spawn_command_task(uid, _process_url_auto(msg, text.strip()))
-        return
+    # 2026-11-14 (user request): auto URL capture (.mhtml + auto CSV on any
+    # plain link, no command) turned OFF — was firing "🌐 Page লোড ও capture
+    # করা হচ্ছে..." on every plain link the user sent. Disabled by simply
+    # never triggering _process_url_auto; function kept in place in case
+    # it's wanted back later.
+    # if text and not msg.get("reply_to_message") and is_plain_url(text):
+    #     _spawn_command_task(uid, _process_url_auto(msg, text.strip()))
+    #     return
 
     # Auto mhtml/html → smart detect (MCQ→CSV queue, Q&A/CQ→tell user to use /qpdf)
     if msg.get("document") and not msg.get("reply_to_message"):
