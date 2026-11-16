@@ -934,8 +934,39 @@ def _truncate_for_edit(text: str, limit: int = _TG_MSG_LIMIT) -> str:
         cut = nl
     return text[:cut] + marker
 
+# 2026-11-14 (user request): the global 25/sec token bucket above paces the
+# BOT's overall send rate, but Telegram also caps edits to one SPECIFIC
+# message at roughly ~1/sec — a feature that edits the same message_id
+# repeatedly in a tight loop (e.g. a live progress/dashboard update per
+# topic finishing) can sail under the 25/sec global cap while still
+# flooding that one message and tripping Telegram's per-message limit,
+# which snowballs into large retry_after values (seen up to 85s) the more
+# it keeps getting violated. Per-(chat_id, message_id) minimum-gap throttle,
+# independent of the global bucket, to stop that specific flood pattern.
+_EDIT_MIN_GAP_SEC = 1.3
+_last_edit_time: dict = {}
+_edit_throttle_lock = asyncio.Lock()
+
+async def _edit_throttle_wait(chat_id, message_id: int):
+    key = (chat_id, message_id)
+    async with _edit_throttle_lock:
+        now = time.time()
+        last = _last_edit_time.get(key, 0)
+        wait_s = _EDIT_MIN_GAP_SEC - (now - last)
+        _last_edit_time[key] = now if wait_s <= 0 else last + _EDIT_MIN_GAP_SEC
+        # Prune occasionally so this dict doesn't grow unbounded over a long
+        # uptime (old message_ids never get edited again, nothing removes them).
+        if len(_last_edit_time) > 5000:
+            cutoff = now - 600
+            for k in [k for k, v in _last_edit_time.items() if v < cutoff]:
+                del _last_edit_time[k]
+    if wait_s > 0:
+        await asyncio.sleep(wait_s)
+
+
 async def edit_msg(chat_id, message_id: int, text: str, parse_mode: str = "HTML", reply_markup: dict = None) -> dict:
     text = _truncate_for_edit(text)
+    await _edit_throttle_wait(chat_id, message_id)
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
