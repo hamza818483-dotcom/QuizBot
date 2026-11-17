@@ -19947,28 +19947,16 @@ def _build_dashboard_v(file_name, topic, pages, page_status, start_time, total_m
 
 
 async def _update_pdf_dashboard(chat_id, message_id, *dash_args, reply_markup=None, **dash_kwargs):
-    """Shared dashboard-update helper: DM (chat_id > 0) -> rich table via
-    edit_rich_msg (auto-falls back to plain HTML edit_msg on any error).
-    Group/channel (chat_id < 0) -> existing plain HTML edit_msg unchanged.
-    Single call-site swap point for all /pdf-family dashboard updates."""
-    if chat_id > 0:
-        md_text = _build_dashboard_md(*dash_args, **dash_kwargs)
-        fallback = _build_dashboard(*dash_args, **dash_kwargs)
-        result = await edit_rich_msg(chat_id, message_id, md_text, fallback_text=fallback)
-        # sendRichMessage/rich edit doesn't accept reply_markup directly --
-        # if buttons are needed, re-apply them via a lightweight follow-up
-        # editMessageReplyMarkup call so regen buttons still work in DM.
-        if reply_markup is not None:
-            try:
-                await tg_post("editMessageReplyMarkup", {
-                    "chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup
-                })
-            except Exception as e:
-                logger.warning(f"[RichMsg] editMessageReplyMarkup failed: {e}")
-        return result
-    else:
-        html_text = _build_dashboard(*dash_args, **dash_kwargs)
-        return await edit_msg(chat_id, message_id, html_text, reply_markup=reply_markup)
+    """Shared dashboard-update helper for all /pdf-family dashboard updates.
+    2026-11-17 (user request): /pdf's dashboard now always renders the same
+    <pre> monospace box /qbm already uses (via _build_dashboard), in DM and
+    group/channel alike -- previously DM used a separate rich-table style
+    (edit_rich_msg + _build_dashboard_md) that looked different from /qbm's.
+    Same underlying data either way (file/topic/pages, per-page MCQ+model+
+    🔑account#attempt tag, progress/elapsed/AI-call totals) -- only the
+    visual box style changes here."""
+    html_text = _build_dashboard(*dash_args, **dash_kwargs)
+    return await edit_msg(chat_id, message_id, html_text, reply_markup=reply_markup)
 
 def _pair_pages_for_extra(pages: list) -> list:
     """Combine consecutive pages 2-at-a-time into a single vertically-
