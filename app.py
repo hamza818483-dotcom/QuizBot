@@ -38291,8 +38291,10 @@ _USER_QUEUE_RUNNING = set()  # uid currently has an active drain-worker running
 _USER_LAST_STATUS = {}  # uid -> {"command": str, "stage": str, "started_at": float, "last_update_at": float}
 
 def _queue_notice_text(pos: int, cmd: str) -> str:
-    return (f"⏳ Ager command sesh howar opekkhay ache — {cmd} ektu porei shuru hobe...\n"
-            f"Task #{pos} — Command: {cmd}")
+    return (f"⏳ <b>কাজ সারিবদ্ধ করা হয়েছে</b>\n"
+            f"আগের কাজ শেষ হলে এটি স্বয়ংক্রিয়ভাবে শুরু হবে।\n\n"
+            f"🔢 সিরিয়াল: #{pos}\n"
+            f"📌 কমান্ড: {cmd}")
 
 
 async def _renumber_queue_notices(uid: int):
