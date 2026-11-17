@@ -38475,13 +38475,15 @@ async def process_update(update: dict):
                     if len(_txt) > 200:
                         _txt = _txt[:200] + "..."
                     _pos = len(_USER_PENDING_QUEUE[uid])
+                    _orig_mid = _msg_obj.get("message_id")
                     if _cid:
-                        async def _send_queue_notice(_cid=_cid, _pos=_pos, _txt=_txt, _qid=_qid, _uid=uid):
+                        async def _send_queue_notice(_cid=_cid, _pos=_pos, _txt=_txt, _qid=_qid, _uid=uid, _orig_mid=_orig_mid):
                             r = await send_msg(
                                 _cid, _queue_notice_text(_pos, _pos, _txt),
                                 reply_markup={"inline_keyboard": [[
                                     {"text": "🛑 Cancel", "callback_data": f"queuecancel_{_uid}_{_qid}"}
-                                ]]}
+                                ]]},
+                                reply_to_message_id=_orig_mid
                             )
                             _mid = r.get("result", {}).get("message_id") if isinstance(r, dict) else None
                             if _mid:
