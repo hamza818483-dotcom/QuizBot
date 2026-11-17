@@ -5501,7 +5501,17 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
                 logger.warning(f"[AI-ROT] {model} HTTP 200 but EMPTY content (finish_reason={finish_reason}): {json.dumps(j)[:300]}")
             return content, r.status_code
     except Exception as e:
-        logger.warning(f"[AI-ROT] {model} err: {e}")
+        # 2026-11-17 FIX: some httpx exceptions (ReadTimeout, ConnectError
+        # wrapping a lower-level socket error, etc.) have an EMPTY str(e),
+        # so "err: " with nothing after it told us nothing about the real
+        # cause and made every network failure indistinguishable from a
+        # dead key. Log the exception TYPE + repr always, plus a trimmed
+        # traceback, so a timeout vs DNS failure vs connection-reset is
+        # actually visible in [Groq-QBM] key-failed logs going forward.
+        logger.warning(
+            f"[AI-ROT] {model} err: {type(e).__name__}: {e!r}"
+        )
+        logger.debug(f"[AI-ROT] {model} full traceback:\n{traceback.format_exc()}")
         return "", 0
 
 _key_exhausted_day: Dict[str, str] = {}   # key -> 'YYYY-MM-DD' (BD) it was marked exhausted
@@ -7293,7 +7303,7 @@ def _dedupe_mcqs(mcqs: list) -> list:
     """DISABLED: dedup inactivated to stop false-positive MCQ drops. No-op passthrough."""
     return list(mcqs or [])
 
-async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False):
+async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = True):
     """
     Smart wrapper: Gemini first (primary), then Groq fallback (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
@@ -7922,7 +7932,7 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
     return mcqs
 
 
-async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False):
+async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = True):
     # 2026-08-19: Gemini is now PRIMARY for ALL modes (explicit user
     # preference), Groq is fallback only when Gemini fails/empty. Previously
     # (2026-08-07) Groq was made primary because Gemini's free-tier daily
@@ -25041,7 +25051,7 @@ def _parse_chem_heading_scan(text: str) -> list:
     return headings
 
 
-async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bool = False) -> list:
+async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bool = True) -> list:
     """/chem extractor — same Call1+Call2 pipeline as /topic and /unmesh, but
     topic boundaries are detected via the BOLD-BLACK-LARGER-FONT + Bangla
     hierarchical-number-prefix (১.২, ১.২.১, ২.২.১...) heading style
@@ -25218,7 +25228,7 @@ async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bo
     return mcqs
 
 
-async def _chem_generate_from_image(img, cache_key: tuple = None, gemini_only: bool = False) -> list:
+async def _chem_generate_from_image(img, cache_key: tuple = None, gemini_only: bool = True) -> list:
     """/chem GENERATION function (creates NEW MCQs from page content, does
     NOT extract existing ones) — same generation engine as /pdf's default
     mode, via _build_chem_gen_prompt, PLUS the same independent heading-scan
@@ -25776,7 +25786,7 @@ def _chem_flag_letter_ref_explanations(mcqs: list, page_num) -> None:
             )
 
 
-async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = False, file_name: str = "") -> list:
+async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = True, file_name: str = "") -> list:
     """/chem GENERATION pipeline, rebuilt 2026-08-20 to mirror /bio's
     _bio_generate_per_topic_pages architecture exactly: Call 1 (batched
     heading-scan, ~1 per 3 pages) detects topic segment boundaries via
@@ -26970,7 +26980,7 @@ async def _qbm_openrouter_call(img, prompt: str) -> str:
     return ""
 
 
-async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = False) -> list:
+async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = True) -> list:
     """
     CALL 1 — OWN OCR + strict-prompt MCQ extraction + inline dedup.
     Job: extract every existing MCQ on the page (option-serial strictly
@@ -27045,7 +27055,7 @@ async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = Fal
         return []
 
 
-async def _qbm_lightweight_miss_check(img, call1_mcqs: list, gemini_only: bool = False) -> list:
+async def _qbm_lightweight_miss_check(img, call1_mcqs: list, gemini_only: bool = True) -> list:
     """
     Dedicated MISS-CHECK ONLY call -- lightweight by design. Job is ONLY:
     scan the full page image once, compare against the full existing MCQ
@@ -27113,7 +27123,7 @@ OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), not
         return []
 
 
-async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = False) -> list:
+async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = True) -> list:
     """
     CALL 2 (dispatcher) — miss-check (ONE lightweight call, always against
     the FULL list regardless of page density) followed by full verification
@@ -27147,7 +27157,7 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = False
     return await _qbm_call2_single(img, combined, do_miss_check=True, gemini_only=gemini_only)
 
 
-async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, gemini_only: bool = False) -> list:
+async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, gemini_only: bool = True) -> list:
     """
     CALL 2 (single chunk) — MERGED miss-check + full verification (single call,
     no separate Call 3). Job:
@@ -27353,7 +27363,7 @@ Output ONLY the full corrected JSON array, all fixes applied, same length/order 
         return call1_mcqs
 
 
-async def _qbm_final_empty_page_scan(img, onu_mode: bool = False, gemini_only: bool = False) -> list:
+async def _qbm_final_empty_page_scan(img, onu_mode: bool = False, gemini_only: bool = True) -> list:
     """
     CALL 3 (empty-page variant) — used ONLY when Call 1 AND Call 2 BOTH
     returned zero MCQs. Two independent empty results is a strong signal but
@@ -27590,7 +27600,7 @@ def _cap_qbm_mcq_cache(cache_dict: dict = None):
         d.pop(next(iter(d)), None)
 
 
-async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False, gemini_only: bool = False) -> list:
+async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False, gemini_only: bool = True) -> list:
     """
     2-STAGE CONNECTED PIPELINE (per page) — Call1 extract + Call2 (which
     itself makes 2 sub-calls: miss-check, then verify), so up to 3 Gemini
@@ -27913,7 +27923,7 @@ No markdown, no extra text."""
         return {}
 
 
-async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> list:
+async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = True) -> list:
     """
     Last-line, zero-trust, CODE-LEVEL (not prompt-level) safety net applied to
     every MCQ right before it leaves the extraction pipeline. Balances and
@@ -28316,7 +28326,7 @@ _QBM_CAREFUL_SCAN_ADDENDUM = (
 )
 
 
-async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: bool = False, _fallback_model: str = None) -> str:
+async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: bool = True, _fallback_model: str = None) -> str:
     """Direct Gemini call with any given prompt -> raw text (caller parses).
     Tries keys in healthiest-first order, one after another, until one
     succeeds -- a single key's 429 RESOURCE_EXHAUSTED (daily quota, only 20
@@ -28652,7 +28662,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         return ""
 
 
-async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = False, _fallback_model: str = None) -> str:
+async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = True, _fallback_model: str = None) -> str:
     """Multi-image variant of _qbm_gemini_raw -- sends several page images
     in ONE Gemini call instead of one call per image, used by /bio's
     batched heading-scan (_bio_apply_heading_scan) to cut per-page API
@@ -28825,7 +28835,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
         return "" if gemini_only else (await _gen_groq_raw_text(imgs[0], prompt) if imgs else "")
 
 
-async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False, _fallback_model: str = None) -> str:
+async def _ai_gemini_text_call(prompt: str, gemini_only: bool = True, _fallback_model: str = None) -> str:
     """Text-only Gemini call (no image) for /ai's explanation generation.
     Same key-rotation/exhaustion handling as _qbm_gemini_raw, minus the
     image part -- tries every non-exhausted key in order before giving up.
@@ -29218,7 +29228,7 @@ async def handle_ai(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
-async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False, careful: bool = False, gemini_only: bool = False, allow5: bool = False):
+async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False, careful: bool = False, gemini_only: bool = True, allow5: bool = False):
     """Direct Gemini call with the strict extraction prompt (fallback path).
 
     2026-08-20: added optional _return_marker_info flag (default False, so
@@ -29283,7 +29293,7 @@ async def _qbm_groq_text_call(prompt: str, model: str = "openai/gpt-oss-120b") -
     return ""
 
 
-async def _qbm_web_resolve_answer(mc: dict, gemini_only: bool = False) -> dict | None:
+async def _qbm_web_resolve_answer(mc: dict, gemini_only: bool = True) -> dict | None:
     """
     LAST-RESORT answer resolution -- used ONLY when the answer could not be
     found anywhere in the page/PDF (no mark, no inline answer, no answer-key
@@ -29371,7 +29381,7 @@ Line 3: the 165-char-max Bengali explanation (omit this line entirely if Line 2 
         return None
 
 
-async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str, gemini_only: bool = False) -> str:
+async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str, gemini_only: bool = True) -> str:
     """
     Builds a clean, question-related, step-by-step Bengali explanation
     when the correct answer is already known (e.g. matched from an
@@ -34137,7 +34147,7 @@ async def _handle_onu2_impl(msg: dict):
                 pass
 
 
-async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = False, serial_strict: bool = False) -> dict:
+async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = True, serial_strict: bool = False) -> dict:
     """
     Given a page image and a list of MCQs whose answer wasn't found on their
     own page, check if THIS page contains an answer key (table, boxed list,
@@ -34316,7 +34326,7 @@ async def qbm_extract_all_pages(
     file_name: str, status_msg_id: int = None,
     extractor=None, file_id: str = None,
     page_status_out: list = None,
-    gemini_only: bool = False,
+    gemini_only: bool = True,
     job_id: str = None,
     no_knowledge_fallback: bool = False,
     skip_lookahead: bool = False,
