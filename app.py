@@ -40172,7 +40172,25 @@ async def handle_callback(query: dict):
                 return
             _r_txt = (_r_info or {}).get("cmd") or "command"
             await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বাতিল করা হলো"})
-            await send_msg(chat_id, f"🛑 বাতিল করা হলো: {_r_txt} (queue থেকে সরানো হয়েছে)")
+            # 2026-11-17 (user request): delete the queued-task's own notice
+            # message (the one carrying the Cancel button) outright instead
+            # of leaving it sitting there + sending a separate standalone
+            # "বাতিল করা হলো" message -- one less message, no stale button.
+            _del_cid = (_r_info or {}).get("cid") or chat_id
+            _del_mid = (_r_info or {}).get("msg_id")
+            _deleted_ok = False
+            if _del_mid:
+                try:
+                    _del_resp = await tg_post("deleteMessage", {"chat_id": _del_cid, "message_id": _del_mid})
+                    _deleted_ok = bool(_del_resp and _del_resp.get("ok"))
+                except Exception as _del_e:
+                    logger.warning(f"[queuecancel] failed to delete notice msg {_del_mid}: {_del_e}")
+            if not _deleted_ok:
+                # Telegram refuses deletes on messages older than 48h (or
+                # various edge cases) -- fall back to the old standalone
+                # notice so the user still gets confirmation instead of
+                # silence when delete isn't possible.
+                await send_msg(chat_id, f"🛑 বাতিল করা হলো: {_r_txt} (queue থেকে সরানো হয়েছে)")
             # 2026-11-17 (user request): mid-queue cancel shifts everyone
             # behind it up by one position -- re-edit their notices in place
             # so the shown "Task #N" never goes stale/wrong.
