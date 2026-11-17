@@ -10430,10 +10430,15 @@ async def handle_img_process(uid: int, chat_id: int, user: dict):
             f"💎 {len(mcqs)} MCQ\n\n"
             f"📌 Format: questions, option1-5, answer(numeric), explanation, type, section"
         )
+        # 2026-11-17 (user request): final CSV replies to the ORIGINAL
+        # image message, not just a bare send -- makes it obvious which
+        # image each CSV came from, especially useful when several
+        # /img jobs are running in the same chat.
         await send_document(
             chat_id, csv_content,
             f"ATLAS_{topic or 'MCQ'}.csv",
-            caption=csv_caption, mime_type="text/csv"
+            caption=csv_caption, mime_type="text/csv",
+            reply_to_message_id=img_data.get("msg_id")
         )
     except Exception as csv_err:
         logger.warning(f"[IMG] CSV auto-send failed: {csv_err}")
@@ -40473,6 +40478,10 @@ async def handle_callback(query: dict):
             orig_uid = int(parts[2])
             if uid != orig_uid:
                 return
+            # 2026-11-17 (user request): delete the "MCQ কোথা থেকে আসবে?"
+            # choose-button message the instant a choice is made, instead
+            # of leaving it sitting in the chat.
+            _spawn_task(tg_post("deleteMessage", {"chat_id": chat_id, "message_id": msg_id}))
             await handle_img_source(source, uid, chat_id, user)
 
         elif data.startswith("imgchannel_"):
