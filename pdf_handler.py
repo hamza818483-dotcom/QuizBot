@@ -2666,13 +2666,11 @@ async def generate_mcq_from_image(
                         pass
                     logger.warning(f"[Gemini] Page {page}: response OK but 0 valid MCQs parsed (attempt {attempt+1}, model={model_name}) — likely malformed/truncated JSON, not a real 'page has no content'")
                 key_rotator.mark_healthy(key)
-                _acct = key_rotator.account_of(key)
-                _khash = _gemini_key_hash(key)
-                logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name}) — account={_acct} key={_khash}")
+                logger.info(f"[Gemini] Page {page}: {len(valid)} MCQs (attempt {attempt+1}, model={model_name})")
                 try:
                     _last_gemini_success_ctx.set({
-                        "account": _acct,
-                        "key_hash": _khash,
+                        "account": key_rotator.account_of(key),
+                        "key_hash": _gemini_key_hash(key),
                         "attempt": attempt + 1,
                         "model": model_name,
                         "page": page,

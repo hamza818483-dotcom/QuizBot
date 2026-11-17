@@ -22417,7 +22417,7 @@ def _get_bd_time() -> str:
 # qbm_get_active_prompt() auto-detect a stale DB-cached prompt from before
 # the code update and self-heal to the new default, without needing a manual
 # `DELETE FROM quiz_sessions WHERE key='qbm_active_prompt'` after every edit.
-QBM_PROMPT_VERSION = 5
+QBM_PROMPT_VERSION = 4
 
 QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page — never invent, never skip. 0 MCQs→[]. N MCQs→exactly N.
 
@@ -22465,25 +22465,6 @@ DIAGRAM: question needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2]
 OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]
 """
-
-
-# 2026-11-14 (user request): /qbm specifically doesn't need any explanation
-# at all -- drop the whole EXPLANATION section (verbatim-copy case + the
-# synthesized "সঠিক উত্তর: X" fallback) so the model has less to read/decide
-# and less to generate per MCQ (smaller prompt, smaller output -> faster,
-# cheaper, and less likely to hit the DEADLINE_EXCEEDED timeouts seen under
-# load). "explanation" stays in the output JSON schema as an always-empty
-# string rather than being removed outright, since several call sites do
-# mcq.get("explanation", "") downstream -- keeping the key just means they
-# get "" instead of needing special-casing for a missing key.
-QBM_EXTRACT_PROMPT_NO_EXPLANATION = re.sub(
-    r"EXPLANATION \(keep simple.*?not writing new explanations\.\n\n",
-    "",
-    QBM_EXTRACT_PROMPT_DEFAULT,
-    flags=re.DOTALL,
-).replace(
-    '"explanation":"...",', '"explanation":"",'
-)
 
 
 # 2026-08-27 (per request): Groq (qwen/qwen3.8-27b) has an 8000 TPM hard
@@ -26634,8 +26615,8 @@ async def qbm_get_active_prompt() -> str:
                 logger.info(f"[QBM] DB-cached prompt is stale (v{saved_version} < v{QBM_PROMPT_VERSION}) — auto-healing to new code default")
     except Exception as e:
         logger.warning(f"[QBM] prompt memory load failed: {e}")
-    _qbm_prompt_cache["prompt"] = QBM_EXTRACT_PROMPT_NO_EXPLANATION
-    return QBM_EXTRACT_PROMPT_NO_EXPLANATION
+    _qbm_prompt_cache["prompt"] = QBM_EXTRACT_PROMPT_DEFAULT
+    return QBM_EXTRACT_PROMPT_DEFAULT
 
 async def qbm_set_active_prompt(new_prompt: str, version: int = QBM_PROMPT_VERSION):
     """New prompt update এলে সেটাকে permanent করে save করে — পরের বার থেকে
@@ -34429,20 +34410,6 @@ async def qbm_extract_all_pages(
         page_status[idx]["mcq"] = len(mcqs)
         page_status[idx]["gen_seconds"] = round(time.time() - _page_start_ts, 1)
         page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
-        # 2026-11-16 (user request): show which Gemini account won this page
-        # on /qbm's live dashboard too (🔑acct tag), same as /pdf already
-        # shows via _attach_gemini_success_info. /qbm's own Gemini call
-        # paths now set _last_gemini_success_ctx (no "attempt"/"page" key,
-        # unlike /pdf's — so no page-number cross-check here, best-effort).
-        if mcqs and any(str(m.get("_provider", "")).lower().startswith("gemini") for m in mcqs):
-            try:
-                from pdf_handler import _last_gemini_success_ctx
-                _ginfo = _last_gemini_success_ctx.get()
-                if _ginfo and _ginfo.get("account"):
-                    page_status[idx]["gemini_account"] = _ginfo["account"]
-                    page_status[idx]["gemini_attempt"] = 1
-            except Exception:
-                pass
         if IS_RENDER:
             _qbm_rss_log("page_done", page=page_num, mcq=len(mcqs))
         if job_id and mcqs:
