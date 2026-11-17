@@ -22506,11 +22506,17 @@ Never mix LaTeX+Unicode in one MCQ. Exception: only a genuinely unrepresentable 
 
 FORBIDDEN SOURCE-REFERENCE PHRASES (question+explanation): never say WHERE info lives (চিত্রে/বক্সে/ছকে/উদ্দীপকে/সারণিতে/পৃষ্ঠায়/প্যাসেজে/অনুচ্ছেদে/গ্রাফে/"দেখা যাচ্ছে"/"বলা আছে"/"প্রদত্ত"/English "as shown in figure/table/passage"/"mentioned in text") — always state the fact directly, as general knowledge. Structural rule: any container-pointing phrase forbidden regardless of wording.
 
-DIAGRAM: question needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) covering entire diagram+labels+arrows edge-to-edge, small margin. Caption like "চিত্র: G"/"Figure 1" near question = proof diagram exists → bbox required. Omit if none. Options never get bbox.
-
 OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]
 """
+# 2026-11-17 (user request): qsn_bbox (question-diagram crop) feature
+# disabled for /qbm -- DIAGRAM instruction + qsn_bbox removed from the
+# output schema so the model is never asked for it. All downstream
+# bbox-handling code (restore_opt_bboxes, recover_missed_diagram_bbox,
+# the figure-caption recovery batch call, etc.) is left in place
+# untouched/unused rather than deleted, in case this needs to be
+# re-enabled later -- it simply never triggers now since mc.get("qsn_bbox")
+# is always None/absent from here on.
 
 
 # 2026-11-14 (user request): /qbm specifically doesn't need any explanation
@@ -22570,10 +22576,11 @@ EXPLANATION (max 190 chars Bengali unless verbatim source text): if page has exp
 
 MATH/CHEMISTRY: never raw LaTeX — use Unicode (H₂O, x², √x, Na⁺, °C, × not x, etc).
 
-QUESTION needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) covering the diagram. Omit if none.
-
 OUTPUT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]"""
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]"""
+# 2026-11-17 (user request): qsn_bbox disabled here too for consistency,
+# though this Groq-only compact prompt rarely fires anymore now that
+# gemini_only=True is the default everywhere in /qbm.
 
 
 TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
@@ -27208,7 +27215,9 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
        matches what's actually marked/given on the source page (scanning other
        pages for an answer key if needed), spelling/context-word correctness
        (Bangla/English), completeness (no truncated words), column-order,
-       উদ্দীপক self-containment, diagram bbox, and explanation_source tagging.
+       উদ্দীপক self-containment, and explanation_source tagging.
+       (2026-11-17: qsn_bbox/diagram-crop check removed from this verify
+       pass per user request -- feature disabled across /qbm.)
     Gemini primary (full-page single call, no chunking) -> Groq fallback ->
     OpenRouter last resort, only if Gemini fails.
     """
@@ -27230,8 +27239,7 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
             return opts
         mcq_json = json.dumps([
             {"question": (m.get("question", "") or "")[:_q_cap], "options": _trim_opts(m.get("options", [])),
-             "answer": m.get("answer", "A"), "explanation": (m.get("explanation", "") or "")[:60],
-             "qsn_bbox": m.get("qsn_bbox")}
+             "answer": m.get("answer", "A"), "explanation": (m.get("explanation", "") or "")[:60]}
             for m in call1_mcqs
         ], ensure_ascii=False)
 
@@ -27303,15 +27311,6 @@ complete, untruncated, corrected question/options/explanation in your response:
    naming which question numbers to answer (e.g. "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও")
    is removed — never strip a real question just because it mentions "উদ্দীপক" (e.g. "উদ্দীপকে
    প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" is a genuine question and must stay in full).
-8) QUESTION-DIAGRAM CHECK: if this MCQ's question genuinely has a diagram/figure/chart in the
-   source image needed to understand/answer it, confirm "qsn_bbox" is present and FULLY contains
-   the entire diagram (all labels/arrows/edges, small margin included — never a partial/cut-off
-   crop) on a 0-1000 scale. Add or widen qsn_bbox if the diagram was missed or cut off. SPECIAL
-   CHECK: if the question text contains a bare figure caption/label like "চিত্র: G", "চিত্র-১",
-   "Figure 1" with no qsn_bbox — that caption is proof a diagram exists nearby; you MUST add
-   qsn_bbox covering that actual diagram (never leave just the caption text uncropped). If
-   qsn_bbox was given but the question has NO actual diagram, remove it (set to null). Never
-   invent a bbox for options — options never get any bbox/image.
 9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
    either "page" (the explanation is copied verbatim from text physically present on the page,
    e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
@@ -27330,7 +27329,7 @@ CRITICAL: OUTPUT LIST ORDER (mandatory) — never move an MCQ to the end or anyw
 because it needed a fix — fix it in place, at its original index.
 
 Output ONLY the full corrected JSON array, all fixes applied, same length/order as input:
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated","qsn_bbox":[100,200,400,450]}}]"""
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
 
         gem_txt = await _qbm_gemini_raw(img, prompt)
         result = _qbm_parse_json(gem_txt) if gem_txt else []
@@ -28014,9 +28013,15 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = True) -> li
         # block auto-filled a short line whenever explanation was blank;
         # removed so an empty explanation from Call1/Call2 ships as-is.
 
-        if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
-            pending_bbox_idx[len(fixed)] = mc["question"]
-            batch_items.append({"idx": len(fixed), "type": "bbox", "question": mc["question"]})
+        # 2026-11-17 (user request): qsn_bbox/diagram-crop feature disabled
+        # for /qbm -- this figure-caption-triggered bbox-recovery call
+        # (which fired an extra Gemini request whenever a question's text
+        # contained a caption like "চিত্র: G" with no qsn_bbox) is disabled
+        # too, so a disabled feature never still costs an API call. Left
+        # commented rather than deleted in case it needs re-enabling later:
+        # if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
+        #     pending_bbox_idx[len(fixed)] = mc["question"]
+        #     batch_items.append({"idx": len(fixed), "type": "bbox", "question": mc["question"]})
 
         fixed.append(mc)
 
