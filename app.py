@@ -34790,7 +34790,17 @@ async def qbm_extract_all_pages(
     # PDF (the RAM guard above couldn't catch it in time since a single
     # window already blew the budget). Strict-sequential there; HF Space
     # (16GB) keeps the faster windowed pipeline.
-    WINDOW = 1 if IS_RENDER else 2
+    # 2026-11-17 (user request): forced to 1 (strict-sequential) always,
+    # HF included. Multi-page batches were intermittently reporting a
+    # genuinely-non-empty page as "0 MCQ — confirmed via 5 retries +
+    # independent scan" when run with a sibling page concurrently (WINDOW=2
+    # on HF) -- a race under concurrent key/account contention, not a
+    # deterministic per-page or per-position bug (confirmed: no fixed page
+    # or batch-position always fails). Processing one page fully at a time,
+    # exactly like a single-page request, removes that contention entirely.
+    # Final merged CSV output is unchanged -- results still accumulate into
+    # the same `results` list/order regardless of window size.
+    WINDOW = 1
 
     async def _extract_one_slotted(slot, idx, page_num, img):
         _qbm_key_offset_ctx.set(slot)
