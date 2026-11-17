@@ -29923,7 +29923,8 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
         or (file_unique_id and _pdf_unique_id_index.get(file_unique_id) in _pdf_bytes_cache)
     )
     status_r = await send_msg(chat_id, ("✅ Cached PDF ব্যবহার হচ্ছে...\n📄 " + file_name) if _is_cache_hit else
-        ("⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]"))
+        ("⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]"),
+        reply_to_message_id=msg.get("message_id"))
     status_msg_id = status_r.get("result", {}).get("message_id")
 
     _last_pct = {"v": -1}
@@ -30014,18 +30015,39 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
         # Channel selection + CSV file generation happen only AFTER extraction
         # is fully complete, so the person picks a channel already knowing
         # exactly how many MCQs were found.
+        _qbm_final_page_status: list = []
+        _qbm_extract_start_time = time.time()
         if mode_v:
             # /v: 2-call Gemini-only pipeline, no lookahead/web-resolve/extra retries
             extracted_pages = await qbm_extract_all_pages(
                 chat_id, pages, topic, file_name, status_msg_id, extractor=_v_extract_from_image,
                 file_id=file_id, gemini_only=True, job_id=_qbm_extract_job_id,
-                no_knowledge_fallback=True, skip_lookahead=True, strict_calls=True
+                no_knowledge_fallback=True, skip_lookahead=True, strict_calls=True,
+                page_status_out=_qbm_final_page_status
             )
         else:
             extracted_pages = await qbm_extract_all_pages(
                 chat_id, pages, topic, file_name, status_msg_id, file_id=file_id, gemini_only=True,
-                job_id=_qbm_extract_job_id
+                job_id=_qbm_extract_job_id, page_status_out=_qbm_final_page_status
             )
+
+        # 2026-11-16 (user request): final dashboard refresh WITHOUT the
+        # cancel button -- extraction is fully done at this point (including
+        # any final-safety-net recovery rounds, which run after the ticker
+        # already stopped and so were never reflected on-screen), and a
+        # cancel button has no purpose on a finished job. Only the dashboard
+        # itself should remain -- no keyboard at all.
+        if status_msg_id and _qbm_final_page_status and not is_cancelled(chat_id):
+            try:
+                _final_total_mcq = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+                _final_text = _build_dashboard(
+                    file_name, topic, pages, _qbm_final_page_status, _qbm_extract_start_time,
+                    _final_total_mcq, 0, ai_calls=_get_ai_call_count(chat_id),
+                    ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)
+                )
+                await edit_msg(chat_id, status_msg_id, _final_text, reply_markup={"inline_keyboard": []})
+            except Exception as _final_dash_e:
+                logger.warning(f"[QBM] final cancel-free dashboard edit failed: {_final_dash_e}")
 
         if _qbm_extract_job_id:
             # Extraction finished cleanly (no crash) -- this job no longer
@@ -30094,7 +30116,8 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
                     f"{topic}_QBM.csv",
                     caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted)",
                     mime_type="text/csv",
-                    reply_markup=_csv_kb)
+                    reply_markup=_csv_kb,
+                    reply_to_message_id=status_msg_id)
             return
 
 
@@ -34956,7 +34979,8 @@ async def process_qbm_pages(
         await send_document(chat_id, buf.getvalue().encode("utf-8"),
             f"{topic}_QBM.csv",
             caption=f"📋 {topic} — {len(all_mcqs_csv)} MCQ (Extracted)",
-            mime_type="text/csv")
+            mime_type="text/csv",
+            reply_to_message_id=status_msg_id)
 
     if not csv_only and summary_pages:
         total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
@@ -35000,7 +35024,8 @@ async def process_qbm_pages(
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📝 Total MCQ Extracted: {total_mcq}\n📋 Pages: {len(display_pages)}\n⏱️ {mins}:{secs:02d}\n"
         f"🤖 Model Usage: {model_totals_line}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━")
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup={"inline_keyboard": []})
 
 # ============================================================
 # FEATURE: /rapid — CSV রিপ্লাই করে Topic দিলে, channel + local time select
