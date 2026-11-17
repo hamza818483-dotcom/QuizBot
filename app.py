@@ -38283,9 +38283,46 @@ _LOCK_ACQUIRED_AT = {}  # uid -> timestamp the currently-held lock was acquired
 _STALE_LOCK_SECONDS = 600  # 10 min — generous even for the slowest /pdf jobs
 _USER_PENDING_QUEUE = {}  # uid -> list of queued update dicts waiting their turn
 _queue_item_id_counter = itertools.count(1)  # unique qid per queued item, for its own Cancel button
+_QUEUE_NOTICE_INFO = {}  # qid -> {"cid": chat_id, "msg_id": int, "cmd": str} -- so positions can be re-rendered after a mid-queue cancel
+_QUEUE_RENOTIFY_LOCK = asyncio.Lock()  # serialize renumber-edits so rapid cancels don't race each other
+_QUEUE_LAST_EDIT_AT = {}  # cid -> last edit_msg timestamp, for a small per-chat throttle on renumber bursts
 
 _USER_QUEUE_RUNNING = set()  # uid currently has an active drain-worker running
 _USER_LAST_STATUS = {}  # uid -> {"command": str, "stage": str, "started_at": float, "last_update_at": float}
+
+def _queue_notice_text(pos: int, cmd: str) -> str:
+    return (f"⏳ Ager command sesh howar opekkhay ache — {cmd} ektu porei shuru hobe...\n"
+            f"Task #{pos} — Command: {cmd}")
+
+
+async def _renumber_queue_notices(uid: int):
+    """After a mid-queue cancel (or any time the queue shrinks from the
+    front), every REMAINING queued item's own notice message still shows its
+    OLD position number -- re-edit each one in place to its new position.
+    Serialized per-process (lock) so overlapping cancels never interleave
+    their edits, and throttled per-chat (min 1.2s gap) so a burst of cancels
+    on a long queue never trips Telegram's per-chat edit rate limit."""
+    async with _QUEUE_RENOTIFY_LOCK:
+        queue = _USER_PENDING_QUEUE.get(uid) or []
+        for _pos, _u in enumerate(queue, start=1):
+            _qid = _u.get("_qid")
+            info = _QUEUE_NOTICE_INFO.get(_qid)
+            if not info:
+                continue
+            _cid = info["cid"]
+            _last = _QUEUE_LAST_EDIT_AT.get(_cid, 0.0)
+            _wait = 1.2 - (time.time() - _last)
+            if _wait > 0:
+                await asyncio.sleep(_wait)
+            try:
+                await edit_msg(_cid, info["msg_id"], _queue_notice_text(_pos, info["cmd"]),
+                                reply_markup={"inline_keyboard": [[
+                                    {"text": "🛑 Cancel", "callback_data": f"queuecancel_{uid}_{_qid}"}
+                                ]]})
+            except Exception as e:
+                logger.warning(f"[Queue] renumber edit failed for qid={_qid}: {e}")
+            _QUEUE_LAST_EDIT_AT[_cid] = time.time()
+
 
 async def _drain_user_queue(uid: int):
     """Single worker per user that drains _USER_PENDING_QUEUE strictly in
@@ -38308,6 +38345,12 @@ async def _drain_user_queue(uid: int):
                 continue
             return
         update = queue.pop(0)
+        _QUEUE_NOTICE_INFO.pop(update.get("_qid"), None)
+        if queue:
+            # The item that just started running was Task #1 -- everyone
+            # left behind it shifts up by one position; re-edit their
+            # notices so the shown numbers stay correct.
+            _spawn_task(_renumber_queue_notices(uid))
         _LOCK_ACQUIRED_AT[uid] = time.time()
         try:
             await handle_message(update["message"])
@@ -38423,14 +38466,17 @@ async def process_update(update: dict):
                     _txt = (_msg_obj.get("text") or "").strip().split()[0] if _msg_obj.get("text") else "command"
                     _pos = len(_USER_PENDING_QUEUE[uid])
                     if _cid:
-                        _spawn_task(send_msg(
-                            _cid,
-                            f"⏳ Ager command sesh howar opekkhay ache — {_txt} ektu porei shuru hobe...\n"
-                            f"Task #{_pos} — Command: {_txt}",
-                            reply_markup={"inline_keyboard": [[
-                                {"text": "🛑 Cancel", "callback_data": f"queuecancel_{uid}_{_qid}"}
-                            ]]}
-                        ))
+                        async def _send_queue_notice(_cid=_cid, _pos=_pos, _txt=_txt, _qid=_qid, _uid=uid):
+                            r = await send_msg(
+                                _cid, _queue_notice_text(_pos, _txt),
+                                reply_markup={"inline_keyboard": [[
+                                    {"text": "🛑 Cancel", "callback_data": f"queuecancel_{_uid}_{_qid}"}
+                                ]]}
+                            )
+                            _mid = r.get("result", {}).get("message_id") if isinstance(r, dict) else None
+                            if _mid:
+                                _QUEUE_NOTICE_INFO[_qid] = {"cid": _cid, "msg_id": _mid, "cmd": _txt}
+                        _spawn_task(_send_queue_notice())
                 if uid not in _USER_QUEUE_RUNNING:
                     # Stale-worker guard: if a previous worker for this uid
                     # died without clearing _USER_QUEUE_RUNNING (crash/restart
@@ -40109,6 +40155,7 @@ async def handle_callback(query: dict):
                 if _u.get("_qid") == target_qid:
                     removed_update = queue.pop(_i)
                     break
+            _QUEUE_NOTICE_INFO.pop(target_qid, None)
             if removed_update is None:
                 await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"),
                                                         "text": "এই কাজটি ইতিমধ্যে শুরু হয়ে গেছে বা বাতিল হয়ে গেছে।"})
@@ -40117,6 +40164,10 @@ async def handle_callback(query: dict):
                 if removed_update.get("message", {}).get("text") else "command"
             await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বাতিল করা হলো"})
             await send_msg(chat_id, f"🛑 বাতিল করা হলো: {_r_txt} (queue থেকে সরানো হয়েছে)")
+            # 2026-11-17 (user request): mid-queue cancel shifts everyone
+            # behind it up by one position -- re-edit their notices in place
+            # so the shown "Task #N" never goes stale/wrong.
+            _spawn_task(_renumber_queue_notices(target_uid))
             return
         if data.startswith("jobcancel_"):
             rest = data[len("jobcancel_"):]
