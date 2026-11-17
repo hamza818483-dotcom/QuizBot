@@ -1157,7 +1157,7 @@ def compress_pdf_to_target(file_bytes: bytes, target_bytes: int = 48 * 1024 * 10
 # forwardMessage is server-side (no re-upload), so it carries no size limit
 # at all, and the message the user sees is a normal bot forward, not
 # something sent from the personal/userbot account directly.
-_LARGE_FILE_STORAGE_GROUP = int(os.environ.get("LARGE_FILE_STORAGE_GROUP", "-1004337829983"))
+_LARGE_FILE_STORAGE_GROUP = int(os.environ.get("CHAT_ID", "-1004337829983"))
 
 
 async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
