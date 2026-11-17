@@ -12016,9 +12016,6 @@ def _csv_meta_caption_suffix(meta: dict) -> str:
     if ma:
         nos = ", ".join(f"Q{n}" for n in ma)
         lines.append(f"🔀 Double answer (option5 দেখো): {nos}")
-    dd = meta.get("dup_dropped") or 0
-    if dd:
-        lines.append(f"🧹 {dd}টি হুবহু duplicate MCQ বাদ দেওয়া হয়েছে")
     return ("\n" + "\n".join(lines)) if lines else ""
 
 def _strip_opt_prefix(opt: str) -> str:
