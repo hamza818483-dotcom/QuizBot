@@ -19793,12 +19793,12 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
     pct = int(done / total * 100) if total else 0
     bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
     lines = [
-        "⏳ <b>ATLAS PDF Processing...</b>",
+        "⏳ ATLAS PDF Processing...",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📄 File: {file_name}", f"🎯 Topic: {topic}", f"📋 Pages: {total} total",
+        f"📄 File: {_html_escape(str(file_name))}", f"🎯 Topic: {_html_escape(str(topic))}", f"📋 Pages: {total} total",
     ]
     if live_topic:
-        lines.append(f"📂 Current topic: {live_topic}")
+        lines.append(f"📂 Current topic: {_html_escape(str(live_topic))}")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     for s in page_status:
         if s["done"]:
@@ -19806,21 +19806,21 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 err = (s.get("error") or "").strip()
                 err_short = (err[:80] + "…") if len(err) > 80 else err
                 if err_short:
-                    lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ — {err_short}")
+                    lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ — {_html_escape(err_short)}")
                 else:
                     lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ (কারণ অজানা — retry/log চেক করুন)")
             else:
                 model_tag = s.get("model", "")
-                model_str = f" ({model_tag})" if model_tag else ""
+                model_str = f" ({_html_escape(model_tag)})" if model_tag else ""
                 page_topic = s.get("detected_topic", "")
-                topic_str = f" 📂{page_topic}" if page_topic else ""
+                topic_str = f" 📂{_html_escape(page_topic)}" if page_topic else ""
                 secs_gen = s.get("gen_seconds")
                 secs_str = f" ⏱{secs_gen}s" if secs_gen is not None else ""
                 calls_n = s.get("req_calls", 0)
                 calls_str = f" 🤖{calls_n}" if calls_n is not None else ""
                 _g_acct = s.get("gemini_account")
                 _g_att = s.get("gemini_attempt")
-                acct_str = f" 🔑{_g_acct}#{_g_att}" if _g_acct else ""
+                acct_str = f" 🔑{_html_escape(str(_g_acct))}#{_g_att}" if _g_acct else ""
                 lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str}{acct_str} ✓")
         elif s["current"]:
             _stage = s.get("stage") or "Processing..."
@@ -19828,7 +19828,7 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
             _live_secs = int(time.time() - _pg_start) if _pg_start else 0
             _calls_now = s.get("req_calls", 0)
             _calls_now_str = f" 🤖{_calls_now}" if _calls_now is not None else ""
-            lines.append(f"⏳ Page {fmt_page(s['page'])}: {_stage} ⏱{_live_secs}s{_calls_now_str}")
+            lines.append(f"⏳ Page {fmt_page(s['page'])}: {_html_escape(str(_stage))} ⏱{_live_secs}s{_calls_now_str}")
         else:
             lines.append(f"⬜ Page {fmt_page(s['page'])}: Waiting")
     lines += [
@@ -19842,11 +19842,15 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("📂 Topic-wise:")
         for t_name, t_count in topic_breakdown.items():
-            lines.append(f"  • {t_name}: {t_count} MCQ")
+            lines.append(f"  • {_html_escape(str(t_name))}: {t_count} MCQ")
     if ai_calls is not None:
-        _breakdown_str = f" ({ai_calls_breakdown})" if ai_calls_breakdown else ""
+        _breakdown_str = f" ({_html_escape(str(ai_calls_breakdown))})" if ai_calls_breakdown else ""
         lines.append(f"🔥 মোট request (exact): {ai_calls}{_breakdown_str}")
-    return "\n".join(lines)
+    # 2026-11-16 (user request): wrap the ENTIRE dashboard in one continuous
+    # <pre> box -- a single unified border around the whole message (not
+    # just the page-list section), rendered as Telegram's monospace
+    # code-block. The internal ━━━ section dividers stay as-is inside it.
+    return "<pre>" + "\n".join(lines) + "</pre>"
 
 def _build_dashboard_md(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=None, ai_calls_breakdown=None, topic_breakdown=None, live_topic=None):
     """_build_dashboard-er markdown/table version -- sendRichMessage/
@@ -19918,7 +19922,7 @@ def _build_dashboard_v(file_name, topic, pages, page_status, start_time, total_m
     base = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0,
                             ai_calls=ai_calls, ai_calls_breakdown=ai_calls_breakdown, live_topic=live_topic)
     sep = "━━━━━━━━━━━━━━━━━━━━━━"
-    now = ["🔴 <b>Now:</b>"]
+    now = ["🔴 Now:"]
     running = [s_ for s_ in page_status if s_.get("current") and not s_["done"]]
     for s_ in running:
         t0 = s_.get("page_start_time")
@@ -22417,7 +22421,7 @@ def _get_bd_time() -> str:
 # qbm_get_active_prompt() auto-detect a stale DB-cached prompt from before
 # the code update and self-heal to the new default, without needing a manual
 # `DELETE FROM quiz_sessions WHERE key='qbm_active_prompt'` after every edit.
-QBM_PROMPT_VERSION = 4
+QBM_PROMPT_VERSION = 5
 
 QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page — never invent, never skip. 0 MCQs→[]. N MCQs→exactly N.
 
@@ -22465,6 +22469,25 @@ DIAGRAM: question needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2]
 OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]
 """
+
+
+# 2026-11-14 (user request): /qbm specifically doesn't need any explanation
+# at all -- drop the whole EXPLANATION section (verbatim-copy case + the
+# synthesized "সঠিক উত্তর: X" fallback) so the model has less to read/decide
+# and less to generate per MCQ (smaller prompt, smaller output -> faster,
+# cheaper, and less likely to hit the DEADLINE_EXCEEDED timeouts seen under
+# load). "explanation" stays in the output JSON schema as an always-empty
+# string rather than being removed outright, since several call sites do
+# mcq.get("explanation", "") downstream -- keeping the key just means they
+# get "" instead of needing special-casing for a missing key.
+QBM_EXTRACT_PROMPT_NO_EXPLANATION = re.sub(
+    r"EXPLANATION \(keep simple.*?not writing new explanations\.\n\n",
+    "",
+    QBM_EXTRACT_PROMPT_DEFAULT,
+    flags=re.DOTALL,
+).replace(
+    '"explanation":"...",', '"explanation":"",'
+)
 
 
 # 2026-08-27 (per request): Groq (qwen/qwen3.8-27b) has an 8000 TPM hard
@@ -26618,8 +26641,8 @@ async def qbm_get_active_prompt() -> str:
                 logger.info(f"[QBM] DB-cached prompt is stale (v{saved_version} < v{QBM_PROMPT_VERSION}) — auto-healing to new code default")
     except Exception as e:
         logger.warning(f"[QBM] prompt memory load failed: {e}")
-    _qbm_prompt_cache["prompt"] = QBM_EXTRACT_PROMPT_DEFAULT
-    return QBM_EXTRACT_PROMPT_DEFAULT
+    _qbm_prompt_cache["prompt"] = QBM_EXTRACT_PROMPT_NO_EXPLANATION
+    return QBM_EXTRACT_PROMPT_NO_EXPLANATION
 
 async def qbm_set_active_prompt(new_prompt: str, version: int = QBM_PROMPT_VERSION):
     """New prompt update এলে সেটাকে permanent করে save করে — পরের বার থেকে
@@ -29903,7 +29926,8 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
         or (file_unique_id and _pdf_unique_id_index.get(file_unique_id) in _pdf_bytes_cache)
     )
     status_r = await send_msg(chat_id, ("✅ Cached PDF ব্যবহার হচ্ছে...\n📄 " + file_name) if _is_cache_hit else
-        ("⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]"))
+        ("⏳ " + ("Image" if is_image_reply else "PDF") + f" download হচ্ছে...\n📄 {file_name}\n[░░░░░░░░░░ 0%]"),
+        reply_to_message_id=msg.get("message_id"))
     status_msg_id = status_r.get("result", {}).get("message_id")
 
     _last_pct = {"v": -1}
@@ -29994,18 +30018,39 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
         # Channel selection + CSV file generation happen only AFTER extraction
         # is fully complete, so the person picks a channel already knowing
         # exactly how many MCQs were found.
+        _qbm_final_page_status: list = []
+        _qbm_extract_start_time = time.time()
         if mode_v:
             # /v: 2-call Gemini-only pipeline, no lookahead/web-resolve/extra retries
             extracted_pages = await qbm_extract_all_pages(
                 chat_id, pages, topic, file_name, status_msg_id, extractor=_v_extract_from_image,
                 file_id=file_id, gemini_only=True, job_id=_qbm_extract_job_id,
-                no_knowledge_fallback=True, skip_lookahead=True, strict_calls=True
+                no_knowledge_fallback=True, skip_lookahead=True, strict_calls=True,
+                page_status_out=_qbm_final_page_status
             )
         else:
             extracted_pages = await qbm_extract_all_pages(
                 chat_id, pages, topic, file_name, status_msg_id, file_id=file_id, gemini_only=True,
-                job_id=_qbm_extract_job_id
+                job_id=_qbm_extract_job_id, page_status_out=_qbm_final_page_status
             )
+
+        # 2026-11-16 (user request): final dashboard refresh WITHOUT the
+        # cancel button -- extraction is fully done at this point (including
+        # any final-safety-net recovery rounds, which run after the ticker
+        # already stopped and so were never reflected on-screen), and a
+        # cancel button has no purpose on a finished job. Only the dashboard
+        # itself should remain -- no keyboard at all.
+        if status_msg_id and _qbm_final_page_status and not is_cancelled(chat_id):
+            try:
+                _final_total_mcq = sum(len(mcqs) for _, _, mcqs in extracted_pages)
+                _final_text = _build_dashboard(
+                    file_name, topic, pages, _qbm_final_page_status, _qbm_extract_start_time,
+                    _final_total_mcq, 0, ai_calls=_get_ai_call_count(chat_id),
+                    ai_calls_breakdown=_get_ai_call_breakdown_str(chat_id)
+                )
+                await edit_msg(chat_id, status_msg_id, _final_text, reply_markup={"inline_keyboard": []})
+            except Exception as _final_dash_e:
+                logger.warning(f"[QBM] final cancel-free dashboard edit failed: {_final_dash_e}")
 
         if _qbm_extract_job_id:
             # Extraction finished cleanly (no crash) -- this job no longer
@@ -30074,7 +30119,8 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
                     f"{topic}_QBM.csv",
                     caption=f"📋 {topic} — {total_mcq_found} MCQ (Extracted)",
                     mime_type="text/csv",
-                    reply_markup=_csv_kb)
+                    reply_markup=_csv_kb,
+                    reply_to_message_id=status_msg_id)
             return
 
 
@@ -34489,6 +34535,20 @@ async def qbm_extract_all_pages(
         page_status[idx]["mcq"] = len(mcqs)
         page_status[idx]["gen_seconds"] = round(time.time() - _page_start_ts, 1)
         page_status[idx]["ai_calls"] = _get_ai_call_count(chat_id) - _page_ai_calls_before
+        # 2026-11-16 (user request): show which Gemini account won this page
+        # on /qbm's live dashboard too (🔑acct tag), same as /pdf already
+        # shows via _attach_gemini_success_info. /qbm's own Gemini call
+        # paths now set _last_gemini_success_ctx (no "attempt"/"page" key,
+        # unlike /pdf's — so no page-number cross-check here, best-effort).
+        if mcqs and any(str(m.get("_provider", "")).lower().startswith("gemini") for m in mcqs):
+            try:
+                from pdf_handler import _last_gemini_success_ctx
+                _ginfo = _last_gemini_success_ctx.get()
+                if _ginfo and _ginfo.get("account"):
+                    page_status[idx]["gemini_account"] = _ginfo["account"]
+                    page_status[idx]["gemini_attempt"] = 1
+            except Exception:
+                pass
         if IS_RENDER:
             _qbm_rss_log("page_done", page=page_num, mcq=len(mcqs))
         if job_id and mcqs:
@@ -34998,7 +35058,8 @@ async def process_qbm_pages(
         await send_document(chat_id, buf.getvalue().encode("utf-8"),
             f"{topic}_QBM.csv",
             caption=f"📋 {topic} — {len(all_mcqs_csv)} MCQ (Extracted)",
-            mime_type="text/csv")
+            mime_type="text/csv",
+            reply_to_message_id=status_msg_id)
 
     if not csv_only and summary_pages:
         total_mcq_sum = sum(p["mcq_count"] for p in summary_pages)
@@ -35042,7 +35103,8 @@ async def process_qbm_pages(
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📝 Total MCQ Extracted: {total_mcq}\n📋 Pages: {len(display_pages)}\n⏱️ {mins}:{secs:02d}\n"
         f"🤖 Model Usage: {model_totals_line}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━")
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup={"inline_keyboard": []})
 
 # ============================================================
 # FEATURE: /rapid — CSV রিপ্লাই করে Topic দিলে, channel + local time select
@@ -38479,11 +38541,14 @@ async def handle_message(msg: dict):
         _spawn_command_task(uid, _process_rayvila_auto(msg, text.strip()))
         return
 
-    # Auto URL → .mhtml capture + auto CSV (any public webpage link, no
-    # command needed — user just pastes the URL as a plain message)
-    if text and not msg.get("reply_to_message") and is_plain_url(text):
-        _spawn_command_task(uid, _process_url_auto(msg, text.strip()))
-        return
+    # 2026-11-14 (user request): auto URL capture (.mhtml + auto CSV on any
+    # plain link, no command) turned OFF — was firing "🌐 Page লোড ও capture
+    # করা হচ্ছে..." on every plain link the user sent. Disabled by simply
+    # never triggering _process_url_auto; function kept in place in case
+    # it's wanted back later.
+    # if text and not msg.get("reply_to_message") and is_plain_url(text):
+    #     _spawn_command_task(uid, _process_url_auto(msg, text.strip()))
+    #     return
 
     # Auto mhtml/html → smart detect (MCQ→CSV queue, Q&A/CQ→tell user to use /qpdf)
     if msg.get("document") and not msg.get("reply_to_message"):
