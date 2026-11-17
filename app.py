@@ -30105,12 +30105,13 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
             # "📋 Channel List" button থাকবে -- চাপলে তখন actual channel
             # buttons (2 per row) reveal হবে সেই একই CSV message-এ edit করে।
             if total_mcq_found:
-                _missing_exp_qbm = [m for _, _, mcqs in extracted_pages for m in mcqs if not (m.get("explanation") or "").strip()]
-                if _missing_exp_qbm:
-                    try:
-                        await _ai_generate_all_explanations(_missing_exp_qbm)
-                    except Exception as e:
-                        logger.warning(f"[QBM] fallback explanation fill failed: {e}")
+                # 2026-11-17 (user request): /qbm explanation stays FULLY
+                # empty by design (see QBM_EXTRACT_PROMPT_NO_EXPLANATION and
+                # the 2026-11-17 note in _qbm_final_safety_net) -- this
+                # fallback block used to call _ai_generate_all_explanations
+                # on every MCQ with a blank explanation right before CSV
+                # export, silently re-adding explanations /qbm is supposed
+                # to never generate. Removed; blank explanation ships as-is.
                 import io as _io_qbm, csv as _csv_mod_qbm
                 _buf_qbm = _io_qbm.StringIO()
                 _w_qbm = _csv_mod_qbm.writer(_buf_qbm)
@@ -34550,11 +34551,18 @@ async def qbm_extract_all_pages(
                             key = (m.get("question") or "").strip()[:80]
                             if key in found_map:
                                 m["answer"] = found_map[key]
+                                # 2026-11-17 (user request): /qbm explanation
+                                # stays FULLY empty -- previously, once the
+                                # answer was resolved from a lookahead answer
+                                # key, a missing/cleared explanation would get
+                                # backfilled via _qbm_build_explanation_for_known_answer.
+                                # That silently reintroduced explanations
+                                # /qbm is supposed to never generate, so just
+                                # clear any leftover placeholder and leave it
+                                # blank.
                                 m["explanation"] = (m.get("explanation") or "").replace(
                                     "Answer not found in source", ""
                                 ).strip()
-                                if not m["explanation"]:
-                                    m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=gemini_only)
                         unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
 
             # Still unresolved after scanning nearby pages -> last-resort Groq
@@ -35010,11 +35018,14 @@ async def process_qbm_pages(
                                 key = (m.get("question") or "").strip()[:80]
                                 if key in found_map:
                                     m["answer"] = found_map[key]
+                                    # 2026-11-17 (user request): /qbm
+                                    # explanation stays FULLY empty -- same
+                                    # fix as in qbm_extract_all_pages above,
+                                    # just clear the placeholder, never
+                                    # regenerate.
                                     m["explanation"] = (m.get("explanation") or "").replace(
                                         "Answer not found in source", ""
                                     ).strip()
-                                    if not m["explanation"]:
-                                        m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=True)
                             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
                 if unresolved:
                     for m in unresolved:
