@@ -928,7 +928,7 @@ _current_job_chat_id_ctx = contextvars.ContextVar("_current_job_chat_id_ctx", de
 # contextvars only propagate correctly through await-chains when both sides
 # reference the SAME ContextVar object, not two separately-created vars
 # with the same name/default.
-from pdf_handler import _qbm_key_offset_ctx, _qbm_page_used_accounts_ctx
+from pdf_handler import _qbm_key_offset_ctx, _qbm_page_used_accounts_ctx, _qbm_page_gemini_info_ctx
 
 def is_cancelled(chat_id=None):
     if chat_id is None:
@@ -28506,13 +28506,22 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 # or exposed which account/key actually won, unlike /pdf's
                 # pipeline (_attach_gemini_success_info). Mirror that here.
                 try:
-                    from pdf_handler import _gemini_key_hash, _last_gemini_success_ctx
+                    from pdf_handler import _gemini_key_hash, _last_gemini_success_ctx, _qbm_page_gemini_info_ctx
                     logger.info(f"[QBM Gemini] success — account={_used_acct} key={_gemini_key_hash(key)}")
-                    _last_gemini_success_ctx.set({
+                    _ginfo_dict = {
                         "account": _used_acct,
                         "key_hash": _gemini_key_hash(key),
                         "model": _fallback_model or "gemini-3.6-flash",
-                    })
+                    }
+                    _last_gemini_success_ctx.set(_ginfo_dict)  # kept for any other same-task reader
+                    # FIX: the contextvar .set() above is invisible to
+                    # _extract_one (spawned-task context-copy boundary) --
+                    # mutate the shared per-page dict instead, which IS
+                    # visible there. See _qbm_page_gemini_info_ctx comment.
+                    _shared_ginfo = _qbm_page_gemini_info_ctx.get()
+                    if _shared_ginfo is not None:
+                        _shared_ginfo.clear()
+                        _shared_ginfo.update(_ginfo_dict)
                 except Exception:
                     pass
                 # 2026-09-08 ROOT-CAUSE DIAGNOSTIC: response.text can be
@@ -34669,8 +34678,10 @@ async def qbm_extract_all_pages(
         # unlike /pdf's — so no page-number cross-check here, best-effort).
         if mcqs and any(str(m.get("_provider", "")).lower().startswith("gemini") for m in mcqs):
             try:
-                from pdf_handler import _last_gemini_success_ctx
-                _ginfo = _last_gemini_success_ctx.get()
+                # FIX: read the mutated shared dict (visible across the
+                # _spawn_task context-copy boundary), not the plain
+                # contextvar -- see _qbm_page_gemini_info_ctx comment.
+                _ginfo = _qbm_page_gemini_info_ctx.get()
                 if _ginfo and _ginfo.get("account"):
                     page_status[idx]["gemini_account"] = _ginfo["account"]
                     page_status[idx]["gemini_attempt"] = 1
@@ -34740,6 +34751,12 @@ async def qbm_extract_all_pages(
         # different accounts from each other -- see
         # ordered_keys_avoiding_accounts() / _qbm_page_used_accounts_ctx.
         _qbm_page_used_accounts_ctx.set(set())
+        # Fresh empty dict per page, set BEFORE _extract_one's own
+        # _spawn_task(_run_extract()) call -- the spawned task's context is a
+        # COPY taken at spawn time, so it inherits this same dict OBJECT;
+        # mutating it (never reassigning) inside the spawned task is then
+        # visible here too. See _qbm_page_gemini_info_ctx comment.
+        _qbm_page_gemini_info_ctx.set({})
         return await _extract_one(idx, page_num, img)
 
     for start in range(0, len(pages), WINDOW):
