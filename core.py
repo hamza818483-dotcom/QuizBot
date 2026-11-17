@@ -1231,7 +1231,26 @@ async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
         async def _do_upload():
             nonlocal uclient
             uclient = TelegramClient(StringSession(_USR_SESSION), _USR_API_ID, _USR_API_HASH)
-            await uclient.connect()
+            # 2026-11-17 (user report): a single connect() ConnectError
+            # (transient MTProto connect blip -- common on HF/Render's
+            # outbound network) was falling straight through to the normal
+            # 50MB error with zero retry. Retry connect a few times with a
+            # short backoff before giving up -- cheap, and the common case
+            # (one-off blip) now self-heals instead of failing the whole
+            # userbot fallback outright.
+            _last_connect_err = None
+            for _attempt in range(3):
+                try:
+                    await uclient.connect()
+                    _last_connect_err = None
+                    break
+                except Exception as _ce:
+                    _last_connect_err = _ce
+                    logger.warning(f"[sendDoc] userbot connect attempt {_attempt+1}/3 failed: {_ce}")
+                    if _attempt < 2:
+                        await asyncio.sleep(1.5 * (_attempt + 1))
+            if _last_connect_err is not None:
+                raise _last_connect_err
             if not await uclient.is_user_authorized():
                 await uclient.disconnect()
                 return None
