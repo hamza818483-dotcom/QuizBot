@@ -19793,12 +19793,12 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
     pct = int(done / total * 100) if total else 0
     bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
     lines = [
-        "⏳ <b>ATLAS PDF Processing...</b>",
+        "⏳ ATLAS PDF Processing...",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📄 File: {file_name}", f"🎯 Topic: {topic}", f"📋 Pages: {total} total",
+        f"📄 File: {_html_escape(str(file_name))}", f"🎯 Topic: {_html_escape(str(topic))}", f"📋 Pages: {total} total",
     ]
     if live_topic:
-        lines.append(f"📂 Current topic: {live_topic}")
+        lines.append(f"📂 Current topic: {_html_escape(str(live_topic))}")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
     for s in page_status:
         if s["done"]:
@@ -19806,21 +19806,21 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
                 err = (s.get("error") or "").strip()
                 err_short = (err[:80] + "…") if len(err) > 80 else err
                 if err_short:
-                    lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ — {err_short}")
+                    lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ — {_html_escape(err_short)}")
                 else:
                     lines.append(f"⚠️ Page {fmt_page(s['page'])}: 0 MCQ (কারণ অজানা — retry/log চেক করুন)")
             else:
                 model_tag = s.get("model", "")
-                model_str = f" ({model_tag})" if model_tag else ""
+                model_str = f" ({_html_escape(model_tag)})" if model_tag else ""
                 page_topic = s.get("detected_topic", "")
-                topic_str = f" 📂{page_topic}" if page_topic else ""
+                topic_str = f" 📂{_html_escape(page_topic)}" if page_topic else ""
                 secs_gen = s.get("gen_seconds")
                 secs_str = f" ⏱{secs_gen}s" if secs_gen is not None else ""
                 calls_n = s.get("req_calls", 0)
                 calls_str = f" 🤖{calls_n}" if calls_n is not None else ""
                 _g_acct = s.get("gemini_account")
                 _g_att = s.get("gemini_attempt")
-                acct_str = f" 🔑{_g_acct}#{_g_att}" if _g_acct else ""
+                acct_str = f" 🔑{_html_escape(str(_g_acct))}#{_g_att}" if _g_acct else ""
                 lines.append(f"✅ Page {fmt_page(s['page'])}: {s['mcq']} MCQ{model_str}{topic_str}{secs_str}{calls_str}{acct_str} ✓")
         elif s["current"]:
             _stage = s.get("stage") or "Processing..."
@@ -19828,7 +19828,7 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
             _live_secs = int(time.time() - _pg_start) if _pg_start else 0
             _calls_now = s.get("req_calls", 0)
             _calls_now_str = f" 🤖{_calls_now}" if _calls_now is not None else ""
-            lines.append(f"⏳ Page {fmt_page(s['page'])}: {_stage} ⏱{_live_secs}s{_calls_now_str}")
+            lines.append(f"⏳ Page {fmt_page(s['page'])}: {_html_escape(str(_stage))} ⏱{_live_secs}s{_calls_now_str}")
         else:
             lines.append(f"⬜ Page {fmt_page(s['page'])}: Waiting")
     lines += [
@@ -19842,11 +19842,15 @@ def _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("📂 Topic-wise:")
         for t_name, t_count in topic_breakdown.items():
-            lines.append(f"  • {t_name}: {t_count} MCQ")
+            lines.append(f"  • {_html_escape(str(t_name))}: {t_count} MCQ")
     if ai_calls is not None:
-        _breakdown_str = f" ({ai_calls_breakdown})" if ai_calls_breakdown else ""
+        _breakdown_str = f" ({_html_escape(str(ai_calls_breakdown))})" if ai_calls_breakdown else ""
         lines.append(f"🔥 মোট request (exact): {ai_calls}{_breakdown_str}")
-    return "\n".join(lines)
+    # 2026-11-16 (user request): wrap the ENTIRE dashboard in one continuous
+    # <pre> box -- a single unified border around the whole message (not
+    # just the page-list section), rendered as Telegram's monospace
+    # code-block. The internal ━━━ section dividers stay as-is inside it.
+    return "<pre>" + "\n".join(lines) + "</pre>"
 
 def _build_dashboard_md(file_name, topic, pages, page_status, start_time, total_mcq, total_polls, ai_calls=None, ai_calls_breakdown=None, topic_breakdown=None, live_topic=None):
     """_build_dashboard-er markdown/table version -- sendRichMessage/
@@ -19918,7 +19922,7 @@ def _build_dashboard_v(file_name, topic, pages, page_status, start_time, total_m
     base = _build_dashboard(file_name, topic, pages, page_status, start_time, total_mcq, 0,
                             ai_calls=ai_calls, ai_calls_breakdown=ai_calls_breakdown, live_topic=live_topic)
     sep = "━━━━━━━━━━━━━━━━━━━━━━"
-    now = ["🔴 <b>Now:</b>"]
+    now = ["🔴 Now:"]
     running = [s_ for s_ in page_status if s_.get("current") and not s_["done"]]
     for s_ in running:
         t0 = s_.get("page_start_time")
