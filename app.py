@@ -995,6 +995,9 @@ RAPID_PENDING = {}
 # job_id -> asyncio.Task (so a scheduled /rapid run can be cancelled before it fires)
 RAPID_TASKS = {}
 
+# /prompt — uid -> {"key": registry-key, "msg_id": full-prompt message_id awaiting reply-edit}
+PROMPT_EDIT_PENDING = {}
+
 # v1.3: /api/new-exam — async job state for instant progress page
 # job_id -> {"status": "running"|"done"|"error", "pct": int, "eta_sec": int,
 #            "started_at": float, "new_cache_id": str, "error": str}
@@ -32911,6 +32914,104 @@ async def prompt_set_active(key: str, text: str):
 async def prompt_reset_to_default(key: str):
     if key in PROMPT_REGISTRY:
         await prompt_set_active(key, PROMPT_REGISTRY[key]["default"])
+
+# ── /prompt command UI (2026-11-17) ─────────────────────────────────────
+# Grid of every PROMPT_REGISTRY command, 4 buttons/row -> tap a command ->
+# full active prompt shown (view) with ✏️ Edit / ♻️ Reset / ⬅️ Back under
+# it -> ✏️ Edit asks admin to reply with new text (reply-to-message, caught
+# via PROMPT_EDIT_PENDING) -> saved, re-shown. Back always present, always
+# returns to the grid, from whichever page it's on.
+def _prompt_main_menu_markup() -> dict:
+    keys = list(PROMPT_REGISTRY.keys())
+    rows = []
+    for i in range(0, len(keys), 4):
+        row_keys = keys[i:i + 4]
+        rows.append([{"text": PROMPT_REGISTRY[k]["label"], "callback_data": f"promptview_{k}"} for k in row_keys])
+    return {"inline_keyboard": rows}
+
+async def show_prompt_main_menu(chat_id, edit_message_id=None):
+    text = "🧠 <b>Prompt Manager</b>\n\nযেকোনো command select করো — active prompt দেখতে/edit করতে পারবে।"
+    markup = _prompt_main_menu_markup()
+    if edit_message_id:
+        await edit_msg(chat_id, edit_message_id, text, reply_markup=markup)
+    else:
+        await send_msg(chat_id, text, reply_markup=markup)
+
+def _prompt_view_markup(key: str) -> dict:
+    return {"inline_keyboard": [
+        [{"text": "✏️ Edit", "callback_data": f"promptedit_{key}"},
+         {"text": "♻️ Reset", "callback_data": f"promptreset_{key}"}],
+        [{"text": "⬅️ Back", "callback_data": "promptback"}],
+    ]}
+
+async def show_prompt_view(chat_id, key: str, edit_message_id=None):
+    if key not in PROMPT_REGISTRY:
+        return
+    label = PROMPT_REGISTRY[key]["label"]
+    active = await prompt_get_active(key)
+    text = f"📋 <b>{label} — Active Prompt</b>\n\n<code>{html_lib.escape(active[:3500])}</code>"
+    markup = _prompt_view_markup(key)
+    if edit_message_id:
+        await edit_msg(chat_id, edit_message_id, text, reply_markup=markup)
+    else:
+        await send_msg(chat_id, text, reply_markup=markup)
+
+async def handle_prompt_callback(query: dict) -> bool:
+    data = query["data"]
+    chat_id = query["message"]["chat"]["id"]
+    msg_id = query["message"]["message_id"]
+    uid = query["from"]["id"]
+    if not data.startswith("prompt"):
+        return False
+    if not await db_is_owner_or_admin(uid):
+        return True
+    if data == "promptmenu" or data == "promptback":
+        PROMPT_EDIT_PENDING.pop(uid, None)
+        await show_prompt_main_menu(chat_id, edit_message_id=msg_id)
+        return True
+    if data.startswith("promptview_"):
+        key = data[len("promptview_"):]
+        await show_prompt_view(chat_id, key, edit_message_id=msg_id)
+        return True
+    if data.startswith("promptedit_"):
+        key = data[len("promptedit_"):]
+        if key not in PROMPT_REGISTRY:
+            return True
+        label = PROMPT_REGISTRY[key]["label"]
+        sent = await send_msg(chat_id, f"✏️ <b>{label}</b> এর নতুন prompt লিখে এই message-এ reply করো।",
+                               reply_markup={"force_reply": True})
+        sent_id = (sent or {}).get("result", {}).get("message_id")
+        PROMPT_EDIT_PENDING[uid] = {"key": key, "msg_id": sent_id, "view_msg_id": msg_id}
+        return True
+    if data.startswith("promptreset_"):
+        key = data[len("promptreset_"):]
+        if key not in PROMPT_REGISTRY:
+            return True
+        await prompt_reset_to_default(key)
+        await show_prompt_view(chat_id, key, edit_message_id=msg_id)
+        return True
+    return True
+
+async def handle_prompt_text_input(msg: dict) -> bool:
+    uid = msg.get("from", {}).get("id")
+    pend = PROMPT_EDIT_PENDING.get(uid)
+    if not pend:
+        return False
+    reply = msg.get("reply_to_message")
+    if not reply or reply.get("message_id") != pend.get("msg_id"):
+        return False
+    new_text = (msg.get("text") or "").strip()
+    chat_id = msg["chat"]["id"]
+    if not new_text:
+        return False
+    key = pend["key"]
+    await prompt_set_active(key, new_text)
+    PROMPT_EDIT_PENDING.pop(uid, None)
+    label = PROMPT_REGISTRY.get(key, {}).get("label", key)
+    await send_msg(chat_id, f"✅ <b>{label}</b> prompt update হয়ে গেছে।")
+    await show_prompt_view(chat_id, key, edit_message_id=pend.get("view_msg_id"))
+    return True
+# ── end /prompt command UI ──────────────────────────────────────────────
 # ── end /prompt command backend ─────────────────────────────────────────
 
 
@@ -38612,6 +38713,12 @@ async def handle_message(msg: dict):
         if consumed:
             return
 
+    # /prompt flow check (awaiting reply-to-edit text for a prompt override)
+    if uid in PROMPT_EDIT_PENDING and msg.get("text"):
+        consumed = await handle_prompt_text_input(msg)
+        if consumed:
+            return
+
     # Channel rename flow check (awaiting new name text after ✏️ Name Update tap)
     if uid in CHANNEL_RENAME_PENDING and msg.get("text") and not text.startswith("/"):
         channel_id = CHANNEL_RENAME_PENDING.pop(uid)
@@ -38944,6 +39051,9 @@ async def handle_message(msg: dict):
         await handle_info2(msg)
     elif text == "/ramdebug" or text.startswith("/ramdebug "):
         await handle_ramdebug(msg)
+    elif text.strip() == "/prompt":
+        if await db_is_owner_or_admin(uid):
+            await show_prompt_main_menu(chat_id)
     elif text.startswith("/qbmprompt"):
         # /qbmprompt <new prompt text> -> permanently overrides the active
         # QBM extraction prompt (Call 1). Persists in Supabase (quiz_sessions,
@@ -39861,6 +39971,9 @@ async def handle_callback(query: dict):
     try:
         if data.startswith("imgmcq_"):
             _spawn_task(handle_imgmcq_callback(query))
+            return
+        if data.startswith("prompt"):
+            await handle_prompt_callback(query)
             return
         if data.startswith("pdfpg_"):
             rest = data[len("pdfpg_"):]
