@@ -23023,7 +23023,7 @@ async def _topic_extract_from_image(img, cache_key: tuple = None) -> list:
         if cached:
             logger.info(f"[TOPIC MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
             return _qbm_dedup_list(cached)
-        gem = await _qbm_gemini_extract(img, TOPIC_EXTRACT_PROMPT)
+        gem = await _qbm_gemini_extract(img, await prompt_get_active("topic"))
         result = _qbm_dedup_list(gem) if gem else []
         if result and cache_key:
             _topic_mcq_result_cache[cache_key] = result
@@ -23143,7 +23143,7 @@ async def _eng_extract_from_image(img, cache_key: tuple = None) -> list:
         if cached:
             logger.info(f"[ENG MCQ Cache] hit for {cache_key} — skipping Call1, still running full Call2 verify")
             return _qbm_dedup_list(cached)
-        gem = await _qbm_gemini_extract(img, ENG_EXTRACT_PROMPT)
+        gem = await _qbm_gemini_extract(img, await prompt_get_active("eng"))
         result = _qbm_dedup_list(gem) if gem else []
         if result and cache_key:
             _eng_mcq_result_cache[cache_key] = result
@@ -23389,7 +23389,8 @@ async def _unmesh_extract_from_image(img, cache_key: tuple = None, bypass_cache:
         # 2026-09-01) — ~150 Gemini keys available so no need to leak into
         # other providers; also avoids wasted calls when OpenRouter's daily
         # quota is already fully exhausted.
-        _prompt = UNMESH_EXTRACT_PROMPT + _QBM_CAREFUL_SCAN_ADDENDUM if careful else UNMESH_EXTRACT_PROMPT
+        _unmesh_base_prompt = await prompt_get_active("unmesh")
+        _prompt = _unmesh_base_prompt + _QBM_CAREFUL_SCAN_ADDENDUM if careful else _unmesh_base_prompt
         gem_txt = await _qbm_gemini_raw_only(img, _prompt, careful=careful)
         gem = _qbm_parse_json(gem_txt) if gem_txt else []
         result = _qbm_dedup_list(gem) if gem else []
@@ -23704,7 +23705,8 @@ async def _bcs_extract_from_image(img, cache_key: tuple = None, bypass_cache: bo
         logger.info(f"[BCS MCQ Cache] hit for {cache_key} — skipping extraction call")
         return _qbm_dedup_list(cached)
 
-    _prompt1 = BCS_EXTRACT_PROMPT_CALL1 + _QBM_CAREFUL_SCAN_ADDENDUM if careful else BCS_EXTRACT_PROMPT_CALL1
+    _bcs_base_prompt = await prompt_get_active("bcs")
+    _prompt1 = _bcs_base_prompt + _QBM_CAREFUL_SCAN_ADDENDUM if careful else _bcs_base_prompt
     gem_txt = await _qbm_gemini_raw_only(img, _prompt1, careful=careful)
     gem = _qbm_parse_json(gem_txt) if gem_txt else []
     result = _qbm_dedup_list(gem) if gem else []
@@ -25042,7 +25044,8 @@ async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bo
         if cached:
             logger.info(f"[CHEM MCQ Cache] hit for {cache_key} — skipping Call1, still running full heading-scan + Call2 verify")
             return _qbm_dedup_list(cached)
-        gem = await _qbm_gemini_extract(img, CHEM_EXTRACT_PROMPT, gemini_only=gemini_only)
+        _chem_base_prompt = await prompt_get_active("chem")
+        gem = await _qbm_gemini_extract(img, _chem_base_prompt, gemini_only=gemini_only)
         if gem:
             result = _qbm_dedup_list(gem)
             if result and cache_key:
@@ -25060,7 +25063,7 @@ async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bo
                 _chem_mcq_result_cache[cache_key] = result
                 _cap_qbm_mcq_cache(_chem_mcq_result_cache)
             return result
-        txt3 = await _qbm_openrouter_call(img, CHEM_EXTRACT_PROMPT)
+        txt3 = await _qbm_openrouter_call(img, _chem_base_prompt)
         result3 = _qbm_parse_json(txt3) if txt3 else []
         return _qbm_dedup_list(result3)
 
@@ -31693,12 +31696,13 @@ async def _onu_call1_extract(img, info: dict = None) -> list:
     explicit "there IS a red-boxed MCQ" note. Reason goes to info["err"]."""
     last_err = ""
     _empty_seen = False
+    _onu_base_prompt = await prompt_get_active("onu")
     for attempt in range(1, 4):
         if _onu_job_cancelled():
             break
         txt = ""
         try:
-            txt = await _qbm_gemini_raw(img, ONU_EXTRACT_PROMPT_GEMINI + (_ONU_EMPTY_RETRY_NOTE if _empty_seen else ""),
+            txt = await _qbm_gemini_raw(img, _onu_base_prompt + (_ONU_EMPTY_RETRY_NOTE if _empty_seen else ""),
                                         careful=_empty_seen, gemini_only=True)
         except Exception as e:
             last_err = f"Gemini error: {str(e)[:60]}"
@@ -32788,6 +32792,81 @@ No red-marked MCQ on this page -> return [].
 
 OUTPUT — ONLY valid JSON array, nothing else, no markdown fences, no commentary:
 [{"mcq_no":"...","question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}]"""
+
+# ── /prompt command backend (2026-11-16) ───────────────────────────────
+# Generic DB-backed override storage for any extraction prompt, mirroring
+# qbm_get_active_prompt/qbm_set_active_prompt's pattern (same Supabase
+# table "quiz_sessions", one row per key="prompt_active_<name>"). Separate
+# from QBM's own storage (key="qbm_active_prompt") so existing /qbmprompt
+# behavior is untouched -- "qbm" in PROMPT_REGISTRY routes through the
+# original qbm_get_active_prompt/qbm_set_active_prompt functions instead.
+_generic_prompt_cache = {}
+
+async def generic_get_active_prompt(key: str, default: str) -> str:
+    if key in _generic_prompt_cache:
+        return _generic_prompt_cache[key]
+    try:
+        r = await sb_exec(lambda: sb.table("quiz_sessions").select("data").eq("key", f"prompt_active_{key}").execute())
+        if r.data:
+            saved = json.loads(r.data[0]["data"])
+            p = saved.get("prompt")
+            if p:
+                _generic_prompt_cache[key] = p
+                return p
+    except Exception as e:
+        logger.warning(f"[PROMPT] load failed for '{key}': {e}")
+    _generic_prompt_cache[key] = default
+    return default
+
+async def generic_set_active_prompt(key: str, new_prompt: str):
+    _generic_prompt_cache[key] = new_prompt
+    try:
+        await sb_exec(lambda: sb.table("quiz_sessions").upsert({
+            "key": f"prompt_active_{key}",
+            "data": json.dumps({"prompt": new_prompt}),
+            "updated_at": int(time.time())
+        }).execute())
+    except Exception as e:
+        logger.warning(f"[PROMPT] save failed for '{key}': {e}")
+
+# key -> {"label": grid-button text, "default": built-in prompt constant}.
+# NOTE: this only covers the commands whose extraction call sites have
+# been switched to read via prompt_get_active() below (/qbm, /topic,
+# /eng, /chem, /bcs, /unmesh, /onu). /onu2 is NOT yet wired -- its real
+# PDF pipeline runs on ONU2_CALL1_PROMPT_BATCHED_TMPL (a %-style {n}
+# template, different shape from the others), not plain ONU2_CALL1_PROMPT,
+# so it needs its own careful handling and is left for a follow-up.
+PROMPT_REGISTRY = {
+    "qbm":    {"label": "📝 /qbm",    "default": QBM_EXTRACT_PROMPT_DEFAULT},
+    "topic":  {"label": "📂 /topic",  "default": TOPIC_EXTRACT_PROMPT},
+    "eng":    {"label": "🇬🇧 /eng",   "default": ENG_EXTRACT_PROMPT},
+    "chem":   {"label": "🧪 /chem",   "default": CHEM_EXTRACT_PROMPT},
+    "bcs":    {"label": "🎓 /bcs",    "default": BCS_EXTRACT_PROMPT_CALL1},
+    "unmesh": {"label": "📘 /unmesh", "default": UNMESH_EXTRACT_PROMPT},
+    "onu":    {"label": "🖍️ /onu",   "default": ONU_EXTRACT_PROMPT_GEMINI},
+}
+
+async def prompt_get_active(key: str) -> str:
+    """Single entry point every wired extraction call site uses instead of
+    its raw *_EXTRACT_PROMPT constant -- returns the admin-edited override
+    if one was saved via /prompt, else the built-in default unchanged."""
+    if key == "qbm":
+        return await qbm_get_active_prompt()
+    if key not in PROMPT_REGISTRY:
+        return ""
+    return await generic_get_active_prompt(key, PROMPT_REGISTRY[key]["default"])
+
+async def prompt_set_active(key: str, text: str):
+    if key == "qbm":
+        await qbm_set_active_prompt(text)
+    else:
+        await generic_set_active_prompt(key, text)
+
+async def prompt_reset_to_default(key: str):
+    if key in PROMPT_REGISTRY:
+        await prompt_set_active(key, PROMPT_REGISTRY[key]["default"])
+# ── end /prompt command backend ─────────────────────────────────────────
+
 
 ONU2_CALL1_PROMPT_BATCHED_TMPL = """MCQ EXTRACTOR — RED-MARKED SERIAL NUMBER ONLY, applied INDEPENDENTLY to {n} SEPARATE page images given to you in this SAME call (image order = page_index 1, 2, ... {n} — never mix content between pages, each page's MCQs stay strictly on that page's own page_index). The SOLE indicator for inclusion is a RED MARKING drawn AROUND or DIRECTLY BESIDE the MCQ's SERIAL NUMBER label (e.g. "১ক১", "1", "৪জ ৯", "১খ৩") — this marking can appear as a RED BOUNDARY, a RED BOX, or a RED RECTANGLE outline; all three are the same signal, just drawn differently by hand, and its exact position/shape varies (may sit tightly around just the number, may extend slightly to include the "।" or a couple of nearby characters, may be a clean rectangle or a rougher hand-drawn loop) -- judge by INTENT (is the serial number clearly circled/boxed in red?) not by exact pixel-perfect shape or position. This marking identifies which MCQ(s) are included, separate from the question text itself. It can be SHORT (wrapping just one number, marking a single MCQ) or TALL/VERTICAL (stretching down to wrap SEVERAL CONSECUTIVE numbers together in one boundary, marking that whole consecutive run of MCQs as included — e.g. one tall boundary spanning "১ক৬" through "১ক১০" means all 5 of those MCQs are included). Carefully trace each marking's edge to see exactly which serial numbers fall inside/beside it, ON ITS OWN PAGE. A red mark that is clearly NOT associated with any serial number at all (e.g. only around question text, an option, or a paragraph, with no number anywhere near it) does NOT count for inclusion — ignore it. IGNORE every MCQ whose serial number has no red boundary/box/rectangle marking it — do not extract it at all.
 
