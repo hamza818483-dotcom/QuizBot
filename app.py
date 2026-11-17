@@ -32893,9 +32893,14 @@ PROMPT_REGISTRY = {
     "bcs":    {"label": "🎓 /bcs",    "default": BCS_EXTRACT_PROMPT_CALL1},
     "unmesh": {"label": "📘 /unmesh", "default": UNMESH_EXTRACT_PROMPT},
     "onu":    {"label": "🖍️ /onu",   "default": ONU_EXTRACT_PROMPT_GEMINI},
-    "onu2_call1": {"label": "🖊️ /onu2 C1", "default": ONU2_CALL1_PROMPT_BATCHED_TMPL},
-    "onu2_call2": {"label": "🖊️ /onu2 C2", "default": ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL},
 }
+# onu2_call1/onu2_call2 defaults reference ONU2_*_TMPL constants defined
+# further below in this file (after their real call sites) -- registered
+# here via a setter called once those constants exist, instead of at this
+# point in module load, to avoid a NameError on import.
+def _register_onu2_prompts():
+    PROMPT_REGISTRY["onu2_call1"] = {"label": "🖊️ /onu2 C1", "default": ONU2_CALL1_PROMPT_BATCHED_TMPL}
+    PROMPT_REGISTRY["onu2_call2"] = {"label": "🖊️ /onu2 C2", "default": ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL}
 
 async def prompt_get_active(key: str) -> str:
     """Single entry point every wired extraction call site uses instead of
@@ -33137,6 +33142,8 @@ FORMATTING (apply to all question/option/explanation text above):
 
 OUTPUT — ONLY valid JSON object covering ALL {n} pages together, nothing else, no markdown fences:
 {{"missed": [{{"page_index":1,"mcq_no":"...","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","marked_answer_wrong":false,"no_mark":false,"explanation":"..."}}], "answer_corrections": [{{"page_index":1,"mcq_no":"...","correct_answer":"A/B/C/D"}}], "text_corrections": [{{"page_index":1,"mcq_no":"...","corrected_question":"...","corrected_options":{{"B":"..."}}}}], "answer_key_overrides": [{{"page_index":1,"mcq_no":"...","key_answer":"A/B/C/D"}}]}}"""
+
+_register_onu2_prompts()
 
 ONU2_ANSWER_KEY_PROMPT_TMPL = """This page may contain an ANSWER KEY / উত্তরমালা section — this is a small table or grid that appears AFTER an entire MCQ set ends (not beside or next to individual MCQs), mapping question numbers to their correct option letter (e.g. "১।(ক) ২।(খ) ৩।(খ)..." or a table with numbered cells each showing "১ (ক)" style entries). It is often on a LATER page than the MCQs it covers -- if this page has no MCQs at all but has such a table, that's expected, still check it.
 
