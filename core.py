@@ -1162,7 +1162,8 @@ _LARGE_FILE_STORAGE_GROUP = -1002017050507
 
 async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
                                       caption: str = "", reply_to_message_id: int = None,
-                                      message_thread_id: int = None) -> Optional[dict]:
+                                      message_thread_id: int = None,
+                                      status_msg_id: int = None) -> Optional[dict]:
     """Files over Telegram's 50MB bot-upload cap: upload via the existing
     Telethon USER session (poll_extract.SESSION_STR — same one /delete already
     runs, no new login needed; a real account, not a bot, so Telegram allows
@@ -1189,6 +1190,44 @@ async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
         from telethon.sessions import StringSession
         import io as _io
 
+        # 2026-11-17 (user request): DM-এ "⏳ PDF পাঠানো হচ্ছে..." মেসেজে
+        # elapsed time + % + বাকি সময় estimate আলাদা আলাদা line-এ লাইভ
+        # দেখানো -- Telethon-এর progress_callback(current,total) দিয়ে,
+        # status_msg_id থাকলে edit_msg দিয়ে update করা হয় (প্রতি 5% অথবা
+        # ৩ সেকেন্ড পর পর, বেশি ঘন ঘন edit করে Telegram-এর per-message
+        # edit rate-limit না ছোঁয়ার জন্য)।
+        _upload_t0 = time.time()
+        _last_upd = {"pct": -1, "t": 0.0}
+
+        def _bar(pct):
+            filled = pct // 10
+            return "█" * filled + "░" * (10 - filled)
+
+        def _fmt_secs(s: float) -> str:
+            s = max(0, int(s))
+            m, sec = divmod(s, 60)
+            return f"{m}m {sec}s" if m else f"{sec}s"
+
+        async def _upload_progress(current, total):
+            if not status_msg_id or not total:
+                return
+            pct = int(current * 100 / total)
+            now = time.time()
+            if pct == _last_upd["pct"] or (pct % 5 != 0 and now - _last_upd["t"] < 3):
+                return
+            _last_upd["pct"] = pct
+            _last_upd["t"] = now
+            elapsed = now - _upload_t0
+            eta = (elapsed / current) * (total - current) if current > 0 else 0
+            try:
+                await edit_msg(chat_id, status_msg_id,
+                                f"⏳ PDF পাঠানো হচ্ছে...\n"
+                                f"[{_bar(pct)} {pct}%]\n"
+                                f"⏱️ Elapsed: {_fmt_secs(elapsed)}\n"
+                                f"⏳ বাকি (আনুমানিক): {_fmt_secs(eta)}")
+            except Exception:
+                pass
+
         async def _do_upload():
             nonlocal uclient
             uclient = TelegramClient(StringSession(_USR_SESSION), _USR_API_ID, _USR_API_HASH)
@@ -1202,6 +1241,7 @@ async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
                 _LARGE_FILE_STORAGE_GROUP, buf,
                 caption=caption or None,
                 force_document=True,
+                progress_callback=_upload_progress,
             )
             await uclient.disconnect()
             uclient = None
@@ -1238,7 +1278,8 @@ async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
 async def send_document(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",
-                        message_thread_id: int = None, reply_markup: dict = None) -> dict:
+                        message_thread_id: int = None, reply_markup: dict = None,
+                        status_msg_id: int = None) -> dict:
     if caption and len(caption) > 1024:
         caption = caption[:1021] + "..."
 
@@ -1258,6 +1299,7 @@ async def send_document(chat_id, file_bytes: bytes, filename: str,
         userbot_r = await _send_document_via_userbot(
             chat_id, file_bytes, filename, caption,
             reply_to_message_id=reply_to_message_id,
+            status_msg_id=status_msg_id,
             message_thread_id=message_thread_id,
         )
         if userbot_r is not None:

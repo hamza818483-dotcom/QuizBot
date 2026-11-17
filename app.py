@@ -12660,7 +12660,8 @@ async def _handle_cut_pdf_command_inner(msg: dict):
             if status_msg_id:
                 await edit_msg(chat_id, status_msg_id, "⏳ PDF পাঠানো হচ্ছে...")
             send_res = await send_document(chat_id, out_bytes, out_name,
-                                 caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)")
+                                 caption=f"✂️ Page {start_page}-{end_page} ({end_page - start_page + 1} পাতা)",
+                                 status_msg_id=status_msg_id)
             if not send_res.get("ok"):
                 err = send_res.get("error") or send_res.get("description") or "unknown error"
                 logger.error(f"[Cut] send_document failed: {err}")
