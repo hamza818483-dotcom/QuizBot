@@ -32893,6 +32893,8 @@ PROMPT_REGISTRY = {
     "bcs":    {"label": "🎓 /bcs",    "default": BCS_EXTRACT_PROMPT_CALL1},
     "unmesh": {"label": "📘 /unmesh", "default": UNMESH_EXTRACT_PROMPT},
     "onu":    {"label": "🖍️ /onu",   "default": ONU_EXTRACT_PROMPT_GEMINI},
+    "onu2_call1": {"label": "🖊️ /onu2 C1", "default": ONU2_CALL1_PROMPT_BATCHED_TMPL},
+    "onu2_call2": {"label": "🖊️ /onu2 C2", "default": ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL},
 }
 
 async def prompt_get_active(key: str) -> str:
@@ -32978,7 +32980,12 @@ async def handle_prompt_callback(query: dict) -> bool:
         if key not in PROMPT_REGISTRY:
             return True
         label = PROMPT_REGISTRY[key]["label"]
-        sent = await send_msg(chat_id, f"✏️ <b>{label}</b> এর নতুন prompt লিখে এই message-এ reply করো।",
+        warn = ""
+        if key == "onu2_call1":
+            warn = "\n\n⚠️ <code>{n}</code> অবশ্যই রাখতে হবে (অক্ষত), নাহলে default prompt ব্যবহার হবে।"
+        elif key == "onu2_call2":
+            warn = "\n\n⚠️ <code>{n}</code> ও <code>{existing_list}</code> অবশ্যই রাখতে হবে (অক্ষত), নাহলে default prompt ব্যবহার হবে।"
+        sent = await send_msg(chat_id, f"✏️ <b>{label}</b> এর নতুন prompt লিখে এই message-এ reply করো।{warn}",
                                reply_markup={"force_reply": True})
         sent_id = (sent or {}).get("result", {}).get("message_id")
         PROMPT_EDIT_PENDING[uid] = {"key": key, "msg_id": sent_id, "view_msg_id": msg_id}
@@ -33337,7 +33344,11 @@ async def _onu2_call1_extract_batch(imgs: list) -> dict:
     n = len(imgs)
     if n == 0:
         return {}
-    prompt = ONU2_CALL1_PROMPT_BATCHED_TMPL.format(n=n)
+    _onu2_c1_tmpl = await prompt_get_active("onu2_call1")
+    try:
+        prompt = _onu2_c1_tmpl.format(n=n)
+    except (KeyError, IndexError):
+        prompt = ONU2_CALL1_PROMPT_BATCHED_TMPL.format(n=n)
     try:
         gem_txt = await _qbm_gemini_raw_multi(imgs, prompt, gemini_only=True)
         provider = "Gemini"
@@ -33528,7 +33539,11 @@ async def _onu2_call2_misscheck_batch(imgs: list, existing_by_index: dict) -> di
             for idx in range(1, n + 1)
         }
         existing_brief = json.dumps(existing_payload, ensure_ascii=False)
-        prompt = ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL.format(n=n, existing_list=existing_brief)
+        _onu2_c2_tmpl = await prompt_get_active("onu2_call2")
+        try:
+            prompt = _onu2_c2_tmpl.format(n=n, existing_list=existing_brief)
+        except (KeyError, IndexError):
+            prompt = ONU2_CALL2_MISSCHECK_PROMPT_BATCHED_TMPL.format(n=n, existing_list=existing_brief)
         txt = await _qbm_gemini_raw_multi(imgs, prompt)
         if not txt:
             txt = await _qbm_groq_call(imgs[0], prompt)
