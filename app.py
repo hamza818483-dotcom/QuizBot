@@ -27098,6 +27098,12 @@ TASK — MISS-CHECK ONLY (do not verify/correct the ones above, that happens sep
    slots by position (never relabeled/sorted); if a missed MCQ belongs under a passage/উদ্দীপক,
    prepend that passage's full text to its question (self-contained).
 
+CRITICAL — DO NOT INVENT: only report an MCQ here if it is ACTUALLY, VISIBLY present on this
+exact page image as a real question+options block. Never create, guess, infer, or hallucinate an
+MCQ that is not literally printed on the page — when in doubt whether something is a real MCQ or
+not, leave it out. Output [] far more often than not; a wrong "missed" MCQ is worse than missing
+one.
+
 OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), nothing else:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
 
@@ -27205,6 +27211,10 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
    (self-contained), same as Call 1's rule.
 3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
    missed — but this is in ADDITION to the full scan above, not instead of it.
+4) CRITICAL — DO NOT INVENT: only add an MCQ here if it is ACTUALLY, VISIBLY present on this
+   exact page image as a real question+options block. Never create, guess, infer, or hallucinate
+   an MCQ that is not literally printed on the page — when in doubt, leave it out. Adding zero
+   missed MCQs is the common and expected outcome; a wrong "missed" MCQ is worse than missing one.
 
 """ if do_miss_check else ""
         task_line = ("do BOTH steps below in this single pass" if do_miss_check
