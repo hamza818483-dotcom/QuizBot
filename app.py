@@ -1384,7 +1384,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                     job["status"] = "cancelled"
                     if dm_msg_id:
                         try:
-                            await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("🛑 বন্ধ করা হয়েছে"))
+                            await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("🛑 বন্ধ করা হয়েছে"), reply_markup={"inline_keyboard": []})
                         except Exception as e:
                             logger.warning(f"[LMS-Send-Multi] DM progress cancel-edit failed: {e}")
                     asyncio.create_task(_lms_job_db_write(job_id, job))
@@ -1953,7 +1953,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 job["status"] = "cancelled"
                 if dm_msg_id:
                     try:
-                        await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("🛑 বন্ধ করা হয়েছে"))
+                        await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("🛑 বন্ধ করা হয়েছে"), reply_markup={"inline_keyboard": []})
                     except Exception as e:
                         logger.warning(f"[LMS-Send] DM progress cancel-edit failed: {e}")
                 return
@@ -1999,7 +1999,7 @@ async def _run_lms_channel_send_job(job_id: str, channel_id: str, thread_id: int
                 job["status"] = "cancelled"
                 if dm_msg_id:
                     try:
-                        await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("🛑 বন্ধ করা হয়েছে"))
+                        await edit_msg(OWNER_ID, dm_msg_id, _dm_progress_text("🛑 বন্ধ করা হয়েছে"), reply_markup={"inline_keyboard": []})
                     except Exception as e:
                         logger.warning(f"[LMS-Send] DM progress cancel-edit failed: {e}")
                 return
@@ -35668,6 +35668,7 @@ async def start_live_quiz(group_id, session_id: str, topic: str,
             final_text = "❌ <b>Live Quiz cancelled!</b>" if was_cancelled else "✅ <b>Live Quiz শেষ হয়েছে!</b>"
             await tg_post("editMessageText", {
                 "chat_id": admin_chat, "message_id": smid, "text": final_text, "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": []},
             })
         except Exception:
             pass
@@ -39617,7 +39618,8 @@ async def handle_imgmcq_callback(query: dict):
         try:
             await tg_post("editMessageCaption", {
                 "chat_id": chat_id, "message_id": msg_id,
-                "caption": "🛑 বন্ধ করা হয়েছে।"
+                "caption": "🛑 বন্ধ করা হয়েছে।",
+                "reply_markup": {"inline_keyboard": []}
             })
         except Exception:
             pass
@@ -40314,7 +40316,8 @@ async def handle_callback(query: dict):
             await tg_post("editMessageText", {
                 "chat_id": chat_id,
                 "message_id": msg_id,
-                "text": "❌ Cancelled!"
+                "text": "❌ Cancelled!",
+                "reply_markup": {"inline_keyboard": []}
             })
 
         elif data.startswith("csvcancel_"):
@@ -40324,7 +40327,8 @@ async def handle_callback(query: dict):
             await tg_post("editMessageText", {
                 "chat_id": chat_id,
                 "message_id": msg_id,
-                "text": "❌ Cancelled!"
+                "text": "❌ Cancelled!",
+                "reply_markup": {"inline_keyboard": []}
             })
 
         elif data.startswith("pdfmch_"):
@@ -40516,7 +40520,8 @@ async def handle_callback(query: dict):
             await tg_post("editMessageText", {
                 "chat_id":    chat_id,
                 "message_id": msg_id,
-                "text":       "❌ Live Quiz cancelled!"
+                "text":       "❌ Live Quiz cancelled!",
+                "reply_markup": {"inline_keyboard": []}
             })
 
         # Bookmark Exam — count select
