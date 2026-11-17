@@ -38282,6 +38282,7 @@ async def webhook(request: Request):
 _LOCK_ACQUIRED_AT = {}  # uid -> timestamp the currently-held lock was acquired
 _STALE_LOCK_SECONDS = 600  # 10 min — generous even for the slowest /pdf jobs
 _USER_PENDING_QUEUE = {}  # uid -> list of queued update dicts waiting their turn
+_queue_item_id_counter = itertools.count(1)  # unique qid per queued item, for its own Cancel button
 
 _USER_QUEUE_RUNNING = set()  # uid currently has an active drain-worker running
 _USER_LAST_STATUS = {}  # uid -> {"command": str, "stage": str, "started_at": float, "last_update_at": float}
@@ -38403,6 +38404,8 @@ async def process_update(update: dict):
                 _spawn_task(handle_message(_msg))
                 return
             if uid is not None:
+                _qid = next(_queue_item_id_counter)
+                update["_qid"] = _qid
                 _USER_PENDING_QUEUE.setdefault(uid, []).append(update)
                 if len(_USER_PENDING_QUEUE[uid]) > 20:
                     # Safety cap — drop oldest queued item rather than growing unbounded
@@ -38412,11 +38415,22 @@ async def process_update(update: dict):
                     # sathe sathe janano hocche je queue te ache (root cause
                     # of "stuck at 0%" reports: /csv silently queued behind a
                     # slow earlier command from same user, no feedback shown).
+                    # 2026-11-17 (user request): এখন কতো নম্বর task, command
+                    # কি ছিলো, এবং নিজের Cancel বাটন (শুধু এই queued item-টাই
+                    # বাতিল করে, চলমান কাজ না)।
                     _msg_obj = update.get("message", {})
                     _cid = _msg_obj.get("chat", {}).get("id")
                     _txt = (_msg_obj.get("text") or "").strip().split()[0] if _msg_obj.get("text") else "command"
+                    _pos = len(_USER_PENDING_QUEUE[uid])
                     if _cid:
-                        _spawn_task(send_msg(_cid, f"⏳ Ager command sesh howar opekkhay ache — {_txt} ektu porei shuru hobe..."))
+                        _spawn_task(send_msg(
+                            _cid,
+                            f"⏳ Ager command sesh howar opekkhay ache — {_txt} ektu porei shuru hobe...\n"
+                            f"Task #{_pos} — Command: {_txt}",
+                            reply_markup={"inline_keyboard": [[
+                                {"text": "🛑 Cancel", "callback_data": f"queuecancel_{uid}_{_qid}"}
+                            ]]}
+                        ))
                 if uid not in _USER_QUEUE_RUNNING:
                     # Stale-worker guard: if a previous worker for this uid
                     # died without clearing _USER_QUEUE_RUNNING (crash/restart
@@ -40076,6 +40090,33 @@ async def handle_callback(query: dict):
                 return
             lms_job["cancel_requested"] = True
             await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বন্ধ করা হচ্ছে..."})
+            return
+        if data.startswith("queuecancel_"):
+            # 2026-11-17 (user request): cancels ONE specific queued (not-yet-
+            # started) command by its qid -- never touches the currently
+            # running job (that's jobcancel_'s job).
+            rest = data[len("queuecancel_"):]
+            parts = rest.rsplit("_", 1)
+            if len(parts) != 2 or not parts[0].lstrip("-").isdigit() or not parts[1].isdigit():
+                return
+            target_uid = int(parts[0])
+            target_qid = int(parts[1])
+            if uid != target_uid and not await db_is_owner_or_admin(uid):
+                return
+            queue = _USER_PENDING_QUEUE.get(target_uid) or []
+            removed_update = None
+            for _i, _u in enumerate(queue):
+                if _u.get("_qid") == target_qid:
+                    removed_update = queue.pop(_i)
+                    break
+            if removed_update is None:
+                await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"),
+                                                        "text": "এই কাজটি ইতিমধ্যে শুরু হয়ে গেছে বা বাতিল হয়ে গেছে।"})
+                return
+            _r_txt = (removed_update.get("message", {}).get("text") or "").strip().split()[0] \
+                if removed_update.get("message", {}).get("text") else "command"
+            await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বাতিল করা হলো"})
+            await send_msg(chat_id, f"🛑 বাতিল করা হলো: {_r_txt} (queue থেকে সরানো হয়েছে)")
             return
         if data.startswith("jobcancel_"):
             rest = data[len("jobcancel_"):]
