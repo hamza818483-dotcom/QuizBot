@@ -39821,7 +39821,20 @@ async def handle_callback(query: dict):
             if _active_task and not _active_task.done():
                 _active_task.cancel()  # kill the in-flight API call immediately, don't wait for it to finish naturally
             running_label = ACTIVE_JOB_LABEL.get(target_chat)
-            await send_msg(chat_id, "🛑 বন্ধ করা হলো।" + (f"\nযে কাজ থামলো: {running_label}" if running_label else ""))
+            # Cancel-এর msg নতুন করে DM-এ পাঠানো হবে না -- বরং এই বাটনটা যে
+            # dashboard message-এর গায়ে বসানো ছিল, সেই message-টাকেই edit করে
+            # cancel-confirmation টেক্সট বসানো হয় এবং বাটন সরিয়ে ফেলা হয় (reply_markup=None),
+            # /img, /pdf, /qbm -- সবক্ষেত্রেই একই আচরণ (user request 18 Nov).
+            cancel_text = "🛑 বন্ধ করা হলো।" + (f"\nযে কাজ থামলো: {running_label}" if running_label else "")
+            try:
+                # reply_markup={"inline_keyboard": []} পাঠানো জরুরি -- None দিলে
+                # edit_msg সেই key-ই payload-এ বসাবে না, ফলে টেলিগ্রাম পুরনো
+                # Cancel বাটনটা রেখেই দেবে। খালি keyboard পাঠালে বাটন সরে যায়।
+                await edit_msg(chat_id, msg_id, cancel_text, reply_markup={"inline_keyboard": []})
+            except Exception:
+                # edit ব্যর্থ হলে (message অনেক পুরনো/deleted ইত্যাদি) শুধু তখনই fallback
+                # হিসেবে নতুন msg পাঠানো হবে, যাতে ইউজার অন্তত নিশ্চিত হতে পারে কাজ থেমেছে।
+                await send_msg(chat_id, cancel_text)
             return
         if data.startswith(("spch_", "spdm_", "spfl_", "spil_", "spgr_", "spgid_", "spmode_", "spwords_",
                              "spgadd_", "spgview_", "spgdel_", "spgback_", "spfltoggle_", "spflact_")) or data == "spback":
