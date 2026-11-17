@@ -1177,40 +1177,62 @@ async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
         return None
     if not _USR_SESSION:
         return None
+    # 2026-11-17 (user report): DM-এ "⏳ PDF পাঠানো হচ্ছে..."-তে আটকে থাকার
+    # মূল কারণ ছিল এখানে কোনো timeout ছিল না -- connect/auth/send_file কোনো
+    # ধাপ hang করলে (স্লো/ডেড নেটওয়ার্ক) পুরো request অনির্দিষ্টকাল await
+    # করত। পুরো ফাংশন এখন একটা hard wall-clock cap-এ wrap করা, timeout হলে
+    # caller-এর normal 50MB error-এ fallback করে (hang করে না)।
+    _USERBOT_FALLBACK_TIMEOUT = 180  # sec -- large (near-2GB) files পুরোপুরি upload+forward করতে যথেষ্ট সময়, কিন্তু অনির্দিষ্টকাল না
+    uclient = None
     try:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
         import io as _io
-        uclient = TelegramClient(StringSession(_USR_SESSION), _USR_API_ID, _USR_API_HASH)
-        await uclient.connect()
-        if not await uclient.is_user_authorized():
-            await uclient.disconnect()
-            return None
-        buf = _io.BytesIO(file_bytes)
-        buf.name = filename
-        stored = await uclient.send_file(
-            _LARGE_FILE_STORAGE_GROUP, buf,
-            caption=caption or None,
-            force_document=True,
-        )
-        await uclient.disconnect()
-        size_mb = len(file_bytes) / 1024 / 1024
 
-        # Bot-side forward: server copies the message, no size limit at all.
-        fwd = await tg_post("forwardMessage", {
-            "chat_id": str(chat_id),
-            "from_chat_id": str(_LARGE_FILE_STORAGE_GROUP),
-            "message_id": stored.id,
-        })
-        if not fwd.get("ok"):
-            logger.warning(f"[sendDoc] userbot uploaded ({size_mb:.1f}MB) but bot forward failed: {fwd}")
-            return None
-        logger.info(f"[sendDoc] {size_mb:.1f}MB file: userbot→storage-group, bot forwarded to {chat_id} (50MB cap bypassed)")
-        fwd["_via"] = "userbot+forward"
-        return fwd
+        async def _do_upload():
+            nonlocal uclient
+            uclient = TelegramClient(StringSession(_USR_SESSION), _USR_API_ID, _USR_API_HASH)
+            await uclient.connect()
+            if not await uclient.is_user_authorized():
+                await uclient.disconnect()
+                return None
+            buf = _io.BytesIO(file_bytes)
+            buf.name = filename
+            stored = await uclient.send_file(
+                _LARGE_FILE_STORAGE_GROUP, buf,
+                caption=caption or None,
+                force_document=True,
+            )
+            await uclient.disconnect()
+            uclient = None
+            size_mb = len(file_bytes) / 1024 / 1024
+
+            # Bot-side forward: server copies the message, no size limit at all.
+            fwd = await tg_post("forwardMessage", {
+                "chat_id": str(chat_id),
+                "from_chat_id": str(_LARGE_FILE_STORAGE_GROUP),
+                "message_id": stored.id,
+            })
+            if not fwd.get("ok"):
+                logger.warning(f"[sendDoc] userbot uploaded ({size_mb:.1f}MB) but bot forward failed: {fwd}")
+                return None
+            logger.info(f"[sendDoc] {size_mb:.1f}MB file: userbot→storage-group, bot forwarded to {chat_id} (50MB cap bypassed)")
+            fwd["_via"] = "userbot+forward"
+            return fwd
+
+        return await asyncio.wait_for(_do_upload(), timeout=_USERBOT_FALLBACK_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning(f"[sendDoc] userbot fallback timed out after {_USERBOT_FALLBACK_TIMEOUT}s -- aborting, caller will show the normal 50MB error instead of hanging")
+        return None
     except Exception as e:
         logger.warning(f"[sendDoc] userbot fallback failed: {e}")
         return None
+    finally:
+        if uclient is not None:
+            try:
+                await uclient.disconnect()
+            except Exception:
+                pass
 
 
 async def send_document(chat_id, file_bytes: bytes, filename: str,
