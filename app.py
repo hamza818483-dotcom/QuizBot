@@ -38462,7 +38462,15 @@ async def process_update(update: dict):
                     # বাতিল করে, চলমান কাজ না)।
                     _msg_obj = update.get("message", {})
                     _cid = _msg_obj.get("chat", {}).get("id")
-                    _txt = (_msg_obj.get("text") or "").strip().split()[0] if _msg_obj.get("text") else "command"
+                    # 2026-11-17 (user request): show the FULL command text as
+                    # typed (not just the leading /word) -- falls back to the
+                    # doc filename/caption for file-based commands with no text.
+                    _txt = (_msg_obj.get("text") or "").strip()
+                    if not _txt:
+                        _doc = _msg_obj.get("document") or {}
+                        _txt = (_msg_obj.get("caption") or "").strip() or _doc.get("file_name") or "command"
+                    if len(_txt) > 200:
+                        _txt = _txt[:200] + "..."
                     _pos = len(_USER_PENDING_QUEUE[uid])
                     if _cid:
                         async def _send_queue_notice(_cid=_cid, _pos=_pos, _txt=_txt, _qid=_qid, _uid=uid):
@@ -40154,13 +40162,12 @@ async def handle_callback(query: dict):
                 if _u.get("_qid") == target_qid:
                     removed_update = queue.pop(_i)
                     break
-            _QUEUE_NOTICE_INFO.pop(target_qid, None)
+            _r_info = _QUEUE_NOTICE_INFO.pop(target_qid, None)
             if removed_update is None:
                 await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"),
                                                         "text": "এই কাজটি ইতিমধ্যে শুরু হয়ে গেছে বা বাতিল হয়ে গেছে।"})
                 return
-            _r_txt = (removed_update.get("message", {}).get("text") or "").strip().split()[0] \
-                if removed_update.get("message", {}).get("text") else "command"
+            _r_txt = (_r_info or {}).get("cmd") or "command"
             await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বাতিল করা হলো"})
             await send_msg(chat_id, f"🛑 বাতিল করা হলো: {_r_txt} (queue থেকে সরানো হয়েছে)")
             # 2026-11-17 (user request): mid-queue cancel shifts everyone
