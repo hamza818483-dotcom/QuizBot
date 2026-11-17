@@ -27182,7 +27182,12 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
    (same question)? If NOT present, it was MISSED — add it in the SAME strict format (options in
    the exact source position order, A/B/C/D slots by position — never relabeled/sorted). If it
    belongs under a passage/উদ্দীপক, prepend that passage's full text to its question
-   (self-contained), same as Call 1's rule.
+   (self-contained), same as Call 1's rule. CRITICAL — SERIAL POSITION: insert each missed MCQ at
+   its CORRECT position in the output list based on where it actually sits on the page relative to
+   the MCQs already in the list below (reading order: top-to-bottom, left-to-right/column-major)
+   — never append all missed MCQs to the end of the list regardless of where they belong on the
+   page. A missed MCQ that sits between question 3 and question 4 on the page must land between
+   them in the output, not after the last one.
 3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
    missed — but this is in ADDITION to the full scan above, not instead of it.
 4) CRITICAL — DO NOT INVENT: only add an MCQ here if it is ACTUALLY, VISIBLY present on this
@@ -27222,9 +27227,8 @@ complete, untruncated, corrected question/options/explanation in your response:
    actually fits the MCQ's context and meaning, cross-checked against the source image. Never
    change a word that is already correct and contextually fitting, even if unusual.
 5) COMPLETENESS CHECK: re-read the full question and every option word-by-word against the
-   image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail).
-6) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
-   Na⁺ etc.) are correctly rendered everywhere.
+   image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail). Also
+   confirm math/chemistry sub/superscripts (H₂O, x², Na⁺ etc.) are correctly rendered everywhere.
 6c) LATEX CHECK: scan question/options/explanation for any raw LaTeX left over from extraction
    (backslash-vec, backslash-hat, backslash-frac, backslash-sqrt, caret, underscore, curly braces
    used as LaTeX syntax) — convert every one to proper Unicode
