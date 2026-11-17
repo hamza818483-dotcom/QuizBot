@@ -27102,74 +27102,6 @@ async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = Tru
         return []
 
 
-async def _qbm_lightweight_miss_check(img, call1_mcqs: list, gemini_only: bool = True) -> list:
-    """
-    Dedicated MISS-CHECK ONLY call -- lightweight by design. Job is ONLY:
-    scan the full page image once, compare against the full existing MCQ
-    list (all of it, not chunked -- miss-check needs the complete picture to
-    know what's already found), and return ONLY the small number of MISSED
-    MCQs (if any). No spelling/answer-source/completeness/column-order
-    verification here -- that's Step B's job, done separately per-chunk on
-    the (Call1 + these newly-found) combined list. Splitting it out this way
-    means: (a) miss-check runs exactly ONCE per page instead of once per
-    verify-chunk, (b) its output is small (usually 0, rarely 1-5 new MCQs)
-    instead of re-emitting the whole list, so this call stays cheap even on
-    dense pages. Returns [] if nothing was missed (the common case).
-    """
-    if not call1_mcqs:
-        return []
-    try:
-        # Only question text needed here (just enough for the model to know
-        # what's already found) -- options/answer/explanation add nothing to
-        # a miss-check decision and would only bloat this call for no reason.
-        existing_qs = json.dumps(
-            [(m.get("question", "") or "")[:150] for m in call1_mcqs],
-            ensure_ascii=False
-        )
-        prompt = f"""You already extracted these MCQ questions from this exact page image:
-{existing_qs}
-
-TASK — MISS-CHECK ONLY (do not verify/correct the ones above, that happens separately):
-1) Look at the ENTIRE page image now and mentally divide it into regions (top/middle/bottom,
-   left/right if multi-column) — scan EACH region for any MCQ block (question + options) that
-   exists on the page.
-2) For every MCQ block you find, check: is its question already present in the list above (same
-   or very similar question)? If NOT present, it was MISSED.
-3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
-   missed — but this is in ADDITION to the full scan above, not instead of it.
-4) If NOTHING was missed (the common case), output an empty array: []
-5) If MCQs were missed, output ONLY those missed MCQs (do not repeat the ones already in the
-   list above) in the same strict format: options in the exact source position order, A/B/C/D
-   slots by position (never relabeled/sorted); if a missed MCQ belongs under a passage/উদ্দীপক,
-   prepend that passage's full text to its question (self-contained).
-
-CRITICAL — DO NOT INVENT: only report an MCQ here if it is ACTUALLY, VISIBLY present on this
-exact page image as a real question+options block. Never create, guess, infer, or hallucinate an
-MCQ that is not literally printed on the page — when in doubt whether something is a real MCQ or
-not, leave it out. Output [] far more often than not; a wrong "missed" MCQ is worse than missing
-one.
-
-OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), nothing else:
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
-
-        # Gemini-primary miss-check (Call2 verify is now Gemini-primary too,
-        # so it already re-scans the full page -- no need to double-spend a
-        # Gemini call here on top of it). Groq fallback only if Gemini fails
-        # or returns nothing.
-        gem_txt = await _qbm_gemini_raw(img, prompt)
-        result = _qbm_parse_json(gem_txt) if gem_txt else []
-        if not result and not gemini_only:
-            txt = await _qbm_groq_call(img, prompt)
-            result = _qbm_parse_json(txt) if txt else []
-        if not result and not gemini_only:
-            or_txt = await _qbm_openrouter_call(img, prompt)
-            result = _qbm_parse_json(or_txt) if or_txt else []
-        return result or []
-    except Exception as e:
-        logger.warning(f"[QBM Miss-Check] failed: {e}")
-        return []
-
-
 async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = True) -> list:
     """
     CALL 2 (dispatcher) — miss-check (ONE lightweight call, always against
@@ -27189,19 +27121,16 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = True)
     """
     if not call1_mcqs:
         return []
-    missed = await _qbm_lightweight_miss_check(img, call1_mcqs, gemini_only=gemini_only)
-    for m in (missed or []):
-        m.setdefault("_call1_provider", "MissCheck")
-    combined = call1_mcqs + (missed or [])
-
-    # Gemini is now Call2's primary provider (no tight per-call TPM ceiling
-    # like Groq's 8000 TPM, which is what chunking existed to protect) --
-    # always send the full page in ONE unchunked verify call. do_miss_check=
-    # True here too (on top of the dedicated lightweight miss-check above) --
-    # a second independent miss-scan inside the SAME call that also does
-    # full verification, so any MCQ the lightweight pass missed still has
-    # one more chance to be caught before this page's result is final.
-    return await _qbm_call2_single(img, combined, do_miss_check=True, gemini_only=gemini_only)
+    # 2026-11-17 (user request): 2 Gemini calls per page total, not 3. The
+    # separate dedicated _qbm_lightweight_miss_check call used to run FIRST
+    # here, then _qbm_call2_single(do_miss_check=True) ran its OWN full
+    # miss-check (STEP A) on top -- the exact same job done twice across two
+    # calls. _qbm_call2_single's single combined pass already does
+    # everything: miss-check + insert any found MCQ at the correct position,
+    # spelling/context-word fix, serial/option-order integrity, and answer
+    # correctness checked against what's actually marked on the page. Call2
+    # alone now covers all of it.
+    return await _qbm_call2_single(img, call1_mcqs, do_miss_check=True, gemini_only=gemini_only)
 
 
 async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, gemini_only: bool = True) -> list:
