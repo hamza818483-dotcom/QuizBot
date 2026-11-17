@@ -22469,8 +22469,7 @@ RULES:
 - Never guess without source proof. Never reword question/options (strip only numbering like ১./1./Q1./ক.). Never translate.
 - Synonym/antonym MCQs (প্রতিশব্দ/সমার্থক/বিপরীত or "synonym/antonym of"): question+options stay 100% English, no Bangla gloss added anywhere.
 - 3+ read-throughs; verify count matches visible MCQs; don't miss the last one per column.
-- Fix obvious spelling errors without changing meaning; verify char-by-char.
-- OCR confusion pairs — check against these: বসতি≠বৃষ্টি, প্রাচীন≠প্রাচীর, দক্ষিণ≠রক্ষণ, রাজধানী≠রাজবাড়ী, সীমান্ত≠সিমেন্ট, অবস্থান≠অবস্থা, বিভাগ≠বিভাজন, জনসংখ্যা≠জনসংখ্যক, স্বাধীনতা≠সাধারণত, কর্তৃক≠কর্তব্য. Re-check glyph shape before committing.
+- Spelling fix (verify char-by-char): any word — Bangla or English — that is spelled wrong, or that looks glyph-similar to the correct word but doesn't actually fit the surrounding question/options/answer/overall MCQ meaning, gets auto-corrected to whichever real word is the best contextual fit (using the surrounding text + options + answer + the MCQ's overall subject as evidence). Never change meaning, and never guess a replacement that doesn't genuinely fit the context just because it looks visually close.
 - Never truncate — question/options end only at proper punctuation (?।); compare length vs source.
 - Hard-to-read word/name: infer full word from context/partial letters/general knowledge, never leave blank.
 - Question unclear but options readable: infer question type from options + general knowledge.
@@ -22503,11 +22502,17 @@ Never mix LaTeX+Unicode in one MCQ. Exception: only a genuinely unrepresentable 
 
 FORBIDDEN SOURCE-REFERENCE PHRASES (question+explanation): never say WHERE info lives (চিত্রে/বক্সে/ছকে/উদ্দীপকে/সারণিতে/পৃষ্ঠায়/প্যাসেজে/অনুচ্ছেদে/গ্রাফে/"দেখা যাচ্ছে"/"বলা আছে"/"প্রদত্ত"/English "as shown in figure/table/passage"/"mentioned in text") — always state the fact directly, as general knowledge. Structural rule: any container-pointing phrase forbidden regardless of wording.
 
-DIAGRAM: question needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) covering entire diagram+labels+arrows edge-to-edge, small margin. Caption like "চিত্র: G"/"Figure 1" near question = proof diagram exists → bbox required. Omit if none. Options never get bbox.
-
 OUTPUT: valid JSON array only, no extra text/markdown. No MCQ → [].
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]
 """
+# 2026-11-17 (user request): qsn_bbox (question-diagram crop) feature
+# disabled for /qbm -- DIAGRAM instruction + qsn_bbox removed from the
+# output schema so the model is never asked for it. All downstream
+# bbox-handling code (restore_opt_bboxes, recover_missed_diagram_bbox,
+# the figure-caption recovery batch call, etc.) is left in place
+# untouched/unused rather than deleted, in case this needs to be
+# re-enabled later -- it simply never triggers now since mc.get("qsn_bbox")
+# is always None/absent from here on.
 
 
 # 2026-11-14 (user request): /qbm specifically doesn't need any explanation
@@ -22567,10 +22572,11 @@ EXPLANATION (max 190 chars Bengali unless verbatim source text): if page has exp
 
 MATH/CHEMISTRY: never raw LaTeX — use Unicode (H₂O, x², √x, Na⁺, °C, × not x, etc).
 
-QUESTION needs a diagram to understand → add "qsn_bbox":[x1,y1,x2,y2] (0-1000 scale) covering the diagram. Omit if none.
-
 OUTPUT: Only a valid JSON array, no extra text/markdown. No MCQ → exactly [].
-[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"...","qsn_bbox":[100,200,400,450]}]"""
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A/B/C/D","explanation":"..."}]"""
+# 2026-11-17 (user request): qsn_bbox disabled here too for consistency,
+# though this Groq-only compact prompt rarely fires anymore now that
+# gemini_only=True is the default everywhere in /qbm.
 
 
 TOPIC_EXTRACT_PROMPT = QBM_EXTRACT_PROMPT_DEFAULT.replace(
@@ -27092,74 +27098,6 @@ async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = Tru
         return []
 
 
-async def _qbm_lightweight_miss_check(img, call1_mcqs: list, gemini_only: bool = True) -> list:
-    """
-    Dedicated MISS-CHECK ONLY call -- lightweight by design. Job is ONLY:
-    scan the full page image once, compare against the full existing MCQ
-    list (all of it, not chunked -- miss-check needs the complete picture to
-    know what's already found), and return ONLY the small number of MISSED
-    MCQs (if any). No spelling/answer-source/completeness/column-order
-    verification here -- that's Step B's job, done separately per-chunk on
-    the (Call1 + these newly-found) combined list. Splitting it out this way
-    means: (a) miss-check runs exactly ONCE per page instead of once per
-    verify-chunk, (b) its output is small (usually 0, rarely 1-5 new MCQs)
-    instead of re-emitting the whole list, so this call stays cheap even on
-    dense pages. Returns [] if nothing was missed (the common case).
-    """
-    if not call1_mcqs:
-        return []
-    try:
-        # Only question text needed here (just enough for the model to know
-        # what's already found) -- options/answer/explanation add nothing to
-        # a miss-check decision and would only bloat this call for no reason.
-        existing_qs = json.dumps(
-            [(m.get("question", "") or "")[:150] for m in call1_mcqs],
-            ensure_ascii=False
-        )
-        prompt = f"""You already extracted these MCQ questions from this exact page image:
-{existing_qs}
-
-TASK — MISS-CHECK ONLY (do not verify/correct the ones above, that happens separately):
-1) Look at the ENTIRE page image now and mentally divide it into regions (top/middle/bottom,
-   left/right if multi-column) — scan EACH region for any MCQ block (question + options) that
-   exists on the page.
-2) For every MCQ block you find, check: is its question already present in the list above (same
-   or very similar question)? If NOT present, it was MISSED.
-3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
-   missed — but this is in ADDITION to the full scan above, not instead of it.
-4) If NOTHING was missed (the common case), output an empty array: []
-5) If MCQs were missed, output ONLY those missed MCQs (do not repeat the ones already in the
-   list above) in the same strict format: options in the exact source position order, A/B/C/D
-   slots by position (never relabeled/sorted); if a missed MCQ belongs under a passage/উদ্দীপক,
-   prepend that passage's full text to its question (self-contained).
-
-CRITICAL — DO NOT INVENT: only report an MCQ here if it is ACTUALLY, VISIBLY present on this
-exact page image as a real question+options block. Never create, guess, infer, or hallucinate an
-MCQ that is not literally printed on the page — when in doubt whether something is a real MCQ or
-not, leave it out. Output [] far more often than not; a wrong "missed" MCQ is worse than missing
-one.
-
-OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), nothing else:
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
-
-        # Gemini-primary miss-check (Call2 verify is now Gemini-primary too,
-        # so it already re-scans the full page -- no need to double-spend a
-        # Gemini call here on top of it). Groq fallback only if Gemini fails
-        # or returns nothing.
-        gem_txt = await _qbm_gemini_raw(img, prompt)
-        result = _qbm_parse_json(gem_txt) if gem_txt else []
-        if not result and not gemini_only:
-            txt = await _qbm_groq_call(img, prompt)
-            result = _qbm_parse_json(txt) if txt else []
-        if not result and not gemini_only:
-            or_txt = await _qbm_openrouter_call(img, prompt)
-            result = _qbm_parse_json(or_txt) if or_txt else []
-        return result or []
-    except Exception as e:
-        logger.warning(f"[QBM Miss-Check] failed: {e}")
-        return []
-
-
 async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = True) -> list:
     """
     CALL 2 (dispatcher) — miss-check (ONE lightweight call, always against
@@ -27179,19 +27117,16 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = True)
     """
     if not call1_mcqs:
         return []
-    missed = await _qbm_lightweight_miss_check(img, call1_mcqs, gemini_only=gemini_only)
-    for m in (missed or []):
-        m.setdefault("_call1_provider", "MissCheck")
-    combined = call1_mcqs + (missed or [])
-
-    # Gemini is now Call2's primary provider (no tight per-call TPM ceiling
-    # like Groq's 8000 TPM, which is what chunking existed to protect) --
-    # always send the full page in ONE unchunked verify call. do_miss_check=
-    # True here too (on top of the dedicated lightweight miss-check above) --
-    # a second independent miss-scan inside the SAME call that also does
-    # full verification, so any MCQ the lightweight pass missed still has
-    # one more chance to be caught before this page's result is final.
-    return await _qbm_call2_single(img, combined, do_miss_check=True, gemini_only=gemini_only)
+    # 2026-11-17 (user request): 2 Gemini calls per page total, not 3. The
+    # separate dedicated _qbm_lightweight_miss_check call used to run FIRST
+    # here, then _qbm_call2_single(do_miss_check=True) ran its OWN full
+    # miss-check (STEP A) on top -- the exact same job done twice across two
+    # calls. _qbm_call2_single's single combined pass already does
+    # everything: miss-check + insert any found MCQ at the correct position,
+    # spelling/context-word fix, serial/option-order integrity, and answer
+    # correctness checked against what's actually marked on the page. Call2
+    # alone now covers all of it.
+    return await _qbm_call2_single(img, call1_mcqs, do_miss_check=True, gemini_only=gemini_only)
 
 
 async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, gemini_only: bool = True) -> list:
@@ -27205,7 +27140,9 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
        matches what's actually marked/given on the source page (scanning other
        pages for an answer key if needed), spelling/context-word correctness
        (Bangla/English), completeness (no truncated words), column-order,
-       উদ্দীপক self-containment, diagram bbox, and explanation_source tagging.
+       উদ্দীপক self-containment, and explanation_source tagging.
+       (2026-11-17: qsn_bbox/diagram-crop check removed from this verify
+       pass per user request -- feature disabled across /qbm.)
     Gemini primary (full-page single call, no chunking) -> Groq fallback ->
     OpenRouter last resort, only if Gemini fails.
     """
@@ -27227,8 +27164,7 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
             return opts
         mcq_json = json.dumps([
             {"question": (m.get("question", "") or "")[:_q_cap], "options": _trim_opts(m.get("options", [])),
-             "answer": m.get("answer", "A"), "explanation": (m.get("explanation", "") or "")[:60],
-             "qsn_bbox": m.get("qsn_bbox")}
+             "answer": m.get("answer", "A"), "explanation": (m.get("explanation", "") or "")[:60]}
             for m in call1_mcqs
         ], ensure_ascii=False)
 
@@ -27243,7 +27179,12 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
    (same question)? If NOT present, it was MISSED — add it in the SAME strict format (options in
    the exact source position order, A/B/C/D slots by position — never relabeled/sorted). If it
    belongs under a passage/উদ্দীপক, prepend that passage's full text to its question
-   (self-contained), same as Call 1's rule.
+   (self-contained), same as Call 1's rule. CRITICAL — SERIAL POSITION: insert each missed MCQ at
+   its CORRECT position in the output list based on where it actually sits on the page relative to
+   the MCQs already in the list below (reading order: top-to-bottom, left-to-right/column-major)
+   — never append all missed MCQs to the end of the list regardless of where they belong on the
+   page. A missed MCQ that sits between question 3 and question 4 on the page must land between
+   them in the output, not after the last one.
 3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
    missed — but this is in ADDITION to the full scan above, not instead of it.
 4) CRITICAL — DO NOT INVENT: only add an MCQ here if it is ACTUALLY, VISIBLY present on this
@@ -27283,9 +27224,8 @@ complete, untruncated, corrected question/options/explanation in your response:
    actually fits the MCQ's context and meaning, cross-checked against the source image. Never
    change a word that is already correct and contextually fitting, even if unusual.
 5) COMPLETENESS CHECK: re-read the full question and every option word-by-word against the
-   image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail).
-6) Re-confirm option order was never reshuffled and math/chemistry sub/superscripts (H₂O, x²,
-   Na⁺ etc.) are correctly rendered everywhere.
+   image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail). Also
+   confirm math/chemistry sub/superscripts (H₂O, x², Na⁺ etc.) are correctly rendered everywhere.
 6c) LATEX CHECK: scan question/options/explanation for any raw LaTeX left over from extraction
    (backslash-vec, backslash-hat, backslash-frac, backslash-sqrt, caret, underscore, curly braces
    used as LaTeX syntax) — convert every one to proper Unicode
@@ -27300,15 +27240,6 @@ complete, untruncated, corrected question/options/explanation in your response:
    naming which question numbers to answer (e.g. "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও")
    is removed — never strip a real question just because it mentions "উদ্দীপক" (e.g. "উদ্দীপকে
    প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" is a genuine question and must stay in full).
-8) QUESTION-DIAGRAM CHECK: if this MCQ's question genuinely has a diagram/figure/chart in the
-   source image needed to understand/answer it, confirm "qsn_bbox" is present and FULLY contains
-   the entire diagram (all labels/arrows/edges, small margin included — never a partial/cut-off
-   crop) on a 0-1000 scale. Add or widen qsn_bbox if the diagram was missed or cut off. SPECIAL
-   CHECK: if the question text contains a bare figure caption/label like "চিত্র: G", "চিত্র-১",
-   "Figure 1" with no qsn_bbox — that caption is proof a diagram exists nearby; you MUST add
-   qsn_bbox covering that actual diagram (never leave just the caption text uncropped). If
-   qsn_bbox was given but the question has NO actual diagram, remove it (set to null). Never
-   invent a bbox for options — options never get any bbox/image.
 9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
    either "page" (the explanation is copied verbatim from text physically present on the page,
    e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
@@ -27327,7 +27258,7 @@ CRITICAL: OUTPUT LIST ORDER (mandatory) — never move an MCQ to the end or anyw
 because it needed a fix — fix it in place, at its original index.
 
 Output ONLY the full corrected JSON array, all fixes applied, same length/order as input:
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated","qsn_bbox":[100,200,400,450]}}]"""
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
 
         gem_txt = await _qbm_gemini_raw(img, prompt)
         result = _qbm_parse_json(gem_txt) if gem_txt else []
@@ -28011,9 +27942,15 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = True) -> li
         # block auto-filled a short line whenever explanation was blank;
         # removed so an empty explanation from Call1/Call2 ships as-is.
 
-        if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
-            pending_bbox_idx[len(fixed)] = mc["question"]
-            batch_items.append({"idx": len(fixed), "type": "bbox", "question": mc["question"]})
+        # 2026-11-17 (user request): qsn_bbox/diagram-crop feature disabled
+        # for /qbm -- this figure-caption-triggered bbox-recovery call
+        # (which fired an extra Gemini request whenever a question's text
+        # contained a caption like "চিত্র: G" with no qsn_bbox) is disabled
+        # too, so a disabled feature never still costs an API call. Left
+        # commented rather than deleted in case it needs re-enabling later:
+        # if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
+        #     pending_bbox_idx[len(fixed)] = mc["question"]
+        #     batch_items.append({"idx": len(fixed), "type": "bbox", "question": mc["question"]})
 
         fixed.append(mc)
 
@@ -34787,7 +34724,17 @@ async def qbm_extract_all_pages(
     # PDF (the RAM guard above couldn't catch it in time since a single
     # window already blew the budget). Strict-sequential there; HF Space
     # (16GB) keeps the faster windowed pipeline.
-    WINDOW = 1 if IS_RENDER else 2
+    # 2026-11-17 (user request): forced to 1 (strict-sequential) always,
+    # HF included. Multi-page batches were intermittently reporting a
+    # genuinely-non-empty page as "0 MCQ — confirmed via 5 retries +
+    # independent scan" when run with a sibling page concurrently (WINDOW=2
+    # on HF) -- a race under concurrent key/account contention, not a
+    # deterministic per-page or per-position bug (confirmed: no fixed page
+    # or batch-position always fails). Processing one page fully at a time,
+    # exactly like a single-page request, removes that contention entirely.
+    # Final merged CSV output is unchanged -- results still accumulate into
+    # the same `results` list/order regardless of window size.
+    WINDOW = 1
 
     async def _extract_one_slotted(slot, idx, page_num, img):
         _qbm_key_offset_ctx.set(slot)
