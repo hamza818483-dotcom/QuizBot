@@ -27971,15 +27971,10 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
 
         _qbm_balance_answer_with_options(mc)
 
-        if not (mc.get("explanation") or "").strip():
-            # SIMPLIFIED (per request): no extra AI call to generate a long
-            # explanation -- just a short deterministic "correct answer is X"
-            # line, zero extra tokens/API calls.
-            ans = mc.get("answer", "A")
-            opt_letters = ["A", "B", "C", "D"]
-            idx = opt_letters.index(ans) if ans in opt_letters else 0
-            ans_text = opts[idx] if idx < len(opts) else ""
-            mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
+        # 2026-11-17 (user request): /qbm explanation stays FULLY empty --
+        # no deterministic "সঠিক উত্তর: X" filler either. Previously this
+        # block auto-filled a short line whenever explanation was blank;
+        # removed so an empty explanation from Call1/Call2 ships as-is.
 
         if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
             pending_bbox_idx[len(fixed)] = mc["question"]
