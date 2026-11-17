@@ -22472,8 +22472,7 @@ RULES:
 - Never guess without source proof. Never reword question/options (strip only numbering like ১./1./Q1./ক.). Never translate.
 - Synonym/antonym MCQs (প্রতিশব্দ/সমার্থক/বিপরীত or "synonym/antonym of"): question+options stay 100% English, no Bangla gloss added anywhere.
 - 3+ read-throughs; verify count matches visible MCQs; don't miss the last one per column.
-- Fix obvious spelling errors without changing meaning; verify char-by-char.
-- OCR confusion pairs — check against these: বসতি≠বৃষ্টি, প্রাচীন≠প্রাচীর, দক্ষিণ≠রক্ষণ, রাজধানী≠রাজবাড়ী, সীমান্ত≠সিমেন্ট, অবস্থান≠অবস্থা, বিভাগ≠বিভাজন, জনসংখ্যা≠জনসংখ্যক, স্বাধীনতা≠সাধারণত, কর্তৃক≠কর্তব্য. Re-check glyph shape before committing.
+- Spelling fix (verify char-by-char): any word — Bangla or English — that is spelled wrong, or that looks glyph-similar to the correct word but doesn't actually fit the surrounding question/options/answer/overall MCQ meaning, gets auto-corrected to whichever real word is the best contextual fit (using the surrounding text + options + answer + the MCQ's overall subject as evidence). Never change meaning, and never guess a replacement that doesn't genuinely fit the context just because it looks visually close.
 - Never truncate — question/options end only at proper punctuation (?।); compare length vs source.
 - Hard-to-read word/name: infer full word from context/partial letters/general knowledge, never leave blank.
 - Question unclear but options readable: infer question type from options + general knowledge.
