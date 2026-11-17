@@ -38290,8 +38290,10 @@ _QUEUE_LAST_EDIT_AT = {}  # cid -> last edit_msg timestamp, for a small per-chat
 _USER_QUEUE_RUNNING = set()  # uid currently has an active drain-worker running
 _USER_LAST_STATUS = {}  # uid -> {"command": str, "stage": str, "started_at": float, "last_update_at": float}
 
-def _queue_notice_text(pos: int, cmd: str) -> str:
-    return f"🔢 Task #{pos}\n📌 {cmd}"
+def _queue_notice_text(pos: int, total: int, cmd: str) -> str:
+    return (f"🔢 Task #{pos} / {total}\n"
+            f"────────────────\n"
+            f"📌 {cmd}")
 
 
 async def _renumber_queue_notices(uid: int):
@@ -38303,6 +38305,7 @@ async def _renumber_queue_notices(uid: int):
     on a long queue never trips Telegram's per-chat edit rate limit."""
     async with _QUEUE_RENOTIFY_LOCK:
         queue = _USER_PENDING_QUEUE.get(uid) or []
+        _total = len(queue)
         for _pos, _u in enumerate(queue, start=1):
             _qid = _u.get("_qid")
             info = _QUEUE_NOTICE_INFO.get(_qid)
@@ -38314,7 +38317,7 @@ async def _renumber_queue_notices(uid: int):
             if _wait > 0:
                 await asyncio.sleep(_wait)
             try:
-                await edit_msg(_cid, info["msg_id"], _queue_notice_text(_pos, info["cmd"]),
+                await edit_msg(_cid, info["msg_id"], _queue_notice_text(_pos, _total, info["cmd"]),
                                 reply_markup={"inline_keyboard": [[
                                     {"text": "🛑 Cancel", "callback_data": f"queuecancel_{uid}_{_qid}"}
                                 ]]})
@@ -38475,7 +38478,7 @@ async def process_update(update: dict):
                     if _cid:
                         async def _send_queue_notice(_cid=_cid, _pos=_pos, _txt=_txt, _qid=_qid, _uid=uid):
                             r = await send_msg(
-                                _cid, _queue_notice_text(_pos, _txt),
+                                _cid, _queue_notice_text(_pos, _pos, _txt),
                                 reply_markup={"inline_keyboard": [[
                                     {"text": "🛑 Cancel", "callback_data": f"queuecancel_{_uid}_{_qid}"}
                                 ]]}
