@@ -27028,6 +27028,103 @@ async def _qbm_openrouter_call(img, prompt: str) -> str:
     return ""
 
 
+# QBM Call2's miss-check step text, only included in the prompt when
+# do_miss_check=True (normal path -- /prompt's view always shows it present).
+QBM_CALL2_STEP_A_TEXT = """STEP A — MISS-CHECK (mandatory, full-image scan every time):
+1) Look at the ENTIRE page image now, independent of the list below — mentally divide it into
+   regions (top/middle/bottom, left/right if multi-column) and scan EACH region for any MCQ
+   block that exists on the page. Do NOT limit your scan to areas "near" the MCQs already in the
+   list — a page can have missed MCQs anywhere, including entirely separate regions the list
+   below doesn't cover at all (this list is only PART of the page's MCQs when the page has more
+   MCQs than fit in one verification chunk).
+2) For every MCQ block you find on the page, check: is it already present in the list below
+   (same question)? If NOT present, it was MISSED — add it in the SAME strict format (options in
+   the exact source position order, A/B/C/D slots by position — never relabeled/sorted). If it
+   belongs under a passage/উদ্দীপক, prepend that passage's full text to its question
+   (self-contained), same as Call 1's rule. CRITICAL — SERIAL POSITION: insert each missed MCQ at
+   its CORRECT position in the output list based on where it actually sits on the page relative to
+   the MCQs already in the list below (reading order: top-to-bottom, left-to-right/column-major)
+   — never append all missed MCQs to the end of the list regardless of where they belong on the
+   page. A missed MCQ that sits between question 3 and question 4 on the page must land between
+   them in the output, not after the last one.
+3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
+   missed — but this is in ADDITION to the full scan above, not instead of it.
+4) CRITICAL — DO NOT INVENT: only add an MCQ here if it is ACTUALLY, VISIBLY present on this
+   exact page image as a real question+options block. Never create, guess, infer, or hallucinate
+   an MCQ that is not literally printed on the page — when in doubt, leave it out. Adding zero
+   missed MCQs is the common and expected outcome; a wrong "missed" MCQ is worse than missing one.
+
+"""
+
+# QBM Call2 (miss-check + full verification, merged single call). Template
+# with {mcq_json}/{task_line}/{step_a_text} placeholders filled in by
+# _qbm_call2_single -- lets /prompt show and let admins edit this prompt,
+# same as Call1's QBM_EXTRACT_PROMPT_DEFAULT.
+QBM_CALL2_PROMPT_DEFAULT = """You already extracted these MCQs from this exact page image (Call 1 result):
+{mcq_json}
+
+TASK — {task_line}, connected to Call 1 (do not redo
+full extraction from scratch):
+
+{step_a_text}STEP B — FULL VERIFICATION on this MCQ list — never
+skip or shortcut this, regardless of how confident Call 1 was. NOTE: each MCQ's "question",
+"options", and "explanation" fields above are truncated to save space (just enough to identify
+which MCQ is which) — always re-read the FULL text from the actual page image and output the
+complete, untruncated, corrected question/options/explanation in your response:
+1) OPTION-SERIAL INTEGRITY: is the answer letter (A/B/C/D) pointing to the option that is
+   actually in that position in THIS output list (not the source's original label)? If the
+   correct option's text sits in position 2 of the output, answer must be "B", etc. Fix any
+   mismatch.
+2) ANSWER SOURCE MATCH: does the answer actually match what is marked/given on the page
+   (marked option, inline answer, bottom-of-page answer box/table, or answer key found on
+   another page — scan forward/backward through all pages as needed)? Fix if wrong.
+3) If an MCQ's answer is genuinely unclear from any source → try twice, reasoning it out from
+   context, to determine the most likely correct answer. If STILL unclear after 2 tries, choose
+   your own best answer, and base the explanation on that chosen answer.
+4) SPELLING + CONTEXT-WORD CHECK: check question + all options + explanation for (a) spelling
+   mistakes (Bangla or English), and (b) any word that is spelled fine but is CONTEXTUALLY WRONG
+   for this MCQ's subject/topic (e.g. an OCR/extraction slip that swapped in a similar-looking but
+   unrelated term that doesn't fit the science/subject context) — replace it with the word that
+   actually fits the MCQ's context and meaning, cross-checked against the source image. Never
+   change a word that is already correct and contextually fitting, even if unusual.
+5) COMPLETENESS CHECK: re-read the full question and every option word-by-word against the
+   image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail). Also
+   confirm math/chemistry sub/superscripts (H₂O, x², Na⁺ etc.) are correctly rendered everywhere.
+6c) LATEX CHECK: scan question/options/explanation for any raw LaTeX left over from extraction
+   (backslash-vec, backslash-hat, backslash-frac, backslash-sqrt, caret, underscore, curly braces
+   used as LaTeX syntax) — convert every one to proper Unicode
+   (vectors: A⃗, î, ĵ, k̂; fractions: a/b; roots: √x; sub/superscripts as actual Unicode chars).
+   Only leave LaTeX if that ONE specific expression is genuinely impossible to represent clearly
+   in Unicode/plain text (rare — e.g. a multi-line matrix) — never leave LaTeX out of laziness.
+6b) COLUMN-ORDER CHECK: if the source page has multiple columns, confirm the MCQ list follows
+   COLUMN-MAJOR order (entire left column top-to-bottom, then next column top-to-bottom) — never
+   zigzag/interleave between columns. Re-order the list if columns got mixed.
+7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
+   is prepended to the question (self-contained), and that ONLY the specific navigation sentence
+   naming which question numbers to answer (e.g. "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও")
+   is removed — never strip a real question just because it mentions "উদ্দীপক" (e.g. "উদ্দীপকে
+   প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" is a genuine question and must stay in full).
+9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
+   either "page" (the explanation is copied verbatim from text physically present on the page,
+   e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
+   page, so the explanation was built from AI knowledge). Be honest and precise about this —
+   it is used for quality auditing, not shown to end users.
+10) EXPLANATION LENGTH (mandatory) — this MUST fit Telegram's poll-explanation box, hard cap
+   ~265 characters. If explanation_source="page" (text is physically on the page): use it as-is
+   if it already fits within ~265 characters; if the on-page text is longer than that, trim it
+   down to the most essential 2-3 sentences (still page-sourced, just condensed) rather than
+   discarding it for a generated one. If explanation_source="generated" (nothing on the page):
+   write a fresh 2-3 sentence explanation (why the answer is correct + one relevant fact) that
+   stays within ~265 characters — never a single one-line answer restatement, never a wall of
+   text past the limit.
+
+CRITICAL: OUTPUT LIST ORDER (mandatory) — never move an MCQ to the end or anywhere else just
+because it needed a fix — fix it in place, at its original index.
+
+Output ONLY the full corrected JSON array, all fixes applied, same length/order as input:
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
+
+
 async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = True) -> list:
     """
     CALL 1 — OWN OCR + strict-prompt MCQ extraction + inline dedup.
@@ -27173,97 +27270,26 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
             for m in call1_mcqs
         ], ensure_ascii=False)
 
-        step_a_text = """STEP A — MISS-CHECK (mandatory, full-image scan every time):
-1) Look at the ENTIRE page image now, independent of the list below — mentally divide it into
-   regions (top/middle/bottom, left/right if multi-column) and scan EACH region for any MCQ
-   block that exists on the page. Do NOT limit your scan to areas "near" the MCQs already in the
-   list — a page can have missed MCQs anywhere, including entirely separate regions the list
-   below doesn't cover at all (this list is only PART of the page's MCQs when the page has more
-   MCQs than fit in one verification chunk).
-2) For every MCQ block you find on the page, check: is it already present in the list below
-   (same question)? If NOT present, it was MISSED — add it in the SAME strict format (options in
-   the exact source position order, A/B/C/D slots by position — never relabeled/sorted). If it
-   belongs under a passage/উদ্দীপক, prepend that passage's full text to its question
-   (self-contained), same as Call 1's rule. CRITICAL — SERIAL POSITION: insert each missed MCQ at
-   its CORRECT position in the output list based on where it actually sits on the page relative to
-   the MCQs already in the list below (reading order: top-to-bottom, left-to-right/column-major)
-   — never append all missed MCQs to the end of the list regardless of where they belong on the
-   page. A missed MCQ that sits between question 3 and question 4 on the page must land between
-   them in the output, not after the last one.
-3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
-   missed — but this is in ADDITION to the full scan above, not instead of it.
-4) CRITICAL — DO NOT INVENT: only add an MCQ here if it is ACTUALLY, VISIBLY present on this
-   exact page image as a real question+options block. Never create, guess, infer, or hallucinate
-   an MCQ that is not literally printed on the page — when in doubt, leave it out. Adding zero
-   missed MCQs is the common and expected outcome; a wrong "missed" MCQ is worse than missing one.
-
-""" if do_miss_check else ""
+        step_a_text = QBM_CALL2_STEP_A_TEXT if do_miss_check else ""
         task_line = ("do BOTH steps below in this single pass" if do_miss_check
                      else "do STEP B below only (miss-check was already done separately -- "
                           "this list is final, just verify/correct it)")
-        prompt = f"""You already extracted these MCQs from this exact page image (Call 1 result):
-{mcq_json if call1_mcqs else "(none found)"}
-
-TASK — {task_line}, connected to Call 1 (do not redo
-full extraction from scratch):
-
-{step_a_text}STEP B — FULL VERIFICATION on this MCQ list — never
-skip or shortcut this, regardless of how confident Call 1 was. NOTE: each MCQ's "question",
-"options", and "explanation" fields above are truncated to save space (just enough to identify
-which MCQ is which) — always re-read the FULL text from the actual page image and output the
-complete, untruncated, corrected question/options/explanation in your response:
-1) OPTION-SERIAL INTEGRITY: is the answer letter (A/B/C/D) pointing to the option that is
-   actually in that position in THIS output list (not the source's original label)? If the
-   correct option's text sits in position 2 of the output, answer must be "B", etc. Fix any
-   mismatch.
-2) ANSWER SOURCE MATCH: does the answer actually match what is marked/given on the page
-   (marked option, inline answer, bottom-of-page answer box/table, or answer key found on
-   another page — scan forward/backward through all pages as needed)? Fix if wrong.
-3) If an MCQ's answer is genuinely unclear from any source → try twice, reasoning it out from
-   context, to determine the most likely correct answer. If STILL unclear after 2 tries, choose
-   your own best answer, and base the explanation on that chosen answer.
-4) SPELLING + CONTEXT-WORD CHECK: check question + all options + explanation for (a) spelling
-   mistakes (Bangla or English), and (b) any word that is spelled fine but is CONTEXTUALLY WRONG
-   for this MCQ's subject/topic (e.g. an OCR/extraction slip that swapped in a similar-looking but
-   unrelated term that doesn't fit the science/subject context) — replace it with the word that
-   actually fits the MCQ's context and meaning, cross-checked against the source image. Never
-   change a word that is already correct and contextually fitting, even if unusual.
-5) COMPLETENESS CHECK: re-read the full question and every option word-by-word against the
-   image — fix any truncated/partial word or sentence (e.g. a word cut to only its tail). Also
-   confirm math/chemistry sub/superscripts (H₂O, x², Na⁺ etc.) are correctly rendered everywhere.
-6c) LATEX CHECK: scan question/options/explanation for any raw LaTeX left over from extraction
-   (backslash-vec, backslash-hat, backslash-frac, backslash-sqrt, caret, underscore, curly braces
-   used as LaTeX syntax) — convert every one to proper Unicode
-   (vectors: A⃗, î, ĵ, k̂; fractions: a/b; roots: √x; sub/superscripts as actual Unicode chars).
-   Only leave LaTeX if that ONE specific expression is genuinely impossible to represent clearly
-   in Unicode/plain text (rare — e.g. a multi-line matrix) — never leave LaTeX out of laziness.
-6b) COLUMN-ORDER CHECK: if the source page has multiple columns, confirm the MCQ list follows
-   COLUMN-MAJOR order (entire left column top-to-bottom, then next column top-to-bottom) — never
-   zigzag/interleave between columns. Re-order the list if columns got mixed.
-7) UDDIPOK CHECK: for any MCQ that depends on a passage/উদ্দীপক, confirm its full passage text
-   is prepended to the question (self-contained), and that ONLY the specific navigation sentence
-   naming which question numbers to answer (e.g. "উদ্দীপকের আলোকে NN ও NN নং প্রশ্নের উত্তর দাও")
-   is removed — never strip a real question just because it mentions "উদ্দীপক" (e.g. "উদ্দীপকে
-   প্রদর্শিত প্রক্রিয়াটি কোন উপদশায় ঘটে?" is a genuine question and must stay in full).
-9) EXPLANATION SOURCE TAG (mandatory, new field): for each MCQ, add "explanation_source" as
-   either "page" (the explanation is copied verbatim from text physically present on the page,
-   e.g. a written ব্যাখ্যা/answer-reasoning block) or "generated" (no such text exists on the
-   page, so the explanation was built from AI knowledge). Be honest and precise about this —
-   it is used for quality auditing, not shown to end users.
-10) EXPLANATION LENGTH (mandatory) — this MUST fit Telegram's poll-explanation box, hard cap
-   ~265 characters. If explanation_source="page" (text is physically on the page): use it as-is
-   if it already fits within ~265 characters; if the on-page text is longer than that, trim it
-   down to the most essential 2-3 sentences (still page-sourced, just condensed) rather than
-   discarding it for a generated one. If explanation_source="generated" (nothing on the page):
-   write a fresh 2-3 sentence explanation (why the answer is correct + one relevant fact) that
-   stays within ~265 characters — never a single one-line answer restatement, never a wall of
-   text past the limit.
-
-CRITICAL: OUTPUT LIST ORDER (mandatory) — never move an MCQ to the end or anywhere else just
-because it needed a fix — fix it in place, at its original index.
-
-Output ONLY the full corrected JSON array, all fixes applied, same length/order as input:
-[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
+        _call2_tmpl = await prompt_get_active("qbm_call2")
+        try:
+            prompt = _call2_tmpl.format(
+                mcq_json=(mcq_json if call1_mcqs else "(none found)"),
+                task_line=task_line,
+                step_a_text=step_a_text,
+            )
+        except (KeyError, IndexError, ValueError) as _fmt_e:
+            # Admin-edited override broke a {placeholder} -- degrade to the
+            # built-in default rather than crashing every Call2 request.
+            logger.warning(f"[QBM Call2] prompt override .format() failed ({_fmt_e}), using built-in default for this call")
+            prompt = QBM_CALL2_PROMPT_DEFAULT.format(
+                mcq_json=(mcq_json if call1_mcqs else "(none found)"),
+                task_line=task_line,
+                step_a_text=step_a_text,
+            )
 
         gem_txt = await _qbm_gemini_raw(img, prompt)
         result = _qbm_parse_json(gem_txt) if gem_txt else []
@@ -32840,7 +32866,7 @@ OUTPUT — ONLY valid JSON array, nothing else, no markdown fences, no commentar
 # qbm_get_active_prompt/qbm_set_active_prompt's pattern (same Supabase
 # table "quiz_sessions", one row per key="prompt_active_<name>"). Separate
 # from QBM's own storage (key="qbm_active_prompt") so existing /qbmprompt
-# behavior is untouched -- "qbm" in PROMPT_REGISTRY routes through the
+# behavior is untouched -- "qbm_call1" in PROMPT_REGISTRY routes through the
 # original qbm_get_active_prompt/qbm_set_active_prompt functions instead.
 _generic_prompt_cache = {}
 
@@ -32879,7 +32905,8 @@ async def generic_set_active_prompt(key: str, new_prompt: str):
 # template, different shape from the others), not plain ONU2_CALL1_PROMPT,
 # so it needs its own careful handling and is left for a follow-up.
 PROMPT_REGISTRY = {
-    "qbm":    {"label": "📝 /qbm",    "default": QBM_EXTRACT_PROMPT_DEFAULT},
+    "qbm_call1": {"label": "📝 /qbm C1", "default": QBM_EXTRACT_PROMPT_DEFAULT},
+    "qbm_call2": {"label": "📝 /qbm C2", "default": QBM_CALL2_PROMPT_DEFAULT},
     "topic":  {"label": "📂 /topic",  "default": TOPIC_EXTRACT_PROMPT},
     "eng":    {"label": "🇬🇧 /eng",   "default": ENG_EXTRACT_PROMPT},
     "chem":   {"label": "🧪 /chem",   "default": CHEM_EXTRACT_PROMPT},
@@ -32899,14 +32926,14 @@ async def prompt_get_active(key: str) -> str:
     """Single entry point every wired extraction call site uses instead of
     its raw *_EXTRACT_PROMPT constant -- returns the admin-edited override
     if one was saved via /prompt, else the built-in default unchanged."""
-    if key == "qbm":
+    if key == "qbm_call1":
         return await qbm_get_active_prompt()
     if key not in PROMPT_REGISTRY:
         return ""
     return await generic_get_active_prompt(key, PROMPT_REGISTRY[key]["default"])
 
 async def prompt_set_active(key: str, text: str):
-    if key == "qbm":
+    if key == "qbm_call1":
         await qbm_set_active_prompt(text)
     else:
         await generic_set_active_prompt(key, text)
@@ -32949,12 +32976,36 @@ async def show_prompt_view(chat_id, key: str, edit_message_id=None):
         return
     label = PROMPT_REGISTRY[key]["label"]
     active = await prompt_get_active(key)
-    text = f"📋 <b>{label} — Active Prompt</b>\n\n<code>{html_lib.escape(active[:3500])}</code>"
-    markup = _prompt_view_markup(key)
-    if edit_message_id:
-        await edit_msg(chat_id, edit_message_id, text, reply_markup=markup)
+    escaped = html_lib.escape(active)
+    header = f"📋 <b>{label} — Active Prompt</b>\n\n"
+    # 2026-11-17 (user request): show the FULL prompt, never truncated --
+    # previously hard-cut at [:3500] chars, so long prompts (Call2's
+    # verification prompt especially) were silently cut off mid-sentence.
+    # Telegram's hard per-message cap is 4096 chars; a <pre> block renders
+    # compact/monospace ("font choto") and keeps the text readable as one
+    # continuous block. If header+prompt+<pre> tags still exceed the cap,
+    # split into overflow text-only messages first, with the final chunk
+    # (Edit/Reset/Back keyboard) landing on the message that edit_message_id
+    # actually points at.
+    _TAG_OVERHEAD = len("<pre></pre>")
+    _budget = 4096 - len(header) - _TAG_OVERHEAD - 10  # Telegram's hard per-message cap, small safety margin
+    if _budget < 200:
+        _budget = 200  # header itself is tiny/fixed-size, this floor is never actually hit
+    if len(escaped) <= _budget:
+        chunks = [escaped]
     else:
-        await send_msg(chat_id, text, reply_markup=markup)
+        chunks = [escaped[i:i + _budget] for i in range(0, len(escaped), _budget)]
+    markup = _prompt_view_markup(key)
+    # Overflow chunks (all but the last) are plain text-only follow-up
+    # messages -- only the LAST chunk carries the header + keyboard, on
+    # whichever message edit_message_id points at (or a fresh send_msg).
+    for i, chunk in enumerate(chunks[:-1]):
+        await send_msg(chat_id, f"<pre>{chunk}</pre> <i>(continued below…)</i>")
+    last_text = header + f"<pre>{chunks[-1]}</pre>"
+    if edit_message_id:
+        await edit_msg(chat_id, edit_message_id, last_text, reply_markup=markup)
+    else:
+        await send_msg(chat_id, last_text, reply_markup=markup)
 
 async def handle_prompt_callback(query: dict) -> bool:
     data = query["data"]
