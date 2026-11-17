@@ -928,7 +928,7 @@ _current_job_chat_id_ctx = contextvars.ContextVar("_current_job_chat_id_ctx", de
 # contextvars only propagate correctly through await-chains when both sides
 # reference the SAME ContextVar object, not two separately-created vars
 # with the same name/default.
-from pdf_handler import _qbm_key_offset_ctx, _qbm_page_used_accounts_ctx
+from pdf_handler import _qbm_key_offset_ctx, _qbm_page_used_accounts_ctx, _qbm_page_gemini_info_ctx
 
 def is_cancelled(chat_id=None):
     if chat_id is None:
@@ -5501,7 +5501,17 @@ async def _post_openai_compat(url: str, key: str, model: str, data_url: str, pro
                 logger.warning(f"[AI-ROT] {model} HTTP 200 but EMPTY content (finish_reason={finish_reason}): {json.dumps(j)[:300]}")
             return content, r.status_code
     except Exception as e:
-        logger.warning(f"[AI-ROT] {model} err: {e}")
+        # 2026-11-17 FIX: some httpx exceptions (ReadTimeout, ConnectError
+        # wrapping a lower-level socket error, etc.) have an EMPTY str(e),
+        # so "err: " with nothing after it told us nothing about the real
+        # cause and made every network failure indistinguishable from a
+        # dead key. Log the exception TYPE + repr always, plus a trimmed
+        # traceback, so a timeout vs DNS failure vs connection-reset is
+        # actually visible in [Groq-QBM] key-failed logs going forward.
+        logger.warning(
+            f"[AI-ROT] {model} err: {type(e).__name__}: {e!r}"
+        )
+        logger.debug(f"[AI-ROT] {model} full traceback:\n{traceback.format_exc()}")
         return "", 0
 
 _key_exhausted_day: Dict[str, str] = {}   # key -> 'YYYY-MM-DD' (BD) it was marked exhausted
@@ -7293,7 +7303,7 @@ def _dedupe_mcqs(mcqs: list) -> list:
     """DISABLED: dedup inactivated to stop false-positive MCQ drops. No-op passthrough."""
     return list(mcqs or [])
 
-async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False):
+async def generate_mcq_from_image(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = True):
     """
     Smart wrapper: Gemini first (primary), then Groq fallback (internal key rotation via pdf_handler).
     On failure → rotate through NVIDIA / OpenRouter Qwen VL / Nemotron / Gemma.
@@ -7922,7 +7932,7 @@ def _cap_mcq_options(mcqs: list, max_opts: int = 4) -> list:
     return mcqs
 
 
-async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = False):
+async def _generate_mcq_from_image_raw(img, topic, page_num, mcq_count=None, exclude_groq_keys: set = None, key_offset: int = 0, custom_prompt: str = None, gemini_only: bool = True):
     # 2026-08-19: Gemini is now PRIMARY for ALL modes (explicit user
     # preference), Groq is fallback only when Gemini fails/empty. Previously
     # (2026-08-07) Groq was made primary because Gemini's free-tier daily
@@ -19947,28 +19957,16 @@ def _build_dashboard_v(file_name, topic, pages, page_status, start_time, total_m
 
 
 async def _update_pdf_dashboard(chat_id, message_id, *dash_args, reply_markup=None, **dash_kwargs):
-    """Shared dashboard-update helper: DM (chat_id > 0) -> rich table via
-    edit_rich_msg (auto-falls back to plain HTML edit_msg on any error).
-    Group/channel (chat_id < 0) -> existing plain HTML edit_msg unchanged.
-    Single call-site swap point for all /pdf-family dashboard updates."""
-    if chat_id > 0:
-        md_text = _build_dashboard_md(*dash_args, **dash_kwargs)
-        fallback = _build_dashboard(*dash_args, **dash_kwargs)
-        result = await edit_rich_msg(chat_id, message_id, md_text, fallback_text=fallback)
-        # sendRichMessage/rich edit doesn't accept reply_markup directly --
-        # if buttons are needed, re-apply them via a lightweight follow-up
-        # editMessageReplyMarkup call so regen buttons still work in DM.
-        if reply_markup is not None:
-            try:
-                await tg_post("editMessageReplyMarkup", {
-                    "chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup
-                })
-            except Exception as e:
-                logger.warning(f"[RichMsg] editMessageReplyMarkup failed: {e}")
-        return result
-    else:
-        html_text = _build_dashboard(*dash_args, **dash_kwargs)
-        return await edit_msg(chat_id, message_id, html_text, reply_markup=reply_markup)
+    """Shared dashboard-update helper for all /pdf-family dashboard updates.
+    2026-11-17 (user request): /pdf's dashboard now always renders the same
+    <pre> monospace box /qbm already uses (via _build_dashboard), in DM and
+    group/channel alike -- previously DM used a separate rich-table style
+    (edit_rich_msg + _build_dashboard_md) that looked different from /qbm's.
+    Same underlying data either way (file/topic/pages, per-page MCQ+model+
+    🔑account#attempt tag, progress/elapsed/AI-call totals) -- only the
+    visual box style changes here."""
+    html_text = _build_dashboard(*dash_args, **dash_kwargs)
+    return await edit_msg(chat_id, message_id, html_text, reply_markup=reply_markup)
 
 def _pair_pages_for_extra(pages: list) -> list:
     """Combine consecutive pages 2-at-a-time into a single vertically-
@@ -25053,7 +25051,7 @@ def _parse_chem_heading_scan(text: str) -> list:
     return headings
 
 
-async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bool = False) -> list:
+async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bool = True) -> list:
     """/chem extractor — same Call1+Call2 pipeline as /topic and /unmesh, but
     topic boundaries are detected via the BOLD-BLACK-LARGER-FONT + Bangla
     hierarchical-number-prefix (১.২, ১.২.১, ২.২.১...) heading style
@@ -25230,7 +25228,7 @@ async def _chem_extract_from_image(img, cache_key: tuple = None, gemini_only: bo
     return mcqs
 
 
-async def _chem_generate_from_image(img, cache_key: tuple = None, gemini_only: bool = False) -> list:
+async def _chem_generate_from_image(img, cache_key: tuple = None, gemini_only: bool = True) -> list:
     """/chem GENERATION function (creates NEW MCQs from page content, does
     NOT extract existing ones) — same generation engine as /pdf's default
     mode, via _build_chem_gen_prompt, PLUS the same independent heading-scan
@@ -25788,7 +25786,7 @@ def _chem_flag_letter_ref_explanations(mcqs: list, page_num) -> None:
             )
 
 
-async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = False, file_name: str = "") -> list:
+async def _chem_generate_per_topic_pages(chat_id: int, pages: list, topic: str, status_msg_id: int = None, gemini_only: bool = True, file_name: str = "") -> list:
     """/chem GENERATION pipeline, rebuilt 2026-08-20 to mirror /bio's
     _bio_generate_per_topic_pages architecture exactly: Call 1 (batched
     heading-scan, ~1 per 3 pages) detects topic segment boundaries via
@@ -26982,7 +26980,7 @@ async def _qbm_openrouter_call(img, prompt: str) -> str:
     return ""
 
 
-async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = False) -> list:
+async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = True) -> list:
     """
     CALL 1 — OWN OCR + strict-prompt MCQ extraction + inline dedup.
     Job: extract every existing MCQ on the page (option-serial strictly
@@ -27057,7 +27055,7 @@ async def _qbm_call1_extract(img, careful: bool = False, gemini_only: bool = Fal
         return []
 
 
-async def _qbm_lightweight_miss_check(img, call1_mcqs: list, gemini_only: bool = False) -> list:
+async def _qbm_lightweight_miss_check(img, call1_mcqs: list, gemini_only: bool = True) -> list:
     """
     Dedicated MISS-CHECK ONLY call -- lightweight by design. Job is ONLY:
     scan the full page image once, compare against the full existing MCQ
@@ -27098,6 +27096,12 @@ TASK — MISS-CHECK ONLY (do not verify/correct the ones above, that happens sep
    slots by position (never relabeled/sorted); if a missed MCQ belongs under a passage/উদ্দীপক,
    prepend that passage's full text to its question (self-contained).
 
+CRITICAL — DO NOT INVENT: only report an MCQ here if it is ACTUALLY, VISIBLY present on this
+exact page image as a real question+options block. Never create, guess, infer, or hallucinate an
+MCQ that is not literally printed on the page — when in doubt whether something is a real MCQ or
+not, leave it out. Output [] far more often than not; a wrong "missed" MCQ is worse than missing
+one.
+
 OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), nothing else:
 [{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A/B/C/D","explanation":"...","explanation_source":"page/generated"}}]"""
 
@@ -27119,7 +27123,7 @@ OUTPUT — ONLY a valid JSON array of the MISSED MCQs (empty array if none), not
         return []
 
 
-async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = False) -> list:
+async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = True) -> list:
     """
     CALL 2 (dispatcher) — miss-check (ONE lightweight call, always against
     the FULL list regardless of page density) followed by full verification
@@ -27153,7 +27157,7 @@ async def _qbm_call2_miss_check(img, call1_mcqs: list, gemini_only: bool = False
     return await _qbm_call2_single(img, combined, do_miss_check=True, gemini_only=gemini_only)
 
 
-async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, gemini_only: bool = False) -> list:
+async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, gemini_only: bool = True) -> list:
     """
     CALL 2 (single chunk) — MERGED miss-check + full verification (single call,
     no separate Call 3). Job:
@@ -27205,6 +27209,10 @@ async def _qbm_call2_single(img, call1_mcqs: list, do_miss_check: bool = True, g
    (self-contained), same as Call 1's rule.
 3) Pay special attention to the LAST MCQ on the page and the BOTTOM of the page — most commonly
    missed — but this is in ADDITION to the full scan above, not instead of it.
+4) CRITICAL — DO NOT INVENT: only add an MCQ here if it is ACTUALLY, VISIBLY present on this
+   exact page image as a real question+options block. Never create, guess, infer, or hallucinate
+   an MCQ that is not literally printed on the page — when in doubt, leave it out. Adding zero
+   missed MCQs is the common and expected outcome; a wrong "missed" MCQ is worse than missing one.
 
 """ if do_miss_check else ""
         task_line = ("do BOTH steps below in this single pass" if do_miss_check
@@ -27355,7 +27363,7 @@ Output ONLY the full corrected JSON array, all fixes applied, same length/order 
         return call1_mcqs
 
 
-async def _qbm_final_empty_page_scan(img, onu_mode: bool = False, gemini_only: bool = False) -> list:
+async def _qbm_final_empty_page_scan(img, onu_mode: bool = False, gemini_only: bool = True) -> list:
     """
     CALL 3 (empty-page variant) — used ONLY when Call 1 AND Call 2 BOTH
     returned zero MCQs. Two independent empty results is a strong signal but
@@ -27592,7 +27600,7 @@ def _cap_qbm_mcq_cache(cache_dict: dict = None):
         d.pop(next(iter(d)), None)
 
 
-async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False, gemini_only: bool = False) -> list:
+async def _qbm_extract_from_image(img, cache_key: tuple = None, bypass_cache: bool = False, careful: bool = False, gemini_only: bool = True) -> list:
     """
     2-STAGE CONNECTED PIPELINE (per page) — Call1 extract + Call2 (which
     itself makes 2 sub-calls: miss-check, then verify), so up to 3 Gemini
@@ -27915,7 +27923,7 @@ No markdown, no extra text."""
         return {}
 
 
-async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> list:
+async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = True) -> list:
     """
     Last-line, zero-trust, CODE-LEVEL (not prompt-level) safety net applied to
     every MCQ right before it leaves the extraction pipeline. Balances and
@@ -27961,15 +27969,10 @@ async def _qbm_final_safety_net(img, mcqs: list, gemini_only: bool = False) -> l
 
         _qbm_balance_answer_with_options(mc)
 
-        if not (mc.get("explanation") or "").strip():
-            # SIMPLIFIED (per request): no extra AI call to generate a long
-            # explanation -- just a short deterministic "correct answer is X"
-            # line, zero extra tokens/API calls.
-            ans = mc.get("answer", "A")
-            opt_letters = ["A", "B", "C", "D"]
-            idx = opt_letters.index(ans) if ans in opt_letters else 0
-            ans_text = opts[idx] if idx < len(opts) else ""
-            mc["explanation"] = f"সঠিক উত্তর: {ans} ({ans_text})" if ans_text else f"সঠিক উত্তর: {ans}"
+        # 2026-11-17 (user request): /qbm explanation stays FULLY empty --
+        # no deterministic "সঠিক উত্তর: X" filler either. Previously this
+        # block auto-filled a short line whenever explanation was blank;
+        # removed so an empty explanation from Call1/Call2 ships as-is.
 
         if not mc.get("qsn_bbox") and "<img" not in mc["question"].lower() and _FIGURE_CAPTION_RE.search(mc["question"]):
             pending_bbox_idx[len(fixed)] = mc["question"]
@@ -28323,7 +28326,7 @@ _QBM_CAREFUL_SCAN_ADDENDUM = (
 )
 
 
-async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: bool = False, _fallback_model: str = None) -> str:
+async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: bool = True, _fallback_model: str = None) -> str:
     """Direct Gemini call with any given prompt -> raw text (caller parses).
     Tries keys in healthiest-first order, one after another, until one
     succeeds -- a single key's 429 RESOURCE_EXHAUSTED (daily quota, only 20
@@ -28503,13 +28506,22 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
                 # or exposed which account/key actually won, unlike /pdf's
                 # pipeline (_attach_gemini_success_info). Mirror that here.
                 try:
-                    from pdf_handler import _gemini_key_hash, _last_gemini_success_ctx
+                    from pdf_handler import _gemini_key_hash, _last_gemini_success_ctx, _qbm_page_gemini_info_ctx
                     logger.info(f"[QBM Gemini] success — account={_used_acct} key={_gemini_key_hash(key)}")
-                    _last_gemini_success_ctx.set({
+                    _ginfo_dict = {
                         "account": _used_acct,
                         "key_hash": _gemini_key_hash(key),
                         "model": _fallback_model or "gemini-3.6-flash",
-                    })
+                    }
+                    _last_gemini_success_ctx.set(_ginfo_dict)  # kept for any other same-task reader
+                    # FIX: the contextvar .set() above is invisible to
+                    # _extract_one (spawned-task context-copy boundary) --
+                    # mutate the shared per-page dict instead, which IS
+                    # visible there. See _qbm_page_gemini_info_ctx comment.
+                    _shared_ginfo = _qbm_page_gemini_info_ctx.get()
+                    if _shared_ginfo is not None:
+                        _shared_ginfo.clear()
+                        _shared_ginfo.update(_ginfo_dict)
                 except Exception:
                     pass
                 # 2026-09-08 ROOT-CAUSE DIAGNOSTIC: response.text can be
@@ -28659,7 +28671,7 @@ async def _qbm_gemini_raw(img, prompt: str, careful: bool = False, gemini_only: 
         return ""
 
 
-async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = False, _fallback_model: str = None) -> str:
+async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = True, _fallback_model: str = None) -> str:
     """Multi-image variant of _qbm_gemini_raw -- sends several page images
     in ONE Gemini call instead of one call per image, used by /bio's
     batched heading-scan (_bio_apply_heading_scan) to cut per-page API
@@ -28832,7 +28844,7 @@ async def _qbm_gemini_raw_multi(imgs: list, prompt: str, gemini_only: bool = Fal
         return "" if gemini_only else (await _gen_groq_raw_text(imgs[0], prompt) if imgs else "")
 
 
-async def _ai_gemini_text_call(prompt: str, gemini_only: bool = False, _fallback_model: str = None) -> str:
+async def _ai_gemini_text_call(prompt: str, gemini_only: bool = True, _fallback_model: str = None) -> str:
     """Text-only Gemini call (no image) for /ai's explanation generation.
     Same key-rotation/exhaustion handling as _qbm_gemini_raw, minus the
     image part -- tries every non-exhausted key in order before giving up.
@@ -29225,7 +29237,7 @@ async def handle_ai(msg: dict):
         await _safe_error_reply(chat_id, e)
 
 
-async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False, careful: bool = False, gemini_only: bool = False, allow5: bool = False):
+async def _qbm_gemini_extract(img, prompt: str = None, _return_marker_info: bool = False, careful: bool = False, gemini_only: bool = True, allow5: bool = False):
     """Direct Gemini call with the strict extraction prompt (fallback path).
 
     2026-08-20: added optional _return_marker_info flag (default False, so
@@ -29290,7 +29302,7 @@ async def _qbm_groq_text_call(prompt: str, model: str = "openai/gpt-oss-120b") -
     return ""
 
 
-async def _qbm_web_resolve_answer(mc: dict, gemini_only: bool = False) -> dict | None:
+async def _qbm_web_resolve_answer(mc: dict, gemini_only: bool = True) -> dict | None:
     """
     LAST-RESORT answer resolution -- used ONLY when the answer could not be
     found anywhere in the page/PDF (no mark, no inline answer, no answer-key
@@ -29378,7 +29390,7 @@ Line 3: the 165-char-max Bengali explanation (omit this line entirely if Line 2 
         return None
 
 
-async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str, gemini_only: bool = False) -> str:
+async def _qbm_build_explanation_for_known_answer(mc: dict, answer_letter: str, gemini_only: bool = True) -> str:
     """
     Builds a clean, question-related, step-by-step Bengali explanation
     when the correct answer is already known (e.g. matched from an
@@ -30093,12 +30105,13 @@ async def _handle_qbm_impl(msg: dict, mode_v: bool = False):
             # "📋 Channel List" button থাকবে -- চাপলে তখন actual channel
             # buttons (2 per row) reveal হবে সেই একই CSV message-এ edit করে।
             if total_mcq_found:
-                _missing_exp_qbm = [m for _, _, mcqs in extracted_pages for m in mcqs if not (m.get("explanation") or "").strip()]
-                if _missing_exp_qbm:
-                    try:
-                        await _ai_generate_all_explanations(_missing_exp_qbm)
-                    except Exception as e:
-                        logger.warning(f"[QBM] fallback explanation fill failed: {e}")
+                # 2026-11-17 (user request): /qbm explanation stays FULLY
+                # empty by design (see QBM_EXTRACT_PROMPT_NO_EXPLANATION and
+                # the 2026-11-17 note in _qbm_final_safety_net) -- this
+                # fallback block used to call _ai_generate_all_explanations
+                # on every MCQ with a blank explanation right before CSV
+                # export, silently re-adding explanations /qbm is supposed
+                # to never generate. Removed; blank explanation ships as-is.
                 import io as _io_qbm, csv as _csv_mod_qbm
                 _buf_qbm = _io_qbm.StringIO()
                 _w_qbm = _csv_mod_qbm.writer(_buf_qbm)
@@ -34144,7 +34157,7 @@ async def _handle_onu2_impl(msg: dict):
                 pass
 
 
-async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = False, serial_strict: bool = False) -> dict:
+async def _qbm_scan_answer_key(img, unresolved_mcqs: list, gemini_only: bool = True, serial_strict: bool = False) -> dict:
     """
     Given a page image and a list of MCQs whose answer wasn't found on their
     own page, check if THIS page contains an answer key (table, boxed list,
@@ -34323,7 +34336,7 @@ async def qbm_extract_all_pages(
     file_name: str, status_msg_id: int = None,
     extractor=None, file_id: str = None,
     page_status_out: list = None,
-    gemini_only: bool = False,
+    gemini_only: bool = True,
     job_id: str = None,
     no_knowledge_fallback: bool = False,
     skip_lookahead: bool = False,
@@ -34538,11 +34551,18 @@ async def qbm_extract_all_pages(
                             key = (m.get("question") or "").strip()[:80]
                             if key in found_map:
                                 m["answer"] = found_map[key]
+                                # 2026-11-17 (user request): /qbm explanation
+                                # stays FULLY empty -- previously, once the
+                                # answer was resolved from a lookahead answer
+                                # key, a missing/cleared explanation would get
+                                # backfilled via _qbm_build_explanation_for_known_answer.
+                                # That silently reintroduced explanations
+                                # /qbm is supposed to never generate, so just
+                                # clear any leftover placeholder and leave it
+                                # blank.
                                 m["explanation"] = (m.get("explanation") or "").replace(
                                     "Answer not found in source", ""
                                 ).strip()
-                                if not m["explanation"]:
-                                    m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=gemini_only)
                         unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
 
             # Still unresolved after scanning nearby pages -> last-resort Groq
@@ -34666,8 +34686,10 @@ async def qbm_extract_all_pages(
         # unlike /pdf's — so no page-number cross-check here, best-effort).
         if mcqs and any(str(m.get("_provider", "")).lower().startswith("gemini") for m in mcqs):
             try:
-                from pdf_handler import _last_gemini_success_ctx
-                _ginfo = _last_gemini_success_ctx.get()
+                # FIX: read the mutated shared dict (visible across the
+                # _spawn_task context-copy boundary), not the plain
+                # contextvar -- see _qbm_page_gemini_info_ctx comment.
+                _ginfo = _qbm_page_gemini_info_ctx.get()
                 if _ginfo and _ginfo.get("account"):
                     page_status[idx]["gemini_account"] = _ginfo["account"]
                     page_status[idx]["gemini_attempt"] = 1
@@ -34737,6 +34759,12 @@ async def qbm_extract_all_pages(
         # different accounts from each other -- see
         # ordered_keys_avoiding_accounts() / _qbm_page_used_accounts_ctx.
         _qbm_page_used_accounts_ctx.set(set())
+        # Fresh empty dict per page, set BEFORE _extract_one's own
+        # _spawn_task(_run_extract()) call -- the spawned task's context is a
+        # COPY taken at spawn time, so it inherits this same dict OBJECT;
+        # mutating it (never reassigning) inside the spawned task is then
+        # visible here too. See _qbm_page_gemini_info_ctx comment.
+        _qbm_page_gemini_info_ctx.set({})
         return await _extract_one(idx, page_num, img)
 
     for start in range(0, len(pages), WINDOW):
@@ -34990,11 +35018,14 @@ async def process_qbm_pages(
                                 key = (m.get("question") or "").strip()[:80]
                                 if key in found_map:
                                     m["answer"] = found_map[key]
+                                    # 2026-11-17 (user request): /qbm
+                                    # explanation stays FULLY empty -- same
+                                    # fix as in qbm_extract_all_pages above,
+                                    # just clear the placeholder, never
+                                    # regenerate.
                                     m["explanation"] = (m.get("explanation") or "").replace(
                                         "Answer not found in source", ""
                                     ).strip()
-                                    if not m["explanation"]:
-                                        m["explanation"] = await _qbm_build_explanation_for_known_answer(m, m["answer"], gemini_only=True)
                             unresolved = [m for m in mcqs if "Answer not found in source" in (m.get("explanation") or "")]
                 if unresolved:
                     for m in unresolved:
@@ -38277,9 +38308,49 @@ async def webhook(request: Request):
 _LOCK_ACQUIRED_AT = {}  # uid -> timestamp the currently-held lock was acquired
 _STALE_LOCK_SECONDS = 600  # 10 min — generous even for the slowest /pdf jobs
 _USER_PENDING_QUEUE = {}  # uid -> list of queued update dicts waiting their turn
+_queue_item_id_counter = itertools.count(1)  # unique qid per queued item, for its own Cancel button
+_QUEUE_NOTICE_INFO = {}  # qid -> {"cid": chat_id, "msg_id": int, "cmd": str} -- so positions can be re-rendered after a mid-queue cancel
+_QUEUE_RENOTIFY_LOCK = asyncio.Lock()  # serialize renumber-edits so rapid cancels don't race each other
+_QUEUE_LAST_EDIT_AT = {}  # cid -> last edit_msg timestamp, for a small per-chat throttle on renumber bursts
 
 _USER_QUEUE_RUNNING = set()  # uid currently has an active drain-worker running
 _USER_LAST_STATUS = {}  # uid -> {"command": str, "stage": str, "started_at": float, "last_update_at": float}
+
+def _queue_notice_text(pos: int, total: int, cmd: str) -> str:
+    return (f"🔢 Task #{pos} / {total}\n"
+            f"────────────────\n"
+            f"📌 {cmd}")
+
+
+async def _renumber_queue_notices(uid: int):
+    """After a mid-queue cancel (or any time the queue shrinks from the
+    front), every REMAINING queued item's own notice message still shows its
+    OLD position number -- re-edit each one in place to its new position.
+    Serialized per-process (lock) so overlapping cancels never interleave
+    their edits, and throttled per-chat (min 1.2s gap) so a burst of cancels
+    on a long queue never trips Telegram's per-chat edit rate limit."""
+    async with _QUEUE_RENOTIFY_LOCK:
+        queue = _USER_PENDING_QUEUE.get(uid) or []
+        _total = len(queue)
+        for _pos, _u in enumerate(queue, start=1):
+            _qid = _u.get("_qid")
+            info = _QUEUE_NOTICE_INFO.get(_qid)
+            if not info:
+                continue
+            _cid = info["cid"]
+            _last = _QUEUE_LAST_EDIT_AT.get(_cid, 0.0)
+            _wait = 1.2 - (time.time() - _last)
+            if _wait > 0:
+                await asyncio.sleep(_wait)
+            try:
+                await edit_msg(_cid, info["msg_id"], _queue_notice_text(_pos, _total, info["cmd"]),
+                                reply_markup={"inline_keyboard": [[
+                                    {"text": "🛑 Cancel", "callback_data": f"queuecancel_{uid}_{_qid}"}
+                                ]]})
+            except Exception as e:
+                logger.warning(f"[Queue] renumber edit failed for qid={_qid}: {e}")
+            _QUEUE_LAST_EDIT_AT[_cid] = time.time()
+
 
 async def _drain_user_queue(uid: int):
     """Single worker per user that drains _USER_PENDING_QUEUE strictly in
@@ -38302,6 +38373,12 @@ async def _drain_user_queue(uid: int):
                 continue
             return
         update = queue.pop(0)
+        _QUEUE_NOTICE_INFO.pop(update.get("_qid"), None)
+        if queue:
+            # The item that just started running was Task #1 -- everyone
+            # left behind it shifts up by one position; re-edit their
+            # notices so the shown numbers stay correct.
+            _spawn_task(_renumber_queue_notices(uid))
         _LOCK_ACQUIRED_AT[uid] = time.time()
         try:
             await handle_message(update["message"])
@@ -38398,6 +38475,8 @@ async def process_update(update: dict):
                 _spawn_task(handle_message(_msg))
                 return
             if uid is not None:
+                _qid = next(_queue_item_id_counter)
+                update["_qid"] = _qid
                 _USER_PENDING_QUEUE.setdefault(uid, []).append(update)
                 if len(_USER_PENDING_QUEUE[uid]) > 20:
                     # Safety cap — drop oldest queued item rather than growing unbounded
@@ -38407,11 +38486,35 @@ async def process_update(update: dict):
                     # sathe sathe janano hocche je queue te ache (root cause
                     # of "stuck at 0%" reports: /csv silently queued behind a
                     # slow earlier command from same user, no feedback shown).
+                    # 2026-11-17 (user request): এখন কতো নম্বর task, command
+                    # কি ছিলো, এবং নিজের Cancel বাটন (শুধু এই queued item-টাই
+                    # বাতিল করে, চলমান কাজ না)।
                     _msg_obj = update.get("message", {})
                     _cid = _msg_obj.get("chat", {}).get("id")
-                    _txt = (_msg_obj.get("text") or "").strip().split()[0] if _msg_obj.get("text") else "command"
+                    # 2026-11-17 (user request): show the FULL command text as
+                    # typed (not just the leading /word) -- falls back to the
+                    # doc filename/caption for file-based commands with no text.
+                    _txt = (_msg_obj.get("text") or "").strip()
+                    if not _txt:
+                        _doc = _msg_obj.get("document") or {}
+                        _txt = (_msg_obj.get("caption") or "").strip() or _doc.get("file_name") or "command"
+                    if len(_txt) > 200:
+                        _txt = _txt[:200] + "..."
+                    _pos = len(_USER_PENDING_QUEUE[uid])
+                    _orig_mid = _msg_obj.get("message_id")
                     if _cid:
-                        _spawn_task(send_msg(_cid, f"⏳ Ager command sesh howar opekkhay ache — {_txt} ektu porei shuru hobe..."))
+                        async def _send_queue_notice(_cid=_cid, _pos=_pos, _txt=_txt, _qid=_qid, _uid=uid, _orig_mid=_orig_mid):
+                            r = await send_msg(
+                                _cid, _queue_notice_text(_pos, _pos, _txt),
+                                reply_markup={"inline_keyboard": [[
+                                    {"text": "🛑 Cancel", "callback_data": f"queuecancel_{_uid}_{_qid}"}
+                                ]]},
+                                reply_to_message_id=_orig_mid
+                            )
+                            _mid = r.get("result", {}).get("message_id") if isinstance(r, dict) else None
+                            if _mid:
+                                _QUEUE_NOTICE_INFO[_qid] = {"cid": _cid, "msg_id": _mid, "cmd": _txt}
+                        _spawn_task(_send_queue_notice())
                 if uid not in _USER_QUEUE_RUNNING:
                     # Stale-worker guard: if a previous worker for this uid
                     # died without clearing _USER_QUEUE_RUNNING (crash/restart
@@ -40071,6 +40174,55 @@ async def handle_callback(query: dict):
                 return
             lms_job["cancel_requested"] = True
             await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বন্ধ করা হচ্ছে..."})
+            return
+        if data.startswith("queuecancel_"):
+            # 2026-11-17 (user request): cancels ONE specific queued (not-yet-
+            # started) command by its qid -- never touches the currently
+            # running job (that's jobcancel_'s job).
+            rest = data[len("queuecancel_"):]
+            parts = rest.rsplit("_", 1)
+            if len(parts) != 2 or not parts[0].lstrip("-").isdigit() or not parts[1].isdigit():
+                return
+            target_uid = int(parts[0])
+            target_qid = int(parts[1])
+            if uid != target_uid and not await db_is_owner_or_admin(uid):
+                return
+            queue = _USER_PENDING_QUEUE.get(target_uid) or []
+            removed_update = None
+            for _i, _u in enumerate(queue):
+                if _u.get("_qid") == target_qid:
+                    removed_update = queue.pop(_i)
+                    break
+            _r_info = _QUEUE_NOTICE_INFO.pop(target_qid, None)
+            if removed_update is None:
+                await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"),
+                                                        "text": "এই কাজটি ইতিমধ্যে শুরু হয়ে গেছে বা বাতিল হয়ে গেছে।"})
+                return
+            _r_txt = (_r_info or {}).get("cmd") or "command"
+            await tg_post("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "🛑 বাতিল করা হলো"})
+            # 2026-11-17 (user request): delete the queued-task's own notice
+            # message (the one carrying the Cancel button) outright instead
+            # of leaving it sitting there + sending a separate standalone
+            # "বাতিল করা হলো" message -- one less message, no stale button.
+            _del_cid = (_r_info or {}).get("cid") or chat_id
+            _del_mid = (_r_info or {}).get("msg_id")
+            _deleted_ok = False
+            if _del_mid:
+                try:
+                    _del_resp = await tg_post("deleteMessage", {"chat_id": _del_cid, "message_id": _del_mid})
+                    _deleted_ok = bool(_del_resp and _del_resp.get("ok"))
+                except Exception as _del_e:
+                    logger.warning(f"[queuecancel] failed to delete notice msg {_del_mid}: {_del_e}")
+            if not _deleted_ok:
+                # Telegram refuses deletes on messages older than 48h (or
+                # various edge cases) -- fall back to the old standalone
+                # notice so the user still gets confirmation instead of
+                # silence when delete isn't possible.
+                await send_msg(chat_id, f"🛑 বাতিল করা হলো: {_r_txt} (queue থেকে সরানো হয়েছে)")
+            # 2026-11-17 (user request): mid-queue cancel shifts everyone
+            # behind it up by one position -- re-edit their notices in place
+            # so the shown "Task #N" never goes stale/wrong.
+            _spawn_task(_renumber_queue_notices(target_uid))
             return
         if data.startswith("jobcancel_"):
             rest = data[len("jobcancel_"):]

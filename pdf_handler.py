@@ -1180,6 +1180,21 @@ _qbm_key_offset_ctx = contextvars.ContextVar("_qbm_key_offset_ctx", default=0)
 # fresh account).
 _qbm_page_used_accounts_ctx = contextvars.ContextVar("_qbm_page_used_accounts_ctx", default=None)
 
+# 2026-11-17 FIX: /qbm's per-page extraction (_run_extract) is launched via
+# _spawn_task -- a BRAND NEW asyncio Task, which gets its own COPY of the
+# context at creation time. _last_gemini_success_ctx.set() deep inside that
+# spawned task's call chain therefore never became visible back in
+# _extract_one's own context (the parent task that awaits it) -- /qbm's
+# dashboard 🔑account#attempt tag silently never appeared, even though the
+# exact same contextvar-based approach works fine for /pdf (no task-spawn
+# boundary there). Fix: same mutable-dict-across-task-boundary trick as
+# _qbm_page_used_accounts_ctx above -- app.py's per-page loop creates ONE
+# dict object per page before spawning the extract task, and every Gemini
+# call success MUTATES that same dict object in place (never reassigns the
+# contextvar) -- mutation of a shared object is visible everywhere holding a
+# reference to it, even across a context-copy task boundary.
+_qbm_page_gemini_info_ctx = contextvars.ContextVar("_qbm_page_gemini_info_ctx", default=None)
+
 # Tracks which Gemini key/account + which attempt# actually succeeded on the
 # MOST RECENT generate_mcq_from_image() call, across every caller (/pdf, /rd,
 # /qbm, /img, /math, everything that goes through this function) -- not just
