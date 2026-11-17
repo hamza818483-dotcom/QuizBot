@@ -1222,6 +1222,7 @@ async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
             try:
                 await edit_msg(chat_id, status_msg_id,
                                 f"⏳ PDF পাঠানো হচ্ছে...\n"
+                                f"{_dest_label(chat_id)}\n"
                                 f"[{_bar(pct)} {pct}%]\n"
                                 f"⏱️ Elapsed: {_fmt_secs(elapsed)}\n"
                                 f"⏳ বাকি (আনুমানিক): {_fmt_secs(eta)}")
@@ -1275,7 +1276,70 @@ async def _send_document_via_userbot(chat_id, file_bytes: bytes, filename: str,
                 pass
 
 
+def _dest_label(chat_id) -> str:
+    """Human-readable destination line for the progress message -- shows
+    exactly where the file is headed (DM/group/channel id)."""
+    return f"📍 Destination: <code>{chat_id}</code>"
+
+
 async def send_document(chat_id, file_bytes: bytes, filename: str,
+                        caption: str = "", mime_type="application/octet-stream",
+                        reply_to_message_id: int = None, parse_mode: str = "HTML",
+                        message_thread_id: int = None, reply_markup: dict = None,
+                        status_msg_id: int = None) -> dict:
+    # 2026-11-17 (user request): every send_document call now (a) shows the
+    # destination chat_id as its own line under the progress message, and
+    # (b) on failure, pushes the root cause straight to the owner's DM via
+    # notify_owner -- regardless of whether the file went through the
+    # ≤50MB direct path or the >50MB userbot fallback.
+    _t0 = time.time()
+    _ticker_task = None
+    if status_msg_id:
+        async def _tick():
+            while True:
+                await asyncio.sleep(3)
+                try:
+                    await edit_msg(chat_id, status_msg_id,
+                                    f"⏳ PDF পাঠানো হচ্ছে...\n"
+                                    f"{_dest_label(chat_id)}\n"
+                                    f"⏱️ Elapsed: {_fmt_elapsed(time.time() - _t0)}")
+                except Exception:
+                    pass
+        # Only the plain elapsed-timer ticker here -- the >50MB userbot path
+        # overrides this with its own real per-chunk % progress below, so
+        # this ticker is cancelled the moment that path takes over.
+        if len(file_bytes) <= 50 * 1024 * 1024:
+            _ticker_task = asyncio.create_task(_tick())
+    try:
+        result = await _send_document_impl(
+            chat_id, file_bytes, filename, caption, mime_type,
+            reply_to_message_id, parse_mode, message_thread_id, reply_markup,
+            status_msg_id,
+        )
+    finally:
+        if _ticker_task:
+            _ticker_task.cancel()
+    if not result.get("ok", True) or result.get("error"):
+        _reason = result.get("error") or result.get("description") or "unknown error"
+        try:
+            await notify_owner(
+                f"❌ <b>send_document ব্যর্থ</b>\n"
+                f"{_dest_label(chat_id)}\n"
+                f"📄 File: <code>{filename}</code> ({len(file_bytes)/1024/1024:.1f}MB)\n"
+                f"🔍 Root cause: <code>{_reason}</code>"
+            )
+        except Exception:
+            pass
+    return result
+
+
+def _fmt_elapsed(s: float) -> str:
+    s = max(0, int(s))
+    m, sec = divmod(s, 60)
+    return f"{m}m {sec}s" if m else f"{sec}s"
+
+
+async def _send_document_impl(chat_id, file_bytes: bytes, filename: str,
                         caption: str = "", mime_type="application/octet-stream",
                         reply_to_message_id: int = None, parse_mode: str = "HTML",
                         message_thread_id: int = None, reply_markup: dict = None,
