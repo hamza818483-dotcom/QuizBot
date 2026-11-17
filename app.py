@@ -11905,6 +11905,40 @@ def _format_mcq_answer_cell(m: dict, opts: list) -> tuple:
             texts.append(opts[i])
     return "5", "+".join(texts)
 
+def _dedup_mcqs_exact(mcqs: list) -> tuple:
+    """2026-11-17 (user request): drop EXACT duplicate MCQs (question text +
+    ALL options identical after whitespace/case normalization) right before
+    the final CSV is written -- this is the one place every /qbm-family
+    extraction path (page-level, call1/call2, retries) converges, so it
+    catches duplicates regardless of which stage re-introduced them.
+
+    Deliberately EXACT match only, never fuzzy -- page-level fuzzy dedup
+    (_qbm_dedup_list, threshold=0.93) was disabled earlier after it started
+    dropping genuinely different MCQs that only looked similar (same bare
+    stem, different options; same subject/chapter wording). An exact-match
+    check on question+options together can never make that mistake: it only
+    ever removes rows that are byte-for-byte the same MCQ, never a
+    near-miss. Keeps the FIRST occurrence (preserves original page order /
+    topic-segment boundaries), drops every later exact repeat.
+    Returns (deduped_list, dropped_count)."""
+    seen = set()
+    out = []
+    dropped = 0
+    for m in mcqs:
+        q = re.sub(r"\s+", " ", str(m.get("question", "")).strip().lower())
+        opts_raw = m.get("options") or []
+        opts = [re.sub(r"\s+", " ", str(o).strip().lower()) for o in opts_raw]
+        key = q + "||" + "|".join(opts)
+        if q and key in seen:
+            dropped += 1
+            continue
+        seen.add(key)
+        out.append(m)
+    if dropped:
+        logger.warning(f"[CSV-dedup] dropped {dropped} exact-duplicate MCQ(s) before final CSV write")
+    return out, dropped
+
+
 async def _mcqs_to_csv_bytes(mcqs: list) -> tuple:
     """MCQ list → (csv_bytes, meta). NEW dual-purpose style: writes 'topic'/
     'subtopic' columns, filling them in only on the row where a segment
@@ -11928,6 +11962,7 @@ async def _mcqs_to_csv_bytes(mcqs: list) -> tuple:
     unpack it.
     """
     mcqs = await _ensure_explanations_before_csv(mcqs)
+    mcqs, _dup_dropped = _dedup_mcqs_exact(mcqs)
     import io, csv as csv_mod_local
     buf = io.StringIO()
     w = csv_mod_local.writer(buf)
@@ -11961,7 +11996,8 @@ async def _mcqs_to_csv_bytes(mcqs: list) -> tuple:
             ans_cell, _strip_img_tag(m.get("explanation", "")), "1", "1",
             topic_cell, subtopic_cell
         ])
-    meta = {"underline_qnos": underline_qnos, "multi_answer_qnos": multi_answer_qnos}
+    meta = {"underline_qnos": underline_qnos, "multi_answer_qnos": multi_answer_qnos,
+            "dup_dropped": _dup_dropped}
     return buf.getvalue().encode("utf-8-sig"), meta
 
 
@@ -11980,6 +12016,9 @@ def _csv_meta_caption_suffix(meta: dict) -> str:
     if ma:
         nos = ", ".join(f"Q{n}" for n in ma)
         lines.append(f"🔀 Double answer (option5 দেখো): {nos}")
+    dd = meta.get("dup_dropped") or 0
+    if dd:
+        lines.append(f"🧹 {dd}টি হুবহু duplicate MCQ বাদ দেওয়া হয়েছে")
     return ("\n" + "\n".join(lines)) if lines else ""
 
 def _strip_opt_prefix(opt: str) -> str:
@@ -22428,6 +22467,7 @@ QBM_PROMPT_VERSION = 5
 QBM_EXTRACT_PROMPT_DEFAULT = """STRICT MCQ EXTRACTOR. Extract ONLY MCQs already on this page — never invent, never skip. 0 MCQs→[]. N MCQs→exactly N.
 
 RULES:
+- Never emit the SAME MCQ (identical question text AND identical options) more than once in your output, even if it visually appears to repeat on the page -- each distinct serial number on the page is exactly one MCQ in your output, never duplicated.
 - Multi-column: COLUMN-MAJOR order (finish left column top-to-bottom, then next). Never zigzag.
 - Never guess without source proof. Never reword question/options (strip only numbering like ১./1./Q1./ক.). Never translate.
 - Synonym/antonym MCQs (প্রতিশব্দ/সমার্থক/বিপরীত or "synonym/antonym of"): question+options stay 100% English, no Bangla gloss added anywhere.
